@@ -9,20 +9,15 @@ use crate::input::InputState;
 use crate::window::{HeadlessWindow, WindowConfig, WindowEvent, WindowId, WindowManager};
 
 /// Vsync mode configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VsyncMode {
     /// Vsync disabled — uncapped frame rate.
     Disabled,
     /// Standard vsync — wait for vertical blank.
+    #[default]
     Enabled,
     /// Adaptive vsync — vsync when above refresh rate, tear when below.
     Adaptive,
-}
-
-impl Default for VsyncMode {
-    fn default() -> Self {
-        Self::Enabled
-    }
 }
 
 /// Manages multiple windows and routes their events to an `InputState`.

@@ -35,9 +35,10 @@ fn rand_range(state: &mut u32, min: f32, max: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Shape from which particles are spawned.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EmissionShape {
     /// Emit from a single point at the origin.
+    #[default]
     Point,
     /// Emit from a random position within a circle.
     Circle { radius: f32 },
@@ -48,12 +49,6 @@ pub enum EmissionShape {
         inner_radius: f32,
         outer_radius: f32,
     },
-}
-
-impl Default for EmissionShape {
-    fn default() -> Self {
-        Self::Point
-    }
 }
 
 impl EmissionShape {

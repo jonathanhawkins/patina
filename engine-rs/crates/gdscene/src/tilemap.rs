@@ -10,7 +10,6 @@ use gdcore::math::{Rect2, Vector2, Vector2i};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
-use crate::scene_tree::SceneTree;
 
 // ---------------------------------------------------------------------------
 // TileDefinition & TileSet

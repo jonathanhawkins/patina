@@ -8,20 +8,15 @@
 // ---------------------------------------------------------------------------
 
 /// Build optimization profile for exports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BuildProfile {
     /// Unoptimized with debug symbols and assertions.
     Debug,
     /// Fully optimized release build.
+    #[default]
     Release,
     /// Optimized but with debug symbols retained.
     ReleaseDebug,
-}
-
-impl Default for BuildProfile {
-    fn default() -> Self {
-        Self::Release
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -139,12 +139,8 @@ impl SceneEditor {
         self.dirty = true;
 
         // The created ID was filled in by execute.
-        if let Some(last_cmd) = self.editor.undo_stack_last() {
-            if let EditorCommand::AddNode { created_id, .. } = last_cmd {
-                if let Some(id) = created_id {
-                    return Ok(*id);
-                }
-            }
+        if let Some(EditorCommand::AddNode { created_id: Some(id), .. }) = self.editor.undo_stack_last() {
+            return Ok(*id);
         }
 
         Err(EditorError::NoSelection)

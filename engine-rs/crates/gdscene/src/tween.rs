@@ -47,20 +47,15 @@ impl fmt::Display for TweenId {
 // ---------------------------------------------------------------------------
 
 /// Controls the acceleration profile of the easing curve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EaseType {
     /// Ease in (slow start).
     In,
     /// Ease out (slow end).
     Out,
     /// Ease in then out (slow start and end).
+    #[default]
     InOut,
-}
-
-impl Default for EaseType {
-    fn default() -> Self {
-        Self::InOut
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -68,9 +63,10 @@ impl Default for EaseType {
 // ---------------------------------------------------------------------------
 
 /// The mathematical function used for easing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransFunc {
     /// No easing — constant speed.
+    #[default]
     Linear,
     /// Sinusoidal easing.
     Sine,
@@ -86,12 +82,6 @@ pub enum TransFunc {
     Bounce,
     /// Back (overshoot) easing.
     Back,
-}
-
-impl Default for TransFunc {
-    fn default() -> Self {
-        Self::Linear
-    }
 }
 
 // ---------------------------------------------------------------------------

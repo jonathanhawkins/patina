@@ -11,18 +11,13 @@ use gdcore::error::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
 
 /// The editor color theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EditorTheme {
     /// Dark theme (default).
+    #[default]
     Dark,
     /// Light theme.
     Light,
-}
-
-impl Default for EditorTheme {
-    fn default() -> Self {
-        Self::Dark
-    }
 }
 
 /// User-level editor preferences.

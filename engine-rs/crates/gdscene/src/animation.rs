@@ -13,18 +13,13 @@ use gdvariant::Variant;
 // ---------------------------------------------------------------------------
 
 /// How values are interpolated between keyframes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransitionType {
     /// Linear interpolation between keyframe values.
+    #[default]
     Linear,
     /// Snap to the nearest keyframe value (no interpolation).
     Nearest,
-}
-
-impl Default for TransitionType {
-    fn default() -> Self {
-        Self::Linear
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,20 +149,15 @@ impl AnimationTrack {
 // ---------------------------------------------------------------------------
 
 /// How an animation wraps when it reaches its end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoopMode {
     /// Play once and stop at the end.
+    #[default]
     None,
     /// Loop back to the start when the end is reached.
     Linear,
     /// Play forward then backward, repeating.
     PingPong,
-}
-
-impl Default for LoopMode {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,8 +364,6 @@ impl Default for AnimationPlayer {
 /// supported for the given type. Supports numeric types (Int, Float),
 /// Vector2, Vector3, and Color.
 pub fn interpolate_variant(from: &Variant, to: &Variant, t: f32) -> Option<Variant> {
-    use gdcore::math::{Color, Vector2, Vector3};
-
     match (from, to) {
         (Variant::Int(a), Variant::Int(b)) => {
             let result = *a as f64 + (*b as f64 - *a as f64) * t as f64;
