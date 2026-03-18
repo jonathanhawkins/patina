@@ -1,0 +1,19 @@
+{
+  "fixture_id": "resource_with_subresource",
+  "capture_type": "resource",
+  "upstream_version": "pending",
+  "class_name": "Theme",
+  "properties": {
+    "name": { "type": "String", "value": "MyTheme" },
+    "default_font_size": { "type": "Int", "value": 16 }
+  },
+  "subresources": {
+    "StyleBoxFlat_001": {
+      "class_name": "StyleBoxFlat",
+      "properties": {
+        "bg_color": { "type": "Color", "value": [0.20000000298023224, 0.30000001192092896, 0.4000000059604645, 1.0] },
+        "border_width": { "type": "Int", "value": 2 }
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "fixture_id": "scene_hierarchy",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "Root",
+      "class": "Node",
+      "path": "/root/Root",
+      "children": [
+        {
+          "name": "Player",
+          "class": "Node2D",
+          "path": "/root/Root/Player",
+          "children": [
+            {
+              "name": "Sprite",
+              "class": "Sprite2D",
+              "path": "/root/Root/Player/Sprite",
+              "children": [],
+              "properties": {}
+            }
+          ],
+          "properties": {}
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

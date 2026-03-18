@@ -1,0 +1,7 @@
+[gd_resource type="Resource" format=3]
+
+[resource]
+name = "SimpleResource"
+value = 42
+position = Vector2(10, 20)
+flag = true

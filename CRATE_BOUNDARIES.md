@@ -121,9 +121,9 @@ These crates implement engine subsystems (rendering, physics, audio, platform). 
 - Z-index and draw ordering
 - Server-side state management
 
-**May depend on**: `gdcore`, `gdvariant`, `gdobject`
+**May depend on**: `gdcore`, `gdvariant`
 
-**Must not depend on**: `gdscene`, `gdrender2d`, `gdphysics2d`, or higher crates
+**Must not depend on**: `gdobject`, `gdscene`, `gdrender2d`, `gdphysics2d`, or higher crates
 
 ### gdrender2d
 
@@ -151,9 +151,9 @@ These crates implement engine subsystems (rendering, physics, audio, platform). 
 - Deterministic simulation mode
 - Physics trace capture for testing
 
-**May depend on**: `gdcore`, `gdvariant`, `gdobject`
+**May depend on**: `gdcore`, `gdvariant`
 
-**Must not depend on**: `gdscene`, `gdserver2d`, `gdrender2d`, or higher crates
+**Must not depend on**: `gdobject`, `gdscene`, `gdserver2d`, `gdrender2d`, or higher crates
 
 ### gdaudio
 
@@ -165,9 +165,9 @@ These crates implement engine subsystems (rendering, physics, audio, platform). 
 - Basic mixer abstractions
 - Audio effect basics
 
-**May depend on**: `gdcore`, `gdvariant`, `gdobject`
+**May depend on**: `gdcore`
 
-**Must not depend on**: `gdscene`, rendering crates, physics crates, or higher crates
+**Must not depend on**: `gdvariant`, `gdobject`, `gdscene`, rendering crates, physics crates, or higher crates
 
 ### gdplatform
 
@@ -179,9 +179,9 @@ These crates implement engine subsystems (rendering, physics, audio, platform). 
 - Timing and frame synchronization
 - OS integration
 
-**May depend on**: `gdcore`, `gdvariant`, `gdobject`
+**May depend on**: `gdcore`
 
-**Must not depend on**: `gdscene`, rendering crates (except through abstract interfaces), or higher crates
+**Must not depend on**: `gdvariant`, `gdobject`, `gdscene`, rendering crates, or higher crates
 
 ---
 
@@ -199,9 +199,9 @@ These crates integrate multiple subsystems and are near the top of the dependenc
 - Property access from scripts
 - Signal connection from scripts
 
-**May depend on**: `gdcore`, `gdvariant`, `gdobject`, `gdresource`, `gdscene`
+**May depend on**: `gdcore`, `gdvariant`, `gdobject`
 
-**Must not depend on**: `gdeditor`
+**Must not depend on**: `gdresource`, `gdscene`, `gdeditor`
 
 ### gdeditor
 
@@ -213,7 +213,7 @@ These crates integrate multiple subsystems and are near the top of the dependenc
 - Import pipeline UI
 - Tool mode support
 
-**May depend on**: All runtime crates (this is the integration point)
+**May depend on**: `gdcore`, `gdobject`, `gdscene` (current); additional runtime crates as editor features are added
 
 **Must not depend on**: Nothing above it (top of the graph)
 
@@ -254,19 +254,20 @@ The crate dependency graph must be a strict DAG (directed acyclic graph). If cra
 The dependency direction is strictly bottom-up:
 
 ```
-gdcore  (bottom -- depends on nothing)
+gdcore  (bottom — depends on nothing)
   |
-gdvariant
-  |
+gdvariant ——————————— gdaudio     gdplatform
+  |                   (gdcore)    (gdcore)
 gdobject
+  |          gdserver2d     gdphysics2d
+gdresource   (gdcore,       (gdcore,
+  |           gdvariant)     gdvariant)
+gdscene            |
+  |            gdrender2d
+gdscript-interop   (gdcore, gdserver2d)
+(gdcore, gdvariant, gdobject)
   |
-gdresource          gdserver2d    gdphysics2d    gdaudio    gdplatform
-  |                      |
-gdscene              gdrender2d
-  |
-gdscript-interop
-  |
-gdeditor  (top -- may depend on everything)
+gdeditor  (top — gdcore, gdobject, gdscene)
 ```
 
 ### Rule 3: Runtime Services are Peers, Not Dependencies

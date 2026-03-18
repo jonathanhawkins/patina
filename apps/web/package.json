@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build && opennextjs-cloudflare build --skipNextBuild",
+    "build:ci": "next build",
     "preview": "opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare deploy",
     "lint": "eslint"

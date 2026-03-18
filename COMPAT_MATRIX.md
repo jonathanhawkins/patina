@@ -11,10 +11,9 @@ This document tracks the implementation and compatibility status of each Patina 
 | Status | Meaning |
 |--------|---------|
 | **Not Started** | No implementation work has begun |
-| **In Progress** | Active implementation underway; not yet testable |
-| **Alpha** | Basic functionality works; limited fixture coverage; API may change |
-| **Beta** | Core functionality stable; broad fixture coverage; API mostly stable |
-| **Stable** | Full fixture coverage; parity tests passing; API frozen for the release |
+| **In Progress** | Active implementation underway; not yet testable against fixtures |
+| **Partial** | Initial implementation exists; limited fixture coverage; gaps remain |
+| **Complete** | Oracle-backed parity tests passing for all supported fixtures in this area |
 
 ---
 
@@ -22,21 +21,21 @@ This document tracks the implementation and compatibility status of each Patina 
 
 | Subsystem | Crate | Status | Fixture Coverage | Parity Rate | Notes |
 |-----------|-------|--------|-----------------|-------------|-------|
-| Core Runtime | `gdcore` | Not Started | -- | -- | Math types, IDs, strings, error handling |
-| Variant System | `gdvariant` | Not Started | -- | -- | Variant enum, type conversions, serialization |
-| Object Model | `gdobject` | Not Started | -- | -- | ClassDB, properties, method binding |
+| Core Runtime | `gdcore` | Partial | -- | -- | Math types, IDs, strings, error handling; implemented, no fixtures yet |
+| Variant System | `gdvariant` | Partial | -- | -- | Variant enum, type conversions, serialization; implemented, no fixtures yet |
+| Object Model | `gdobject` | Not Started | -- | -- | ClassDB, properties, method binding; stub only |
 | Signals | `gdobject` | Not Started | -- | -- | Declaration, connection, emission, ordering |
 | Notifications | `gdobject` | Not Started | -- | -- | Dispatch, ordering, lifecycle notifications |
-| Resources | `gdresource` | Not Started | -- | -- | Load/save, cache, UID/path, .tres/.tscn parsing |
-| Scene System | `gdscene` | Not Started | -- | -- | Node hierarchy, SceneTree, lifecycle, PackedScene |
-| 2D Rendering | `gdrender2d` | Not Started | -- | -- | Sprites, draw ops, transforms, viewports |
-| 2D Physics | `gdphysics2d` | Not Started | -- | -- | Shapes, collision detection, bodies, spaces |
-| Audio | `gdaudio` | Not Started | -- | -- | Playback, buses, mixing |
-| Input | `gdplatform` | Not Started | -- | -- | Keyboard, mouse, gamepad events |
-| Platform | `gdplatform` | Not Started | -- | -- | Windowing, timing, OS integration |
-| 3D Runtime | -- | Not Started | -- | -- | Deferred to Phase 6 |
-| Scripting Interop | `gdscript-interop` | Not Started | -- | -- | GDScript-compatible API surface |
-| Editor | `gdeditor` | Not Started | -- | -- | Deferred to Phase 8 |
+| Resources | `gdresource` | Not Started | -- | -- | Load/save, cache, UID/path, .tres/.tscn parsing; stub only |
+| Scene System | `gdscene` | Not Started | -- | -- | Node hierarchy, SceneTree, lifecycle, PackedScene; stub only |
+| 2D Rendering | `gdrender2d` | Not Started | -- | -- | Sprites, draw ops, transforms, viewports; stub only |
+| 2D Physics | `gdphysics2d` | Not Started | -- | -- | Shapes, collision detection, bodies, spaces; stub only |
+| Audio | `gdaudio` | Not Started | -- | -- | Playback, buses, mixing; stub only |
+| Input | `gdplatform` | Not Started | -- | -- | Keyboard, mouse, gamepad events; stub only |
+| Platform | `gdplatform` | Not Started | -- | -- | Windowing, timing, OS integration; stub only |
+| 3D Runtime | -- | Not Started | -- | -- | Deferred to Phase 6; no crate yet |
+| Scripting Interop | `gdscript-interop` | Not Started | -- | -- | GDScript-compatible API surface; stub only |
+| Editor | `gdeditor` | Not Started | -- | -- | Deferred to Phase 8; stub only |
 
 ---
 
@@ -44,10 +43,10 @@ This document tracks the implementation and compatibility status of each Patina 
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux (x86_64) | Not Started | Primary CI target |
-| macOS (x86_64) | Not Started | Development platform |
-| macOS (aarch64) | Not Started | Development platform |
-| Windows (x86_64) | Not Started | Broad user base |
+| Linux (x86_64) | Not Started | Primary CI and development target |
+| macOS (aarch64) | Not Started | Developer workstation target |
+| macOS (x86_64) | Not Started | Developer workstation target |
+| Windows (x86_64) | Not Started | Deferred to Phase 7 |
 | Android | Not Started | Deferred to Phase 7+ |
 | iOS | Not Started | Deferred to Phase 7+ |
 | Web (WASM) | Not Started | Deferred to Phase 7+ |

@@ -32,6 +32,8 @@ version = "0.1.0"
 dependencies = [
  "gdcore",
  "gdvariant",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -64,6 +66,8 @@ dependencies = [
  "gdcore",
  "gdobject",
  "gdvariant",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -74,6 +78,9 @@ dependencies = [
  "gdobject",
  "gdresource",
  "gdvariant",
+ "serde_json",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

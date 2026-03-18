@@ -173,19 +173,64 @@ Golden outputs are JSON files with a standard envelope:
 
 ### Capture-Specific Data Formats
 
-**Scene Tree**: Nested JSON objects mirroring the node hierarchy with type, name, path, and group fields.
+**Scene Tree**: Nested JSON objects mirroring the node hierarchy. Each node contains `name`, `class`, `path`, `children` (recursive), and `properties` (tagged Variant values). Example:
 
-**Properties**: Flat key-value map with property name, type, and value for each node.
+```json
+{
+  "nodes": [
+    {
+      "name": "Root",
+      "class": "Node",
+      "path": "/root/Root",
+      "children": [
+        {
+          "name": "Player",
+          "class": "Node2D",
+          "path": "/root/Root/Player",
+          "children": [],
+          "properties": {
+            "position": { "type": "Vector2", "value": [100.0, 200.0] }
+          }
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}
+```
+
+**Properties**: Each property value uses the gdvariant tagged JSON format: `{ "type": "<VariantType>", "value": <typed-value> }`. Supported types: `Nil`, `Bool`, `Int`, `Float`, `String`, `Vector2` (array of 2 floats), `Vector3` (array of 3 floats), `Color` (array of 4 floats), `Rect2`, `Transform2D`, `Array`, `Dictionary`.
+
+**Resources**: Object with `class_name`, `properties` (tagged Variant map), and `subresources` (keyed by sub-resource ID, each with `class_name` and `properties`). Example:
+
+```json
+{
+  "class_name": "Theme",
+  "properties": {
+    "name": { "type": "String", "value": "MyTheme" }
+  },
+  "subresources": {
+    "StyleBoxFlat_001": {
+      "class_name": "StyleBoxFlat",
+      "properties": {
+        "bg_color": { "type": "Color", "value": [0.2, 0.3, 0.4, 1.0] }
+      }
+    }
+  }
+}
+```
 
 **Signals**: Ordered array of signal emission events with signal name, emitter path, and parameters.
 
 **Notifications**: Ordered array of notification events with notification ID, target path, and frame number.
 
-**Resources**: Serialized resource data in a normalized format for comparison.
-
 **Render Snapshots**: PNG file path + metadata (viewport size, camera config, frame number).
 
 **Physics Traces**: Array of per-step records with body states (position, velocity, rotation) and collision events.
+
+### Float Comparison Strategy
+
+Golden files for scene trees and resources use float tolerance (epsilon = 1e-6) when comparing `Vector2`, `Vector3`, `Color`, and `Float` variant values. This accounts for f32/f64 conversion artifacts. Non-float types use exact comparison.
 
 ---
 

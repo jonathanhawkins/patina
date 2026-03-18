@@ -85,13 +85,15 @@ v1 targets desktop platforms only:
 | Platform | Priority | Notes |
 |----------|----------|-------|
 | Linux (x86_64) | Primary | CI and development platform |
-| macOS (x86_64, aarch64) | Primary | Development platform |
-| Windows (x86_64) | Primary | Broad user base |
+| macOS (aarch64) | Primary | Developer workstation target |
+| macOS (x86_64) | Primary | Developer workstation target |
+| Windows (x86_64) | Deferred | Phase 7 |
 
 ### Deferred Platforms
 
 | Platform | Target Phase |
 |----------|-------------|
+| Windows (x86_64) | Phase 7 |
 | Android | Phase 7+ |
 | iOS | Phase 7+ |
 | Web (WASM) | Phase 7+ |
@@ -137,6 +139,6 @@ v1 is complete when:
 2. Parity tests pass at an agreed threshold (target: 95%+ of fixture corpus).
 3. At least one representative 2D project or fixture set runs end-to-end.
 4. Render outputs are within agreed diff thresholds.
-5. The runtime builds and runs on all three desktop platforms.
+5. The runtime builds and runs on Linux and macOS (initial targets; Windows deferred to Phase 7).
 6. Performance baselines are established and documented in BENCHMARKS.md.
 7. The compatibility matrix (COMPAT_MATRIX.md) reflects actual measured status.

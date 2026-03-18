@@ -1,0 +1,7 @@
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Player" type="Node2D" parent="."]
+
+[node name="Sprite" type="Sprite2D" parent="Player"]

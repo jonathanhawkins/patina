@@ -127,7 +127,7 @@ This document maps upstream Godot C++ subsystems to their corresponding Rust cra
 - Z-index and draw ordering
 - Server-side state management
 
-**Dependencies**: `gdcore`, `gdvariant`, `gdobject`
+**Dependencies**: `gdcore`, `gdvariant`
 
 ### gdrender2d
 
@@ -159,7 +159,7 @@ This document maps upstream Godot C++ subsystems to their corresponding Rust cra
 - Deterministic simulation mode for testing
 - Physics trace capture for oracle comparison
 
-**Dependencies**: `gdcore`, `gdvariant`, `gdobject`
+**Dependencies**: `gdcore`, `gdvariant`
 
 ### gdaudio
 
@@ -174,7 +174,7 @@ This document maps upstream Godot C++ subsystems to their corresponding Rust cra
 - Audio effect basics
 - Spatial audio (later)
 
-**Dependencies**: `gdcore`, `gdvariant`, `gdobject`
+**Dependencies**: `gdcore`
 
 ### gdplatform
 
@@ -189,7 +189,7 @@ This document maps upstream Godot C++ subsystems to their corresponding Rust cra
 - OS integration (file dialogs, clipboard, etc.)
 - Platform-specific backends (Linux/X11/Wayland, macOS, Windows)
 
-**Dependencies**: `gdcore`, `gdvariant`, `gdobject`
+**Dependencies**: `gdcore`
 
 ---
 
@@ -208,7 +208,7 @@ This document maps upstream Godot C++ subsystems to their corresponding Rust cra
 - Signal connection from scripts
 - Not a full GDScript interpreter in v1; focused on interop contracts
 
-**Dependencies**: `gdcore`, `gdvariant`, `gdobject`, `gdresource`, `gdscene`
+**Dependencies**: `gdcore`, `gdvariant`, `gdobject`
 
 ### gdeditor
 
@@ -223,7 +223,7 @@ This document maps upstream Godot C++ subsystems to their corresponding Rust cra
 - Tool mode support
 - Plugin system
 
-**Dependencies**: All runtime crates
+**Dependencies**: `gdcore`, `gdobject`, `gdscene`
 
 ---
 
@@ -266,40 +266,33 @@ This document maps upstream Godot C++ subsystems to their corresponding Rust cra
 ## Dependency Graph
 
 ```
-                    +---------+
-                    | gdcore  |
-                    +---------+
-                     /       \
-                    v         v
-            +-----------+  +-----------+
-            | gdvariant |  |           |
-            +-----------+  |           |
-                    \      |           |
-                     v     v           |
-                 +----------+          |
-                 | gdobject |          |
-                 +----------+          |
-                 /    |    \           |
-                v     v     v          |
-    +------------+ +--------+ +----------+
-    | gdresource | |gdserver| |gdphysics |
-    +------------+ |  2d    | |   2d     |
-         |         +--------+ +----------+
-         v             |
-    +---------+        v
-    | gdscene |   +----------+
-    +---------+   | gdrender |
-         |        |    2d    |
-         |        +----------+
-         v
-    +-----------+     +----------+    +-----------+
-    | gdscript- |     | gdaudio  |    | gdplatform|
-    | interop   |     +----------+    +-----------+
-    +-----------+
+                         +---------+
+                         | gdcore  |
+                         +---------+
+                        /     |     \
+                       v      v      v
+               +-----------+  |  +-----------+
+               | gdvariant |  |  | gdaudio   |  gdplatform
+               +-----------+  |  +-----------+  (gdcore only)
+                /      \      |
+               v        v     v
+         +----------+  +-----------+
+         | gdobject |  | gdserver2d|  gdphysics2d
+         +----------+  | gdvariant |  (gdcore, gdvariant)
+          /   |         +-----------+
+         v    v               |
+  +--------+ +----------+     v
+  |gdscene | |gdresource|  +-----------+
+  +--------+ +----------+  | gdrender2d|
+       |      (gdobject)    +-----------+
+       v
+  +-----------+
+  | gdscript- |  gdeditor
+  | interop   |  (gdcore, gdobject, gdscene)
+  +-----------+
+  (gdcore, gdvariant, gdobject)
 
-    All crates may depend on gdcore.
-    Higher-level crates depend on lower-level crates.
-    No circular dependencies are permitted.
+  Actual Cargo.toml dependencies — no circular deps permitted.
 ```
 
 ---

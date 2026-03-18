@@ -1,0 +1,14 @@
+{
+  "fixture_id": "scene_minimal",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "Root",
+      "class": "Node",
+      "path": "/root/Root",
+      "children": [],
+      "properties": {}
+    }
+  ]
+}

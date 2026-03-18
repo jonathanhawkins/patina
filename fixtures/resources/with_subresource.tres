@@ -1,0 +1,9 @@
+[gd_resource type="Theme" format=3]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_001"]
+bg_color = Color(0.2, 0.3, 0.4, 1.0)
+border_width = 2
+
+[resource]
+name = "MyTheme"
+default_font_size = 16

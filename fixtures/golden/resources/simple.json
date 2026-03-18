@@ -1,0 +1,13 @@
+{
+  "fixture_id": "resource_simple",
+  "capture_type": "resource",
+  "upstream_version": "pending",
+  "class_name": "Resource",
+  "properties": {
+    "name": { "type": "String", "value": "SimpleResource" },
+    "value": { "type": "Int", "value": 42 },
+    "position": { "type": "Vector2", "value": [10.0, 20.0] },
+    "flag": { "type": "Bool", "value": true }
+  },
+  "subresources": {}
+}
