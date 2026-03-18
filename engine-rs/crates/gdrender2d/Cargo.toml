@@ -1,0 +1,10 @@
+[package]
+name = "gdrender2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gdcore = { path = "../gdcore" }
+gdserver2d = { path = "../gdserver2d" }

@@ -1,0 +1,1 @@
+//! Resource caching and deduplication.

@@ -1,0 +1,1 @@
+//! Collision detection and resolution.

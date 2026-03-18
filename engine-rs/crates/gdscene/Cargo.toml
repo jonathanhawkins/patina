@@ -1,0 +1,12 @@
+[package]
+name = "gdscene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gdcore = { path = "../gdcore" }
+gdvariant = { path = "../gdvariant" }
+gdobject = { path = "../gdobject" }
+gdresource = { path = "../gdresource" }
