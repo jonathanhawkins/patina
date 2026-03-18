@@ -20,15 +20,12 @@ export function Navbar() {
       initial={{ y: -20, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ duration: 0.4, ease: "easeOut" }}
-      className="sticky top-0 z-50 w-full border-b border-border/50 bg-background/60 backdrop-blur-xl backdrop-saturate-150"
+      className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/80 backdrop-blur-xl"
     >
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-        <Link href="/" className="flex items-center gap-2.5">
-          <div className="flex size-7 items-center justify-center rounded-md bg-brand/90">
-            <span className="text-xs font-bold text-brand-foreground">P</span>
-          </div>
-          <span className="text-base font-semibold tracking-tight">
-            Patina Engine
+      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
+        <Link href="/" className="flex items-center gap-2">
+          <span className="text-sm font-semibold tracking-tight text-brand">
+            Patina
           </span>
         </Link>
 
@@ -66,7 +63,7 @@ export function Navbar() {
           <Button
             size="sm"
             nativeButton={false}
-            className="hidden bg-brand text-brand-foreground hover:bg-brand/80 sm:inline-flex"
+            className="hidden rounded-md bg-brand text-sm font-medium text-brand-foreground hover:bg-brand/80 sm:inline-flex"
             render={
               <a
                 href="https://github.com/patinaengine/patina"
@@ -94,7 +91,7 @@ export function Navbar() {
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: "auto" }}
           exit={{ opacity: 0, height: 0 }}
-          className="border-t border-border/50 bg-background/95 backdrop-blur-xl md:hidden"
+          className="border-t border-border/40 bg-background/95 backdrop-blur-xl md:hidden"
         >
           <nav className="flex flex-col gap-1 px-6 py-4">
             {navLinks.map((link) => (

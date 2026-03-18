@@ -194,6 +194,40 @@ mod tests {
     }
 
     #[test]
+    fn enter_tree_single_node_no_children() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let leaf = Node::new("Leaf", "Node");
+        let leaf_id = tree.add_child(root, leaf).unwrap();
+
+        LifecycleManager::enter_tree(&mut tree, leaf_id);
+
+        let log = tree.get_node(leaf_id).unwrap().notification_log();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0], NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[1], NOTIFICATION_READY);
+    }
+
+    #[test]
+    fn exit_tree_leaf_node_only() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = Node::new("Parent", "Node");
+        let parent_id = tree.add_child(root, parent).unwrap();
+        let leaf = Node::new("Leaf", "Node");
+        let leaf_id = tree.add_child(parent_id, leaf).unwrap();
+
+        LifecycleManager::exit_tree(&mut tree, leaf_id);
+
+        let leaf_log = tree.get_node(leaf_id).unwrap().notification_log();
+        assert_eq!(leaf_log, &[NOTIFICATION_EXIT_TREE]);
+
+        // Parent should not have received any notification
+        let parent_log = tree.get_node(parent_id).unwrap().notification_log();
+        assert!(parent_log.is_empty());
+    }
+
+    #[test]
     fn enter_then_exit_full_cycle() {
         let (mut tree, _root, parent_id, child1_id, _child2_id) = build_test_tree();
 

@@ -222,4 +222,155 @@ mod tests {
         assert!(Variant::NodePath(NodePath::new("/root")).is_truthy());
         assert!(!Variant::NodePath(NodePath::new("")).is_truthy());
     }
+
+    // -- Display for every variant type -------------------------------------
+
+    #[test]
+    fn display_nil() {
+        assert_eq!(format!("{}", Variant::Nil), "<null>");
+    }
+
+    #[test]
+    fn display_bool() {
+        assert_eq!(format!("{}", Variant::Bool(true)), "true");
+        assert_eq!(format!("{}", Variant::Bool(false)), "false");
+    }
+
+    #[test]
+    fn display_int() {
+        assert_eq!(format!("{}", Variant::Int(42)), "42");
+        assert_eq!(format!("{}", Variant::Int(-7)), "-7");
+    }
+
+    #[test]
+    fn display_float() {
+        assert_eq!(format!("{}", Variant::Float(3.14)), "3.14");
+    }
+
+    #[test]
+    fn display_string() {
+        assert_eq!(format!("{}", Variant::String("hello".into())), "hello");
+    }
+
+    #[test]
+    fn display_string_name() {
+        let sn = StringName::new("test_sn");
+        assert_eq!(format!("{}", Variant::StringName(sn)), "&test_sn");
+    }
+
+    #[test]
+    fn display_node_path() {
+        let np = NodePath::new("/root/Player");
+        assert_eq!(format!("{}", Variant::NodePath(np)), "NodePath(\"/root/Player\")");
+    }
+
+    #[test]
+    fn display_vector2() {
+        let v = Vector2::new(1.0, 2.0);
+        assert_eq!(format!("{}", Variant::Vector2(v)), "(1, 2)");
+    }
+
+    #[test]
+    fn display_vector3() {
+        let v = gdcore::math::Vector3::new(1.0, 2.0, 3.0);
+        assert_eq!(format!("{}", Variant::Vector3(v)), "(1, 2, 3)");
+    }
+
+    #[test]
+    fn display_rect2() {
+        let r = gdcore::math::Rect2::new(Vector2::new(1.0, 2.0), Vector2::new(3.0, 4.0));
+        assert_eq!(format!("{}", Variant::Rect2(r)), "[(1, 2), (3, 4)]");
+    }
+
+    #[test]
+    fn display_transform2d() {
+        let t = gdcore::math::Transform2D::IDENTITY;
+        assert_eq!(format!("{}", Variant::Transform2D(t)), "<Transform2D>");
+    }
+
+    #[test]
+    fn display_color() {
+        let c = gdcore::math::Color::new(1.0, 0.5, 0.0, 1.0);
+        assert_eq!(format!("{}", Variant::Color(c)), "Color(1, 0.5, 0, 1)");
+    }
+
+    #[test]
+    fn display_object_id() {
+        let id = gdcore::id::ObjectId::from_raw(99);
+        assert_eq!(format!("{}", Variant::ObjectId(id)), "<Object#99>");
+    }
+
+    #[test]
+    fn display_array() {
+        let a = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
+        assert_eq!(format!("{a}"), "[Array; len=2]");
+    }
+
+    #[test]
+    fn display_dictionary() {
+        let mut d = std::collections::HashMap::new();
+        d.insert("key".to_string(), Variant::Int(1));
+        let v = Variant::Dictionary(d);
+        assert_eq!(format!("{v}"), "{Dict; len=1}");
+    }
+
+    // -- Clone correctness --------------------------------------------------
+
+    #[test]
+    fn clone_nested_array() {
+        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
+        let outer = Variant::Array(vec![inner.clone(), Variant::String("x".into())]);
+        let cloned = outer.clone();
+        assert_eq!(outer, cloned);
+    }
+
+    #[test]
+    fn clone_nested_dictionary() {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("a".into(), Variant::Int(1));
+        let outer = Variant::Dictionary(inner);
+        let cloned = outer.clone();
+        assert_eq!(outer, cloned);
+    }
+
+    // -- Truthy for remaining types -----------------------------------------
+
+    #[test]
+    fn dictionary_truthy() {
+        assert!(!Variant::Dictionary(std::collections::HashMap::new()).is_truthy());
+        let mut d = std::collections::HashMap::new();
+        d.insert("k".into(), Variant::Nil);
+        assert!(Variant::Dictionary(d).is_truthy());
+    }
+
+    #[test]
+    fn object_id_is_always_truthy() {
+        assert!(Variant::ObjectId(gdcore::id::ObjectId::from_raw(0)).is_truthy());
+    }
+
+    #[test]
+    fn color_is_always_truthy() {
+        assert!(Variant::Color(gdcore::math::Color::TRANSPARENT).is_truthy());
+    }
+
+    // -- VariantType Display ------------------------------------------------
+
+    #[test]
+    fn variant_type_display_all() {
+        assert_eq!(format!("{}", VariantType::Nil), "Nil");
+        assert_eq!(format!("{}", VariantType::Bool), "bool");
+        assert_eq!(format!("{}", VariantType::Int), "int");
+        assert_eq!(format!("{}", VariantType::Float), "float");
+        assert_eq!(format!("{}", VariantType::String), "String");
+        assert_eq!(format!("{}", VariantType::StringName), "StringName");
+        assert_eq!(format!("{}", VariantType::NodePath), "NodePath");
+        assert_eq!(format!("{}", VariantType::Vector2), "Vector2");
+        assert_eq!(format!("{}", VariantType::Vector3), "Vector3");
+        assert_eq!(format!("{}", VariantType::Rect2), "Rect2");
+        assert_eq!(format!("{}", VariantType::Transform2D), "Transform2D");
+        assert_eq!(format!("{}", VariantType::Color), "Color");
+        assert_eq!(format!("{}", VariantType::ObjectId), "ObjectId");
+        assert_eq!(format!("{}", VariantType::Array), "Array");
+        assert_eq!(format!("{}", VariantType::Dictionary), "Dictionary");
+    }
 }

@@ -308,6 +308,27 @@ impl Transform2D {
             origin: Vector2::ZERO,
         }
     }
+
+    /// Returns the inverse of this affine transform.
+    ///
+    /// Assumes the transform is invertible (non-zero determinant).
+    pub fn affine_inverse(self) -> Self {
+        let det = self.x.x * self.y.y - self.x.y * self.y.x;
+        // Invert the 2x2 basis.
+        let inv_det = 1.0 / det;
+        let ix = Vector2::new(self.y.y * inv_det, -self.x.y * inv_det);
+        let iy = Vector2::new(-self.y.x * inv_det, self.x.x * inv_det);
+        // Invert the origin: -inv_basis * origin
+        let io = Vector2::new(
+            -(ix.x * self.origin.x + iy.x * self.origin.y),
+            -(ix.y * self.origin.x + iy.y * self.origin.y),
+        );
+        Self {
+            x: ix,
+            y: iy,
+            origin: io,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,5 +477,244 @@ mod tests {
         assert!(approx_eq(c.g, 0.5));
         assert!(approx_eq(c.b, 0.5));
         assert!(approx_eq(c.a, 1.0));
+    }
+
+    // -- Vector2 edge cases -------------------------------------------------
+
+    #[test]
+    fn vector2_normalize_zero_returns_zero() {
+        let v = Vector2::ZERO.normalized();
+        assert_eq!(v, Vector2::ZERO);
+    }
+
+    #[test]
+    fn vector2_normalize_very_small_returns_zero() {
+        let v = Vector2::new(1e-20, 1e-20).normalized();
+        assert_eq!(v, Vector2::ZERO);
+    }
+
+    #[test]
+    fn vector2_lerp_at_zero_returns_self() {
+        let a = Vector2::new(1.0, 2.0);
+        let b = Vector2::new(10.0, 20.0);
+        let r = a.lerp(b, 0.0);
+        assert!(approx_eq(r.x, a.x));
+        assert!(approx_eq(r.y, a.y));
+    }
+
+    #[test]
+    fn vector2_lerp_at_one_returns_target() {
+        let a = Vector2::new(1.0, 2.0);
+        let b = Vector2::new(10.0, 20.0);
+        let r = a.lerp(b, 1.0);
+        assert!(approx_eq(r.x, b.x));
+        assert!(approx_eq(r.y, b.y));
+    }
+
+    #[test]
+    fn vector2_lerp_at_half() {
+        let a = Vector2::new(0.0, 0.0);
+        let b = Vector2::new(10.0, 20.0);
+        let r = a.lerp(b, 0.5);
+        assert!(approx_eq(r.x, 5.0));
+        assert!(approx_eq(r.y, 10.0));
+    }
+
+    #[test]
+    fn vector2_negation() {
+        let v = Vector2::new(3.0, -4.0);
+        let neg = -v;
+        assert!(approx_eq(neg.x, -3.0));
+        assert!(approx_eq(neg.y, 4.0));
+    }
+
+    #[test]
+    fn vector2_length_squared() {
+        let v = Vector2::new(3.0, 4.0);
+        assert!(approx_eq(v.length_squared(), 25.0));
+    }
+
+    // -- Vector3 edge cases -------------------------------------------------
+
+    #[test]
+    fn vector3_normalize_zero_returns_zero() {
+        let v = Vector3::ZERO.normalized();
+        assert_eq!(v, Vector3::ZERO);
+    }
+
+    #[test]
+    fn vector3_normalize_very_small_returns_zero() {
+        let v = Vector3::new(1e-20, 1e-20, 1e-20).normalized();
+        assert_eq!(v, Vector3::ZERO);
+    }
+
+    #[test]
+    fn vector3_lerp_at_zero_returns_self() {
+        let a = Vector3::new(1.0, 2.0, 3.0);
+        let b = Vector3::new(10.0, 20.0, 30.0);
+        let r = a.lerp(b, 0.0);
+        assert!(approx_eq(r.x, a.x));
+        assert!(approx_eq(r.y, a.y));
+        assert!(approx_eq(r.z, a.z));
+    }
+
+    #[test]
+    fn vector3_lerp_at_one_returns_target() {
+        let a = Vector3::new(1.0, 2.0, 3.0);
+        let b = Vector3::new(10.0, 20.0, 30.0);
+        let r = a.lerp(b, 1.0);
+        assert!(approx_eq(r.x, b.x));
+        assert!(approx_eq(r.y, b.y));
+        assert!(approx_eq(r.z, b.z));
+    }
+
+    #[test]
+    fn vector3_basics() {
+        let v = Vector3::new(1.0, 2.0, 2.0);
+        assert!(approx_eq(v.length(), 3.0));
+        let n = v.normalized();
+        assert!(approx_eq(n.length(), 1.0));
+    }
+
+    #[test]
+    fn vector3_arithmetic() {
+        let a = Vector3::new(1.0, 2.0, 3.0);
+        let b = Vector3::new(4.0, 5.0, 6.0);
+        assert_eq!(a + b, Vector3::new(5.0, 7.0, 9.0));
+        assert_eq!(b - a, Vector3::new(3.0, 3.0, 3.0));
+        assert_eq!(a * 2.0, Vector3::new(2.0, 4.0, 6.0));
+    }
+
+    #[test]
+    fn vector3_negation() {
+        let v = Vector3::new(1.0, -2.0, 3.0);
+        let neg = -v;
+        assert!(approx_eq(neg.x, -1.0));
+        assert!(approx_eq(neg.y, 2.0));
+        assert!(approx_eq(neg.z, -3.0));
+    }
+
+    #[test]
+    fn vector3_dot_product() {
+        let a = Vector3::new(1.0, 0.0, 0.0);
+        let b = Vector3::new(0.0, 1.0, 0.0);
+        assert!(approx_eq(a.dot(b), 0.0));
+        assert!(approx_eq(a.dot(a), 1.0));
+    }
+
+    // -- Rect2 edge cases ---------------------------------------------------
+
+    #[test]
+    fn rect2_zero_size_contains_nothing() {
+        let r = Rect2::new(Vector2::new(5.0, 5.0), Vector2::ZERO);
+        assert!(!r.contains_point(Vector2::new(5.0, 5.0)));
+        assert!(approx_eq(r.area(), 0.0));
+    }
+
+    #[test]
+    fn rect2_negative_size_contains_nothing() {
+        let r = Rect2::new(Vector2::new(10.0, 10.0), Vector2::new(-5.0, -5.0));
+        assert!(!r.contains_point(Vector2::new(7.0, 7.0)));
+        assert!(!r.contains_point(Vector2::new(10.0, 10.0)));
+    }
+
+    #[test]
+    fn rect2_negative_size_area() {
+        let r = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(-5.0, -5.0));
+        assert!(approx_eq(r.area(), 25.0)); // -5 * -5 = 25
+    }
+
+    #[test]
+    fn rect2_end_point() {
+        let r = Rect2::new(Vector2::new(1.0, 2.0), Vector2::new(3.0, 4.0));
+        let end = r.end();
+        assert!(approx_eq(end.x, 4.0));
+        assert!(approx_eq(end.y, 6.0));
+    }
+
+    #[test]
+    fn rect2_touching_rects_do_not_intersect() {
+        let a = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0));
+        let b = Rect2::new(Vector2::new(10.0, 0.0), Vector2::new(10.0, 10.0));
+        assert!(!a.intersects(b));
+    }
+
+    #[test]
+    fn rect2_contains_point_boundary() {
+        let r = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0));
+        assert!(r.contains_point(Vector2::new(0.0, 0.0)));
+        assert!(!r.contains_point(Vector2::new(10.0, 0.0)));
+        assert!(!r.contains_point(Vector2::new(0.0, 10.0)));
+    }
+
+    // -- Transform2D edge cases ---------------------------------------------
+
+    #[test]
+    fn transform2d_scale() {
+        let t = Transform2D::scaled(Vector2::new(2.0, 3.0));
+        let p = t.xform(Vector2::new(5.0, 10.0));
+        assert!(approx_eq(p.x, 10.0));
+        assert!(approx_eq(p.y, 30.0));
+    }
+
+    #[test]
+    fn transform2d_identity_mul_identity() {
+        let result = Transform2D::IDENTITY.mul(Transform2D::IDENTITY);
+        assert_eq!(result, Transform2D::IDENTITY);
+    }
+
+    #[test]
+    fn transform2d_rotation_360_returns_near_identity() {
+        let t = Transform2D::rotated(2.0 * std::f32::consts::PI);
+        let p = t.xform(Vector2::new(1.0, 0.0));
+        assert!(approx_eq(p.x, 1.0));
+        assert!(approx_eq(p.y, 0.0));
+    }
+
+    #[test]
+    fn transform2d_translate_then_scale() {
+        let t = Transform2D::translated(Vector2::new(10.0, 0.0));
+        let s = Transform2D::scaled(Vector2::new(2.0, 2.0));
+        let combined = t.mul(s);
+        let p = combined.xform(Vector2::new(1.0, 0.0));
+        assert!(approx_eq(p.x, 12.0)); // 1*2 + 10
+        assert!(approx_eq(p.y, 0.0));
+    }
+
+    // -- Color edge cases ---------------------------------------------------
+
+    #[test]
+    fn color_lerp_at_zero_returns_self() {
+        let a = Color::new(0.1, 0.2, 0.3, 0.4);
+        let b = Color::new(0.9, 0.8, 0.7, 0.6);
+        let c = a.lerp(b, 0.0);
+        assert!(approx_eq(c.r, a.r));
+        assert!(approx_eq(c.g, a.g));
+        assert!(approx_eq(c.b, a.b));
+        assert!(approx_eq(c.a, a.a));
+    }
+
+    #[test]
+    fn color_lerp_at_one_returns_target() {
+        let a = Color::new(0.1, 0.2, 0.3, 0.4);
+        let b = Color::new(0.9, 0.8, 0.7, 0.6);
+        let c = a.lerp(b, 1.0);
+        assert!(approx_eq(c.r, b.r));
+        assert!(approx_eq(c.g, b.g));
+        assert!(approx_eq(c.b, b.b));
+        assert!(approx_eq(c.a, b.a));
+    }
+
+    #[test]
+    fn color_rgb_has_alpha_one() {
+        let c = Color::rgb(0.5, 0.6, 0.7);
+        assert!(approx_eq(c.a, 1.0));
+    }
+
+    #[test]
+    fn color_constants() {
+        assert_eq!(Color::WHITE, Color::new(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(Color::BLACK, Color::new(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(Color::TRANSPARENT, Color::new(0.0, 0.0, 0.0, 0.0));
     }
 }

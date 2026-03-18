@@ -387,4 +387,101 @@ mod tests {
         register_class(ClassRegistration::new("B"));
         assert_eq!(class_count(), 2);
     }
+
+    #[test]
+    fn register_same_class_twice_overwrites() {
+        let _g = setup();
+        let id1 = register_class(ClassRegistration::new("Duplicate"));
+        let id2 = register_class(ClassRegistration::new("Duplicate"));
+        // Second registration gets a new ID
+        assert_ne!(id1, id2);
+        // Only one class entry in the map
+        assert_eq!(class_count(), 1);
+        // The latest ID is the one stored
+        let info = get_class_info("Duplicate").unwrap();
+        assert_eq!(info.class_id, id2);
+    }
+
+    #[test]
+    fn lookup_nonexistent_class_returns_none() {
+        let _g = setup();
+        assert!(get_class_info("DoesNotExist").is_none());
+    }
+
+    #[test]
+    fn lookup_nonexistent_by_id_returns_none() {
+        let _g = setup();
+        assert!(get_class_info_by_id(ClassId::new(9999)).is_none());
+    }
+
+    #[test]
+    fn inheritance_depth_greater_than_two() {
+        let _g = setup();
+        register_class(ClassRegistration::new("Object"));
+        register_class(ClassRegistration::new("Node").parent("Object"));
+        register_class(ClassRegistration::new("CanvasItem").parent("Node"));
+        register_class(ClassRegistration::new("Node2D").parent("CanvasItem"));
+        register_class(ClassRegistration::new("Sprite2D").parent("Node2D"));
+
+        let chain = inheritance_chain("Sprite2D");
+        assert_eq!(chain, vec!["Sprite2D", "Node2D", "CanvasItem", "Node", "Object"]);
+        assert_eq!(chain.len(), 5);
+
+        assert!(is_parent_class("Sprite2D", "Object"));
+        assert!(is_parent_class("Sprite2D", "CanvasItem"));
+        assert!(!is_parent_class("Object", "Sprite2D"));
+    }
+
+    #[test]
+    fn inheritance_chain_of_unregistered_class() {
+        let _g = setup();
+        let chain = inheritance_chain("Unknown");
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn is_parent_class_self() {
+        let _g = setup();
+        register_class(ClassRegistration::new("TestSelf"));
+        assert!(is_parent_class("TestSelf", "TestSelf"));
+    }
+
+    #[test]
+    fn instantiate_applies_inherited_defaults() {
+        let _g = setup();
+        register_class(ClassRegistration::new("Object"));
+        register_class(
+            ClassRegistration::new("Node")
+                .parent("Object")
+                .property(PropertyInfo::new("name", Variant::String("".into()))),
+        );
+        register_class(
+            ClassRegistration::new("Node2D")
+                .parent("Node")
+                .property(PropertyInfo::new("position", Variant::Vector2(gdcore::math::Vector2::ZERO)))
+                .property(PropertyInfo::new("name", Variant::String("default_2d".into()))),
+        );
+
+        let obj = instantiate("Node2D").unwrap();
+        // Derived default overrides base default
+        assert_eq!(obj.get_property("name"), Variant::String("default_2d".into()));
+        assert_eq!(obj.get_property("position"), Variant::Vector2(gdcore::math::Vector2::ZERO));
+    }
+
+    #[test]
+    fn class_registration_builder_methods() {
+        let _g = setup();
+        let id = register_class(
+            ClassRegistration::new("FullClass")
+                .parent("Object")
+                .property(PropertyInfo::new("hp", Variant::Int(100)))
+                .method(MethodInfo::new("take_damage", 1))
+                .method(MethodInfo::new("heal", 1)),
+        );
+        let info = get_class_info_by_id(id).unwrap();
+        assert_eq!(info.properties.len(), 1);
+        assert_eq!(info.methods.len(), 2);
+        assert_eq!(info.methods[0].name, "take_damage");
+        assert_eq!(info.methods[0].argument_count, 1);
+    }
 }

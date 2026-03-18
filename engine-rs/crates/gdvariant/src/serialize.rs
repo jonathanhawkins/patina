@@ -225,4 +225,141 @@ mod tests {
         let missing_type = serde_json::json!({ "value": 42 });
         assert!(from_json(&missing_type).is_none());
     }
+
+    // -- Roundtrip remaining variant types ----------------------------------
+
+    #[test]
+    fn roundtrip_vector3() {
+        let v = Variant::Vector3(gdcore::math::Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_rect2() {
+        let v = Variant::Rect2(gdcore::math::Rect2::new(
+            Vector2::new(10.0, 20.0),
+            Vector2::new(100.0, 50.0),
+        ));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_transform2d() {
+        let t = gdcore::math::Transform2D {
+            x: Vector2::new(1.0, 0.0),
+            y: Vector2::new(0.0, 1.0),
+            origin: Vector2::new(50.0, 100.0),
+        };
+        // Transform2D doesn't have from_json support yet, test to_json is valid
+        let json = to_json(&Variant::Transform2D(t));
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.get("type").unwrap().as_str().unwrap(), "Transform2D");
+    }
+
+    #[test]
+    fn roundtrip_object_id() {
+        let v = Variant::ObjectId(gdcore::id::ObjectId::from_raw(42));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_nested_array() {
+        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
+        let outer = Variant::Array(vec![inner, Variant::String("x".into())]);
+        assert_eq!(roundtrip(outer.clone()), outer);
+    }
+
+    #[test]
+    fn roundtrip_nested_dictionary() {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("nested".into(), Variant::Bool(true));
+        let mut outer = std::collections::HashMap::new();
+        outer.insert("child".into(), Variant::Dictionary(inner));
+        let v = Variant::Dictionary(outer);
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    // -- Malformed JSON inputs ----------------------------------------------
+
+    #[test]
+    fn malformed_not_an_object() {
+        assert!(from_json(&serde_json::json!(42)).is_none());
+        assert!(from_json(&serde_json::json!("string")).is_none());
+        assert!(from_json(&serde_json::json!(null)).is_none());
+    }
+
+    #[test]
+    fn malformed_type_not_string() {
+        let j = serde_json::json!({ "type": 42 });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_bool_missing_value() {
+        let j = serde_json::json!({ "type": "Bool" });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_int_wrong_value_type() {
+        let j = serde_json::json!({ "type": "Int", "value": "not_a_number" });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_vector2_wrong_length() {
+        let j = serde_json::json!({ "type": "Vector2", "value": [1.0] });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_vector3_wrong_length() {
+        let j = serde_json::json!({ "type": "Vector3", "value": [1.0, 2.0] });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_color_wrong_length() {
+        let j = serde_json::json!({ "type": "Color", "value": [1.0, 0.5] });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_array_with_bad_element() {
+        let j = serde_json::json!({
+            "type": "Array",
+            "value": [{"type": "Unknown"}]
+        });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_dictionary_with_bad_value() {
+        let j = serde_json::json!({
+            "type": "Dictionary",
+            "value": {"key": {"type": "Unknown"}}
+        });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_float_missing_value() {
+        let j = serde_json::json!({ "type": "Float" });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_string_wrong_value_type() {
+        let j = serde_json::json!({ "type": "String", "value": 42 });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn malformed_rect2_missing_size() {
+        let j = serde_json::json!({
+            "type": "Rect2",
+            "value": { "position": [0.0, 0.0] }
+        });
+        assert!(from_json(&j).is_none());
+    }
 }

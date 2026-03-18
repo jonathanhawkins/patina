@@ -128,4 +128,81 @@ mod tests {
         assert!(ResourceUid::new(0).is_valid());
         assert!(ResourceUid::new(100).is_valid());
     }
+
+    #[test]
+    fn object_id_display() {
+        let id = ObjectId::from_raw(42);
+        assert_eq!(format!("{id}"), "42");
+    }
+
+    #[test]
+    fn object_id_debug() {
+        let id = ObjectId::from_raw(42);
+        assert_eq!(format!("{id:?}"), "ObjectId(42)");
+    }
+
+    #[test]
+    fn object_id_hash_consistent() {
+        use std::collections::HashSet;
+        let id = ObjectId::from_raw(99);
+        let mut set = HashSet::new();
+        set.insert(id);
+        assert!(set.contains(&ObjectId::from_raw(99)));
+        assert!(!set.contains(&ObjectId::from_raw(100)));
+    }
+
+    #[test]
+    fn object_id_next_always_increases() {
+        let a = ObjectId::next();
+        let b = ObjectId::next();
+        let c = ObjectId::next();
+        assert!(a.raw() < b.raw());
+        assert!(b.raw() < c.raw());
+    }
+
+    #[test]
+    fn class_id_display() {
+        let id = ClassId::new(7);
+        assert_eq!(format!("{id:?}"), "ClassId(7)");
+    }
+
+    #[test]
+    fn class_id_roundtrip() {
+        let id = ClassId::new(123);
+        assert_eq!(id.raw(), 123);
+    }
+
+    #[test]
+    fn class_id_equality() {
+        assert_eq!(ClassId::new(5), ClassId::new(5));
+        assert_ne!(ClassId::new(5), ClassId::new(6));
+    }
+
+    #[test]
+    fn resource_uid_display() {
+        let uid = ResourceUid::new(42);
+        assert_eq!(format!("{uid}"), "42");
+        assert_eq!(format!("{uid:?}"), "ResourceUid(42)");
+    }
+
+    #[test]
+    fn resource_uid_negative_value_is_valid() {
+        // -1 is INVALID, but -2 should be valid
+        assert!(ResourceUid::new(-2).is_valid());
+    }
+
+    #[test]
+    fn resource_uid_hash_consistent() {
+        use std::collections::HashSet;
+        let uid = ResourceUid::new(42);
+        let mut set = HashSet::new();
+        set.insert(uid);
+        assert!(set.contains(&ResourceUid::new(42)));
+    }
+
+    #[test]
+    fn resource_uid_roundtrip() {
+        let uid = ResourceUid::new(i64::MAX);
+        assert_eq!(uid.raw(), i64::MAX);
+    }
 }

@@ -280,4 +280,87 @@ mod tests {
         let c = NodePath::new("root/Player");
         assert_ne!(a, c); // absolute vs relative
     }
+
+    #[test]
+    fn root_only_path() {
+        let p = NodePath::new("/");
+        assert!(p.is_absolute());
+        assert_eq!(p.get_name_count(), 0);
+        assert!(p.subnames.is_empty());
+    }
+
+    #[test]
+    fn subnames_only_path() {
+        let p = NodePath::new(":prop:sub");
+        assert!(!p.is_absolute());
+        assert_eq!(p.get_name_count(), 0);
+        assert_eq!(p.get_subname_count(), 2);
+        assert_eq!(p.get_subname(0), Some("prop"));
+        assert_eq!(p.get_subname(1), Some("sub"));
+    }
+
+    #[test]
+    fn double_dot_navigation() {
+        let p = NodePath::new("../../Sibling/Child");
+        assert!(!p.is_absolute());
+        assert_eq!(p.get_name_count(), 4);
+        assert_eq!(p.get_name(0), Some(".."));
+        assert_eq!(p.get_name(1), Some(".."));
+        assert_eq!(p.get_name(2), Some("Sibling"));
+        assert_eq!(p.get_name(3), Some("Child"));
+    }
+
+    #[test]
+    fn single_dot_path() {
+        let p = NodePath::new(".");
+        assert!(!p.is_absolute());
+        assert_eq!(p.get_name_count(), 1);
+        assert_eq!(p.get_name(0), Some("."));
+    }
+
+    #[test]
+    fn get_subname_out_of_bounds() {
+        let p = NodePath::new("A:b");
+        assert_eq!(p.get_subname(5), None);
+    }
+
+    #[test]
+    fn display_empty_path() {
+        let p = NodePath::empty();
+        assert_eq!(format!("{p}"), "");
+    }
+
+    #[test]
+    fn display_root_only() {
+        let p = NodePath::new("/");
+        assert_eq!(format!("{p}"), "/");
+    }
+
+    #[test]
+    fn display_subnames_only() {
+        let p = NodePath::new(":prop:sub");
+        assert_eq!(format!("{p}"), ":prop:sub");
+    }
+
+    #[test]
+    fn hash_consistent_with_eq() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(NodePath::new("/root/A"));
+        assert!(set.contains(&NodePath::new("/root/A")));
+        assert!(!set.contains(&NodePath::new("/root/B")));
+    }
+
+    #[test]
+    fn concatenated_subnames_empty_when_none() {
+        let p = NodePath::new("A/B");
+        assert_eq!(p.get_concatenated_subnames(), "");
+    }
+
+    #[test]
+    fn property_path_from_no_subnames() {
+        let p = NodePath::new("A/B");
+        let prop = p.get_as_property_path();
+        assert!(prop.is_empty());
+    }
 }

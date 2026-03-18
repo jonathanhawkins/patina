@@ -240,4 +240,53 @@ mod tests {
         assert_eq!(log[0], NOTIFICATION_READY);
         assert_eq!(log[1], NOTIFICATION_PROCESS);
     }
+
+    #[test]
+    fn get_nonexistent_property_returns_nil() {
+        let obj = GenericObject::new("Node");
+        assert_eq!(obj.get_property("nonexistent"), Variant::Nil);
+        assert_eq!(obj.get_property(""), Variant::Nil);
+        assert_eq!(obj.get_property("a/b/c"), Variant::Nil);
+    }
+
+    #[test]
+    fn set_same_property_twice_overwrites() {
+        let mut obj = GenericObject::new("Node");
+        obj.set_property("x", Variant::Int(1));
+        assert_eq!(obj.get_property("x"), Variant::Int(1));
+        obj.set_property("x", Variant::Int(2));
+        assert_eq!(obj.get_property("x"), Variant::Int(2));
+    }
+
+    #[test]
+    fn has_property_returns_false_for_missing() {
+        let obj = GenericObject::new("Node");
+        assert!(!obj.base.has_property("missing"));
+    }
+
+    #[test]
+    fn object_base_with_id() {
+        let id = ObjectId::from_raw(999);
+        let base = ObjectBase::with_id("TestClass", id);
+        assert_eq!(base.id(), id);
+        assert_eq!(base.class_name(), "TestClass");
+    }
+
+    #[test]
+    fn signals_initially_empty() {
+        let obj = GenericObject::new("Node");
+        assert!(obj.base.signals().signal_names().is_empty());
+    }
+
+    #[test]
+    fn empty_property_names_for_new_object() {
+        let obj = GenericObject::new("Node");
+        assert!(obj.base.property_names().is_empty());
+    }
+
+    #[test]
+    fn notification_log_initially_empty() {
+        let obj = GenericObject::new("Node");
+        assert!(obj.base.notification_log().is_empty());
+    }
 }

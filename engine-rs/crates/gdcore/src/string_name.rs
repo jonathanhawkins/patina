@@ -198,4 +198,61 @@ mod tests {
         let b = a; // Copy
         assert_eq!(a, b);
     }
+
+    #[test]
+    fn empty_string() {
+        let sn = StringName::new("");
+        assert_eq!(sn.as_str(), "");
+        assert_eq!(format!("{sn}"), "");
+    }
+
+    #[test]
+    fn empty_string_interned_twice_is_equal() {
+        let a = StringName::new("");
+        let b = StringName::new("");
+        assert_eq!(a, b);
+        assert!(std::ptr::eq(a.as_str() as *const str, b.as_str() as *const str));
+    }
+
+    #[test]
+    fn very_long_string() {
+        let long = "a".repeat(10_000);
+        let sn = StringName::new(&long);
+        assert_eq!(sn.as_str().len(), 10_000);
+    }
+
+    #[test]
+    fn unicode_string() {
+        let sn = StringName::new("日本語テスト🎮");
+        assert_eq!(sn.as_str(), "日本語テスト🎮");
+    }
+
+    #[test]
+    fn unicode_string_interned_twice() {
+        let a = StringName::new("こんにちは");
+        let b = StringName::new("こんにちは");
+        assert_eq!(a, b);
+        assert!(std::ptr::eq(a.as_str() as *const str, b.as_str() as *const str));
+    }
+
+    #[test]
+    fn same_string_interned_twice_returns_equal() {
+        let a = StringName::new("duplicate_test_xyz");
+        let b = StringName::new("duplicate_test_xyz");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn from_ref_string() {
+        let owned = String::from("ref_string_test");
+        let sn: StringName = (&owned).into();
+        assert_eq!(sn.as_str(), "ref_string_test");
+    }
+
+    #[test]
+    fn ordering_same_string() {
+        let a = StringName::new("same_ord");
+        let b = StringName::new("same_ord");
+        assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+    }
 }

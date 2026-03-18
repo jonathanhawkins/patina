@@ -291,4 +291,115 @@ mod tests {
         assert_eq!(log[0], NOTIFICATION_PHYSICS_PROCESS);
         assert_eq!(log[1], NOTIFICATION_PROCESS);
     }
+
+    #[test]
+    fn step_with_delta_zero() {
+        let (mut ml, child_id) = make_loop_with_child();
+        ml.step(0.0);
+
+        assert_eq!(ml.frame_count(), 1);
+        assert_eq!(ml.process_time(), 0.0);
+
+        // With delta=0, no physics ticks should fire, but process should
+        let log = ml.tree().get_node(child_id).unwrap().notification_log();
+        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        let process_count = log.iter().filter(|&&n| n == NOTIFICATION_PROCESS).count();
+        assert_eq!(physics_count, 0);
+        assert_eq!(process_count, 1);
+    }
+
+    #[test]
+    fn step_with_very_small_delta() {
+        let (mut ml, child_id) = make_loop_with_child();
+        // Much smaller than physics timestep (1/60)
+        ml.step(1e-10);
+
+        assert_eq!(ml.frame_count(), 1);
+
+        let log = ml.tree().get_node(child_id).unwrap().notification_log();
+        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        let process_count = log.iter().filter(|&&n| n == NOTIFICATION_PROCESS).count();
+        // Delta too small for any physics step
+        assert_eq!(physics_count, 0);
+        assert_eq!(process_count, 1);
+    }
+
+    #[test]
+    fn run_frames_zero() {
+        let (mut ml, child_id) = make_loop_with_child();
+        ml.run_frames(0, 1.0 / 60.0);
+
+        assert_eq!(ml.frame_count(), 0);
+        let log = ml.tree().get_node(child_id).unwrap().notification_log();
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn physics_ticks_per_second_accessor() {
+        let (ml, _) = make_loop_with_child();
+        assert_eq!(ml.physics_ticks_per_second(), 60);
+    }
+
+    #[test]
+    fn max_physics_steps_per_frame_accessor() {
+        let (ml, _) = make_loop_with_child();
+        assert_eq!(ml.max_physics_steps_per_frame(), 8);
+    }
+
+    #[test]
+    fn set_physics_ticks_per_second() {
+        let (mut ml, _) = make_loop_with_child();
+        ml.set_physics_ticks_per_second(120);
+        assert_eq!(ml.physics_ticks_per_second(), 120);
+    }
+
+    #[test]
+    #[should_panic(expected = "physics_ticks_per_second must be > 0")]
+    fn set_physics_ticks_per_second_zero_panics() {
+        let (mut ml, _) = make_loop_with_child();
+        ml.set_physics_ticks_per_second(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_physics_steps_per_frame must be > 0")]
+    fn set_max_physics_steps_zero_panics() {
+        let (mut ml, _) = make_loop_with_child();
+        ml.set_max_physics_steps_per_frame(0);
+    }
+
+    #[test]
+    fn tree_mut_access() {
+        let (mut ml, _) = make_loop_with_child();
+        let child = Node::new("Extra", "Node");
+        let root = ml.tree().root_id();
+        ml.tree_mut().add_child(root, child).unwrap();
+        assert_eq!(ml.tree().node_count(), 3); // root + Child + Extra
+    }
+
+    #[test]
+    fn multiple_physics_steps_in_one_frame() {
+        let (mut ml, child_id) = make_loop_with_child();
+        // With delta = 2/60, at 60 TPS we should get 2 physics steps
+        ml.step(2.0 / 60.0);
+
+        let log = ml.tree().get_node(child_id).unwrap().notification_log();
+        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        assert_eq!(physics_count, 2);
+    }
+
+    #[test]
+    fn accumulator_carries_over_between_frames() {
+        let (mut ml, child_id) = make_loop_with_child();
+        // At 60 TPS, physics dt = 1/60 ~= 0.01667
+        // Step with half the physics dt twice — accumulator should carry over
+        let half_dt = 0.5 / 60.0;
+        ml.step(half_dt);
+        ml.step(half_dt);
+
+        let log = ml.tree().get_node(child_id).unwrap().notification_log();
+        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        // The first step accumulates half, second step accumulates to full => 1 physics step
+        assert_eq!(physics_count, 1);
+        assert_eq!(ml.frame_count(), 2);
+    }
 }

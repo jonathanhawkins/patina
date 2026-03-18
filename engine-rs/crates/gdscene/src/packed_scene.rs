@@ -15,8 +15,33 @@ use std::collections::HashMap;
 use gdcore::error::{EngineError, EngineResult};
 use gdresource::loader::parse_variant_value;
 use gdvariant::Variant;
+use gdobject::signal::Connection;
 
-use crate::node::Node;
+use crate::node::{Node, NodeId};
+
+// ---------------------------------------------------------------------------
+// SceneConnection
+// ---------------------------------------------------------------------------
+
+/// A signal connection parsed from a `[connection]` section in a `.tscn` file.
+///
+/// ```text
+/// [connection signal="pressed" from="Button" to="." method="_on_button_pressed" flags=3]
+/// ```
+#[derive(Debug, Clone)]
+pub struct SceneConnection {
+    /// The signal name (e.g. `"pressed"`).
+    pub signal_name: String,
+    /// Relative path from the scene root to the emitting node.
+    pub from_path: String,
+    /// Relative path from the scene root to the receiving node.
+    /// `"."` means the scene root itself.
+    pub to_path: String,
+    /// The method name to call on the target node.
+    pub method_name: String,
+    /// Optional connection flags (defaults to 0).
+    pub flags: u32,
+}
 
 // ---------------------------------------------------------------------------
 // NodeTemplate
@@ -50,6 +75,8 @@ pub struct PackedScene {
     pub uid: Option<String>,
     /// Ordered list of node templates.
     templates: Vec<NodeTemplate>,
+    /// Signal connections parsed from `[connection]` sections.
+    connections: Vec<SceneConnection>,
 }
 
 impl PackedScene {
@@ -57,6 +84,7 @@ impl PackedScene {
     pub fn from_tscn(source: &str) -> EngineResult<Self> {
         let mut uid = None;
         let mut templates: Vec<NodeTemplate> = Vec::new();
+        let mut connections: Vec<SceneConnection> = Vec::new();
         let mut current: Option<NodeTemplate> = None;
 
         for line in source.lines() {
@@ -79,6 +107,34 @@ impl PackedScene {
                 if inner.starts_with("gd_scene") {
                     let attrs = extract_header_attrs(inner);
                     uid = attrs.get("uid").cloned();
+                } else if inner.starts_with("connection") {
+                    let attrs = extract_header_attrs(inner);
+                    // All four required attributes must be present.
+                    let signal_name = attrs.get("signal").cloned();
+                    let from_path = attrs.get("from").cloned();
+                    let to_path = attrs.get("to").cloned();
+                    let method_name = attrs.get("method").cloned();
+
+                    match (signal_name, from_path, to_path, method_name) {
+                        (Some(signal), Some(from), Some(to), Some(method)) => {
+                            let flags = attrs
+                                .get("flags")
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .unwrap_or(0);
+                            connections.push(SceneConnection {
+                                signal_name: signal,
+                                from_path: from,
+                                to_path: to,
+                                method_name: method,
+                                flags,
+                            });
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "skipping malformed [connection] — missing required attributes"
+                            );
+                        }
+                    }
                 } else if inner.starts_with("node") {
                     let attrs = extract_header_attrs(inner);
                     let name = attrs.get("name").cloned().unwrap_or_default();
@@ -126,7 +182,11 @@ impl PackedScene {
             ));
         }
 
-        Ok(Self { uid, templates })
+        Ok(Self {
+            uid,
+            templates,
+            connections,
+        })
     }
 
     /// Instantiates the packed scene, returning the root node and a flat
@@ -205,6 +265,16 @@ impl PackedScene {
     /// Returns the number of node templates in this packed scene.
     pub fn node_count(&self) -> usize {
         self.templates.len()
+    }
+
+    /// Returns the parsed signal connections.
+    pub fn connections(&self) -> &[SceneConnection] {
+        &self.connections
+    }
+
+    /// Returns the number of signal connections in this packed scene.
+    pub fn connection_count(&self) -> usize {
+        self.connections.len()
     }
 }
 
@@ -324,7 +394,64 @@ pub fn add_packed_scene_to_tree(
         tree.add_child(new_parent_id, new_node)?;
     }
 
+    // Wire any signal connections from the packed scene.
+    wire_connections(tree, new_root_id, &scene.connections);
+
     Ok(new_root_id)
+}
+
+/// Wires signal connections from a packed scene into the scene tree.
+///
+/// After a packed scene has been instanced and added to the tree via
+/// [`add_packed_scene_to_tree`], call this function to resolve the
+/// `from`/`to` paths in each [`SceneConnection`] to [`NodeId`]s and
+/// register the connections in the tree's signal stores.
+///
+/// - `"."` in `from_path` or `to_path` refers to the scene root.
+/// - Non-existent paths produce a warning but do not cause an error.
+pub fn wire_connections(
+    tree: &mut crate::scene_tree::SceneTree,
+    root_id: NodeId,
+    connections: &[SceneConnection],
+) {
+    for conn in connections {
+        // Resolve "from" path relative to scene root.
+        let from_id = if conn.from_path == "." {
+            Some(root_id)
+        } else {
+            tree.get_node_relative(root_id, &conn.from_path)
+        };
+
+        // Resolve "to" path relative to scene root.
+        let to_id = if conn.to_path == "." {
+            Some(root_id)
+        } else {
+            tree.get_node_relative(root_id, &conn.to_path)
+        };
+
+        match (from_id, to_id) {
+            (Some(from), Some(to)) => {
+                // Look up the target node's ObjectId for the Connection.
+                let to_object_id = to.object_id();
+                let connection = Connection::new(to_object_id, &conn.method_name);
+                tree.connect_signal(from, &conn.signal_name, connection);
+            }
+            (None, _) => {
+                tracing::warn!(
+                    "wire_connections: from path '{}' not found for signal '{}'",
+                    conn.from_path,
+                    conn.signal_name,
+                );
+            }
+            (_, None) => {
+                tracing::warn!(
+                    "wire_connections: to path '{}' not found for signal '{}'",
+                    conn.to_path,
+                    conn.signal_name,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +459,8 @@ mod tests {
     use super::*;
     use crate::scene_tree::SceneTree;
     use gdcore::math::Vector2;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     const SIMPLE_TSCN: &str = r#"
 [gd_scene format=3 uid="uid://abc123"]
@@ -342,6 +471,22 @@ mod tests {
 position = Vector2(100, 200)
 
 [node name="Sprite" type="Sprite2D" parent="Player"]
+"#;
+
+    const SIGNALS_TSCN: &str = r#"
+[gd_scene format=3 uid="uid://signals_test"]
+
+[node name="Root" type="Control"]
+
+[node name="Button" type="Button" parent="."]
+
+[node name="Player" type="Node2D" parent="."]
+
+[node name="Area2D" type="Area2D" parent="Player"]
+
+[connection signal="pressed" from="Button" to="." method="_on_button_pressed"]
+[connection signal="body_entered" from="Player/Area2D" to="Player" method="_on_body_entered" flags=3]
+[connection signal="mouse_entered" from="Button" to="Player" method="_on_mouse_entered"]
 "#;
 
     #[test]
@@ -441,5 +586,338 @@ health = 100
         assert_eq!(nodes[3].name(), "Boss");
         assert_eq!(nodes[3].get_property("health"), Variant::Int(100));
         assert_eq!(nodes[3].parent(), Some(nodes[2].id()));
+    }
+
+    #[test]
+    fn parse_empty_scene_file_fails() {
+        let result = PackedScene::from_tscn("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_scene_with_only_gd_scene_header_fails() {
+        let tscn = "[gd_scene format=3]\n";
+        let result = PackedScene::from_tscn(tscn);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_scene_with_unknown_attributes_still_works() {
+        let tscn = r#"
+[gd_scene format=3 unknown_attr="value"]
+
+[node name="Root" type="Node" some_extra="ignored"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        assert_eq!(scene.node_count(), 1);
+    }
+
+    #[test]
+    fn malformed_tscn_node_without_root() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Child" type="Node" parent="."]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let result = scene.instance();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_tscn_child_references_missing_parent() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Child" type="Node" parent="NonExistent"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let result = scene.instance();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_scene_with_comments() {
+        let tscn = r#"
+; This is a comment
+[gd_scene format=3]
+; Another comment
+
+[node name="Root" type="Node"]
+; Property comment
+value = 42
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert_eq!(nodes[0].get_property("value"), Variant::Int(42));
+    }
+
+    #[test]
+    fn instance_node_without_type_defaults_to_node() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert_eq!(nodes[0].class_name(), "Node");
+    }
+
+    // -----------------------------------------------------------------------
+    // Signal connection parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_single_connection() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Button" type="Button" parent="."]
+
+[connection signal="pressed" from="Button" to="." method="_on_pressed"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        assert_eq!(scene.connection_count(), 1);
+
+        let conn = &scene.connections()[0];
+        assert_eq!(conn.signal_name, "pressed");
+        assert_eq!(conn.from_path, "Button");
+        assert_eq!(conn.to_path, ".");
+        assert_eq!(conn.method_name, "_on_pressed");
+        assert_eq!(conn.flags, 0);
+    }
+
+    #[test]
+    fn parse_multiple_connections() {
+        let scene = PackedScene::from_tscn(SIGNALS_TSCN).unwrap();
+        assert_eq!(scene.connection_count(), 3);
+
+        assert_eq!(scene.connections()[0].signal_name, "pressed");
+        assert_eq!(scene.connections()[1].signal_name, "body_entered");
+        assert_eq!(scene.connections()[2].signal_name, "mouse_entered");
+    }
+
+    #[test]
+    fn parse_connection_with_flags() {
+        let scene = PackedScene::from_tscn(SIGNALS_TSCN).unwrap();
+        let body_conn = &scene.connections()[1];
+        assert_eq!(body_conn.signal_name, "body_entered");
+        assert_eq!(body_conn.from_path, "Player/Area2D");
+        assert_eq!(body_conn.to_path, "Player");
+        assert_eq!(body_conn.method_name, "_on_body_entered");
+        assert_eq!(body_conn.flags, 3);
+    }
+
+    #[test]
+    fn scene_with_no_connections_still_works() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        assert_eq!(scene.connection_count(), 0);
+        assert!(scene.connections().is_empty());
+
+        // Instancing and adding to tree should still work fine.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+        assert_eq!(tree.node_count(), 4);
+        // No signal stores should be created.
+        assert!(tree.signal_store(scene_root).is_none());
+    }
+
+    #[test]
+    fn malformed_connection_missing_attributes() {
+        // Missing "method" attribute — should be skipped gracefully.
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Button" type="Button" parent="."]
+
+[connection signal="pressed" from="Button" to="."]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        // Malformed connection is silently skipped.
+        assert_eq!(scene.connection_count(), 0);
+        assert_eq!(scene.node_count(), 2);
+    }
+
+    #[test]
+    fn instance_scene_and_verify_connections_exist() {
+        let scene = PackedScene::from_tscn(SIGNALS_TSCN).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        // Button node should have signal "pressed" connected.
+        let button_id = tree.get_node_by_path("/root/Root/Button").unwrap();
+        let store = tree.signal_store(button_id).expect("Button should have a signal store");
+        let pressed = store.get_signal("pressed").expect("should have 'pressed' signal");
+        assert_eq!(pressed.connection_count(), 1);
+        // The target should be the scene root (to=".").
+        assert_eq!(pressed.connections()[0].method, "_on_button_pressed");
+        assert_eq!(pressed.connections()[0].target_id, scene_root.object_id());
+
+        // Button also has mouse_entered connected.
+        let mouse = store.get_signal("mouse_entered").expect("should have 'mouse_entered'");
+        assert_eq!(mouse.connection_count(), 1);
+        assert_eq!(mouse.connections()[0].method, "_on_mouse_entered");
+
+        // Player/Area2D should have body_entered connected.
+        let area_id = tree.get_node_by_path("/root/Root/Player/Area2D").unwrap();
+        let area_store = tree.signal_store(area_id).expect("Area2D should have a signal store");
+        let body = area_store.get_signal("body_entered").expect("should have 'body_entered'");
+        assert_eq!(body.connection_count(), 1);
+        assert_eq!(body.connections()[0].method, "_on_body_entered");
+    }
+
+    #[test]
+    fn connection_from_child_to_root() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Child" type="Node" parent="."]
+
+[connection signal="done" from="Child" to="." method="_on_child_done"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let child_id = tree.get_node_by_path("/root/Root/Child").unwrap();
+        let store = tree.signal_store(child_id).expect("Child should have signal store");
+        let sig = store.get_signal("done").unwrap();
+        assert_eq!(sig.connection_count(), 1);
+        assert_eq!(sig.connections()[0].target_id, scene_root.object_id());
+        assert_eq!(sig.connections()[0].method, "_on_child_done");
+    }
+
+    #[test]
+    fn connection_from_nested_child_to_parent() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Parent" type="Node" parent="."]
+
+[node name="Deep" type="Node" parent="Parent"]
+
+[connection signal="alert" from="Parent/Deep" to="Parent" method="_on_deep_alert"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let deep_id = tree.get_node_by_path("/root/Root/Parent/Deep").unwrap();
+        let parent_id = tree.get_node_by_path("/root/Root/Parent").unwrap();
+
+        let store = tree.signal_store(deep_id).expect("Deep should have signal store");
+        let sig = store.get_signal("alert").unwrap();
+        assert_eq!(sig.connection_count(), 1);
+        assert_eq!(sig.connections()[0].target_id, parent_id.object_id());
+        assert_eq!(sig.connections()[0].method, "_on_deep_alert");
+    }
+
+    #[test]
+    fn connection_nonexistent_from_path_warns_no_crash() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[connection signal="pressed" from="NonExistent" to="." method="_on_pressed"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        assert_eq!(scene.connection_count(), 1);
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        // Should not crash — just logs a warning.
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+        // No signal store should have been created since from_path didn't resolve.
+        assert!(tree.signal_store(scene_root).is_none());
+    }
+
+    #[test]
+    fn connection_nonexistent_to_path_warns_no_crash() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Button" type="Button" parent="."]
+
+[connection signal="pressed" from="Button" to="Ghost" method="_on_pressed"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        assert_eq!(scene.connection_count(), 1);
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let _scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+        let button_id = tree.get_node_by_path("/root/Root/Button").unwrap();
+        // No signal store since connection couldn't be wired.
+        assert!(tree.signal_store(button_id).is_none());
+    }
+
+    #[test]
+    fn emit_signal_after_instancing() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Button" type="Button" parent="."]
+
+[connection signal="pressed" from="Button" to="." method="_on_pressed"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let button_id = tree.get_node_by_path("/root/Root/Button").unwrap();
+
+        // The connection was wired without a callback. Attach a callback now
+        // to test emission works end-to-end.
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let counter = call_count.clone();
+        let target_object_id = scene_root.object_id();
+        tree.connect_signal(
+            button_id,
+            "pressed",
+            Connection::with_callback(target_object_id, "_on_pressed_cb", move |_args| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            }),
+        );
+
+        // Emit the signal and verify the callback fires.
+        let results = tree.emit_signal(button_id, "pressed", &[]);
+        // Two connections: the original from tscn (no callback -> Nil) + our callback.
+        assert_eq!(results.len(), 2);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        // Emit again.
+        tree.emit_signal(button_id, "pressed", &[]);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn parse_fixture_file() {
+        let fixture = include_str!("../fixtures/scenes/with_signals.tscn");
+        let scene = PackedScene::from_tscn(fixture).unwrap();
+        assert_eq!(scene.node_count(), 4);
+        assert_eq!(scene.connection_count(), 3);
+        assert_eq!(scene.uid.as_deref(), Some("uid://signals_test"));
     }
 }

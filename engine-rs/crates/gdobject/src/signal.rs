@@ -437,4 +437,118 @@ mod tests {
         assert!(!conn.has_callback());
         assert_eq!(conn.call(&[]), Variant::Nil);
     }
+
+    #[test]
+    fn emit_with_no_connections_returns_empty() {
+        let signal = Signal::new("empty_signal");
+        let results = signal.emit(&[Variant::Int(42)]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn emit_nonexistent_signal_on_store_returns_empty() {
+        let store = SignalStore::new();
+        let results = store.emit("nonexistent", &[Variant::Bool(true)]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn connect_same_callback_twice_fires_twice() {
+        let mut signal = Signal::new("doubled");
+        let target_id = ObjectId::next();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let counter = call_count.clone();
+            signal.connect(Connection::with_callback(
+                target_id,
+                "on_doubled",
+                move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Variant::Nil
+                },
+            ));
+        }
+
+        assert_eq!(signal.connection_count(), 2);
+        let results = signal.emit(&[]);
+        assert_eq!(results.len(), 2);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn disconnect_nonexistent_returns_false() {
+        let mut signal = Signal::new("test");
+        assert!(!signal.disconnect(ObjectId::next(), "no_method"));
+    }
+
+    #[test]
+    fn signal_name_accessor() {
+        let signal = Signal::new("my_signal");
+        assert_eq!(signal.name(), "my_signal");
+    }
+
+    #[test]
+    fn signal_store_add_signal_is_idempotent() {
+        let mut store = SignalStore::new();
+        store.add_signal("ready");
+        store.add_signal("ready"); // should not panic or create duplicate
+        assert!(store.has_signal("ready"));
+        assert_eq!(store.get_signal("ready").unwrap().connection_count(), 0);
+    }
+
+    #[test]
+    fn signal_store_disconnect_nonexistent_signal_returns_false() {
+        let mut store = SignalStore::new();
+        assert!(!store.disconnect("missing", ObjectId::next(), "method"));
+    }
+
+    #[test]
+    fn signal_store_get_signal_returns_none_for_missing() {
+        let store = SignalStore::new();
+        assert!(store.get_signal("missing").is_none());
+    }
+
+    #[test]
+    fn signal_store_signal_names() {
+        let mut store = SignalStore::new();
+        store.add_signal("a");
+        store.add_signal("b");
+        let mut names = store.signal_names();
+        names.sort();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn signal_store_disconnect_all_for_target() {
+        let mut store = SignalStore::new();
+        let target = ObjectId::next();
+        store.connect("sig_a", Connection::new(target, "method_a"));
+        store.connect("sig_b", Connection::new(target, "method_b"));
+        store.connect("sig_a", Connection::new(ObjectId::next(), "other"));
+
+        store.disconnect_all_for(target);
+        assert_eq!(store.get_signal("sig_a").unwrap().connection_count(), 1);
+        assert_eq!(store.get_signal("sig_b").unwrap().connection_count(), 0);
+    }
+
+    #[test]
+    fn connection_clone() {
+        let conn = Connection::with_callback(
+            ObjectId::next(),
+            "method",
+            |_| Variant::Int(42),
+        );
+        let cloned = conn.clone();
+        assert_eq!(cloned.method, "method");
+        assert_eq!(cloned.call(&[]), Variant::Int(42));
+    }
+
+    #[test]
+    fn connection_debug_format() {
+        let conn = Connection::new(ObjectId::from_raw(1), "test_method");
+        let debug = format!("{conn:?}");
+        assert!(debug.contains("Connection"));
+        assert!(debug.contains("test_method"));
+    }
 }

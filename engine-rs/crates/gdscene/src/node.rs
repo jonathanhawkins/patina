@@ -288,4 +288,88 @@ mod tests {
         assert!(parent.remove_child_id(child_id));
         assert!(parent.children().is_empty());
     }
+
+    #[test]
+    fn node_with_empty_name() {
+        let node = Node::new("", "Node");
+        assert_eq!(node.name(), "");
+    }
+
+    #[test]
+    fn node_with_unicode_name() {
+        let node = Node::new("プレイヤー🎮", "Node2D");
+        assert_eq!(node.name(), "プレイヤー🎮");
+        assert_eq!(node.class_name(), "Node2D");
+    }
+
+    #[test]
+    fn node_set_name() {
+        let mut node = Node::new("Old", "Node");
+        node.set_name("New");
+        assert_eq!(node.name(), "New");
+    }
+
+    #[test]
+    fn node_id_display() {
+        let id = NodeId::next();
+        let display = format!("{id}");
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn node_id_debug() {
+        let id = NodeId::next();
+        let debug = format!("{id:?}");
+        assert!(debug.starts_with("NodeId("));
+    }
+
+    #[test]
+    fn node_with_id() {
+        let id = NodeId::next();
+        let node = Node::with_id(id, "Custom", "Sprite2D");
+        assert_eq!(node.id(), id);
+        assert_eq!(node.name(), "Custom");
+    }
+
+    #[test]
+    fn remove_nonexistent_child_returns_false() {
+        let mut node = Node::new("Parent", "Node");
+        assert!(!node.remove_child_id(NodeId::next()));
+    }
+
+    #[test]
+    fn notification_log_records_in_order() {
+        let mut node = Node::new("N", "Node");
+        node.receive_notification(gdobject::NOTIFICATION_ENTER_TREE);
+        node.receive_notification(gdobject::NOTIFICATION_READY);
+        node.receive_notification(gdobject::NOTIFICATION_EXIT_TREE);
+        let log = node.notification_log();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0], gdobject::NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[1], gdobject::NOTIFICATION_READY);
+        assert_eq!(log[2], gdobject::NOTIFICATION_EXIT_TREE);
+    }
+
+    #[test]
+    fn group_add_twice_is_idempotent() {
+        let mut node = Node::new("N", "Node");
+        node.add_to_group("enemies");
+        node.add_to_group("enemies");
+        assert!(node.is_in_group("enemies"));
+        assert_eq!(node.groups().len(), 1);
+    }
+
+    #[test]
+    fn remove_from_nonexistent_group_returns_false() {
+        let mut node = Node::new("N", "Node");
+        assert!(!node.remove_from_group("nonexistent"));
+    }
+
+    #[test]
+    fn node_id_from_object_id() {
+        let oid = ObjectId::next();
+        let nid = NodeId::from_object_id(oid);
+        assert_eq!(nid.object_id(), oid);
+        assert_eq!(nid.raw(), oid.raw());
+    }
 }

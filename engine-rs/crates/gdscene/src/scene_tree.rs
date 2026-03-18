@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gdcore::error::{EngineError, EngineResult};
+use gdobject::signal::SignalStore;
 
 use crate::node::{Node, NodeId};
 
@@ -22,6 +23,8 @@ pub struct SceneTree {
     root_id: NodeId,
     /// Group index: group name -> set of member NodeIds.
     groups: HashMap<String, HashSet<NodeId>>,
+    /// Per-node signal stores. Lazily created when a signal is connected.
+    signal_stores: HashMap<NodeId, SignalStore>,
 }
 
 impl SceneTree {
@@ -35,6 +38,7 @@ impl SceneTree {
             nodes,
             root_id,
             groups: HashMap::new(),
+            signal_stores: HashMap::new(),
         }
     }
 
@@ -300,6 +304,43 @@ impl SceneTree {
         out
     }
 
+    // -- signal management --------------------------------------------------
+
+    /// Returns a reference to a node's signal store, if it exists.
+    pub fn signal_store(&self, id: NodeId) -> Option<&SignalStore> {
+        self.signal_stores.get(&id)
+    }
+
+    /// Returns a mutable reference to a node's signal store, creating it
+    /// if it doesn't already exist.
+    pub fn signal_store_mut(&mut self, id: NodeId) -> &mut SignalStore {
+        self.signal_stores.entry(id).or_default()
+    }
+
+    /// Connects a signal on the `source` node. The signal store for
+    /// `source` is created lazily if needed.
+    pub fn connect_signal(
+        &mut self,
+        source: NodeId,
+        signal_name: &str,
+        connection: gdobject::signal::Connection,
+    ) {
+        self.signal_store_mut(source).connect(signal_name, connection);
+    }
+
+    /// Emits a signal on the given node, returning the collected return
+    /// values from all connected callbacks.
+    pub fn emit_signal(
+        &self,
+        source: NodeId,
+        signal_name: &str,
+        args: &[gdvariant::Variant],
+    ) -> Vec<gdvariant::Variant> {
+        self.signal_stores
+            .get(&source)
+            .map_or_else(Vec::new, |store| store.emit(signal_name, args))
+    }
+
     // -- process stub -------------------------------------------------------
 
     /// Dispatches [`NOTIFICATION_PROCESS`](gdobject::NOTIFICATION_PROCESS)
@@ -493,5 +534,158 @@ mod tests {
         let child_log = tree.get_node(child_id).unwrap().notification_log();
         assert_eq!(child_log.len(), 1);
         assert_eq!(child_log[0], gdobject::NOTIFICATION_PROCESS);
+    }
+
+    #[test]
+    fn add_child_to_nonexistent_parent_returns_error() {
+        let mut tree = SceneTree::new();
+        let fake_parent = crate::node::NodeId::next();
+        let child = Node::new("Orphan", "Node");
+        let result = tree.add_child(fake_parent, child);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_nonexistent_node_returns_error() {
+        let mut tree = SceneTree::new();
+        let fake_id = crate::node::NodeId::next();
+        let result = tree.remove_node(fake_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_path_computation() {
+        let mut tree = SceneTree::new();
+        let mut parent_id = tree.root_id();
+        let mut ids = vec![parent_id];
+
+        for i in 0..12 {
+            let node = Node::new(format!("L{i}"), "Node");
+            let id = tree.add_child(parent_id, node).unwrap();
+            ids.push(id);
+            parent_id = id;
+        }
+
+        let deepest = *ids.last().unwrap();
+        let path = tree.node_path(deepest).unwrap();
+        assert!(path.starts_with("/root/L0/L1/L2"));
+        assert!(path.ends_with("/L11"));
+
+        let parts: Vec<&str> = path[1..].split('/').collect();
+        assert_eq!(parts.len(), 13); // root + L0..L11
+    }
+
+    #[test]
+    fn get_node_by_path_invalid_not_starting_with_slash() {
+        let tree = SceneTree::new();
+        assert_eq!(tree.get_node_by_path("root"), None);
+    }
+
+    #[test]
+    fn get_node_by_path_wrong_root_name() {
+        let tree = SceneTree::new();
+        assert_eq!(tree.get_node_by_path("/wrong_root"), None);
+    }
+
+    #[test]
+    fn relative_path_self_reference() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = Node::new("A", "Node");
+        let a_id = tree.add_child(root, node).unwrap();
+        assert_eq!(tree.get_node_relative(a_id, ""), Some(a_id));
+    }
+
+    #[test]
+    fn reparent_root_fails() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = Node::new("A", "Node");
+        let a_id = tree.add_child(root, node).unwrap();
+        let result = tree.reparent(root, a_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reparent_nonexistent_node_fails() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let fake = crate::node::NodeId::next();
+        assert!(tree.reparent(fake, root).is_err());
+    }
+
+    #[test]
+    fn reparent_to_nonexistent_parent_fails() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = Node::new("A", "Node");
+        let a_id = tree.add_child(root, node).unwrap();
+        let fake = crate::node::NodeId::next();
+        assert!(tree.reparent(a_id, fake).is_err());
+    }
+
+    #[test]
+    fn physics_frame_dispatches_notification() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("C", "Node");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        tree.process_physics_frame();
+
+        let log = tree.get_node(child_id).unwrap().notification_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0], gdobject::NOTIFICATION_PHYSICS_PROCESS);
+    }
+
+    #[test]
+    fn default_scene_tree() {
+        let tree = SceneTree::default();
+        assert_eq!(tree.node_count(), 1);
+    }
+
+    #[test]
+    fn node_path_of_nonexistent_returns_none() {
+        let tree = SceneTree::new();
+        let fake = crate::node::NodeId::next();
+        assert!(tree.node_path(fake).is_none());
+    }
+
+    #[test]
+    fn get_nodes_in_empty_group() {
+        let tree = SceneTree::new();
+        assert!(tree.get_nodes_in_group("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn remove_subtree_cleans_groups() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = Node::new("A", "Node");
+        let a_id = tree.add_child(root, node).unwrap();
+        tree.add_to_group(a_id, "enemies").unwrap();
+        assert_eq!(tree.get_nodes_in_group("enemies").len(), 1);
+
+        tree.remove_node(a_id).unwrap();
+        assert!(tree.get_nodes_in_group("enemies").is_empty());
+    }
+
+    #[test]
+    fn unicode_node_names_in_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = Node::new("プレイヤー", "Node2D");
+        let id = tree.add_child(root, node).unwrap();
+        assert_eq!(tree.node_path(id).unwrap(), "/root/プレイヤー");
+        assert_eq!(tree.get_node_by_path("/root/プレイヤー"), Some(id));
+    }
+
+    #[test]
+    fn empty_name_node_in_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = Node::new("", "Node");
+        let id = tree.add_child(root, node).unwrap();
+        assert_eq!(tree.node_path(id).unwrap(), "/root/");
     }
 }

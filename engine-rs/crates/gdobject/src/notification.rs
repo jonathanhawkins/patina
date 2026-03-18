@@ -204,4 +204,69 @@ mod tests {
         assert_eq!(derived.received, vec![NOTIFICATION_READY]);
         assert_eq!(base.received, vec![NOTIFICATION_READY]);
     }
+
+    #[test]
+    fn dispatch_empty_chain() {
+        let records = dispatch_notification_chain(&mut [], NOTIFICATION_READY);
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn dispatch_unknown_notification_code() {
+        let mut handler = MockHandler {
+            class: "Test",
+            received: vec![],
+        };
+
+        let unknown = Notification::new(9999);
+        let records = dispatch_notification_chain(&mut [&mut handler], unknown);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].notification, unknown);
+        assert_eq!(handler.received, vec![unknown]);
+    }
+
+    #[test]
+    fn notification_equality() {
+        assert_eq!(NOTIFICATION_READY, NOTIFICATION_READY);
+        assert_ne!(NOTIFICATION_READY, NOTIFICATION_PROCESS);
+    }
+
+    #[test]
+    fn notification_hash_consistent() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(NOTIFICATION_READY);
+        assert!(set.contains(&NOTIFICATION_READY));
+        assert!(!set.contains(&NOTIFICATION_PROCESS));
+    }
+
+    #[test]
+    fn notification_new_and_code_roundtrip() {
+        let n = Notification::new(42);
+        assert_eq!(n.code(), 42);
+    }
+
+    #[test]
+    fn notification_display_all_known() {
+        assert_eq!(format!("{}", NOTIFICATION_POSTINITIALIZE), "NOTIFICATION_POSTINITIALIZE");
+        assert_eq!(format!("{}", NOTIFICATION_PREDELETE), "NOTIFICATION_PREDELETE");
+        assert_eq!(format!("{}", NOTIFICATION_ENTER_TREE), "NOTIFICATION_ENTER_TREE");
+        assert_eq!(format!("{}", NOTIFICATION_EXIT_TREE), "NOTIFICATION_EXIT_TREE");
+        assert_eq!(format!("{}", NOTIFICATION_PAUSED), "NOTIFICATION_PAUSED");
+        assert_eq!(format!("{}", NOTIFICATION_UNPAUSED), "NOTIFICATION_UNPAUSED");
+        assert_eq!(format!("{}", NOTIFICATION_PARENTED), "NOTIFICATION_PARENTED");
+        assert_eq!(format!("{}", NOTIFICATION_UNPARENTED), "NOTIFICATION_UNPARENTED");
+        assert_eq!(format!("{}", NOTIFICATION_INSTANCED), "NOTIFICATION_INSTANCED");
+        assert_eq!(format!("{}", NOTIFICATION_DRAW), "NOTIFICATION_DRAW");
+    }
+
+    #[test]
+    fn notification_record_clone_and_eq() {
+        let record = NotificationRecord {
+            class_name: "Player".into(),
+            notification: NOTIFICATION_READY,
+        };
+        let cloned = record.clone();
+        assert_eq!(record, cloned);
+    }
 }

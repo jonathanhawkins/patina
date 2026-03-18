@@ -150,4 +150,41 @@ mod tests {
         cache.clear();
         assert!(cache.is_empty());
     }
+
+    #[test]
+    fn load_nonexistent_file_returns_error() {
+        // Use TresLoader which reads from disk — nonexistent file should error
+        let mut cache = ResourceCache::new(crate::TresLoader::new());
+        let result = cache.load("/nonexistent/path/that/does/not/exist.tres");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalidate_nonexistent_path_does_not_panic() {
+        let loader = CountingLoader::new();
+        let mut cache = ResourceCache::new(loader);
+        // Should not panic
+        cache.invalidate("res://never_loaded.tres");
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn cache_reload_after_invalidate() {
+        let loader = CountingLoader::new();
+        let mut cache = ResourceCache::new(loader);
+
+        let a = cache.load("res://test.tres").unwrap();
+        cache.invalidate("res://test.tres");
+        let b = cache.load("res://test.tres").unwrap();
+
+        // After invalidation, a new resource is loaded (different Arc)
+        assert!(!Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn contains_returns_false_for_unknown() {
+        let loader = CountingLoader::new();
+        let cache = ResourceCache::new(loader);
+        assert!(!cache.contains("res://unknown.tres"));
+    }
 }

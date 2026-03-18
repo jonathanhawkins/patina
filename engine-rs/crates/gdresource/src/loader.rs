@@ -779,6 +779,120 @@ position = Vector2(10, 20)
         );
     }
 
+    // -- Malformed .tres inputs -----------------------------------------------
+
+    #[test]
+    fn parse_tres_missing_header() {
+        let source = r#"
+[resource]
+name = "NoHeader"
+"#;
+        let loader = TresLoader::new();
+        // Should parse but with default class name "Resource"
+        let res = loader.parse_str(source, "res://no_header.tres").unwrap();
+        assert_eq!(res.class_name, "Resource");
+        assert_eq!(
+            res.get_property("name"),
+            Some(&Variant::String("NoHeader".into()))
+        );
+    }
+
+    #[test]
+    fn parse_tres_no_resource_section() {
+        let source = r#"[gd_resource type="Resource" format=3]
+"#;
+        let loader = TresLoader::new();
+        let res = loader.parse_str(source, "res://empty.tres").unwrap();
+        assert_eq!(res.class_name, "Resource");
+        assert_eq!(res.property_count(), 0);
+    }
+
+    #[test]
+    fn parse_tres_invalid_value_syntax() {
+        let source = r#"[gd_resource type="Resource" format=3]
+
+[resource]
+good = 42
+bad = Vector2(not_a_number, oops)
+"#;
+        let loader = TresLoader::new();
+        let result = loader.parse_str(source, "res://bad.tres");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_tres_only_comments_and_blank_lines() {
+        let source = r#"
+; This is a comment
+; Another comment
+
+"#;
+        let loader = TresLoader::new();
+        let res = loader.parse_str(source, "res://comments.tres").unwrap();
+        assert_eq!(res.property_count(), 0);
+    }
+
+    #[test]
+    fn parse_tres_unknown_section_ignored() {
+        let source = r#"[gd_resource type="Resource" format=3]
+
+[some_unknown_section]
+ignored_key = 42
+
+[resource]
+kept = 1
+"#;
+        let loader = TresLoader::new();
+        let res = loader.parse_str(source, "res://unknown.tres").unwrap();
+        assert_eq!(res.get_property("kept"), Some(&Variant::Int(1)));
+        assert_eq!(res.get_property("ignored_key"), None);
+    }
+
+    #[test]
+    fn parse_color_rgb_three_components() {
+        let v = parse_variant_value("Color(1, 0.5, 0)").unwrap();
+        assert_eq!(
+            v,
+            Variant::Color(Color::rgb(1.0, 0.5, 0.0))
+        );
+    }
+
+    #[test]
+    fn parse_invalid_vector2_arg_count() {
+        let result = parse_variant_value("Vector2(1)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_invalid_vector3_arg_count() {
+        let result = parse_variant_value("Vector3(1, 2)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_invalid_color_arg_count() {
+        let result = parse_variant_value("Color(1, 2)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_invalid_rect2_arg_count() {
+        let result = parse_variant_value("Rect2(1, 2, 3)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_invalid_transform2d_arg_count() {
+        let result = parse_variant_value("Transform2D(1, 0, 0, 1, 10)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_unrecognized_value() {
+        let result = parse_variant_value("totally_unknown_value");
+        assert!(result.is_err());
+    }
+
     #[test]
     fn parse_tres_with_new_types() {
         let source = r#"

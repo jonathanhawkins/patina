@@ -48,6 +48,8 @@ version = "0.1.0"
 dependencies = [
  "gdcore",
  "gdvariant",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -55,6 +57,7 @@ name = "gdplatform"
 version = "0.1.0"
 dependencies = [
  "gdcore",
+ "thiserror",
 ]
 
 [[package]]

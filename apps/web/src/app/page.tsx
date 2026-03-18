@@ -1,7 +1,6 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Shield,
   Gamepad2,
@@ -13,8 +12,6 @@ import {
   BookOpen,
   ArrowRight,
   Terminal,
-  Clock,
-  Circle,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -161,151 +158,152 @@ function HeroSection() {
     <section className="relative overflow-hidden">
       {/* Background layers */}
       <div className="pointer-events-none absolute inset-0">
-        {/* Radial glow behind hero */}
-        <div className="absolute left-1/2 top-0 h-[600px] w-[900px] -translate-x-1/2 -translate-y-1/4 rounded-full bg-brand/[0.07] blur-[120px]" />
-        {/* Grid pattern */}
+        {/* Subtle radial glow -- offset left to match left-aligned content */}
+        <div className="absolute -top-32 left-[15%] h-[600px] w-[700px] rounded-full bg-brand/[0.05] blur-[140px]" />
+        {/* Fine dot grid -- very subtle texture */}
         <div
-          className="absolute inset-0 opacity-[0.03]"
+          className="absolute inset-0 opacity-[0.02]"
           style={{
             backgroundImage:
-              "linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)",
-            backgroundSize: "64px 64px",
+              "radial-gradient(rgba(255,255,255,0.3) 1px, transparent 1px)",
+            backgroundSize: "32px 32px",
           }}
         />
-        {/* Bottom fade */}
-        <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-background to-transparent" />
       </div>
 
-      <div className="relative mx-auto max-w-5xl px-6 pb-28 pt-28 text-center sm:pt-36 sm:pb-36">
+      <div className="relative mx-auto max-w-6xl px-6 pb-24 pt-24 sm:pt-32 sm:pb-32 lg:pt-40 lg:pb-40">
         <motion.div
           initial="hidden"
           animate="visible"
           variants={stagger}
-          className="flex flex-col items-center"
         >
-          <motion.div variants={fadeUp} custom={0}>
-            <Badge
-              variant="outline"
-              className="mb-8 border-brand/30 bg-brand-muted px-3 py-1 text-xs font-medium text-brand"
-            >
-              <Circle className="size-1.5 fill-brand text-brand" />
-              Early development -- follow along on GitHub
-            </Badge>
-          </motion.div>
+          {/* Two-column layout: hero text left, code right */}
+          <div className="grid items-start gap-16 lg:grid-cols-[1fr_minmax(0,520px)] lg:gap-20">
+            {/* Left column -- hero text */}
+            <div className="max-w-xl">
+              <motion.p
+                variants={fadeUp}
+                custom={0}
+                className="mb-6 text-sm font-medium tracking-wide text-brand"
+              >
+                Early development -- follow along on GitHub
+              </motion.p>
 
-          <motion.h1
-            variants={fadeUp}
-            custom={1}
-            className="max-w-3xl text-4xl font-bold leading-[1.1] tracking-tight sm:text-5xl md:text-6xl lg:text-7xl"
-          >
-            The game engine{" "}
-            <span className="bg-gradient-to-r from-brand via-amber-300 to-orange-400 bg-clip-text text-transparent">
-              Rust deserves
-            </span>
-          </motion.h1>
+              <motion.h1
+                variants={fadeUp}
+                custom={1}
+                className="text-4xl font-bold leading-[1.08] tracking-tight sm:text-5xl lg:text-6xl"
+              >
+                The game engine{" "}
+                <span className="text-brand">
+                  Rust deserves
+                </span>
+              </motion.h1>
 
-          <motion.p
-            variants={fadeUp}
-            custom={2}
-            className="mt-6 max-w-xl text-base leading-relaxed text-muted-foreground sm:text-lg"
-          >
-            A Rust-native game engine with full Godot scene compatibility.
-            Memory safe. High performance. Open source.
-          </motion.p>
+              <motion.p
+                variants={fadeUp}
+                custom={2}
+                className="mt-6 text-lg leading-relaxed text-muted-foreground"
+              >
+                A Rust-native game engine with full Godot scene compatibility.
+                Memory safe. High performance. Open source.
+              </motion.p>
 
-          <motion.div
-            variants={fadeUp}
-            custom={3}
-            className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:gap-4"
-          >
-            <Button
-              size="lg"
-              className="h-11 gap-2 bg-brand px-5 text-sm font-semibold text-brand-foreground shadow-lg shadow-brand/20 hover:bg-brand/85"
-              render={
-                <a
-                  href="https://github.com/patinaengine/patina"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                />
-              }
-            >
-              <Github className="size-4" />
-              View on GitHub
-            </Button>
-            <Button
-              variant="outline"
-              size="lg"
-              className="h-11 gap-2 px-5 text-sm"
-              render={
-                <a
-                  href="https://docs.patinaengine.com"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                />
-              }
-            >
-              <BookOpen className="size-4" />
-              Documentation
-            </Button>
-          </motion.div>
-
-          {/* Code preview */}
-          <motion.div
-            variants={fadeUp}
-            custom={4}
-            className="mx-auto mt-20 w-full max-w-2xl"
-          >
-            <div className="overflow-hidden rounded-xl border border-border/60 bg-[oklch(0.1_0.005_270)] shadow-2xl shadow-black/40">
-              <div className="flex items-center gap-2 border-b border-white/[0.06] px-4 py-3">
-                <div className="size-2.5 rounded-full bg-[#ff5f57]" />
-                <div className="size-2.5 rounded-full bg-[#febc2e]" />
-                <div className="size-2.5 rounded-full bg-[#28c840]" />
-                <div className="ml-3 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Terminal className="size-3" />
-                  main.rs
-                </div>
-              </div>
-              <pre className="overflow-x-auto px-5 py-5 text-[13px] leading-[1.7] sm:px-6">
-                <code>
-                  <span className="text-muted-foreground/60">
-                    {"// Load a Godot scene and query nodes\n"}
-                  </span>
-                  <span className="text-blue-400">{"use"}</span>
-                  <span className="text-foreground/80">
-                    {" patina::prelude::*;\n\n"}
-                  </span>
-                  <span className="text-blue-400">{"fn"}</span>{" "}
-                  <span className="text-amber-300">{"main"}</span>
-                  <span className="text-foreground/80">{"() {\n"}</span>
-                  {"    "}
-                  <span className="text-blue-400">{"let"}</span>
-                  <span className="text-foreground/80">{" scene = Scene::"}</span>
-                  <span className="text-amber-300">{"load"}</span>
-                  <span className="text-foreground/80">{"("}</span>
-                  <span className="text-emerald-400">
-                    {'"res://main.tscn"'}
-                  </span>
-                  <span className="text-foreground/80">{");\n"}</span>
-                  {"    "}
-                  <span className="text-blue-400">{"let"}</span>
-                  <span className="text-foreground/80">
-                    {" player = scene."}
-                  </span>
-                  <span className="text-amber-300">{"get_node"}</span>
-                  <span className="text-foreground/80">{"("}</span>
-                  <span className="text-emerald-400">{'"Player"'}</span>
-                  <span className="text-foreground/80">{");\n"}</span>
-                  {"    "}
-                  <span className="text-foreground/80">{"println!("}</span>
-                  <span className="text-emerald-400">{'"Found: {}"'}</span>
-                  <span className="text-foreground/80">
-                    {", player.name);\n"}
-                  </span>
-                  <span className="text-foreground/80">{"}"}</span>
-                </code>
-              </pre>
+              <motion.div
+                variants={fadeUp}
+                custom={3}
+                className="mt-10 flex items-center gap-3"
+              >
+                <Button
+                  size="lg"
+                  className="h-10 gap-2 rounded-md bg-brand px-5 text-sm font-medium text-brand-foreground hover:bg-brand/85"
+                  render={
+                    <a
+                      href="https://github.com/patinaengine/patina"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    />
+                  }
+                >
+                  <Github className="size-4" />
+                  View on GitHub
+                </Button>
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="h-10 gap-2 rounded-md px-5 text-sm"
+                  render={
+                    <a
+                      href="https://docs.patinaengine.com"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    />
+                  }
+                >
+                  <BookOpen className="size-4" />
+                  Documentation
+                </Button>
+              </motion.div>
             </div>
-          </motion.div>
+
+            {/* Right column -- code preview */}
+            <motion.div
+              variants={fadeUp}
+              custom={3}
+              className="w-full"
+            >
+              <div className="overflow-hidden rounded-lg border border-border/60 bg-[oklch(0.1_0.005_270)]">
+                <div className="flex items-center gap-2 border-b border-white/[0.06] px-4 py-3">
+                  <div className="size-2.5 rounded-full bg-[#ff5f57]/70" />
+                  <div className="size-2.5 rounded-full bg-[#febc2e]/70" />
+                  <div className="size-2.5 rounded-full bg-[#28c840]/70" />
+                  <div className="ml-3 flex items-center gap-1.5 text-xs text-muted-foreground/70">
+                    <Terminal className="size-3" />
+                    main.rs
+                  </div>
+                </div>
+                <pre className="overflow-x-auto px-5 py-5 text-[13px] leading-[1.7] sm:px-6">
+                  <code>
+                    <span className="text-muted-foreground/50">
+                      {"// Load a Godot scene and query nodes\n"}
+                    </span>
+                    <span className="text-blue-400">{"use"}</span>
+                    <span className="text-foreground/80">
+                      {" patina::prelude::*;\n\n"}
+                    </span>
+                    <span className="text-blue-400">{"fn"}</span>{" "}
+                    <span className="text-amber-300">{"main"}</span>
+                    <span className="text-foreground/80">{"() {\n"}</span>
+                    {"    "}
+                    <span className="text-blue-400">{"let"}</span>
+                    <span className="text-foreground/80">{" scene = Scene::"}</span>
+                    <span className="text-amber-300">{"load"}</span>
+                    <span className="text-foreground/80">{"("}</span>
+                    <span className="text-emerald-400">
+                      {'"res://main.tscn"'}
+                    </span>
+                    <span className="text-foreground/80">{");\n"}</span>
+                    {"    "}
+                    <span className="text-blue-400">{"let"}</span>
+                    <span className="text-foreground/80">
+                      {" player = scene."}
+                    </span>
+                    <span className="text-amber-300">{"get_node"}</span>
+                    <span className="text-foreground/80">{"("}</span>
+                    <span className="text-emerald-400">{'"Player"'}</span>
+                    <span className="text-foreground/80">{");\n"}</span>
+                    {"    "}
+                    <span className="text-foreground/80">{"println!("}</span>
+                    <span className="text-emerald-400">{'"Found: {}"'}</span>
+                    <span className="text-foreground/80">
+                      {", player.name);\n"}
+                    </span>
+                    <span className="text-foreground/80">{"}"}</span>
+                  </code>
+                </pre>
+              </div>
+            </motion.div>
+          </div>
         </motion.div>
       </div>
     </section>
@@ -325,26 +323,25 @@ function FeaturesSection() {
           whileInView="visible"
           viewport={{ once: true, amount: 0.3 }}
           variants={stagger}
-          className="text-center"
         >
           <motion.p
             variants={fadeUp}
             custom={0}
-            className="text-sm font-semibold uppercase tracking-widest text-brand"
+            className="text-sm font-medium tracking-wide text-brand"
           >
             Why Patina
           </motion.p>
           <motion.h2
             variants={fadeUp}
             custom={1}
-            className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl"
+            className="mt-3 max-w-lg text-3xl font-bold tracking-tight sm:text-4xl"
           >
             Built for the future of game development
           </motion.h2>
           <motion.p
             variants={fadeUp}
             custom={2}
-            className="mx-auto mt-4 max-w-2xl text-base text-muted-foreground"
+            className="mt-4 max-w-xl text-base text-muted-foreground"
           >
             Rust&apos;s safety guarantees meet Godot&apos;s proven scene
             architecture.
@@ -356,21 +353,17 @@ function FeaturesSection() {
           whileInView="visible"
           viewport={{ once: true, amount: 0.1 }}
           variants={stagger}
-          className="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
+          className="mt-16 grid gap-px overflow-hidden rounded-lg border border-border/50 bg-border/30 sm:grid-cols-2 lg:grid-cols-3"
         >
           {features.map((feature, i) => (
             <motion.div
               key={feature.title}
               variants={fadeUp}
               custom={i}
-              className="group rounded-xl border border-border/50 bg-card/40 p-6 transition-colors duration-300 hover:border-border hover:bg-card/80"
+              className="bg-background p-6 transition-colors duration-300 hover:bg-card/60 sm:p-8"
             >
-              <div
-                className={`mb-4 flex size-10 items-center justify-center rounded-lg ${feature.bg}`}
-              >
-                <feature.icon className={`size-5 ${feature.color}`} />
-              </div>
-              <h3 className="text-base font-semibold">{feature.title}</h3>
+              <feature.icon className={`mb-4 size-5 ${feature.color}`} />
+              <h3 className="text-sm font-semibold">{feature.title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                 {feature.description}
               </p>
@@ -386,26 +379,19 @@ function FeaturesSection() {
 // Roadmap
 // ---------------------------------------------------------------------------
 
-function StatusIcon({ status }: { status: "active" | "planned" | "future" }) {
+function StatusIndicator({ status }: { status: "active" | "planned" | "future" }) {
   if (status === "active") {
     return (
-      <div className="flex size-6 items-center justify-center rounded-full bg-brand/20 ring-2 ring-brand/40">
+      <div className="relative flex size-2.5 items-center justify-center">
+        <div className="absolute size-2.5 animate-ping rounded-full bg-brand/40" />
         <div className="size-2 rounded-full bg-brand" />
       </div>
     );
   }
   if (status === "planned") {
-    return (
-      <div className="flex size-6 items-center justify-center rounded-full bg-muted ring-2 ring-border">
-        <Clock className="size-3 text-muted-foreground" />
-      </div>
-    );
+    return <div className="size-2 rounded-full bg-muted-foreground/40" />;
   }
-  return (
-    <div className="flex size-6 items-center justify-center rounded-full bg-muted/50 ring-2 ring-border/50">
-      <Circle className="size-2.5 text-muted-foreground/50" />
-    </div>
-  );
+  return <div className="size-2 rounded-full bg-muted-foreground/20" />;
 }
 
 function statusLabel(status: "active" | "planned" | "future") {
@@ -416,33 +402,32 @@ function statusLabel(status: "active" | "planned" | "future") {
 
 function RoadmapSection() {
   return (
-    <section id="roadmap" className="relative border-t border-border/40 bg-card/30">
-      <div className="mx-auto max-w-4xl px-6 py-24 sm:py-32">
+    <section id="roadmap" className="relative border-t border-border/40">
+      <div className="mx-auto max-w-6xl px-6 py-24 sm:py-32">
         <motion.div
           initial="hidden"
           whileInView="visible"
           viewport={{ once: true, amount: 0.3 }}
           variants={stagger}
-          className="text-center"
         >
           <motion.p
             variants={fadeUp}
             custom={0}
-            className="text-sm font-semibold uppercase tracking-widest text-brand"
+            className="text-sm font-medium tracking-wide text-brand"
           >
             Roadmap
           </motion.p>
           <motion.h2
             variants={fadeUp}
             custom={1}
-            className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl"
+            className="mt-3 max-w-lg text-3xl font-bold tracking-tight sm:text-4xl"
           >
             A staged approach to building an engine
           </motion.h2>
           <motion.p
             variants={fadeUp}
             custom={2}
-            className="mx-auto mt-4 max-w-2xl text-base text-muted-foreground"
+            className="mt-4 max-w-xl text-base text-muted-foreground"
           >
             Each phase delivers a working, useful tool -- not just a milestone
             on the way to something else.
@@ -461,33 +446,25 @@ function RoadmapSection() {
               key={stage.title}
               variants={fadeUp}
               custom={i}
-              className="group relative flex gap-6"
+              className="group relative flex items-start gap-4 border-l border-border/50 py-6 pl-8"
             >
-              {/* Timeline line + dot */}
-              <div className="flex flex-col items-center">
-                <StatusIcon status={stage.status} />
-                {i < roadmapStages.length - 1 && (
-                  <div className="w-px flex-1 bg-border/60" />
-                )}
+              {/* Timeline dot */}
+              <div className="absolute -left-[5px] top-7">
+                <StatusIndicator status={stage.status} />
               </div>
 
               {/* Content */}
-              <div className="pb-10">
+              <div className="flex-1">
                 <div className="flex items-center gap-3">
-                  <span className="font-mono text-xs text-muted-foreground/60">
+                  <span className="font-mono text-xs text-muted-foreground/50">
                     {stage.phase}
                   </span>
-                  <h3 className="text-base font-semibold">{stage.title}</h3>
-                  <Badge
-                    variant={stage.status === "active" ? "default" : "outline"}
-                    className={
-                      stage.status === "active"
-                        ? "border-brand/30 bg-brand/15 text-brand"
-                        : "text-muted-foreground"
-                    }
-                  >
-                    {statusLabel(stage.status)}
-                  </Badge>
+                  <h3 className="text-sm font-semibold">{stage.title}</h3>
+                  {stage.status === "active" && (
+                    <span className="rounded-md bg-brand/10 px-2 py-0.5 text-xs font-medium text-brand">
+                      {statusLabel(stage.status)}
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1.5 max-w-lg text-sm leading-relaxed text-muted-foreground">
                   {stage.description}
@@ -508,12 +485,7 @@ function RoadmapSection() {
 function CTASection() {
   return (
     <section className="relative border-t border-border/40">
-      {/* Glow */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute left-1/2 top-1/2 h-[400px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand/[0.04] blur-[100px]" />
-      </div>
-
-      <div className="relative mx-auto max-w-3xl px-6 py-24 text-center sm:py-32">
+      <div className="relative mx-auto max-w-6xl px-6 py-24 sm:py-32">
         <motion.div
           initial="hidden"
           whileInView="visible"
@@ -523,14 +495,14 @@ function CTASection() {
           <motion.h2
             variants={fadeUp}
             custom={0}
-            className="text-3xl font-bold tracking-tight sm:text-4xl"
+            className="max-w-md text-3xl font-bold tracking-tight sm:text-4xl"
           >
             Ready to explore?
           </motion.h2>
           <motion.p
             variants={fadeUp}
             custom={1}
-            className="mt-4 text-base text-muted-foreground"
+            className="mt-4 max-w-lg text-base text-muted-foreground"
           >
             Patina is open source and in active development. Star the repo, read
             the docs, or jump into the code.
@@ -538,11 +510,11 @@ function CTASection() {
           <motion.div
             variants={fadeUp}
             custom={2}
-            className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row sm:gap-4"
+            className="mt-8 flex items-center gap-3"
           >
             <Button
               size="lg"
-              className="h-11 gap-2 bg-brand px-5 text-sm font-semibold text-brand-foreground shadow-lg shadow-brand/20 hover:bg-brand/85"
+              className="h-10 gap-2 rounded-md bg-brand px-5 text-sm font-medium text-brand-foreground hover:bg-brand/85"
               render={
                 <a
                   href="https://github.com/patinaengine/patina"
@@ -557,7 +529,7 @@ function CTASection() {
             <Button
               variant="outline"
               size="lg"
-              className="h-11 gap-2 px-5 text-sm"
+              className="h-10 gap-2 rounded-md px-5 text-sm"
               render={
                 <a
                   href="https://docs.patinaengine.com"
@@ -587,12 +559,7 @@ function Footer() {
         <div className="flex flex-col items-start justify-between gap-8 sm:flex-row sm:items-center">
           <div>
             <div className="flex items-center gap-2.5">
-              <div className="flex size-6 items-center justify-center rounded-md bg-brand/90">
-                <span className="text-[10px] font-bold text-brand-foreground">
-                  P
-                </span>
-              </div>
-              <span className="text-sm font-semibold">Patina Engine</span>
+              <span className="text-sm font-semibold text-brand">Patina</span>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               A Rust-native, Godot-compatible game engine. MIT Licensed.

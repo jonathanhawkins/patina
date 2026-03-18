@@ -134,4 +134,56 @@ mod tests {
         assert_eq!(reg.lookup_path("res://new.tres"), Some(uid));
         assert_eq!(reg.len(), 1);
     }
+
+    #[test]
+    fn register_duplicate_uid_overwrites_previous_path() {
+        let mut reg = UidRegistry::new();
+        let uid = ResourceUid::new(42);
+        reg.register(uid, "res://first.tres");
+        reg.register(uid, "res://second.tres");
+
+        assert_eq!(reg.lookup_uid(uid), Some("res://second.tres"));
+        assert_eq!(reg.lookup_path("res://first.tres"), None);
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn register_same_path_different_uid_replaces() {
+        let mut reg = UidRegistry::new();
+        let uid1 = ResourceUid::new(1);
+        let uid2 = ResourceUid::new(2);
+        reg.register(uid1, "res://shared.tres");
+        reg.register(uid2, "res://shared.tres");
+
+        assert_eq!(reg.lookup_path("res://shared.tres"), Some(uid2));
+        assert_eq!(reg.lookup_uid(uid1), None); // old uid removed
+        assert_eq!(reg.lookup_uid(uid2), Some("res://shared.tres"));
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn unregister_nonexistent_uid_does_not_panic() {
+        let mut reg = UidRegistry::new();
+        reg.unregister_uid(ResourceUid::new(999));
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn unregister_nonexistent_path_does_not_panic() {
+        let mut reg = UidRegistry::new();
+        reg.unregister_path("res://nonexistent.tres");
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn clear_removes_all() {
+        let mut reg = UidRegistry::new();
+        reg.register(ResourceUid::new(1), "res://a.tres");
+        reg.register(ResourceUid::new(2), "res://b.tres");
+        assert_eq!(reg.len(), 2);
+
+        reg.clear();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+    }
 }

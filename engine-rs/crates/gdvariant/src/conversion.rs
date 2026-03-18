@@ -254,4 +254,160 @@ mod tests {
         let extracted = gdcore::NodePath::try_from(v).unwrap();
         assert_eq!(extracted, np);
     }
+
+    // -- Error cases for every invalid TryFrom ------------------------------
+
+    #[test]
+    fn try_from_bool_error_on_float() {
+        assert!(bool::try_from(Variant::Float(1.0)).is_err());
+    }
+
+    #[test]
+    fn try_from_bool_error_on_nil() {
+        assert!(bool::try_from(Variant::Nil).is_err());
+    }
+
+    #[test]
+    fn try_from_bool_error_on_array() {
+        assert!(bool::try_from(Variant::Array(vec![])).is_err());
+    }
+
+    #[test]
+    fn try_from_int_error_on_string() {
+        assert!(i64::try_from(Variant::String("42".into())).is_err());
+    }
+
+    #[test]
+    fn try_from_int_error_on_nil() {
+        assert!(i64::try_from(Variant::Nil).is_err());
+    }
+
+    #[test]
+    fn try_from_int_error_on_vector2() {
+        assert!(i64::try_from(Variant::Vector2(Vector2::ZERO)).is_err());
+    }
+
+    #[test]
+    fn try_from_float_error_on_string() {
+        assert!(f64::try_from(Variant::String("3.14".into())).is_err());
+    }
+
+    #[test]
+    fn try_from_float_error_on_nil() {
+        assert!(f64::try_from(Variant::Nil).is_err());
+    }
+
+    #[test]
+    fn try_from_vector2_error_on_vector3() {
+        let v3 = gdcore::math::Vector3::new(1.0, 2.0, 3.0);
+        assert!(Vector2::try_from(Variant::Vector3(v3)).is_err());
+    }
+
+    #[test]
+    fn try_from_vector3_error_on_vector2() {
+        assert!(gdcore::math::Vector3::try_from(Variant::Vector2(Vector2::ZERO)).is_err());
+    }
+
+    #[test]
+    fn try_from_vector3_error_on_string() {
+        assert!(gdcore::math::Vector3::try_from(Variant::String("x".into())).is_err());
+    }
+
+    #[test]
+    fn try_from_string_name_error_on_int() {
+        assert!(gdcore::StringName::try_from(Variant::Int(42)).is_err());
+    }
+
+    #[test]
+    fn try_from_string_name_error_on_nil() {
+        assert!(gdcore::StringName::try_from(Variant::Nil).is_err());
+    }
+
+    #[test]
+    fn try_from_node_path_error_on_int() {
+        assert!(gdcore::NodePath::try_from(Variant::Int(42)).is_err());
+    }
+
+    #[test]
+    fn try_from_node_path_from_string_coercion() {
+        let v = Variant::String("/root/Player".into());
+        let np = gdcore::NodePath::try_from(v).unwrap();
+        assert!(np.is_absolute());
+        assert_eq!(np.get_name_count(), 2);
+    }
+
+    // -- Roundtrip conversions ----------------------------------------------
+
+    #[test]
+    fn i32_to_variant_to_i64_roundtrip() {
+        let original: i32 = 42;
+        let v = Variant::from(original);
+        let back = i64::try_from(v).unwrap();
+        assert_eq!(back, 42_i64);
+    }
+
+    #[test]
+    fn f32_to_variant_to_f64_roundtrip() {
+        let original: f32 = 1.5;
+        let v = Variant::from(original);
+        let back = f64::try_from(v).unwrap();
+        assert!((back - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bool_int_roundtrip() {
+        // true -> Int(1) -> back to bool
+        let v = Variant::Int(1);
+        assert_eq!(bool::try_from(v).unwrap(), true);
+        let v = Variant::Int(0);
+        assert_eq!(bool::try_from(v).unwrap(), false);
+    }
+
+    #[test]
+    fn float_to_int_truncation() {
+        assert_eq!(i64::try_from(Variant::Float(3.9)).unwrap(), 3);
+        assert_eq!(i64::try_from(Variant::Float(-1.7)).unwrap(), -1);
+    }
+
+    #[test]
+    fn bool_to_float() {
+        assert_eq!(f64::try_from(Variant::Bool(true)).unwrap(), 1.0);
+        assert_eq!(f64::try_from(Variant::Bool(false)).unwrap(), 0.0);
+    }
+
+    // -- ConversionError display --------------------------------------------
+
+    #[test]
+    fn conversion_error_display() {
+        let err = ConversionError {
+            from: VariantType::String,
+            to: VariantType::Int,
+        };
+        assert_eq!(format!("{err}"), "cannot convert String to int");
+    }
+
+    // -- From impls ---------------------------------------------------------
+
+    #[test]
+    fn from_vec_variant() {
+        let v = Variant::from(vec![Variant::Int(1), Variant::Bool(true)]);
+        match v {
+            Variant::Array(items) => assert_eq!(items.len(), 2),
+            _ => panic!("expected Array"),
+        }
+    }
+
+    #[test]
+    fn from_color() {
+        let c = gdcore::math::Color::WHITE;
+        let v = Variant::from(c);
+        assert_eq!(v.variant_type(), VariantType::Color);
+    }
+
+    #[test]
+    fn from_vector3() {
+        let v3 = gdcore::math::Vector3::ONE;
+        let v = Variant::from(v3);
+        assert_eq!(v.variant_type(), VariantType::Vector3);
+    }
 }

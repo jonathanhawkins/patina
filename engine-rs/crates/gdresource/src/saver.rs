@@ -195,6 +195,64 @@ mod tests {
     }
 
     #[test]
+    fn save_empty_resource() {
+        let r = Resource::new("EmptyResource");
+        let saver = TresSaver::new();
+        let output = saver.save_to_string(&r).unwrap();
+        assert!(output.contains("[gd_resource type=\"EmptyResource\""));
+        // No [resource] section since there are no properties
+        assert!(!output.contains("[resource]"));
+    }
+
+    #[test]
+    fn save_resource_without_uid() {
+        let r = Resource::new("Resource");
+        let saver = TresSaver::new();
+        let output = saver.save_to_string(&r).unwrap();
+        assert!(!output.contains("uid="));
+    }
+
+    #[test]
+    fn save_resource_with_nil_property() {
+        let mut r = Resource::new("Resource");
+        r.set_property("nothing", Variant::Nil);
+        let saver = TresSaver::new();
+        let output = saver.save_to_string(&r).unwrap();
+        assert!(output.contains("nothing = null"));
+    }
+
+    #[test]
+    fn save_resource_with_bool_properties() {
+        let mut r = Resource::new("Resource");
+        r.set_property("flag_a", Variant::Bool(true));
+        r.set_property("flag_b", Variant::Bool(false));
+        let saver = TresSaver::new();
+        let output = saver.save_to_string(&r).unwrap();
+        assert!(output.contains("flag_a = true"));
+        assert!(output.contains("flag_b = false"));
+    }
+
+    #[test]
+    fn save_resource_with_float() {
+        let mut r = Resource::new("Resource");
+        r.set_property("pi", Variant::Float(3.14));
+        r.set_property("whole", Variant::Float(5.0));
+        let saver = TresSaver::new();
+        let output = saver.save_to_string(&r).unwrap();
+        assert!(output.contains("pi = 3.14"));
+        assert!(output.contains("whole = 5.0"));
+    }
+
+    #[test]
+    fn save_resource_with_escaped_string() {
+        let mut r = Resource::new("Resource");
+        r.set_property("text", Variant::String("line1\nline2\ttab".into()));
+        let saver = TresSaver::new();
+        let output = saver.save_to_string(&r).unwrap();
+        assert!(output.contains(r#"text = "line1\nline2\ttab""#));
+    }
+
+    #[test]
     fn save_with_subresource() {
         let mut r = Resource::new("Resource");
         r.set_property("value", Variant::Int(1));
