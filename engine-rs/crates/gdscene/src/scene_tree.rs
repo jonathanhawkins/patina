@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use gdcore::error::{EngineError, EngineResult};
 use gdobject::signal::SignalStore;
 
+use crate::animation::AnimationPlayer;
 use crate::node::{Node, NodeId};
+use crate::tween::{Tween, TweenId};
 
 /// The scene tree — an arena that owns every node and maintains the
 /// hierarchy.
@@ -25,6 +27,10 @@ pub struct SceneTree {
     groups: HashMap<String, HashSet<NodeId>>,
     /// Per-node signal stores. Lazily created when a signal is connected.
     signal_stores: HashMap<NodeId, SignalStore>,
+    /// Per-node animation players.
+    animation_players: HashMap<NodeId, AnimationPlayer>,
+    /// Active tweens: maps TweenId -> (owning NodeId, Tween).
+    tweens: HashMap<TweenId, (NodeId, Tween)>,
 }
 
 impl SceneTree {
@@ -39,6 +45,8 @@ impl SceneTree {
             root_id,
             groups: HashMap::new(),
             signal_stores: HashMap::new(),
+            animation_players: HashMap::new(),
+            tweens: HashMap::new(),
         }
     }
 
@@ -311,6 +319,11 @@ impl SceneTree {
         self.signal_stores.get(&id)
     }
 
+    /// Returns all signal stores (node ID -> signal store).
+    pub fn signal_stores(&self) -> &HashMap<NodeId, SignalStore> {
+        &self.signal_stores
+    }
+
     /// Returns a mutable reference to a node's signal store, creating it
     /// if it doesn't already exist.
     pub fn signal_store_mut(&mut self, id: NodeId) -> &mut SignalStore {
@@ -429,6 +442,106 @@ impl SceneTree {
         }
 
         Ok(cloned)
+    }
+
+    // -- animation player management ----------------------------------------
+
+    /// Attaches an [`AnimationPlayer`] to a node.
+    pub fn attach_animation_player(
+        &mut self,
+        node_id: NodeId,
+        player: AnimationPlayer,
+    ) -> EngineResult<()> {
+        if !self.nodes.contains_key(&node_id) {
+            return Err(EngineError::NotFound(format!(
+                "node {node_id} not found"
+            )));
+        }
+        self.animation_players.insert(node_id, player);
+        Ok(())
+    }
+
+    /// Returns a reference to a node's animation player, if attached.
+    pub fn get_animation_player(&self, node_id: NodeId) -> Option<&AnimationPlayer> {
+        self.animation_players.get(&node_id)
+    }
+
+    /// Returns a mutable reference to a node's animation player, if attached.
+    pub fn get_animation_player_mut(&mut self, node_id: NodeId) -> Option<&mut AnimationPlayer> {
+        self.animation_players.get_mut(&node_id)
+    }
+
+    /// Advances all animation players by `delta` seconds and applies sampled
+    /// values to the corresponding node properties.
+    pub fn process_animations(&mut self, delta: f64) {
+        // Collect node_ids to avoid borrowing self twice.
+        let node_ids: Vec<NodeId> = self.animation_players.keys().copied().collect();
+        for node_id in node_ids {
+            if let Some(player) = self.animation_players.get_mut(&node_id) {
+                player.advance(delta);
+                let values = player.get_current_values();
+                for (path, value) in values {
+                    if let Some(node) = self.nodes.get_mut(&node_id) {
+                        node.set_property(&path, value);
+                    }
+                }
+            }
+        }
+    }
+
+    // -- tween management ---------------------------------------------------
+
+    /// Creates a new tween associated with a node. Returns the [`TweenId`].
+    ///
+    /// The tween is stored but not yet started — call
+    /// [`get_tween_mut`](Self::get_tween_mut) to configure and start it.
+    pub fn create_tween(&mut self, node_id: NodeId) -> TweenId {
+        let id = TweenId::next();
+        self.tweens.insert(id, (node_id, Tween::new()));
+        id
+    }
+
+    /// Inserts an already-configured tween for the given node.
+    pub fn add_tween(&mut self, node_id: NodeId, tween: Tween) -> TweenId {
+        let id = TweenId::next();
+        self.tweens.insert(id, (node_id, tween));
+        id
+    }
+
+    /// Returns a mutable reference to a tween by ID.
+    pub fn get_tween_mut(&mut self, tween_id: TweenId) -> Option<&mut Tween> {
+        self.tweens.get_mut(&tween_id).map(|(_, t)| t)
+    }
+
+    /// Returns the number of active tweens.
+    pub fn tween_count(&self) -> usize {
+        self.tweens.len()
+    }
+
+    /// Advances all tweens by `delta` seconds, applies interpolated values
+    /// to the corresponding node properties, and removes completed
+    /// non-looping tweens.
+    pub fn process_tweens(&mut self, delta: f64) {
+        let mut completed = Vec::new();
+        let tween_ids: Vec<TweenId> = self.tweens.keys().copied().collect();
+        for tween_id in tween_ids {
+            if let Some((node_id, tween)) = self.tweens.get_mut(&tween_id) {
+                let node_id = *node_id;
+                let done = tween.advance(delta);
+                let values = tween.get_current_values();
+                for (path, value) in values {
+                    if let Some(node) = self.nodes.get_mut(&node_id) {
+                        node.set_property(&path, value);
+                    }
+                }
+                if done {
+                    completed.push(tween_id);
+                }
+            }
+        }
+        for id in completed {
+            self.tweens.remove(&id);
+        }
     }
 
     // -- process stub -------------------------------------------------------
@@ -777,5 +890,569 @@ mod tests {
         let node = Node::new("", "Node");
         let id = tree.add_child(root, node).unwrap();
         assert_eq!(tree.node_path(id).unwrap(), "/root/");
+    }
+
+    // -- AnimationPlayer store tests ----------------------------------------
+
+    mod animation_store_tests {
+        use super::*;
+        use crate::animation::{
+            Animation, AnimationPlayer, AnimationTrack, KeyFrame, LoopMode,
+        };
+        use gdcore::math::Vector2;
+        use gdvariant::Variant;
+
+        /// Helper: build a tree with root + one Node2D child.
+        fn tree_with_node() -> (SceneTree, NodeId) {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let node = Node::new("Sprite", "Node2D");
+            let id = tree.add_child(root, node).unwrap();
+            (tree, id)
+        }
+
+        #[test]
+        fn attach_and_get_animation_player() {
+            let (mut tree, id) = tree_with_node();
+            let player = AnimationPlayer::new();
+            tree.attach_animation_player(id, player).unwrap();
+            assert!(tree.get_animation_player(id).is_some());
+        }
+
+        #[test]
+        fn attach_animation_player_to_nonexistent_node_fails() {
+            let mut tree = SceneTree::new();
+            let fake = NodeId::next();
+            let result = tree.attach_animation_player(fake, AnimationPlayer::new());
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn get_animation_player_mut_works() {
+            let (mut tree, id) = tree_with_node();
+            let player = AnimationPlayer::new();
+            tree.attach_animation_player(id, player).unwrap();
+            let p = tree.get_animation_player_mut(id).unwrap();
+            p.speed_scale = 2.0;
+            assert_eq!(tree.get_animation_player(id).unwrap().speed_scale, 2.0);
+        }
+
+        #[test]
+        fn process_animations_applies_float_property() {
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("fade", 1.0);
+            let mut track = AnimationTrack::new("opacity");
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(1.0)));
+            track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(0.0)));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("fade");
+
+            tree.attach_animation_player(id, player).unwrap();
+
+            // Advance half-way.
+            tree.process_animations(0.5);
+
+            let val = tree.get_node(id).unwrap().get_property("opacity");
+            if let Variant::Float(f) = val {
+                assert!((f - 0.5).abs() < 1e-4, "got {f}");
+            } else {
+                panic!("expected Float, got {val:?}");
+            }
+        }
+
+        #[test]
+        fn process_animations_applies_vector2_position() {
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("move", 1.0);
+            let mut track = AnimationTrack::new("position");
+            track.add_keyframe(KeyFrame::linear(
+                0.0,
+                Variant::Vector2(Vector2::ZERO),
+            ));
+            track.add_keyframe(KeyFrame::linear(
+                1.0,
+                Variant::Vector2(Vector2::new(100.0, 200.0)),
+            ));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("move");
+
+            tree.attach_animation_player(id, player).unwrap();
+            tree.process_animations(0.5);
+
+            let val = tree.get_node(id).unwrap().get_property("position");
+            if let Variant::Vector2(v) = val {
+                assert!((v.x - 50.0).abs() < 1e-3);
+                assert!((v.y - 100.0).abs() < 1e-3);
+            } else {
+                panic!("expected Vector2, got {val:?}");
+            }
+        }
+
+        #[test]
+        fn multiple_animations_on_different_nodes() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+
+            let a = Node::new("A", "Node2D");
+            let a_id = tree.add_child(root, a).unwrap();
+
+            let b = Node::new("B", "Node2D");
+            let b_id = tree.add_child(root, b).unwrap();
+
+            // Player for A: animate "x"
+            let mut pa = AnimationPlayer::new();
+            let mut anim_a = Animation::new("go", 1.0);
+            let mut track_a = AnimationTrack::new("x");
+            track_a.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            track_a.add_keyframe(KeyFrame::linear(1.0, Variant::Float(10.0)));
+            anim_a.tracks.push(track_a);
+            pa.add_animation(anim_a);
+            pa.play("go");
+            tree.attach_animation_player(a_id, pa).unwrap();
+
+            // Player for B: animate "y"
+            let mut pb = AnimationPlayer::new();
+            let mut anim_b = Animation::new("go", 1.0);
+            let mut track_b = AnimationTrack::new("y");
+            track_b.add_keyframe(KeyFrame::linear(0.0, Variant::Float(100.0)));
+            track_b.add_keyframe(KeyFrame::linear(1.0, Variant::Float(200.0)));
+            anim_b.tracks.push(track_b);
+            pb.add_animation(anim_b);
+            pb.play("go");
+            tree.attach_animation_player(b_id, pb).unwrap();
+
+            tree.process_animations(0.5);
+
+            if let Variant::Float(f) = tree.get_node(a_id).unwrap().get_property("x") {
+                assert!((f - 5.0).abs() < 1e-4);
+            } else {
+                panic!("A.x not Float");
+            }
+            if let Variant::Float(f) = tree.get_node(b_id).unwrap().get_property("y") {
+                assert!((f - 150.0).abs() < 1e-4);
+            } else {
+                panic!("B.y not Float");
+            }
+        }
+
+        #[test]
+        fn animation_stops_at_end_no_loop() {
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("once", 1.0);
+            let mut track = AnimationTrack::new("val");
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(10.0)));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("once");
+
+            tree.attach_animation_player(id, player).unwrap();
+
+            // Advance past end.
+            tree.process_animations(2.0);
+
+            assert!(!tree.get_animation_player(id).unwrap().playing);
+            if let Variant::Float(f) = tree.get_node(id).unwrap().get_property("val") {
+                assert!((f - 10.0).abs() < 1e-4);
+            } else {
+                panic!("expected Float");
+            }
+        }
+
+        #[test]
+        fn animation_loop_linear_wraps() {
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("loop", 1.0);
+            anim.loop_mode = LoopMode::Linear;
+            let mut track = AnimationTrack::new("val");
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(10.0)));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("loop");
+
+            tree.attach_animation_player(id, player).unwrap();
+
+            // Advance 1.5s — should wrap to 0.5
+            tree.process_animations(1.5);
+
+            assert!(tree.get_animation_player(id).unwrap().playing);
+            if let Variant::Float(f) = tree.get_node(id).unwrap().get_property("val") {
+                assert!((f - 5.0).abs() < 1e-4, "expected ~5.0, got {f}");
+            } else {
+                panic!("expected Float");
+            }
+        }
+
+        #[test]
+        fn animation_pingpong_reverses() {
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("pp", 1.0);
+            anim.loop_mode = LoopMode::PingPong;
+            let mut track = AnimationTrack::new("val");
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(10.0)));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("pp");
+
+            tree.attach_animation_player(id, player).unwrap();
+
+            // Advance 1.5s — should bounce back to position 0.5
+            tree.process_animations(1.5);
+
+            assert!(tree.get_animation_player(id).unwrap().playing);
+            if let Variant::Float(f) = tree.get_node(id).unwrap().get_property("val") {
+                assert!((f - 5.0).abs() < 1e-4, "expected ~5.0, got {f}");
+            } else {
+                panic!("expected Float");
+            }
+        }
+
+        #[test]
+        fn animation_multiple_tracks_applied() {
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("multi", 1.0);
+
+            let mut t1 = AnimationTrack::new("x");
+            t1.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            t1.add_keyframe(KeyFrame::linear(1.0, Variant::Float(10.0)));
+            anim.tracks.push(t1);
+
+            let mut t2 = AnimationTrack::new("y");
+            t2.add_keyframe(KeyFrame::linear(0.0, Variant::Float(100.0)));
+            t2.add_keyframe(KeyFrame::linear(1.0, Variant::Float(200.0)));
+            anim.tracks.push(t2);
+
+            player.add_animation(anim);
+            player.play("multi");
+            tree.attach_animation_player(id, player).unwrap();
+
+            tree.process_animations(0.5);
+
+            if let Variant::Float(f) = tree.get_node(id).unwrap().get_property("x") {
+                assert!((f - 5.0).abs() < 1e-4);
+            } else {
+                panic!("x not Float");
+            }
+            if let Variant::Float(f) = tree.get_node(id).unwrap().get_property("y") {
+                assert!((f - 150.0).abs() < 1e-4);
+            } else {
+                panic!("y not Float");
+            }
+        }
+
+        #[test]
+        fn stopped_animation_player_does_not_advance() {
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("a", 1.0);
+            let mut track = AnimationTrack::new("val");
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(10.0)));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            // Don't call play() — player is not playing.
+            tree.attach_animation_player(id, player).unwrap();
+
+            tree.process_animations(0.5);
+
+            // Property should not have been set (no current animation values).
+            assert_eq!(
+                tree.get_node(id).unwrap().get_property("val"),
+                Variant::Nil
+            );
+        }
+    }
+
+    // -- Tween store tests --------------------------------------------------
+
+    mod tween_store_tests {
+        use super::*;
+        use crate::tween::{TweenBuilder, TweenId};
+        use gdcore::math::Vector2;
+        use gdvariant::Variant;
+
+        fn tree_with_node() -> (SceneTree, NodeId) {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let node = Node::new("Player", "Node2D");
+            let id = tree.add_child(root, node).unwrap();
+            (tree, id)
+        }
+
+        #[test]
+        fn create_tween_returns_id() {
+            let (mut tree, id) = tree_with_node();
+            let tid = tree.create_tween(id);
+            assert!(tree.get_tween_mut(tid).is_some());
+            assert_eq!(tree.tween_count(), 1);
+        }
+
+        #[test]
+        fn add_tween_with_builder() {
+            let (mut tree, id) = tree_with_node();
+            let tween = TweenBuilder::new()
+                .tween_property("x", Variant::Float(0.0), Variant::Float(100.0), 1.0)
+                .build();
+            let tid = tree.add_tween(id, tween);
+            assert!(tree.get_tween_mut(tid).is_some());
+        }
+
+        #[test]
+        fn process_tweens_applies_float_property() {
+            let (mut tree, id) = tree_with_node();
+            let tween = TweenBuilder::new()
+                .tween_property("speed", Variant::Float(0.0), Variant::Float(100.0), 1.0)
+                .build();
+            tree.add_tween(id, tween);
+
+            tree.process_tweens(0.5);
+
+            if let Variant::Float(f) = tree.get_node(id).unwrap().get_property("speed") {
+                assert!((f - 50.0).abs() < 1e-3, "got {f}");
+            } else {
+                panic!("expected Float");
+            }
+        }
+
+        #[test]
+        fn tween_node2d_position_updates() {
+            let (mut tree, id) = tree_with_node();
+            let tween = TweenBuilder::new()
+                .tween_property(
+                    "position",
+                    Variant::Vector2(Vector2::ZERO),
+                    Variant::Vector2(Vector2::new(100.0, 200.0)),
+                    1.0,
+                )
+                .build();
+            tree.add_tween(id, tween);
+
+            tree.process_tweens(0.5);
+
+            if let Variant::Vector2(v) = tree.get_node(id).unwrap().get_property("position") {
+                assert!((v.x - 50.0).abs() < 1e-3);
+                assert!((v.y - 100.0).abs() < 1e-3);
+            } else {
+                panic!("expected Vector2");
+            }
+        }
+
+        #[test]
+        fn tween_completion_removes_from_store() {
+            let (mut tree, id) = tree_with_node();
+            let tween = TweenBuilder::new()
+                .tween_property("x", Variant::Float(0.0), Variant::Float(10.0), 1.0)
+                .build();
+            tree.add_tween(id, tween);
+            assert_eq!(tree.tween_count(), 1);
+
+            // Advance past completion.
+            tree.process_tweens(2.0);
+            assert_eq!(tree.tween_count(), 0);
+        }
+
+        #[test]
+        fn tween_looping_does_not_remove() {
+            let (mut tree, id) = tree_with_node();
+            let tween = TweenBuilder::new()
+                .tween_property("x", Variant::Float(0.0), Variant::Float(10.0), 1.0)
+                .set_loops(-1)
+                .build();
+            tree.add_tween(id, tween);
+
+            tree.process_tweens(5.0);
+            assert_eq!(tree.tween_count(), 1, "infinite-loop tween should persist");
+        }
+
+        #[test]
+        fn tween_finite_loops_removes_after_all() {
+            let (mut tree, id) = tree_with_node();
+            let tween = TweenBuilder::new()
+                .tween_property("x", Variant::Float(0.0), Variant::Float(10.0), 1.0)
+                .set_loops(2)
+                .build();
+            tree.add_tween(id, tween);
+
+            tree.process_tweens(1.0); // First loop done
+            assert_eq!(tree.tween_count(), 1, "should still be alive after first loop");
+
+            tree.process_tweens(1.0); // Second loop done
+            assert_eq!(tree.tween_count(), 0, "should be removed after all loops");
+        }
+
+        #[test]
+        fn multiple_tweens_on_different_nodes() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+
+            let a = Node::new("A", "Node2D");
+            let a_id = tree.add_child(root, a).unwrap();
+
+            let b = Node::new("B", "Node2D");
+            let b_id = tree.add_child(root, b).unwrap();
+
+            let tw_a = TweenBuilder::new()
+                .tween_property("x", Variant::Float(0.0), Variant::Float(10.0), 1.0)
+                .build();
+            tree.add_tween(a_id, tw_a);
+
+            let tw_b = TweenBuilder::new()
+                .tween_property("y", Variant::Float(50.0), Variant::Float(150.0), 1.0)
+                .build();
+            tree.add_tween(b_id, tw_b);
+
+            tree.process_tweens(0.5);
+
+            if let Variant::Float(f) = tree.get_node(a_id).unwrap().get_property("x") {
+                assert!((f - 5.0).abs() < 1e-3);
+            } else {
+                panic!("A.x not Float");
+            }
+            if let Variant::Float(f) = tree.get_node(b_id).unwrap().get_property("y") {
+                assert!((f - 100.0).abs() < 1e-3);
+            } else {
+                panic!("B.y not Float");
+            }
+        }
+
+        #[test]
+        fn tween_end_value_applied_on_completion() {
+            let (mut tree, id) = tree_with_node();
+            let tween = TweenBuilder::new()
+                .tween_property("x", Variant::Float(0.0), Variant::Float(42.0), 1.0)
+                .build();
+            tree.add_tween(id, tween);
+
+            tree.process_tweens(1.0);
+
+            if let Variant::Float(f) = tree.get_node(id).unwrap().get_property("x") {
+                assert!((f - 42.0).abs() < 1e-4);
+            } else {
+                panic!("expected Float");
+            }
+        }
+
+        #[test]
+        fn get_nonexistent_tween_returns_none() {
+            let mut tree = SceneTree::new();
+            let fake = TweenId::next();
+            assert!(tree.get_tween_mut(fake).is_none());
+        }
+    }
+
+    // -- MainLoop animation/tween integration tests -------------------------
+
+    mod mainloop_integration_tests {
+        use crate::animation::{Animation, AnimationPlayer, AnimationTrack, KeyFrame};
+        use crate::main_loop::MainLoop;
+        use crate::node::Node;
+        use crate::scene_tree::SceneTree;
+        use crate::tween::TweenBuilder;
+        use gdcore::math::Vector2;
+        use gdvariant::Variant;
+
+        #[test]
+        fn mainloop_advances_animation_player() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let node = Node::new("N", "Node2D");
+            let id = tree.add_child(root, node).unwrap();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("slide", 1.0);
+            let mut track = AnimationTrack::new("position");
+            track.add_keyframe(KeyFrame::linear(
+                0.0,
+                Variant::Vector2(Vector2::ZERO),
+            ));
+            track.add_keyframe(KeyFrame::linear(
+                1.0,
+                Variant::Vector2(Vector2::new(60.0, 0.0)),
+            ));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("slide");
+            tree.attach_animation_player(id, player).unwrap();
+
+            let mut ml = MainLoop::new(tree);
+            // Run 30 frames at 1/60 each = 0.5s
+            ml.run_frames(30, 1.0 / 60.0);
+
+            let pos = ml.tree().get_node(id).unwrap().get_property("position");
+            if let Variant::Vector2(v) = pos {
+                assert!((v.x - 30.0).abs() < 1.0, "expected ~30, got {}", v.x);
+            } else {
+                panic!("expected Vector2, got {pos:?}");
+            }
+        }
+
+        #[test]
+        fn mainloop_advances_tween() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let node = Node::new("N", "Node2D");
+            let id = tree.add_child(root, node).unwrap();
+
+            let tween = TweenBuilder::new()
+                .tween_property(
+                    "position",
+                    Variant::Vector2(Vector2::ZERO),
+                    Variant::Vector2(Vector2::new(60.0, 0.0)),
+                    1.0,
+                )
+                .build();
+            tree.add_tween(id, tween);
+
+            let mut ml = MainLoop::new(tree);
+            ml.run_frames(30, 1.0 / 60.0);
+
+            let pos = ml.tree().get_node(id).unwrap().get_property("position");
+            if let Variant::Vector2(v) = pos {
+                assert!((v.x - 30.0).abs() < 1.0, "expected ~30, got {}", v.x);
+            } else {
+                panic!("expected Vector2, got {pos:?}");
+            }
+        }
+
+        #[test]
+        fn mainloop_tween_completes_and_is_removed() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let node = Node::new("N", "Node2D");
+            let id = tree.add_child(root, node).unwrap();
+
+            let tween = TweenBuilder::new()
+                .tween_property("x", Variant::Float(0.0), Variant::Float(10.0), 0.5)
+                .build();
+            tree.add_tween(id, tween);
+
+            let mut ml = MainLoop::new(tree);
+            // Run 60 frames at 1/60 = 1.0s (tween is 0.5s)
+            ml.run_frames(60, 1.0 / 60.0);
+
+            assert_eq!(ml.tree().tween_count(), 0);
+            if let Variant::Float(f) = ml.tree().get_node(id).unwrap().get_property("x") {
+                assert!((f - 10.0).abs() < 1e-4);
+            } else {
+                panic!("expected Float");
+            }
+        }
     }
 }

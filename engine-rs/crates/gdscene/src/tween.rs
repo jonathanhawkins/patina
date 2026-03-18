@@ -4,8 +4,43 @@
 //! alternative to keyframe-based [`Animation`](crate::animation::Animation).
 //! They support easing functions, delays, parallel execution, and looping.
 
+use std::fmt;
+
 use crate::animation::interpolate_variant;
+use gdcore::ObjectId;
 use gdvariant::Variant;
+
+// ---------------------------------------------------------------------------
+// TweenId
+// ---------------------------------------------------------------------------
+
+/// A lightweight identifier for a tween within the scene tree's tween store.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TweenId(ObjectId);
+
+impl TweenId {
+    /// Creates a new, globally unique `TweenId`.
+    pub fn next() -> Self {
+        Self(ObjectId::next())
+    }
+
+    /// Returns the raw `u64` value.
+    pub fn raw(self) -> u64 {
+        self.0.raw()
+    }
+}
+
+impl fmt::Debug for TweenId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TweenId({})", self.0.raw())
+    }
+}
+
+impl fmt::Display for TweenId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.raw())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EaseType

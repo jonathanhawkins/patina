@@ -122,6 +122,10 @@ impl MainLoop {
             self.physics_accumulator = 0.0;
         }
 
+        // -- animation / tween phase --
+        self.tree.process_animations(delta_secs);
+        self.tree.process_tweens(delta_secs);
+
         // -- process phase --
         self.tree.process_frame();
 
