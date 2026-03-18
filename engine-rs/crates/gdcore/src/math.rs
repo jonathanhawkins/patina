@@ -7,6 +7,54 @@
 use std::ops::{Add, Mul, Neg, Sub};
 
 // ---------------------------------------------------------------------------
+// Vector2i
+// ---------------------------------------------------------------------------
+
+/// A 2D vector with `i32` components, matching Godot's `Vector2i`.
+///
+/// Used for tile coordinates, pixel-perfect positions, and grid-based math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Vector2i {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Vector2i {
+    pub const ZERO: Self = Self { x: 0, y: 0 };
+    pub const ONE: Self = Self { x: 1, y: 1 };
+    pub const UP: Self = Self { x: 0, y: -1 };
+    pub const DOWN: Self = Self { x: 0, y: 1 };
+    pub const LEFT: Self = Self { x: -1, y: 0 };
+    pub const RIGHT: Self = Self { x: 1, y: 0 };
+
+    /// Creates a new integer vector.
+    pub const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+}
+
+impl Add for Vector2i {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self::new(self.x + rhs.x, self.y + rhs.y)
+    }
+}
+
+impl Sub for Vector2i {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self::new(self.x - rhs.x, self.y - rhs.y)
+    }
+}
+
+impl Neg for Vector2i {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Vector2
 // ---------------------------------------------------------------------------
 
@@ -718,5 +766,45 @@ mod tests {
         assert_eq!(Color::WHITE, Color::new(1.0, 1.0, 1.0, 1.0));
         assert_eq!(Color::BLACK, Color::new(0.0, 0.0, 0.0, 1.0));
         assert_eq!(Color::TRANSPARENT, Color::new(0.0, 0.0, 0.0, 0.0));
+    }
+
+    // -- Vector2i -----------------------------------------------------------
+
+    #[test]
+    fn vector2i_add() {
+        let a = Vector2i::new(1, 2);
+        let b = Vector2i::new(3, 4);
+        assert_eq!(a + b, Vector2i::new(4, 6));
+    }
+
+    #[test]
+    fn vector2i_sub() {
+        let a = Vector2i::new(5, 7);
+        let b = Vector2i::new(2, 3);
+        assert_eq!(a - b, Vector2i::new(3, 4));
+    }
+
+    #[test]
+    fn vector2i_neg() {
+        let v = Vector2i::new(3, -4);
+        assert_eq!(-v, Vector2i::new(-3, 4));
+    }
+
+    #[test]
+    fn vector2i_eq_and_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Vector2i::new(1, 2));
+        set.insert(Vector2i::new(1, 2));
+        set.insert(Vector2i::new(3, 4));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn vector2i_constants() {
+        assert_eq!(Vector2i::ZERO, Vector2i::new(0, 0));
+        assert_eq!(Vector2i::ONE, Vector2i::new(1, 1));
+        assert_eq!(Vector2i::UP, Vector2i::new(0, -1));
+        assert_eq!(Vector2i::DOWN, Vector2i::new(0, 1));
     }
 }

@@ -70,41 +70,78 @@ const features = [
   },
 ];
 
-const roadmapStages = [
+type RoadmapStatus = "complete" | "active" | "deferred" | "planned" | "future";
+
+const roadmapStages: Array<{ phase: string; title: string; description: string; status: RoadmapStatus }> = [
+  {
+    phase: "00",
+    title: "Foundation",
+    description:
+      "Core types, math library, Variant system, object IDs. The bedrock every crate builds on.",
+    status: "complete" as const,
+  },
   {
     phase: "01",
     title: "Oracle",
     description:
       "Scene parser and inspector. Load Godot scenes, query nodes, validate structure.",
-    status: "active" as const,
+    status: "complete" as const,
   },
   {
     phase: "02",
     title: "GDExtension Lab",
     description:
-      "Experimental GDExtension bindings. Run Patina components inside Godot for rapid iteration.",
-    status: "planned" as const,
+      "Experimental GDExtension bindings. Deferred — runtime-first approach chosen instead.",
+    status: "deferred" as const,
   },
   {
     phase: "03",
     title: "Headless Runtime",
     description:
-      "Server-side scene execution. Game logic, physics, and scripting running purely in Rust.",
-    status: "planned" as const,
+      "Server-side scene execution. SceneTree, lifecycle, MainLoop, physics, and scripting in pure Rust.",
+    status: "complete" as const,
   },
   {
     phase: "04",
     title: "2D Slice",
     description:
-      "Full 2D rendering pipeline. Sprites, tilemaps, particles, and UI. Ship a complete 2D game.",
-    status: "planned" as const,
+      "Full 2D rendering pipeline, editor foundations, render tests, and fixture system.",
+    status: "complete" as const,
   },
   {
     phase: "05",
-    title: "3D Runtime",
+    title: "3D Foundation",
     description:
-      "Complete 3D rendering with modern graphics. A full Rust-native alternative to the Godot runtime.",
-    status: "future" as const,
+      "3D node types, expanded input handling, scene instancing, and spatial transforms.",
+    status: "complete" as const,
+  },
+  {
+    phase: "06",
+    title: "Input & Instancing",
+    description:
+      "Input mapping, sub-scene instancing, and advanced resource loading.",
+    status: "complete" as const,
+  },
+  {
+    phase: "07",
+    title: "Platform",
+    description:
+      "Platform abstraction layer, window management, and OS integration.",
+    status: "complete" as const,
+  },
+  {
+    phase: "08",
+    title: "Editor",
+    description:
+      "Editor support: scene dock, inspector, project settings, and editor tooling.",
+    status: "complete" as const,
+  },
+  {
+    phase: "09",
+    title: "Hardening & CI",
+    description:
+      "Test coverage, CI pipeline, golden tests, and benchmarks. 869 tests passing.",
+    status: "complete" as const,
   },
 ];
 
@@ -378,7 +415,10 @@ function FeaturesSection() {
 // Roadmap
 // ---------------------------------------------------------------------------
 
-function StatusIndicator({ status }: { status: "active" | "planned" | "future" }) {
+function StatusIndicator({ status }: { status: "complete" | "active" | "deferred" | "planned" | "future" }) {
+  if (status === "complete") {
+    return <div className="size-2 rounded-full bg-emerald-400" />;
+  }
   if (status === "active") {
     return (
       <div className="relative flex size-2.5 items-center justify-center">
@@ -387,14 +427,19 @@ function StatusIndicator({ status }: { status: "active" | "planned" | "future" }
       </div>
     );
   }
+  if (status === "deferred") {
+    return <div className="size-2 rounded-full bg-muted-foreground/30" />;
+  }
   if (status === "planned") {
     return <div className="size-2 rounded-full bg-muted-foreground/40" />;
   }
   return <div className="size-2 rounded-full bg-muted-foreground/20" />;
 }
 
-function statusLabel(status: "active" | "planned" | "future") {
+function statusLabel(status: "complete" | "active" | "deferred" | "planned" | "future") {
+  if (status === "complete") return "Complete";
   if (status === "active") return "In Progress";
+  if (status === "deferred") return "Deferred";
   if (status === "planned") return "Planned";
   return "Future";
 }
@@ -461,8 +506,18 @@ function RoadmapSection() {
                   <h3 className="text-sm font-semibold tracking-tight">
                     {stage.title}
                   </h3>
+                  {stage.status === "complete" && (
+                    <span className="rounded-md bg-emerald-500/10 px-2 py-0.5 font-mono text-xs font-medium text-emerald-400">
+                      {statusLabel(stage.status)}
+                    </span>
+                  )}
                   {stage.status === "active" && (
                     <span className="rounded-md bg-brand/10 px-2 py-0.5 font-mono text-xs font-medium text-brand">
+                      {statusLabel(stage.status)}
+                    </span>
+                  )}
+                  {stage.status === "deferred" && (
+                    <span className="rounded-md bg-muted/50 px-2 py-0.5 font-mono text-xs font-medium text-muted-foreground">
                       {statusLabel(stage.status)}
                     </span>
                   )}
