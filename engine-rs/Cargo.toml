@@ -47,6 +47,7 @@ gdphysics2d = { path = "crates/gdphysics2d" }
 gdplatform = { path = "crates/gdplatform" }
 gdaudio = { path = "crates/gdaudio" }
 gdresource = { path = "crates/gdresource" }
+gdscript-interop = { path = "crates/gdscript-interop" }
 serde_json.workspace = true
 
 [[example]]
@@ -60,3 +61,7 @@ path = "examples/benchmarks.rs"
 [[example]]
 name = "platformer_demo"
 path = "examples/platformer_demo.rs"
+
+[[example]]
+name = "hello_gdscript"
+path = "examples/hello_gdscript.rs"

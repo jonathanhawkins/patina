@@ -37,6 +37,7 @@ impl LifecycleManager {
             if let Some(node) = tree.get_node_mut(id) {
                 node.receive_notification(NOTIFICATION_ENTER_TREE);
             }
+            tree.process_script_enter_tree(id);
         }
 
         // Phase 2: READY — bottom-up.
@@ -47,6 +48,7 @@ impl LifecycleManager {
             if let Some(node) = tree.get_node_mut(id) {
                 node.receive_notification(NOTIFICATION_READY);
             }
+            tree.process_script_ready(id);
         }
     }
 
@@ -62,6 +64,7 @@ impl LifecycleManager {
             if let Some(node) = tree.get_node_mut(id) {
                 node.receive_notification(NOTIFICATION_EXIT_TREE);
             }
+            tree.process_script_exit_tree(id);
         }
     }
 }

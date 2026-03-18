@@ -55,6 +55,10 @@ pub enum Expr {
     ArrayLiteral(Vec<Expr>),
     /// Dictionary literal (e.g. `{"a": 1}`).
     DictLiteral(Vec<(Expr, Expr)>),
+    /// `self` reference.
+    SelfRef,
+    /// `super` reference.
+    SuperRef,
 }
 
 /// Binary operators.
@@ -110,6 +114,13 @@ pub enum AssignOp {
     SubAssign,
 }
 
+/// An annotation on a declaration (e.g. `@export`, `@onready`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Annotation {
+    /// Annotation name (e.g. "export", "onready").
+    pub name: String,
+}
+
 /// A statement node in the GDScript AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -121,6 +132,8 @@ pub enum Stmt {
         type_hint: Option<String>,
         /// Optional initial value.
         value: Option<Expr>,
+        /// Annotations (e.g. `@export`).
+        annotations: Vec<Annotation>,
     },
     /// Assignment: `target op value`
     Assignment {
@@ -170,6 +183,30 @@ pub enum Stmt {
         return_type: Option<String>,
         /// Function body.
         body: Vec<Stmt>,
+    },
+    /// `extends ClassName` or `extends "ClassName"`.
+    Extends {
+        /// The parent class name.
+        class_name: String,
+    },
+    /// `class_name MyClass`.
+    ClassNameDecl {
+        /// The class name.
+        name: String,
+    },
+    /// `signal signal_name(param1, param2)`.
+    SignalDecl {
+        /// Signal name.
+        name: String,
+        /// Parameter names.
+        params: Vec<String>,
+    },
+    /// `enum MyEnum { IDLE, RUNNING, JUMPING }`.
+    EnumDecl {
+        /// Enum name.
+        name: String,
+        /// Variant names (assigned ascending integer values starting at 0).
+        variants: Vec<String>,
     },
     /// An expression used as a statement.
     ExprStmt(Expr),
@@ -297,12 +334,17 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         match self.peek().clone() {
-            Token::Var => self.parse_var_decl(),
+            Token::AtSign => self.parse_annotated_stmt(),
+            Token::Var => self.parse_var_decl_with_annotations(vec![]),
             Token::If => self.parse_if(),
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
             Token::Return => self.parse_return(),
             Token::Func => self.parse_func_def(),
+            Token::Extends => self.parse_extends(),
+            Token::ClassName => self.parse_class_name_decl(),
+            Token::Signal => self.parse_signal_decl(),
+            Token::Enum => self.parse_enum_decl(),
             Token::Pass => {
                 self.advance();
                 Ok(Stmt::Pass)
@@ -319,7 +361,50 @@ impl Parser {
         }
     }
 
-    fn parse_var_decl(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_annotated_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let mut annotations = Vec::new();
+        while self.check(&Token::AtSign) {
+            self.advance(); // consume `@`
+                            // Annotation names may be keywords (e.g. `@export`, `@onready`).
+            let name = match self.peek().clone() {
+                Token::Ident(n) => {
+                    self.advance();
+                    n
+                }
+                other => {
+                    // Accept any keyword-like token as an annotation name
+                    // by using its Display representation.
+                    let n = other.to_string();
+                    self.advance();
+                    n
+                }
+            };
+            annotations.push(Annotation { name });
+            self.skip_newlines();
+        }
+        // After annotations, expect a var decl (or could be func, etc.)
+        match self.peek().clone() {
+            Token::Var => self.parse_var_decl_with_annotations(annotations),
+            _ => {
+                let ts = self.tokens.get(self.pos);
+                let (token, line, col) = match ts {
+                    Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                    None => ("EOF".to_string(), 0, 0),
+                };
+                Err(ParseError::UnexpectedToken {
+                    token,
+                    expected: "var declaration after annotation".to_string(),
+                    line,
+                    col,
+                })
+            }
+        }
+    }
+
+    fn parse_var_decl_with_annotations(
+        &mut self,
+        annotations: Vec<Annotation>,
+    ) -> Result<Stmt, ParseError> {
         self.advance(); // consume `var`
         let name = self.eat_ident()?;
         let type_hint = if self.check(&Token::Colon) {
@@ -338,7 +423,79 @@ impl Parser {
             name,
             type_hint,
             value,
+            annotations,
         })
+    }
+
+    fn parse_extends(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `extends`
+        let class_name = match self.peek().clone() {
+            Token::StringLit(s) => {
+                self.advance();
+                s
+            }
+            Token::Ident(name) => {
+                self.advance();
+                name
+            }
+            _ => {
+                let ts = self.tokens.get(self.pos);
+                let (token, line, col) = match ts {
+                    Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                    None => ("EOF".to_string(), 0, 0),
+                };
+                return Err(ParseError::UnexpectedToken {
+                    token,
+                    expected: "class name or string".to_string(),
+                    line,
+                    col,
+                });
+            }
+        };
+        Ok(Stmt::Extends { class_name })
+    }
+
+    fn parse_class_name_decl(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `class_name`
+        let name = self.eat_ident()?;
+        Ok(Stmt::ClassNameDecl { name })
+    }
+
+    fn parse_signal_decl(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `signal`
+        let name = self.eat_ident()?;
+        let mut params = Vec::new();
+        if self.check(&Token::LParen) {
+            self.advance();
+            if !self.check(&Token::RParen) {
+                params.push(self.eat_ident()?);
+                while self.check(&Token::Comma) {
+                    self.advance();
+                    params.push(self.eat_ident()?);
+                }
+            }
+            self.expect(&Token::RParen)?;
+        }
+        Ok(Stmt::SignalDecl { name, params })
+    }
+
+    fn parse_enum_decl(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `enum`
+        let name = self.eat_ident()?;
+        self.expect(&Token::LBrace)?;
+        let mut variants = Vec::new();
+        if !self.check(&Token::RBrace) {
+            variants.push(self.eat_ident()?);
+            while self.check(&Token::Comma) {
+                self.advance();
+                if self.check(&Token::RBrace) {
+                    break;
+                }
+                variants.push(self.eat_ident()?);
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(Stmt::EnumDecl { name, variants })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
@@ -680,6 +837,14 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Ident(name))
             }
+            Token::Self_ => {
+                self.advance();
+                Ok(Expr::SelfRef)
+            }
+            Token::Super => {
+                self.advance();
+                Ok(Expr::SuperRef)
+            }
             Token::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;
@@ -764,7 +929,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert!(matches!(
             &stmts[0],
-            Stmt::VarDecl { name, type_hint: None, value: Some(Expr::Literal(Variant::Int(10))) }
+            Stmt::VarDecl { name, type_hint: None, value: Some(Expr::Literal(Variant::Int(10))), .. }
             if name == "x"
         ));
     }
@@ -774,7 +939,7 @@ mod tests {
         let stmts = parse("var x: int = 5\n");
         assert!(matches!(
             &stmts[0],
-            Stmt::VarDecl { name, type_hint: Some(th), value: Some(_) }
+            Stmt::VarDecl { name, type_hint: Some(th), value: Some(_), .. }
             if name == "x" && th == "int"
         ));
     }
@@ -1001,5 +1166,106 @@ mod tests {
     fn parse_empty_dict() {
         let expr = parse_expr_str("{}");
         assert!(matches!(expr, Expr::DictLiteral(ref v) if v.is_empty()));
+    }
+
+    #[test]
+    fn parse_extends_ident() {
+        let stmts = parse("extends Node\n");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Extends { class_name } if class_name == "Node"
+        ));
+    }
+
+    #[test]
+    fn parse_extends_string() {
+        let stmts = parse("extends \"Node2D\"\n");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Extends { class_name } if class_name == "Node2D"
+        ));
+    }
+
+    #[test]
+    fn parse_class_name_decl() {
+        let stmts = parse("class_name Player\n");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::ClassNameDecl { name } if name == "Player"
+        ));
+    }
+
+    #[test]
+    fn parse_signal_no_params() {
+        let stmts = parse("signal health_changed\n");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::SignalDecl { name, params } if name == "health_changed" && params.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parse_signal_with_params() {
+        let stmts = parse("signal damage_taken(amount, source)\n");
+        if let Stmt::SignalDecl { name, params } = &stmts[0] {
+            assert_eq!(name, "damage_taken");
+            assert_eq!(params, &["amount", "source"]);
+        } else {
+            panic!("expected SignalDecl");
+        }
+    }
+
+    #[test]
+    fn parse_enum_decl() {
+        let stmts = parse("enum State { IDLE, RUNNING, JUMPING }\n");
+        if let Stmt::EnumDecl { name, variants } = &stmts[0] {
+            assert_eq!(name, "State");
+            assert_eq!(variants, &["IDLE", "RUNNING", "JUMPING"]);
+        } else {
+            panic!("expected EnumDecl");
+        }
+    }
+
+    #[test]
+    fn parse_export_var() {
+        let stmts = parse("@export\nvar speed: float = 100.0\n");
+        if let Stmt::VarDecl {
+            name,
+            type_hint,
+            annotations,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "speed");
+            assert_eq!(type_hint.as_deref(), Some("float"));
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].name, "export");
+        } else {
+            panic!("expected VarDecl with export annotation");
+        }
+    }
+
+    #[test]
+    fn parse_self_member_access() {
+        let expr = parse_expr_str("self.health");
+        assert!(matches!(
+            expr,
+            Expr::MemberAccess { ref object, ref member }
+            if matches!(**object, Expr::SelfRef) && member == "health"
+        ));
+    }
+
+    #[test]
+    fn parse_self_method_call() {
+        let expr = parse_expr_str("self.take_damage(10)");
+        assert!(matches!(expr, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn parse_super_call() {
+        let expr = parse_expr_str("super()");
+        assert!(
+            matches!(expr, Expr::Call { ref callee, .. } if matches!(**callee, Expr::SuperRef))
+        );
     }
 }

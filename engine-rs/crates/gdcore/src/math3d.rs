@@ -13,9 +13,13 @@ use std::ops::Mul;
 /// A unit quaternion for representing 3D rotations, matching Godot's `Quaternion`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Quaternion {
+    /// The X imaginary component.
     pub x: f32,
+    /// The Y imaginary component.
     pub y: f32,
+    /// The Z imaginary component.
     pub z: f32,
+    /// The W real component.
     pub w: f32,
 }
 
@@ -337,7 +341,9 @@ impl Mul for Basis {
 /// A 3D affine transform (basis + origin), matching Godot's `Transform3D`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform3D {
+    /// The 3×3 rotation/scale basis.
     pub basis: Basis,
+    /// The translation origin.
     pub origin: Vector3,
 }
 
@@ -429,7 +435,9 @@ impl Mul for Transform3D {
 /// An axis-aligned bounding box in 3D, matching Godot's `AABB`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb {
+    /// The minimum corner position.
     pub position: Vector3,
+    /// The size (extents) of the box.
     pub size: Vector3,
 }
 
@@ -532,7 +540,9 @@ impl Aabb {
 /// Defined by a normal vector and distance `d` from the origin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Plane {
+    /// The unit normal vector of the plane.
     pub normal: Vector3,
+    /// The signed distance from the origin along the normal.
     pub d: f32,
 }
 

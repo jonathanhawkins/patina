@@ -4,6 +4,7 @@
 //! for the Patina Engine runtime.
 
 #![warn(clippy::all)]
+#![warn(missing_docs)]
 
 pub mod diagnostics;
 pub mod error;

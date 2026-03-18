@@ -5,17 +5,15 @@
 //!
 //! This crate provides the core scene system:
 //!
-//! - [`node`] — The [`Node`](node::Node) type and lightweight
-//!   [`NodeId`](node::NodeId) handle.
-//! - [`scene_tree`] — The [`SceneTree`](scene_tree::SceneTree) arena that
-//!   owns all nodes and provides hierarchy, path, and group operations.
-//! - [`lifecycle`] — [`LifecycleManager`](lifecycle::LifecycleManager) for
-//!   dispatching enter-tree, ready, and exit-tree notifications in the
-//!   correct Godot-compatible order.
-//! - [`main_loop`] — [`MainLoop`](main_loop::MainLoop) for driving
-//!   deterministic frame execution with fixed-timestep physics.
-//! - [`packed_scene`] — [`PackedScene`](packed_scene::PackedScene) for
-//!   parsing `.tscn` files and instantiating node subtrees.
+//! - [`node`] — The [`Node`] type and lightweight [`NodeId`] handle.
+//! - [`scene_tree`] — The [`SceneTree`] arena that owns all nodes and
+//!   provides hierarchy, path, and group operations.
+//! - [`lifecycle`] — [`LifecycleManager`] for dispatching enter-tree,
+//!   ready, and exit-tree notifications in the correct Godot-compatible order.
+//! - [`main_loop`] — [`MainLoop`] for driving deterministic frame execution
+//!   with fixed-timestep physics.
+//! - [`packed_scene`] — [`PackedScene`] for parsing `.tscn` files and
+//!   instantiating node subtrees.
 
 #![warn(clippy::all)]
 
@@ -31,6 +29,7 @@ pub mod packed_scene;
 pub mod particle;
 pub mod scene_saver;
 pub mod scene_tree;
+pub mod scripting;
 pub mod tilemap;
 pub mod tween;
 
@@ -41,3 +40,4 @@ pub use node::{Node, NodeId};
 pub use packed_scene::{add_packed_scene_to_tree, wire_connections, PackedScene, SceneConnection};
 pub use scene_saver::TscnSaver;
 pub use scene_tree::SceneTree;
+pub use scripting::GDScriptNodeInstance;

@@ -48,6 +48,16 @@ pub enum Token {
     Const,
     /// `static`
     Static,
+    /// `self`
+    Self_,
+    /// `super`
+    Super,
+    /// `class_name`
+    ClassName,
+    /// `@onready`
+    Onready,
+    /// `@export`
+    Export,
 
     // Literals
     /// Integer literal.
@@ -102,6 +112,8 @@ pub enum Token {
     MinusAssign,
     /// `->`
     Arrow,
+    /// `@`
+    AtSign,
 
     // Punctuation
     /// `(`
@@ -158,6 +170,11 @@ impl fmt::Display for Token {
             Token::Continue => write!(f, "continue"),
             Token::Const => write!(f, "const"),
             Token::Static => write!(f, "static"),
+            Token::Self_ => write!(f, "self"),
+            Token::Super => write!(f, "super"),
+            Token::ClassName => write!(f, "class_name"),
+            Token::Onready => write!(f, "onready"),
+            Token::Export => write!(f, "export"),
             Token::IntLit(v) => write!(f, "{v}"),
             Token::FloatLit(v) => write!(f, "{v}"),
             Token::StringLit(v) => write!(f, "\"{v}\""),
@@ -182,6 +199,7 @@ impl fmt::Display for Token {
             Token::PlusAssign => write!(f, "+="),
             Token::MinusAssign => write!(f, "-="),
             Token::Arrow => write!(f, "->"),
+            Token::AtSign => write!(f, "@"),
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
             Token::LBracket => write!(f, "["),
@@ -493,6 +511,11 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 "continue" => Token::Continue,
                 "const" => Token::Const,
                 "static" => Token::Static,
+                "self" => Token::Self_,
+                "super" => Token::Super,
+                "class_name" => Token::ClassName,
+                "onready" => Token::Onready,
+                "export" => Token::Export,
                 "true" => Token::BoolLit(true),
                 "false" => Token::BoolLit(false),
                 "null" => Token::Null,
@@ -608,6 +631,7 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             ',' => Token::Comma,
             '.' => Token::Dot,
             ';' => Token::Semicolon,
+            '@' => Token::AtSign,
             _ => {
                 return Err(LexError::UnexpectedChar { ch, line, col });
             }
@@ -843,8 +867,29 @@ mod tests {
 
     #[test]
     fn unexpected_char_error() {
-        let err = tokenize("@").unwrap_err();
-        assert!(matches!(err, LexError::UnexpectedChar { ch: '@', .. }));
+        let err = tokenize("~").unwrap_err();
+        assert!(matches!(err, LexError::UnexpectedChar { ch: '~', .. }));
+    }
+
+    #[test]
+    fn tokenize_at_sign() {
+        let tokens = tok_types("@export");
+        assert_eq!(tokens, vec![Token::AtSign, Token::Export, Token::Eof]);
+    }
+
+    #[test]
+    fn tokenize_self_and_super() {
+        let tokens = tok_types("self super");
+        assert_eq!(tokens, vec![Token::Self_, Token::Super, Token::Eof]);
+    }
+
+    #[test]
+    fn tokenize_class_name_keyword() {
+        let tokens = tok_types("class_name MyClass");
+        assert_eq!(
+            tokens,
+            vec![Token::ClassName, Token::Ident("MyClass".into()), Token::Eof]
+        );
     }
 
     #[test]
