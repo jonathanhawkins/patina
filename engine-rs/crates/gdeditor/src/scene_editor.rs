@@ -139,7 +139,11 @@ impl SceneEditor {
         self.dirty = true;
 
         // The created ID was filled in by execute.
-        if let Some(EditorCommand::AddNode { created_id: Some(id), .. }) = self.editor.undo_stack_last() {
+        if let Some(EditorCommand::AddNode {
+            created_id: Some(id),
+            ..
+        }) = self.editor.undo_stack_last()
+        {
             return Ok(*id);
         }
 
