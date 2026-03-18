@@ -7,5 +7,9 @@
     "directory": ".open-next/assets",
     "binding": "ASSETS"
   },
-  "main": ".open-next/worker.mjs"
+  "main": ".open-next/worker.js",
+  "routes": [
+    { "pattern": "patinaengine.com/*", "zone_name": "patinaengine.com" },
+    { "pattern": "www.patinaengine.com/*", "zone_name": "patinaengine.com" }
+  ]
 }
