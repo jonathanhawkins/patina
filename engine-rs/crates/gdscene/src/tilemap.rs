@@ -1,7 +1,7 @@
 //! TileMap and TileSet system for 2D grid-based levels.
 //!
 //! Mirrors Godot's TileMap/TileSet workflow: a [`TileSet`] defines tile
-//! definitions (texture, collision, custom data), and a [`TileMap`] node
+//! definitions (texture, collision, custom data), and a [`TileMapStore`] node
 //! stores per-layer cell data referencing those definitions.
 
 use std::collections::HashMap;

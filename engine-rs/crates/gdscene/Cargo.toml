@@ -10,6 +10,7 @@ gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
+gdscript-interop = { path = "../gdscript-interop" }
 thiserror.workspace = true
 tracing.workspace = true
 

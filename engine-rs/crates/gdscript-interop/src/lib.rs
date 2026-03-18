@@ -15,5 +15,5 @@ pub mod tokenizer;
 
 pub use bindings::{MethodFlags, MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo};
 pub use bridge::{NativeScript, NativeScriptBuilder, ScriptBridge};
-pub use parser::{AssignOp, BinOp, Expr, ParseError, Parser, Stmt, UnaryOp};
+pub use parser::{Annotation, AssignOp, BinOp, Expr, ParseError, Parser, Stmt, UnaryOp};
 pub use tokenizer::{tokenize, LexError, Token, TokenSpan};

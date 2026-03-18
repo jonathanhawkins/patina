@@ -112,6 +112,7 @@ impl MainLoop {
             && physics_steps < self.max_physics_steps_per_frame
         {
             self.tree.process_physics_frame();
+            self.tree.process_all_scripts_physics_process(physics_dt);
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
             physics_steps += 1;
@@ -128,6 +129,7 @@ impl MainLoop {
 
         // -- process phase --
         self.tree.process_frame();
+        self.tree.process_all_scripts_process(delta_secs);
 
         // -- bookkeeping --
         self.process_time += delta_secs;

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use gdvariant::Variant;
 
 use crate::bindings::{MethodFlags, MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo};
-use crate::parser::{AssignOp, BinOp, Expr, Parser, Stmt, UnaryOp};
+use crate::parser::{Annotation, AssignOp, BinOp, Expr, Parser, Stmt, UnaryOp};
 use crate::tokenizer::tokenize;
 
 /// Maximum call-stack depth before we bail out.
@@ -139,13 +139,69 @@ pub struct Interpreter {
     function_registry: HashMap<String, FuncDef>,
     output: Vec<String>,
     call_depth: usize,
+    /// The current class instance when executing inside a class method.
+    self_instance: Option<ClassInstance>,
+    /// Registry of known class definitions (for super lookup).
+    class_registry: HashMap<String, ClassDef>,
 }
 
 /// A stored user-defined function.
 #[derive(Debug, Clone)]
-struct FuncDef {
-    params: Vec<String>,
-    body: Vec<Stmt>,
+pub struct FuncDef {
+    /// Parameter names.
+    pub params: Vec<String>,
+    /// Function body statements.
+    pub body: Vec<Stmt>,
+}
+
+/// Information about an exported variable.
+#[derive(Debug, Clone)]
+pub struct ExportInfo {
+    /// Variable name.
+    pub name: String,
+    /// Optional type hint.
+    pub type_hint: Option<String>,
+}
+
+/// Instance variable declaration with default.
+#[derive(Debug, Clone)]
+pub struct VarDecl {
+    /// Variable name.
+    pub name: String,
+    /// Optional type hint.
+    pub type_hint: Option<String>,
+    /// Default value expression.
+    pub default: Option<Expr>,
+    /// Annotations on this variable.
+    pub annotations: Vec<Annotation>,
+}
+
+/// A GDScript class definition parsed from source.
+#[derive(Debug, Clone)]
+pub struct ClassDef {
+    /// The class name (from `class_name`).
+    pub name: Option<String>,
+    /// Parent class name (from `extends`).
+    pub parent_class: Option<String>,
+    /// Declared signals.
+    pub signals: Vec<String>,
+    /// Declared enums: name → { variant_name → value }.
+    pub enums: HashMap<String, HashMap<String, i64>>,
+    /// Methods defined in the class.
+    pub methods: HashMap<String, FuncDef>,
+    /// Instance variable declarations.
+    pub instance_vars: Vec<VarDecl>,
+    /// Exported variables.
+    pub exports: Vec<ExportInfo>,
+}
+
+/// A live instance of a class.
+#[derive(Debug, Clone)]
+pub struct ClassInstance {
+    /// The class definition this instance was created from.
+    pub class_def: ClassDef,
+    /// Instance variable values.
+    pub properties: HashMap<String, Variant>,
 }
 
 impl Interpreter {
@@ -156,6 +212,8 @@ impl Interpreter {
             function_registry: HashMap::new(),
             output: Vec::new(),
             call_depth: 0,
+            self_instance: None,
+            class_registry: HashMap::new(),
         }
     }
 
@@ -300,6 +358,13 @@ impl Interpreter {
             Stmt::Break => Ok(Some(ControlFlow::Break)),
 
             Stmt::Continue => Ok(Some(ControlFlow::Continue)),
+
+            // Class-level statements are no-ops during normal execution;
+            // they are processed by `run_class()`.
+            Stmt::Extends { .. }
+            | Stmt::ClassNameDecl { .. }
+            | Stmt::SignalDecl { .. }
+            | Stmt::EnumDecl { .. } => Ok(None),
         }
     }
 
@@ -364,6 +429,45 @@ impl Interpreter {
                 self.environment.set(&container_name, container)
             }
             Expr::MemberAccess { object, member } => {
+                // Handle self.member = value
+                if matches!(object.as_ref(), Expr::SelfRef) {
+                    if self.self_instance.is_none() {
+                        return Err(RuntimeError::TypeError(
+                            "'self' used outside of a class instance".into(),
+                        ));
+                    }
+                    let final_val = match op {
+                        AssignOp::Assign => rhs,
+                        AssignOp::AddAssign => {
+                            let cur = self
+                                .self_instance
+                                .as_ref()
+                                .unwrap()
+                                .properties
+                                .get(member)
+                                .cloned()
+                                .unwrap_or(Variant::Nil);
+                            self.binary_add(&cur, &rhs)?
+                        }
+                        AssignOp::SubAssign => {
+                            let cur = self
+                                .self_instance
+                                .as_ref()
+                                .unwrap()
+                                .properties
+                                .get(member)
+                                .cloned()
+                                .unwrap_or(Variant::Nil);
+                            self.binary_sub(&cur, &rhs)?
+                        }
+                    };
+                    self.self_instance
+                        .as_mut()
+                        .unwrap()
+                        .properties
+                        .insert(member.clone(), final_val);
+                    return Ok(());
+                }
                 let obj_name = match object.as_ref() {
                     Expr::Ident(n) => n.clone(),
                     _ => {
@@ -453,14 +557,34 @@ impl Interpreter {
                         self.call_user_func(name, &evaluated_args)
                     }
                     Expr::MemberAccess { object, member } => {
+                        // Handle self.method() — dispatch to class methods
+                        if matches!(object.as_ref(), Expr::SelfRef) {
+                            return self.call_user_func(member, &evaluated_args);
+                        }
                         let obj = self.eval_expr(object)?;
                         self.call_method_on(&obj, member, &evaluated_args, object)
                     }
+                    // super() — call parent class method with same name
+                    Expr::SuperRef => self.call_super(&evaluated_args),
                     _ => Err(RuntimeError::TypeError("not callable".into())),
                 }
             }
 
             Expr::MemberAccess { object, member } => {
+                // Handle self.member specially
+                if matches!(object.as_ref(), Expr::SelfRef) {
+                    if let Some(ref inst) = self.self_instance {
+                        return inst
+                            .properties
+                            .get(member)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::UndefinedVariable(member.clone()));
+                    } else {
+                        return Err(RuntimeError::TypeError(
+                            "'self' used outside of a class instance".into(),
+                        ));
+                    }
+                }
                 let obj = self.eval_expr(object)?;
                 match &obj {
                     Variant::Dictionary(d) => d
@@ -500,6 +624,21 @@ impl Interpreter {
                     map.insert(key_str, val);
                 }
                 Ok(Variant::Dictionary(map))
+            }
+
+            Expr::SelfRef => {
+                if let Some(ref inst) = self.self_instance {
+                    Ok(Variant::Dictionary(inst.properties.clone()))
+                } else {
+                    Err(RuntimeError::TypeError(
+                        "'self' used outside of a class instance".into(),
+                    ))
+                }
+            }
+
+            Expr::SuperRef => {
+                // super is only meaningful as a call target; return Nil as marker
+                Ok(Variant::Nil)
             }
         }
     }
@@ -958,6 +1097,211 @@ impl Interpreter {
                 "cannot call method on {}",
                 obj.variant_type()
             ))),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Class system
+    // -----------------------------------------------------------------------
+
+    /// Parses a GDScript source as a class definition.
+    pub fn run_class(&mut self, source: &str) -> Result<ClassDef, RuntimeError> {
+        let tokens = tokenize(source).map_err(|e| RuntimeError::LexError(e.to_string()))?;
+        let mut parser = Parser::new(tokens);
+        let stmts = parser
+            .parse_script()
+            .map_err(|e| RuntimeError::ParseError(e.to_string()))?;
+
+        let mut class_def = ClassDef {
+            name: None,
+            parent_class: None,
+            signals: Vec::new(),
+            enums: HashMap::new(),
+            methods: HashMap::new(),
+            instance_vars: Vec::new(),
+            exports: Vec::new(),
+        };
+
+        for stmt in &stmts {
+            match stmt {
+                Stmt::Extends { class_name } => {
+                    class_def.parent_class = Some(class_name.clone());
+                }
+                Stmt::ClassNameDecl { name } => {
+                    class_def.name = Some(name.clone());
+                }
+                Stmt::SignalDecl { name, .. } => {
+                    class_def.signals.push(name.clone());
+                }
+                Stmt::EnumDecl { name, variants } => {
+                    let mut map = HashMap::new();
+                    for (i, v) in variants.iter().enumerate() {
+                        map.insert(v.clone(), i as i64);
+                    }
+                    class_def.enums.insert(name.clone(), map);
+                }
+                Stmt::FuncDef {
+                    name, params, body, ..
+                } => {
+                    class_def.methods.insert(
+                        name.clone(),
+                        FuncDef {
+                            params: params.clone(),
+                            body: body.clone(),
+                        },
+                    );
+                }
+                Stmt::VarDecl {
+                    name,
+                    type_hint,
+                    value,
+                    annotations,
+                } => {
+                    let var_decl = VarDecl {
+                        name: name.clone(),
+                        type_hint: type_hint.clone(),
+                        default: value.clone(),
+                        annotations: annotations.clone(),
+                    };
+                    if annotations.iter().any(|a| a.name == "export") {
+                        class_def.exports.push(ExportInfo {
+                            name: name.clone(),
+                            type_hint: type_hint.clone(),
+                        });
+                    }
+                    class_def.instance_vars.push(var_decl);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(ref name) = class_def.name {
+            self.class_registry.insert(name.clone(), class_def.clone());
+        }
+
+        Ok(class_def)
+    }
+
+    /// Creates a new instance of a class, initializing instance variables.
+    pub fn instantiate_class(
+        &mut self,
+        class_def: &ClassDef,
+    ) -> Result<ClassInstance, RuntimeError> {
+        let mut properties = HashMap::new();
+        for var in &class_def.instance_vars {
+            let val = match &var.default {
+                Some(expr) => self.eval_expr(expr)?,
+                None => Variant::Nil,
+            };
+            properties.insert(var.name.clone(), val);
+        }
+        Ok(ClassInstance {
+            class_def: class_def.clone(),
+            properties,
+        })
+    }
+
+    /// Calls a method on a class instance.
+    pub fn call_instance_method(
+        &mut self,
+        instance: &mut ClassInstance,
+        method_name: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let func = instance
+            .class_def
+            .methods
+            .get(method_name)
+            .cloned()
+            .ok_or_else(|| RuntimeError::UndefinedFunction(method_name.to_string()))?;
+
+        if args.len() != func.params.len() {
+            return Err(RuntimeError::TypeError(format!(
+                "{}() takes {} arguments, got {}",
+                method_name,
+                func.params.len(),
+                args.len()
+            )));
+        }
+
+        if self.call_depth >= MAX_RECURSION_DEPTH {
+            return Err(RuntimeError::MaxRecursionDepth(MAX_RECURSION_DEPTH));
+        }
+        self.call_depth += 1;
+
+        let prev_self = self.self_instance.take();
+        self.self_instance = Some(instance.clone());
+
+        for (name, func_def) in &instance.class_def.methods {
+            self.function_registry
+                .insert(name.clone(), func_def.clone());
+        }
+
+        self.environment.push_scope();
+        for (param, arg) in func.params.iter().zip(args.iter()) {
+            self.environment.define(param.clone(), arg.clone());
+        }
+        for (name, val) in &instance.properties {
+            self.environment.define(name.clone(), val.clone());
+        }
+
+        let mut return_val = Variant::Nil;
+        for stmt in &func.body {
+            if let Some(ControlFlow::Return(v)) = self.exec_stmt(stmt)? {
+                return_val = v.unwrap_or(Variant::Nil);
+                break;
+            }
+        }
+
+        if let Some(ref updated) = self.self_instance {
+            instance.properties = updated.properties.clone();
+        }
+
+        self.environment.pop_scope();
+        self.self_instance = prev_self;
+        self.call_depth -= 1;
+        Ok(return_val)
+    }
+
+    /// Calls the parent class method (for `super()` calls).
+    fn call_super(&mut self, args: &[Variant]) -> Result<Variant, RuntimeError> {
+        let parent_name = self
+            .self_instance
+            .as_ref()
+            .and_then(|inst| inst.class_def.parent_class.clone())
+            .ok_or_else(|| RuntimeError::TypeError("super() called but no parent class".into()))?;
+
+        let parent_def = self
+            .class_registry
+            .get(&parent_name)
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeError::UndefinedFunction(format!("parent class '{parent_name}'"))
+            })?;
+
+        if let Some(func) = parent_def.methods.get("_init") {
+            if args.len() != func.params.len() {
+                return Err(RuntimeError::TypeError(format!(
+                    "super() takes {} arguments, got {}",
+                    func.params.len(),
+                    args.len()
+                )));
+            }
+            self.environment.push_scope();
+            for (param, arg) in func.params.iter().zip(args.iter()) {
+                self.environment.define(param.clone(), arg.clone());
+            }
+            let mut return_val = Variant::Nil;
+            for stmt in &func.body {
+                if let Some(ControlFlow::Return(v)) = self.exec_stmt(stmt)? {
+                    return_val = v.unwrap_or(Variant::Nil);
+                    break;
+                }
+            }
+            self.environment.pop_scope();
+            Ok(return_val)
+        } else {
+            Ok(Variant::Nil)
         }
     }
 }
@@ -1699,5 +2043,418 @@ return fib(10)
     #[test]
     fn null_is_falsy() {
         assert_eq!(run_val("return not null\n"), Variant::Bool(true));
+    }
+
+    // -- Class system -------------------------------------------------------
+
+    fn run_class(src: &str) -> (Interpreter, ClassDef) {
+        let mut interp = Interpreter::new();
+        let class_def = interp.run_class(src).unwrap();
+        (interp, class_def)
+    }
+
+    #[test]
+    fn class_extends_parsing() {
+        let (_, class_def) = run_class("extends Node\nclass_name Player\n");
+        assert_eq!(class_def.parent_class.as_deref(), Some("Node"));
+    }
+
+    #[test]
+    fn class_extends_string() {
+        let (_, class_def) = run_class("extends \"Node2D\"\n");
+        assert_eq!(class_def.parent_class.as_deref(), Some("Node2D"));
+    }
+
+    #[test]
+    fn class_name_parsing() {
+        let (_, class_def) = run_class("class_name Player\n");
+        assert_eq!(class_def.name.as_deref(), Some("Player"));
+    }
+
+    #[test]
+    fn class_signal_declaration() {
+        let (_, class_def) = run_class(
+            "\
+class_name Entity
+signal health_changed
+signal damage_taken
+",
+        );
+        assert_eq!(class_def.signals, vec!["health_changed", "damage_taken"]);
+    }
+
+    #[test]
+    fn class_signal_with_params() {
+        let (_, class_def) = run_class("signal hit(damage, source)\n");
+        assert_eq!(class_def.signals, vec!["hit"]);
+    }
+
+    #[test]
+    fn class_enum_values() {
+        let (_, class_def) = run_class("enum State { IDLE, RUNNING, JUMPING }\n");
+        let state_enum = class_def.enums.get("State").unwrap();
+        assert_eq!(state_enum.get("IDLE"), Some(&0));
+        assert_eq!(state_enum.get("RUNNING"), Some(&1));
+        assert_eq!(state_enum.get("JUMPING"), Some(&2));
+    }
+
+    #[test]
+    fn class_enum_multiple() {
+        let (_, class_def) = run_class(
+            "\
+enum Color { RED, GREEN, BLUE }
+enum Direction { UP, DOWN }
+",
+        );
+        assert!(class_def.enums.contains_key("Color"));
+        assert!(class_def.enums.contains_key("Direction"));
+        assert_eq!(
+            class_def.enums.get("Direction").unwrap().get("UP"),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn class_export_var() {
+        let (_, class_def) = run_class(
+            "\
+@export
+var speed: float = 100.0
+var health: int = 100
+",
+        );
+        assert_eq!(class_def.exports.len(), 1);
+        assert_eq!(class_def.exports[0].name, "speed");
+        assert_eq!(class_def.exports[0].type_hint.as_deref(), Some("float"));
+        assert_eq!(class_def.instance_vars.len(), 2);
+    }
+
+    #[test]
+    fn class_var_type_hint() {
+        let (_, class_def) = run_class("var health: int = 100\n");
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert_eq!(class_def.instance_vars[0].name, "health");
+        assert_eq!(class_def.instance_vars[0].type_hint.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn class_methods() {
+        let (_, class_def) = run_class(
+            "\
+func _ready():
+    pass
+func _process(delta):
+    pass
+",
+        );
+        assert!(class_def.methods.contains_key("_ready"));
+        assert!(class_def.methods.contains_key("_process"));
+        assert_eq!(class_def.methods["_process"].params, vec!["delta"]);
+    }
+
+    #[test]
+    fn class_ready_and_process() {
+        let (_, class_def) = run_class(
+            "\
+class_name Player
+var health: int = 100
+
+func _ready():
+    return health
+
+func _process(delta):
+    return delta
+",
+        );
+        assert!(class_def.methods.contains_key("_ready"));
+        assert!(class_def.methods.contains_key("_process"));
+        assert_eq!(class_def.name.as_deref(), Some("Player"));
+    }
+
+    #[test]
+    fn class_instance_creation() {
+        let (mut interp, class_def) = run_class(
+            "\
+var health = 100
+var speed = 50
+",
+        );
+        let inst = interp.instantiate_class(&class_def).unwrap();
+        assert_eq!(inst.properties.get("health"), Some(&Variant::Int(100)));
+        assert_eq!(inst.properties.get("speed"), Some(&Variant::Int(50)));
+    }
+
+    #[test]
+    fn class_instance_default_nil() {
+        let (mut interp, class_def) = run_class("var x\n");
+        let inst = interp.instantiate_class(&class_def).unwrap();
+        assert_eq!(inst.properties.get("x"), Some(&Variant::Nil));
+    }
+
+    #[test]
+    fn class_method_dispatch() {
+        let (mut interp, class_def) = run_class(
+            "\
+var health = 100
+func get_health():
+    return health
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "get_health", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(100));
+    }
+
+    #[test]
+    fn class_method_with_args() {
+        let (mut interp, class_def) = run_class(
+            "\
+var health = 100
+func take_damage(amount):
+    health -= amount
+    return health
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "take_damage", &[Variant::Int(30)])
+            .unwrap();
+        assert_eq!(result, Variant::Int(70));
+    }
+
+    #[test]
+    fn class_self_member_access() {
+        let (mut interp, class_def) = run_class(
+            "\
+var health = 100
+func get_health():
+    return self.health
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "get_health", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(100));
+    }
+
+    #[test]
+    fn class_self_member_assignment() {
+        let (mut interp, class_def) = run_class(
+            "\
+var health = 100
+func set_health(val):
+    self.health = val
+    return self.health
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "set_health", &[Variant::Int(50)])
+            .unwrap();
+        assert_eq!(result, Variant::Int(50));
+        assert_eq!(inst.properties.get("health"), Some(&Variant::Int(50)));
+    }
+
+    #[test]
+    fn class_self_method_call() {
+        let (mut interp, class_def) = run_class(
+            "\
+func helper():
+    return 42
+func main():
+    return self.helper()
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp.call_instance_method(&mut inst, "main", &[]).unwrap();
+        assert_eq!(result, Variant::Int(42));
+    }
+
+    #[test]
+    fn class_inheritance_chain() {
+        let mut interp = Interpreter::new();
+        let _parent = interp
+            .run_class(
+                "\
+class_name BaseEntity
+var name = \"base\"
+func _init():
+    return name
+",
+            )
+            .unwrap();
+        let child = interp
+            .run_class(
+                "\
+class_name Player
+extends BaseEntity
+var level = 1
+func get_level():
+    return level
+",
+            )
+            .unwrap();
+        assert_eq!(child.parent_class.as_deref(), Some("BaseEntity"));
+        assert_eq!(child.name.as_deref(), Some("Player"));
+    }
+
+    #[test]
+    fn class_super_call() {
+        let mut interp = Interpreter::new();
+        let _parent = interp
+            .run_class(
+                "\
+class_name Base
+func _init():
+    return 42
+",
+            )
+            .unwrap();
+        let child = interp
+            .run_class(
+                "\
+class_name Child
+extends Base
+func call_super():
+    return super()
+",
+            )
+            .unwrap();
+        let mut inst = interp.instantiate_class(&child).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "call_super", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(42));
+    }
+
+    #[test]
+    fn class_full_script() {
+        let src = "\
+extends Node
+class_name Player
+
+signal health_changed(new_health)
+
+enum State { IDLE, RUNNING, JUMPING }
+
+@export
+var speed: float = 100.0
+var health: int = 100
+
+func _ready():
+    return health
+
+func take_damage(amount):
+    health -= amount
+    return health
+
+func get_speed():
+    return speed
+";
+        let (mut interp, class_def) = run_class(src);
+        assert_eq!(class_def.name.as_deref(), Some("Player"));
+        assert_eq!(class_def.parent_class.as_deref(), Some("Node"));
+        assert_eq!(class_def.signals, vec!["health_changed"]);
+        assert!(class_def.enums.contains_key("State"));
+        assert_eq!(class_def.exports.len(), 1);
+        assert!(class_def.methods.contains_key("_ready"));
+        assert!(class_def.methods.contains_key("take_damage"));
+
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let hp = interp
+            .call_instance_method(&mut inst, "_ready", &[])
+            .unwrap();
+        assert_eq!(hp, Variant::Int(100));
+
+        let hp = interp
+            .call_instance_method(&mut inst, "take_damage", &[Variant::Int(25)])
+            .unwrap();
+        assert_eq!(hp, Variant::Int(75));
+
+        let spd = interp
+            .call_instance_method(&mut inst, "get_speed", &[])
+            .unwrap();
+        assert_eq!(spd, Variant::Float(100.0));
+    }
+
+    #[test]
+    fn class_registered_in_registry() {
+        let mut interp = Interpreter::new();
+        interp.run_class("class_name Foo\nvar x = 1\n").unwrap();
+        assert!(interp.class_registry.contains_key("Foo"));
+    }
+
+    #[test]
+    fn class_no_name_not_registered() {
+        let mut interp = Interpreter::new();
+        interp.run_class("var x = 1\n").unwrap();
+        assert!(interp.class_registry.is_empty());
+    }
+
+    #[test]
+    fn class_method_undefined_error() {
+        let (mut interp, class_def) = run_class("func foo():\n    pass\n");
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let err = interp
+            .call_instance_method(&mut inst, "bar", &[])
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::UndefinedFunction(_)));
+    }
+
+    #[test]
+    fn class_multiple_methods_dispatch() {
+        let (mut interp, class_def) = run_class(
+            "\
+func add(a, b):
+    return a + b
+func mul(a, b):
+    return a * b
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let sum = interp
+            .call_instance_method(&mut inst, "add", &[Variant::Int(3), Variant::Int(4)])
+            .unwrap();
+        assert_eq!(sum, Variant::Int(7));
+        let prod = interp
+            .call_instance_method(&mut inst, "mul", &[Variant::Int(3), Variant::Int(4)])
+            .unwrap();
+        assert_eq!(prod, Variant::Int(12));
+    }
+
+    #[test]
+    fn class_enum_variant_count() {
+        let (_, class_def) = run_class("enum Dir { N, S, E, W }\n");
+        let dir_enum = class_def.enums.get("Dir").unwrap();
+        assert_eq!(dir_enum.len(), 4);
+        assert_eq!(dir_enum.get("W"), Some(&3));
+    }
+
+    #[test]
+    fn class_export_onready_annotation() {
+        let (_, class_def) = run_class(
+            "\
+@onready
+var node = null
+@export
+var speed = 10
+",
+        );
+        // Only speed should be in exports (onready is not export)
+        assert_eq!(class_def.exports.len(), 1);
+        assert_eq!(class_def.exports[0].name, "speed");
+        // But both should be in instance_vars
+        assert_eq!(class_def.instance_vars.len(), 2);
+        assert_eq!(class_def.instance_vars[0].annotations[0].name, "onready");
+    }
+
+    #[test]
+    fn class_extends_without_class_name() {
+        let (_, class_def) = run_class("extends Sprite2D\nvar x = 0\n");
+        assert_eq!(class_def.parent_class.as_deref(), Some("Sprite2D"));
+        assert!(class_def.name.is_none());
     }
 }

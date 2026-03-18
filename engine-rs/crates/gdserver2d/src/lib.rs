@@ -14,17 +14,25 @@ pub mod mesh;
 pub mod parallax;
 pub mod server;
 pub mod server3d;
+pub mod shader;
 pub mod viewport;
 
 pub use animated_sprite::{AnimatedSprite, SpriteFrame, SpriteFrames};
 pub use canvas::{CanvasItem, CanvasItemId, DrawCommand};
 pub use canvas_layer::CanvasLayer;
-pub use material::Material3D;
+pub use material::{
+    BlendMode, CanvasItemMaterial, CullMode, LightMode, Material3D, StandardMaterial3D,
+    TransparencyMode, VisualShader, VisualShaderConnection, VisualShaderNode, VisualShaderNodeType,
+};
 pub use mesh::{Mesh3D, PrimitiveType};
 pub use parallax::ParallaxLayer;
 pub use server::{FrameData, RenderingServer2D};
 pub use server3d::{
     perspective_projection_matrix, FrameData3D, Instance3D, Instance3DId, RenderingServer3D,
     Viewport3D,
+};
+pub use shader::{
+    parse_uniforms, tokenize_shader, Shader, ShaderKeyword, ShaderMaterial, ShaderToken,
+    ShaderType, ShaderUniform, UniformType,
 };
 pub use viewport::Viewport;

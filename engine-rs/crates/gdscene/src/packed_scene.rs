@@ -2,7 +2,7 @@
 //!
 //! A [`PackedScene`] is a template parsed from a `.tscn` file. Calling
 //! [`instance()`](PackedScene::instance) creates a fresh subtree of
-//! [`Node`]s that can be inserted into a [`SceneTree`].
+//! [`Node`]s that can be inserted into a [`crate::SceneTree`].
 //!
 //! The parser handles the simplified `.tscn` subset:
 //! - `[gd_scene]` header
@@ -67,6 +67,18 @@ struct NodeTemplate {
     /// Instance resource reference (e.g. `ExtResource("1_abc")`), if this
     /// node instances a sub-scene.
     instance: Option<String>,
+    /// Script resource path resolved from `script = ExtResource("id")`.
+    script_path: Option<String>,
+}
+
+/// An external resource reference parsed from `[ext_resource]` sections.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ExtResourceEntry {
+    /// The resource type (e.g. `"Script"`, `"PackedScene"`, `"Texture2D"`).
+    res_type: String,
+    /// The resource path (e.g. `"res://scripts/player.gd"`).
+    path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +96,9 @@ pub struct PackedScene {
     templates: Vec<NodeTemplate>,
     /// Signal connections parsed from `[connection]` sections.
     connections: Vec<SceneConnection>,
+    /// External resources: id -> entry.
+    #[allow(dead_code)]
+    ext_resources: HashMap<String, ExtResourceEntry>,
 }
 
 impl PackedScene {
@@ -92,6 +107,7 @@ impl PackedScene {
         let mut uid = None;
         let mut templates: Vec<NodeTemplate> = Vec::new();
         let mut connections: Vec<SceneConnection> = Vec::new();
+        let mut ext_resources: HashMap<String, ExtResourceEntry> = HashMap::new();
         let mut current: Option<NodeTemplate> = None;
 
         for line in source.lines() {
@@ -173,9 +189,18 @@ impl PackedScene {
                         groups,
                         unique_name,
                         instance,
+                        script_path: None,
                     });
+                } else if inner.starts_with("ext_resource") {
+                    let attrs = extract_header_attrs(inner);
+                    if let (Some(id), Some(path)) =
+                        (attrs.get("id").cloned(), attrs.get("path").cloned())
+                    {
+                        let res_type = attrs.get("type").cloned().unwrap_or_default();
+                        ext_resources.insert(id, ExtResourceEntry { res_type, path });
+                    }
                 }
-                // Ignore other sections (ext_resource, sub_resource, etc.)
+                // Ignore other sections (sub_resource, etc.)
                 // for this simplified parser.
                 continue;
             }
@@ -185,6 +210,20 @@ impl PackedScene {
                 if let Some((key, value_str)) = line.split_once('=') {
                     let key = key.trim();
                     let value_str = value_str.trim();
+
+                    // Handle ExtResource references (e.g. `script = ExtResource("1_abc")`).
+                    if let Some(ext_id) = parse_ext_resource_ref(value_str) {
+                        if key == "script" {
+                            if let Some(entry) = ext_resources.get(&ext_id) {
+                                tmpl.script_path = Some(entry.path.clone());
+                            }
+                        }
+                        // Store the raw reference as a string property too.
+                        tmpl.properties
+                            .insert(key.to_string(), Variant::String(value_str.to_string()));
+                        continue;
+                    }
+
                     match parse_variant_value(value_str) {
                         Ok(value) => {
                             tmpl.properties.insert(key.to_string(), value);
@@ -215,13 +254,14 @@ impl PackedScene {
             uid,
             templates,
             connections,
+            ext_resources,
         })
     }
 
     /// Instantiates the packed scene, returning the root node and a flat
     /// list of all nodes in the subtree.
     ///
-    /// The returned nodes are not yet attached to any [`SceneTree`]. The
+    /// The returned nodes are not yet attached to any [`crate::SceneTree`]. The
     /// caller should add the root to the tree and then add each subsequent
     /// node as a child of the appropriate parent.
     ///
@@ -257,6 +297,9 @@ impl PackedScene {
         if let Some(ref inst) = root_tmpl.instance {
             root_node.set_property("_instance", Variant::String(inst.clone()));
         }
+        if let Some(ref script_path) = root_tmpl.script_path {
+            root_node.set_property("_script_path", Variant::String(script_path.clone()));
+        }
         // Root node owns itself (owner = None signals it IS the owner).
         path_to_index.insert(".".into(), 0);
         // Also map by name for child lookup.
@@ -284,6 +327,9 @@ impl PackedScene {
             node.set_unique_name(tmpl.unique_name);
             if let Some(ref inst) = tmpl.instance {
                 node.set_property("_instance", Variant::String(inst.clone()));
+            }
+            if let Some(ref script_path) = tmpl.script_path {
+                node.set_property("_script_path", Variant::String(script_path.clone()));
             }
             // Owner is the scene root for all non-root nodes.
             node.set_owner(Some(root_id));
@@ -425,12 +471,25 @@ fn parse_groups_attr(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parses an `ExtResource("id")` value string and returns the id.
+fn parse_ext_resource_ref(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let inner = trimmed.strip_prefix("ExtResource(")?;
+    let inner = inner.strip_suffix(')')?;
+    let id = inner.trim().trim_matches('"');
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Utility: add instanced nodes to a SceneTree
 // ---------------------------------------------------------------------------
 
 /// Adds all nodes from a [`PackedScene::instance()`] call into a
-/// [`SceneTree`] under the given parent.
+/// [`crate::SceneTree`] under the given parent.
 ///
 /// Returns the [`NodeId`] of the instanced scene's root node.
 pub fn add_packed_scene_to_tree(

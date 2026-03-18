@@ -68,9 +68,15 @@ fn simple_2d_script_ext_resource_property() {
     let nodes = scene.instance().unwrap();
 
     let player = nodes.iter().find(|n| n.name() == "Player").unwrap();
-    // script = ExtResource("1_abc12") should parse to "ExtResource:1_abc12"
+    // script = ExtResource("1_abc12") is stored as the raw reference string.
     let script = player.get_property("script");
-    assert_eq!(script, Variant::String("ExtResource:1_abc12".into()));
+    assert_eq!(script, Variant::String("ExtResource(\"1_abc12\")".into()));
+    // The resolved script path is stored in the _script_path property.
+    let script_path = player.get_property("_script_path");
+    assert_eq!(
+        script_path,
+        Variant::String("res://scripts/player_controller.gd".into())
+    );
 }
 
 #[test]

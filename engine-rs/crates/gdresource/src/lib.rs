@@ -10,21 +10,20 @@
 //!
 //! This crate provides:
 //!
-//! - [`resource`] — The core [`Resource`](resource::Resource) type.
-//! - [`uid`] — A bidirectional [`UidRegistry`](uid::UidRegistry) mapping
-//!   UIDs to paths.
-//! - [`loader`] — The [`ResourceLoader`](loader::ResourceLoader) trait and
-//!   a [`TresLoader`](loader::TresLoader) for Godot's `.tres` format.
-//! - [`saver`] — The [`ResourceSaver`](saver::ResourceSaver) trait and
-//!   a [`TresSaver`](saver::TresSaver) for writing `.tres` files.
-//! - [`cache`] — A [`ResourceCache`](cache::ResourceCache) that deduplicates
-//!   loads by path.
+//! - [`resource`] — The core [`Resource`] type.
+//! - [`uid`] — A bidirectional [`UidRegistry`] mapping UIDs to paths.
+//! - [`loader`] — The [`ResourceLoader`] trait and a [`TresLoader`] for
+//!   Godot's `.tres` format.
+//! - [`saver`] — The [`ResourceSaver`] trait and a [`TresSaver`] for
+//!   writing `.tres` files.
+//! - [`cache`] — A [`ResourceCache`] that deduplicates loads by path.
 
 #![warn(clippy::all)]
 
 pub mod cache;
 pub mod importers;
 pub mod loader;
+pub mod project;
 pub mod resource;
 pub mod saver;
 pub mod uid;
@@ -36,6 +35,7 @@ pub use importers::{
     ImportFile, ResourceFormatLoader,
 };
 pub use loader::{parse_variant_value, ResourceLoader, TresLoader};
+pub use project::{AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader};
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::UidRegistry;

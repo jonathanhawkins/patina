@@ -15,16 +15,24 @@ use std::ops::{Add, Mul, Neg, Sub};
 /// Used for tile coordinates, pixel-perfect positions, and grid-based math.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Vector2i {
+    /// The X component.
     pub x: i32,
+    /// The Y component.
     pub y: i32,
 }
 
 impl Vector2i {
+    /// The zero vector `(0, 0)`.
     pub const ZERO: Self = Self { x: 0, y: 0 };
+    /// The one vector `(1, 1)`.
     pub const ONE: Self = Self { x: 1, y: 1 };
+    /// The up direction `(0, -1)`.
     pub const UP: Self = Self { x: 0, y: -1 };
+    /// The down direction `(0, 1)`.
     pub const DOWN: Self = Self { x: 0, y: 1 };
+    /// The left direction `(-1, 0)`.
     pub const LEFT: Self = Self { x: -1, y: 0 };
+    /// The right direction `(1, 0)`.
     pub const RIGHT: Self = Self { x: 1, y: 0 };
 
     /// Creates a new integer vector.
@@ -61,16 +69,24 @@ impl Neg for Vector2i {
 /// A 2D vector with `f32` components, matching Godot's `Vector2`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vector2 {
+    /// The X component.
     pub x: f32,
+    /// The Y component.
     pub y: f32,
 }
 
 impl Vector2 {
+    /// The zero vector `(0, 0)`.
     pub const ZERO: Self = Self { x: 0.0, y: 0.0 };
+    /// The one vector `(1, 1)`.
     pub const ONE: Self = Self { x: 1.0, y: 1.0 };
+    /// The up direction `(0, -1)`.
     pub const UP: Self = Self { x: 0.0, y: -1.0 };
+    /// The down direction `(0, 1)`.
     pub const DOWN: Self = Self { x: 0.0, y: 1.0 };
+    /// The left direction `(-1, 0)`.
     pub const LEFT: Self = Self { x: -1.0, y: 0.0 };
+    /// The right direction `(1, 0)`.
     pub const RIGHT: Self = Self { x: 1.0, y: 0.0 };
 
     /// Creates a new vector.
@@ -149,32 +165,40 @@ impl Neg for Vector2 {
 /// A 3D vector with `f32` components, matching Godot's `Vector3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vector3 {
+    /// The X component.
     pub x: f32,
+    /// The Y component.
     pub y: f32,
+    /// The Z component.
     pub z: f32,
 }
 
 impl Vector3 {
+    /// The zero vector `(0, 0, 0)`.
     pub const ZERO: Self = Self {
         x: 0.0,
         y: 0.0,
         z: 0.0,
     };
+    /// The one vector `(1, 1, 1)`.
     pub const ONE: Self = Self {
         x: 1.0,
         y: 1.0,
         z: 1.0,
     };
+    /// The up direction `(0, 1, 0)`.
     pub const UP: Self = Self {
         x: 0.0,
         y: 1.0,
         z: 0.0,
     };
+    /// The down direction `(0, -1, 0)`.
     pub const DOWN: Self = Self {
         x: 0.0,
         y: -1.0,
         z: 0.0,
     };
+    /// The forward direction `(0, 0, -1)`.
     pub const FORWARD: Self = Self {
         x: 0.0,
         y: 0.0,
@@ -265,7 +289,9 @@ impl Neg for Vector3 {
 /// An axis-aligned rectangle, matching Godot's `Rect2`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect2 {
+    /// The top-left corner position.
     pub position: Vector2,
+    /// The width and height of the rectangle.
     pub size: Vector2,
 }
 
@@ -314,8 +340,11 @@ impl Rect2 {
 /// Stored as three column vectors: `x` (right), `y` (down), `origin`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform2D {
+    /// The X basis vector (right column).
     pub x: Vector2,
+    /// The Y basis vector (down column).
     pub y: Vector2,
+    /// The translation origin.
     pub origin: Vector2,
 }
 
@@ -408,25 +437,32 @@ impl Mul for Transform2D {
 /// An RGBA color with `f32` components in [0, 1], matching Godot's `Color`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
+    /// The red channel.
     pub r: f32,
+    /// The green channel.
     pub g: f32,
+    /// The blue channel.
     pub b: f32,
+    /// The alpha channel (opacity).
     pub a: f32,
 }
 
 impl Color {
+    /// Opaque white `(1, 1, 1, 1)`.
     pub const WHITE: Self = Self {
         r: 1.0,
         g: 1.0,
         b: 1.0,
         a: 1.0,
     };
+    /// Opaque black `(0, 0, 0, 1)`.
     pub const BLACK: Self = Self {
         r: 0.0,
         g: 0.0,
         b: 0.0,
         a: 1.0,
     };
+    /// Fully transparent black `(0, 0, 0, 0)`.
     pub const TRANSPARENT: Self = Self {
         r: 0.0,
         g: 0.0,

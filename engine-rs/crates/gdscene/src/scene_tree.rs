@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use gdcore::error::{EngineError, EngineResult};
 use gdobject::signal::SignalStore;
+use gdscript_interop::bindings::ScriptInstance;
+use gdvariant::Variant;
 
 use crate::animation::AnimationPlayer;
 use crate::node::{Node, NodeId};
@@ -17,7 +19,6 @@ use crate::tween::{Tween, TweenId};
 /// hierarchy.
 ///
 /// A root node is created automatically and is always present.
-#[derive(Debug)]
 pub struct SceneTree {
     /// Arena storage: every node in the tree lives here.
     nodes: HashMap<NodeId, Node>,
@@ -31,6 +32,20 @@ pub struct SceneTree {
     animation_players: HashMap<NodeId, AnimationPlayer>,
     /// Active tweens: maps TweenId -> (owning NodeId, Tween).
     tweens: HashMap<TweenId, (NodeId, Tween)>,
+    /// Per-node script instances. Attached scripts receive lifecycle
+    /// callbacks (_ready, _process, etc.) during scene execution.
+    scripts: HashMap<NodeId, Box<dyn ScriptInstance>>,
+}
+
+impl std::fmt::Debug for SceneTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SceneTree")
+            .field("nodes", &self.nodes)
+            .field("root_id", &self.root_id)
+            .field("groups", &self.groups)
+            .field("scripts", &format!("({} scripts)", self.scripts.len()))
+            .finish()
+    }
 }
 
 impl SceneTree {
@@ -47,6 +62,7 @@ impl SceneTree {
             signal_stores: HashMap::new(),
             animation_players: HashMap::new(),
             tweens: HashMap::new(),
+            scripts: HashMap::new(),
         }
     }
 
@@ -384,7 +400,7 @@ impl SceneTree {
     /// Returns the cloned nodes as a flat `Vec` with parent/child
     /// relationships already wired (using the new IDs). The first element
     /// is the clone of `root_id`. The cloned nodes are **not** inserted
-    /// into the tree — the caller can add them via [`add_child`].
+    /// into the tree — the caller can add them via [`SceneTree::add_child`].
     pub fn duplicate_subtree(&self, root_id: NodeId) -> EngineResult<Vec<Node>> {
         let _source = self
             .nodes
@@ -535,6 +551,87 @@ impl SceneTree {
         }
         for id in completed {
             self.tweens.remove(&id);
+        }
+    }
+
+    // -- script store -------------------------------------------------------
+
+    /// Attaches a script instance to a node.
+    pub fn attach_script(&mut self, node_id: NodeId, script: Box<dyn ScriptInstance>) {
+        self.scripts.insert(node_id, script);
+    }
+
+    /// Detaches the script from a node, if any.
+    pub fn detach_script(&mut self, node_id: NodeId) -> Option<Box<dyn ScriptInstance>> {
+        self.scripts.remove(&node_id)
+    }
+
+    /// Returns `true` if the node has an attached script.
+    pub fn has_script(&self, node_id: NodeId) -> bool {
+        self.scripts.contains_key(&node_id)
+    }
+
+    /// Returns a reference to the node's script instance.
+    pub fn get_script(&self, node_id: NodeId) -> Option<&dyn ScriptInstance> {
+        self.scripts.get(&node_id).map(|s| s.as_ref())
+    }
+
+    /// Returns a mutable reference to the node's script instance.
+    pub fn get_script_mut(&mut self, node_id: NodeId) -> Option<&mut Box<dyn ScriptInstance>> {
+        self.scripts.get_mut(&node_id)
+    }
+
+    // -- script callbacks ---------------------------------------------------
+
+    /// Calls `_ready()` on the node's script, if present.
+    pub fn process_script_ready(&mut self, node_id: NodeId) {
+        if let Some(script) = self.scripts.get_mut(&node_id) {
+            // Ignore MethodNotFound — the script may not define _ready.
+            let _ = script.call_method("_ready", &[]);
+        }
+    }
+
+    /// Calls `_process(delta)` on the node's script, if present.
+    pub fn process_script_process(&mut self, node_id: NodeId, delta: f64) {
+        if let Some(script) = self.scripts.get_mut(&node_id) {
+            let _ = script.call_method("_process", &[Variant::Float(delta)]);
+        }
+    }
+
+    /// Calls `_physics_process(delta)` on the node's script, if present.
+    pub fn process_script_physics_process(&mut self, node_id: NodeId, delta: f64) {
+        if let Some(script) = self.scripts.get_mut(&node_id) {
+            let _ = script.call_method("_physics_process", &[Variant::Float(delta)]);
+        }
+    }
+
+    /// Calls `_enter_tree()` on the node's script, if present.
+    pub fn process_script_enter_tree(&mut self, node_id: NodeId) {
+        if let Some(script) = self.scripts.get_mut(&node_id) {
+            let _ = script.call_method("_enter_tree", &[]);
+        }
+    }
+
+    /// Calls `_exit_tree()` on the node's script, if present.
+    pub fn process_script_exit_tree(&mut self, node_id: NodeId) {
+        if let Some(script) = self.scripts.get_mut(&node_id) {
+            let _ = script.call_method("_exit_tree", &[]);
+        }
+    }
+
+    /// Calls `_process(delta)` on all nodes that have attached scripts.
+    pub fn process_all_scripts_process(&mut self, delta: f64) {
+        let ids: Vec<NodeId> = self.scripts.keys().copied().collect();
+        for id in ids {
+            self.process_script_process(id, delta);
+        }
+    }
+
+    /// Calls `_physics_process(delta)` on all nodes that have attached scripts.
+    pub fn process_all_scripts_physics_process(&mut self, delta: f64) {
+        let ids: Vec<NodeId> = self.scripts.keys().copied().collect();
+        for id in ids {
+            self.process_script_physics_process(id, delta);
         }
     }
 
