@@ -28,3 +28,24 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Root package for examples and integration tests.
+[package]
+name = "patina-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gdcore = { path = "crates/gdcore" }
+gdvariant = { path = "crates/gdvariant" }
+gdscene = { path = "crates/gdscene" }
+gdserver2d = { path = "crates/gdserver2d" }
+gdrender2d = { path = "crates/gdrender2d" }
+gdphysics2d = { path = "crates/gdphysics2d" }
+serde_json.workspace = true
+
+[[example]]
+name = "demo_2d"
+path = "examples/demo_2d.rs"
