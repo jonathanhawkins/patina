@@ -158,11 +158,11 @@ function HeroSection() {
     <section className="relative overflow-hidden">
       {/* Background layers */}
       <div className="pointer-events-none absolute inset-0">
-        {/* Subtle radial glow -- offset left to match left-aligned content */}
-        <div className="absolute -top-32 left-[15%] h-[600px] w-[700px] rounded-full bg-brand/[0.05] blur-[140px]" />
+        {/* Subtle radial glow -- centered */}
+        <div className="absolute -top-32 left-1/2 h-[600px] w-[700px] -translate-x-1/2 rounded-full bg-brand/[0.06] blur-[140px]" />
         {/* Fine dot grid -- very subtle texture */}
         <div
-          className="absolute inset-0 opacity-[0.02]"
+          className="absolute inset-0 opacity-[0.015]"
           style={{
             backgroundImage:
               "radial-gradient(rgba(255,255,255,0.3) 1px, transparent 1px)",
@@ -171,98 +171,95 @@ function HeroSection() {
         />
       </div>
 
-      <div className="relative mx-auto max-w-6xl px-6 pb-24 pt-24 sm:pt-32 sm:pb-32 lg:pt-40 lg:pb-40">
+      <div className="relative mx-auto max-w-6xl px-6 pb-24 pt-28 sm:pt-36 sm:pb-32 lg:pt-44 lg:pb-40">
         <motion.div
           initial="hidden"
           animate="visible"
           variants={stagger}
         >
-          {/* Two-column layout: hero text left, code right */}
-          <div className="grid items-start gap-16 lg:grid-cols-[1fr_minmax(0,520px)] lg:gap-20">
-            {/* Left column -- hero text */}
-            <div className="max-w-xl">
-              <motion.p
-                variants={fadeUp}
-                custom={0}
-                className="mb-6 text-sm font-medium tracking-wide text-brand"
-              >
-                Early development -- follow along on GitHub
-              </motion.p>
+          {/* Centered hero content */}
+          <div className="flex flex-col items-center text-center">
+            <motion.p
+              variants={fadeUp}
+              custom={0}
+              className="mb-6 font-mono text-xs font-medium uppercase tracking-widest text-brand"
+            >
+              Early development -- follow along on GitHub
+            </motion.p>
 
-              <motion.h1
-                variants={fadeUp}
-                custom={1}
-                className="text-4xl font-bold leading-[1.08] tracking-tight sm:text-5xl lg:text-6xl"
-              >
-                The game engine{" "}
-                <span className="text-brand">
-                  Rust deserves
-                </span>
-              </motion.h1>
+            <motion.h1
+              variants={fadeUp}
+              custom={1}
+              className="max-w-2xl text-4xl font-semibold leading-[1.08] tracking-tight sm:text-5xl lg:text-[3.5rem]"
+            >
+              The game engine{" "}
+              <span className="text-brand">
+                Rust deserves
+              </span>
+            </motion.h1>
 
-              <motion.p
-                variants={fadeUp}
-                custom={2}
-                className="mt-6 text-lg leading-relaxed text-muted-foreground"
-              >
-                A Rust-native game engine with full Godot scene compatibility.
-                Memory safe. High performance. Open source.
-              </motion.p>
+            <motion.p
+              variants={fadeUp}
+              custom={2}
+              className="mt-6 max-w-xl text-lg leading-relaxed text-muted-foreground"
+            >
+              A Rust-native game engine with full Godot scene compatibility.
+              Memory safe. High performance. Open source.
+            </motion.p>
 
-              <motion.div
-                variants={fadeUp}
-                custom={3}
-                className="mt-10 flex items-center gap-3"
-              >
-                <Button
-                  size="lg"
-                  className="h-10 gap-2 rounded-md bg-brand px-5 text-sm font-medium text-brand-foreground hover:bg-brand/85"
-                  render={
-                    <a
-                      href="https://github.com/patinaengine/patina"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    />
-                  }
-                >
-                  <Github className="size-4" />
-                  View on GitHub
-                </Button>
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="h-10 gap-2 rounded-md px-5 text-sm"
-                  render={
-                    <a
-                      href="https://docs.patinaengine.com"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    />
-                  }
-                >
-                  <BookOpen className="size-4" />
-                  Documentation
-                </Button>
-              </motion.div>
-            </div>
-
-            {/* Right column -- code preview */}
             <motion.div
               variants={fadeUp}
               custom={3}
-              className="w-full"
+              className="mt-10 flex items-center gap-3"
             >
-              <div className="overflow-hidden rounded-lg border border-border/60 bg-[oklch(0.1_0.005_270)]">
+              <Button
+                size="lg"
+                className="h-10 gap-2 rounded-md bg-brand px-5 text-sm font-medium text-brand-foreground hover:bg-brand/85"
+                render={
+                  <a
+                    href="https://github.com/patinaengine/patina"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  />
+                }
+              >
+                <Github className="size-4" />
+                View on GitHub
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                className="h-10 gap-2 rounded-md px-5 text-sm"
+                render={
+                  <a
+                    href="https://docs.patinaengine.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  />
+                }
+              >
+                <BookOpen className="size-4" />
+                Documentation
+              </Button>
+            </motion.div>
+
+            {/* Code preview -- centered below */}
+            <motion.div
+              variants={fadeUp}
+              custom={4}
+              className="mt-16 w-full max-w-2xl"
+            >
+              <div className="overflow-hidden rounded-xl border border-border/60 bg-[oklch(0.09_0.005_270)]">
                 <div className="flex items-center gap-2 border-b border-white/[0.06] px-4 py-3">
                   <div className="size-2.5 rounded-full bg-[#ff5f57]/70" />
                   <div className="size-2.5 rounded-full bg-[#febc2e]/70" />
                   <div className="size-2.5 rounded-full bg-[#28c840]/70" />
-                  <div className="ml-3 flex items-center gap-1.5 text-xs text-muted-foreground/70">
+                  <div className="ml-3 flex items-center gap-1.5 font-mono text-xs text-muted-foreground/70">
                     <Terminal className="size-3" />
                     main.rs
                   </div>
                 </div>
-                <pre className="overflow-x-auto px-5 py-5 text-[13px] leading-[1.7] sm:px-6">
+                <pre className="overflow-x-auto px-5 py-5 text-left font-mono text-[13px] leading-[1.7] sm:px-6">
                   <code>
                     <span className="text-muted-foreground/50">
                       {"// Load a Godot scene and query nodes\n"}
@@ -327,21 +324,21 @@ function FeaturesSection() {
           <motion.p
             variants={fadeUp}
             custom={0}
-            className="text-sm font-medium tracking-wide text-brand"
+            className="font-mono text-xs font-medium uppercase tracking-widest text-brand"
           >
             Why Patina
           </motion.p>
           <motion.h2
             variants={fadeUp}
             custom={1}
-            className="mt-3 max-w-lg text-3xl font-bold tracking-tight sm:text-4xl"
+            className="mt-4 max-w-lg text-3xl font-semibold tracking-tight sm:text-4xl"
           >
             Built for the future of game development
           </motion.h2>
           <motion.p
             variants={fadeUp}
             custom={2}
-            className="mt-4 max-w-xl text-base text-muted-foreground"
+            className="mt-4 max-w-xl text-base leading-relaxed text-muted-foreground"
           >
             Rust&apos;s safety guarantees meet Godot&apos;s proven scene
             architecture.
@@ -353,7 +350,7 @@ function FeaturesSection() {
           whileInView="visible"
           viewport={{ once: true, amount: 0.1 }}
           variants={stagger}
-          className="mt-16 grid gap-px overflow-hidden rounded-lg border border-border/50 bg-border/30 sm:grid-cols-2 lg:grid-cols-3"
+          className="mt-16 grid gap-px overflow-hidden rounded-xl border border-border/50 bg-border/30 sm:grid-cols-2 lg:grid-cols-3"
         >
           {features.map((feature, i) => (
             <motion.div
@@ -363,7 +360,9 @@ function FeaturesSection() {
               className="bg-background p-6 transition-colors duration-300 hover:bg-card/60 sm:p-8"
             >
               <feature.icon className={`mb-4 size-5 ${feature.color}`} />
-              <h3 className="text-sm font-semibold">{feature.title}</h3>
+              <h3 className="text-sm font-semibold tracking-tight">
+                {feature.title}
+              </h3>
               <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                 {feature.description}
               </p>
@@ -413,21 +412,21 @@ function RoadmapSection() {
           <motion.p
             variants={fadeUp}
             custom={0}
-            className="text-sm font-medium tracking-wide text-brand"
+            className="font-mono text-xs font-medium uppercase tracking-widest text-brand"
           >
             Roadmap
           </motion.p>
           <motion.h2
             variants={fadeUp}
             custom={1}
-            className="mt-3 max-w-lg text-3xl font-bold tracking-tight sm:text-4xl"
+            className="mt-4 max-w-lg text-3xl font-semibold tracking-tight sm:text-4xl"
           >
             A staged approach to building an engine
           </motion.h2>
           <motion.p
             variants={fadeUp}
             custom={2}
-            className="mt-4 max-w-xl text-base text-muted-foreground"
+            className="mt-4 max-w-xl text-base leading-relaxed text-muted-foreground"
           >
             Each phase delivers a working, useful tool -- not just a milestone
             on the way to something else.
@@ -459,9 +458,11 @@ function RoadmapSection() {
                   <span className="font-mono text-xs text-muted-foreground/50">
                     {stage.phase}
                   </span>
-                  <h3 className="text-sm font-semibold">{stage.title}</h3>
+                  <h3 className="text-sm font-semibold tracking-tight">
+                    {stage.title}
+                  </h3>
                   {stage.status === "active" && (
-                    <span className="rounded-md bg-brand/10 px-2 py-0.5 text-xs font-medium text-brand">
+                    <span className="rounded-md bg-brand/10 px-2 py-0.5 font-mono text-xs font-medium text-brand">
                       {statusLabel(stage.status)}
                     </span>
                   )}
@@ -495,14 +496,14 @@ function CTASection() {
           <motion.h2
             variants={fadeUp}
             custom={0}
-            className="max-w-md text-3xl font-bold tracking-tight sm:text-4xl"
+            className="max-w-md text-3xl font-semibold tracking-tight sm:text-4xl"
           >
             Ready to explore?
           </motion.h2>
           <motion.p
             variants={fadeUp}
             custom={1}
-            className="mt-4 max-w-lg text-base text-muted-foreground"
+            className="mt-4 max-w-lg text-base leading-relaxed text-muted-foreground"
           >
             Patina is open source and in active development. Star the repo, read
             the docs, or jump into the code.
@@ -559,7 +560,9 @@ function Footer() {
         <div className="flex flex-col items-start justify-between gap-8 sm:flex-row sm:items-center">
           <div>
             <div className="flex items-center gap-2.5">
-              <span className="text-sm font-semibold text-brand">Patina</span>
+              <span className="text-sm font-semibold tracking-tight text-brand">
+                Patina
+              </span>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               A Rust-native, Godot-compatible game engine. MIT Licensed.
