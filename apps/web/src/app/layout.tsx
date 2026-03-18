@@ -16,7 +16,10 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Patina Engine — Rust-Native, Godot-Compatible Game Engine",
+  title: {
+    default: "Patina Engine — Rust-Native, Godot-Compatible Game Engine",
+    template: "%s — Patina Engine",
+  },
   description:
     "A memory-safe, high-performance game engine built in Rust with full Godot scene compatibility. Open source and community driven.",
   keywords: [
@@ -26,22 +29,59 @@ export const metadata: Metadata = {
     "open source",
     "memory safe",
     "patina",
+    "game development",
+    "rust game engine",
   ],
   openGraph: {
-    title: "Patina Engine",
+    title: "Patina Engine — Rust-Native, Godot-Compatible Game Engine",
     description:
-      "Rust-native, Godot-compatible game engine. Memory safe. High performance. Open source.",
+      "A memory-safe, high-performance game engine built in Rust with full Godot scene compatibility. Open source and community driven.",
     url: "https://patinaengine.com",
     siteName: "Patina Engine",
     type: "website",
+    images: [
+      {
+        url: "https://patinaengine.com/og-image.png",
+        width: 1200,
+        height: 630,
+        alt: "Patina Engine — Rust-Native, Godot-Compatible Game Engine",
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Patina Engine",
+    title: "Patina Engine — Rust-Native, Godot-Compatible Game Engine",
     description:
-      "Rust-native, Godot-compatible game engine. Memory safe. High performance. Open source.",
+      "A memory-safe, high-performance game engine built in Rust with full Godot scene compatibility. Open source and community driven.",
+    images: ["https://patinaengine.com/og-image.png"],
   },
   metadataBase: new URL("https://patinaengine.com"),
+  robots: {
+    index: true,
+    follow: true,
+  },
+};
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "Patina Engine",
+  description:
+    "A memory-safe, high-performance game engine built in Rust with full Godot scene compatibility.",
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Windows, macOS, Linux",
+  url: "https://patinaengine.com",
+  license: "https://opensource.org/licenses/MIT",
+  offers: {
+    "@type": "Offer",
+    price: "0",
+    priceCurrency: "USD",
+  },
+  author: {
+    "@type": "Organization",
+    name: "Patina Engine",
+    url: "https://patinaengine.com",
+  },
 };
 
 export default function RootLayout({
@@ -51,6 +91,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
+      <head>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        />
+      </head>
       <body
         className={`${instrumentSans.variable} ${jetbrainsMono.variable} antialiased`}
       >

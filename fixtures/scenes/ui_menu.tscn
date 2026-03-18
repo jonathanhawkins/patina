@@ -1,0 +1,16 @@
+[gd_scene format=3 uid="uid://ui_menu"]
+
+[node name="MenuRoot" type="Node"]
+
+[node name="Title" type="Node" parent="."]
+text = "Main Menu"
+
+[node name="PlayButton" type="Node" parent="."]
+
+[node name="SettingsButton" type="Node" parent="."]
+
+[node name="QuitButton" type="Node" parent="."]
+
+[connection signal="pressed" from="PlayButton" to="." method="_on_play_pressed"]
+[connection signal="pressed" from="SettingsButton" to="." method="_on_settings_pressed"]
+[connection signal="pressed" from="QuitButton" to="." method="_on_quit_pressed"]

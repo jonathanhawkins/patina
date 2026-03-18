@@ -1,0 +1,57 @@
+{
+  "fixture_id": "scene_signals_complex",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "Root",
+      "class": "Node",
+      "path": "/root/Root",
+      "children": [
+        {
+          "name": "Player",
+          "class": "Node2D",
+          "path": "/root/Root/Player",
+          "children": [
+            {
+              "name": "TriggerZone",
+              "class": "Node2D",
+              "path": "/root/Root/Player/TriggerZone",
+              "children": [],
+              "properties": {}
+            }
+          ],
+          "properties": {
+            "position": { "type": "Vector2", "value": [200.0, 300.0] }
+          }
+        },
+        {
+          "name": "Enemy",
+          "class": "Node2D",
+          "path": "/root/Root/Enemy",
+          "children": [],
+          "properties": {
+            "position": { "type": "Vector2", "value": [600.0, 300.0] }
+          }
+        },
+        {
+          "name": "HUD",
+          "class": "Node",
+          "path": "/root/Root/HUD",
+          "children": [],
+          "properties": {}
+        },
+        {
+          "name": "ItemDrop",
+          "class": "Node2D",
+          "path": "/root/Root/ItemDrop",
+          "children": [],
+          "properties": {
+            "position": { "type": "Vector2", "value": [400.0, 200.0] }
+          }
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

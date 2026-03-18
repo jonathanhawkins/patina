@@ -32,6 +32,9 @@ dependencies = [
  "gdcore",
  "gdobject",
  "gdscene",
+ "gdvariant",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
