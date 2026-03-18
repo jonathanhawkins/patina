@@ -17,7 +17,7 @@ use gdscene::node::Node;
 use gdscene::node2d::{get_position, set_position};
 use gdscene::particle::{ParticleEmitter, ParticleMaterial, ParticleSimulator};
 use gdscene::scene_tree::SceneTree;
-use gdscene::tween::{TweenBuilder, EaseType, TransFunc};
+use gdscene::tween::{EaseType, TransFunc, TweenBuilder};
 use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
 use gdserver2d::viewport::Viewport;
 use gdvariant::Variant;
@@ -58,52 +58,92 @@ fn build_input_sequence() -> Vec<(u64, InputEvent)> {
     let mut events = Vec::new();
 
     // Frames 0-30: move right (press at 0, release at 30)
-    events.push((0, InputEvent::Key {
-        key: Key::Right,
-        pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((30, InputEvent::Key {
-        key: Key::Right,
-        pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
+    events.push((
+        0,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        30,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
 
     // Frame 35: jump
-    events.push((35, InputEvent::Key {
-        key: Key::Space,
-        pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((36, InputEvent::Key {
-        key: Key::Space,
-        pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
+    events.push((
+        35,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        36,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
 
     // Frames 40-80: move right
-    events.push((40, InputEvent::Key {
-        key: Key::Right,
-        pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((80, InputEvent::Key {
-        key: Key::Right,
-        pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
+    events.push((
+        40,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        80,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
 
     // Frame 90: jump again
-    events.push((90, InputEvent::Key {
-        key: Key::Space,
-        pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((91, InputEvent::Key {
-        key: Key::Space,
-        pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
+    events.push((
+        90,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        91,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
 
     events
 }
@@ -143,7 +183,8 @@ pub fn run_platformer() -> PlatformerResult {
 
     let score_node = Node::new("ScoreLabel", "Node");
     let score_id = tree.add_child(world_id, score_node).unwrap();
-    tree.get_node_mut(score_id).unwrap()
+    tree.get_node_mut(score_id)
+        .unwrap()
         .set_property("text", Variant::String("Score: 0".to_string()));
 
     let ground_node = Node::new("Ground", "Node2D");
@@ -172,7 +213,9 @@ pub fn run_platformer() -> PlatformerResult {
             BodyId(0),
             BodyType::Static,
             *pos,
-            Shape2D::Rectangle { half_extents: platform_half },
+            Shape2D::Rectangle {
+                half_extents: platform_half,
+            },
             1.0,
         );
         physics.add_body(pbody);
@@ -245,12 +288,7 @@ pub fn run_platformer() -> PlatformerResult {
     // 6. Tween setup (for collectible)
     // -----------------------------------------------------------------------
     let mut collect_tween = TweenBuilder::new()
-        .tween_property(
-            "scale",
-            Variant::Float(1.0),
-            Variant::Float(0.0),
-            0.3,
-        )
+        .tween_property("scale", Variant::Float(1.0), Variant::Float(0.0), 0.3)
         .set_ease(EaseType::Out)
         .set_trans(TransFunc::Quad)
         .build();
@@ -319,10 +357,7 @@ pub fn run_platformer() -> PlatformerResult {
                     collect_tween.start();
                     // Update score label
                     if let Some(label) = main_loop.tree_mut().get_node_mut(score_id) {
-                        label.set_property(
-                            "text",
-                            Variant::String(format!("Score: {}", score)),
-                        );
+                        label.set_property("text", Variant::String(format!("Score: {}", score)));
                     }
                 }
             }
@@ -452,7 +487,10 @@ pub fn run_platformer() -> PlatformerResult {
     // 9. Output
     // -----------------------------------------------------------------------
     println!("\n=== Platformer Demo Summary ===");
-    println!("Player final position: ({:.1}, {:.1})", final_player_pos.x, final_player_pos.y);
+    println!(
+        "Player final position: ({:.1}, {:.1})",
+        final_player_pos.x, final_player_pos.y
+    );
     println!("Score: {}", score);
     println!("Frames rendered: {}", main_loop.frame_count());
     println!("Particles emitted: {}", particle_sim.total_emitted);

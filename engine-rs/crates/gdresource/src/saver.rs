@@ -38,8 +38,7 @@ impl TresSaver {
             write!(out, " uid=\"uid://{}\"", resource.uid.raw())
                 .map_err(|e| EngineError::Parse(e.to_string()))?;
         }
-        writeln!(out, " format=3]")
-            .map_err(|e| EngineError::Parse(e.to_string()))?;
+        writeln!(out, " format=3]").map_err(|e| EngineError::Parse(e.to_string()))?;
 
         // [ext_resource] sections
         if !resource.ext_resources.is_empty() {
@@ -77,8 +76,7 @@ impl TresSaver {
         // [resource] section
         if resource.property_count() > 0 {
             writeln!(out).map_err(|e| EngineError::Parse(e.to_string()))?;
-            writeln!(out, "[resource]")
-                .map_err(|e| EngineError::Parse(e.to_string()))?;
+            writeln!(out, "[resource]").map_err(|e| EngineError::Parse(e.to_string()))?;
             write_properties(&mut out, resource)?;
         }
 

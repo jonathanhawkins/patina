@@ -173,7 +173,10 @@ mod tests {
         let a = StringName::new("test_pointer");
         let b = StringName::new("test_pointer");
         // They must share the same pointer.
-        assert!(std::ptr::eq(a.as_str() as *const str, b.as_str() as *const str));
+        assert!(std::ptr::eq(
+            a.as_str() as *const str,
+            b.as_str() as *const str
+        ));
     }
 
     #[test]
@@ -211,7 +214,10 @@ mod tests {
         let a = StringName::new("");
         let b = StringName::new("");
         assert_eq!(a, b);
-        assert!(std::ptr::eq(a.as_str() as *const str, b.as_str() as *const str));
+        assert!(std::ptr::eq(
+            a.as_str() as *const str,
+            b.as_str() as *const str
+        ));
     }
 
     #[test]
@@ -232,7 +238,10 @@ mod tests {
         let a = StringName::new("こんにちは");
         let b = StringName::new("こんにちは");
         assert_eq!(a, b);
-        assert!(std::ptr::eq(a.as_str() as *const str, b.as_str() as *const str));
+        assert!(std::ptr::eq(
+            a.as_str() as *const str,
+            b.as_str() as *const str
+        ));
     }
 
     #[test]

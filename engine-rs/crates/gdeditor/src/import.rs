@@ -134,10 +134,7 @@ impl ImportPipeline {
             }
         }
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         for importer in &self.importers {
             if importer.can_import(ext) {

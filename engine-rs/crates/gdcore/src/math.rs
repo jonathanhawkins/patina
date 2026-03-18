@@ -155,11 +155,31 @@ pub struct Vector3 {
 }
 
 impl Vector3 {
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
-    pub const ONE: Self = Self { x: 1.0, y: 1.0, z: 1.0 };
-    pub const UP: Self = Self { x: 0.0, y: 1.0, z: 0.0 };
-    pub const DOWN: Self = Self { x: 0.0, y: -1.0, z: 0.0 };
-    pub const FORWARD: Self = Self { x: 0.0, y: 0.0, z: -1.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const ONE: Self = Self {
+        x: 1.0,
+        y: 1.0,
+        z: 1.0,
+    };
+    pub const UP: Self = Self {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    pub const DOWN: Self = Self {
+        x: 0.0,
+        y: -1.0,
+        z: 0.0,
+    };
+    pub const FORWARD: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: -1.0,
+    };
 
     /// Creates a new vector.
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
@@ -395,9 +415,24 @@ pub struct Color {
 }
 
 impl Color {
-    pub const WHITE: Self = Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    pub const BLACK: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const TRANSPARENT: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const WHITE: Self = Self {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    pub const BLACK: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const TRANSPARENT: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
 
     /// Creates a new color.
     pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {

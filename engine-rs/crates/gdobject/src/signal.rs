@@ -203,12 +203,7 @@ impl SignalStore {
     /// Disconnects the first matching connection from a signal.
     ///
     /// Returns `true` if a connection was removed.
-    pub fn disconnect(
-        &mut self,
-        signal_name: &str,
-        target_id: ObjectId,
-        method: &str,
-    ) -> bool {
+    pub fn disconnect(&mut self, signal_name: &str, target_id: ObjectId, method: &str) -> bool {
         self.signals
             .get_mut(signal_name)
             .is_some_and(|s| s.disconnect(target_id, method))
@@ -269,12 +264,7 @@ pub trait SignalEmitter {
     }
 
     /// Disconnects a callback from a signal.
-    fn disconnect_signal(
-        &mut self,
-        signal_name: &str,
-        target_id: ObjectId,
-        method: &str,
-    ) -> bool {
+    fn disconnect_signal(&mut self, signal_name: &str, target_id: ObjectId, method: &str) -> bool {
         self.signal_store_mut()
             .disconnect(signal_name, target_id, method)
     }
@@ -351,16 +341,12 @@ mod tests {
         let target_a = ObjectId::next();
         let target_b = ObjectId::next();
 
-        signal.connect(Connection::with_callback(
-            target_a,
-            "on_changed",
-            |_| Variant::Int(1),
-        ));
-        signal.connect(Connection::with_callback(
-            target_b,
-            "on_changed",
-            |_| Variant::Int(2),
-        ));
+        signal.connect(Connection::with_callback(target_a, "on_changed", |_| {
+            Variant::Int(1)
+        }));
+        signal.connect(Connection::with_callback(target_b, "on_changed", |_| {
+            Variant::Int(2)
+        }));
 
         assert_eq!(signal.connection_count(), 2);
 
@@ -423,10 +409,7 @@ mod tests {
         let mut store = SignalStore::new();
         assert!(!store.has_signal("new_signal"));
 
-        store.connect(
-            "new_signal",
-            Connection::new(ObjectId::next(), "handler"),
-        );
+        store.connect("new_signal", Connection::new(ObjectId::next(), "handler"));
 
         assert!(store.has_signal("new_signal"));
     }
@@ -534,11 +517,7 @@ mod tests {
 
     #[test]
     fn connection_clone() {
-        let conn = Connection::with_callback(
-            ObjectId::next(),
-            "method",
-            |_| Variant::Int(42),
-        );
+        let conn = Connection::with_callback(ObjectId::next(), "method", |_| Variant::Int(42));
         let cloned = conn.clone();
         assert_eq!(cloned.method, "method");
         assert_eq!(cloned.call(&[]), Variant::Int(42));

@@ -14,16 +14,83 @@ use gdcore::math::Vector2;
 /// Physical/logical key codes, mirroring Godot's `Key` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
-    A, B, C, D, E, F, G, H, I, J, K, L, M,
-    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
-    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
-    Space, Enter, Escape, Tab,
-    Shift, Ctrl, Alt,
-    Up, Down, Left, Right,
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
-    Backspace, Delete, Insert, Home, End, PageUp, PageDown,
-    CapsLock, Comma, Period, Slash, Semicolon, Quote,
-    BracketLeft, BracketRight, Backslash, Minus, Equal,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
+    Space,
+    Enter,
+    Escape,
+    Tab,
+    Shift,
+    Ctrl,
+    Alt,
+    Up,
+    Down,
+    Left,
+    Right,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    CapsLock,
+    Comma,
+    Period,
+    Slash,
+    Semicolon,
+    Quote,
+    BracketLeft,
+    BracketRight,
+    Backslash,
+    Minus,
+    Equal,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,9 +295,10 @@ impl InputMap {
                 ) if button == b => {
                     return true;
                 }
-                (InputEvent::GamepadAxis { axis, value, .. }, ActionBinding::GamepadAxisBinding(a))
-                    if axis == a =>
-                {
+                (
+                    InputEvent::GamepadAxis { axis, value, .. },
+                    ActionBinding::GamepadAxisBinding(a),
+                ) if axis == a => {
                     return value.abs() > deadzone;
                 }
                 _ => {}
@@ -494,13 +562,7 @@ impl InputState {
     /// Returns a 2D input vector based on four directional actions.
     ///
     /// Mirrors Godot's `Input.get_vector(neg_x, pos_x, neg_y, pos_y)`.
-    pub fn get_vector(
-        &self,
-        neg_x: &str,
-        pos_x: &str,
-        neg_y: &str,
-        pos_y: &str,
-    ) -> Vector2 {
+    pub fn get_vector(&self, neg_x: &str, pos_x: &str, neg_y: &str, pos_y: &str) -> Vector2 {
         let x = self.get_axis(neg_x, pos_x);
         let y = self.get_axis(neg_y, pos_y);
         let v = Vector2::new(x, y);
@@ -811,7 +873,10 @@ mod tests {
     fn gamepad_axis_variants_are_distinct() {
         assert_ne!(GamepadAxis::LeftStickX, GamepadAxis::LeftStickY);
         assert_ne!(GamepadAxis::RightStickX, GamepadAxis::RightStickY);
-        assert_ne!(GamepadAxis::LeftTriggerAnalog, GamepadAxis::RightTriggerAnalog);
+        assert_ne!(
+            GamepadAxis::LeftTriggerAnalog,
+            GamepadAxis::RightTriggerAnalog
+        );
     }
 
     #[test]
@@ -929,10 +994,14 @@ mod tests {
             pressed: true,
             gamepad_id: 0,
         });
-        assert!(state.gamepad_buttons_just_pressed.contains(&(0, GamepadButton::Start)));
+        assert!(state
+            .gamepad_buttons_just_pressed
+            .contains(&(0, GamepadButton::Start)));
 
         state.flush_frame();
-        assert!(!state.gamepad_buttons_just_pressed.contains(&(0, GamepadButton::Start)));
+        assert!(!state
+            .gamepad_buttons_just_pressed
+            .contains(&(0, GamepadButton::Start)));
         assert!(state.is_gamepad_button_pressed(0, GamepadButton::Start));
     }
 
@@ -944,15 +1013,24 @@ mod tests {
             value: 0.8,
             gamepad_id: 0,
         });
-        assert_eq!(state.get_gamepad_axis_value(0, GamepadAxis::LeftStickX), 0.8);
-        assert_eq!(state.get_gamepad_axis_value(0, GamepadAxis::LeftStickY), 0.0);
+        assert_eq!(
+            state.get_gamepad_axis_value(0, GamepadAxis::LeftStickX),
+            0.8
+        );
+        assert_eq!(
+            state.get_gamepad_axis_value(0, GamepadAxis::LeftStickY),
+            0.0
+        );
     }
 
     #[test]
     fn input_map_gamepad_button_binding() {
         let mut map = InputMap::new();
         map.add_action("jump", 0.0);
-        map.action_add_event("jump", ActionBinding::GamepadButtonBinding(GamepadButton::FaceA));
+        map.action_add_event(
+            "jump",
+            ActionBinding::GamepadButtonBinding(GamepadButton::FaceA),
+        );
 
         let evt = InputEvent::GamepadButton {
             button: GamepadButton::FaceA,
@@ -973,7 +1051,10 @@ mod tests {
     fn input_map_gamepad_axis_binding_with_deadzone() {
         let mut map = InputMap::new();
         map.add_action("move_right", 0.2);
-        map.action_add_event("move_right", ActionBinding::GamepadAxisBinding(GamepadAxis::LeftStickX));
+        map.action_add_event(
+            "move_right",
+            ActionBinding::GamepadAxisBinding(GamepadAxis::LeftStickX),
+        );
 
         // Below deadzone
         let evt_low = InputEvent::GamepadAxis {
@@ -996,7 +1077,10 @@ mod tests {
     fn gamepad_button_action_resolution() {
         let mut map = InputMap::new();
         map.add_action("fire", 0.0);
-        map.action_add_event("fire", ActionBinding::GamepadButtonBinding(GamepadButton::RightTrigger));
+        map.action_add_event(
+            "fire",
+            ActionBinding::GamepadButtonBinding(GamepadButton::RightTrigger),
+        );
 
         let mut state = InputState::new();
         state.set_input_map(map);
@@ -1097,7 +1181,10 @@ mod tests {
 
         let v = state.get_vector("left", "right", "up", "down");
         let len = (v.x * v.x + v.y * v.y).sqrt();
-        assert!((len - 1.0).abs() < 0.001, "diagonal vector should be normalized, got len={len}");
+        assert!(
+            (len - 1.0).abs() < 0.001,
+            "diagonal vector should be normalized, got len={len}"
+        );
         assert!(v.x > 0.0);
         assert!(v.y > 0.0);
     }

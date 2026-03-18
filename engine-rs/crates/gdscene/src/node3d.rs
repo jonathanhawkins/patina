@@ -216,10 +216,11 @@ pub fn set_mesh_path(tree: &mut SceneTree, node_id: NodeId, path: &str) {
 
 /// Reads the `"mesh"` property as a path string, if present.
 pub fn get_mesh_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("mesh") {
-        Variant::String(s) => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("mesh") {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
 }
 
 /// Sets the `"material"` property to a resource path string.
@@ -608,8 +609,14 @@ mod tests {
         set_visibility_range_end(&mut tree, id, 100.0);
 
         let n = tree.get_node(id).unwrap();
-        assert_eq!(n.get_property("visibility_range_begin"), Variant::Float(10.0));
-        assert_eq!(n.get_property("visibility_range_end"), Variant::Float(100.0));
+        assert_eq!(
+            n.get_property("visibility_range_begin"),
+            Variant::Float(10.0)
+        );
+        assert_eq!(
+            n.get_property("visibility_range_end"),
+            Variant::Float(100.0)
+        );
     }
 
     // -- Light3D properties -------------------------------------------------

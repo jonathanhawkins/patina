@@ -84,7 +84,11 @@ impl AnimationTrack {
     pub fn add_keyframe(&mut self, kf: KeyFrame) {
         let pos = self
             .keyframes
-            .binary_search_by(|k| k.time.partial_cmp(&kf.time).unwrap_or(std::cmp::Ordering::Equal))
+            .binary_search_by(|k| {
+                k.time
+                    .partial_cmp(&kf.time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .unwrap_or_else(|e| e);
         self.keyframes.insert(pos, kf);
     }
@@ -389,15 +393,9 @@ pub fn interpolate_variant(from: &Variant, to: &Variant, t: f32) -> Option<Varia
             let result = a + (*b as f64 - a) * t as f64;
             Some(Variant::Float(result))
         }
-        (Variant::Vector2(a), Variant::Vector2(b)) => {
-            Some(Variant::Vector2(a.lerp(*b, t)))
-        }
-        (Variant::Vector3(a), Variant::Vector3(b)) => {
-            Some(Variant::Vector3(a.lerp(*b, t)))
-        }
-        (Variant::Color(a), Variant::Color(b)) => {
-            Some(Variant::Color(a.lerp(*b, t)))
-        }
+        (Variant::Vector2(a), Variant::Vector2(b)) => Some(Variant::Vector2(a.lerp(*b, t))),
+        (Variant::Vector3(a), Variant::Vector3(b)) => Some(Variant::Vector3(a.lerp(*b, t))),
+        (Variant::Color(a), Variant::Color(b)) => Some(Variant::Color(a.lerp(*b, t))),
         _ => None,
     }
 }
@@ -473,7 +471,11 @@ mod tests {
     fn track_sample_nearest_transition() {
         let mut track = AnimationTrack::new("x");
         track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
-        track.add_keyframe(KeyFrame::new(1.0, Variant::Float(10.0), TransitionType::Nearest));
+        track.add_keyframe(KeyFrame::new(
+            1.0,
+            Variant::Float(10.0),
+            TransitionType::Nearest,
+        ));
 
         // Before midpoint → first value
         assert_eq!(track.sample(0.3), Some(Variant::Float(0.0)));
@@ -761,8 +763,14 @@ mod tests {
     #[test]
     fn vector2_track_interpolation() {
         let mut track = AnimationTrack::new("position");
-        track.add_keyframe(KeyFrame::linear(0.0, Variant::Vector2(Vector2::new(0.0, 0.0))));
-        track.add_keyframe(KeyFrame::linear(1.0, Variant::Vector2(Vector2::new(10.0, 20.0))));
+        track.add_keyframe(KeyFrame::linear(
+            0.0,
+            Variant::Vector2(Vector2::new(0.0, 0.0)),
+        ));
+        track.add_keyframe(KeyFrame::linear(
+            1.0,
+            Variant::Vector2(Vector2::new(10.0, 20.0)),
+        ));
 
         if let Some(Variant::Vector2(v)) = track.sample(0.5) {
             assert!((v.x - 5.0).abs() < 1e-5);

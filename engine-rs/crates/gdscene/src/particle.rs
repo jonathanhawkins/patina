@@ -245,8 +245,7 @@ impl ParticleEmitter {
         let velocity = Vector2::new(angle.cos() * speed, angle.sin() * speed);
 
         // Lifetime with randomness
-        let lifetime_factor =
-            1.0 - self.material.lifetime_randomness * rand_f32(&mut rng);
+        let lifetime_factor = 1.0 - self.material.lifetime_randomness * rand_f32(&mut rng);
         let lifetime = self.lifetime * lifetime_factor;
 
         let scale = rand_range(&mut rng, self.material.scale_min, self.material.scale_max);
@@ -314,7 +313,11 @@ impl ParticleSimulator {
 
             // Interpolate color over lifetime
             let t = p.age_ratio();
-            p.color = self.emitter.material.start_color.lerp(self.emitter.material.end_color, t);
+            p.color = self
+                .emitter
+                .material
+                .start_color
+                .lerp(self.emitter.material.end_color, t);
         }
 
         // --- Remove dead particles ---
@@ -517,10 +520,7 @@ mod tests {
         };
         let p = emitter.emit_particle(1);
         let speed = p.velocity.length();
-        assert!(
-            approx_eq(speed, 100.0),
-            "Expected speed ~100, got {speed}"
-        );
+        assert!(approx_eq(speed, 100.0), "Expected speed ~100, got {speed}");
     }
 
     #[test]

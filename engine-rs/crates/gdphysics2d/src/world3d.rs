@@ -161,9 +161,14 @@ fn raycast_shape_3d(
         Shape3D::Sphere { radius } => {
             ray_sphere(origin, dir, max_distance, body.position, radius, body.id)
         }
-        Shape3D::BoxShape { half_extents } => {
-            ray_aabb_3d(origin, dir, max_distance, body.position, half_extents, body.id)
-        }
+        Shape3D::BoxShape { half_extents } => ray_aabb_3d(
+            origin,
+            dir,
+            max_distance,
+            body.position,
+            half_extents,
+            body.id,
+        ),
         _ => None,
     }
 }
@@ -389,8 +394,7 @@ mod tests {
         let mut world = PhysicsWorld3D::new();
         world.gravity = Vector3::ZERO;
         let static_id = world.add_body(make_static_box(Vector3::ZERO, 5.0));
-        let rigid_id =
-            world.add_body(make_rigid_sphere(Vector3::new(6.0, 0.0, 0.0), 2.0));
+        let rigid_id = world.add_body(make_rigid_sphere(Vector3::new(6.0, 0.0, 0.0), 2.0));
 
         world.step(0.0);
 
@@ -437,13 +441,10 @@ mod tests {
             let mut world = PhysicsWorld3D::new();
             world.gravity = Vector3::ZERO;
             let id_a = world.add_body(make_rigid_sphere(Vector3::ZERO, 3.0));
-            let id_b =
-                world.add_body(make_rigid_sphere(Vector3::new(5.0, 0.0, 0.0), 3.0));
+            let id_b = world.add_body(make_rigid_sphere(Vector3::new(5.0, 0.0, 0.0), 3.0));
 
-            world.get_body_mut(id_a).unwrap().linear_velocity =
-                Vector3::new(1.0, 0.0, 0.0);
-            world.get_body_mut(id_b).unwrap().linear_velocity =
-                Vector3::new(-1.0, 0.0, 0.0);
+            world.get_body_mut(id_a).unwrap().linear_velocity = Vector3::new(1.0, 0.0, 0.0);
+            world.get_body_mut(id_b).unwrap().linear_velocity = Vector3::new(-1.0, 0.0, 0.0);
 
             for _ in 0..10 {
                 world.step(1.0 / 60.0);

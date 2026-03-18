@@ -46,7 +46,9 @@ fn random_variant(rng: &mut Rng) -> Variant {
         3 => Variant::Float(rng.next_f32() as f64),
         4 => {
             let len = (rng.next_u64() % 20) as usize;
-            let s: String = (0..len).map(|_| (b'a' + (rng.next_u64() % 26) as u8) as char).collect();
+            let s: String = (0..len)
+                .map(|_| (b'a' + (rng.next_u64() % 26) as u8) as char)
+                .collect();
             Variant::String(s)
         }
         5 => Variant::Vector2(Vector2::new(rng.next_f32(), rng.next_f32())),
@@ -224,6 +226,10 @@ fn property_json_string_roundtrip() {
             restored.is_some(),
             "Iteration {i}: string roundtrip failed for {v:?}"
         );
-        assert_eq!(v, restored.unwrap(), "Iteration {i}: string roundtrip mismatch");
+        assert_eq!(
+            v,
+            restored.unwrap(),
+            "Iteration {i}: string roundtrip mismatch"
+        );
     }
 }

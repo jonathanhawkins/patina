@@ -60,8 +60,7 @@ impl EditorSettings {
     /// Loads settings from a JSON file.
     pub fn load(path: &Path) -> EngineResult<Self> {
         let data = std::fs::read_to_string(path).map_err(EngineError::Io)?;
-        serde_json::from_str(&data)
-            .map_err(|e| EngineError::Parse(format!("editor settings: {e}")))
+        serde_json::from_str(&data).map_err(|e| EngineError::Parse(format!("editor settings: {e}")))
     }
 
     /// Saves settings to a JSON file.

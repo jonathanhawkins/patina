@@ -188,11 +188,7 @@ impl TscnSaver {
 }
 
 /// Writes a `[node ...]` section for a single node.
-fn write_node_section(
-    out: &mut String,
-    node: &crate::node::Node,
-    parent_path: Option<&str>,
-) {
+fn write_node_section(out: &mut String, node: &crate::node::Node, parent_path: Option<&str>) {
     out.push('\n');
 
     let name = node.name();
@@ -407,10 +403,7 @@ mod tests {
             Variant::String("two".into()),
             Variant::Bool(true),
         ]);
-        assert_eq!(
-            format_variant_value(&arr),
-            "[1, \"two\", true]"
-        );
+        assert_eq!(format_variant_value(&arr), "[1, \"two\", true]");
     }
 
     #[test]
@@ -489,9 +482,7 @@ mod tests {
         assert!(output.contains("[node name=\"World\" type=\"Node\"]"));
         assert!(output.contains("[node name=\"Level\" type=\"Node\" parent=\".\"]"));
         assert!(output.contains("[node name=\"Enemies\" type=\"Node\" parent=\"Level\"]"));
-        assert!(output.contains(
-            "[node name=\"Boss\" type=\"Node2D\" parent=\"Level/Enemies\"]"
-        ));
+        assert!(output.contains("[node name=\"Boss\" type=\"Node2D\" parent=\"Level/Enemies\"]"));
         assert!(output.contains("health = 500"));
     }
 

@@ -81,10 +81,8 @@ pub fn to_json(v: &Variant) -> Value {
             json!({ "type": "Array", "value": items })
         }
         Variant::Dictionary(dict) => {
-            let entries: serde_json::Map<String, Value> = dict
-                .iter()
-                .map(|(k, v)| (k.clone(), to_json(v)))
-                .collect();
+            let entries: serde_json::Map<String, Value> =
+                dict.iter().map(|(k, v)| (k.clone(), to_json(v))).collect();
             json!({ "type": "Dictionary", "value": entries })
         }
     }
@@ -113,7 +111,9 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         }
         "Vector2" => {
             let arr = obj.get("value")?.as_array()?;
-            if arr.len() != 2 { return None; }
+            if arr.len() != 2 {
+                return None;
+            }
             Some(Variant::Vector2(Vector2::new(
                 arr[0].as_f64()? as f32,
                 arr[1].as_f64()? as f32,
@@ -121,7 +121,9 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         }
         "Vector3" => {
             let arr = obj.get("value")?.as_array()?;
-            if arr.len() != 3 { return None; }
+            if arr.len() != 3 {
+                return None;
+            }
             Some(Variant::Vector3(Vector3::new(
                 arr[0].as_f64()? as f32,
                 arr[1].as_f64()? as f32,
@@ -132,7 +134,9 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             let v = obj.get("value")?.as_object()?;
             let pos = v.get("position")?.as_array()?;
             let sz = v.get("size")?.as_array()?;
-            if pos.len() != 2 || sz.len() != 2 { return None; }
+            if pos.len() != 2 || sz.len() != 2 {
+                return None;
+            }
             Some(Variant::Rect2(Rect2::new(
                 Vector2::new(pos[0].as_f64()? as f32, pos[1].as_f64()? as f32),
                 Vector2::new(sz[0].as_f64()? as f32, sz[1].as_f64()? as f32),
@@ -140,7 +144,9 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         }
         "Color" => {
             let arr = obj.get("value")?.as_array()?;
-            if arr.len() != 4 { return None; }
+            if arr.len() != 4 {
+                return None;
+            }
             Some(Variant::Color(Color::new(
                 arr[0].as_f64()? as f32,
                 arr[1].as_f64()? as f32,
@@ -153,11 +159,25 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             let x = v.get("x")?.as_array()?;
             let y = v.get("y")?.as_array()?;
             let z = v.get("z")?.as_array()?;
-            if x.len() != 3 || y.len() != 3 || z.len() != 3 { return None; }
+            if x.len() != 3 || y.len() != 3 || z.len() != 3 {
+                return None;
+            }
             Some(Variant::Basis(Basis {
-                x: Vector3::new(x[0].as_f64()? as f32, x[1].as_f64()? as f32, x[2].as_f64()? as f32),
-                y: Vector3::new(y[0].as_f64()? as f32, y[1].as_f64()? as f32, y[2].as_f64()? as f32),
-                z: Vector3::new(z[0].as_f64()? as f32, z[1].as_f64()? as f32, z[2].as_f64()? as f32),
+                x: Vector3::new(
+                    x[0].as_f64()? as f32,
+                    x[1].as_f64()? as f32,
+                    x[2].as_f64()? as f32,
+                ),
+                y: Vector3::new(
+                    y[0].as_f64()? as f32,
+                    y[1].as_f64()? as f32,
+                    y[2].as_f64()? as f32,
+                ),
+                z: Vector3::new(
+                    z[0].as_f64()? as f32,
+                    z[1].as_f64()? as f32,
+                    z[2].as_f64()? as f32,
+                ),
             }))
         }
         "Transform3D" => {
@@ -167,19 +187,39 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             let by = b.get("y")?.as_array()?;
             let bz = b.get("z")?.as_array()?;
             let o = v.get("origin")?.as_array()?;
-            if bx.len() != 3 || by.len() != 3 || bz.len() != 3 || o.len() != 3 { return None; }
+            if bx.len() != 3 || by.len() != 3 || bz.len() != 3 || o.len() != 3 {
+                return None;
+            }
             Some(Variant::Transform3D(Transform3D {
                 basis: Basis {
-                    x: Vector3::new(bx[0].as_f64()? as f32, bx[1].as_f64()? as f32, bx[2].as_f64()? as f32),
-                    y: Vector3::new(by[0].as_f64()? as f32, by[1].as_f64()? as f32, by[2].as_f64()? as f32),
-                    z: Vector3::new(bz[0].as_f64()? as f32, bz[1].as_f64()? as f32, bz[2].as_f64()? as f32),
+                    x: Vector3::new(
+                        bx[0].as_f64()? as f32,
+                        bx[1].as_f64()? as f32,
+                        bx[2].as_f64()? as f32,
+                    ),
+                    y: Vector3::new(
+                        by[0].as_f64()? as f32,
+                        by[1].as_f64()? as f32,
+                        by[2].as_f64()? as f32,
+                    ),
+                    z: Vector3::new(
+                        bz[0].as_f64()? as f32,
+                        bz[1].as_f64()? as f32,
+                        bz[2].as_f64()? as f32,
+                    ),
                 },
-                origin: Vector3::new(o[0].as_f64()? as f32, o[1].as_f64()? as f32, o[2].as_f64()? as f32),
+                origin: Vector3::new(
+                    o[0].as_f64()? as f32,
+                    o[1].as_f64()? as f32,
+                    o[2].as_f64()? as f32,
+                ),
             }))
         }
         "Quaternion" => {
             let arr = obj.get("value")?.as_array()?;
-            if arr.len() != 4 { return None; }
+            if arr.len() != 4 {
+                return None;
+            }
             Some(Variant::Quaternion(Quaternion::new(
                 arr[0].as_f64()? as f32,
                 arr[1].as_f64()? as f32,
@@ -191,19 +231,35 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             let v = obj.get("value")?.as_object()?;
             let pos = v.get("position")?.as_array()?;
             let sz = v.get("size")?.as_array()?;
-            if pos.len() != 3 || sz.len() != 3 { return None; }
+            if pos.len() != 3 || sz.len() != 3 {
+                return None;
+            }
             Some(Variant::Aabb(Aabb::new(
-                Vector3::new(pos[0].as_f64()? as f32, pos[1].as_f64()? as f32, pos[2].as_f64()? as f32),
-                Vector3::new(sz[0].as_f64()? as f32, sz[1].as_f64()? as f32, sz[2].as_f64()? as f32),
+                Vector3::new(
+                    pos[0].as_f64()? as f32,
+                    pos[1].as_f64()? as f32,
+                    pos[2].as_f64()? as f32,
+                ),
+                Vector3::new(
+                    sz[0].as_f64()? as f32,
+                    sz[1].as_f64()? as f32,
+                    sz[2].as_f64()? as f32,
+                ),
             )))
         }
         "Plane" => {
             let v = obj.get("value")?.as_object()?;
             let n = v.get("normal")?.as_array()?;
             let d = v.get("d")?.as_f64()? as f32;
-            if n.len() != 3 { return None; }
+            if n.len() != 3 {
+                return None;
+            }
             Some(Variant::Plane(Plane::new(
-                Vector3::new(n[0].as_f64()? as f32, n[1].as_f64()? as f32, n[2].as_f64()? as f32),
+                Vector3::new(
+                    n[0].as_f64()? as f32,
+                    n[1].as_f64()? as f32,
+                    n[2].as_f64()? as f32,
+                ),
                 d,
             )))
         }

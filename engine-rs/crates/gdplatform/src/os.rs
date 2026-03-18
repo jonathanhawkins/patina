@@ -122,7 +122,14 @@ mod tests {
         let p = current_platform();
         // On macOS CI / dev machines this should be MacOS.
         assert!(
-            matches!(p, Platform::Linux | Platform::MacOS | Platform::Windows | Platform::Web | Platform::Unknown),
+            matches!(
+                p,
+                Platform::Linux
+                    | Platform::MacOS
+                    | Platform::Windows
+                    | Platform::Web
+                    | Platform::Unknown
+            ),
             "unexpected platform variant"
         );
     }

@@ -43,30 +43,42 @@ pub fn test_collision(
     transform_b: &Transform2D,
 ) -> Option<CollisionResult> {
     match (shape_a, shape_b) {
-        (Shape2D::Circle { radius: ra }, Shape2D::Circle { radius: rb }) => {
-            Some(circle_circle(transform_a.origin, *ra, transform_b.origin, *rb))
-        }
+        (Shape2D::Circle { radius: ra }, Shape2D::Circle { radius: rb }) => Some(circle_circle(
+            transform_a.origin,
+            *ra,
+            transform_b.origin,
+            *rb,
+        )),
         (Shape2D::Circle { radius }, Shape2D::Rectangle { half_extents }) => {
             // circle_rect returns normal pointing from rect toward circle (B→A).
             // Our convention: normal from A to B, so flip it.
-            let mut result =
-                circle_rect(transform_a.origin, *radius, transform_b.origin, *half_extents);
+            let mut result = circle_rect(
+                transform_a.origin,
+                *radius,
+                transform_b.origin,
+                *half_extents,
+            );
             result.normal = -result.normal;
             Some(result)
         }
         (Shape2D::Rectangle { half_extents }, Shape2D::Circle { radius }) => {
             // circle_rect returns normal pointing from rect toward circle.
             // Here rect=A, circle=B, so normal points A→B — already correct.
-            Some(circle_rect(transform_b.origin, *radius, transform_a.origin, *half_extents))
+            Some(circle_rect(
+                transform_b.origin,
+                *radius,
+                transform_a.origin,
+                *half_extents,
+            ))
         }
-        (
-            Shape2D::Rectangle {
-                half_extents: he_a,
-            },
-            Shape2D::Rectangle {
-                half_extents: he_b,
-            },
-        ) => Some(rect_rect(transform_a.origin, *he_a, transform_b.origin, *he_b)),
+        (Shape2D::Rectangle { half_extents: he_a }, Shape2D::Rectangle { half_extents: he_b }) => {
+            Some(rect_rect(
+                transform_a.origin,
+                *he_a,
+                transform_b.origin,
+                *he_b,
+            ))
+        }
         _ => None, // Unsupported shape pair
     }
 }
@@ -161,12 +173,7 @@ fn circle_rect(
 }
 
 /// Axis-aligned rectangle vs rectangle collision test.
-fn rect_rect(
-    pos_a: Vector2,
-    he_a: Vector2,
-    pos_b: Vector2,
-    he_b: Vector2,
-) -> CollisionResult {
+fn rect_rect(pos_a: Vector2, he_a: Vector2, pos_b: Vector2, he_b: Vector2) -> CollisionResult {
     let diff = pos_b - pos_a;
     let overlap_x = he_a.x + he_b.x - diff.x.abs();
     let overlap_y = he_a.y + he_b.y - diff.y.abs();
@@ -182,10 +189,7 @@ fn rect_rect(
             colliding: true,
             normal: Vector2::new(sign, 0.0),
             depth: overlap_x,
-            point: Vector2::new(
-                pos_a.x + he_a.x * sign,
-                pos_a.y + diff.y * 0.5,
-            ),
+            point: Vector2::new(pos_a.x + he_a.x * sign, pos_a.y + diff.y * 0.5),
         }
     } else {
         let sign = if diff.y >= 0.0 { 1.0 } else { -1.0 };
@@ -193,10 +197,7 @@ fn rect_rect(
             colliding: true,
             normal: Vector2::new(0.0, sign),
             depth: overlap_y,
-            point: Vector2::new(
-                pos_a.x + diff.x * 0.5,
-                pos_a.y + he_a.y * sign,
-            ),
+            point: Vector2::new(pos_a.x + diff.x * 0.5, pos_a.y + he_a.y * sign),
         }
     }
 }

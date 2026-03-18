@@ -19,9 +19,9 @@ use std::process;
 
 use gdscene::node::NodeId;
 use gdscene::scene_tree::SceneTree;
-use gdscene::{LifecycleManager, MainLoop, PackedScene, add_packed_scene_to_tree};
+use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -186,7 +186,7 @@ fn main() {
     let scene_root_id = match add_packed_scene_to_tree(&mut tree, root_id, &packed_scene) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("Error instancing scene: {e}", );
+            eprintln!("Error instancing scene: {e}",);
             process::exit(1);
         }
     };

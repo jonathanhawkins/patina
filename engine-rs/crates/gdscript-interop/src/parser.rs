@@ -230,7 +230,10 @@ impl Parser {
     // --- Helpers ---
 
     fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).map(|ts| &ts.token).unwrap_or(&Token::Eof)
+        self.tokens
+            .get(self.pos)
+            .map(|ts| &ts.token)
+            .unwrap_or(&Token::Eof)
     }
 
     fn advance(&mut self) -> &TokenSpan {
@@ -300,9 +303,18 @@ impl Parser {
             Token::For => self.parse_for(),
             Token::Return => self.parse_return(),
             Token::Func => self.parse_func_def(),
-            Token::Pass => { self.advance(); Ok(Stmt::Pass) }
-            Token::Break => { self.advance(); Ok(Stmt::Break) }
-            Token::Continue => { self.advance(); Ok(Stmt::Continue) }
+            Token::Pass => {
+                self.advance();
+                Ok(Stmt::Pass)
+            }
+            Token::Break => {
+                self.advance();
+                Ok(Stmt::Break)
+            }
+            Token::Continue => {
+                self.advance();
+                Ok(Stmt::Continue)
+            }
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -322,7 +334,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt::VarDecl { name, type_hint, value })
+        Ok(Stmt::VarDecl {
+            name,
+            type_hint,
+            value,
+        })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
@@ -352,7 +368,12 @@ impl Parser {
             }
         }
 
-        Ok(Stmt::If { condition, body, elif_branches, else_body })
+        Ok(Stmt::If {
+            condition,
+            body,
+            elif_branches,
+            else_body,
+        })
     }
 
     fn parse_while(&mut self) -> Result<Stmt, ParseError> {
@@ -370,16 +391,22 @@ impl Parser {
         let iterable = self.parse_expr()?;
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
-        Ok(Stmt::For { var, iterable, body })
+        Ok(Stmt::For {
+            var,
+            iterable,
+            body,
+        })
     }
 
     fn parse_return(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // consume `return`
-        let value = if self.check(&Token::Newline) || self.check(&Token::Eof) || self.check(&Token::Dedent) {
-            None
-        } else {
-            Some(self.parse_expr()?)
-        };
+        let value =
+            if self.check(&Token::Newline) || self.check(&Token::Eof) || self.check(&Token::Dedent)
+            {
+                None
+            } else {
+                Some(self.parse_expr()?)
+            };
         Ok(Stmt::Return(value))
     }
 
@@ -407,7 +434,12 @@ impl Parser {
 
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
-        Ok(Stmt::FuncDef { name, params, return_type, body })
+        Ok(Stmt::FuncDef {
+            name,
+            params,
+            return_type,
+            body,
+        })
     }
 
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, ParseError> {
@@ -417,17 +449,29 @@ impl Parser {
             Token::Assign => {
                 self.advance();
                 let value = self.parse_expr()?;
-                Ok(Stmt::Assignment { target: expr, op: AssignOp::Assign, value })
+                Ok(Stmt::Assignment {
+                    target: expr,
+                    op: AssignOp::Assign,
+                    value,
+                })
             }
             Token::PlusAssign => {
                 self.advance();
                 let value = self.parse_expr()?;
-                Ok(Stmt::Assignment { target: expr, op: AssignOp::AddAssign, value })
+                Ok(Stmt::Assignment {
+                    target: expr,
+                    op: AssignOp::AddAssign,
+                    value,
+                })
             }
             Token::MinusAssign => {
                 self.advance();
                 let value = self.parse_expr()?;
-                Ok(Stmt::Assignment { target: expr, op: AssignOp::SubAssign, value })
+                Ok(Stmt::Assignment {
+                    target: expr,
+                    op: AssignOp::SubAssign,
+                    value,
+                })
             }
             _ => Ok(Stmt::ExprStmt(expr)),
         }
@@ -459,7 +503,11 @@ impl Parser {
         while self.check(&Token::Or) {
             self.advance();
             let right = self.parse_and()?;
-            left = Expr::BinaryOp { left: Box::new(left), op: BinOp::Or, right: Box::new(right) };
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinOp::Or,
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -469,7 +517,11 @@ impl Parser {
         while self.check(&Token::And) {
             self.advance();
             let right = self.parse_comparison()?;
-            left = Expr::BinaryOp { left: Box::new(left), op: BinOp::And, right: Box::new(right) };
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinOp::And,
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -489,7 +541,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_addition()?;
-            left = Expr::BinaryOp { left: Box::new(left), op, right: Box::new(right) };
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -504,7 +560,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_multiplication()?;
-            left = Expr::BinaryOp { left: Box::new(left), op, right: Box::new(right) };
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -520,7 +580,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_unary()?;
-            left = Expr::BinaryOp { left: Box::new(left), op, right: Box::new(right) };
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -530,12 +594,18 @@ impl Parser {
             Token::Minus => {
                 self.advance();
                 let expr = self.parse_unary()?;
-                Ok(Expr::UnaryOp { op: UnaryOp::Neg, expr: Box::new(expr) })
+                Ok(Expr::UnaryOp {
+                    op: UnaryOp::Neg,
+                    expr: Box::new(expr),
+                })
             }
             Token::Not => {
                 self.advance();
                 let expr = self.parse_unary()?;
-                Ok(Expr::UnaryOp { op: UnaryOp::Not, expr: Box::new(expr) })
+                Ok(Expr::UnaryOp {
+                    op: UnaryOp::Not,
+                    expr: Box::new(expr),
+                })
             }
             _ => self.parse_postfix(),
         }
@@ -556,18 +626,27 @@ impl Parser {
                         }
                     }
                     self.expect(&Token::RParen)?;
-                    expr = Expr::Call { callee: Box::new(expr), args };
+                    expr = Expr::Call {
+                        callee: Box::new(expr),
+                        args,
+                    };
                 }
                 Token::Dot => {
                     self.advance();
                     let member = self.eat_ident()?;
-                    expr = Expr::MemberAccess { object: Box::new(expr), member };
+                    expr = Expr::MemberAccess {
+                        object: Box::new(expr),
+                        member,
+                    };
                 }
                 Token::LBracket => {
                     self.advance();
                     let index = self.parse_expr()?;
                     self.expect(&Token::RBracket)?;
-                    expr = Expr::Index { object: Box::new(expr), index: Box::new(index) };
+                    expr = Expr::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                    };
                 }
                 _ => break,
             }
@@ -577,12 +656,30 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match self.peek().clone() {
-            Token::IntLit(v) => { self.advance(); Ok(Expr::Literal(Variant::Int(v))) }
-            Token::FloatLit(v) => { self.advance(); Ok(Expr::Literal(Variant::Float(v))) }
-            Token::StringLit(v) => { self.advance(); Ok(Expr::Literal(Variant::String(v))) }
-            Token::BoolLit(v) => { self.advance(); Ok(Expr::Literal(Variant::Bool(v))) }
-            Token::Null => { self.advance(); Ok(Expr::Literal(Variant::Nil)) }
-            Token::Ident(name) => { self.advance(); Ok(Expr::Ident(name)) }
+            Token::IntLit(v) => {
+                self.advance();
+                Ok(Expr::Literal(Variant::Int(v)))
+            }
+            Token::FloatLit(v) => {
+                self.advance();
+                Ok(Expr::Literal(Variant::Float(v)))
+            }
+            Token::StringLit(v) => {
+                self.advance();
+                Ok(Expr::Literal(Variant::String(v)))
+            }
+            Token::BoolLit(v) => {
+                self.advance();
+                Ok(Expr::Literal(Variant::Bool(v)))
+            }
+            Token::Null => {
+                self.advance();
+                Ok(Expr::Literal(Variant::Nil))
+            }
+            Token::Ident(name) => {
+                self.advance();
+                Ok(Expr::Ident(name))
+            }
             Token::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;
@@ -596,7 +693,9 @@ impl Parser {
                     elements.push(self.parse_expr()?);
                     while self.check(&Token::Comma) {
                         self.advance();
-                        if self.check(&Token::RBracket) { break; }
+                        if self.check(&Token::RBracket) {
+                            break;
+                        }
                         elements.push(self.parse_expr()?);
                     }
                 }
@@ -613,7 +712,9 @@ impl Parser {
                     entries.push((key, val));
                     while self.check(&Token::Comma) {
                         self.advance();
-                        if self.check(&Token::RBrace) { break; }
+                        if self.check(&Token::RBrace) {
+                            break;
+                        }
                         let key = self.parse_expr()?;
                         self.expect(&Token::Colon)?;
                         let val = self.parse_expr()?;
@@ -693,7 +794,10 @@ mod tests {
         let expr = parse_expr_str("-5");
         assert!(matches!(
             expr,
-            Expr::UnaryOp { op: UnaryOp::Neg, .. }
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                ..
+            }
         ));
     }
 
@@ -702,7 +806,10 @@ mod tests {
         let expr = parse_expr_str("not true");
         assert!(matches!(
             expr,
-            Expr::UnaryOp { op: UnaryOp::Not, .. }
+            Expr::UnaryOp {
+                op: UnaryOp::Not,
+                ..
+            }
         ));
     }
 
@@ -756,14 +863,22 @@ mod tests {
         let stmts = parse("if x:\n    pass\nelse:\n    pass\n");
         assert!(matches!(
             &stmts[0],
-            Stmt::If { else_body: Some(_), .. }
+            Stmt::If {
+                else_body: Some(_),
+                ..
+            }
         ));
     }
 
     #[test]
     fn parse_if_elif_else() {
         let stmts = parse("if a:\n    pass\nelif b:\n    pass\nelse:\n    pass\n");
-        if let Stmt::If { elif_branches, else_body, .. } = &stmts[0] {
+        if let Stmt::If {
+            elif_branches,
+            else_body,
+            ..
+        } = &stmts[0]
+        {
             assert_eq!(elif_branches.len(), 1);
             assert!(else_body.is_some());
         } else {
@@ -799,7 +914,10 @@ mod tests {
     #[test]
     fn parse_func_def_with_params() {
         let stmts = parse("func add(a, b):\n    return a + b\n");
-        if let Stmt::FuncDef { name, params, body, .. } = &stmts[0] {
+        if let Stmt::FuncDef {
+            name, params, body, ..
+        } = &stmts[0]
+        {
             assert_eq!(name, "add");
             assert_eq!(params, &["a", "b"]);
             assert_eq!(body.len(), 1);
@@ -821,13 +939,25 @@ mod tests {
     #[test]
     fn parse_assignment() {
         let stmts = parse("x = 10\n");
-        assert!(matches!(&stmts[0], Stmt::Assignment { op: AssignOp::Assign, .. }));
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Assignment {
+                op: AssignOp::Assign,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parse_plus_assign() {
         let stmts = parse("x += 5\n");
-        assert!(matches!(&stmts[0], Stmt::Assignment { op: AssignOp::AddAssign, .. }));
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Assignment {
+                op: AssignOp::AddAssign,
+                ..
+            }
+        ));
     }
 
     #[test]

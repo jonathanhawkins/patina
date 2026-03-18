@@ -398,11 +398,7 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                         '"' => s.push('"'),
                         '0' => s.push('\0'),
                         _ => {
-                            return Err(LexError::InvalidEscape {
-                                ch: esc,
-                                line,
-                                col,
-                            });
+                            return Err(LexError::InvalidEscape { ch: esc, line, col });
                         }
                     }
                     pos += 1;
@@ -431,7 +427,9 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             let start_col = col;
             let mut num_str = String::new();
             let mut is_float = false;
-            while pos < len && (chars[pos].is_ascii_digit() || chars[pos] == '.' || chars[pos] == '_') {
+            while pos < len
+                && (chars[pos].is_ascii_digit() || chars[pos] == '.' || chars[pos] == '_')
+            {
                 if chars[pos] == '.' {
                     // Check for .. or method call like 1.method
                     if pos + 1 < len && chars[pos + 1] == '.' {
@@ -517,32 +515,74 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             let two: String = chars[pos..pos + 2].iter().collect();
             match two.as_str() {
                 "==" => {
-                    tokens.push(TokenSpan { token: Token::EqEq, line, col: start_col });
-                    pos += 2; col += 2; continue;
+                    tokens.push(TokenSpan {
+                        token: Token::EqEq,
+                        line,
+                        col: start_col,
+                    });
+                    pos += 2;
+                    col += 2;
+                    continue;
                 }
                 "!=" => {
-                    tokens.push(TokenSpan { token: Token::BangEq, line, col: start_col });
-                    pos += 2; col += 2; continue;
+                    tokens.push(TokenSpan {
+                        token: Token::BangEq,
+                        line,
+                        col: start_col,
+                    });
+                    pos += 2;
+                    col += 2;
+                    continue;
                 }
                 "<=" => {
-                    tokens.push(TokenSpan { token: Token::LtEq, line, col: start_col });
-                    pos += 2; col += 2; continue;
+                    tokens.push(TokenSpan {
+                        token: Token::LtEq,
+                        line,
+                        col: start_col,
+                    });
+                    pos += 2;
+                    col += 2;
+                    continue;
                 }
                 ">=" => {
-                    tokens.push(TokenSpan { token: Token::GtEq, line, col: start_col });
-                    pos += 2; col += 2; continue;
+                    tokens.push(TokenSpan {
+                        token: Token::GtEq,
+                        line,
+                        col: start_col,
+                    });
+                    pos += 2;
+                    col += 2;
+                    continue;
                 }
                 "+=" => {
-                    tokens.push(TokenSpan { token: Token::PlusAssign, line, col: start_col });
-                    pos += 2; col += 2; continue;
+                    tokens.push(TokenSpan {
+                        token: Token::PlusAssign,
+                        line,
+                        col: start_col,
+                    });
+                    pos += 2;
+                    col += 2;
+                    continue;
                 }
                 "-=" => {
-                    tokens.push(TokenSpan { token: Token::MinusAssign, line, col: start_col });
-                    pos += 2; col += 2; continue;
+                    tokens.push(TokenSpan {
+                        token: Token::MinusAssign,
+                        line,
+                        col: start_col,
+                    });
+                    pos += 2;
+                    col += 2;
+                    continue;
                 }
                 "->" => {
-                    tokens.push(TokenSpan { token: Token::Arrow, line, col: start_col });
-                    pos += 2; col += 2; continue;
+                    tokens.push(TokenSpan {
+                        token: Token::Arrow,
+                        line,
+                        col: start_col,
+                    });
+                    pos += 2;
+                    col += 2;
+                    continue;
                 }
                 _ => {}
             }
@@ -605,7 +645,11 @@ mod tests {
     use super::*;
 
     fn tok_types(src: &str) -> Vec<Token> {
-        tokenize(src).unwrap().into_iter().map(|ts| ts.token).collect()
+        tokenize(src)
+            .unwrap()
+            .into_iter()
+            .map(|ts| ts.token)
+            .collect()
     }
 
     #[test]
@@ -657,8 +701,14 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::If, Token::Else, Token::Elif, Token::While,
-                Token::For, Token::In, Token::Return, Token::Eof,
+                Token::If,
+                Token::Else,
+                Token::Elif,
+                Token::While,
+                Token::For,
+                Token::In,
+                Token::Return,
+                Token::Eof,
             ]
         );
     }
@@ -668,7 +718,12 @@ mod tests {
         let tokens = tok_types("true false null");
         assert_eq!(
             tokens,
-            vec![Token::BoolLit(true), Token::BoolLit(false), Token::Null, Token::Eof]
+            vec![
+                Token::BoolLit(true),
+                Token::BoolLit(false),
+                Token::Null,
+                Token::Eof
+            ]
         );
     }
 
@@ -678,9 +733,22 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::Plus, Token::Minus, Token::Star, Token::Slash, Token::Percent,
-                Token::EqEq, Token::BangEq, Token::Lt, Token::Gt, Token::LtEq, Token::GtEq,
-                Token::Assign, Token::PlusAssign, Token::MinusAssign, Token::Arrow, Token::Eof,
+                Token::Plus,
+                Token::Minus,
+                Token::Star,
+                Token::Slash,
+                Token::Percent,
+                Token::EqEq,
+                Token::BangEq,
+                Token::Lt,
+                Token::Gt,
+                Token::LtEq,
+                Token::GtEq,
+                Token::Assign,
+                Token::PlusAssign,
+                Token::MinusAssign,
+                Token::Arrow,
+                Token::Eof,
             ]
         );
     }
@@ -691,9 +759,17 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::LParen, Token::RParen, Token::LBracket, Token::RBracket,
-                Token::LBrace, Token::RBrace, Token::Colon, Token::Comma,
-                Token::Dot, Token::Semicolon, Token::Eof,
+                Token::LParen,
+                Token::RParen,
+                Token::LBracket,
+                Token::RBracket,
+                Token::LBrace,
+                Token::RBrace,
+                Token::Colon,
+                Token::Comma,
+                Token::Dot,
+                Token::Semicolon,
+                Token::Eof,
             ]
         );
     }
@@ -705,9 +781,15 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::If, Token::BoolLit(true), Token::Colon, Token::Newline,
-                Token::Indent, Token::Pass, Token::Newline,
-                Token::Dedent, Token::Eof,
+                Token::If,
+                Token::BoolLit(true),
+                Token::Colon,
+                Token::Newline,
+                Token::Indent,
+                Token::Pass,
+                Token::Newline,
+                Token::Dedent,
+                Token::Eof,
             ]
         );
     }
@@ -719,10 +801,21 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::If, Token::BoolLit(true), Token::Colon, Token::Newline,
-                Token::Indent, Token::If, Token::BoolLit(false), Token::Colon, Token::Newline,
-                Token::Indent, Token::Pass, Token::Newline,
-                Token::Dedent, Token::Dedent, Token::Eof,
+                Token::If,
+                Token::BoolLit(true),
+                Token::Colon,
+                Token::Newline,
+                Token::Indent,
+                Token::If,
+                Token::BoolLit(false),
+                Token::Colon,
+                Token::Newline,
+                Token::Indent,
+                Token::Pass,
+                Token::Newline,
+                Token::Dedent,
+                Token::Dedent,
+                Token::Eof,
             ]
         );
     }
@@ -761,12 +854,23 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::Func, Token::Ident("add".into()), Token::LParen,
-                Token::Ident("a".into()), Token::Comma, Token::Ident("b".into()),
-                Token::RParen, Token::Colon, Token::Newline,
-                Token::Indent, Token::Return, Token::Ident("a".into()),
-                Token::Plus, Token::Ident("b".into()), Token::Newline,
-                Token::Dedent, Token::Eof,
+                Token::Func,
+                Token::Ident("add".into()),
+                Token::LParen,
+                Token::Ident("a".into()),
+                Token::Comma,
+                Token::Ident("b".into()),
+                Token::RParen,
+                Token::Colon,
+                Token::Newline,
+                Token::Indent,
+                Token::Return,
+                Token::Ident("a".into()),
+                Token::Plus,
+                Token::Ident("b".into()),
+                Token::Newline,
+                Token::Dedent,
+                Token::Eof,
             ]
         );
     }

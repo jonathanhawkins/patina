@@ -4,9 +4,9 @@
 //! This implementation covers the subset needed for Phase 3 (headless
 //! runtime): scalars, strings, math types, collections, and object refs.
 
+use gdcore::id::ObjectId;
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
-use gdcore::id::ObjectId;
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use std::collections::HashMap;
@@ -149,14 +149,26 @@ impl fmt::Display for Variant {
             Self::NodePath(np) => write!(f, "NodePath(\"{np}\")"),
             Self::Vector2(v) => write!(f, "({}, {})", v.x, v.y),
             Self::Vector3(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
-            Self::Rect2(r) => write!(f, "[({}, {}), ({}, {})]", r.position.x, r.position.y, r.size.x, r.size.y),
+            Self::Rect2(r) => write!(
+                f,
+                "[({}, {}), ({}, {})]",
+                r.position.x, r.position.y, r.size.x, r.size.y
+            ),
             Self::Transform2D(_) => write!(f, "<Transform2D>"),
             Self::Color(c) => write!(f, "Color({}, {}, {}, {})", c.r, c.g, c.b, c.a),
             Self::Basis(_) => write!(f, "<Basis>"),
             Self::Transform3D(_) => write!(f, "<Transform3D>"),
             Self::Quaternion(q) => write!(f, "Quaternion({}, {}, {}, {})", q.x, q.y, q.z, q.w),
-            Self::Aabb(a) => write!(f, "AABB(({}, {}, {}), ({}, {}, {}))", a.position.x, a.position.y, a.position.z, a.size.x, a.size.y, a.size.z),
-            Self::Plane(p) => write!(f, "Plane(({}, {}, {}), {})", p.normal.x, p.normal.y, p.normal.z, p.d),
+            Self::Aabb(a) => write!(
+                f,
+                "AABB(({}, {}, {}), ({}, {}, {}))",
+                a.position.x, a.position.y, a.position.z, a.size.x, a.size.y, a.size.z
+            ),
+            Self::Plane(p) => write!(
+                f,
+                "Plane(({}, {}, {}), {})",
+                p.normal.x, p.normal.y, p.normal.z, p.d
+            ),
             Self::ObjectId(id) => write!(f, "<Object#{id}>"),
             Self::Array(a) => write!(f, "[Array; len={}]", a.len()),
             Self::Dictionary(d) => write!(f, "{{Dict; len={}}}", d.len()),
@@ -200,7 +212,10 @@ mod tests {
     fn variant_type_tag() {
         assert_eq!(Variant::Nil.variant_type(), VariantType::Nil);
         assert_eq!(Variant::Int(42).variant_type(), VariantType::Int);
-        assert_eq!(Variant::String("hi".into()).variant_type(), VariantType::String);
+        assert_eq!(
+            Variant::String("hi".into()).variant_type(),
+            VariantType::String
+        );
     }
 
     #[test]
@@ -228,7 +243,10 @@ mod tests {
     #[test]
     fn variant_string_name_type_tag() {
         let sn = StringName::new("test");
-        assert_eq!(Variant::StringName(sn).variant_type(), VariantType::StringName);
+        assert_eq!(
+            Variant::StringName(sn).variant_type(),
+            VariantType::StringName
+        );
     }
 
     #[test]
@@ -287,7 +305,10 @@ mod tests {
     #[test]
     fn display_node_path() {
         let np = NodePath::new("/root/Player");
-        assert_eq!(format!("{}", Variant::NodePath(np)), "NodePath(\"/root/Player\")");
+        assert_eq!(
+            format!("{}", Variant::NodePath(np)),
+            "NodePath(\"/root/Player\")"
+        );
     }
 
     #[test]

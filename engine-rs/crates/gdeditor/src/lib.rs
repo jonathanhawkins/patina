@@ -143,14 +143,10 @@ impl EditorCommand {
                 Ok(())
             }
             EditorCommand::RemoveNode {
-                node_id,
-                parent_id,
-                ..
+                node_id, parent_id, ..
             } => {
                 // Save parent for undo.
-                *parent_id = tree
-                    .get_node(*node_id)
-                    .and_then(|n| n.parent());
+                *parent_id = tree.get_node(*node_id).and_then(|n| n.parent());
                 tree.remove_node(*node_id)?;
                 tracing::debug!("RemoveNode {:?}", node_id);
                 Ok(())
@@ -160,9 +156,7 @@ impl EditorCommand {
                 new_parent_id,
                 old_parent_id,
             } => {
-                *old_parent_id = tree
-                    .get_node(*node_id)
-                    .and_then(|n| n.parent());
+                *old_parent_id = tree.get_node(*node_id).and_then(|n| n.parent());
                 tree.reparent(*node_id, *new_parent_id)?;
                 tracing::debug!("ReparentNode {:?} -> {:?}", node_id, new_parent_id);
                 Ok(())
@@ -492,17 +486,11 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            editor.tree().get_node(c_id).unwrap().parent(),
-            Some(b_id)
-        );
+        assert_eq!(editor.tree().get_node(c_id).unwrap().parent(), Some(b_id));
 
         // Undo.
         editor.undo().unwrap();
-        assert_eq!(
-            editor.tree().get_node(c_id).unwrap().parent(),
-            Some(a_id)
-        );
+        assert_eq!(editor.tree().get_node(c_id).unwrap().parent(), Some(a_id));
     }
 
     #[test]

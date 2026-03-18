@@ -97,10 +97,7 @@ impl ObjectBase {
 
     /// Gets a property by name. Returns `Nil` if absent.
     pub fn get_property(&self, name: &str) -> Variant {
-        self.properties
-            .get(name)
-            .cloned()
-            .unwrap_or(Variant::Nil)
+        self.properties.get(name).cloned().unwrap_or(Variant::Nil)
     }
 
     /// Returns `true` if the property exists.
@@ -229,7 +226,7 @@ mod tests {
 
     #[test]
     fn notification_recording() {
-        use crate::notification::{NOTIFICATION_READY, NOTIFICATION_PROCESS};
+        use crate::notification::{NOTIFICATION_PROCESS, NOTIFICATION_READY};
 
         let mut obj = GenericObject::new("Node");
         obj.notification(NOTIFICATION_READY);

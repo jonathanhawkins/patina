@@ -163,8 +163,7 @@ fn ease_out(t: f64, func: TransFunc) -> f64 {
                 t
             } else {
                 let p = 0.3;
-                2.0_f64.powf(-10.0 * t) * ((t - p / 4.0) * std::f64::consts::TAU / p).sin()
-                    + 1.0
+                2.0_f64.powf(-10.0 * t) * ((t - p / 4.0) * std::f64::consts::TAU / p).sin() + 1.0
             }
         }
         TransFunc::Bounce => bounce_out(t),

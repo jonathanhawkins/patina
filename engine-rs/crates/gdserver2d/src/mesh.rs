@@ -56,17 +56,41 @@ impl Mesh3D {
         // (normal, tangent_u, tangent_v) for each face.
         let faces: [(Vector3, Vector3, Vector3); 6] = [
             // +X
-            (Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, -1.0), Vector3::new(0.0, 1.0, 0.0)),
+            (
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
             // -X
-            (Vector3::new(-1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0)),
+            (
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
             // +Y
-            (Vector3::new(0.0, 1.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),
+            (
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ),
             // -Y
-            (Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, -1.0)),
+            (
+                Vector3::new(0.0, -1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+            ),
             // +Z
-            (Vector3::new(0.0, 0.0, 1.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0)),
+            (
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
             // -Z
-            (Vector3::new(0.0, 0.0, -1.0), Vector3::new(-1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0)),
+            (
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
         ];
 
         for (normal, u_dir, v_dir) in &faces {

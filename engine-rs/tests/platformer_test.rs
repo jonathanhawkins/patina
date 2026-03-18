@@ -50,38 +50,86 @@ const COLLECT_RADIUS: f32 = 30.0;
 
 fn build_input_sequence() -> Vec<(u64, InputEvent)> {
     let mut events = Vec::new();
-    events.push((0, InputEvent::Key {
-        key: Key::Right, pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((30, InputEvent::Key {
-        key: Key::Right, pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((35, InputEvent::Key {
-        key: Key::Space, pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((36, InputEvent::Key {
-        key: Key::Space, pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((40, InputEvent::Key {
-        key: Key::Right, pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((80, InputEvent::Key {
-        key: Key::Right, pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((90, InputEvent::Key {
-        key: Key::Space, pressed: true,
-        shift: false, ctrl: false, alt: false,
-    }));
-    events.push((91, InputEvent::Key {
-        key: Key::Space, pressed: false,
-        shift: false, ctrl: false, alt: false,
-    }));
+    events.push((
+        0,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        30,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        35,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        36,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        40,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        80,
+        InputEvent::Key {
+            key: Key::Right,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        90,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
+    events.push((
+        91,
+        InputEvent::Key {
+            key: Key::Space,
+            pressed: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        },
+    ));
     events
 }
 
@@ -113,7 +161,8 @@ fn run_platformer() -> PlatformerResult {
 
     let score_node = Node::new("ScoreLabel", "Node");
     let score_id = tree.add_child(world_id, score_node).unwrap();
-    tree.get_node_mut(score_id).unwrap()
+    tree.get_node_mut(score_id)
+        .unwrap()
         .set_property("text", Variant::String("Score: 0".to_string()));
 
     let ground_node = Node::new("Ground", "Node2D");
@@ -123,17 +172,24 @@ fn run_platformer() -> PlatformerResult {
     // Physics setup
     let mut physics = PhysicsWorld2D::new();
     let player_body = PhysicsBody2D::new(
-        BodyId(0), BodyType::Rigid,
+        BodyId(0),
+        BodyType::Rigid,
         Vector2::new(100.0, 400.0),
-        Shape2D::Circle { radius: 16.0 }, 1.0,
+        Shape2D::Circle { radius: 16.0 },
+        1.0,
     );
     let player_body_id = physics.add_body(player_body);
 
     let platform_half = Vector2::new(60.0, 10.0);
     for pos in &platform_positions {
         let pbody = PhysicsBody2D::new(
-            BodyId(0), BodyType::Static, *pos,
-            Shape2D::Rectangle { half_extents: platform_half }, 1.0,
+            BodyId(0),
+            BodyType::Static,
+            *pos,
+            Shape2D::Rectangle {
+                half_extents: platform_half,
+            },
+            1.0,
         );
         physics.add_body(pbody);
     }
@@ -141,9 +197,13 @@ fn run_platformer() -> PlatformerResult {
     let collectible_pos = Vector2::new(300.0, 350.0);
 
     let ground_body = PhysicsBody2D::new(
-        BodyId(0), BodyType::Static,
+        BodyId(0),
+        BodyType::Static,
         Vector2::new(320.0, 550.0),
-        Shape2D::Rectangle { half_extents: Vector2::new(320.0, 20.0) }, 1.0,
+        Shape2D::Rectangle {
+            half_extents: Vector2::new(320.0, 20.0),
+        },
+        1.0,
     );
     physics.add_body(ground_body);
 
@@ -178,8 +238,10 @@ fn run_platformer() -> PlatformerResult {
             end_color: Color::rgb(1.0, 0.3, 0.0),
             ..ParticleMaterial::default()
         },
-        amount: 6, lifetime: 0.5,
-        one_shot: true, explosiveness: 1.0,
+        amount: 6,
+        lifetime: 0.5,
+        one_shot: true,
+        explosiveness: 1.0,
         emitting: false,
         ..ParticleEmitter::default()
     };
@@ -240,10 +302,7 @@ fn run_platformer() -> PlatformerResult {
                     score += 1;
                     collect_tween.start();
                     if let Some(label) = main_loop.tree_mut().get_node_mut(score_id) {
-                        label.set_property(
-                            "text",
-                            Variant::String(format!("Score: {}", score)),
-                        );
+                        label.set_property("text", Variant::String(format!("Score: {}", score)));
                     }
                 }
             }
@@ -255,7 +314,9 @@ fn run_platformer() -> PlatformerResult {
 
         if collect_tween.running {
             let done = collect_tween.advance(DT as f64);
-            if done { tween_completed = true; }
+            if done {
+                tween_completed = true;
+            }
             let values = collect_tween.get_current_values();
             if let Some((_, Variant::Float(s))) = values.first() {
                 collectible_scale = *s as f32;
@@ -263,7 +324,9 @@ fn run_platformer() -> PlatformerResult {
         }
 
         particle_sim.step(DT);
-        if jump_sfx.is_playing() { jump_sfx.advance(DT); }
+        if jump_sfx.is_playing() {
+            jump_sfx.advance(DT);
+        }
         main_loop.step(DT as f64);
 
         let player_pos = get_position(main_loop.tree(), player_id);
@@ -367,7 +430,9 @@ fn player_jumped_and_returned() {
     let result = run_platformer();
     let initial_y = result.player_y_history[0];
     // After jump at frame 35, player should go up (y decreases)
-    let min_y = result.player_y_history.iter()
+    let min_y = result
+        .player_y_history
+        .iter()
         .skip(35)
         .take(30)
         .cloned()
@@ -432,21 +497,18 @@ fn tween_completed_after_collect() {
 #[test]
 fn audio_buses_configured() {
     let result = run_platformer();
-    assert_eq!(
-        result.audio_bus_count, 2,
-        "Should have Master + SFX buses"
-    );
+    assert_eq!(result.audio_bus_count, 2, "Should have Master + SFX buses");
 }
 
 #[test]
 fn rendered_frame_has_non_background_pixels() {
     let result = run_platformer();
     let bg = Color::rgb(0.4, 0.6, 0.9);
-    let non_bg_count = result.pixel_data.iter()
+    let non_bg_count = result
+        .pixel_data
+        .iter()
         .filter(|c| {
-            (c.r - bg.r).abs() > 0.01
-                || (c.g - bg.g).abs() > 0.01
-                || (c.b - bg.b).abs() > 0.01
+            (c.r - bg.r).abs() > 0.01 || (c.g - bg.g).abs() > 0.01 || (c.b - bg.b).abs() > 0.01
         })
         .count();
     assert!(
@@ -460,22 +522,36 @@ fn deterministic_two_runs_identical() {
     let result1 = run_platformer();
     let result2 = run_platformer();
 
-    assert_eq!(result1.player_final_pos.0, result2.player_final_pos.0,
-        "Player X should be identical across runs");
-    assert_eq!(result1.player_final_pos.1, result2.player_final_pos.1,
-        "Player Y should be identical across runs");
+    assert_eq!(
+        result1.player_final_pos.0, result2.player_final_pos.0,
+        "Player X should be identical across runs"
+    );
+    assert_eq!(
+        result1.player_final_pos.1, result2.player_final_pos.1,
+        "Player Y should be identical across runs"
+    );
     assert_eq!(result1.score, result2.score);
     assert_eq!(result1.frames_rendered, result2.frames_rendered);
     assert_eq!(result1.particles_emitted, result2.particles_emitted);
-    assert_eq!(result1.player_y_history, result2.player_y_history,
-        "Y history should be identical (deterministic physics)");
+    assert_eq!(
+        result1.player_y_history, result2.player_y_history,
+        "Y history should be identical (deterministic physics)"
+    );
 }
 
 #[test]
 fn player_y_history_has_variation() {
     let result = run_platformer();
-    let min_y = result.player_y_history.iter().cloned().fold(f32::MAX, f32::min);
-    let max_y = result.player_y_history.iter().cloned().fold(f32::MIN, f32::max);
+    let min_y = result
+        .player_y_history
+        .iter()
+        .cloned()
+        .fold(f32::MAX, f32::min);
+    let max_y = result
+        .player_y_history
+        .iter()
+        .cloned()
+        .fold(f32::MIN, f32::max);
     assert!(
         (max_y - min_y) > 20.0,
         "Player Y should have significant variation from jumps: range={}",

@@ -252,11 +252,7 @@ pub fn erase_cell(
 }
 
 /// Returns all used cell coordinates in a layer.
-pub fn get_used_cells(
-    store: &TileMapStore,
-    node_id: NodeId,
-    layer: usize,
-) -> Vec<Vector2i> {
+pub fn get_used_cells(store: &TileMapStore, node_id: NodeId, layer: usize) -> Vec<Vector2i> {
     store
         .get(node_id)
         .and_then(|d| d.layers.get(layer))
@@ -455,7 +451,13 @@ mod tests {
     #[test]
     fn set_cell_invalid_layer_returns_false() {
         let (mut store, nid) = make_store_with_tilemap();
-        assert!(!set_cell(&mut store, nid, 10, Vector2i::ZERO, TileData::new(0)));
+        assert!(!set_cell(
+            &mut store,
+            nid,
+            10,
+            Vector2i::ZERO,
+            TileData::new(0)
+        ));
     }
 
     #[test]
@@ -558,8 +560,8 @@ mod tests {
         let neighbors = get_surrounding_cells(Vector2i::ZERO);
         assert_eq!(neighbors.len(), 4);
         assert!(neighbors.contains(&Vector2i::new(0, -1))); // up
-        assert!(neighbors.contains(&Vector2i::new(1, 0)));  // right
-        assert!(neighbors.contains(&Vector2i::new(0, 1)));  // down
+        assert!(neighbors.contains(&Vector2i::new(1, 0))); // right
+        assert!(neighbors.contains(&Vector2i::new(0, 1))); // down
         assert!(neighbors.contains(&Vector2i::new(-1, 0))); // left
     }
 

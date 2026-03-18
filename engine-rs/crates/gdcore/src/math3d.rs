@@ -21,7 +21,12 @@ pub struct Quaternion {
 
 impl Quaternion {
     /// The identity quaternion (no rotation).
-    pub const IDENTITY: Self = Self { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+    pub const IDENTITY: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0,
+    };
 
     /// Creates a new quaternion.
     pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
@@ -234,21 +239,9 @@ impl Basis {
         let (sz, cz) = euler.z.sin_cos();
 
         Self {
-            x: Vector3::new(
-                cy * cz + sy * sx * sz,
-                cx * sz,
-                -sy * cz + cy * sx * sz,
-            ),
-            y: Vector3::new(
-                cy * -sz + sy * sx * cz,
-                cx * cz,
-                sy * sz + cy * sx * cz,
-            ),
-            z: Vector3::new(
-                sy * cx,
-                -sx,
-                cy * cx,
-            ),
+            x: Vector3::new(cy * cz + sy * sx * sz, cx * sz, -sy * cz + cy * sx * sz),
+            y: Vector3::new(cy * -sz + sy * sx * cz, cx * cz, sy * sz + cy * sx * cz),
+            z: Vector3::new(sy * cx, -sx, cy * cx),
         }
     }
 
@@ -507,11 +500,7 @@ impl Aabb {
             self.position.y.min(point.y),
             self.position.z.min(point.z),
         );
-        let new_end = Vector3::new(
-            end.x.max(point.x),
-            end.y.max(point.y),
-            end.z.max(point.z),
-        );
+        let new_end = Vector3::new(end.x.max(point.x), end.y.max(point.y), end.z.max(point.z));
         Self {
             position: new_pos,
             size: new_end - new_pos,
@@ -897,10 +886,7 @@ mod tests {
     #[test]
     fn plane_intersects_ray() {
         let p = Plane::new(Vector3::UP, 0.0);
-        let hit = p.intersects_ray(
-            Vector3::new(0.0, 5.0, 0.0),
-            Vector3::new(0.0, -1.0, 0.0),
-        );
+        let hit = p.intersects_ray(Vector3::new(0.0, 5.0, 0.0), Vector3::new(0.0, -1.0, 0.0));
         assert!(hit.is_some());
         assert!(v3_approx_eq(hit.unwrap(), Vector3::ZERO));
     }
@@ -909,20 +895,14 @@ mod tests {
     fn plane_intersects_ray_miss() {
         let p = Plane::new(Vector3::UP, 0.0);
         // Ray pointing away from plane.
-        let hit = p.intersects_ray(
-            Vector3::new(0.0, 5.0, 0.0),
-            Vector3::new(0.0, 1.0, 0.0),
-        );
+        let hit = p.intersects_ray(Vector3::new(0.0, 5.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
         assert!(hit.is_none());
     }
 
     #[test]
     fn plane_intersects_segment() {
         let p = Plane::new(Vector3::UP, 0.0);
-        let hit = p.intersects_segment(
-            Vector3::new(0.0, 1.0, 0.0),
-            Vector3::new(0.0, -1.0, 0.0),
-        );
+        let hit = p.intersects_segment(Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.0, -1.0, 0.0));
         assert!(hit.is_some());
         assert!(v3_approx_eq(hit.unwrap(), Vector3::ZERO));
     }
@@ -931,10 +911,7 @@ mod tests {
     fn plane_intersects_segment_miss() {
         let p = Plane::new(Vector3::UP, 0.0);
         // Segment entirely above plane.
-        let hit = p.intersects_segment(
-            Vector3::new(0.0, 1.0, 0.0),
-            Vector3::new(0.0, 2.0, 0.0),
-        );
+        let hit = p.intersects_segment(Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.0, 2.0, 0.0));
         assert!(hit.is_none());
     }
 

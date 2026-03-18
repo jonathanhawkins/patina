@@ -28,75 +28,111 @@ impl ConversionError {
 // ---------------------------------------------------------------------------
 
 impl From<bool> for Variant {
-    fn from(v: bool) -> Self { Self::Bool(v) }
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
 }
 
 impl From<i64> for Variant {
-    fn from(v: i64) -> Self { Self::Int(v) }
+    fn from(v: i64) -> Self {
+        Self::Int(v)
+    }
 }
 
 impl From<i32> for Variant {
-    fn from(v: i32) -> Self { Self::Int(v as i64) }
+    fn from(v: i32) -> Self {
+        Self::Int(v as i64)
+    }
 }
 
 impl From<f64> for Variant {
-    fn from(v: f64) -> Self { Self::Float(v) }
+    fn from(v: f64) -> Self {
+        Self::Float(v)
+    }
 }
 
 impl From<f32> for Variant {
-    fn from(v: f32) -> Self { Self::Float(v as f64) }
+    fn from(v: f32) -> Self {
+        Self::Float(v as f64)
+    }
 }
 
 impl From<String> for Variant {
-    fn from(v: String) -> Self { Self::String(v) }
+    fn from(v: String) -> Self {
+        Self::String(v)
+    }
 }
 
 impl From<&str> for Variant {
-    fn from(v: &str) -> Self { Self::String(v.to_owned()) }
+    fn from(v: &str) -> Self {
+        Self::String(v.to_owned())
+    }
 }
 
 impl From<gdcore::math::Vector2> for Variant {
-    fn from(v: gdcore::math::Vector2) -> Self { Self::Vector2(v) }
+    fn from(v: gdcore::math::Vector2) -> Self {
+        Self::Vector2(v)
+    }
 }
 
 impl From<gdcore::math::Vector3> for Variant {
-    fn from(v: gdcore::math::Vector3) -> Self { Self::Vector3(v) }
+    fn from(v: gdcore::math::Vector3) -> Self {
+        Self::Vector3(v)
+    }
 }
 
 impl From<gdcore::math::Color> for Variant {
-    fn from(v: gdcore::math::Color) -> Self { Self::Color(v) }
+    fn from(v: gdcore::math::Color) -> Self {
+        Self::Color(v)
+    }
 }
 
 impl From<gdcore::math3d::Basis> for Variant {
-    fn from(v: gdcore::math3d::Basis) -> Self { Self::Basis(v) }
+    fn from(v: gdcore::math3d::Basis) -> Self {
+        Self::Basis(v)
+    }
 }
 
 impl From<gdcore::math3d::Transform3D> for Variant {
-    fn from(v: gdcore::math3d::Transform3D) -> Self { Self::Transform3D(v) }
+    fn from(v: gdcore::math3d::Transform3D) -> Self {
+        Self::Transform3D(v)
+    }
 }
 
 impl From<gdcore::math3d::Quaternion> for Variant {
-    fn from(v: gdcore::math3d::Quaternion) -> Self { Self::Quaternion(v) }
+    fn from(v: gdcore::math3d::Quaternion) -> Self {
+        Self::Quaternion(v)
+    }
 }
 
 impl From<gdcore::math3d::Aabb> for Variant {
-    fn from(v: gdcore::math3d::Aabb) -> Self { Self::Aabb(v) }
+    fn from(v: gdcore::math3d::Aabb) -> Self {
+        Self::Aabb(v)
+    }
 }
 
 impl From<gdcore::math3d::Plane> for Variant {
-    fn from(v: gdcore::math3d::Plane) -> Self { Self::Plane(v) }
+    fn from(v: gdcore::math3d::Plane) -> Self {
+        Self::Plane(v)
+    }
 }
 
 impl From<gdcore::StringName> for Variant {
-    fn from(v: gdcore::StringName) -> Self { Self::StringName(v) }
+    fn from(v: gdcore::StringName) -> Self {
+        Self::StringName(v)
+    }
 }
 
 impl From<gdcore::NodePath> for Variant {
-    fn from(v: gdcore::NodePath) -> Self { Self::NodePath(v) }
+    fn from(v: gdcore::NodePath) -> Self {
+        Self::NodePath(v)
+    }
 }
 
 impl From<Vec<Variant>> for Variant {
-    fn from(v: Vec<Variant>) -> Self { Self::Array(v) }
+    fn from(v: Vec<Variant>) -> Self {
+        Self::Array(v)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +145,10 @@ impl TryFrom<Variant> for bool {
         match v {
             Variant::Bool(b) => Ok(b),
             Variant::Int(i) => Ok(i != 0),
-            other => Err(ConversionError::new(other.variant_type(), VariantType::Bool)),
+            other => Err(ConversionError::new(
+                other.variant_type(),
+                VariantType::Bool,
+            )),
         }
     }
 }
@@ -133,7 +172,10 @@ impl TryFrom<Variant> for f64 {
             Variant::Float(f) => Ok(f),
             Variant::Int(i) => Ok(i as f64),
             Variant::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-            other => Err(ConversionError::new(other.variant_type(), VariantType::Float)),
+            other => Err(ConversionError::new(
+                other.variant_type(),
+                VariantType::Float,
+            )),
         }
     }
 }
@@ -155,7 +197,10 @@ impl TryFrom<Variant> for gdcore::StringName {
         match v {
             Variant::StringName(sn) => Ok(sn),
             Variant::String(s) => Ok(gdcore::StringName::new(&s)),
-            other => Err(ConversionError::new(other.variant_type(), VariantType::StringName)),
+            other => Err(ConversionError::new(
+                other.variant_type(),
+                VariantType::StringName,
+            )),
         }
     }
 }
@@ -166,7 +211,10 @@ impl TryFrom<Variant> for gdcore::NodePath {
         match v {
             Variant::NodePath(np) => Ok(np),
             Variant::String(s) => Ok(gdcore::NodePath::new(&s)),
-            other => Err(ConversionError::new(other.variant_type(), VariantType::NodePath)),
+            other => Err(ConversionError::new(
+                other.variant_type(),
+                VariantType::NodePath,
+            )),
         }
     }
 }
@@ -176,7 +224,10 @@ impl TryFrom<Variant> for gdcore::math::Vector2 {
     fn try_from(v: Variant) -> Result<Self, Self::Error> {
         match v {
             Variant::Vector2(vec) => Ok(vec),
-            other => Err(ConversionError::new(other.variant_type(), VariantType::Vector2)),
+            other => Err(ConversionError::new(
+                other.variant_type(),
+                VariantType::Vector2,
+            )),
         }
     }
 }
@@ -186,7 +237,10 @@ impl TryFrom<Variant> for gdcore::math::Vector3 {
     fn try_from(v: Variant) -> Result<Self, Self::Error> {
         match v {
             Variant::Vector3(vec) => Ok(vec),
-            other => Err(ConversionError::new(other.variant_type(), VariantType::Vector3)),
+            other => Err(ConversionError::new(
+                other.variant_type(),
+                VariantType::Vector3,
+            )),
         }
     }
 }

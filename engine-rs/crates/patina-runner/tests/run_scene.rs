@@ -47,7 +47,9 @@ fn runner_outputs_valid_json() {
     assert_eq!(tree["path"].as_str(), Some("/root"));
 
     // The instanced scene root should be a child of the tree root.
-    let children = tree["children"].as_array().expect("root should have children");
+    let children = tree["children"]
+        .as_array()
+        .expect("root should have children");
     assert!(!children.is_empty(), "root should have at least one child");
 
     let scene_root = &children[0];

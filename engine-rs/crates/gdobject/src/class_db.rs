@@ -189,7 +189,10 @@ fn global_db() -> &'static Mutex<ClassDB> {
 ///
 /// Returns the assigned `ClassId`. Panics if the lock is poisoned.
 pub fn register_class(reg: ClassRegistration) -> ClassId {
-    global_db().lock().expect("ClassDB lock poisoned").register(reg)
+    global_db()
+        .lock()
+        .expect("ClassDB lock poisoned")
+        .register(reg)
 }
 
 /// Returns class info by name, if registered.
@@ -300,9 +303,7 @@ mod tests {
     fn register_and_lookup() {
         let _g = setup();
 
-        let id = register_class(
-            ClassRegistration::new("Object"),
-        );
+        let id = register_class(ClassRegistration::new("Object"));
 
         assert!(class_exists("Object"));
         assert!(!class_exists("Node"));
@@ -343,30 +344,20 @@ mod tests {
     fn instantiate_with_defaults() {
         let _g = setup();
 
-        register_class(
-            ClassRegistration::new("Object"),
-        );
+        register_class(ClassRegistration::new("Object"));
         register_class(
             ClassRegistration::new("Node")
                 .parent("Object")
                 .property(PropertyInfo::new("name", Variant::String(String::new())))
                 .method(MethodInfo::new("_ready", 0)),
         );
-        register_class(
-            ClassRegistration::new("Node2D")
-                .parent("Node")
-                .property(PropertyInfo::new(
-                    "position",
-                    Variant::Vector2(gdcore::math::Vector2::ZERO),
-                )),
-        );
+        register_class(ClassRegistration::new("Node2D").parent("Node").property(
+            PropertyInfo::new("position", Variant::Vector2(gdcore::math::Vector2::ZERO)),
+        ));
 
         let obj = instantiate("Node2D").expect("should create Node2D");
         assert_eq!(obj.get_class(), "Node2D");
-        assert_eq!(
-            obj.get_property("name"),
-            Variant::String(String::new()),
-        );
+        assert_eq!(obj.get_property("name"), Variant::String(String::new()),);
         assert_eq!(
             obj.get_property("position"),
             Variant::Vector2(gdcore::math::Vector2::ZERO),
@@ -424,7 +415,10 @@ mod tests {
         register_class(ClassRegistration::new("Sprite2D").parent("Node2D"));
 
         let chain = inheritance_chain("Sprite2D");
-        assert_eq!(chain, vec!["Sprite2D", "Node2D", "CanvasItem", "Node", "Object"]);
+        assert_eq!(
+            chain,
+            vec!["Sprite2D", "Node2D", "CanvasItem", "Node", "Object"]
+        );
         assert_eq!(chain.len(), 5);
 
         assert!(is_parent_class("Sprite2D", "Object"));
@@ -458,14 +452,26 @@ mod tests {
         register_class(
             ClassRegistration::new("Node2D")
                 .parent("Node")
-                .property(PropertyInfo::new("position", Variant::Vector2(gdcore::math::Vector2::ZERO)))
-                .property(PropertyInfo::new("name", Variant::String("default_2d".into()))),
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "name",
+                    Variant::String("default_2d".into()),
+                )),
         );
 
         let obj = instantiate("Node2D").unwrap();
         // Derived default overrides base default
-        assert_eq!(obj.get_property("name"), Variant::String("default_2d".into()));
-        assert_eq!(obj.get_property("position"), Variant::Vector2(gdcore::math::Vector2::ZERO));
+        assert_eq!(
+            obj.get_property("name"),
+            Variant::String("default_2d".into())
+        );
+        assert_eq!(
+            obj.get_property("position"),
+            Variant::Vector2(gdcore::math::Vector2::ZERO)
+        );
     }
 
     #[test]

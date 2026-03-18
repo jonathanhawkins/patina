@@ -376,8 +376,7 @@ impl NavigationServer2D {
             }
 
             // Build positions (centroids) for A*
-            let positions: Vec<Vector2> =
-                region.polygons.iter().map(|p| p.centroid()).collect();
+            let positions: Vec<Vector2> = region.polygons.iter().map(|p| p.centroid()).collect();
 
             if let Some(poly_path) =
                 astar_find_path(start_poly, goal_poly, &positions, &region.connections)
@@ -453,7 +452,12 @@ impl NavigationAgent2D {
     }
 
     /// Sets the target position and computes a path using the given server.
-    pub fn set_target_position(&mut self, target: Vector2, current: Vector2, server: &NavigationServer2D) {
+    pub fn set_target_position(
+        &mut self,
+        target: Vector2,
+        current: Vector2,
+        server: &NavigationServer2D,
+    ) {
         self.target_position = target;
         self.path = server.find_path(current, target);
         self.path_index = if self.path.len() > 1 { 1 } else { 0 };
@@ -578,8 +582,7 @@ impl NavigationServer3D {
     /// Returns an empty `Vec` if no path is found.
     pub fn find_path(&self, from: Vector3, to: Vector3) -> Vec<Vector3> {
         for region in &self.regions {
-            let positions: Vec<Vector3> =
-                region.polygons.iter().map(|p| p.centroid()).collect();
+            let positions: Vec<Vector3> = region.polygons.iter().map(|p| p.centroid()).collect();
 
             // Find closest polygon to `from` and `to`.
             let start = Self::closest_polygon(&positions, from);
@@ -706,12 +709,12 @@ mod tests {
             Vector2::new(2.0, 1.0),
         ];
         let neighbors = vec![
-            vec![1, 3],    // 0
-            vec![0, 2],    // 1
-            vec![1, 5],    // 2
-            vec![0, 4],    // 3
-            vec![3, 5],    // 4
-            vec![2, 4],    // 5
+            vec![1, 3], // 0
+            vec![0, 2], // 1
+            vec![1, 5], // 2
+            vec![0, 4], // 3
+            vec![3, 5], // 4
+            vec![2, 4], // 5
         ];
         let path = astar_find_path(0, 5, &positions, &neighbors).unwrap();
         assert_eq!(path[0], 0);
@@ -869,11 +872,7 @@ mod tests {
         server.add_region(mesh);
 
         let mut agent = NavigationAgent2D::new();
-        agent.set_target_position(
-            Vector2::new(15.0, 5.0),
-            Vector2::new(5.0, 5.0),
-            &server,
-        );
+        agent.set_target_position(Vector2::new(15.0, 5.0), Vector2::new(5.0, 5.0), &server);
 
         assert!(!agent.is_navigation_finished());
         let next = agent.get_next_path_position(Vector2::new(5.0, 5.0));
@@ -914,10 +913,7 @@ mod tests {
         let mut server = NavigationServer3D::new();
         server.add_region(mesh);
 
-        let path = server.find_path(
-            Vector3::new(1.0, 0.0, 1.0),
-            Vector3::new(9.0, 0.0, 1.0),
-        );
+        let path = server.find_path(Vector3::new(1.0, 0.0, 1.0), Vector3::new(9.0, 0.0, 1.0));
         assert!(!path.is_empty());
         assert!(approx_eq(path[0].x, 1.0));
         assert!(approx_eq(path.last().unwrap().x, 9.0));
@@ -941,10 +937,7 @@ mod tests {
         let mut server = NavigationServer3D::new();
         server.add_region(mesh);
 
-        let path = server.find_path(
-            Vector3::new(1.0, 0.0, 1.0),
-            Vector3::new(52.0, 0.0, 1.0),
-        );
+        let path = server.find_path(Vector3::new(1.0, 0.0, 1.0), Vector3::new(52.0, 0.0, 1.0));
         assert!(path.is_empty());
     }
 

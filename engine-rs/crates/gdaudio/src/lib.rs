@@ -30,7 +30,10 @@ mod tests {
     fn bus_volume_db_to_linear_unity() {
         let bus = AudioBus::new("Test");
         let lin = bus.volume_linear();
-        assert!((lin - 1.0).abs() < 1e-6, "0 dB should be linear 1.0, got {lin}");
+        assert!(
+            (lin - 1.0).abs() < 1e-6,
+            "0 dB should be linear 1.0, got {lin}"
+        );
     }
 
     #[test]
@@ -104,7 +107,7 @@ mod tests {
         mixer.add_bus("Voice");
         // Buses: [Master, SFX, Music, Voice]
         mixer.move_bus(3, 1); // Move Voice to index 1
-        // Buses: [Master, Voice, SFX, Music]
+                              // Buses: [Master, Voice, SFX, Music]
         assert_eq!(mixer.get_bus(1).unwrap().name(), "Voice");
         assert_eq!(mixer.get_bus(2).unwrap().name(), "SFX");
     }

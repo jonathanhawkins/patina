@@ -45,10 +45,7 @@ pub struct ExportConfig {
 
 impl ExportConfig {
     /// Creates a new export config with required fields.
-    pub fn new(
-        target_platform: impl Into<String>,
-        app_name: impl Into<String>,
-    ) -> Self {
+    pub fn new(target_platform: impl Into<String>, app_name: impl Into<String>) -> Self {
         Self {
             target_platform: target_platform.into(),
             build_profile: BuildProfile::default(),
@@ -191,8 +188,7 @@ mod tests {
 
     #[test]
     fn export_config_with_resources_batch() {
-        let cfg = ExportConfig::new("macos", "App")
-            .with_resources(["a/", "b/", "c/"]);
+        let cfg = ExportConfig::new("macos", "App").with_resources(["a/", "b/", "c/"]);
         assert_eq!(cfg.resources.len(), 3);
     }
 

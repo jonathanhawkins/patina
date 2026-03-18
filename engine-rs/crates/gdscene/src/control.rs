@@ -508,10 +508,12 @@ pub fn set_separation(tree: &mut SceneTree, node_id: NodeId, px: i64) {
 /// Gets the `"separation"` theme override, defaulting to `0`.
 pub fn get_separation(tree: &SceneTree, node_id: NodeId) -> i64 {
     tree.get_node(node_id)
-        .map(|n| match n.get_property("theme_override_constants/separation") {
-            Variant::Int(i) => i,
-            _ => 0,
-        })
+        .map(
+            |n| match n.get_property("theme_override_constants/separation") {
+                Variant::Int(i) => i,
+                _ => 0,
+            },
+        )
         .unwrap_or(0)
 }
 
@@ -546,10 +548,12 @@ pub fn set_font_size(tree: &mut SceneTree, node_id: NodeId, size: i64) {
 /// Gets the font size theme override, defaulting to `16`.
 pub fn get_font_size(tree: &SceneTree, node_id: NodeId) -> i64 {
     tree.get_node(node_id)
-        .map(|n| match n.get_property("theme_override_font_sizes/font_size") {
-            Variant::Int(i) => i,
-            _ => 16,
-        })
+        .map(
+            |n| match n.get_property("theme_override_font_sizes/font_size") {
+                Variant::Int(i) => i,
+                _ => 16,
+            },
+        )
         .unwrap_or(16)
 }
 
@@ -657,10 +661,11 @@ pub fn set_texture_rect_path(tree: &mut SceneTree, node_id: NodeId, path: &str) 
 
 /// Gets the `"texture"` property from a TextureRect node.
 pub fn get_texture_rect_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("texture") {
-        Variant::String(s) => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("texture") {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
 }
 
 /// Sets the `"stretch_mode"` on a TextureRect.
@@ -759,51 +764,66 @@ pub fn is_editable(tree: &SceneTree, node_id: NodeId) -> bool {
 /// Sets a background color override on a Panel (stored as a theme override).
 pub fn set_bg_color(tree: &mut SceneTree, node_id: NodeId, color: Color) {
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("theme_override_styles/panel/bg_color", Variant::Color(color));
+        node.set_property(
+            "theme_override_styles/panel/bg_color",
+            Variant::Color(color),
+        );
     }
 }
 
 /// Gets the background color override, defaulting to [`Color::WHITE`].
 pub fn get_bg_color(tree: &SceneTree, node_id: NodeId) -> Color {
     tree.get_node(node_id)
-        .map(|n| match n.get_property("theme_override_styles/panel/bg_color") {
-            Variant::Color(c) => c,
-            _ => Color::WHITE,
-        })
+        .map(
+            |n| match n.get_property("theme_override_styles/panel/bg_color") {
+                Variant::Color(c) => c,
+                _ => Color::WHITE,
+            },
+        )
         .unwrap_or(Color::WHITE)
 }
 
 /// Sets a border color override on a Panel.
 pub fn set_border_color(tree: &mut SceneTree, node_id: NodeId, color: Color) {
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("theme_override_styles/panel/border_color", Variant::Color(color));
+        node.set_property(
+            "theme_override_styles/panel/border_color",
+            Variant::Color(color),
+        );
     }
 }
 
 /// Gets the border color override, defaulting to [`Color::BLACK`].
 pub fn get_border_color(tree: &SceneTree, node_id: NodeId) -> Color {
     tree.get_node(node_id)
-        .map(|n| match n.get_property("theme_override_styles/panel/border_color") {
-            Variant::Color(c) => c,
-            _ => Color::BLACK,
-        })
+        .map(
+            |n| match n.get_property("theme_override_styles/panel/border_color") {
+                Variant::Color(c) => c,
+                _ => Color::BLACK,
+            },
+        )
         .unwrap_or(Color::BLACK)
 }
 
 /// Sets a corner radius override on a Panel (all corners).
 pub fn set_corner_radius(tree: &mut SceneTree, node_id: NodeId, radius: i64) {
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("theme_override_styles/panel/corner_radius", Variant::Int(radius));
+        node.set_property(
+            "theme_override_styles/panel/corner_radius",
+            Variant::Int(radius),
+        );
     }
 }
 
 /// Gets the corner radius override, defaulting to `0`.
 pub fn get_corner_radius(tree: &SceneTree, node_id: NodeId) -> i64 {
     tree.get_node(node_id)
-        .map(|n| match n.get_property("theme_override_styles/panel/corner_radius") {
-            Variant::Int(i) => i,
-            _ => 0,
-        })
+        .map(
+            |n| match n.get_property("theme_override_styles/panel/corner_radius") {
+                Variant::Int(i) => i,
+                _ => 0,
+            },
+        )
         .unwrap_or(0)
 }
 
@@ -837,10 +857,11 @@ pub fn set_focus_next(tree: &mut SceneTree, node_id: NodeId, path: &str) {
 
 /// Gets the `"focus_next"` path, if set.
 pub fn get_focus_next(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("focus_next") {
-        Variant::String(s) if !s.is_empty() => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("focus_next") {
+            Variant::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        })
 }
 
 /// Sets the `"focus_previous"` node path for keyboard navigation.
@@ -852,10 +873,11 @@ pub fn set_focus_previous(tree: &mut SceneTree, node_id: NodeId, path: &str) {
 
 /// Gets the `"focus_previous"` path, if set.
 pub fn get_focus_previous(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("focus_previous") {
-        Variant::String(s) if !s.is_empty() => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("focus_previous") {
+            Variant::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        })
 }
 
 // ===========================================================================
@@ -996,7 +1018,10 @@ mod tests {
         let id = add_control(&mut tree, "Ctrl", "Control");
 
         set_custom_minimum_size(&mut tree, id, Vector2::new(100.0, 50.0));
-        assert_eq!(get_custom_minimum_size(&tree, id), Vector2::new(100.0, 50.0));
+        assert_eq!(
+            get_custom_minimum_size(&tree, id),
+            Vector2::new(100.0, 50.0)
+        );
     }
 
     // -- Grow direction -----------------------------------------------------
@@ -1004,8 +1029,14 @@ mod tests {
     #[test]
     fn grow_direction_default_is_end() {
         let tree = make_tree();
-        assert_eq!(get_grow_direction_h(&tree, tree.root_id()), GrowDirection::End);
-        assert_eq!(get_grow_direction_v(&tree, tree.root_id()), GrowDirection::End);
+        assert_eq!(
+            get_grow_direction_h(&tree, tree.root_id()),
+            GrowDirection::End
+        );
+        assert_eq!(
+            get_grow_direction_v(&tree, tree.root_id()),
+            GrowDirection::End
+        );
     }
 
     #[test]
@@ -1132,7 +1163,10 @@ mod tests {
 
         assert_eq!(get_texture_rect_path(&tree, id), None);
         set_texture_rect_path(&mut tree, id, "res://sprites/hero.png");
-        assert_eq!(get_texture_rect_path(&tree, id), Some("res://sprites/hero.png".into()));
+        assert_eq!(
+            get_texture_rect_path(&tree, id),
+            Some("res://sprites/hero.png".into())
+        );
     }
 
     #[test]

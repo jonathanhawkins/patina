@@ -235,10 +235,7 @@ mod tests {
         assert_eq!(uid, uid2);
 
         assert_eq!(fs.get_uid("res://scenes/main.tscn"), Some(uid));
-        assert_eq!(
-            fs.get_path_for_uid(uid),
-            Some("res://scenes/main.tscn")
-        );
+        assert_eq!(fs.get_path_for_uid(uid), Some("res://scenes/main.tscn"));
     }
 
     #[test]

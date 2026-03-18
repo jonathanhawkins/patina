@@ -254,10 +254,7 @@ impl SceneTree {
             .get_mut(&id)
             .ok_or_else(|| EngineError::NotFound(format!("node {id} not found")))?;
         node.add_to_group(group);
-        self.groups
-            .entry(group.to_owned())
-            .or_default()
-            .insert(id);
+        self.groups.entry(group.to_owned()).or_default().insert(id);
         Ok(())
     }
 
@@ -338,7 +335,8 @@ impl SceneTree {
         signal_name: &str,
         connection: gdobject::signal::Connection,
     ) {
-        self.signal_store_mut(source).connect(signal_name, connection);
+        self.signal_store_mut(source)
+            .connect(signal_name, connection);
     }
 
     /// Emits a signal on the given node, returning the collected return
@@ -428,9 +426,7 @@ impl SceneTree {
                     if let Some(&new_parent) = old_to_new.get(&old_parent) {
                         clone.set_parent(Some(new_parent));
                         // Also add as child of the new parent.
-                        if let Some(parent_clone) = cloned
-                            .iter_mut()
-                            .find(|n| n.id() == new_parent)
+                        if let Some(parent_clone) = cloned.iter_mut().find(|n| n.id() == new_parent)
                         {
                             parent_clone.add_child_id(new_id);
                         }
@@ -453,9 +449,7 @@ impl SceneTree {
         player: AnimationPlayer,
     ) -> EngineResult<()> {
         if !self.nodes.contains_key(&node_id) {
-            return Err(EngineError::NotFound(format!(
-                "node {node_id} not found"
-            )));
+            return Err(EngineError::NotFound(format!("node {node_id} not found")));
         }
         self.animation_players.insert(node_id, player);
         Ok(())
@@ -606,10 +600,7 @@ mod tests {
         assert_eq!(tree.node_count(), 3);
 
         // Absolute path lookup.
-        assert_eq!(
-            tree.get_node_by_path("/root/Main/Player"),
-            Some(player_id)
-        );
+        assert_eq!(tree.get_node_by_path("/root/Main/Player"), Some(player_id));
         assert_eq!(tree.get_node_by_path("/root/Main"), Some(main_id));
         assert_eq!(tree.get_node_by_path("/root"), Some(root));
         assert_eq!(tree.get_node_by_path("/root/Missing"), None);
@@ -896,9 +887,7 @@ mod tests {
 
     mod animation_store_tests {
         use super::*;
-        use crate::animation::{
-            Animation, AnimationPlayer, AnimationTrack, KeyFrame, LoopMode,
-        };
+        use crate::animation::{Animation, AnimationPlayer, AnimationTrack, KeyFrame, LoopMode};
         use gdcore::math::Vector2;
         use gdvariant::Variant;
 
@@ -970,10 +959,7 @@ mod tests {
             let mut player = AnimationPlayer::new();
             let mut anim = Animation::new("move", 1.0);
             let mut track = AnimationTrack::new("position");
-            track.add_keyframe(KeyFrame::linear(
-                0.0,
-                Variant::Vector2(Vector2::ZERO),
-            ));
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Vector2(Vector2::ZERO)));
             track.add_keyframe(KeyFrame::linear(
                 1.0,
                 Variant::Vector2(Vector2::new(100.0, 200.0)),
@@ -1173,10 +1159,7 @@ mod tests {
             tree.process_animations(0.5);
 
             // Property should not have been set (no current animation values).
-            assert_eq!(
-                tree.get_node(id).unwrap().get_property("val"),
-                Variant::Nil
-            );
+            assert_eq!(tree.get_node(id).unwrap().get_property("val"), Variant::Nil);
         }
     }
 
@@ -1291,7 +1274,11 @@ mod tests {
             tree.add_tween(id, tween);
 
             tree.process_tweens(1.0); // First loop done
-            assert_eq!(tree.tween_count(), 1, "should still be alive after first loop");
+            assert_eq!(
+                tree.tween_count(),
+                1,
+                "should still be alive after first loop"
+            );
 
             tree.process_tweens(1.0); // Second loop done
             assert_eq!(tree.tween_count(), 0, "should be removed after all loops");
@@ -1378,10 +1365,7 @@ mod tests {
             let mut player = AnimationPlayer::new();
             let mut anim = Animation::new("slide", 1.0);
             let mut track = AnimationTrack::new("position");
-            track.add_keyframe(KeyFrame::linear(
-                0.0,
-                Variant::Vector2(Vector2::ZERO),
-            ));
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Vector2(Vector2::ZERO)));
             track.add_keyframe(KeyFrame::linear(
                 1.0,
                 Variant::Vector2(Vector2::new(60.0, 0.0)),

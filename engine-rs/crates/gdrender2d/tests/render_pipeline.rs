@@ -34,7 +34,8 @@ fn load_golden(name: &str) -> String {
         env!("CARGO_MANIFEST_DIR").replace("/engine-rs/crates/gdrender2d", ""),
         name
     );
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to load golden {}: {}", path, e))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to load golden {}: {}", path, e))
 }
 
 /// Count how many pixels in the framebuffer match the given color.
@@ -391,7 +392,12 @@ fn translate_transform_on_line() {
     let fb = capture_frame(&mut renderer, &vp);
     // Pixels along y=3 from x=5..14 should be white.
     for x in 5..=14 {
-        assert_eq!(fb.get_pixel(x, 3), Color::WHITE, "Expected white at ({}, 3)", x);
+        assert_eq!(
+            fb.get_pixel(x, 3),
+            Color::WHITE,
+            "Expected white at ({}, 3)",
+            x
+        );
     }
     // y=0 should be all black.
     assert_eq!(fb.get_pixel(5, 0), Color::BLACK);
@@ -423,7 +429,11 @@ fn stress_100_items_z_index_sorting() {
     let fb = capture_frame(&mut renderer, &vp);
     let pixel = fb.get_pixel(0, 0);
     // z=99 item has intensity 1.0.
-    assert!((pixel.r - 1.0).abs() < 0.02, "Expected r≈1.0, got {}", pixel.r);
+    assert!(
+        (pixel.r - 1.0).abs() < 0.02,
+        "Expected r≈1.0, got {}",
+        pixel.r
+    );
 }
 
 #[test]
@@ -447,7 +457,11 @@ fn stress_100_items_reverse_z_order() {
     let fb = capture_frame(&mut renderer, &vp);
     let pixel = fb.get_pixel(0, 0);
     // z=99 should still be on top with intensity 1.0.
-    assert!((pixel.r - 1.0).abs() < 0.02, "Expected r≈1.0, got {}", pixel.r);
+    assert!(
+        (pixel.r - 1.0).abs() < 0.02,
+        "Expected r≈1.0, got {}",
+        pixel.r
+    );
 }
 
 #[test]
@@ -511,7 +525,10 @@ fn negative_circle_center() {
     let fb = capture_frame(&mut renderer, &vp);
     // Some pixels near (0,0) should be white.
     let white_count = count_pixels(&fb, Color::WHITE);
-    assert!(white_count > 0, "Expected some white pixels from clipped circle");
+    assert!(
+        white_count > 0,
+        "Expected some white pixels from clipped circle"
+    );
     assert!(white_count < 100, "Not all pixels should be white");
 }
 
@@ -533,7 +550,12 @@ fn negative_line_endpoints() {
     let fb = capture_frame(&mut renderer, &vp);
     // Pixels at (0,5) through (5,5) should be white.
     for x in 0..=5 {
-        assert_eq!(fb.get_pixel(x, 5), Color::WHITE, "Expected white at ({}, 5)", x);
+        assert_eq!(
+            fb.get_pixel(x, 5),
+            Color::WHITE,
+            "Expected white at ({}, 5)",
+            x
+        );
     }
 }
 
@@ -604,7 +626,13 @@ fn draw_line_diagonal() {
     let fb = capture_frame(&mut renderer, &vp);
     // Diagonal should have white pixels along (i,i).
     for i in 0..10 {
-        assert_eq!(fb.get_pixel(i, i), Color::WHITE, "Expected white at ({}, {})", i, i);
+        assert_eq!(
+            fb.get_pixel(i, i),
+            Color::WHITE,
+            "Expected white at ({}, {})",
+            i,
+            i
+        );
     }
 }
 
@@ -765,7 +793,10 @@ fn texture_with_half_green_modulate() {
 fn texture_colored_with_modulate() {
     let mut renderer = SoftwareRenderer::new();
     // Blue texture modulated by green → black (0*0, 0*1, 1*0).
-    renderer.register_texture("blue.png", Texture2D::solid(2, 2, Color::rgb(0.0, 0.0, 1.0)));
+    renderer.register_texture(
+        "blue.png",
+        Texture2D::solid(2, 2, Color::rgb(0.0, 0.0, 1.0)),
+    );
 
     let mut vp = Viewport::new(4, 4, Color::BLACK);
     let mut item = CanvasItem::new(CanvasItemId(1));
@@ -837,7 +868,11 @@ fn zero_radius_circle() {
     let fb = capture_frame(&mut renderer, &vp);
     // A zero-radius circle should draw nothing or at most the center pixel.
     let white_count = count_pixels(&fb, Color::WHITE);
-    assert!(white_count <= 1, "Zero-radius circle drew {} pixels", white_count);
+    assert!(
+        white_count <= 1,
+        "Zero-radius circle drew {} pixels",
+        white_count
+    );
 }
 
 #[test]

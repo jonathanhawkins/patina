@@ -56,14 +56,9 @@ pub fn test_collision_3d(
         (Shape3D::BoxShape { half_extents }, Shape3D::Sphere { radius }) => {
             Some(sphere_box(pos_b, *radius, pos_a, *half_extents))
         }
-        (
-            Shape3D::BoxShape {
-                half_extents: he_a,
-            },
-            Shape3D::BoxShape {
-                half_extents: he_b,
-            },
-        ) => Some(box_box(pos_a, *he_a, pos_b, *he_b)),
+        (Shape3D::BoxShape { half_extents: he_a }, Shape3D::BoxShape { half_extents: he_b }) => {
+            Some(box_box(pos_a, *he_a, pos_b, *he_b))
+        }
         _ => None, // Capsule pairs not yet implemented
     }
 }
@@ -134,7 +129,11 @@ fn sphere_box(
                 colliding: true,
                 normal: Vector3::new(sign, 0.0, 0.0),
                 depth: dx + radius,
-                point: Vector3::new(box_pos.x + half_extents.x * sign, sphere_pos.y, sphere_pos.z),
+                point: Vector3::new(
+                    box_pos.x + half_extents.x * sign,
+                    sphere_pos.y,
+                    sphere_pos.z,
+                ),
             };
         } else if dy <= dz {
             let sign = if local.y >= 0.0 { 1.0 } else { -1.0 };
@@ -142,7 +141,11 @@ fn sphere_box(
                 colliding: true,
                 normal: Vector3::new(0.0, sign, 0.0),
                 depth: dy + radius,
-                point: Vector3::new(sphere_pos.x, box_pos.y + half_extents.y * sign, sphere_pos.z),
+                point: Vector3::new(
+                    sphere_pos.x,
+                    box_pos.y + half_extents.y * sign,
+                    sphere_pos.z,
+                ),
             };
         } else {
             let sign = if local.z >= 0.0 { 1.0 } else { -1.0 };
@@ -150,7 +153,11 @@ fn sphere_box(
                 colliding: true,
                 normal: Vector3::new(0.0, 0.0, sign),
                 depth: dz + radius,
-                point: Vector3::new(sphere_pos.x, sphere_pos.y, box_pos.z + half_extents.z * sign),
+                point: Vector3::new(
+                    sphere_pos.x,
+                    sphere_pos.y,
+                    box_pos.z + half_extents.z * sign,
+                ),
             };
         }
     }
@@ -167,12 +174,7 @@ fn sphere_box(
 }
 
 /// Axis-aligned box vs box collision test.
-fn box_box(
-    pos_a: Vector3,
-    he_a: Vector3,
-    pos_b: Vector3,
-    he_b: Vector3,
-) -> CollisionResult3D {
+fn box_box(pos_a: Vector3, he_a: Vector3, pos_b: Vector3, he_b: Vector3) -> CollisionResult3D {
     let diff = pos_b - pos_a;
     let overlap_x = he_a.x + he_b.x - diff.x.abs();
     let overlap_y = he_a.y + he_b.y - diff.y.abs();

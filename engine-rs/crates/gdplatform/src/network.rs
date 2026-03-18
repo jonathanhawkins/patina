@@ -188,12 +188,7 @@ impl MultiplayerAPI {
     }
 
     /// Initiate an RPC call on `node_path` (hashed to `u64`).
-    pub fn rpc(
-        &mut self,
-        node_path: u64,
-        method: &str,
-        args: Vec<Variant>,
-    ) -> Result<()> {
+    pub fn rpc(&mut self, node_path: u64, method: &str, args: Vec<Variant>) -> Result<()> {
         let config = self
             .rpc_configs
             .get(method)
@@ -217,8 +212,7 @@ impl MultiplayerAPI {
         };
 
         // Serialize the RPC call into a simple packet payload.
-        let data = format!("rpc:{}:{}", call.method_name, call.args.len())
-            .into_bytes();
+        let data = format!("rpc:{}:{}", call.method_name, call.args.len()).into_bytes();
 
         let packet = Packet {
             sender: sender_id,
@@ -245,10 +239,7 @@ impl MultiplayerAPI {
 
     /// `true` when the underlying peer is the server.
     pub fn is_server(&self) -> bool {
-        self.peer
-            .as_ref()
-            .map(|p| p.is_server())
-            .unwrap_or(false)
+        self.peer.as_ref().map(|p| p.is_server()).unwrap_or(false)
     }
 }
 

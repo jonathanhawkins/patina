@@ -32,9 +32,7 @@ impl PropertyCategory {
     pub fn categorize(name: &str) -> Self {
         match name {
             "position" | "rotation" | "scale" | "transform" | "global_position"
-            | "global_rotation" | "global_scale" | "global_transform" | "skew" => {
-                Self::Transform
-            }
+            | "global_rotation" | "global_scale" | "global_transform" | "skew" => Self::Transform,
             "visible" | "modulate" | "self_modulate" | "texture" | "color" | "z_index"
             | "z_as_relative" | "material" | "light_mask" => Self::Rendering,
             "velocity" | "mass" | "gravity_scale" | "linear_velocity" | "angular_velocity"
@@ -136,7 +134,10 @@ impl InspectorPanel {
         let entries = self.list_properties(tree);
         let mut grouped: HashMap<PropertyCategory, Vec<PropertyEntry>> = HashMap::new();
         for entry in entries {
-            grouped.entry(entry.category.clone()).or_default().push(entry);
+            grouped
+                .entry(entry.category.clone())
+                .or_default()
+                .push(entry);
         }
         grouped
     }
@@ -252,11 +253,26 @@ mod tests {
 
     #[test]
     fn property_categories() {
-        assert_eq!(PropertyCategory::categorize("position"), PropertyCategory::Transform);
-        assert_eq!(PropertyCategory::categorize("visible"), PropertyCategory::Rendering);
-        assert_eq!(PropertyCategory::categorize("velocity"), PropertyCategory::Physics);
-        assert_eq!(PropertyCategory::categorize("script_var"), PropertyCategory::Script);
-        assert_eq!(PropertyCategory::categorize("custom"), PropertyCategory::Misc);
+        assert_eq!(
+            PropertyCategory::categorize("position"),
+            PropertyCategory::Transform
+        );
+        assert_eq!(
+            PropertyCategory::categorize("visible"),
+            PropertyCategory::Rendering
+        );
+        assert_eq!(
+            PropertyCategory::categorize("velocity"),
+            PropertyCategory::Physics
+        );
+        assert_eq!(
+            PropertyCategory::categorize("script_var"),
+            PropertyCategory::Script
+        );
+        assert_eq!(
+            PropertyCategory::categorize("custom"),
+            PropertyCategory::Misc
+        );
     }
 
     #[test]

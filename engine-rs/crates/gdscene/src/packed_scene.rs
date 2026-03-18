@@ -13,9 +13,9 @@
 use std::collections::HashMap;
 
 use gdcore::error::{EngineError, EngineResult};
+use gdobject::signal::Connection;
 use gdresource::loader::parse_variant_value;
 use gdvariant::Variant;
-use gdobject::signal::Connection;
 
 use crate::node::{Node, NodeId};
 
@@ -191,7 +191,9 @@ impl PackedScene {
                         }
                         Err(_) => {
                             // Skip values we cannot parse rather than fail.
-                            tracing::warn!("skipping unparseable value for key '{key}': {value_str}");
+                            tracing::warn!(
+                                "skipping unparseable value for key '{key}': {value_str}"
+                            );
                         }
                     }
                 }
@@ -474,10 +476,7 @@ pub fn add_packed_scene_to_tree(
     // Add remaining nodes.
     for node in &nodes[1..] {
         let old_parent_id = node.parent().ok_or_else(|| {
-            EngineError::InvalidOperation(format!(
-                "instanced node '{}' has no parent",
-                node.name()
-            ))
+            EngineError::InvalidOperation(format!("instanced node '{}' has no parent", node.name()))
         })?;
         let &new_parent_id = old_to_new.get(&old_parent_id).ok_or_else(|| {
             EngineError::InvalidOperation(format!(
@@ -647,10 +646,7 @@ position = Vector2(100, 200)
         assert_eq!(tree.node_count(), 4);
 
         // Verify paths.
-        assert_eq!(
-            tree.node_path(scene_root_id).unwrap(),
-            "/root/Root"
-        );
+        assert_eq!(tree.node_path(scene_root_id).unwrap(), "/root/Root");
 
         let player_id = tree.get_node_by_path("/root/Root/Player").unwrap();
         let player = tree.get_node(player_id).unwrap();
@@ -862,22 +858,32 @@ value = 42
 
         // Button node should have signal "pressed" connected.
         let button_id = tree.get_node_by_path("/root/Root/Button").unwrap();
-        let store = tree.signal_store(button_id).expect("Button should have a signal store");
-        let pressed = store.get_signal("pressed").expect("should have 'pressed' signal");
+        let store = tree
+            .signal_store(button_id)
+            .expect("Button should have a signal store");
+        let pressed = store
+            .get_signal("pressed")
+            .expect("should have 'pressed' signal");
         assert_eq!(pressed.connection_count(), 1);
         // The target should be the scene root (to=".").
         assert_eq!(pressed.connections()[0].method, "_on_button_pressed");
         assert_eq!(pressed.connections()[0].target_id, scene_root.object_id());
 
         // Button also has mouse_entered connected.
-        let mouse = store.get_signal("mouse_entered").expect("should have 'mouse_entered'");
+        let mouse = store
+            .get_signal("mouse_entered")
+            .expect("should have 'mouse_entered'");
         assert_eq!(mouse.connection_count(), 1);
         assert_eq!(mouse.connections()[0].method, "_on_mouse_entered");
 
         // Player/Area2D should have body_entered connected.
         let area_id = tree.get_node_by_path("/root/Root/Player/Area2D").unwrap();
-        let area_store = tree.signal_store(area_id).expect("Area2D should have a signal store");
-        let body = area_store.get_signal("body_entered").expect("should have 'body_entered'");
+        let area_store = tree
+            .signal_store(area_id)
+            .expect("Area2D should have a signal store");
+        let body = area_store
+            .get_signal("body_entered")
+            .expect("should have 'body_entered'");
         assert_eq!(body.connection_count(), 1);
         assert_eq!(body.connections()[0].method, "_on_body_entered");
     }
@@ -899,7 +905,9 @@ value = 42
         let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
 
         let child_id = tree.get_node_by_path("/root/Root/Child").unwrap();
-        let store = tree.signal_store(child_id).expect("Child should have signal store");
+        let store = tree
+            .signal_store(child_id)
+            .expect("Child should have signal store");
         let sig = store.get_signal("done").unwrap();
         assert_eq!(sig.connection_count(), 1);
         assert_eq!(sig.connections()[0].target_id, scene_root.object_id());
@@ -927,7 +935,9 @@ value = 42
         let deep_id = tree.get_node_by_path("/root/Root/Parent/Deep").unwrap();
         let parent_id = tree.get_node_by_path("/root/Root/Parent").unwrap();
 
-        let store = tree.signal_store(deep_id).expect("Deep should have signal store");
+        let store = tree
+            .signal_store(deep_id)
+            .expect("Deep should have signal store");
         let sig = store.get_signal("alert").unwrap();
         assert_eq!(sig.connection_count(), 1);
         assert_eq!(sig.connections()[0].target_id, parent_id.object_id());
@@ -1247,7 +1257,9 @@ value = 42
         let b_id = tree.add_child(a_id, b).unwrap();
 
         // Set a property on B.
-        tree.get_node_mut(b_id).unwrap().set_property("frame", Variant::Int(5));
+        tree.get_node_mut(b_id)
+            .unwrap()
+            .set_property("frame", Variant::Int(5));
         tree.add_to_group(b_id, "sprites").unwrap();
 
         let cloned = tree.duplicate_subtree(a_id).unwrap();

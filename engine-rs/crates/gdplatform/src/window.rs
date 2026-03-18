@@ -406,7 +406,14 @@ mod tests {
             alt: false,
         };
         let input = evt.to_input_event().unwrap();
-        assert!(matches!(input, InputEvent::Key { key: Key::Space, pressed: true, .. }));
+        assert!(matches!(
+            input,
+            InputEvent::Key {
+                key: Key::Space,
+                pressed: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -417,7 +424,13 @@ mod tests {
             position: Vector2::new(10.0, 20.0),
         };
         let input = evt.to_input_event().unwrap();
-        assert!(matches!(input, InputEvent::MouseButton { button: MouseButton::Left, .. }));
+        assert!(matches!(
+            input,
+            InputEvent::MouseButton {
+                button: MouseButton::Left,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -434,7 +447,12 @@ mod tests {
         assert!(WindowEvent::CloseRequested.to_input_event().is_none());
         assert!(WindowEvent::FocusGained.to_input_event().is_none());
         assert!(WindowEvent::FocusLost.to_input_event().is_none());
-        assert!((WindowEvent::Resized { width: 800, height: 600 }).to_input_event().is_none());
+        assert!((WindowEvent::Resized {
+            width: 800,
+            height: 600
+        })
+        .to_input_event()
+        .is_none());
     }
 
     #[test]

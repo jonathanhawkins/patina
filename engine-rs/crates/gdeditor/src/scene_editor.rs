@@ -124,7 +124,10 @@ impl SceneEditor {
     ///
     /// If no node is selected, returns [`EditorError::NoSelection`].
     pub fn add_node_to_selected(&mut self, name: &str, class_name: &str) -> EditorResult<NodeId> {
-        let parent_id = self.editor.selected_node().ok_or(EditorError::NoSelection)?;
+        let parent_id = self
+            .editor
+            .selected_node()
+            .ok_or(EditorError::NoSelection)?;
 
         let cmd = EditorCommand::AddNode {
             parent_id,
@@ -151,14 +154,15 @@ impl SceneEditor {
     ///
     /// Clears the selection after deletion.
     pub fn delete_selected(&mut self) -> EditorResult<()> {
-        let node_id = self.editor.selected_node().ok_or(EditorError::NoSelection)?;
-        let node = self
+        let node_id = self
             .editor
-            .tree()
-            .get_node(node_id)
-            .ok_or_else(|| EditorError::Engine(
-                gdcore::error::EngineError::NotFound("node not found".into()),
-            ))?;
+            .selected_node()
+            .ok_or(EditorError::NoSelection)?;
+        let node = self.editor.tree().get_node(node_id).ok_or_else(|| {
+            EditorError::Engine(gdcore::error::EngineError::NotFound(
+                "node not found".into(),
+            ))
+        })?;
         let name = node.name().to_string();
         let class_name = node.class_name().to_string();
 
@@ -176,7 +180,10 @@ impl SceneEditor {
 
     /// Reparents the currently selected node to a new parent via an undoable command.
     pub fn reparent_selected(&mut self, new_parent_id: NodeId) -> EditorResult<()> {
-        let node_id = self.editor.selected_node().ok_or(EditorError::NoSelection)?;
+        let node_id = self
+            .editor
+            .selected_node()
+            .ok_or(EditorError::NoSelection)?;
 
         let cmd = EditorCommand::ReparentNode {
             node_id,
