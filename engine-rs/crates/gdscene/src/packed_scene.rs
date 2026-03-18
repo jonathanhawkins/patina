@@ -110,7 +110,8 @@ impl PackedScene {
         let mut ext_resources: HashMap<String, ExtResourceEntry> = HashMap::new();
         let mut current: Option<NodeTemplate> = None;
 
-        for line in source.lines() {
+        for (line_num, line) in source.lines().enumerate() {
+            let _line_num = line_num + 1; // 1-based, for error reporting
             let line = line.trim();
 
             // Skip empty / comments.

@@ -144,4 +144,34 @@ pub trait ScriptInstance {
 
     /// Returns the human-readable name of this script.
     fn get_script_name(&self) -> &str;
+
+    /// Inject scene-tree access so the script can call get_node / emit_signal.
+    fn set_scene_access(&mut self, _access: Box<dyn SceneAccess>, _node_id: u64) {}
+
+    /// Remove scene-tree access after a script callback finishes.
+    fn clear_scene_access(&mut self) {}
+}
+
+/// Trait providing scene-tree operations to a running script.
+///
+/// The engine crate (`gdscene`) implements this trait on an accessor that wraps
+/// a raw pointer to the `SceneTree`, breaking the circular borrow that would
+/// otherwise prevent a script from calling back into the tree during execution.
+pub trait SceneAccess {
+    /// Resolve a node by path relative to `from`.
+    fn get_node(&self, from: u64, path: &str) -> Option<u64>;
+    /// Return the parent of `node`, if any.
+    fn get_parent(&self, node: u64) -> Option<u64>;
+    /// Return the children of `node`.
+    fn get_children(&self, node: u64) -> Vec<u64>;
+    /// Read a property from `node`.
+    fn get_node_property(&self, node: u64, prop: &str) -> Variant;
+    /// Write a property on `node`.
+    fn set_node_property(&mut self, node: u64, prop: &str, value: Variant);
+    /// Emit a signal on `node`.
+    fn emit_signal(&mut self, node: u64, signal: &str, args: &[Variant]);
+    /// Connect a signal on `source` to `method` on `target`.
+    fn connect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str);
+    /// Return the name of `node`, if it exists.
+    fn get_node_name(&self, node: u64) -> Option<String>;
 }

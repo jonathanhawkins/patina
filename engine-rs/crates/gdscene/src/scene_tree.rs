@@ -583,40 +583,44 @@ impl SceneTree {
 
     // -- script callbacks ---------------------------------------------------
 
+    /// Temporarily extracts a script, gives it scene-tree access via
+    /// [`SceneTreeAccessor`], calls the named method, then re-inserts the
+    /// script. This allows the running script to call back into the tree
+    /// (e.g. `get_node`, `emit_signal`) without violating borrow rules.
+    fn call_script_with_access(&mut self, node_id: NodeId, method: &str, args: &[Variant]) {
+        if let Some(mut script) = self.scripts.remove(&node_id) {
+            let accessor =
+                unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) };
+            script.set_scene_access(Box::new(accessor), node_id.raw());
+            let _ = script.call_method(method, args);
+            script.clear_scene_access();
+            self.scripts.insert(node_id, script);
+        }
+    }
+
     /// Calls `_ready()` on the node's script, if present.
     pub fn process_script_ready(&mut self, node_id: NodeId) {
-        if let Some(script) = self.scripts.get_mut(&node_id) {
-            // Ignore MethodNotFound — the script may not define _ready.
-            let _ = script.call_method("_ready", &[]);
-        }
+        self.call_script_with_access(node_id, "_ready", &[]);
     }
 
     /// Calls `_process(delta)` on the node's script, if present.
     pub fn process_script_process(&mut self, node_id: NodeId, delta: f64) {
-        if let Some(script) = self.scripts.get_mut(&node_id) {
-            let _ = script.call_method("_process", &[Variant::Float(delta)]);
-        }
+        self.call_script_with_access(node_id, "_process", &[Variant::Float(delta)]);
     }
 
     /// Calls `_physics_process(delta)` on the node's script, if present.
     pub fn process_script_physics_process(&mut self, node_id: NodeId, delta: f64) {
-        if let Some(script) = self.scripts.get_mut(&node_id) {
-            let _ = script.call_method("_physics_process", &[Variant::Float(delta)]);
-        }
+        self.call_script_with_access(node_id, "_physics_process", &[Variant::Float(delta)]);
     }
 
     /// Calls `_enter_tree()` on the node's script, if present.
     pub fn process_script_enter_tree(&mut self, node_id: NodeId) {
-        if let Some(script) = self.scripts.get_mut(&node_id) {
-            let _ = script.call_method("_enter_tree", &[]);
-        }
+        self.call_script_with_access(node_id, "_enter_tree", &[]);
     }
 
     /// Calls `_exit_tree()` on the node's script, if present.
     pub fn process_script_exit_tree(&mut self, node_id: NodeId) {
-        if let Some(script) = self.scripts.get_mut(&node_id) {
-            let _ = script.call_method("_exit_tree", &[]);
-        }
+        self.call_script_with_access(node_id, "_exit_tree", &[]);
     }
 
     /// Calls `_process(delta)` on all nodes that have attached scripts.

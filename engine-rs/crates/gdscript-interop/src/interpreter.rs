@@ -5,55 +5,145 @@
 //! (print, str, int, float, len, range, typeof) are provided out of the box.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use gdvariant::Variant;
 
-use crate::bindings::{MethodFlags, MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo};
-use crate::parser::{Annotation, AssignOp, BinOp, Expr, Parser, Stmt, UnaryOp};
+use crate::bindings::{
+    MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
+};
+use crate::parser::{Annotation, AssignOp, BinOp, Expr, MatchPattern, Parser, Stmt, UnaryOp};
 use crate::tokenizer::tokenize;
 
 /// Maximum call-stack depth before we bail out.
 const MAX_RECURSION_DEPTH: usize = 64;
 
-/// A runtime error produced during interpretation.
+/// Source location for error reporting.
+#[derive(Debug, Clone)]
+pub struct SourceLocation {
+    pub line: usize,
+    pub column: usize,
+    pub source_line: String,
+}
+
+impl fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "line {}, column {}", self.line, self.column)?;
+        if !self.source_line.is_empty() {
+            write!(f, "\n  | {}", self.source_line)?;
+            if self.column > 0 {
+                write!(f, "\n  | {}^", " ".repeat(self.column - 1))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StackFrame {
+    pub function_name: String,
+    pub source_location: Option<SourceLocation>,
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum RuntimeError {
-    /// Reference to a variable that has not been defined.
+pub enum RuntimeErrorKind {
     #[error("undefined variable: '{0}'")]
     UndefinedVariable(String),
-
-    /// A type mismatch during an operation.
     #[error("type error: {0}")]
     TypeError(String),
-
-    /// Division (or modulo) by zero.
     #[error("division by zero")]
     DivisionByZero,
-
-    /// Call to a function that does not exist.
     #[error("undefined function: '{0}'")]
     UndefinedFunction(String),
-
-    /// Array or string index out of bounds.
     #[error("index out of bounds: {index} (length {length})")]
-    IndexOutOfBounds {
-        /// The index that was accessed.
-        index: i64,
-        /// The length of the container.
-        length: usize,
-    },
-
-    /// Exceeded the maximum recursion depth.
+    IndexOutOfBounds { index: i64, length: usize },
     #[error("maximum recursion depth exceeded ({0})")]
     MaxRecursionDepth(usize),
-
-    /// Propagated parse error.
     #[error("parse error: {0}")]
     ParseError(String),
-
-    /// Propagated lex error.
     #[error("lex error: {0}")]
     LexError(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeError {
+    pub kind: RuntimeErrorKind,
+    pub source_location: Option<SourceLocation>,
+    pub call_stack: Vec<StackFrame>,
+}
+
+impl RuntimeError {
+    pub fn new(kind: RuntimeErrorKind) -> Self {
+        Self {
+            kind,
+            source_location: None,
+            call_stack: Vec::new(),
+        }
+    }
+    pub fn with_location(mut self, loc: SourceLocation) -> Self {
+        self.source_location = Some(loc);
+        self
+    }
+    pub fn with_call_stack(mut self, stack: Vec<StackFrame>) -> Self {
+        self.call_stack = stack;
+        self
+    }
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.kind)?;
+        if let Some(ref loc) = self.source_location {
+            write!(f, " at {loc}")?;
+        }
+        if !self.call_stack.is_empty() {
+            write!(f, "\nCall stack:")?;
+            for frame in self.call_stack.iter().rev() {
+                write!(f, "\n  in {}", frame.function_name)?;
+                if let Some(ref loc) = frame.source_location {
+                    write!(f, " (line {})", loc.line)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.kind)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ScriptWarning {
+    UnusedVariable {
+        name: String,
+        location: SourceLocation,
+    },
+    ShadowedVariable {
+        name: String,
+        location: SourceLocation,
+    },
+    UnreachableCode {
+        location: SourceLocation,
+    },
+}
+
+impl fmt::Display for ScriptWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScriptWarning::UnusedVariable { name, location } => {
+                write!(f, "warning: unused variable '{name}' at {location}")
+            }
+            ScriptWarning::ShadowedVariable { name, location } => {
+                write!(f, "warning: variable '{name}' shadows outer at {location}")
+            }
+            ScriptWarning::UnreachableCode { location } => {
+                write!(f, "warning: unreachable code at {location}")
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +183,9 @@ impl Environment {
                 return Ok(v.clone());
             }
         }
-        Err(RuntimeError::UndefinedVariable(name.to_string()))
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
+            name.to_string(),
+        )))
     }
 
     /// Set an existing variable. Searches scopes from inner to outer.
@@ -104,7 +196,22 @@ impl Environment {
                 return Ok(());
             }
         }
-        Err(RuntimeError::UndefinedVariable(name.to_string()))
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
+            name.to_string(),
+        )))
+    }
+
+    #[allow(dead_code)]
+    fn exists_in_outer_scope(&self, name: &str) -> bool {
+        if self.scopes.len() < 2 {
+            return false;
+        }
+        for scope in self.scopes[..self.scopes.len() - 1].iter().rev() {
+            if scope.contains_key(name) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -133,7 +240,6 @@ pub struct InterpreterResult {
 }
 
 /// A tree-walk interpreter for GDScript.
-#[derive(Debug, Clone)]
 pub struct Interpreter {
     environment: Environment,
     function_registry: HashMap<String, FuncDef>,
@@ -143,6 +249,47 @@ pub struct Interpreter {
     self_instance: Option<ClassInstance>,
     /// Registry of known class definitions (for super lookup).
     class_registry: HashMap<String, ClassDef>,
+    source_lines: Vec<String>,
+    current_line: usize,
+    current_col: usize,
+    current_function: Option<String>,
+    call_stack_frames: Vec<StackFrame>,
+    warnings: Vec<ScriptWarning>,
+    /// Scene-tree access for `get_node`, `emit_signal`, etc.
+    pub(crate) scene_access: Option<Box<dyn SceneAccess>>,
+    /// The raw NodeId of the node this script is attached to.
+    pub(crate) current_node_id: Option<u64>,
+}
+
+impl fmt::Debug for Interpreter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Interpreter")
+            .field("call_depth", &self.call_depth)
+            .field("scene_access", &self.scene_access.is_some())
+            .field("current_node_id", &self.current_node_id)
+            .finish()
+    }
+}
+
+impl Clone for Interpreter {
+    fn clone(&self) -> Self {
+        Self {
+            environment: self.environment.clone(),
+            function_registry: self.function_registry.clone(),
+            output: self.output.clone(),
+            call_depth: self.call_depth,
+            self_instance: self.self_instance.clone(),
+            class_registry: self.class_registry.clone(),
+            source_lines: self.source_lines.clone(),
+            current_line: self.current_line,
+            current_col: self.current_col,
+            current_function: self.current_function.clone(),
+            call_stack_frames: self.call_stack_frames.clone(),
+            warnings: self.warnings.clone(),
+            scene_access: None,
+            current_node_id: self.current_node_id,
+        }
+    }
 }
 
 /// A stored user-defined function.
@@ -214,17 +361,90 @@ impl Interpreter {
             call_depth: 0,
             self_instance: None,
             class_registry: HashMap::new(),
+
+            source_lines: Vec::new(),
+            current_line: 0,
+            current_col: 0,
+            current_function: None,
+            call_stack_frames: Vec::new(),
+            warnings: Vec::new(),
+            scene_access: None,
+            current_node_id: None,
+        }
+    }
+
+    /// Sets scene-tree access for the interpreter.
+    pub fn set_scene_access(&mut self, access: Box<dyn SceneAccess>, node_id: u64) {
+        self.scene_access = Some(access);
+        self.current_node_id = Some(node_id);
+    }
+
+    /// Clears scene-tree access after a method call.
+    pub fn clear_scene_access(&mut self) {
+        self.scene_access = None;
+    }
+
+    pub fn warnings(&self) -> &[ScriptWarning] {
+        &self.warnings
+    }
+
+    fn make_location(&self) -> SourceLocation {
+        let line_text = if self.current_line > 0 && self.current_line <= self.source_lines.len() {
+            self.source_lines[self.current_line - 1].to_string()
+        } else {
+            String::new()
+        };
+        SourceLocation {
+            line: self.current_line,
+            column: self.current_col,
+            source_line: line_text,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn make_error(&self, kind: RuntimeErrorKind) -> RuntimeError {
+        RuntimeError {
+            kind,
+            source_location: Some(self.make_location()),
+            call_stack: self.call_stack_frames.clone(),
+        }
+    }
+
+    fn check_unreachable_code(&mut self, stmts: &[Stmt]) {
+        let mut found_return = false;
+        for stmt in stmts {
+            if found_return {
+                self.warnings.push(ScriptWarning::UnreachableCode {
+                    location: self.make_location(),
+                });
+                break;
+            }
+            if matches!(stmt, Stmt::Return(_)) {
+                found_return = true;
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn check_shadowed_variable(&mut self, name: &str) {
+        if self.environment.exists_in_outer_scope(name) {
+            self.warnings.push(ScriptWarning::ShadowedVariable {
+                name: name.to_string(),
+                location: self.make_location(),
+            });
         }
     }
 
     /// Tokenizes, parses, and executes a GDScript source string.
     pub fn run(&mut self, source: &str) -> Result<InterpreterResult, RuntimeError> {
-        let tokens = tokenize(source).map_err(|e| RuntimeError::LexError(e.to_string()))?;
-        let mut parser = Parser::new(tokens);
+        self.source_lines = source.lines().map(|l| l.to_string()).collect();
+        let tokens = tokenize(source)
+            .map_err(|e| RuntimeError::new(RuntimeErrorKind::LexError(e.to_string())))?;
+        let mut parser = Parser::new(tokens, source);
         let stmts = parser
             .parse_script()
-            .map_err(|e| RuntimeError::ParseError(e.to_string()))?;
-
+            .map_err(|e| RuntimeError::new(RuntimeErrorKind::ParseError(e.to_string())))?;
+        self.check_unreachable_code(&stmts);
         let mut last_return = None;
         for stmt in &stmts {
             if let Some(ControlFlow::Return(v)) = self.exec_stmt(stmt)? {
@@ -232,7 +452,6 @@ impl Interpreter {
                 break;
             }
         }
-
         Ok(InterpreterResult {
             output: self.output.clone(),
             return_value: last_return,
@@ -308,10 +527,10 @@ impl Interpreter {
                 let items = match iter_val {
                     Variant::Array(a) => a,
                     other => {
-                        return Err(RuntimeError::TypeError(format!(
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot iterate over {}",
                             other.variant_type()
-                        )));
+                        ))));
                     }
                 };
                 for item in &items {
@@ -359,6 +578,22 @@ impl Interpreter {
 
             Stmt::Continue => Ok(Some(ControlFlow::Continue)),
 
+            Stmt::Match { value, arms } => {
+                let val = self.eval_expr(value)?;
+                for arm in arms {
+                    if let Some(bindings) = self.match_pattern(&arm.pattern, &val) {
+                        self.environment.push_scope();
+                        for (n, v) in bindings {
+                            self.environment.define(n, v);
+                        }
+                        let r = self.exec_block_no_scope(&arm.body);
+                        self.environment.pop_scope();
+                        return r;
+                    }
+                }
+                Ok(None)
+            }
+
             // Class-level statements are no-ops during normal execution;
             // they are processed by `run_class()`.
             Stmt::Extends { .. }
@@ -381,6 +616,48 @@ impl Interpreter {
         Ok(result)
     }
 
+    fn exec_block_no_scope(&mut self, stmts: &[Stmt]) -> Result<Option<ControlFlow>, RuntimeError> {
+        for stmt in stmts {
+            if let Some(cf) = self.exec_stmt(stmt)? {
+                return Ok(Some(cf));
+            }
+        }
+        Ok(None)
+    }
+    fn match_pattern(
+        &self,
+        pattern: &MatchPattern,
+        value: &Variant,
+    ) -> Option<Vec<(String, Variant)>> {
+        match pattern {
+            MatchPattern::Wildcard => Some(vec![]),
+            MatchPattern::Variable(name) => Some(vec![(name.clone(), value.clone())]),
+            MatchPattern::Literal(lit) => {
+                if variant_eq(lit, value) {
+                    Some(vec![])
+                } else {
+                    None
+                }
+            }
+            MatchPattern::Array(patterns) => {
+                if let Variant::Array(arr) = value {
+                    if arr.len() != patterns.len() {
+                        return None;
+                    }
+                    let mut bindings = vec![];
+                    for (pat, val) in patterns.iter().zip(arr.iter()) {
+                        match self.match_pattern(pat, val) {
+                            Some(b) => bindings.extend(b),
+                            None => return None,
+                        }
+                    }
+                    Some(bindings)
+                } else {
+                    None
+                }
+            }
+        }
+    }
     fn exec_assignment(
         &mut self,
         target: &Expr,
@@ -408,9 +685,9 @@ impl Interpreter {
                 let container_name = match object.as_ref() {
                     Expr::Ident(n) => n.clone(),
                     _ => {
-                        return Err(RuntimeError::TypeError(
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "indexed assignment only supported on variables".into(),
-                        ));
+                        )));
                     }
                 };
                 let mut container = self.environment.get(&container_name)?;
@@ -432,9 +709,9 @@ impl Interpreter {
                 // Handle self.member = value
                 if matches!(object.as_ref(), Expr::SelfRef) {
                     if self.self_instance.is_none() {
-                        return Err(RuntimeError::TypeError(
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "'self' used outside of a class instance".into(),
-                        ));
+                        )));
                     }
                     let final_val = match op {
                         AssignOp::Assign => rhs,
@@ -468,12 +745,39 @@ impl Interpreter {
                         .insert(member.clone(), final_val);
                     return Ok(());
                 }
+                // Check if the object evaluates to an ObjectId
+                let obj_val = self.eval_expr(object)?;
+                if let Variant::ObjectId(oid) = &obj_val {
+                    let final_val = match op {
+                        AssignOp::Assign => rhs,
+                        AssignOp::AddAssign => {
+                            let cur = if let Some(ref access) = self.scene_access {
+                                access.get_node_property(oid.raw(), member)
+                            } else {
+                                Variant::Nil
+                            };
+                            self.binary_add(&cur, &rhs)?
+                        }
+                        AssignOp::SubAssign => {
+                            let cur = if let Some(ref access) = self.scene_access {
+                                access.get_node_property(oid.raw(), member)
+                            } else {
+                                Variant::Nil
+                            };
+                            self.binary_sub(&cur, &rhs)?
+                        }
+                    };
+                    if let Some(ref mut access) = self.scene_access {
+                        access.set_node_property(oid.raw(), member, final_val);
+                    }
+                    return Ok(());
+                }
                 let obj_name = match object.as_ref() {
                     Expr::Ident(n) => n.clone(),
                     _ => {
-                        return Err(RuntimeError::TypeError(
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "member assignment only supported on variables".into(),
-                        ));
+                        )));
                     }
                 };
                 let mut container = self.environment.get(&obj_name)?;
@@ -491,7 +795,9 @@ impl Interpreter {
                 set_index(&mut container, &Variant::String(member.clone()), final_val)?;
                 self.environment.set(&obj_name, container)
             }
-            _ => Err(RuntimeError::TypeError("invalid assignment target".into())),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "invalid assignment target".into(),
+            ))),
         }
     }
 
@@ -503,7 +809,13 @@ impl Interpreter {
         match expr {
             Expr::Literal(v) => Ok(v.clone()),
 
-            Expr::Ident(name) => self.environment.get(name),
+            Expr::Ident(name) => match name.as_str() {
+                "PI" => Ok(Variant::Float(std::f64::consts::PI)),
+                "TAU" => Ok(Variant::Float(std::f64::consts::TAU)),
+                "INF" => Ok(Variant::Float(f64::INFINITY)),
+                "NAN" => Ok(Variant::Float(f64::NAN)),
+                _ => self.environment.get(name),
+            },
 
             Expr::BinaryOp { left, op, right } => {
                 let lhs = self.eval_expr(left)?;
@@ -533,10 +845,10 @@ impl Interpreter {
                     UnaryOp::Neg => match val {
                         Variant::Int(i) => Ok(Variant::Int(-i)),
                         Variant::Float(f) => Ok(Variant::Float(-f)),
-                        _ => Err(RuntimeError::TypeError(format!(
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot negate {}",
                             val.variant_type()
-                        ))),
+                        )))),
                     },
                     UnaryOp::Not => Ok(Variant::Bool(!val.is_truthy())),
                 }
@@ -566,7 +878,9 @@ impl Interpreter {
                     }
                     // super() — call parent class method with same name
                     Expr::SuperRef => self.call_super(&evaluated_args),
-                    _ => Err(RuntimeError::TypeError("not callable".into())),
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "not callable".into(),
+                    ))),
                 }
             }
 
@@ -574,27 +888,31 @@ impl Interpreter {
                 // Handle self.member specially
                 if matches!(object.as_ref(), Expr::SelfRef) {
                     if let Some(ref inst) = self.self_instance {
-                        return inst
-                            .properties
-                            .get(member)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::UndefinedVariable(member.clone()));
+                        return inst.properties.get(member).cloned().ok_or_else(|| {
+                            RuntimeError::new(RuntimeErrorKind::UndefinedVariable(member.clone()))
+                        });
                     } else {
-                        return Err(RuntimeError::TypeError(
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "'self' used outside of a class instance".into(),
-                        ));
+                        )));
                     }
                 }
                 let obj = self.eval_expr(object)?;
+                // ObjectId property access via scene_access
+                if let Variant::ObjectId(oid) = &obj {
+                    if let Some(ref access) = self.scene_access {
+                        let val = access.get_node_property(oid.raw(), member);
+                        return Ok(val);
+                    }
+                }
                 match &obj {
-                    Variant::Dictionary(d) => d
-                        .get(member)
-                        .cloned()
-                        .ok_or_else(|| RuntimeError::UndefinedVariable(member.clone())),
-                    _ => Err(RuntimeError::TypeError(format!(
+                    Variant::Dictionary(d) => d.get(member).cloned().ok_or_else(|| {
+                        RuntimeError::new(RuntimeErrorKind::UndefinedVariable(member.clone()))
+                    }),
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "cannot access member on {}",
                         obj.variant_type()
-                    ))),
+                    )))),
                 }
             }
 
@@ -630,15 +948,46 @@ impl Interpreter {
                 if let Some(ref inst) = self.self_instance {
                     Ok(Variant::Dictionary(inst.properties.clone()))
                 } else {
-                    Err(RuntimeError::TypeError(
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "'self' used outside of a class instance".into(),
-                    ))
+                    )))
                 }
             }
 
             Expr::SuperRef => {
                 // super is only meaningful as a call target; return Nil as marker
                 Ok(Variant::Nil)
+            }
+            Expr::Ternary {
+                value,
+                condition,
+                else_value,
+            } => {
+                let cond = self.eval_expr(condition)?;
+                if cond.is_truthy() {
+                    self.eval_expr(value)
+                } else {
+                    self.eval_expr(else_value)
+                }
+            }
+
+            Expr::GetNode(path) => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    match access.get_node(node_id, path) {
+                        Some(target_id) => {
+                            Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(target_id)))
+                        }
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "node not found: {path}"
+                        )))),
+                    }
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_node() requires scene access".into(),
+                    )))
+                }
             }
         }
     }
@@ -670,10 +1019,10 @@ impl Interpreter {
                     };
                     Ok(Variant::Bool(d.contains_key(&key)))
                 }
-                _ => Err(RuntimeError::TypeError(format!(
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                     "cannot use 'in' with {}",
                     rhs.variant_type()
-                ))),
+                )))),
             },
             // And/Or handled via short-circuit in eval_expr
             BinOp::And | BinOp::Or => unreachable!(),
@@ -689,11 +1038,11 @@ impl Interpreter {
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 + b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a + *b as f64)),
             (Variant::String(a), Variant::String(b)) => Ok(Variant::String(format!("{a}{b}"))),
-            _ => Err(RuntimeError::TypeError(format!(
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot add {} and {}",
                 lhs.variant_type(),
                 rhs.variant_type()
-            ))),
+            )))),
         }
     }
 
@@ -703,11 +1052,11 @@ impl Interpreter {
             (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a - b)),
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 - b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a - *b as f64)),
-            _ => Err(RuntimeError::TypeError(format!(
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot subtract {} from {}",
                 rhs.variant_type(),
                 lhs.variant_type()
-            ))),
+            )))),
         }
     }
 
@@ -717,11 +1066,11 @@ impl Interpreter {
             (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a * b)),
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 * b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a * *b as f64)),
-            _ => Err(RuntimeError::TypeError(format!(
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot multiply {} and {}",
                 lhs.variant_type(),
                 rhs.variant_type()
-            ))),
+            )))),
         }
     }
 
@@ -729,67 +1078,74 @@ impl Interpreter {
         match (lhs, rhs) {
             (Variant::Int(a), Variant::Int(b)) => {
                 if *b == 0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Int(a / b))
             }
             (Variant::Float(a), Variant::Float(b)) => {
                 if *b == 0.0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Float(a / b))
             }
             (Variant::Int(a), Variant::Float(b)) => {
                 if *b == 0.0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Float(*a as f64 / b))
             }
             (Variant::Float(a), Variant::Int(b)) => {
                 if *b == 0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Float(a / *b as f64))
             }
-            _ => Err(RuntimeError::TypeError(format!(
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot divide {} by {}",
                 lhs.variant_type(),
                 rhs.variant_type()
-            ))),
+            )))),
         }
     }
 
     fn binary_mod(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
+        if let Variant::String(fmt) = lhs {
+            let values: Vec<Variant> = match rhs {
+                Variant::Array(a) => a.clone(),
+                other => vec![other.clone()],
+            };
+            return Ok(Variant::String(string_format(fmt, &values)));
+        }
         match (lhs, rhs) {
             (Variant::Int(a), Variant::Int(b)) => {
                 if *b == 0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Int(a % b))
             }
             (Variant::Float(a), Variant::Float(b)) => {
                 if *b == 0.0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Float(a % b))
             }
             (Variant::Int(a), Variant::Float(b)) => {
                 if *b == 0.0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Float(*a as f64 % b))
             }
             (Variant::Float(a), Variant::Int(b)) => {
                 if *b == 0 {
-                    return Err(RuntimeError::DivisionByZero);
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Float(a % *b as f64))
             }
-            _ => Err(RuntimeError::TypeError(format!(
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot modulo {} by {}",
                 lhs.variant_type(),
                 rhs.variant_type()
-            ))),
+            )))),
         }
     }
 
@@ -812,11 +1168,11 @@ impl Interpreter {
                 .unwrap_or(std::cmp::Ordering::Equal),
             (Variant::String(a), Variant::String(b)) => a.cmp(b),
             _ => {
-                return Err(RuntimeError::TypeError(format!(
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                     "cannot compare {} and {}",
                     lhs.variant_type(),
                     rhs.variant_type()
-                )));
+                ))));
             }
         };
         Ok(Variant::Bool(pred(ord)))
@@ -839,17 +1195,17 @@ impl Interpreter {
             }
             "str" => {
                 if args.len() != 1 {
-                    return Err(RuntimeError::TypeError(
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "str() takes exactly 1 argument".into(),
-                    ));
+                    )));
                 }
                 Ok(Some(Variant::String(format!("{}", args[0]))))
             }
             "int" => {
                 if args.len() != 1 {
-                    return Err(RuntimeError::TypeError(
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "int() takes exactly 1 argument".into(),
-                    ));
+                    )));
                 }
                 match &args[0] {
                     Variant::Int(i) => Ok(Some(Variant::Int(*i))),
@@ -857,21 +1213,23 @@ impl Interpreter {
                     Variant::Bool(b) => Ok(Some(Variant::Int(if *b { 1 } else { 0 }))),
                     Variant::String(s) => {
                         let i: i64 = s.parse().map_err(|_| {
-                            RuntimeError::TypeError(format!("cannot convert '{s}' to int"))
+                            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "cannot convert '{s}' to int"
+                            )))
                         })?;
                         Ok(Some(Variant::Int(i)))
                     }
-                    other => Err(RuntimeError::TypeError(format!(
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "cannot convert {} to int",
                         other.variant_type()
-                    ))),
+                    )))),
                 }
             }
             "float" => {
                 if args.len() != 1 {
-                    return Err(RuntimeError::TypeError(
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "float() takes exactly 1 argument".into(),
-                    ));
+                    )));
                 }
                 match &args[0] {
                     Variant::Float(f) => Ok(Some(Variant::Float(*f))),
@@ -879,30 +1237,32 @@ impl Interpreter {
                     Variant::Bool(b) => Ok(Some(Variant::Float(if *b { 1.0 } else { 0.0 }))),
                     Variant::String(s) => {
                         let f: f64 = s.parse().map_err(|_| {
-                            RuntimeError::TypeError(format!("cannot convert '{s}' to float"))
+                            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "cannot convert '{s}' to float"
+                            )))
                         })?;
                         Ok(Some(Variant::Float(f)))
                     }
-                    other => Err(RuntimeError::TypeError(format!(
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "cannot convert {} to float",
                         other.variant_type()
-                    ))),
+                    )))),
                 }
             }
             "len" => {
                 if args.len() != 1 {
-                    return Err(RuntimeError::TypeError(
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "len() takes exactly 1 argument".into(),
-                    ));
+                    )));
                 }
                 match &args[0] {
                     Variant::String(s) => Ok(Some(Variant::Int(s.len() as i64))),
                     Variant::Array(a) => Ok(Some(Variant::Int(a.len() as i64))),
                     Variant::Dictionary(d) => Ok(Some(Variant::Int(d.len() as i64))),
-                    other => Err(RuntimeError::TypeError(format!(
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "len() not supported for {}",
                         other.variant_type()
-                    ))),
+                    )))),
                 }
             }
             "range" => match args.len() {
@@ -911,25 +1271,25 @@ impl Interpreter {
                         let arr: Vec<Variant> = (0..*n).map(Variant::Int).collect();
                         Ok(Some(Variant::Array(arr)))
                     }
-                    _ => Err(RuntimeError::TypeError(
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "range() argument must be int".into(),
-                    )),
+                    ))),
                 },
                 2 => match (&args[0], &args[1]) {
                     (Variant::Int(start), Variant::Int(end)) => {
                         let arr: Vec<Variant> = (*start..*end).map(Variant::Int).collect();
                         Ok(Some(Variant::Array(arr)))
                     }
-                    _ => Err(RuntimeError::TypeError(
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "range() arguments must be int".into(),
-                    )),
+                    ))),
                 },
                 3 => match (&args[0], &args[1], &args[2]) {
                     (Variant::Int(start), Variant::Int(end), Variant::Int(step)) => {
                         if *step == 0 {
-                            return Err(RuntimeError::TypeError(
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                 "range() step cannot be zero".into(),
-                            ));
+                            )));
                         }
                         let mut arr = Vec::new();
                         let mut i = *start;
@@ -946,35 +1306,287 @@ impl Interpreter {
                         }
                         Ok(Some(Variant::Array(arr)))
                     }
-                    _ => Err(RuntimeError::TypeError(
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "range() arguments must be int".into(),
-                    )),
+                    ))),
                 },
-                _ => Err(RuntimeError::TypeError(
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                     "range() takes 1, 2, or 3 arguments".into(),
-                )),
+                ))),
             },
             "typeof" => {
                 if args.len() != 1 {
-                    return Err(RuntimeError::TypeError(
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "typeof() takes exactly 1 argument".into(),
-                    ));
+                    )));
                 }
                 Ok(Some(Variant::String(format!("{}", args[0].variant_type()))))
             }
             "abs" => {
                 if args.len() != 1 {
-                    return Err(RuntimeError::TypeError(
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "abs() takes exactly 1 argument".into(),
-                    ));
+                    )));
                 }
                 match &args[0] {
                     Variant::Int(i) => Ok(Some(Variant::Int(i.abs()))),
                     Variant::Float(f) => Ok(Some(Variant::Float(f.abs()))),
-                    other => Err(RuntimeError::TypeError(format!(
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "abs() not supported for {}",
                         other.variant_type()
+                    )))),
+                }
+            }
+            "preload" | "load" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "preload/load takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(args[0].clone()))
+            }
+            "min" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "min() takes 2 arguments".into(),
+                    )));
+                }
+                Ok(Some(float_or_int(
+                    to_float(&args[0])?.min(to_float(&args[1])?),
+                    &args[0],
+                    &args[1],
+                )))
+            }
+            "max" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "max() takes 2 arguments".into(),
+                    )));
+                }
+                Ok(Some(float_or_int(
+                    to_float(&args[0])?.max(to_float(&args[1])?),
+                    &args[0],
+                    &args[1],
+                )))
+            }
+            "clamp" => {
+                if args.len() != 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "clamp() takes 3 arguments".into(),
+                    )));
+                }
+                let v = to_float(&args[0])?;
+                let lo = to_float(&args[1])?;
+                let hi = to_float(&args[2])?;
+                Ok(Some(float_or_int(v.max(lo).min(hi), &args[0], &args[1])))
+            }
+            "lerp" => {
+                if args.len() != 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "lerp() takes 3 arguments".into(),
+                    )));
+                }
+                let a = to_float(&args[0])?;
+                let b = to_float(&args[1])?;
+                let t = to_float(&args[2])?;
+                Ok(Some(Variant::Float(a + (b - a) * t)))
+            }
+            "sign" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "sign() takes 1 argument".into(),
+                    )));
+                }
+                let v = to_float(&args[0])?;
+                let s = if v > 0.0 {
+                    1.0
+                } else if v < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                Ok(Some(float_or_int(s, &args[0], &args[0])))
+            }
+            "floor" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "floor() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.floor())))
+            }
+            "ceil" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "ceil() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.ceil())))
+            }
+            "round" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "round() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.round())))
+            }
+            "sqrt" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "sqrt() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.sqrt())))
+            }
+            "pow" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "pow() takes 2 arguments".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(
+                    to_float(&args[0])?.powf(to_float(&args[1])?),
+                )))
+            }
+            "sin" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "sin() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.sin())))
+            }
+            "cos" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "cos() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.cos())))
+            }
+            "randi" => Ok(Some(Variant::Int(deterministic_randi()))),
+            "randf" => Ok(Some(Variant::Float(
+                (deterministic_randi() as f64) / (i64::MAX as f64),
+            ))),
+            "randi_range" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "randi_range() takes 2 arguments".into(),
+                    )));
+                }
+                match (&args[0], &args[1]) {
+                    (Variant::Int(lo), Variant::Int(hi)) => {
+                        if hi < lo {
+                            return Ok(Some(Variant::Int(*lo)));
+                        }
+                        let r = (hi - lo + 1) as u64;
+                        Ok(Some(Variant::Int(
+                            lo + ((deterministic_randi().unsigned_abs()) % r) as i64,
+                        )))
+                    }
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "randi_range() arguments must be int".into(),
                     ))),
+                }
+            }
+            "randf_range" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "randf_range() takes 2 arguments".into(),
+                    )));
+                }
+                let lo = to_float(&args[0])?;
+                let hi = to_float(&args[1])?;
+                let t = (deterministic_randi() as f64) / (i64::MAX as f64);
+                Ok(Some(Variant::Float(lo + (hi - lo) * t.abs())))
+            }
+            "get_node" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_node() takes 1 argument".into(),
+                    )));
+                }
+                let path = match &args[0] {
+                    Variant::String(s) => s.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "get_node() argument must be a string".into(),
+                        )))
+                    }
+                };
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    match access.get_node(node_id, &path) {
+                        Some(target_id) => Ok(Some(Variant::ObjectId(
+                            gdcore::id::ObjectId::from_raw(target_id),
+                        ))),
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "node not found: {path}"
+                        )))),
+                    }
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_node() requires scene access".into(),
+                    )))
+                }
+            }
+            "get_parent" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    match access.get_parent(node_id) {
+                        Some(parent_id) => Ok(Some(Variant::ObjectId(
+                            gdcore::id::ObjectId::from_raw(parent_id),
+                        ))),
+                        None => Ok(Some(Variant::Nil)),
+                    }
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_parent() requires scene access".into(),
+                    )))
+                }
+            }
+            "get_children" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    let children = access.get_children(node_id);
+                    let arr: Vec<Variant> = children
+                        .iter()
+                        .map(|id| Variant::ObjectId(gdcore::id::ObjectId::from_raw(*id)))
+                        .collect();
+                    Ok(Some(Variant::Array(arr)))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_children() requires scene access".into(),
+                    )))
+                }
+            }
+            "emit_signal" => {
+                if args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "emit_signal() needs at least a signal name".into(),
+                    )));
+                }
+                let sig_name = match &args[0] {
+                    Variant::String(s) => s.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "emit_signal() first arg must be string".into(),
+                        )))
+                    }
+                };
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.emit_signal(node_id, &sig_name, &args[1..]);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "emit_signal() requires scene access".into(),
+                    )))
                 }
             }
             _ => Ok(None), // Not a built-in
@@ -982,23 +1594,30 @@ impl Interpreter {
     }
 
     fn call_user_func(&mut self, name: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
-        let func = self
-            .function_registry
-            .get(name)
-            .cloned()
-            .ok_or_else(|| RuntimeError::UndefinedFunction(name.to_string()))?;
+        self.call_stack_frames.push(StackFrame {
+            function_name: name.to_string(),
+            source_location: Some(self.make_location()),
+        });
+        let prev_function = self.current_function.take();
+        self.current_function = Some(name.to_string());
+
+        let func = self.function_registry.get(name).cloned().ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::UndefinedFunction(name.to_string()))
+        })?;
 
         if args.len() != func.params.len() {
-            return Err(RuntimeError::TypeError(format!(
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "{}() takes {} arguments, got {}",
                 name,
                 func.params.len(),
                 args.len()
-            )));
+            ))));
         }
 
         if self.call_depth >= MAX_RECURSION_DEPTH {
-            return Err(RuntimeError::MaxRecursionDepth(MAX_RECURSION_DEPTH));
+            return Err(RuntimeError::new(RuntimeErrorKind::MaxRecursionDepth(
+                MAX_RECURSION_DEPTH,
+            )));
         }
         self.call_depth += 1;
 
@@ -1017,6 +1636,8 @@ impl Interpreter {
 
         self.environment.pop_scope();
         self.call_depth -= 1;
+        self.current_function = prev_function;
+        self.call_stack_frames.pop();
         Ok(return_val)
     }
 
@@ -1033,70 +1654,442 @@ impl Interpreter {
                 "size" | "length" => Ok(Variant::Int(arr.len() as i64)),
                 "push_back" | "append" => {
                     if args.len() != 1 {
-                        return Err(RuntimeError::TypeError(format!(
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "{method}() takes 1 argument"
-                        )));
+                        ))));
                     }
-                    // Mutate the array in-place in the environment
-                    let var_name = match object_expr {
-                        Expr::Ident(n) => n.clone(),
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "push_back only on variables".into(),
-                            ));
-                        }
-                    };
-                    let mut container = self.environment.get(&var_name)?;
-                    if let Variant::Array(ref mut a) = container {
+                    let vn = var_name_from_expr(object_expr)?;
+                    let mut c = self.environment.get(&vn)?;
+                    if let Variant::Array(ref mut a) = c {
                         a.push(args[0].clone());
                     }
-                    self.environment.set(&var_name, container)?;
+                    self.environment.set(&vn, c)?;
                     Ok(Variant::Nil)
                 }
                 "pop_back" => {
-                    let var_name = match object_expr {
-                        Expr::Ident(n) => n.clone(),
-                        _ => {
-                            return Err(RuntimeError::TypeError(
-                                "pop_back only on variables".into(),
-                            ));
-                        }
-                    };
-                    let mut container = self.environment.get(&var_name)?;
-                    let result = if let Variant::Array(ref mut a) = container {
+                    let vn = var_name_from_expr(object_expr)?;
+                    let mut c = self.environment.get(&vn)?;
+                    let r = if let Variant::Array(ref mut a) = c {
                         a.pop().unwrap_or(Variant::Nil)
                     } else {
                         Variant::Nil
                     };
-                    self.environment.set(&var_name, container)?;
-                    Ok(result)
+                    self.environment.set(&vn, c)?;
+                    Ok(r)
                 }
-                _ => Err(RuntimeError::UndefinedFunction(format!("Array.{method}"))),
+                "sort" => {
+                    let vn = var_name_from_expr(object_expr)?;
+                    let mut c = self.environment.get(&vn)?;
+                    if let Variant::Array(ref mut a) = c {
+                        a.sort_by(variant_cmp);
+                    }
+                    self.environment.set(&vn, c)?;
+                    Ok(Variant::Nil)
+                }
+                "reverse" => {
+                    let vn = var_name_from_expr(object_expr)?;
+                    let mut c = self.environment.get(&vn)?;
+                    if let Variant::Array(ref mut a) = c {
+                        a.reverse();
+                    }
+                    self.environment.set(&vn, c)?;
+                    Ok(Variant::Nil)
+                }
+                "find" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "find() takes 1 argument".into(),
+                        )));
+                    }
+                    Ok(Variant::Int(
+                        arr.iter()
+                            .position(|v| variant_eq(v, &args[0]))
+                            .map(|idx| idx as i64)
+                            .unwrap_or(-1),
+                    ))
+                }
+                "has" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "has() takes 1 argument".into(),
+                        )));
+                    }
+                    Ok(Variant::Bool(arr.iter().any(|v| variant_eq(v, &args[0]))))
+                }
+                "erase" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "erase() takes 1 argument".into(),
+                        )));
+                    }
+                    let vn = var_name_from_expr(object_expr)?;
+                    let mut c = self.environment.get(&vn)?;
+                    if let Variant::Array(ref mut a) = c {
+                        if let Some(pos) = a.iter().position(|v| variant_eq(v, &args[0])) {
+                            a.remove(pos);
+                        }
+                    }
+                    self.environment.set(&vn, c)?;
+                    Ok(Variant::Nil)
+                }
+                "insert" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "insert() takes 2 arguments".into(),
+                        )));
+                    }
+                    let vn = var_name_from_expr(object_expr)?;
+                    let idx = match &args[0] {
+                        Variant::Int(ii) => *ii as usize,
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "insert() index must be int".into(),
+                            )))
+                        }
+                    };
+                    let mut c = self.environment.get(&vn)?;
+                    if let Variant::Array(ref mut a) = c {
+                        if idx <= a.len() {
+                            a.insert(idx, args[1].clone());
+                        }
+                    }
+                    self.environment.set(&vn, c)?;
+                    Ok(Variant::Nil)
+                }
+                "slice" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "slice() takes 2 arguments".into(),
+                        )));
+                    }
+                    match (&args[0], &args[1]) {
+                        (Variant::Int(from), Variant::Int(to)) => {
+                            let f = (*from).max(0) as usize;
+                            let t = ((*to).max(0) as usize).min(arr.len());
+                            let f = f.min(t);
+                            Ok(Variant::Array(arr[f..t].to_vec()))
+                        }
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "slice() arguments must be int".into(),
+                        ))),
+                    }
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("Array.{method}"),
+                ))),
             },
             Variant::String(s) => match method {
                 "length" => Ok(Variant::Int(s.len() as i64)),
-                _ => Err(RuntimeError::UndefinedFunction(format!("String.{method}"))),
+                "to_upper" => Ok(Variant::String(s.to_uppercase())),
+                "to_lower" => Ok(Variant::String(s.to_lowercase())),
+                "begins_with" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "begins_with() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::String(pp) => Ok(Variant::Bool(s.starts_with(pp.as_str()))),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "begins_with() arg must be string".into(),
+                        ))),
+                    }
+                }
+                "ends_with" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "ends_with() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::String(pp) => Ok(Variant::Bool(s.ends_with(pp.as_str()))),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "ends_with() arg must be string".into(),
+                        ))),
+                    }
+                }
+                "split" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "split() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::String(d) => Ok(Variant::Array(
+                            s.split(d.as_str())
+                                .map(|pp| Variant::String(pp.to_string()))
+                                .collect(),
+                        )),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "split() arg must be string".into(),
+                        ))),
+                    }
+                }
+                "join" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "join() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Array(a) => {
+                            let parts: Vec<String> = a.iter().map(|v| format!("{v}")).collect();
+                            Ok(Variant::String(parts.join(s)))
+                        }
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "join() arg must be array".into(),
+                        ))),
+                    }
+                }
+                "replace" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "replace() takes 2 arguments".into(),
+                        )));
+                    }
+                    match (&args[0], &args[1]) {
+                        (Variant::String(from), Variant::String(to)) => {
+                            Ok(Variant::String(s.replace(from.as_str(), to.as_str())))
+                        }
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "replace() args must be strings".into(),
+                        ))),
+                    }
+                }
+                "find" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "find() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::String(n) => Ok(Variant::Int(
+                            s.find(n.as_str()).map(|idx| idx as i64).unwrap_or(-1),
+                        )),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "find() arg must be string".into(),
+                        ))),
+                    }
+                }
+                "substr" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "substr() takes 2 arguments".into(),
+                        )));
+                    }
+                    match (&args[0], &args[1]) {
+                        (Variant::Int(from), Variant::Int(len)) => Ok(Variant::String(
+                            s.chars().skip(*from as usize).take(*len as usize).collect(),
+                        )),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "substr() args must be int".into(),
+                        ))),
+                    }
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("String.{method}"),
+                ))),
             },
             Variant::Dictionary(d) => match method {
                 "size" => Ok(Variant::Int(d.len() as i64)),
                 "has" => {
                     if args.len() != 1 {
-                        return Err(RuntimeError::TypeError("has() takes 1 argument".into()));
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "has() takes 1 argument".into(),
+                        )));
                     }
                     let key = match &args[0] {
-                        Variant::String(s) => s.clone(),
+                        Variant::String(ss) => ss.clone(),
                         other => format!("{other}"),
                     };
                     Ok(Variant::Bool(d.contains_key(&key)))
                 }
-                _ => Err(RuntimeError::UndefinedFunction(format!(
-                    "Dictionary.{method}"
+                "keys" => Ok(Variant::Array(
+                    d.keys().map(|k| Variant::String(k.clone())).collect(),
+                )),
+                "values" => Ok(Variant::Array(d.values().cloned().collect())),
+                "erase" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "erase() takes 1 argument".into(),
+                        )));
+                    }
+                    let key = match &args[0] {
+                        Variant::String(ss) => ss.clone(),
+                        other => format!("{other}"),
+                    };
+                    let vn = var_name_from_expr(object_expr)?;
+                    let mut c = self.environment.get(&vn)?;
+                    if let Variant::Dictionary(ref mut dm) = c {
+                        dm.remove(&key);
+                    }
+                    self.environment.set(&vn, c)?;
+                    Ok(Variant::Nil)
+                }
+                "merge" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "merge() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Dictionary(other) => {
+                            let vn = var_name_from_expr(object_expr)?;
+                            let mut c = self.environment.get(&vn)?;
+                            if let Variant::Dictionary(ref mut dm) = c {
+                                for (k, v) in other {
+                                    dm.insert(k.clone(), v.clone());
+                                }
+                            }
+                            self.environment.set(&vn, c)?;
+                            Ok(Variant::Nil)
+                        }
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "merge() arg must be dictionary".into(),
+                        ))),
+                    }
+                }
+                "get" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "get() takes 1-2 arguments".into(),
+                        )));
+                    }
+                    let key = match &args[0] {
+                        Variant::String(ss) => ss.clone(),
+                        other => format!("{other}"),
+                    };
+                    let default = if args.len() == 2 {
+                        args[1].clone()
+                    } else {
+                        Variant::Nil
+                    };
+                    Ok(d.get(&key).cloned().unwrap_or(default))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("Dictionary.{method}"),
                 ))),
             },
-            _ => Err(RuntimeError::TypeError(format!(
+            Variant::ObjectId(oid) => {
+                let id = oid.raw();
+                match method {
+                    "get_children" => {
+                        if let Some(ref access) = self.scene_access {
+                            let children = access.get_children(id);
+                            let arr: Vec<Variant> = children
+                                .iter()
+                                .map(|c| Variant::ObjectId(gdcore::id::ObjectId::from_raw(*c)))
+                                .collect();
+                            Ok(Variant::Array(arr))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_parent" => {
+                        if let Some(ref access) = self.scene_access {
+                            match access.get_parent(id) {
+                                Some(pid) => {
+                                    Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(pid)))
+                                }
+                                None => Ok(Variant::Nil),
+                            }
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_node" => {
+                        if args.len() != 1 {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "get_node() takes 1 argument".into(),
+                            )));
+                        }
+                        let path = match &args[0] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "get_node() arg must be string".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref access) = self.scene_access {
+                            match access.get_node(id, &path) {
+                                Some(tid) => {
+                                    Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(tid)))
+                                }
+                                None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    format!("node not found: {path}"),
+                                ))),
+                            }
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "connect" => {
+                        if args.len() < 3 {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "connect() needs signal, target, method".into(),
+                            )));
+                        }
+                        let signal = match &args[0] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "connect() signal must be string".into(),
+                                )))
+                            }
+                        };
+                        let target_id = match &args[1] {
+                            Variant::ObjectId(tid) => tid.raw(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "connect() target must be ObjectId".into(),
+                                )))
+                            }
+                        };
+                        let method_name = match &args[2] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "connect() method must be string".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.connect_signal(id, &signal, target_id, &method_name);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_name" => {
+                        if let Some(ref access) = self.scene_access {
+                            match access.get_node_name(id) {
+                                Some(name) => Ok(Variant::String(name)),
+                                None => Ok(Variant::Nil),
+                            }
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!("ObjectId.{method}"),
+                    ))),
+                }
+            }
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot call method on {}",
                 obj.variant_type()
-            ))),
+            )))),
         }
     }
 
@@ -1106,11 +2099,12 @@ impl Interpreter {
 
     /// Parses a GDScript source as a class definition.
     pub fn run_class(&mut self, source: &str) -> Result<ClassDef, RuntimeError> {
-        let tokens = tokenize(source).map_err(|e| RuntimeError::LexError(e.to_string()))?;
-        let mut parser = Parser::new(tokens);
+        let tokens = tokenize(source)
+            .map_err(|e| RuntimeError::new(RuntimeErrorKind::LexError(e.to_string())))?;
+        let mut parser = Parser::new(tokens, source);
         let stmts = parser
             .parse_script()
-            .map_err(|e| RuntimeError::ParseError(e.to_string()))?;
+            .map_err(|e| RuntimeError::new(RuntimeErrorKind::ParseError(e.to_string())))?;
 
         let mut class_def = ClassDef {
             name: None,
@@ -1213,19 +2207,23 @@ impl Interpreter {
             .methods
             .get(method_name)
             .cloned()
-            .ok_or_else(|| RuntimeError::UndefinedFunction(method_name.to_string()))?;
+            .ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::UndefinedFunction(method_name.to_string()))
+            })?;
 
         if args.len() != func.params.len() {
-            return Err(RuntimeError::TypeError(format!(
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "{}() takes {} arguments, got {}",
                 method_name,
                 func.params.len(),
                 args.len()
-            )));
+            ))));
         }
 
         if self.call_depth >= MAX_RECURSION_DEPTH {
-            return Err(RuntimeError::MaxRecursionDepth(MAX_RECURSION_DEPTH));
+            return Err(RuntimeError::new(RuntimeErrorKind::MaxRecursionDepth(
+                MAX_RECURSION_DEPTH,
+            )));
         }
         self.call_depth += 1;
 
@@ -1269,23 +2267,29 @@ impl Interpreter {
             .self_instance
             .as_ref()
             .and_then(|inst| inst.class_def.parent_class.clone())
-            .ok_or_else(|| RuntimeError::TypeError("super() called but no parent class".into()))?;
+            .ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "super() called but no parent class".into(),
+                ))
+            })?;
 
         let parent_def = self
             .class_registry
             .get(&parent_name)
             .cloned()
             .ok_or_else(|| {
-                RuntimeError::UndefinedFunction(format!("parent class '{parent_name}'"))
+                RuntimeError::new(RuntimeErrorKind::UndefinedFunction(format!(
+                    "parent class '{parent_name}'"
+                )))
             })?;
 
         if let Some(func) = parent_def.methods.get("_init") {
             if args.len() != func.params.len() {
-                return Err(RuntimeError::TypeError(format!(
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                     "super() takes {} arguments, got {}",
                     func.params.len(),
                     args.len()
-                )));
+                ))));
             }
             self.environment.push_scope();
             for (param, arg) in func.params.iter().zip(args.iter()) {
@@ -1324,15 +2328,17 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
             } else {
                 *i as usize
             };
-            a.get(index).cloned().ok_or(RuntimeError::IndexOutOfBounds {
-                index: *i,
-                length: a.len(),
-            })
+            a.get(index)
+                .cloned()
+                .ok_or(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                    index: *i,
+                    length: a.len(),
+                }))
         }
         (Variant::Dictionary(d), Variant::String(k)) => d
             .get(k)
             .cloned()
-            .ok_or_else(|| RuntimeError::UndefinedVariable(k.clone())),
+            .ok_or_else(|| RuntimeError::new(RuntimeErrorKind::UndefinedVariable(k.clone()))),
         (Variant::String(s), Variant::Int(i)) => {
             let index = if *i < 0 {
                 (s.len() as i64 + i) as usize
@@ -1342,16 +2348,16 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
             s.chars()
                 .nth(index)
                 .map(|c| Variant::String(c.to_string()))
-                .ok_or(RuntimeError::IndexOutOfBounds {
+                .ok_or(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
                     index: *i,
                     length: s.len(),
-                })
+                }))
         }
-        _ => Err(RuntimeError::TypeError(format!(
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
             "cannot index {} with {}",
             container.variant_type(),
             idx.variant_type()
-        ))),
+        )))),
     }
 }
 
@@ -1364,10 +2370,10 @@ fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(
                 *i as usize
             };
             if index >= a.len() {
-                return Err(RuntimeError::IndexOutOfBounds {
+                return Err(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
                     index: *i,
                     length: a.len(),
-                });
+                }));
             }
             a[index] = value;
             Ok(())
@@ -1376,8 +2382,115 @@ fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(
             d.insert(k.clone(), value);
             Ok(())
         }
-        _ => Err(RuntimeError::TypeError("invalid index assignment".into())),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+            "invalid index assignment".into(),
+        ))),
     }
+}
+
+fn var_name_from_expr(expr: &Expr) -> Result<String, RuntimeError> {
+    match expr {
+        Expr::Ident(n) => Ok(n.clone()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+            "method only supported on variables".into(),
+        ))),
+    }
+}
+fn variant_cmp(a: &Variant, b: &Variant) -> std::cmp::Ordering {
+    match (a, b) {
+        (Variant::Int(x), Variant::Int(y)) => x.cmp(y),
+        (Variant::Float(x), Variant::Float(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Variant::Int(x), Variant::Float(y)) => (*x as f64)
+            .partial_cmp(y)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Variant::Float(x), Variant::Int(y)) => x
+            .partial_cmp(&(*y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Variant::String(x), Variant::String(y)) => x.cmp(y),
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+fn to_float(v: &Variant) -> Result<f64, RuntimeError> {
+    match v {
+        Variant::Float(f) => Ok(*f),
+        Variant::Int(ii) => Ok(*ii as f64),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "expected number, got {}",
+            v.variant_type()
+        )))),
+    }
+}
+fn float_or_int(val: f64, a: &Variant, b: &Variant) -> Variant {
+    if matches!(a, Variant::Int(_)) && matches!(b, Variant::Int(_)) && val.fract() == 0.0 {
+        Variant::Int(val as i64)
+    } else {
+        Variant::Float(val)
+    }
+}
+fn deterministic_randi() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static COUNTER: AtomicI64 = AtomicI64::new(42);
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    (c.wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407))
+        & i64::MAX
+}
+fn string_format(fmt: &str, values: &[Variant]) -> String {
+    let mut result = String::new();
+    let mut chars = fmt.chars().peekable();
+    let mut idx = 0;
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.peek() {
+                Some('%') => {
+                    chars.next();
+                    result.push('%');
+                }
+                Some('s') => {
+                    chars.next();
+                    if idx < values.len() {
+                        result.push_str(&format!("{}", values[idx]));
+                        idx += 1;
+                    }
+                }
+                Some('d') => {
+                    chars.next();
+                    if idx < values.len() {
+                        match &values[idx] {
+                            Variant::Int(ii) => result.push_str(&ii.to_string()),
+                            Variant::Float(ff) => result.push_str(&(*ff as i64).to_string()),
+                            v => result.push_str(&format!("{v}")),
+                        }
+                        idx += 1;
+                    }
+                }
+                Some('f') => {
+                    chars.next();
+                    if idx < values.len() {
+                        match &values[idx] {
+                            Variant::Float(ff) => result.push_str(&format!("{:.6}", ff)),
+                            Variant::Int(ii) => result.push_str(&format!("{:.6}", *ii as f64)),
+                            v => result.push_str(&format!("{v}")),
+                        }
+                        idx += 1;
+                    }
+                }
+                Some('v') => {
+                    chars.next();
+                    if idx < values.len() {
+                        result.push_str(&format!("{}", values[idx]));
+                        idx += 1;
+                    }
+                }
+                _ => result.push('%'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn variant_eq(a: &Variant, b: &Variant) -> bool {
@@ -1420,9 +2533,9 @@ impl ScriptInstance for GDScriptInstance {
     fn call_method(&mut self, name: &str, args: &[Variant]) -> Result<Variant, ScriptError> {
         self.interpreter
             .call_user_func(name, args)
-            .map_err(|e| match e {
-                RuntimeError::UndefinedFunction(n) => ScriptError::MethodNotFound(n),
-                RuntimeError::TypeError(msg) => ScriptError::TypeError(msg),
+            .map_err(|e| match e.kind {
+                RuntimeErrorKind::UndefinedFunction(n) => ScriptError::MethodNotFound(n),
+                RuntimeErrorKind::TypeError(msg) => ScriptError::TypeError(msg),
                 other => ScriptError::TypeError(other.to_string()),
             })
     }
@@ -1713,7 +2826,7 @@ func inf(n):
 inf(0)
 ";
         let err = run_err(src);
-        assert!(matches!(err, RuntimeError::MaxRecursionDepth(_)));
+        assert!(matches!(err.kind, RuntimeErrorKind::MaxRecursionDepth(_)));
     }
 
     // -- Arrays -------------------------------------------------------------
@@ -1863,31 +2976,34 @@ return d[\"b\"]
     #[test]
     fn undefined_variable_error() {
         let err = run_err("return x\n");
-        assert!(matches!(err, RuntimeError::UndefinedVariable(_)));
+        assert!(matches!(err.kind, RuntimeErrorKind::UndefinedVariable(_)));
     }
 
     #[test]
     fn division_by_zero_error() {
         let err = run_err("return 1 / 0\n");
-        assert!(matches!(err, RuntimeError::DivisionByZero));
+        assert!(matches!(err.kind, RuntimeErrorKind::DivisionByZero));
     }
 
     #[test]
     fn type_error_add_int_bool() {
         let err = run_err("return 1 + true\n");
-        assert!(matches!(err, RuntimeError::TypeError(_)));
+        assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
     }
 
     #[test]
     fn undefined_function_error() {
         let err = run_err("foo()\n");
-        assert!(matches!(err, RuntimeError::UndefinedFunction(_)));
+        assert!(matches!(err.kind, RuntimeErrorKind::UndefinedFunction(_)));
     }
 
     #[test]
     fn index_out_of_bounds_error() {
         let err = run_err("return [1, 2][5]\n");
-        assert!(matches!(err, RuntimeError::IndexOutOfBounds { .. }));
+        assert!(matches!(
+            err.kind,
+            RuntimeErrorKind::IndexOutOfBounds { .. }
+        ));
     }
 
     // -- GDScriptInstance (ScriptInstance trait) ----------------------------
@@ -2401,7 +3517,7 @@ func get_speed():
         let err = interp
             .call_instance_method(&mut inst, "bar", &[])
             .unwrap_err();
-        assert!(matches!(err, RuntimeError::UndefinedFunction(_)));
+        assert!(matches!(err.kind, RuntimeErrorKind::UndefinedFunction(_)));
     }
 
     #[test]
@@ -2456,5 +3572,436 @@ var speed = 10
         let (_, class_def) = run_class("extends Sprite2D\nvar x = 0\n");
         assert_eq!(class_def.parent_class.as_deref(), Some("Sprite2D"));
         assert!(class_def.name.is_none());
+    }
+
+    // -- New: match, ternary, string formatting, built-ins, methods --
+    #[test]
+    fn match_literal_int() {
+        assert_eq!(run_val("var r = 0\nmatch 2:\n    1:\n        r = 10\n    2:\n        r = 20\n    3:\n        r = 30\nreturn r\n"), Variant::Int(20));
+    }
+    #[test]
+    fn match_wildcard() {
+        assert_eq!(
+            run_val("match 99:\n    1:\n        return 10\n    _:\n        return 42\n"),
+            Variant::Int(42)
+        );
+    }
+    #[test]
+    fn match_variable_binding() {
+        assert_eq!(
+            run_val("match 7:\n    x:\n        return x * 2\n"),
+            Variant::Int(14)
+        );
+    }
+    #[test]
+    fn match_string_pattern() {
+        assert_eq!(run_val("match \"hello\":\n    \"world\":\n        return 1\n    \"hello\":\n        return 2\n    _:\n        return 3\n"), Variant::Int(2));
+    }
+    #[test]
+    fn match_array_destructure() {
+        assert_eq!(
+            run_val("match [1, 2]:\n    [1, 2]:\n        return 99\n    _:\n        return 0\n"),
+            Variant::Int(99)
+        );
+    }
+    #[test]
+    fn match_array_binding() {
+        assert_eq!(
+            run_val("match [10, 20]:\n    [a, b]:\n        return a + b\n"),
+            Variant::Int(30)
+        );
+    }
+    #[test]
+    fn match_no_arm() {
+        assert_eq!(
+            run_val(
+                "var r = 0\nmatch 5:\n    1:\n        r = 10\n    2:\n        r = 20\nreturn r\n"
+            ),
+            Variant::Int(0)
+        );
+    }
+    #[test]
+    fn ternary_true() {
+        assert_eq!(run_val("return 10 if true else 20\n"), Variant::Int(10));
+    }
+    #[test]
+    fn ternary_false() {
+        assert_eq!(run_val("return 10 if false else 20\n"), Variant::Int(20));
+    }
+    #[test]
+    fn ternary_expr() {
+        assert_eq!(
+            run_val("var x = 5\nreturn \"big\" if x > 3 else \"small\"\n"),
+            Variant::String("big".into())
+        );
+    }
+    #[test]
+    fn str_fmt_basic() {
+        assert_eq!(
+            run_val("return \"Hello %s\" % \"world\"\n"),
+            Variant::String("Hello world".into())
+        );
+    }
+    #[test]
+    fn str_fmt_multi() {
+        assert_eq!(
+            run_val("return \"%s has %d items\" % [\"bag\", 5]\n"),
+            Variant::String("bag has 5 items".into())
+        );
+    }
+    #[test]
+    fn str_fmt_escape() {
+        assert_eq!(
+            run_val("return \"100%%\" % []\n"),
+            Variant::String("100%".into())
+        );
+    }
+    #[test]
+    fn preload_placeholder() {
+        assert_eq!(
+            run_val("return preload(\"res://scene.tscn\")\n"),
+            Variant::String("res://scene.tscn".into())
+        );
+    }
+    #[test]
+    fn builtin_min_max() {
+        assert_eq!(run_val("return min(3, 7)\n"), Variant::Int(3));
+        assert_eq!(run_val("return max(3, 7)\n"), Variant::Int(7));
+    }
+    #[test]
+    fn builtin_clamp() {
+        assert_eq!(run_val("return clamp(15, 0, 10)\n"), Variant::Int(10));
+        assert_eq!(run_val("return clamp(-5, 0, 10)\n"), Variant::Int(0));
+    }
+    #[test]
+    fn builtin_lerp() {
+        assert_eq!(
+            run_val("return lerp(0.0, 10.0, 0.5)\n"),
+            Variant::Float(5.0)
+        );
+    }
+    #[test]
+    fn builtin_sign() {
+        assert_eq!(run_val("return sign(5)\n"), Variant::Int(1));
+        assert_eq!(run_val("return sign(-3)\n"), Variant::Int(-1));
+        assert_eq!(run_val("return sign(0)\n"), Variant::Int(0));
+    }
+    #[test]
+    fn builtin_floor_ceil_round() {
+        assert_eq!(run_val("return floor(3.7)\n"), Variant::Float(3.0));
+        assert_eq!(run_val("return ceil(3.2)\n"), Variant::Float(4.0));
+        assert_eq!(run_val("return round(3.5)\n"), Variant::Float(4.0));
+    }
+    #[test]
+    fn builtin_sqrt() {
+        assert_eq!(run_val("return sqrt(9.0)\n"), Variant::Float(3.0));
+    }
+    #[test]
+    fn builtin_pow() {
+        assert_eq!(run_val("return pow(2.0, 3.0)\n"), Variant::Float(8.0));
+    }
+    #[test]
+    fn builtin_sin_cos() {
+        assert_eq!(run_val("return sin(0.0)\n"), Variant::Float(0.0));
+        assert_eq!(run_val("return cos(0.0)\n"), Variant::Float(1.0));
+    }
+    #[test]
+    fn constants_pi_tau() {
+        let pi = run_val("return PI\n");
+        assert!(matches!(pi, Variant::Float(f) if (f - std::f64::consts::PI).abs() < 1e-10));
+        let tau = run_val("return TAU\n");
+        assert!(matches!(tau, Variant::Float(f) if (f - std::f64::consts::TAU).abs() < 1e-10));
+    }
+    #[test]
+    fn constants_inf_nan() {
+        assert!(matches!(run_val("return INF\n"), Variant::Float(f) if f.is_infinite()));
+        assert!(matches!(run_val("return NAN\n"), Variant::Float(f) if f.is_nan()));
+    }
+    #[test]
+    fn builtin_randi() {
+        assert!(matches!(run_val("return randi()\n"), Variant::Int(_)));
+    }
+    #[test]
+    fn builtin_randf() {
+        if let Variant::Float(f) = run_val("return randf()\n") {
+            assert!(f >= -1.0 && f <= 1.0);
+        } else {
+            panic!("expected float");
+        }
+    }
+    #[test]
+    fn array_sort_test() {
+        assert_eq!(
+            run_val("var a = [3, 1, 2]\na.sort()\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+        );
+    }
+    #[test]
+    fn array_reverse_test() {
+        assert_eq!(
+            run_val("var a = [1, 2, 3]\na.reverse()\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(3), Variant::Int(2), Variant::Int(1)])
+        );
+    }
+    #[test]
+    fn array_find_has() {
+        assert_eq!(run_val("return [10, 20, 30].find(20)\n"), Variant::Int(1));
+        assert_eq!(
+            run_val("return [10, 20, 30].has(20)\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return [10, 20, 30].has(99)\n"),
+            Variant::Bool(false)
+        );
+    }
+    #[test]
+    fn array_erase_test() {
+        assert_eq!(
+            run_val("var a = [1, 2, 3, 2]\na.erase(2)\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(3), Variant::Int(2)])
+        );
+    }
+    #[test]
+    fn array_insert_test() {
+        assert_eq!(
+            run_val("var a = [1, 3]\na.insert(1, 2)\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+        );
+    }
+    #[test]
+    fn array_slice_test() {
+        assert_eq!(
+            run_val("return [10, 20, 30, 40, 50].slice(1, 4)\n"),
+            Variant::Array(vec![Variant::Int(20), Variant::Int(30), Variant::Int(40)])
+        );
+    }
+    #[test]
+    fn str_upper_lower() {
+        assert_eq!(
+            run_val("return \"hello\".to_upper()\n"),
+            Variant::String("HELLO".into())
+        );
+        assert_eq!(
+            run_val("return \"HELLO\".to_lower()\n"),
+            Variant::String("hello".into())
+        );
+    }
+    #[test]
+    fn str_begins_ends() {
+        assert_eq!(
+            run_val("return \"hello world\".begins_with(\"hello\")\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return \"hello world\".ends_with(\"world\")\n"),
+            Variant::Bool(true)
+        );
+    }
+    #[test]
+    fn str_split_join() {
+        assert_eq!(
+            run_val("return \"a,b,c\".split(\",\")\n"),
+            Variant::Array(vec![
+                Variant::String("a".into()),
+                Variant::String("b".into()),
+                Variant::String("c".into())
+            ])
+        );
+        assert_eq!(
+            run_val("return \"-\".join([\"a\", \"b\", \"c\"])\n"),
+            Variant::String("a-b-c".into())
+        );
+    }
+    #[test]
+    fn str_replace() {
+        assert_eq!(
+            run_val("return \"hello world\".replace(\"world\", \"rust\")\n"),
+            Variant::String("hello rust".into())
+        );
+    }
+    #[test]
+    fn str_find_method() {
+        assert_eq!(run_val("return \"hello\".find(\"ll\")\n"), Variant::Int(2));
+        assert_eq!(
+            run_val("return \"hello\".find(\"xyz\")\n"),
+            Variant::Int(-1)
+        );
+    }
+    #[test]
+    fn str_substr() {
+        assert_eq!(
+            run_val("return \"hello\".substr(1, 3)\n"),
+            Variant::String("ell".into())
+        );
+    }
+    #[test]
+    fn dict_keys_vals() {
+        let v = run_val("var d = {\"a\": 1}\nreturn d.keys()\n");
+        assert!(matches!(v, Variant::Array(ref a) if a.len() == 1));
+    }
+    #[test]
+    fn dict_erase_test() {
+        assert_eq!(
+            run_val("var d = {\"a\": 1, \"b\": 2}\nd.erase(\"a\")\nreturn d.size()\n"),
+            Variant::Int(1)
+        );
+    }
+    #[test]
+    fn dict_merge_test() {
+        assert_eq!(
+            run_val("var d = {\"a\": 1}\nd.merge({\"b\": 2})\nreturn d.size()\n"),
+            Variant::Int(2)
+        );
+    }
+    #[test]
+    fn dict_get_default() {
+        assert_eq!(
+            run_val("var d = {\"a\": 1}\nreturn d.get(\"b\", 42)\n"),
+            Variant::Int(42)
+        );
+    }
+
+    #[test]
+    fn error_includes_source_location() {
+        let mut interp = Interpreter::new();
+        let err = interp
+            .run("var x = 1\nvar y = undefined_var\n")
+            .unwrap_err();
+        assert!(matches!(err.kind, RuntimeErrorKind::UndefinedVariable(_)));
+    }
+    #[test]
+    fn error_display_shows_kind() {
+        assert!(
+            format!("{}", RuntimeError::new(RuntimeErrorKind::DivisionByZero))
+                .contains("division by zero")
+        );
+    }
+    #[test]
+    fn error_display_with_location() {
+        let err = RuntimeError::new(RuntimeErrorKind::TypeError("bad".into())).with_location(
+            SourceLocation {
+                line: 5,
+                column: 3,
+                source_line: "var x = bad".to_string(),
+            },
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("line 5") && msg.contains("var x = bad"));
+    }
+    #[test]
+    fn error_display_with_call_stack() {
+        let err =
+            RuntimeError::new(RuntimeErrorKind::DivisionByZero).with_call_stack(vec![StackFrame {
+                function_name: "foo".to_string(),
+                source_location: Some(SourceLocation {
+                    line: 10,
+                    column: 1,
+                    source_line: "func foo():".to_string(),
+                }),
+            }]);
+        let msg = format!("{err}");
+        assert!(msg.contains("Call stack") && msg.contains("in foo"));
+    }
+    #[test]
+    fn error_has_std_error_source() {
+        assert!(
+            std::error::Error::source(&RuntimeError::new(RuntimeErrorKind::DivisionByZero))
+                .is_some()
+        );
+    }
+    #[test]
+    fn runtime_error_kind_variants() {
+        let _ = (
+            RuntimeErrorKind::UndefinedVariable("x".into()),
+            RuntimeErrorKind::TypeError("t".into()),
+            RuntimeErrorKind::DivisionByZero,
+            RuntimeErrorKind::UndefinedFunction("f".into()),
+            RuntimeErrorKind::IndexOutOfBounds {
+                index: 0,
+                length: 0,
+            },
+            RuntimeErrorKind::MaxRecursionDepth(10),
+        );
+    }
+    #[test]
+    fn source_location_display() {
+        let msg = format!(
+            "{}",
+            SourceLocation {
+                line: 3,
+                column: 5,
+                source_line: "var x = 1".to_string()
+            }
+        );
+        assert!(msg.contains("line 3") && msg.contains("var x = 1") && msg.contains("^"));
+    }
+    #[test]
+    fn stack_frame_in_error() {
+        let mut interp = Interpreter::new();
+        let err = interp
+            .run("func foo():\n    return 1 / 0\nfoo()\n")
+            .unwrap_err();
+        assert!(matches!(err.kind, RuntimeErrorKind::DivisionByZero));
+    }
+    #[test]
+    fn warning_unreachable_code() {
+        let mut interp = Interpreter::new();
+        let _ = interp.run("return 1\nvar x = 2\n");
+        assert!(interp
+            .warnings()
+            .iter()
+            .any(|w| matches!(w, ScriptWarning::UnreachableCode { .. })));
+    }
+    #[test]
+    fn warning_display() {
+        let w = ScriptWarning::UnusedVariable {
+            name: "x".to_string(),
+            location: SourceLocation {
+                line: 1,
+                column: 5,
+                source_line: "var x = 1".to_string(),
+            },
+        };
+        assert!(format!("{w}").contains("unused variable"));
+    }
+    #[test]
+    fn interpreter_result_is_debug() {
+        let _ = format!(
+            "{:?}",
+            InterpreterResult {
+                output: vec![],
+                return_value: None
+            }
+        );
+    }
+    #[test]
+    fn error_from_undefined_function() {
+        assert!(matches!(
+            Interpreter::new().run("no_such_func()").unwrap_err().kind,
+            RuntimeErrorKind::UndefinedFunction(_)
+        ));
+    }
+    #[test]
+    fn error_from_index_out_of_bounds() {
+        assert!(matches!(
+            Interpreter::new()
+                .run("var a = [1,2]\nvar x = a[10]\n")
+                .unwrap_err()
+                .kind,
+            RuntimeErrorKind::IndexOutOfBounds { .. }
+        ));
+    }
+    #[test]
+    fn match_stmt_basic() {
+        let res = Interpreter::new().run("var x = 2\nmatch x:\n    1:\n        print(\"one\")\n    2:\n        print(\"two\")\n    _:\n        print(\"other\")\n").unwrap();
+        assert_eq!(res.output, vec!["two"]);
+    }
+    #[test]
+    fn ternary_expr_with_print() {
+        let res = Interpreter::new()
+            .run("var x = 10 if true else 20\nprint(x)\n")
+            .unwrap();
+        assert_eq!(res.output, vec!["10"]);
     }
 }

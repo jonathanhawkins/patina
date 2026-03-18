@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use gdscript_interop::bindings::{
-    MethodFlags, MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo,
+    MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
 };
 use gdscript_interop::interpreter::{ClassInstance, Interpreter, RuntimeError};
 use gdvariant::variant::VariantType;
@@ -78,9 +78,13 @@ impl ScriptInstance for GDScriptNodeInstance {
     fn call_method(&mut self, name: &str, args: &[Variant]) -> Result<Variant, ScriptError> {
         self.interpreter
             .call_instance_method(&mut self.instance, name, args)
-            .map_err(|e| match e {
-                RuntimeError::UndefinedFunction(n) => ScriptError::MethodNotFound(n),
-                RuntimeError::TypeError(msg) => ScriptError::TypeError(msg),
+            .map_err(|e| match e.kind {
+                gdscript_interop::interpreter::RuntimeErrorKind::UndefinedFunction(n) => {
+                    ScriptError::MethodNotFound(n)
+                }
+                gdscript_interop::interpreter::RuntimeErrorKind::TypeError(msg) => {
+                    ScriptError::TypeError(msg)
+                }
                 other => ScriptError::TypeError(other.to_string()),
             })
     }
@@ -130,6 +134,147 @@ impl ScriptInstance for GDScriptNodeInstance {
             .name
             .as_deref()
             .unwrap_or("GDScript")
+    }
+
+    fn set_scene_access(&mut self, access: Box<dyn SceneAccess>, node_id: u64) {
+        self.interpreter.set_scene_access(access, node_id);
+    }
+
+    fn clear_scene_access(&mut self) {
+        self.interpreter.clear_scene_access();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SceneTreeAccessor
+// ---------------------------------------------------------------------------
+
+use crate::scene_tree::SceneTree;
+use gdcore::id::ObjectId;
+use gdobject::signal::Connection;
+
+/// Wraps a raw pointer to [`SceneTree`] so that a running script can call
+/// back into the tree (e.g. `get_node`, `emit_signal`) during execution.
+///
+/// # Safety
+///
+/// The pointer is valid for the duration of a single `call_script_with_access`
+/// call. The script is temporarily removed from the tree's script map before
+/// the accessor is created, so there is no aliasing of the script itself.
+pub(crate) struct SceneTreeAccessor {
+    tree: *mut SceneTree,
+}
+
+impl SceneTreeAccessor {
+    /// Creates a new accessor. Caller must ensure the pointer is valid.
+    pub(crate) unsafe fn new(tree: *mut SceneTree) -> Self {
+        Self { tree }
+    }
+
+    fn tree(&self) -> &SceneTree {
+        unsafe { &*self.tree }
+    }
+
+    fn tree_mut(&mut self) -> &mut SceneTree {
+        unsafe { &mut *self.tree }
+    }
+}
+
+impl SceneAccess for SceneTreeAccessor {
+    fn get_node(&self, from: u64, path: &str) -> Option<u64> {
+        let from_id = NodeId::from_object_id(ObjectId::from_raw(from));
+        let tree = self.tree();
+        // Use the tree's built-in relative path lookup first
+        if let Some(found) = tree.get_node_or_null(from_id, path) {
+            return Some(found.raw());
+        }
+        // Fallback: search children by name
+        if let Some(from_node) = tree.get_node(from_id) {
+            for &child_id in from_node.children() {
+                if let Some(child_node) = tree.get_node(child_id) {
+                    if child_node.name() == path {
+                        return Some(child_id.raw());
+                    }
+                }
+            }
+        }
+        // Search siblings
+        if let Some(from_node) = tree.get_node(from_id) {
+            if let Some(parent_id) = from_node.parent() {
+                if let Some(parent_node) = tree.get_node(parent_id) {
+                    for &sib_id in parent_node.children() {
+                        if let Some(sib_node) = tree.get_node(sib_id) {
+                            if sib_node.name() == path {
+                                return Some(sib_id.raw());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn get_parent(&self, node: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_node(nid)
+            .and_then(|n| n.parent())
+            .map(|pid| pid.raw())
+    }
+
+    fn get_children(&self, node: u64) -> Vec<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_node(nid)
+            .map(|n| n.children().iter().map(|id| id.raw()).collect())
+            .unwrap_or_default()
+    }
+
+    fn get_node_property(&self, node: u64, prop: &str) -> Variant {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // Try script property first
+        if let Some(script) = self.tree().get_script(nid) {
+            if let Some(val) = script.get_property(prop) {
+                return val;
+            }
+        }
+        // Then try node property
+        if let Some(n) = self.tree().get_node(nid) {
+            return n.get_property(prop);
+        }
+        Variant::Nil
+    }
+
+    fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // Try script property first
+        if let Some(script) = self.tree_mut().get_script_mut(nid) {
+            if script.set_property(prop, value.clone()) {
+                return;
+            }
+        }
+        // Then try node property
+        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+            n.set_property(prop, value);
+        }
+    }
+
+    fn emit_signal(&mut self, node: u64, signal: &str, args: &[Variant]) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().signal_store_mut(nid).emit(signal, args);
+    }
+
+    fn connect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str) {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        let target_oid = ObjectId::from_raw(target);
+        let conn = Connection::new(target_oid, method);
+        self.tree_mut().connect_signal(source_id, signal, conn);
+    }
+
+    fn get_node_name(&self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_node(nid).map(|n| n.name().to_string())
     }
 }
 
@@ -664,5 +809,547 @@ script = ExtResource(\"1_abc\")
         let scene = crate::packed_scene::PackedScene::from_tscn(tscn).unwrap();
         let nodes = scene.instance().unwrap();
         assert_eq!(nodes[0].get_property("_script_path"), Variant::Nil);
+    }
+
+    // -- Scene access / signal tests ----------------------------------------
+
+    /// Helper: build a tree with root → parent → child1, child2
+    fn build_tree_with_children() -> (SceneTree, NodeId, NodeId, NodeId) {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = Node::new("Parent", "Node2D");
+        let parent_id = tree.add_child(root, parent).unwrap();
+        let c1 = Node::new("Child1", "Node2D");
+        let c1_id = tree.add_child(parent_id, c1).unwrap();
+        let c2 = Node::new("Child2", "Node2D");
+        let c2_id = tree.add_child(parent_id, c2).unwrap();
+        (tree, parent_id, c1_id, c2_id)
+    }
+
+    #[test]
+    fn get_node_from_script() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var found = false
+func _ready():
+    var c = get_node(\"Child1\")
+    self.found = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(parent_id).unwrap().get_property("found"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    #[test]
+    fn dollar_syntax_parses() {
+        // Verify the tokenizer and parser handle $NodeName
+        let tokens = gdscript_interop::tokenize("$Player\n").unwrap();
+        let has_dollar = tokens
+            .iter()
+            .any(|t| matches!(t.token, gdscript_interop::Token::Dollar));
+        assert!(has_dollar, "Dollar token not found");
+    }
+
+    #[test]
+    fn dollar_syntax_in_script() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var found_name = \"\"
+func _ready():
+    var c = $Child1
+    self.found_name = c.get_name()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("found_name"),
+            Some(Variant::String("Child1".into()))
+        );
+    }
+
+    #[test]
+    fn dollar_string_syntax() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var ok = false
+func _ready():
+    var c = $\"Child2\"
+    self.ok = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(parent_id).unwrap().get_property("ok"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    #[test]
+    fn get_parent_from_script() {
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var has_parent = false
+func _ready():
+    var p = get_parent()
+    self.has_parent = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id).unwrap().get_property("has_parent"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    #[test]
+    fn get_children_from_script() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var child_count = 0
+func _ready():
+    var kids = get_children()
+    self.child_count = len(kids)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn emit_signal_from_script() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+        // Set up signal handler
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        let conn = gdobject::signal::Connection::with_callback(
+            ObjectId::from_raw(parent_id.raw()),
+            "on_hit",
+            move |_args| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            },
+        );
+        tree.connect_signal(parent_id, "hit", conn);
+
+        let script_src = "\
+extends Node2D
+func _ready():
+    emit_signal(\"hit\")
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn emit_signal_with_args() {
+        use std::sync::{Arc, Mutex};
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let conn = gdobject::signal::Connection::with_callback(
+            ObjectId::from_raw(parent_id.raw()),
+            "on_damage",
+            move |args| {
+                received_clone.lock().unwrap().extend_from_slice(args);
+                Variant::Nil
+            },
+        );
+        tree.connect_signal(parent_id, "damage_taken", conn);
+
+        let script_src = "\
+extends Node2D
+func _ready():
+    emit_signal(\"damage_taken\", 42)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+
+        let args = received.lock().unwrap();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], Variant::Int(42));
+    }
+
+    #[test]
+    fn connect_signal_from_script() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+
+        // Child1 has a script that connects parent's "test_sig" to itself
+        // We can't fully test cross-node method dispatch yet, but we can
+        // verify the connection is registered.
+        let script_src = "\
+extends Node2D
+var connected = false
+func _ready():
+    var p = get_parent()
+    p.connect(\"test_sig\", $Child2, \"on_test\")
+    self.connected = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id).unwrap().get_property("connected"),
+            Some(Variant::Bool(true))
+        );
+        // Verify signal was registered on the parent
+        let store = tree.signal_store(parent_id);
+        assert!(store.is_some());
+        assert!(store.unwrap().has_signal("test_sig"));
+    }
+
+    #[test]
+    fn get_node_property_via_dot_access() {
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+
+        // Attach a script to Child1 with a property
+        let child_script = "\
+extends Node2D
+var health = 100
+";
+        let cs = GDScriptNodeInstance::from_source(child_script, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(cs));
+
+        // Parent script reads Child1's property
+        let parent_script = "\
+extends Node2D
+var child_health = 0
+func _ready():
+    var c = get_node(\"Child1\")
+    self.child_health = c.health
+";
+        let ps = GDScriptNodeInstance::from_source(parent_script, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(ps));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_health"),
+            Some(Variant::Int(100))
+        );
+    }
+
+    #[test]
+    fn set_node_property_via_dot_access() {
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+
+        let child_script = "\
+extends Node2D
+var health = 100
+";
+        let cs = GDScriptNodeInstance::from_source(child_script, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(cs));
+
+        // Parent sets Child1's health to 50
+        let parent_script = "\
+extends Node2D
+func _ready():
+    var c = get_node(\"Child1\")
+    c.health = 50
+";
+        let ps = GDScriptNodeInstance::from_source(parent_script, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(ps));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(c1_id).unwrap().get_property("health"),
+            Some(Variant::Int(50))
+        );
+    }
+
+    #[test]
+    fn get_node_name_method() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var child_name = \"\"
+func _ready():
+    var c = get_node(\"Child1\")
+    self.child_name = c.get_name()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_name"),
+            Some(Variant::String("Child1".into()))
+        );
+    }
+
+    #[test]
+    fn get_node_not_found_error() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var ok = true
+func _ready():
+    var c = get_node(\"NonExistent\")
+    self.ok = false
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        // Script should have errored on get_node, so ok stays true
+        assert_eq!(
+            tree.get_script(parent_id).unwrap().get_property("ok"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    #[test]
+    fn get_children_on_object_id() {
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var grandchild_count = 0
+func _ready():
+    var p = get_parent()
+    var kids = p.get_children()
+    self.grandchild_count = len(kids)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id)
+                .unwrap()
+                .get_property("grandchild_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn get_parent_on_object_id() {
+        let (mut tree, _parent_id, c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var ok = false
+func _ready():
+    var p = get_parent()
+    var gp = p.get_parent()
+    self.ok = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id).unwrap().get_property("ok"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    #[test]
+    fn get_node_on_object_id() {
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var sibling_name = \"\"
+func _ready():
+    var p = get_parent()
+    var sib = p.get_node(\"Child2\")
+    self.sibling_name = sib.get_name()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id).unwrap().get_property("sibling_name"),
+            Some(Variant::String("Child2".into()))
+        );
+    }
+
+    #[test]
+    fn scene_access_during_process() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var child_count = 0
+func _process(delta):
+    var kids = get_children()
+    self.child_count = len(kids)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        tree.process_script_process(parent_id, 0.016);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn scene_access_during_physics_process() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var child_count = 0
+func _physics_process(delta):
+    var kids = get_children()
+    self.child_count = len(kids)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        tree.process_script_physics_process(parent_id, 0.016);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn scene_access_during_enter_tree() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var child_count = 0
+func _enter_tree():
+    var kids = get_children()
+    self.child_count = len(kids)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        tree.process_script_enter_tree(parent_id);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn scene_access_during_exit_tree() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var child_count = 0
+func _exit_tree():
+    var kids = get_children()
+    self.child_count = len(kids)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        tree.process_script_exit_tree(parent_id);
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn multiple_emit_signals() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let cc = counter.clone();
+        let conn = gdobject::signal::Connection::with_callback(
+            ObjectId::from_raw(parent_id.raw()),
+            "on_tick",
+            move |_| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            },
+        );
+        tree.connect_signal(parent_id, "tick", conn);
+
+        let script_src = "\
+extends Node2D
+func _ready():
+    emit_signal(\"tick\")
+    emit_signal(\"tick\")
+    emit_signal(\"tick\")
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn get_node_finds_sibling() {
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+        // Child1's script looks for sibling Child2
+        let script_src = "\
+extends Node2D
+var found = false
+func _ready():
+    var sib = get_node(\"Child2\")
+    self.found = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id).unwrap().get_property("found"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    #[test]
+    fn tokenizer_dollar_token() {
+        let tokens = gdscript_interop::tokenize("$Foo\n").unwrap();
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.token, gdscript_interop::Token::Dollar)));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(&t.token, gdscript_interop::Token::Ident(n) if n == "Foo")));
+    }
+
+    #[test]
+    fn parser_get_node_expr() {
+        let tokens = gdscript_interop::tokenize("$Player\n").unwrap();
+        let mut parser = gdscript_interop::Parser::new(tokens, "$Player\n");
+        let stmts = parser.parse_script().unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            gdscript_interop::Stmt::ExprStmt(expr) => {
+                assert!(matches!(expr, gdscript_interop::Expr::GetNode(_)));
+            }
+            _ => panic!("expected ExprStmt with GetNode"),
+        }
     }
 }

@@ -59,6 +59,13 @@ pub enum Expr {
     SelfRef,
     /// `super` reference.
     SuperRef,
+    Ternary {
+        value: Box<Expr>,
+        condition: Box<Expr>,
+        else_value: Box<Expr>,
+    },
+    /// `$NodeName` / `$"Path/To/Node"` sugar for get_node.
+    GetNode(String),
 }
 
 /// Binary operators.
@@ -210,12 +217,29 @@ pub enum Stmt {
     },
     /// An expression used as a statement.
     ExprStmt(Expr),
+    Match {
+        value: Expr,
+        arms: Vec<MatchArm>,
+    },
     /// `pass`
     Pass,
     /// `break`
     Break,
     /// `continue`
     Continue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: Vec<Stmt>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchPattern {
+    Literal(Variant),
+    Variable(String),
+    Wildcard,
+    Array(Vec<MatchPattern>),
 }
 
 /// A parse error.
@@ -232,6 +256,7 @@ pub enum ParseError {
         line: usize,
         /// Column number.
         col: usize,
+        source_line: Option<String>,
     },
 
     /// Reached end of input unexpectedly.
@@ -245,12 +270,17 @@ pub enum ParseError {
 pub struct Parser {
     tokens: Vec<TokenSpan>,
     pos: usize,
+    source_lines: Vec<String>,
 }
 
 impl Parser {
     /// Creates a new parser from a token stream.
-    pub fn new(tokens: Vec<TokenSpan>) -> Self {
-        Self { tokens, pos: 0 }
+    pub fn new(tokens: Vec<TokenSpan>, source: &str) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            source_lines: source.lines().map(|l| l.to_string()).collect(),
+        }
     }
 
     /// Parses a complete script into a list of top-level statements.
@@ -298,6 +328,11 @@ impl Parser {
                 expected: expected.to_string(),
                 line,
                 col,
+                source_line: if line > 0 {
+                    self.source_lines.get(line - 1).cloned()
+                } else {
+                    None
+                },
             })
         }
     }
@@ -325,6 +360,7 @@ impl Parser {
                     expected: "identifier".to_string(),
                     line,
                     col,
+                    source_line: None,
                 })
             }
         }
@@ -357,6 +393,7 @@ impl Parser {
                 self.advance();
                 Ok(Stmt::Continue)
             }
+            Token::Match => self.parse_match(),
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -396,6 +433,7 @@ impl Parser {
                     expected: "var declaration after annotation".to_string(),
                     line,
                     col,
+                    source_line: None,
                 })
             }
         }
@@ -449,6 +487,7 @@ impl Parser {
                     expected: "class name or string".to_string(),
                     line,
                     col,
+                    source_line: None,
                 });
             }
         };
@@ -599,6 +638,117 @@ impl Parser {
         })
     }
 
+    fn parse_match(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let value = self.parse_expr()?;
+        self.expect(&Token::Colon)?;
+        self.skip_newlines();
+        self.expect(&Token::Indent)?;
+        let mut arms = Vec::new();
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            let pattern = self.parse_match_pattern()?;
+            self.expect(&Token::Colon)?;
+            let body = self.parse_block()?;
+            arms.push(MatchArm { pattern, body });
+            self.skip_newlines();
+        }
+        if self.check(&Token::Dedent) {
+            self.advance();
+        }
+        Ok(Stmt::Match { value, arms })
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<MatchPattern, ParseError> {
+        match self.peek().clone() {
+            Token::IntLit(v) => {
+                self.advance();
+                Ok(MatchPattern::Literal(Variant::Int(v)))
+            }
+            Token::FloatLit(v) => {
+                self.advance();
+                Ok(MatchPattern::Literal(Variant::Float(v)))
+            }
+            Token::StringLit(v) => {
+                self.advance();
+                Ok(MatchPattern::Literal(Variant::String(v)))
+            }
+            Token::BoolLit(v) => {
+                self.advance();
+                Ok(MatchPattern::Literal(Variant::Bool(v)))
+            }
+            Token::Null => {
+                self.advance();
+                Ok(MatchPattern::Literal(Variant::Nil))
+            }
+            Token::Ident(name) if name == "_" => {
+                self.advance();
+                Ok(MatchPattern::Wildcard)
+            }
+            Token::Ident(name) => {
+                self.advance();
+                Ok(MatchPattern::Variable(name))
+            }
+            Token::LBracket => {
+                self.advance();
+                let mut pats = Vec::new();
+                if !self.check(&Token::RBracket) {
+                    pats.push(self.parse_match_pattern()?);
+                    while self.check(&Token::Comma) {
+                        self.advance();
+                        if self.check(&Token::RBracket) {
+                            break;
+                        }
+                        pats.push(self.parse_match_pattern()?);
+                    }
+                }
+                self.expect(&Token::RBracket)?;
+                Ok(MatchPattern::Array(pats))
+            }
+            Token::Minus => {
+                self.advance();
+                match self.peek().clone() {
+                    Token::IntLit(v) => {
+                        self.advance();
+                        Ok(MatchPattern::Literal(Variant::Int(-v)))
+                    }
+                    Token::FloatLit(v) => {
+                        self.advance();
+                        Ok(MatchPattern::Literal(Variant::Float(-v)))
+                    }
+                    _ => {
+                        let ts = self.tokens.get(self.pos);
+                        let (token, line, col) = match ts {
+                            Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                            None => ("EOF".to_string(), 0, 0),
+                        };
+                        Err(ParseError::UnexpectedToken {
+                            token,
+                            expected: "number after minus".to_string(),
+                            line,
+                            col,
+                            source_line: None,
+                        })
+                    }
+                }
+            }
+            _ => {
+                let ts = self.tokens.get(self.pos);
+                let (token, line, col) = match ts {
+                    Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                    None => ("EOF".to_string(), 0, 0),
+                };
+                Err(ParseError::UnexpectedToken {
+                    token,
+                    expected: "match pattern".to_string(),
+                    line,
+                    col,
+                    source_line: None,
+                })
+            }
+        }
+    }
+
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, ParseError> {
         let expr = self.parse_expr()?;
 
@@ -652,7 +802,19 @@ impl Parser {
     // --- Expression parsing (precedence climbing) ---
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or()
+        let value = self.parse_or()?;
+        if self.check(&Token::If) {
+            self.advance();
+            let condition = self.parse_or()?;
+            self.expect(&Token::Else)?;
+            let else_value = self.parse_expr()?;
+            return Ok(Expr::Ternary {
+                value: Box::new(value),
+                condition: Box::new(condition),
+                else_value: Box::new(else_value),
+            });
+        }
+        Ok(value)
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
@@ -845,6 +1007,45 @@ impl Parser {
                 self.advance();
                 Ok(Expr::SuperRef)
             }
+            Token::Dollar => {
+                self.advance();
+                let path = match self.peek().clone() {
+                    Token::Ident(name) => {
+                        self.advance();
+                        let mut full = name;
+                        while self.check(&Token::Slash) {
+                            self.advance();
+                            let next = self.eat_ident()?;
+                            full.push('/');
+                            full.push_str(&next);
+                        }
+                        full
+                    }
+                    Token::StringLit(s) => {
+                        self.advance();
+                        s
+                    }
+                    _ => {
+                        let ts = self.tokens.get(self.pos);
+                        let (token, line, col) = match ts {
+                            Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                            None => ("EOF".to_string(), 0, 0),
+                        };
+                        return Err(ParseError::UnexpectedToken {
+                            token,
+                            expected: "identifier or string after $".to_string(),
+                            line,
+                            col,
+                            source_line: if line > 0 {
+                                self.source_lines.get(line - 1).cloned()
+                            } else {
+                                None
+                            },
+                        });
+                    }
+                };
+                Ok(Expr::GetNode(path))
+            }
             Token::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;
@@ -900,6 +1101,7 @@ impl Parser {
                     expected: "expression".to_string(),
                     line,
                     col,
+                    source_line: None,
                 })
             }
         }
@@ -913,13 +1115,13 @@ mod tests {
 
     fn parse(src: &str) -> Vec<Stmt> {
         let tokens = tokenize(src).unwrap();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens, src);
         parser.parse_script().unwrap()
     }
 
     fn parse_expr_str(src: &str) -> Expr {
         let tokens = tokenize(src).unwrap();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens, src);
         parser.parse_expr().unwrap()
     }
 
@@ -1267,5 +1469,16 @@ mod tests {
         assert!(
             matches!(expr, Expr::Call { ref callee, .. } if matches!(**callee, Expr::SuperRef))
         );
+    }
+
+    #[test]
+    fn parse_ternary() {
+        let e = parse_expr_str("x if true else y");
+        assert!(matches!(e, Expr::Ternary { .. }));
+    }
+    #[test]
+    fn parse_match_stmt() {
+        let s = parse("match x:\n    1:\n        pass\n    _:\n        pass\n");
+        assert!(matches!(&s[0], Stmt::Match { .. }));
     }
 }
