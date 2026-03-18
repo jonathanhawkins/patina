@@ -8,3 +8,5 @@ repository.workspace = true
 [dependencies]
 gdcore = { path = "../gdcore" }
 gdserver2d = { path = "../gdserver2d" }
+thiserror.workspace = true
+tracing.workspace = true

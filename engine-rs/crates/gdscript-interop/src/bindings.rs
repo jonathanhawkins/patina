@@ -1,1 +1,147 @@
-//! Auto-generated or manual API bindings for script access.
+//! Script instance traits and supporting types for scripting interop.
+//!
+//! This module defines the `ScriptInstance` trait that every scripting backend
+//! (GDScript, Rust-native, etc.) must implement, along with metadata structs
+//! for method and property introspection.
+
+use std::fmt;
+
+use gdvariant::variant::VariantType;
+use gdvariant::Variant;
+
+/// Bitflags describing method characteristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MethodFlags(u8);
+
+impl MethodFlags {
+    /// A regular instance method.
+    pub const NORMAL: Self = Self(0b001);
+    /// A virtual method (overridable by subclasses).
+    pub const VIRTUAL: Self = Self(0b010);
+    /// A const method (does not mutate the object).
+    pub const CONST: Self = Self(0b100);
+
+    /// Returns `true` if `self` contains all the flags in `other`.
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for MethodFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl fmt::Display for MethodFlags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts = Vec::new();
+        if self.contains(Self::NORMAL) {
+            parts.push("NORMAL");
+        }
+        if self.contains(Self::VIRTUAL) {
+            parts.push("VIRTUAL");
+        }
+        if self.contains(Self::CONST) {
+            parts.push("CONST");
+        }
+        if parts.is_empty() {
+            write!(f, "(none)")
+        } else {
+            write!(f, "{}", parts.join(" | "))
+        }
+    }
+}
+
+/// Metadata describing a single method on a script.
+#[derive(Debug, Clone)]
+pub struct MethodInfo {
+    /// The method name.
+    pub name: String,
+    /// Names of the method's arguments.
+    pub argument_names: Vec<String>,
+    /// The return type of the method.
+    pub return_type: VariantType,
+    /// Method flags.
+    pub flags: MethodFlags,
+}
+
+impl fmt::Display for MethodInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}({}) -> {} [{}]",
+            self.name,
+            self.argument_names.join(", "),
+            self.return_type,
+            self.flags,
+        )
+    }
+}
+
+/// Metadata describing a single property on a script.
+#[derive(Debug, Clone)]
+pub struct ScriptPropertyInfo {
+    /// The property name.
+    pub name: String,
+    /// The type of the property value.
+    pub property_type: VariantType,
+    /// The default value for this property.
+    pub default_value: Variant,
+}
+
+/// Errors that can occur when interacting with a script instance.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ScriptError {
+    /// The requested method does not exist on the script.
+    #[error("method not found: '{0}'")]
+    MethodNotFound(String),
+
+    /// The wrong number of arguments were passed to a method.
+    #[error("invalid argument count: expected {expected}, got {got}")]
+    InvalidArgCount {
+        /// Expected number of arguments.
+        expected: usize,
+        /// Actual number of arguments provided.
+        got: usize,
+    },
+
+    /// The requested property does not exist on the script.
+    #[error("property not found: '{0}'")]
+    PropertyNotFound(String),
+
+    /// A type mismatch occurred during a script operation.
+    #[error("type error: {0}")]
+    TypeError(String),
+
+    /// No script is attached to the given object.
+    #[error("no script attached to object")]
+    NoScript,
+}
+
+/// Trait implemented by all script instances.
+///
+/// Each scripting backend provides its own concrete type that implements this
+/// trait, allowing the engine to call methods, get/set properties, and
+/// introspect the script's API uniformly.
+pub trait ScriptInstance {
+    /// Calls a method by name with the given arguments.
+    fn call_method(&mut self, name: &str, args: &[Variant]) -> Result<Variant, ScriptError>;
+
+    /// Gets a property value by name, or `None` if it does not exist.
+    fn get_property(&self, name: &str) -> Option<Variant>;
+
+    /// Sets a property value by name. Returns `true` if the property existed.
+    fn set_property(&mut self, name: &str, value: Variant) -> bool;
+
+    /// Returns metadata for all methods exposed by this script.
+    fn list_methods(&self) -> Vec<MethodInfo>;
+
+    /// Returns metadata for all properties exposed by this script.
+    fn list_properties(&self) -> Vec<ScriptPropertyInfo>;
+
+    /// Returns the human-readable name of this script.
+    fn get_script_name(&self) -> &str;
+}

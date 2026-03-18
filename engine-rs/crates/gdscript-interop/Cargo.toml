@@ -9,3 +9,5 @@ repository.workspace = true
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
+thiserror.workspace = true
+tracing.workspace = true

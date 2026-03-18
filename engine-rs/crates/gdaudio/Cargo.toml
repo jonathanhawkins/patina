@@ -7,3 +7,5 @@ repository.workspace = true
 
 [dependencies]
 gdcore = { path = "../gdcore" }
+thiserror.workspace = true
+tracing.workspace = true
