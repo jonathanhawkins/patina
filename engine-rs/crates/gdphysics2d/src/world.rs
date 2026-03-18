@@ -99,9 +99,7 @@ impl PhysicsWorld2D {
                 let tf_a = Transform2D::translated(pos_a);
                 let tf_b = Transform2D::translated(pos_b);
 
-                if let Some(result) =
-                    collision::test_collision(&shape_a, &tf_a, &shape_b, &tf_b)
-                {
+                if let Some(result) = collision::test_collision(&shape_a, &tf_a, &shape_b, &tf_b) {
                     if result.colliding && result.depth > 0.0 {
                         // We need to split the borrow to get two mutable refs.
                         // SAFETY: id_a != id_b because i != j and IDs are unique.
@@ -161,9 +159,14 @@ fn raycast_shape(
         Shape2D::Circle { radius } => {
             ray_circle(origin, dir, max_distance, body.position, radius, body.id)
         }
-        Shape2D::Rectangle { half_extents } => {
-            ray_aabb(origin, dir, max_distance, body.position, half_extents, body.id)
-        }
+        Shape2D::Rectangle { half_extents } => ray_aabb(
+            origin,
+            dir,
+            max_distance,
+            body.position,
+            half_extents,
+            body.id,
+        ),
         _ => None, // Segment and capsule raycasts not yet implemented
     }
 }
@@ -229,8 +232,16 @@ fn ray_aabb(
     let max = center + half_extents;
 
     let inv_dir = Vector2::new(
-        if dir.x.abs() > 1e-10 { 1.0 / dir.x } else { f32::INFINITY * dir.x.signum() },
-        if dir.y.abs() > 1e-10 { 1.0 / dir.y } else { f32::INFINITY * dir.y.signum() },
+        if dir.x.abs() > 1e-10 {
+            1.0 / dir.x
+        } else {
+            f32::INFINITY * dir.x.signum()
+        },
+        if dir.y.abs() > 1e-10 {
+            1.0 / dir.y
+        } else {
+            f32::INFINITY * dir.y.signum()
+        },
     );
 
     let t1x = (min.x - origin.x) * inv_dir.x;
@@ -417,10 +428,7 @@ mod tests {
 
             let a = world.get_body(id_a).unwrap();
             let b = world.get_body(id_b).unwrap();
-            vec![
-                (a.position.x, a.position.y),
-                (b.position.x, b.position.y),
-            ]
+            vec![(a.position.x, a.position.y), (b.position.x, b.position.y)]
         }
 
         let run1 = run_simulation();

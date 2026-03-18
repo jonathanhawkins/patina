@@ -1,0 +1,21 @@
+[gd_scene format=3 uid="uid://platformer"]
+
+[node name="World" type="Node"]
+
+[node name="Player" type="Node2D" parent="."]
+position = Vector2(100, 300)
+speed = 250
+
+[node name="Platform1" type="Node2D" parent="."]
+position = Vector2(0, 500)
+
+[node name="Platform2" type="Node2D" parent="."]
+position = Vector2(300, 400)
+
+[node name="Platform3" type="Node2D" parent="."]
+position = Vector2(600, 350)
+
+[node name="Camera" type="Camera2D" parent="."]
+
+[node name="Collectible" type="Node2D" parent="."]
+position = Vector2(450, 250)

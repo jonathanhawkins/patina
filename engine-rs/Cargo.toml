@@ -44,8 +44,19 @@ gdscene = { path = "crates/gdscene" }
 gdserver2d = { path = "crates/gdserver2d" }
 gdrender2d = { path = "crates/gdrender2d" }
 gdphysics2d = { path = "crates/gdphysics2d" }
+gdplatform = { path = "crates/gdplatform" }
+gdaudio = { path = "crates/gdaudio" }
+gdresource = { path = "crates/gdresource" }
 serde_json.workspace = true
 
 [[example]]
 name = "demo_2d"
 path = "examples/demo_2d.rs"
+
+[[example]]
+name = "benchmarks"
+path = "examples/benchmarks.rs"
+
+[[example]]
+name = "platformer_demo"
+path = "examples/platformer_demo.rs"

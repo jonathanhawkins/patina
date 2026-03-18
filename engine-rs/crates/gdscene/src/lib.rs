@@ -19,16 +19,25 @@
 
 #![warn(clippy::all)]
 
+pub mod animation;
+pub mod control;
 pub mod lifecycle;
 pub mod main_loop;
+pub mod navigation;
 pub mod node;
 pub mod node2d;
+pub mod node3d;
 pub mod packed_scene;
+pub mod particle;
+pub mod scene_saver;
 pub mod scene_tree;
+pub mod tilemap;
+pub mod tween;
 
 // Re-export the most-used types at the crate root.
 pub use lifecycle::LifecycleManager;
 pub use main_loop::MainLoop;
 pub use node::{Node, NodeId};
 pub use packed_scene::{add_packed_scene_to_tree, wire_connections, PackedScene, SceneConnection};
+pub use scene_saver::TscnSaver;
 pub use scene_tree::SceneTree;

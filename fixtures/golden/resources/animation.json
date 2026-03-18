@@ -1,0 +1,40 @@
+{
+  "fixture_id": "resource_animation",
+  "capture_type": "resource",
+  "upstream_version": "pending",
+  "class_name": "Animation",
+  "properties": {
+    "keyframe_times": {
+      "type": "Array",
+      "value": [
+        { "type": "Float", "value": 0.0 },
+        { "type": "Float", "value": 0.25 },
+        { "type": "Float", "value": 0.5 },
+        { "type": "Float", "value": 0.75 },
+        { "type": "Float", "value": 1.0 }
+      ]
+    },
+    "keyframe_values": {
+      "type": "Array",
+      "value": [
+        { "type": "Vector2", "value": [0.0, 0.0] },
+        { "type": "Vector2", "value": [10.0, -5.0] },
+        { "type": "Vector2", "value": [20.0, 0.0] },
+        { "type": "Vector2", "value": [10.0, -5.0] },
+        { "type": "Vector2", "value": [0.0, 0.0] }
+      ]
+    },
+    "length": { "type": "Float", "value": 1.0 },
+    "loop_mode": { "type": "Int", "value": 1 },
+    "name": { "type": "String", "value": "walk_cycle" },
+    "tracks": {
+      "type": "Array",
+      "value": [
+        { "type": "Int", "value": 0 },
+        { "type": "Int", "value": 1 },
+        { "type": "Int", "value": 2 }
+      ]
+    }
+  },
+  "subresources": {}
+}

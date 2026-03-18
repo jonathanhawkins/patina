@@ -1,0 +1,23 @@
+[gd_scene format=3 uid="uid://signals_complex"]
+
+[node name="Root" type="Node"]
+
+[node name="Player" type="Node2D" parent="."]
+position = Vector2(200, 300)
+
+[node name="Enemy" type="Node2D" parent="."]
+position = Vector2(600, 300)
+
+[node name="HUD" type="Node" parent="."]
+
+[node name="ItemDrop" type="Node2D" parent="."]
+position = Vector2(400, 200)
+
+[node name="TriggerZone" type="Node2D" parent="Player"]
+
+[connection signal="health_changed" from="Player" to="HUD" method="_on_health_changed"]
+[connection signal="died" from="Player" to="." method="_on_player_died"]
+[connection signal="attack" from="Enemy" to="Player" method="_on_enemy_attack"]
+[connection signal="score_updated" from="." to="HUD" method="_on_score_updated" flags=0]
+[connection signal="collected" from="ItemDrop" to="Player" method="_on_item_collected"]
+[connection signal="body_entered" from="Player/TriggerZone" to="Enemy" method="_on_trigger_entered" flags=3]

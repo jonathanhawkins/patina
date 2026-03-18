@@ -30,7 +30,7 @@ pub mod uid;
 
 // Re-export the most-used types at the crate root.
 pub use cache::ResourceCache;
-pub use loader::{ResourceLoader, TresLoader};
+pub use loader::{parse_variant_value, ResourceLoader, TresLoader};
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::UidRegistry;
@@ -66,22 +66,10 @@ flag = true
 
         // Verify properties match.
         assert_eq!(res1.class_name, res2.class_name);
-        assert_eq!(
-            res1.get_property("name"),
-            res2.get_property("name")
-        );
-        assert_eq!(
-            res1.get_property("value"),
-            res2.get_property("value")
-        );
-        assert_eq!(
-            res1.get_property("position"),
-            res2.get_property("position")
-        );
-        assert_eq!(
-            res1.get_property("flag"),
-            res2.get_property("flag")
-        );
+        assert_eq!(res1.get_property("name"), res2.get_property("name"));
+        assert_eq!(res1.get_property("value"), res2.get_property("value"));
+        assert_eq!(res1.get_property("position"), res2.get_property("position"));
+        assert_eq!(res1.get_property("flag"), res2.get_property("flag"));
     }
 
     /// Roundtrip with sub-resources.
@@ -111,10 +99,7 @@ name = "MyTheme"
         let sub1 = &res1.subresources["StyleBoxFlat_001"];
         let sub2 = &res2.subresources["StyleBoxFlat_001"];
         assert_eq!(sub1.class_name, sub2.class_name);
-        assert_eq!(
-            sub1.get_property("bg_color"),
-            sub2.get_property("bg_color")
-        );
+        assert_eq!(sub1.get_property("bg_color"), sub2.get_property("bg_color"));
         assert_eq!(
             sub1.get_property("border_width"),
             sub2.get_property("border_width")

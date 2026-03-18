@@ -104,9 +104,7 @@ impl TresLoader {
 
         // Flush final sub-resource.
         if let Some(sub) = current_sub.take() {
-            resource
-                .subresources
-                .insert(current_sub_id, Arc::new(sub));
+            resource.subresources.insert(current_sub_id, Arc::new(sub));
         }
 
         Ok(Arc::new(resource))
@@ -531,9 +529,8 @@ fn parse_dictionary(s: &str) -> EngineResult<Variant> {
             )));
         }
         // Find end of key string.
-        let key_end = find_closing_quote(pair, 1).ok_or_else(|| {
-            EngineError::Parse(format!("unterminated dictionary key: {pair}"))
-        })?;
+        let key_end = find_closing_quote(pair, 1)
+            .ok_or_else(|| EngineError::Parse(format!("unterminated dictionary key: {pair}")))?;
         let key = unescape_string(&pair[1..key_end]);
         let rest = pair[key_end + 1..].trim();
         let rest = rest
@@ -642,7 +639,10 @@ mod tests {
     #[test]
     fn parse_node_path_value() {
         let v = parse_variant_value(r#"NodePath("Player/Sprite")"#).unwrap();
-        assert_eq!(v, Variant::NodePath(gdcore::node_path::NodePath::new("Player/Sprite")));
+        assert_eq!(
+            v,
+            Variant::NodePath(gdcore::node_path::NodePath::new("Player/Sprite"))
+        );
     }
 
     #[test]
@@ -667,10 +667,7 @@ mod tests {
     #[test]
     fn parse_string_escape_sequences() {
         let v = parse_variant_value(r#""line1\nline2\ttab\\slash\"quote""#).unwrap();
-        assert_eq!(
-            v,
-            Variant::String("line1\nline2\ttab\\slash\"quote".into())
-        );
+        assert_eq!(v, Variant::String("line1\nline2\ttab\\slash\"quote".into()));
     }
 
     #[test]
@@ -851,10 +848,7 @@ kept = 1
     #[test]
     fn parse_color_rgb_three_components() {
         let v = parse_variant_value("Color(1, 0.5, 0)").unwrap();
-        assert_eq!(
-            v,
-            Variant::Color(Color::rgb(1.0, 0.5, 0.0))
-        );
+        assert_eq!(v, Variant::Color(Color::rgb(1.0, 0.5, 0.0)));
     }
 
     #[test]
@@ -933,7 +927,9 @@ nothing = null
         );
         assert_eq!(
             res.get_property("target"),
-            Some(&Variant::NodePath(gdcore::node_path::NodePath::new("Player/Sprite")))
+            Some(&Variant::NodePath(gdcore::node_path::NodePath::new(
+                "Player/Sprite"
+            )))
         );
         assert_eq!(
             res.get_property("texture"),

@@ -203,3 +203,41 @@ The goal for v1 is not to beat upstream Godot on performance but to be "competit
 - A summary dashboard is generated from the result files.
 - Regressions above the failure threshold block merges to main.
 - Historical trends are tracked to detect gradual degradation.
+
+---
+
+## Runnable Benchmark Harness
+
+A concrete benchmark harness is available at `engine-rs/examples/benchmarks.rs`. It uses `std::time::Instant` (no external dependencies) and outputs JSON to stdout.
+
+### Running
+
+```bash
+cd engine-rs
+cargo run --example benchmarks
+cargo run --example benchmarks > benchmark_results.json  # Save to file
+```
+
+### Implemented Benchmarks
+
+| Name | Workload |
+|------|----------|
+| `scene_load` | Parse demo_2d.tscn (5 nodes) |
+| `resource_load` | Parse 4-property .tres resource |
+| `physics_step_2d` | 100 rigid circles, 60 frames at 60 Hz |
+| `physics_step_3d` | 100 rigid spheres, 60 frames at 60 Hz |
+| `variant_conversion` | 1000 Variant JSON roundtrips |
+| `render_frame_2d` | 100 canvas items into 640x480 framebuffer |
+
+Each runs 100 iterations. Output format:
+
+```json
+{
+  "engine": "patina",
+  "timestamp": "unix:1710720000",
+  "iterations_per_bench": 100,
+  "benchmarks": [
+    { "name": "scene_load", "iterations": 100, "total_us": 0, "avg_us": 0 }
+  ]
+}
+```

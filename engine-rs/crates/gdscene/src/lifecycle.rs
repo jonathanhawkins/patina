@@ -11,9 +11,7 @@
 //! The [`LifecycleManager`] encapsulates this logic and operates on a
 //! [`SceneTree`].
 
-use gdobject::notification::{
-    NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_READY,
-};
+use gdobject::notification::{NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_READY};
 
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
@@ -235,17 +233,23 @@ mod tests {
         LifecycleManager::exit_tree(&mut tree, parent_id);
 
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log, &[
-            NOTIFICATION_ENTER_TREE,
-            NOTIFICATION_READY,
-            NOTIFICATION_EXIT_TREE,
-        ]);
+        assert_eq!(
+            c1_log,
+            &[
+                NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_READY,
+                NOTIFICATION_EXIT_TREE,
+            ]
+        );
 
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert_eq!(parent_log, &[
-            NOTIFICATION_ENTER_TREE,
-            NOTIFICATION_READY,
-            NOTIFICATION_EXIT_TREE,
-        ]);
+        assert_eq!(
+            parent_log,
+            &[
+                NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_READY,
+                NOTIFICATION_EXIT_TREE,
+            ]
+        );
     }
 }

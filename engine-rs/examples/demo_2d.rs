@@ -28,13 +28,12 @@ fn main() {
     // 1. Load scene from .tscn fixture
     // -----------------------------------------------------------------------
     let tscn_source = include_str!("../fixtures/scenes/demo_2d.tscn");
-    let packed_scene =
-        PackedScene::from_tscn(tscn_source).expect("failed to parse demo_2d.tscn");
+    let packed_scene = PackedScene::from_tscn(tscn_source).expect("failed to parse demo_2d.tscn");
 
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();
-    let scene_root_id =
-        add_packed_scene_to_tree(&mut tree, root_id, &packed_scene).expect("failed to instance scene");
+    let scene_root_id = add_packed_scene_to_tree(&mut tree, root_id, &packed_scene)
+        .expect("failed to instance scene");
 
     // Look up node IDs by path.
     let player_id = tree
@@ -48,18 +47,9 @@ fn main() {
         .expect("Ground node not found");
 
     println!("Scene loaded: {} nodes", tree.node_count());
-    println!(
-        "  Player position: {:?}",
-        get_position(&tree, player_id)
-    );
-    println!(
-        "  Enemy position:  {:?}",
-        get_position(&tree, enemy_id)
-    );
-    println!(
-        "  Ground position: {:?}",
-        get_position(&tree, ground_id)
-    );
+    println!("  Player position: {:?}", get_position(&tree, player_id));
+    println!("  Enemy position:  {:?}", get_position(&tree, enemy_id));
+    println!("  Ground position: {:?}", get_position(&tree, ground_id));
 
     // -----------------------------------------------------------------------
     // 2. Set up physics world

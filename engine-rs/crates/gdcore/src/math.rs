@@ -7,6 +7,54 @@
 use std::ops::{Add, Mul, Neg, Sub};
 
 // ---------------------------------------------------------------------------
+// Vector2i
+// ---------------------------------------------------------------------------
+
+/// A 2D vector with `i32` components, matching Godot's `Vector2i`.
+///
+/// Used for tile coordinates, pixel-perfect positions, and grid-based math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Vector2i {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Vector2i {
+    pub const ZERO: Self = Self { x: 0, y: 0 };
+    pub const ONE: Self = Self { x: 1, y: 1 };
+    pub const UP: Self = Self { x: 0, y: -1 };
+    pub const DOWN: Self = Self { x: 0, y: 1 };
+    pub const LEFT: Self = Self { x: -1, y: 0 };
+    pub const RIGHT: Self = Self { x: 1, y: 0 };
+
+    /// Creates a new integer vector.
+    pub const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+}
+
+impl Add for Vector2i {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self::new(self.x + rhs.x, self.y + rhs.y)
+    }
+}
+
+impl Sub for Vector2i {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self::new(self.x - rhs.x, self.y - rhs.y)
+    }
+}
+
+impl Neg for Vector2i {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Vector2
 // ---------------------------------------------------------------------------
 
@@ -107,11 +155,31 @@ pub struct Vector3 {
 }
 
 impl Vector3 {
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
-    pub const ONE: Self = Self { x: 1.0, y: 1.0, z: 1.0 };
-    pub const UP: Self = Self { x: 0.0, y: 1.0, z: 0.0 };
-    pub const DOWN: Self = Self { x: 0.0, y: -1.0, z: 0.0 };
-    pub const FORWARD: Self = Self { x: 0.0, y: 0.0, z: -1.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const ONE: Self = Self {
+        x: 1.0,
+        y: 1.0,
+        z: 1.0,
+    };
+    pub const UP: Self = Self {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    pub const DOWN: Self = Self {
+        x: 0.0,
+        y: -1.0,
+        z: 0.0,
+    };
+    pub const FORWARD: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: -1.0,
+    };
 
     /// Creates a new vector.
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
@@ -267,21 +335,6 @@ impl Transform2D {
         )
     }
 
-    /// Multiplies two transforms.
-    pub fn mul(self, other: Self) -> Self {
-        Self {
-            x: Vector2::new(
-                self.x.x * other.x.x + self.y.x * other.x.y,
-                self.x.y * other.x.x + self.y.y * other.x.y,
-            ),
-            y: Vector2::new(
-                self.x.x * other.y.x + self.y.x * other.y.y,
-                self.x.y * other.y.x + self.y.y * other.y.y,
-            ),
-            origin: self.xform(other.origin),
-        }
-    }
-
     /// Creates a translation-only transform.
     pub fn translated(offset: Vector2) -> Self {
         Self {
@@ -331,6 +384,23 @@ impl Transform2D {
     }
 }
 
+impl Mul for Transform2D {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        Self {
+            x: Vector2::new(
+                self.x.x * rhs.x.x + self.y.x * rhs.x.y,
+                self.x.y * rhs.x.x + self.y.y * rhs.x.y,
+            ),
+            y: Vector2::new(
+                self.x.x * rhs.y.x + self.y.x * rhs.y.y,
+                self.x.y * rhs.y.x + self.y.y * rhs.y.y,
+            ),
+            origin: self.xform(rhs.origin),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Color
 // ---------------------------------------------------------------------------
@@ -345,9 +415,24 @@ pub struct Color {
 }
 
 impl Color {
-    pub const WHITE: Self = Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    pub const BLACK: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const TRANSPARENT: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const WHITE: Self = Self {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    pub const BLACK: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const TRANSPARENT: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
 
     /// Creates a new color.
     pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
@@ -463,7 +548,7 @@ mod tests {
     fn transform2d_compose() {
         let t = Transform2D::translated(Vector2::new(5.0, 0.0));
         let r = Transform2D::rotated(std::f32::consts::FRAC_PI_2);
-        let combined = t.mul(r);
+        let combined = t * r;
         let p = combined.xform(Vector2::ZERO);
         // Origin of r is (0,0), translated by t → (5,0)
         assert!(approx_eq(p.x, 5.0));
@@ -659,7 +744,7 @@ mod tests {
 
     #[test]
     fn transform2d_identity_mul_identity() {
-        let result = Transform2D::IDENTITY.mul(Transform2D::IDENTITY);
+        let result = Transform2D::IDENTITY * Transform2D::IDENTITY;
         assert_eq!(result, Transform2D::IDENTITY);
     }
 
@@ -675,7 +760,7 @@ mod tests {
     fn transform2d_translate_then_scale() {
         let t = Transform2D::translated(Vector2::new(10.0, 0.0));
         let s = Transform2D::scaled(Vector2::new(2.0, 2.0));
-        let combined = t.mul(s);
+        let combined = t * s;
         let p = combined.xform(Vector2::new(1.0, 0.0));
         assert!(approx_eq(p.x, 12.0)); // 1*2 + 10
         assert!(approx_eq(p.y, 0.0));
@@ -716,5 +801,45 @@ mod tests {
         assert_eq!(Color::WHITE, Color::new(1.0, 1.0, 1.0, 1.0));
         assert_eq!(Color::BLACK, Color::new(0.0, 0.0, 0.0, 1.0));
         assert_eq!(Color::TRANSPARENT, Color::new(0.0, 0.0, 0.0, 0.0));
+    }
+
+    // -- Vector2i -----------------------------------------------------------
+
+    #[test]
+    fn vector2i_add() {
+        let a = Vector2i::new(1, 2);
+        let b = Vector2i::new(3, 4);
+        assert_eq!(a + b, Vector2i::new(4, 6));
+    }
+
+    #[test]
+    fn vector2i_sub() {
+        let a = Vector2i::new(5, 7);
+        let b = Vector2i::new(2, 3);
+        assert_eq!(a - b, Vector2i::new(3, 4));
+    }
+
+    #[test]
+    fn vector2i_neg() {
+        let v = Vector2i::new(3, -4);
+        assert_eq!(-v, Vector2i::new(-3, 4));
+    }
+
+    #[test]
+    fn vector2i_eq_and_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Vector2i::new(1, 2));
+        set.insert(Vector2i::new(1, 2));
+        set.insert(Vector2i::new(3, 4));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn vector2i_constants() {
+        assert_eq!(Vector2i::ZERO, Vector2i::new(0, 0));
+        assert_eq!(Vector2i::ONE, Vector2i::new(1, 1));
+        assert_eq!(Vector2i::UP, Vector2i::new(0, -1));
+        assert_eq!(Vector2i::DOWN, Vector2i::new(0, 1));
     }
 }

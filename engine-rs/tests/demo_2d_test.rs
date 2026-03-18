@@ -240,10 +240,7 @@ fn rendered_frame_has_correct_dimensions() {
     let result = run_demo();
     assert_eq!(result.framebuffer.width, WIDTH);
     assert_eq!(result.framebuffer.height, HEIGHT);
-    assert_eq!(
-        result.framebuffer.pixels.len(),
-        (WIDTH * HEIGHT) as usize
-    );
+    assert_eq!(result.framebuffer.pixels.len(), (WIDTH * HEIGHT) as usize);
 }
 
 #[test]
@@ -257,9 +254,7 @@ fn rendered_frame_has_nonzero_pixels() {
         .pixels
         .iter()
         .filter(|c| {
-            (c.r - bg.r).abs() > 0.01
-                || (c.g - bg.g).abs() > 0.01
-                || (c.b - bg.b).abs() > 0.01
+            (c.r - bg.r).abs() > 0.01 || (c.g - bg.g).abs() > 0.01 || (c.b - bg.b).abs() > 0.01
         })
         .count();
 
@@ -280,7 +275,10 @@ fn rendered_frame_pixel_data_is_nonempty() {
         .iter()
         .any(|c| c.r > 0.0 || c.g > 0.0 || c.b > 0.0);
 
-    assert!(any_nonzero, "Frame buffer should contain non-zero pixel data");
+    assert!(
+        any_nonzero,
+        "Frame buffer should contain non-zero pixel data"
+    );
 }
 
 #[test]

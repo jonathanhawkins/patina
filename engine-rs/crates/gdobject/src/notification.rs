@@ -157,14 +157,8 @@ mod tests {
 
     #[test]
     fn notification_display() {
-        assert_eq!(
-            format!("{}", NOTIFICATION_READY),
-            "NOTIFICATION_READY"
-        );
-        assert_eq!(
-            format!("{}", Notification::new(999)),
-            "Notification(999)"
-        );
+        assert_eq!(format!("{}", NOTIFICATION_READY), "NOTIFICATION_READY");
+        assert_eq!(format!("{}", Notification::new(999)), "Notification(999)");
     }
 
     struct MockHandler {
@@ -193,10 +187,8 @@ mod tests {
             received: vec![],
         };
 
-        let records = dispatch_notification_chain(
-            &mut [&mut derived, &mut base],
-            NOTIFICATION_READY,
-        );
+        let records =
+            dispatch_notification_chain(&mut [&mut derived, &mut base], NOTIFICATION_READY);
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].class_name, "Player");
@@ -248,15 +240,39 @@ mod tests {
 
     #[test]
     fn notification_display_all_known() {
-        assert_eq!(format!("{}", NOTIFICATION_POSTINITIALIZE), "NOTIFICATION_POSTINITIALIZE");
-        assert_eq!(format!("{}", NOTIFICATION_PREDELETE), "NOTIFICATION_PREDELETE");
-        assert_eq!(format!("{}", NOTIFICATION_ENTER_TREE), "NOTIFICATION_ENTER_TREE");
-        assert_eq!(format!("{}", NOTIFICATION_EXIT_TREE), "NOTIFICATION_EXIT_TREE");
+        assert_eq!(
+            format!("{}", NOTIFICATION_POSTINITIALIZE),
+            "NOTIFICATION_POSTINITIALIZE"
+        );
+        assert_eq!(
+            format!("{}", NOTIFICATION_PREDELETE),
+            "NOTIFICATION_PREDELETE"
+        );
+        assert_eq!(
+            format!("{}", NOTIFICATION_ENTER_TREE),
+            "NOTIFICATION_ENTER_TREE"
+        );
+        assert_eq!(
+            format!("{}", NOTIFICATION_EXIT_TREE),
+            "NOTIFICATION_EXIT_TREE"
+        );
         assert_eq!(format!("{}", NOTIFICATION_PAUSED), "NOTIFICATION_PAUSED");
-        assert_eq!(format!("{}", NOTIFICATION_UNPAUSED), "NOTIFICATION_UNPAUSED");
-        assert_eq!(format!("{}", NOTIFICATION_PARENTED), "NOTIFICATION_PARENTED");
-        assert_eq!(format!("{}", NOTIFICATION_UNPARENTED), "NOTIFICATION_UNPARENTED");
-        assert_eq!(format!("{}", NOTIFICATION_INSTANCED), "NOTIFICATION_INSTANCED");
+        assert_eq!(
+            format!("{}", NOTIFICATION_UNPAUSED),
+            "NOTIFICATION_UNPAUSED"
+        );
+        assert_eq!(
+            format!("{}", NOTIFICATION_PARENTED),
+            "NOTIFICATION_PARENTED"
+        );
+        assert_eq!(
+            format!("{}", NOTIFICATION_UNPARENTED),
+            "NOTIFICATION_UNPARENTED"
+        );
+        assert_eq!(
+            format!("{}", NOTIFICATION_INSTANCED),
+            "NOTIFICATION_INSTANCED"
+        );
         assert_eq!(format!("{}", NOTIFICATION_DRAW), "NOTIFICATION_DRAW");
     }
 

@@ -122,6 +122,10 @@ impl MainLoop {
             self.physics_accumulator = 0.0;
         }
 
+        // -- animation / tween phase --
+        self.tree.process_animations(delta_secs);
+        self.tree.process_tweens(delta_secs);
+
         // -- process phase --
         self.tree.process_frame();
 
@@ -212,10 +216,7 @@ mod tests {
         ml.run_frames(3, 1.0 / 60.0);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        let process_count = log
-            .iter()
-            .filter(|&&n| n == NOTIFICATION_PROCESS)
-            .count();
+        let process_count = log.iter().filter(|&&n| n == NOTIFICATION_PROCESS).count();
         assert_eq!(process_count, 3, "expected 3 process calls");
     }
 
@@ -251,7 +252,12 @@ mod tests {
         let run = || {
             let (mut ml, child_id) = make_loop_with_child();
             ml.run_frames(100, 1.0 / 60.0);
-            let log = ml.tree().get_node(child_id).unwrap().notification_log().to_vec();
+            let log = ml
+                .tree()
+                .get_node(child_id)
+                .unwrap()
+                .notification_log()
+                .to_vec();
             (ml.frame_count(), ml.physics_time(), ml.process_time(), log)
         };
 
@@ -302,7 +308,10 @@ mod tests {
 
         // With delta=0, no physics ticks should fire, but process should
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        let physics_count = log
+            .iter()
+            .filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS)
+            .count();
         let process_count = log.iter().filter(|&&n| n == NOTIFICATION_PROCESS).count();
         assert_eq!(physics_count, 0);
         assert_eq!(process_count, 1);
@@ -317,7 +326,10 @@ mod tests {
         assert_eq!(ml.frame_count(), 1);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        let physics_count = log
+            .iter()
+            .filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS)
+            .count();
         let process_count = log.iter().filter(|&&n| n == NOTIFICATION_PROCESS).count();
         // Delta too small for any physics step
         assert_eq!(physics_count, 0);
@@ -383,7 +395,10 @@ mod tests {
         ml.step(2.0 / 60.0);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        let physics_count = log
+            .iter()
+            .filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS)
+            .count();
         assert_eq!(physics_count, 2);
     }
 
@@ -397,7 +412,10 @@ mod tests {
         ml.step(half_dt);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        let physics_count = log.iter().filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS).count();
+        let physics_count = log
+            .iter()
+            .filter(|&&n| n == NOTIFICATION_PHYSICS_PROCESS)
+            .count();
         // The first step accumulates half, second step accumulates to full => 1 physics step
         assert_eq!(physics_count, 1);
         assert_eq!(ml.frame_count(), 2);

@@ -9,9 +9,7 @@ use std::collections::HashMap;
 use gdcore::id::ObjectId;
 use gdvariant::Variant;
 
-use crate::bindings::{
-    MethodFlags, MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo,
-};
+use crate::bindings::{MethodFlags, MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo};
 use gdvariant::variant::VariantType;
 
 /// Central registry mapping engine objects to their script instances.
@@ -52,7 +50,10 @@ impl ScriptBridge {
         method: &str,
         args: &[Variant],
     ) -> Result<Variant, ScriptError> {
-        let script = self.scripts.get_mut(&object_id).ok_or(ScriptError::NoScript)?;
+        let script = self
+            .scripts
+            .get_mut(&object_id)
+            .ok_or(ScriptError::NoScript)?;
         script.call_method(method, args)
     }
 
@@ -205,8 +206,7 @@ mod tests {
     fn native_script_call_method() {
         let mut script = NativeScript::builder("TestScript")
             .method("add", |args| {
-                if let (Some(Variant::Int(a)), Some(Variant::Int(b))) =
-                    (args.first(), args.get(1))
+                if let (Some(Variant::Int(a)), Some(Variant::Int(b))) = (args.first(), args.get(1))
                 {
                     Ok(Variant::Int(a + b))
                 } else {
@@ -319,10 +319,7 @@ mod tests {
 
         assert_eq!(bridge.get_property(obj_id, "score"), Some(Variant::Int(0)));
         assert!(bridge.set_property(obj_id, "score", Variant::Int(42)));
-        assert_eq!(
-            bridge.get_property(obj_id, "score"),
-            Some(Variant::Int(42))
-        );
+        assert_eq!(bridge.get_property(obj_id, "score"), Some(Variant::Int(42)));
     }
 
     #[test]
@@ -353,10 +350,7 @@ mod tests {
             expected: 2,
             got: 3,
         };
-        assert_eq!(
-            e2.to_string(),
-            "invalid argument count: expected 2, got 3"
-        );
+        assert_eq!(e2.to_string(), "invalid argument count: expected 2, got 3");
 
         let e3 = ScriptError::PropertyNotFound("bar".into());
         assert_eq!(e3.to_string(), "property not found: 'bar'");

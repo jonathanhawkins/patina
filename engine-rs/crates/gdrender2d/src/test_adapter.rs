@@ -7,8 +7,8 @@ use gdcore::math::Color;
 use gdserver2d::server::FrameData;
 
 use crate::renderer::{FrameBuffer, SoftwareRenderer};
-use gdserver2d::viewport::Viewport;
 use gdserver2d::server::RenderingServer2D;
+use gdserver2d::viewport::Viewport;
 
 /// Captures a frame by rendering the viewport with the given renderer.
 pub fn capture_frame(renderer: &mut SoftwareRenderer, viewport: &Viewport) -> FrameBuffer {

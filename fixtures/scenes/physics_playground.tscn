@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://physics_playground"]
+
+[node name="World" type="Node"]
+
+[node name="Ball" type="Node2D" parent="."]
+position = Vector2(400, 100)
+velocity = Vector2(50, 0)
+radius = 16
+
+[node name="Wall" type="Node2D" parent="."]
+position = Vector2(800, 300)
+
+[node name="Floor" type="Node2D" parent="."]
+position = Vector2(400, 600)

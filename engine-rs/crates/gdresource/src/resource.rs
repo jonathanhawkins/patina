@@ -106,7 +106,10 @@ mod tests {
         r.set_property("pos", Variant::Vector2(Vector2::new(1.0, 2.0)));
 
         assert_eq!(r.property_count(), 3);
-        assert_eq!(r.get_property("name"), Some(&Variant::String("hello".into())));
+        assert_eq!(
+            r.get_property("name"),
+            Some(&Variant::String("hello".into()))
+        );
         assert_eq!(r.get_property("value"), Some(&Variant::Int(42)));
         assert_eq!(r.get_property("missing"), None);
     }

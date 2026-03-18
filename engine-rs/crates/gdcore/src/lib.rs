@@ -9,12 +9,14 @@ pub mod diagnostics;
 pub mod error;
 pub mod id;
 pub mod math;
+pub mod math3d;
 pub mod node_path;
 pub mod string_name;
 
 // Re-export commonly used types at the crate root.
 pub use error::{EngineError, EngineResult};
 pub use id::{ClassId, ObjectId, ResourceUid};
-pub use math::{Color, Rect2, Transform2D, Vector2, Vector3};
+pub use math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3};
+pub use math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 pub use node_path::NodePath;
 pub use string_name::StringName;

@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use gdcore::ObjectId;
-use gdvariant::Variant;
 use gdobject::notification::Notification;
+use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -85,6 +85,11 @@ pub struct Node {
     groups: HashSet<String>,
     /// Log of notifications received (for testing / debugging).
     notification_log: Vec<Notification>,
+    /// The node that "owns" this node in the scene hierarchy.
+    /// Usually the scene root that this node was instanced from.
+    owner: Option<NodeId>,
+    /// Whether this node has a scene-unique name (the `%` prefix in Godot).
+    unique_name: bool,
 }
 
 impl Node {
@@ -99,15 +104,13 @@ impl Node {
             properties: HashMap::new(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
+            owner: None,
+            unique_name: false,
         }
     }
 
     /// Creates a node with a specific [`NodeId`] (for deserialization / tests).
-    pub fn with_id(
-        id: NodeId,
-        name: impl Into<String>,
-        class_name: impl Into<String>,
-    ) -> Self {
+    pub fn with_id(id: NodeId, name: impl Into<String>, class_name: impl Into<String>) -> Self {
         Self {
             id,
             name: name.into(),
@@ -117,6 +120,8 @@ impl Node {
             properties: HashMap::new(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
+            owner: None,
+            unique_name: false,
         }
     }
 
@@ -185,10 +190,7 @@ impl Node {
 
     /// Gets a property by name, returning `Nil` if absent.
     pub fn get_property(&self, key: &str) -> Variant {
-        self.properties
-            .get(key)
-            .cloned()
-            .unwrap_or(Variant::Nil)
+        self.properties.get(key).cloned().unwrap_or(Variant::Nil)
     }
 
     /// Returns `true` if the property exists.
@@ -221,6 +223,30 @@ impl Node {
     /// Returns all groups this node belongs to.
     pub fn groups(&self) -> &HashSet<String> {
         &self.groups
+    }
+
+    // -- owner --------------------------------------------------------------
+
+    /// Returns the owner node ID, if set.
+    pub fn owner(&self) -> Option<NodeId> {
+        self.owner
+    }
+
+    /// Sets the owner node ID.
+    pub fn set_owner(&mut self, owner: Option<NodeId>) {
+        self.owner = owner;
+    }
+
+    // -- unique name --------------------------------------------------------
+
+    /// Returns whether this node has a scene-unique name (`%` prefix).
+    pub fn is_unique_name(&self) -> bool {
+        self.unique_name
+    }
+
+    /// Sets the scene-unique name flag.
+    pub fn set_unique_name(&mut self, unique: bool) {
+        self.unique_name = unique;
     }
 
     // -- notifications ------------------------------------------------------

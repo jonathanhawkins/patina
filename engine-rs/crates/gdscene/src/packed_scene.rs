@@ -13,9 +13,9 @@
 use std::collections::HashMap;
 
 use gdcore::error::{EngineError, EngineResult};
+use gdobject::signal::Connection;
 use gdresource::loader::parse_variant_value;
 use gdvariant::Variant;
-use gdobject::signal::Connection;
 
 use crate::node::{Node, NodeId};
 
@@ -60,6 +60,13 @@ struct NodeTemplate {
     parent_path: Option<String>,
     /// Properties parsed from key=value lines.
     properties: HashMap<String, Variant>,
+    /// Groups this node belongs to, parsed from `groups=["a", "b"]`.
+    groups: Vec<String>,
+    /// Whether this node has a scene-unique name (`%` prefix).
+    unique_name: bool,
+    /// Instance resource reference (e.g. `ExtResource("1_abc")`), if this
+    /// node instances a sub-scene.
+    instance: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,15 +144,35 @@ impl PackedScene {
                     }
                 } else if inner.starts_with("node") {
                     let attrs = extract_header_attrs(inner);
-                    let name = attrs.get("name").cloned().unwrap_or_default();
+                    let raw_name = attrs.get("name").cloned().unwrap_or_default();
+
+                    // Scene unique name: `%` prefix in Godot editor.
+                    let (unique_name, name) = if let Some(stripped) = raw_name.strip_prefix('%') {
+                        (true, stripped.to_string())
+                    } else {
+                        (false, raw_name)
+                    };
+
                     let class_name = attrs.get("type").cloned().unwrap_or_else(|| "Node".into());
                     let parent_path = attrs.get("parent").cloned();
+
+                    // Parse groups=["group1", "group2"] attribute.
+                    let groups = attrs
+                        .get("groups")
+                        .map(|g| parse_groups_attr(g))
+                        .unwrap_or_default();
+
+                    // Parse instance=ExtResource("id") attribute.
+                    let instance = attrs.get("instance").cloned();
 
                     current = Some(NodeTemplate {
                         name,
                         class_name,
                         parent_path,
                         properties: HashMap::new(),
+                        groups,
+                        unique_name,
+                        instance,
                     });
                 }
                 // Ignore other sections (ext_resource, sub_resource, etc.)
@@ -164,7 +191,9 @@ impl PackedScene {
                         }
                         Err(_) => {
                             // Skip values we cannot parse rather than fail.
-                            tracing::warn!("skipping unparseable value for key '{key}': {value_str}");
+                            tracing::warn!(
+                                "skipping unparseable value for key '{key}': {value_str}"
+                            );
                         }
                     }
                 }
@@ -221,9 +250,18 @@ impl PackedScene {
         for (key, value) in &root_tmpl.properties {
             root_node.set_property(key, value.clone());
         }
+        for group in &root_tmpl.groups {
+            root_node.add_to_group(group.clone());
+        }
+        root_node.set_unique_name(root_tmpl.unique_name);
+        if let Some(ref inst) = root_tmpl.instance {
+            root_node.set_property("_instance", Variant::String(inst.clone()));
+        }
+        // Root node owns itself (owner = None signals it IS the owner).
         path_to_index.insert(".".into(), 0);
         // Also map by name for child lookup.
         path_to_index.insert(root_tmpl.name.clone(), 0);
+        let root_id = root_node.id();
         nodes.push(root_node);
 
         // Process remaining nodes.
@@ -240,6 +278,15 @@ impl PackedScene {
             for (key, value) in &tmpl.properties {
                 node.set_property(key, value.clone());
             }
+            for group in &tmpl.groups {
+                node.add_to_group(group.clone());
+            }
+            node.set_unique_name(tmpl.unique_name);
+            if let Some(ref inst) = tmpl.instance {
+                node.set_property("_instance", Variant::String(inst.clone()));
+            }
+            // Owner is the scene root for all non-root nodes.
+            node.set_owner(Some(root_id));
 
             let child_id = node.id();
             let child_idx = nodes.len();
@@ -285,6 +332,8 @@ impl PackedScene {
 /// Extracts `key="value"` pairs from a section header string.
 ///
 /// Replicates the logic from `gdresource::loader` for `.tscn` headers.
+/// Also handles bracket-delimited values like `groups=["a", "b"]` and
+/// function-call values like `instance=ExtResource("1_abc")`.
 fn extract_header_attrs(header: &str) -> HashMap<String, String> {
     let mut attrs = HashMap::new();
     let mut remaining = header;
@@ -309,8 +358,40 @@ fn extract_header_attrs(header: &str) -> HashMap<String, String> {
             } else {
                 break;
             }
+        } else if remaining.starts_with('[') {
+            // Bracket-delimited value like ["group1", "group2"].
+            if let Some(end_bracket) = remaining.find(']') {
+                let value = &remaining[..=end_bracket];
+                attrs.insert(key.to_string(), value.to_string());
+                remaining = &remaining[end_bracket + 1..];
+            } else {
+                break;
+            }
         } else {
-            let end = remaining.find(' ').unwrap_or(remaining.len());
+            // Unquoted value — may contain parentheses like ExtResource("id").
+            // Find the end by tracking paren depth.
+            let mut end = 0;
+            let mut paren_depth = 0i32;
+            for (i, ch) in remaining.char_indices() {
+                match ch {
+                    '(' => paren_depth += 1,
+                    ')' => {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            end = i + 1;
+                            break;
+                        }
+                    }
+                    ' ' if paren_depth == 0 => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if end == 0 {
+                end = remaining.len();
+            }
             let value = &remaining[..end];
             attrs.insert(key.to_string(), value.to_string());
             remaining = &remaining[end..];
@@ -318,6 +399,30 @@ fn extract_header_attrs(header: &str) -> HashMap<String, String> {
     }
 
     attrs
+}
+
+/// Parses a groups attribute value like `["enemy", "damageable"]` into a
+/// `Vec<String>`.
+fn parse_groups_attr(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    // Strip outer brackets.
+    let inner = if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    inner
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim().trim_matches('"');
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +468,7 @@ pub fn add_packed_scene_to_tree(
     for group in scene_root.groups() {
         new_root.add_to_group(group.clone());
     }
+    new_root.set_unique_name(scene_root.is_unique_name());
     let new_root_id = new_root.id();
     old_to_new.insert(scene_root.id(), new_root_id);
     tree.add_child(parent_id, new_root)?;
@@ -370,10 +476,7 @@ pub fn add_packed_scene_to_tree(
     // Add remaining nodes.
     for node in &nodes[1..] {
         let old_parent_id = node.parent().ok_or_else(|| {
-            EngineError::InvalidOperation(format!(
-                "instanced node '{}' has no parent",
-                node.name()
-            ))
+            EngineError::InvalidOperation(format!("instanced node '{}' has no parent", node.name()))
         })?;
         let &new_parent_id = old_to_new.get(&old_parent_id).ok_or_else(|| {
             EngineError::InvalidOperation(format!(
@@ -389,6 +492,9 @@ pub fn add_packed_scene_to_tree(
         for group in node.groups() {
             new_node.add_to_group(group.clone());
         }
+        new_node.set_unique_name(node.is_unique_name());
+        // Set owner to the new scene root.
+        new_node.set_owner(Some(new_root_id));
         let new_node_id = new_node.id();
         old_to_new.insert(node.id(), new_node_id);
         tree.add_child(new_parent_id, new_node)?;
@@ -540,10 +646,7 @@ position = Vector2(100, 200)
         assert_eq!(tree.node_count(), 4);
 
         // Verify paths.
-        assert_eq!(
-            tree.node_path(scene_root_id).unwrap(),
-            "/root/Root"
-        );
+        assert_eq!(tree.node_path(scene_root_id).unwrap(), "/root/Root");
 
         let player_id = tree.get_node_by_path("/root/Root/Player").unwrap();
         let player = tree.get_node(player_id).unwrap();
@@ -755,22 +858,32 @@ value = 42
 
         // Button node should have signal "pressed" connected.
         let button_id = tree.get_node_by_path("/root/Root/Button").unwrap();
-        let store = tree.signal_store(button_id).expect("Button should have a signal store");
-        let pressed = store.get_signal("pressed").expect("should have 'pressed' signal");
+        let store = tree
+            .signal_store(button_id)
+            .expect("Button should have a signal store");
+        let pressed = store
+            .get_signal("pressed")
+            .expect("should have 'pressed' signal");
         assert_eq!(pressed.connection_count(), 1);
         // The target should be the scene root (to=".").
         assert_eq!(pressed.connections()[0].method, "_on_button_pressed");
         assert_eq!(pressed.connections()[0].target_id, scene_root.object_id());
 
         // Button also has mouse_entered connected.
-        let mouse = store.get_signal("mouse_entered").expect("should have 'mouse_entered'");
+        let mouse = store
+            .get_signal("mouse_entered")
+            .expect("should have 'mouse_entered'");
         assert_eq!(mouse.connection_count(), 1);
         assert_eq!(mouse.connections()[0].method, "_on_mouse_entered");
 
         // Player/Area2D should have body_entered connected.
         let area_id = tree.get_node_by_path("/root/Root/Player/Area2D").unwrap();
-        let area_store = tree.signal_store(area_id).expect("Area2D should have a signal store");
-        let body = area_store.get_signal("body_entered").expect("should have 'body_entered'");
+        let area_store = tree
+            .signal_store(area_id)
+            .expect("Area2D should have a signal store");
+        let body = area_store
+            .get_signal("body_entered")
+            .expect("should have 'body_entered'");
         assert_eq!(body.connection_count(), 1);
         assert_eq!(body.connections()[0].method, "_on_body_entered");
     }
@@ -792,7 +905,9 @@ value = 42
         let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
 
         let child_id = tree.get_node_by_path("/root/Root/Child").unwrap();
-        let store = tree.signal_store(child_id).expect("Child should have signal store");
+        let store = tree
+            .signal_store(child_id)
+            .expect("Child should have signal store");
         let sig = store.get_signal("done").unwrap();
         assert_eq!(sig.connection_count(), 1);
         assert_eq!(sig.connections()[0].target_id, scene_root.object_id());
@@ -820,7 +935,9 @@ value = 42
         let deep_id = tree.get_node_by_path("/root/Root/Parent/Deep").unwrap();
         let parent_id = tree.get_node_by_path("/root/Root/Parent").unwrap();
 
-        let store = tree.signal_store(deep_id).expect("Deep should have signal store");
+        let store = tree
+            .signal_store(deep_id)
+            .expect("Deep should have signal store");
         let sig = store.get_signal("alert").unwrap();
         assert_eq!(sig.connection_count(), 1);
         assert_eq!(sig.connections()[0].target_id, parent_id.object_id());
@@ -919,5 +1036,275 @@ value = 42
         assert_eq!(scene.node_count(), 4);
         assert_eq!(scene.connection_count(), 3);
         assert_eq!(scene.uid.as_deref(), Some("uid://signals_test"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Groups from .tscn
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_groups_from_tscn() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Enemy" type="Node2D" parent="." groups=["enemies", "damageable"]]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[1].is_in_group("enemies"));
+        assert!(nodes[1].is_in_group("damageable"));
+        assert!(!nodes[1].is_in_group("players"));
+    }
+
+    #[test]
+    fn groups_survive_add_to_tree() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Player" type="Node2D" parent="." groups=["players", "controllable"]]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let player_id = tree.get_node_by_path("/root/Root/Player").unwrap();
+        let player = tree.get_node(player_id).unwrap();
+        assert!(player.is_in_group("players"));
+        assert!(player.is_in_group("controllable"));
+    }
+
+    #[test]
+    fn parse_single_group() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node" groups=["persistent"]]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert!(nodes[0].is_in_group("persistent"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Scene unique names (% prefix)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_unique_name_prefix() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="%HealthBar" type="Control" parent="."]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert_eq!(nodes[1].name(), "HealthBar");
+        assert!(nodes[1].is_unique_name());
+    }
+
+    #[test]
+    fn non_unique_name_flag_is_false() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        for node in &nodes {
+            assert!(!node.is_unique_name());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property overrides (instance attribute)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_instance_attribute() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" uid="uid://abc" path="res://enemy.tscn" id="1_abc"]
+
+[node name="Root" type="Node"]
+
+[node name="Enemy1" parent="." instance=ExtResource("1_abc")]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert_eq!(nodes[1].name(), "Enemy1");
+        assert_eq!(
+            nodes[1].get_property("_instance"),
+            Variant::String("ExtResource(\"1_abc\")".into())
+        );
+    }
+
+    #[test]
+    fn node_without_instance_has_no_instance_property() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert_eq!(nodes[1].get_property("_instance"), Variant::Nil);
+    }
+
+    // -----------------------------------------------------------------------
+    // Owner tracking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn root_node_has_no_owner() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert!(nodes[0].owner().is_none());
+    }
+
+    #[test]
+    fn child_nodes_owner_is_scene_root() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        let root_id = nodes[0].id();
+        for node in &nodes[1..] {
+            assert_eq!(node.owner(), Some(root_id));
+        }
+    }
+
+    #[test]
+    fn owner_set_in_tree_after_instancing() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root_id = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let player_id = tree.get_node_by_path("/root/Root/Player").unwrap();
+        let player = tree.get_node(player_id).unwrap();
+        assert_eq!(player.owner(), Some(scene_root_id));
+
+        let sprite_id = tree.get_node_by_path("/root/Root/Player/Sprite").unwrap();
+        let sprite = tree.get_node(sprite_id).unwrap();
+        assert_eq!(sprite.owner(), Some(scene_root_id));
+    }
+
+    // -----------------------------------------------------------------------
+    // get_node_or_null
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_node_or_null_relative() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = Node::new("A", "Node");
+        let a_id = tree.add_child(root, a).unwrap();
+        let b = Node::new("B", "Node");
+        let b_id = tree.add_child(a_id, b).unwrap();
+
+        assert_eq!(tree.get_node_or_null(root, "A/B"), Some(b_id));
+        assert_eq!(tree.get_node_or_null(root, "A/Missing"), None);
+    }
+
+    #[test]
+    fn get_node_or_null_absolute() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = Node::new("A", "Node");
+        let a_id = tree.add_child(root, a).unwrap();
+
+        assert_eq!(tree.get_node_or_null(a_id, "/root/A"), Some(a_id));
+        assert_eq!(tree.get_node_or_null(a_id, "/root/Nope"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_index
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_index_returns_correct_position() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = Node::new("A", "Node");
+        let a_id = tree.add_child(root, a).unwrap();
+        let b = Node::new("B", "Node");
+        let b_id = tree.add_child(root, b).unwrap();
+        let c = Node::new("C", "Node");
+        let c_id = tree.add_child(root, c).unwrap();
+
+        assert_eq!(tree.get_index(a_id), Some(0));
+        assert_eq!(tree.get_index(b_id), Some(1));
+        assert_eq!(tree.get_index(c_id), Some(2));
+    }
+
+    #[test]
+    fn get_index_root_has_no_index() {
+        let tree = SceneTree::new();
+        assert_eq!(tree.get_index(tree.root_id()), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // duplicate_subtree
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_subtree_deep_clone() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let a = Node::new("A", "Node2D");
+        let a_id = tree.add_child(root, a).unwrap();
+
+        let b = Node::new("B", "Sprite2D");
+        let b_id = tree.add_child(a_id, b).unwrap();
+
+        // Set a property on B.
+        tree.get_node_mut(b_id)
+            .unwrap()
+            .set_property("frame", Variant::Int(5));
+        tree.add_to_group(b_id, "sprites").unwrap();
+
+        let cloned = tree.duplicate_subtree(a_id).unwrap();
+        assert_eq!(cloned.len(), 2);
+
+        // New IDs.
+        assert_ne!(cloned[0].id(), a_id);
+        assert_ne!(cloned[1].id(), b_id);
+
+        // Names and classes preserved.
+        assert_eq!(cloned[0].name(), "A");
+        assert_eq!(cloned[0].class_name(), "Node2D");
+        assert_eq!(cloned[1].name(), "B");
+        assert_eq!(cloned[1].class_name(), "Sprite2D");
+
+        // Properties cloned.
+        assert_eq!(cloned[1].get_property("frame"), Variant::Int(5));
+
+        // Groups cloned.
+        assert!(cloned[1].is_in_group("sprites"));
+
+        // Parent/child wiring uses new IDs.
+        assert!(cloned[0].parent().is_none()); // root of clone has no parent
+        assert_eq!(cloned[1].parent(), Some(cloned[0].id()));
+        assert_eq!(cloned[0].children(), &[cloned[1].id()]);
+    }
+
+    #[test]
+    fn duplicate_subtree_nonexistent_fails() {
+        let tree = SceneTree::new();
+        let fake = crate::node::NodeId::next();
+        assert!(tree.duplicate_subtree(fake).is_err());
+    }
+
+    #[test]
+    fn duplicate_single_node() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = Node::new("Leaf", "Node");
+        let a_id = tree.add_child(root, a).unwrap();
+
+        let cloned = tree.duplicate_subtree(a_id).unwrap();
+        assert_eq!(cloned.len(), 1);
+        assert_eq!(cloned[0].name(), "Leaf");
+        assert_ne!(cloned[0].id(), a_id);
+        assert!(cloned[0].children().is_empty());
     }
 }

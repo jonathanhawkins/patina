@@ -1,10 +1,10 @@
 //! # gdphysics2d
 //!
-//! 2D physics implementation for the Patina Engine runtime.
+//! 2D and 3D physics implementation for the Patina Engine runtime.
 //!
 //! Provides collision shapes, rigid/static/kinematic bodies, narrow-phase
 //! collision detection with resolution, a physics world with simulation
-//! stepping, and raycasting.
+//! stepping, and raycasting for both 2D and 3D.
 //!
 //! ## Quick start
 //!
@@ -34,8 +34,20 @@ pub mod shape;
 pub mod test_harness;
 pub mod world;
 
+// 3D physics modules.
+pub mod body3d;
+pub mod collision3d;
+pub mod shape3d;
+pub mod world3d;
+
 // Re-export key types for convenience.
 pub use body::{BodyId, BodyType, PhysicsBody2D};
 pub use collision::CollisionResult;
 pub use shape::Shape2D;
 pub use world::{PhysicsWorld2D, RaycastHit};
+
+// 3D re-exports.
+pub use body3d::{BodyId3D, BodyType3D, PhysicsBody3D};
+pub use collision3d::CollisionResult3D;
+pub use shape3d::Shape3D;
+pub use world3d::{PhysicsWorld3D, RaycastHit3D};

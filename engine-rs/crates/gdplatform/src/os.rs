@@ -12,6 +12,49 @@ fn epoch() -> &'static Instant {
     EPOCH.get_or_init(Instant::now)
 }
 
+// ---------------------------------------------------------------------------
+// Platform
+// ---------------------------------------------------------------------------
+
+/// Target platform identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Platform {
+    /// GNU/Linux.
+    Linux,
+    /// Apple macOS.
+    MacOS,
+    /// Microsoft Windows.
+    Windows,
+    /// Web / WASM.
+    Web,
+    /// Unrecognized platform.
+    Unknown,
+}
+
+/// Returns the platform this binary was compiled for.
+pub fn current_platform() -> Platform {
+    if cfg!(target_os = "linux") {
+        Platform::Linux
+    } else if cfg!(target_os = "macos") {
+        Platform::MacOS
+    } else if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else if cfg!(target_arch = "wasm32") {
+        Platform::Web
+    } else {
+        Platform::Unknown
+    }
+}
+
+/// Returns `true` when compiled with debug assertions enabled.
+pub fn is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+// ---------------------------------------------------------------------------
+// OsInfo
+// ---------------------------------------------------------------------------
+
 /// Basic OS information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OsInfo {
@@ -72,5 +115,35 @@ mod tests {
         }
         let t2 = get_ticks_usec();
         assert!(t2 >= t1, "t2 ({t2}) should be >= t1 ({t1})");
+    }
+
+    #[test]
+    fn current_platform_returns_known_variant() {
+        let p = current_platform();
+        // On macOS CI / dev machines this should be MacOS.
+        assert!(
+            matches!(
+                p,
+                Platform::Linux
+                    | Platform::MacOS
+                    | Platform::Windows
+                    | Platform::Web
+                    | Platform::Unknown
+            ),
+            "unexpected platform variant"
+        );
+    }
+
+    #[test]
+    fn is_debug_build_true_in_tests() {
+        // Cargo test builds with debug_assertions by default.
+        assert!(is_debug_build());
+    }
+
+    #[test]
+    fn platform_variants_are_distinct() {
+        assert_ne!(Platform::Linux, Platform::MacOS);
+        assert_ne!(Platform::Windows, Platform::Web);
+        assert_ne!(Platform::Unknown, Platform::Linux);
     }
 }

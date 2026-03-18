@@ -75,9 +75,7 @@ pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
     let rot = get_rotation(tree, node_id);
     let scl = get_scale(tree, node_id);
 
-    Transform2D::translated(pos)
-        .mul(Transform2D::rotated(rot))
-        .mul(Transform2D::scaled(scl))
+    Transform2D::translated(pos) * Transform2D::rotated(rot) * Transform2D::scaled(scl)
 }
 
 /// Computes the global transform by walking the parent chain and multiplying
@@ -97,7 +95,7 @@ pub fn get_global_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
     chain.reverse();
     let mut global = Transform2D::IDENTITY;
     for id in chain {
-        global = global.mul(get_local_transform(tree, id));
+        global = global * get_local_transform(tree, id);
     }
     global
 }
@@ -190,10 +188,11 @@ pub fn set_texture_path(tree: &mut SceneTree, node_id: NodeId, path: &str) {
 
 /// Reads the `"texture"` property as a path string, if present.
 pub fn get_texture_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("texture") {
-        Variant::String(s) => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("texture") {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
 }
 
 /// Sets the `"offset"` property on a Sprite2D node.
@@ -485,7 +484,10 @@ mod tests {
         set_flip_v(&mut tree, id, false);
 
         let n = tree.get_node(id).unwrap();
-        assert_eq!(n.get_property("offset"), Variant::Vector2(Vector2::new(16.0, 32.0)));
+        assert_eq!(
+            n.get_property("offset"),
+            Variant::Vector2(Vector2::new(16.0, 32.0))
+        );
         assert_eq!(n.get_property("flip_h"), Variant::Bool(true));
         assert_eq!(n.get_property("flip_v"), Variant::Bool(false));
     }

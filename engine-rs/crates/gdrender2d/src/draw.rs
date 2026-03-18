@@ -11,8 +11,12 @@ use crate::texture::Texture2D;
 pub fn fill_rect(fb: &mut FrameBuffer, rect: Rect2, color: Color) {
     let x_min = (rect.position.x as i32).max(0) as u32;
     let y_min = (rect.position.y as i32).max(0) as u32;
-    let x_max = ((rect.position.x + rect.size.x) as i32).max(0).min(fb.width as i32) as u32;
-    let y_max = ((rect.position.y + rect.size.y) as i32).max(0).min(fb.height as i32) as u32;
+    let x_max = ((rect.position.x + rect.size.x) as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((rect.position.y + rect.size.y) as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
 
     for py in y_min..y_max {
         for px in x_min..x_max {
@@ -26,8 +30,12 @@ pub fn fill_circle(fb: &mut FrameBuffer, center: Vector2, radius: f32, color: Co
     let r_sq = radius * radius;
     let x_min = ((center.x - radius) as i32).max(0) as u32;
     let y_min = ((center.y - radius) as i32).max(0) as u32;
-    let x_max = ((center.x + radius).ceil() as i32).max(0).min(fb.width as i32) as u32;
-    let y_max = ((center.y + radius).ceil() as i32).max(0).min(fb.height as i32) as u32;
+    let x_max = ((center.x + radius).ceil() as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((center.y + radius).ceil() as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
 
     for py in y_min..y_max {
         for px in x_min..x_max {
@@ -76,20 +84,19 @@ pub fn draw_line(fb: &mut FrameBuffer, from: Vector2, to: Vector2, color: Color,
 }
 
 /// Draws a texture into `rect`, modulating each texel by `modulate`.
-pub fn draw_texture_rect(
-    fb: &mut FrameBuffer,
-    texture: &Texture2D,
-    rect: Rect2,
-    modulate: Color,
-) {
+pub fn draw_texture_rect(fb: &mut FrameBuffer, texture: &Texture2D, rect: Rect2, modulate: Color) {
     if texture.width == 0 || texture.height == 0 {
         return;
     }
 
     let x_min = (rect.position.x as i32).max(0) as u32;
     let y_min = (rect.position.y as i32).max(0) as u32;
-    let x_max = ((rect.position.x + rect.size.x) as i32).max(0).min(fb.width as i32) as u32;
-    let y_max = ((rect.position.y + rect.size.y) as i32).max(0).min(fb.height as i32) as u32;
+    let x_max = ((rect.position.x + rect.size.x) as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((rect.position.y + rect.size.y) as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
 
     for py in y_min..y_max {
         for px in x_min..x_max {

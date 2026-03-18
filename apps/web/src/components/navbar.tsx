@@ -1,19 +1,28 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Github, Menu, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { useState } from "react";
+import { cn } from "@/lib/utils";
 
 const navLinks = [
-  { href: "#features", label: "Features" },
-  { href: "#roadmap", label: "Roadmap" },
-  { href: "https://docs.patinaengine.com", label: "Docs", external: true },
+  { href: "/#features", label: "Features" },
+  { href: "/#roadmap", label: "Roadmap" },
+  { href: "/docs", label: "Docs" },
+  { href: "/blog", label: "Blog" },
 ];
 
 export function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const pathname = usePathname();
+
+  function isActive(href: string) {
+    if (href.startsWith("/#")) return false;
+    return pathname === href || pathname.startsWith(href + "/");
+  }
 
   return (
     <motion.header
@@ -34,10 +43,12 @@ export function Navbar() {
             <Link
               key={link.href}
               href={link.href}
-              {...(link.external
-                ? { target: "_blank", rel: "noopener noreferrer" }
-                : {})}
-              className="rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+              className={cn(
+                "rounded-md px-3 py-1.5 text-sm transition-colors",
+                isActive(link.href)
+                  ? "bg-muted text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
             >
               {link.label}
             </Link>
@@ -99,7 +110,12 @@ export function Navbar() {
                 key={link.href}
                 href={link.href}
                 onClick={() => setMobileOpen(false)}
-                className="rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                className={cn(
+                  "rounded-md px-3 py-2 text-sm transition-colors",
+                  isActive(link.href)
+                    ? "bg-muted text-foreground font-medium"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
               >
                 {link.label}
               </Link>

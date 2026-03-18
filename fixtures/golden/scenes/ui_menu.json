@@ -1,0 +1,45 @@
+{
+  "fixture_id": "scene_ui_menu",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "MenuRoot",
+      "class": "Node",
+      "path": "/root/MenuRoot",
+      "children": [
+        {
+          "name": "Title",
+          "class": "Node",
+          "path": "/root/MenuRoot/Title",
+          "children": [],
+          "properties": {
+            "text": { "type": "String", "value": "Main Menu" }
+          }
+        },
+        {
+          "name": "PlayButton",
+          "class": "Node",
+          "path": "/root/MenuRoot/PlayButton",
+          "children": [],
+          "properties": {}
+        },
+        {
+          "name": "SettingsButton",
+          "class": "Node",
+          "path": "/root/MenuRoot/SettingsButton",
+          "children": [],
+          "properties": {}
+        },
+        {
+          "name": "QuitButton",
+          "class": "Node",
+          "path": "/root/MenuRoot/QuitButton",
+          "children": [],
+          "properties": {}
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

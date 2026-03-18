@@ -1,0 +1,28 @@
+{
+  "fixture_id": "resource_theme",
+  "capture_type": "resource",
+  "upstream_version": "pending",
+  "class_name": "Theme",
+  "properties": {
+    "base_scale": { "type": "Float", "value": 1.0 },
+    "default_font_size": { "type": "Int", "value": 14 },
+    "name": { "type": "String", "value": "GameTheme" }
+  },
+  "subresources": {
+    "button_style": {
+      "class_name": "StyleBoxFlat",
+      "properties": {
+        "bg_color": { "type": "Color", "value": [0.5, 0.75, 1.0, 1.0] },
+        "border_width": { "type": "Int", "value": 2 }
+      }
+    },
+    "panel_style": {
+      "class_name": "StyleBoxFlat",
+      "properties": {
+        "bg_color": { "type": "Color", "value": [0.25, 0.25, 0.5, 1.0] },
+        "border_width": { "type": "Int", "value": 1 },
+        "corner_radius": { "type": "Int", "value": 4 }
+      }
+    }
+  }
+}

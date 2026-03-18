@@ -1,0 +1,44 @@
+{
+  "fixture_id": "scene_physics_playground",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "World",
+      "class": "Node",
+      "path": "/root/World",
+      "children": [
+        {
+          "name": "Ball",
+          "class": "Node2D",
+          "path": "/root/World/Ball",
+          "children": [],
+          "properties": {
+            "position": { "type": "Vector2", "value": [400.0, 100.0] },
+            "radius": { "type": "Int", "value": 16 },
+            "velocity": { "type": "Vector2", "value": [50.0, 0.0] }
+          }
+        },
+        {
+          "name": "Wall",
+          "class": "Node2D",
+          "path": "/root/World/Wall",
+          "children": [],
+          "properties": {
+            "position": { "type": "Vector2", "value": [800.0, 300.0] }
+          }
+        },
+        {
+          "name": "Floor",
+          "class": "Node2D",
+          "path": "/root/World/Floor",
+          "children": [],
+          "properties": {
+            "position": { "type": "Vector2", "value": [400.0, 600.0] }
+          }
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

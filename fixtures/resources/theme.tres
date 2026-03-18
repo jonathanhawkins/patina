@@ -1,0 +1,15 @@
+[gd_resource type="Theme" format=3 uid="uid://theme_res"]
+
+[sub_resource type="StyleBoxFlat" id="panel_style"]
+bg_color = Color(0.25, 0.25, 0.5, 1.0)
+border_width = 1
+corner_radius = 4
+
+[sub_resource type="StyleBoxFlat" id="button_style"]
+bg_color = Color(0.5, 0.75, 1.0, 1.0)
+border_width = 2
+
+[resource]
+name = "GameTheme"
+default_font_size = 14
+base_scale = 1.0

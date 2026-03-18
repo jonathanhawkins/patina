@@ -1,0 +1,9 @@
+[gd_resource type="Animation" format=3 uid="uid://anim_res"]
+
+[resource]
+name = "walk_cycle"
+length = 1.0
+loop_mode = 1
+tracks = [0, 1, 2]
+keyframe_times = [0.0, 0.25, 0.5, 0.75, 1.0]
+keyframe_values = [Vector2(0, 0), Vector2(10, -5), Vector2(20, 0), Vector2(10, -5), Vector2(0, 0)]

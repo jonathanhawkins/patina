@@ -275,7 +275,10 @@ fn assert_variant_json_eq(actual: &Value, expected: &Value, context: &str) {
         }
         "Float" => {
             let af = actual.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let ef = expected.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let ef = expected
+                .get("value")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             assert!(
                 (af - ef).abs() < 1e-6,
                 "float mismatch at {context}: actual={af}, expected={ef}"
@@ -353,11 +356,113 @@ fn golden_resource_with_subresource() {
     assert_resource_matches_golden(&actual, &golden);
 }
 
+// ===========================================================================
+// Phase 4 comprehensive fixture tests
+// ===========================================================================
+
+/// Checks: 2D platformer scene with 6 child nodes (Player, 3 Platforms,
+/// Camera, Collectible) at various positions produces correct hierarchy.
+/// Fixture: scenes/platformer.tscn
+/// Comparison: Full tree structure with Vector2 positions and int properties.
+#[test]
+fn golden_scene_platformer() {
+    let actual = load_and_dump_scene("scenes/platformer.tscn");
+    let golden = read_golden("golden/scenes/platformer.json");
+    assert_scene_matches_golden(&actual, &golden);
+}
+
+/// Checks: UI menu scene with Title (string property), 3 button nodes, and
+/// 3 signal connections parses correctly.
+/// Fixture: scenes/ui_menu.tscn
+/// Comparison: Tree structure, string property, and connection count.
+#[test]
+fn golden_scene_ui_menu() {
+    let actual = load_and_dump_scene("scenes/ui_menu.tscn");
+    let golden = read_golden("golden/scenes/ui_menu.json");
+    assert_scene_matches_golden(&actual, &golden);
+
+    // Also verify connections parsed correctly.
+    let source = read_fixture("scenes/ui_menu.tscn");
+    let packed = PackedScene::from_tscn(&source).unwrap();
+    assert_eq!(packed.connection_count(), 3);
+    assert_eq!(packed.connections()[0].signal_name, "pressed");
+    assert_eq!(packed.connections()[0].from_path, "PlayButton");
+    assert_eq!(packed.connections()[1].from_path, "SettingsButton");
+    assert_eq!(packed.connections()[2].from_path, "QuitButton");
+}
+
+/// Checks: Physics playground scene with Ball (position + velocity), Wall,
+/// and Floor nodes produces correct hierarchy and properties.
+/// Fixture: scenes/physics_playground.tscn
+/// Comparison: Full tree structure with Vector2 position/velocity properties.
+#[test]
+fn golden_scene_physics_playground() {
+    let actual = load_and_dump_scene("scenes/physics_playground.tscn");
+    let golden = read_golden("golden/scenes/physics_playground.json");
+    assert_scene_matches_golden(&actual, &golden);
+}
+
+/// Checks: Complex signals scene with 5 child nodes (including nested
+/// TriggerZone under Player) and 6 connections including cross-node
+/// connections parses correctly.
+/// Fixture: scenes/signals_complex.tscn
+/// Comparison: Tree structure and all 6 signal connections.
+#[test]
+fn golden_scene_signals_complex() {
+    let actual = load_and_dump_scene("scenes/signals_complex.tscn");
+    let golden = read_golden("golden/scenes/signals_complex.json");
+    assert_scene_matches_golden(&actual, &golden);
+
+    // Verify all 6 connections parsed.
+    let source = read_fixture("scenes/signals_complex.tscn");
+    let packed = PackedScene::from_tscn(&source).unwrap();
+    assert_eq!(packed.node_count(), 6);
+    assert_eq!(packed.connection_count(), 6);
+
+    // Verify cross-node connection from nested child.
+    let trigger_conn = packed
+        .connections()
+        .iter()
+        .find(|c| c.signal_name == "body_entered")
+        .expect("should have body_entered connection");
+    assert_eq!(trigger_conn.from_path, "Player/TriggerZone");
+    assert_eq!(trigger_conn.to_path, "Enemy");
+    assert_eq!(trigger_conn.flags, 3);
+}
+
+/// Checks: Theme resource with two sub_resource blocks (panel_style,
+/// button_style) each with Color and int properties parses correctly.
+/// Fixture: resources/theme.tres
+/// Comparison: class_name, properties, both sub-resources with their properties.
+#[test]
+fn golden_resource_theme() {
+    let actual = load_and_dump_resource("resources/theme.tres");
+    let golden = read_golden("golden/resources/theme.json");
+    assert_resource_matches_golden(&actual, &golden);
+}
+
+/// Checks: Animation resource with Array properties (int array, float array,
+/// Vector2 array) representing keyframe data parses correctly.
+/// Fixture: resources/animation.tres
+/// Comparison: class_name, all properties including nested Array contents.
+#[test]
+fn golden_resource_animation() {
+    let actual = load_and_dump_resource("resources/animation.tres");
+    let golden = read_golden("golden/resources/animation.json");
+    assert_resource_matches_golden(&actual, &golden);
+}
+
 /// Compares actual resource dump against a golden file.
 fn assert_resource_matches_golden(actual: &Value, golden: &Value) {
     // class_name
-    let a_class = actual.get("class_name").and_then(|v| v.as_str()).unwrap_or("");
-    let e_class = golden.get("class_name").and_then(|v| v.as_str()).unwrap_or("");
+    let a_class = actual
+        .get("class_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let e_class = golden
+        .get("class_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     assert_eq!(a_class, e_class, "resource class_name mismatch");
 
     // properties
@@ -369,16 +474,20 @@ fn assert_resource_matches_golden(actual: &Value, golden: &Value) {
     let a_subs = actual.get("subresources").and_then(|v| v.as_object());
     let e_subs = golden.get("subresources").and_then(|v| v.as_object());
 
-    let a_sub_keys: Vec<_> = a_subs.map(|o| {
-        let mut keys: Vec<_> = o.keys().collect();
-        keys.sort();
-        keys
-    }).unwrap_or_default();
-    let e_sub_keys: Vec<_> = e_subs.map(|o| {
-        let mut keys: Vec<_> = o.keys().collect();
-        keys.sort();
-        keys
-    }).unwrap_or_default();
+    let a_sub_keys: Vec<_> = a_subs
+        .map(|o| {
+            let mut keys: Vec<_> = o.keys().collect();
+            keys.sort();
+            keys
+        })
+        .unwrap_or_default();
+    let e_sub_keys: Vec<_> = e_subs
+        .map(|o| {
+            let mut keys: Vec<_> = o.keys().collect();
+            keys.sort();
+            keys
+        })
+        .unwrap_or_default();
     assert_eq!(a_sub_keys, e_sub_keys, "subresource keys mismatch");
 
     if let (Some(a_map), Some(e_map)) = (a_subs, e_subs) {
@@ -386,8 +495,14 @@ fn assert_resource_matches_golden(actual: &Value, golden: &Value) {
             let a_sub = &a_map[key];
             let e_sub = &e_map[key];
 
-            let a_cn = a_sub.get("class_name").and_then(|v| v.as_str()).unwrap_or("");
-            let e_cn = e_sub.get("class_name").and_then(|v| v.as_str()).unwrap_or("");
+            let a_cn = a_sub
+                .get("class_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let e_cn = e_sub
+                .get("class_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             assert_eq!(a_cn, e_cn, "subresource '{key}' class_name mismatch");
 
             let a_sp = a_sub.get("properties").cloned().unwrap_or(json!({}));
