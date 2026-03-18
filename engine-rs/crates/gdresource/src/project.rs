@@ -462,9 +462,7 @@ fn extract_field<'a>(s: &'a str, field: &str) -> Option<&'a str> {
     let rest = &s[start + pattern.len()..];
     let rest = rest.trim_start();
     // Read until comma, paren, or end.
-    let end = rest
-        .find([',', ')', '}'])
-        .unwrap_or(rest.len());
+    let end = rest.find([',', ')', '}']).unwrap_or(rest.len());
     let val = rest[..end].trim();
     if val.is_empty() {
         None
