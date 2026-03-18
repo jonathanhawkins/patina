@@ -147,8 +147,8 @@ impl PackedScene {
                     let raw_name = attrs.get("name").cloned().unwrap_or_default();
 
                     // Scene unique name: `%` prefix in Godot editor.
-                    let (unique_name, name) = if raw_name.starts_with('%') {
-                        (true, raw_name[1..].to_string())
+                    let (unique_name, name) = if let Some(stripped) = raw_name.strip_prefix('%') {
+                        (true, stripped.to_string())
                     } else {
                         (false, raw_name)
                     };

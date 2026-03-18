@@ -30,7 +30,7 @@ pub mod uid;
 
 // Re-export the most-used types at the crate root.
 pub use cache::ResourceCache;
-pub use loader::{ResourceLoader, TresLoader};
+pub use loader::{parse_variant_value, ResourceLoader, TresLoader};
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::UidRegistry;

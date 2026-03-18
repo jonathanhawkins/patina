@@ -15,7 +15,11 @@
 #![warn(clippy::all)]
 
 pub mod dock;
+pub mod filesystem;
+pub mod import;
 pub mod inspector;
+pub mod scene_editor;
+pub mod settings;
 
 use gdscene::node::{Node, NodeId};
 use gdscene::SceneTree;
@@ -24,7 +28,11 @@ use thiserror::Error;
 
 // Re-exports for convenience.
 pub use dock::{DockPanel, PropertyDock, SceneTreeDock};
+pub use filesystem::EditorFileSystem;
+pub use import::{ImportPipeline, ImportedResource, ResourceImporter, TresImporter, TscnImporter};
 pub use inspector::InspectorPanel;
+pub use scene_editor::SceneEditor;
+pub use settings::{EditorSettings, EditorTheme, ProjectSettings};
 
 /// Errors specific to editor operations.
 #[derive(Debug, Error)]
@@ -317,6 +325,11 @@ impl Editor {
     pub fn add_plugin(&mut self, plugin: Box<dyn EditorPlugin>) {
         tracing::debug!("Registered editor plugin: {}", plugin.name());
         self.plugins.push(plugin);
+    }
+
+    /// Returns the last command on the undo stack (for inspecting results).
+    pub fn undo_stack_last(&self) -> Option<&EditorCommand> {
+        self.undo_stack.last()
     }
 
     /// Returns the names of all registered plugins.
