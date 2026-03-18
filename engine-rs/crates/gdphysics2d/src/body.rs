@@ -47,6 +47,14 @@ pub struct PhysicsBody2D {
     pub friction: f32,
     /// Coefficient of restitution (bounciness) in [0, 1].
     pub bounce: f32,
+    /// Collision layer bitmask — which layers this body occupies.
+    pub collision_layer: u32,
+    /// Collision mask bitmask — which layers this body scans for collisions.
+    pub collision_mask: u32,
+    /// If true, only collide when the other body approaches from the positive normal direction.
+    pub one_way_collision: bool,
+    /// The direction for one-way collision (default: up, i.e. negative Y).
+    pub one_way_direction: Vector2,
 
     /// Accumulated force for the current frame (reset after integration).
     accumulated_force: Vector2,
@@ -72,6 +80,10 @@ impl PhysicsBody2D {
             mass,
             friction: 0.5,
             bounce: 0.0,
+            collision_layer: 1,
+            collision_mask: 1,
+            one_way_collision: false,
+            one_way_direction: Vector2::new(0.0, -1.0),
             accumulated_force: Vector2::ZERO,
         }
     }

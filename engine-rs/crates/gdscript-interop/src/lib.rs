@@ -9,6 +9,7 @@
 
 pub mod bindings;
 pub mod bridge;
+pub mod interpreter;
 pub mod parser;
 pub mod tokenizer;
 

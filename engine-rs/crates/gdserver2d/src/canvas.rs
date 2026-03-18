@@ -37,6 +37,13 @@ pub enum DrawCommand {
         rect: Rect2,
         modulate: Color,
     },
+    /// Draw a sub-region of a texture atlas into `rect`, tinted by `modulate`.
+    DrawTextureRegion {
+        texture_path: String,
+        rect: Rect2,
+        source_rect: Rect2,
+        modulate: Color,
+    },
 }
 
 /// A canvas item that holds a transform, draw commands, and child references.
@@ -54,6 +61,10 @@ pub struct CanvasItem {
     pub commands: Vec<DrawCommand>,
     /// Child canvas item IDs.
     pub children: Vec<CanvasItemId>,
+    /// Parent canvas item ID (for transform inheritance).
+    pub parent: Option<CanvasItemId>,
+    /// Canvas layer this item belongs to.
+    pub layer_id: Option<u64>,
 }
 
 impl CanvasItem {
@@ -66,6 +77,8 @@ impl CanvasItem {
             visible: true,
             commands: Vec::new(),
             children: Vec::new(),
+            parent: None,
+            layer_id: None,
         }
     }
 }

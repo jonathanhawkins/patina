@@ -1,0 +1,69 @@
+[gd_scene load_steps=5 format=3 uid="uid://d9m3kqr7wp4vn"]
+
+[ext_resource type="Script" uid="uid://b5k2nwp8rm3qa" path="res://scripts/physics_controller.gd" id="1_scr01"]
+[ext_resource type="Texture2D" uid="uid://c4m7kqp2rw9vn" path="res://sprites/crate.png" id="2_tex01"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_rect1"]
+size = Vector2(64, 64)
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_circ1"]
+radius = 24.0
+
+[sub_resource type="WorldBoundaryShape2D" id="WorldBoundaryShape2D_bnd1"]
+
+[node name="PhysicsWorld" type="Node2D"]
+script = ExtResource("1_scr01")
+
+[node name="DynamicCrate" type="RigidBody2D" parent="."]
+position = Vector2(200, 100)
+mass = 5.0
+gravity_scale = 1.0
+collision_layer = 1
+collision_mask = 3
+
+[node name="Sprite" type="Sprite2D" parent="DynamicCrate"]
+texture = ExtResource("2_tex01")
+
+[node name="CollisionShape" type="CollisionShape2D" parent="DynamicCrate"]
+shape = SubResource("RectangleShape2D_rect1")
+
+[node name="BouncyBall" type="RigidBody2D" parent="."]
+position = Vector2(400, 50)
+mass = 1.0
+physics_material_override = null
+gravity_scale = 1.5
+continuous_cd = 1
+collision_layer = 1
+collision_mask = 3
+
+[node name="CollisionShape" type="CollisionShape2D" parent="BouncyBall"]
+shape = SubResource("CircleShape2D_circ1")
+
+[node name="StaticPlatform" type="StaticBody2D" parent="."]
+position = Vector2(300, 400)
+collision_layer = 2
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="StaticPlatform"]
+shape = SubResource("RectangleShape2D_rect1")
+scale = Vector2(8, 0.5)
+
+[node name="KillZone" type="Area2D" parent="."]
+position = Vector2(300, 600)
+collision_layer = 4
+collision_mask = 1
+monitorable = false
+
+[node name="CollisionShape" type="CollisionShape2D" parent="KillZone"]
+shape = SubResource("RectangleShape2D_rect1")
+scale = Vector2(20, 1)
+
+[node name="Ground" type="StaticBody2D" parent="."]
+collision_layer = 2
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Ground"]
+shape = SubResource("WorldBoundaryShape2D_bnd1")
+position = Vector2(0, 500)
+
+[connection signal="body_entered" from="KillZone" to="." method="_on_kill_zone_body_entered"]

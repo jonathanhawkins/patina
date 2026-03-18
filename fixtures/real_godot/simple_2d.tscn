@@ -1,0 +1,25 @@
+[gd_scene load_steps=3 format=3 uid="uid://bx2m7kcr1f4qp"]
+
+[ext_resource type="Script" uid="uid://c6v3aqrej7l8n" path="res://scripts/player_controller.gd" id="1_abc12"]
+[ext_resource type="Texture2D" uid="uid://dkq8m5zr2wp1a" path="res://sprites/icon.png" id="2_def34"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_ghij5"]
+radius = 32.0
+
+[node name="Level" type="Node2D"]
+
+[node name="Player" type="CharacterBody2D" parent="."]
+position = Vector2(100, 200)
+script = ExtResource("1_abc12")
+metadata/move_speed = 300.0
+metadata/jump_force = -450.0
+
+[node name="Sprite" type="Sprite2D" parent="Player"]
+texture = ExtResource("2_def34")
+offset = Vector2(0, -16)
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Player"]
+shape = SubResource("CircleShape2D_ghij5")
+
+[node name="Camera" type="Camera2D" parent="Player"]
+zoom = Vector2(2, 2)
