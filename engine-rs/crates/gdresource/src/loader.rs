@@ -347,6 +347,59 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         return Err(EngineError::Parse(format!("invalid SubResource: {s}")));
     }
 
+    // Packed typed arrays: PackedByteArray(), PackedInt32Array(), etc.
+    // Stored as Variant::Array with the appropriate element types.
+    if let Some(inner) = try_strip_call(s, "PackedByteArray") {
+        return parse_packed_int_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedInt32Array") {
+        return parse_packed_int_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedInt64Array") {
+        return parse_packed_int_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedFloat32Array") {
+        return parse_packed_float_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedFloat64Array") {
+        return parse_packed_float_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedStringArray") {
+        return parse_packed_string_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedVector2Array") {
+        return parse_packed_vector2_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedVector3Array") {
+        return parse_packed_vector3_array(inner);
+    }
+    if let Some(inner) = try_strip_call(s, "PackedColorArray") {
+        return parse_packed_color_array(inner);
+    }
+
+    // Vector2i(x, y)
+    if let Some(inner) = try_strip_call(s, "Vector2i") {
+        let parts = split_args(inner);
+        if parts.len() == 2 {
+            let x = parse_f32(&parts[0])?;
+            let y = parse_f32(&parts[1])?;
+            return Ok(Variant::Vector2(Vector2::new(x, y)));
+        }
+        return Err(EngineError::Parse(format!("invalid Vector2i: {s}")));
+    }
+
+    // Vector3i(x, y, z)
+    if let Some(inner) = try_strip_call(s, "Vector3i") {
+        let parts = split_args(inner);
+        if parts.len() == 3 {
+            let x = parse_f32(&parts[0])?;
+            let y = parse_f32(&parts[1])?;
+            let z = parse_f32(&parts[2])?;
+            return Ok(Variant::Vector3(Vector3::new(x, y, z)));
+        }
+        return Err(EngineError::Parse(format!("invalid Vector3i: {s}")));
+    }
+
     // Array: [elem, elem, ...]
     if s.starts_with('[') && s.ends_with(']') {
         return parse_array(&s[1..s.len() - 1]);
@@ -543,6 +596,130 @@ fn parse_dictionary(s: &str) -> EngineResult<Variant> {
         map.insert(key, value);
     }
     Ok(Variant::Dictionary(map))
+}
+
+/// Parses a packed integer array body (e.g. `"1, 2, 3"` or `""`) into `Variant::Array`.
+fn parse_packed_int_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    let mut result = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let i = part.trim().parse::<i64>().map_err(|_| {
+            EngineError::Parse(format!("expected int in packed array, got: {part}"))
+        })?;
+        result.push(Variant::Int(i));
+    }
+    Ok(Variant::Array(result))
+}
+
+/// Parses a packed float array body into `Variant::Array`.
+fn parse_packed_float_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    let mut result = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let f = part.trim().parse::<f64>().map_err(|_| {
+            EngineError::Parse(format!("expected float in packed array, got: {part}"))
+        })?;
+        result.push(Variant::Float(f));
+    }
+    Ok(Variant::Array(result))
+}
+
+/// Parses a packed string array body into `Variant::Array`.
+fn parse_packed_string_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    let mut result = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let part = part.trim();
+        if part.starts_with('"') && part.ends_with('"') && part.len() >= 2 {
+            result.push(Variant::String(unescape_string(&part[1..part.len() - 1])));
+        } else {
+            return Err(EngineError::Parse(format!(
+                "expected quoted string in packed array, got: {part}"
+            )));
+        }
+    }
+    Ok(Variant::Array(result))
+}
+
+/// Parses a packed Vector2 array body (flat pairs: `x1, y1, x2, y2, ...`) into `Variant::Array`.
+fn parse_packed_vector2_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    if !parts.len().is_multiple_of(2) {
+        return Err(EngineError::Parse(format!(
+            "PackedVector2Array needs even number of floats, got {}",
+            parts.len()
+        )));
+    }
+    let mut result = Vec::with_capacity(parts.len() / 2);
+    for chunk in parts.chunks(2) {
+        let x = parse_f32(&chunk[0])?;
+        let y = parse_f32(&chunk[1])?;
+        result.push(Variant::Vector2(Vector2::new(x, y)));
+    }
+    Ok(Variant::Array(result))
+}
+
+/// Parses a packed Vector3 array body (flat triples: `x1, y1, z1, ...`) into `Variant::Array`.
+fn parse_packed_vector3_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    if !parts.len().is_multiple_of(3) {
+        return Err(EngineError::Parse(format!(
+            "PackedVector3Array needs multiple-of-3 floats, got {}",
+            parts.len()
+        )));
+    }
+    let mut result = Vec::with_capacity(parts.len() / 3);
+    for chunk in parts.chunks(3) {
+        let x = parse_f32(&chunk[0])?;
+        let y = parse_f32(&chunk[1])?;
+        let z = parse_f32(&chunk[2])?;
+        result.push(Variant::Vector3(Vector3::new(x, y, z)));
+    }
+    Ok(Variant::Array(result))
+}
+
+/// Parses a packed Color array body (flat quads: `r1, g1, b1, a1, ...`) into `Variant::Array`.
+fn parse_packed_color_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    if !parts.len().is_multiple_of(4) {
+        return Err(EngineError::Parse(format!(
+            "PackedColorArray needs multiple-of-4 floats, got {}",
+            parts.len()
+        )));
+    }
+    let mut result = Vec::with_capacity(parts.len() / 4);
+    for chunk in parts.chunks(4) {
+        let r = parse_f32(&chunk[0])?;
+        let g = parse_f32(&chunk[1])?;
+        let b = parse_f32(&chunk[2])?;
+        let a = parse_f32(&chunk[3])?;
+        result.push(Variant::Color(Color::new(r, g, b, a)));
+    }
+    Ok(Variant::Array(result))
 }
 
 /// Finds the index of the closing quote in a string, starting search at `start`.

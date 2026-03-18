@@ -223,7 +223,7 @@ pub fn separate_bodies(a: &mut PhysicsBody2D, b: &mut PhysicsBody2D, result: &Co
     a.position = a.position - separation * (inv_a / total_inv);
     b.position = b.position + separation * (inv_b / total_inv);
 
-    // Simple velocity resolution with restitution
+    // Velocity resolution with restitution
     let relative_vel = b.linear_velocity - a.linear_velocity;
     let vel_along_normal = relative_vel.dot(result.normal);
 
@@ -231,17 +231,36 @@ pub fn separate_bodies(a: &mut PhysicsBody2D, b: &mut PhysicsBody2D, result: &Co
         return; // Bodies are already separating
     }
 
-    let restitution = a.bounce.min(b.bounce);
+    let restitution = a.bounce.max(b.bounce);
     let impulse_magnitude = -(1.0 + restitution) * vel_along_normal / total_inv;
     let impulse = result.normal * impulse_magnitude;
 
     a.linear_velocity = a.linear_velocity - impulse * inv_a;
     b.linear_velocity = b.linear_velocity + impulse * inv_b;
+
+    // Friction: reduce tangential velocity component
+    let friction = (a.friction + b.friction) * 0.5;
+    if friction > 0.0 {
+        let new_relative_vel = b.linear_velocity - a.linear_velocity;
+        let tangent_vel = new_relative_vel - result.normal * new_relative_vel.dot(result.normal);
+        let tangent_speed = tangent_vel.length();
+        if tangent_speed > 1e-6 {
+            let tangent_dir = tangent_vel * (1.0 / tangent_speed);
+            // Coulomb friction: clamp tangential impulse to friction * normal impulse
+            let max_friction_impulse = friction * impulse_magnitude;
+            let friction_impulse_mag = tangent_speed.min(max_friction_impulse / total_inv);
+            let friction_impulse = tangent_dir * friction_impulse_mag;
+
+            a.linear_velocity = a.linear_velocity + friction_impulse * inv_a;
+            b.linear_velocity = b.linear_velocity - friction_impulse * inv_b;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body::{BodyId, BodyType};
 
     const EPSILON: f32 = 1e-4;
 
@@ -367,5 +386,181 @@ mod tests {
             &Transform2D::IDENTITY,
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn restitution_bounces_bodies() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.bounce = 1.0;
+        a.linear_velocity = Vector2::new(5.0, 0.0);
+
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Rigid,
+            Vector2::new(1.5, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        b.bounce = 1.0;
+        b.linear_velocity = Vector2::new(-5.0, 0.0);
+
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(1.0, 0.0),
+            depth: 0.5,
+            point: Vector2::new(0.75, 0.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+
+        // With restitution=1.0, velocities should swap (elastic collision, equal mass)
+        assert!(approx_eq(a.linear_velocity.x, -5.0));
+        assert!(approx_eq(b.linear_velocity.x, 5.0));
+    }
+
+    #[test]
+    fn zero_restitution_stops_relative_motion() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.bounce = 0.0;
+        a.linear_velocity = Vector2::new(5.0, 0.0);
+
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(1.5, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        b.bounce = 0.0;
+
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(1.0, 0.0),
+            depth: 0.5,
+            point: Vector2::new(0.75, 0.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+
+        // With restitution=0, body A should stop (no bounce)
+        assert!(approx_eq(a.linear_velocity.x, 0.0));
+    }
+
+    #[test]
+    fn friction_reduces_tangential_velocity() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.friction = 1.0;
+        a.bounce = 0.0;
+        // Moving right and downward (into the floor below)
+        a.linear_velocity = Vector2::new(10.0, 5.0);
+
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(0.0, 2.0),
+            Shape2D::Rectangle {
+                half_extents: Vector2::new(100.0, 1.0),
+            },
+            1.0,
+        );
+        b.friction = 1.0;
+
+        // Normal points from A toward B (downward)
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(0.0, 1.0),
+            depth: 0.1,
+            point: Vector2::new(0.0, 1.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+
+        // Tangential velocity (x) should be reduced by friction
+        assert!(a.linear_velocity.x.abs() < 10.0);
+    }
+
+    #[test]
+    fn zero_friction_preserves_tangential_velocity() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.friction = 0.0;
+        a.bounce = 0.0;
+        a.linear_velocity = Vector2::new(10.0, -5.0);
+
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(0.0, -2.0),
+            Shape2D::Rectangle {
+                half_extents: Vector2::new(100.0, 1.0),
+            },
+            1.0,
+        );
+        b.friction = 0.0;
+
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(0.0, 1.0),
+            depth: 0.1,
+            point: Vector2::new(0.0, -1.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+
+        // Tangential velocity (x) should be preserved with 0 friction
+        assert!(approx_eq(a.linear_velocity.x, 10.0));
+    }
+
+    #[test]
+    fn max_restitution_used() {
+        // When one body has bounce=0.8 and other has bounce=0.2, max(0.8,0.2)=0.8 is used
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.bounce = 0.8;
+        a.linear_velocity = Vector2::new(10.0, 0.0);
+
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(1.5, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        b.bounce = 0.2;
+
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(1.0, 0.0),
+            depth: 0.5,
+            point: Vector2::new(0.75, 0.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+
+        // With restitution=0.8 against static, velocity should reverse * 0.8
+        assert!(approx_eq(a.linear_velocity.x, -8.0));
     }
 }

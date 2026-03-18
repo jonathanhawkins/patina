@@ -1,0 +1,35 @@
+[gd_scene load_steps=3 format=3 uid="uid://bkr4n7vm2qp5w"]
+
+[ext_resource type="TileSet" uid="uid://d3m8kqw5np2rv" path="res://tilesets/world_tileset.tres" id="1_ts01"]
+[ext_resource type="Script" uid="uid://c7v2nkp4rm8qa" path="res://scripts/level_manager.gd" id="2_scr01"]
+
+[node name="TileMapLevel" type="Node2D"]
+script = ExtResource("2_scr01")
+
+[node name="Background" type="ParallaxBackground" parent="."]
+
+[node name="BackgroundLayer" type="ParallaxLayer" parent="Background"]
+motion_scale = Vector2(0.5, 0.5)
+
+[node name="TileMapLayer" type="TileMapLayer" parent="."]
+tile_set = ExtResource("1_ts01")
+tile_map_data = PackedByteArray()
+
+[node name="Collectibles" type="Node2D" parent="."]
+
+[node name="Coin1" type="Area2D" parent="Collectibles"]
+position = Vector2(128, 192)
+
+[node name="Coin2" type="Area2D" parent="Collectibles"]
+position = Vector2(256, 128)
+
+[node name="Coin3" type="Area2D" parent="Collectibles"]
+position = Vector2(384, 192)
+
+[node name="SpawnPoints" type="Node2D" parent="."]
+metadata/spawn_positions = PackedVector2Array(64, 320, 512, 320, 256, 64)
+metadata/enemy_types = PackedStringArray("slime", "bat", "skeleton")
+
+[node name="Boundaries" type="Node2D" parent="."]
+metadata/level_bounds = PackedFloat32Array(0, 0, 1024, 640)
+metadata/tile_indices = PackedInt32Array(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)

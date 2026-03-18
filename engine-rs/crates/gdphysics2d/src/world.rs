@@ -4,7 +4,7 @@
 //! integration, broad-phase culling, narrow-phase collision detection, and
 //! overlap resolution.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gdcore::math::{Transform2D, Vector2};
 
@@ -25,10 +25,38 @@ pub struct RaycastHit {
     pub distance: f32,
 }
 
+/// Whether a contact was just entered or just exited this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactState {
+    /// The contact started this frame.
+    Entered,
+    /// The contact persisted from the previous frame.
+    Persisting,
+    /// The contact ended this frame.
+    Exited,
+}
+
+/// A collision event generated during a physics step.
+#[derive(Debug, Clone, Copy)]
+pub struct CollisionEvent {
+    /// First body in the collision pair.
+    pub body_a: BodyId,
+    /// Second body in the collision pair.
+    pub body_b: BodyId,
+    /// The contact point in world space.
+    pub contact_point: Vector2,
+    /// The collision normal (from A toward B).
+    pub normal: Vector2,
+    /// Whether this contact just entered, is persisting, or just exited.
+    pub state: ContactState,
+}
+
 /// A 2D physics world that owns bodies and steps the simulation.
 pub struct PhysicsWorld2D {
     bodies: HashMap<BodyId, PhysicsBody2D>,
     next_id: u64,
+    /// Contacts from the previous frame, keyed by (min_id, max_id).
+    previous_contacts: HashSet<(BodyId, BodyId)>,
 }
 
 impl PhysicsWorld2D {
@@ -37,6 +65,7 @@ impl PhysicsWorld2D {
         Self {
             bodies: HashMap::new(),
             next_id: 1,
+            previous_contacts: HashSet::new(),
         }
     }
 
@@ -72,36 +101,103 @@ impl PhysicsWorld2D {
     /// Steps the physics simulation by `dt` seconds.
     ///
     /// 1. Integrate all rigid/kinematic bodies.
-    /// 2. Detect collisions between all body pairs.
+    /// 2. Detect collisions between all body pairs (respecting layers/masks).
     /// 3. Resolve overlaps and apply impulses.
-    pub fn step(&mut self, dt: f32) {
+    ///
+    /// Returns collision events for this frame (entered, persisting, exited).
+    pub fn step(&mut self, dt: f32) -> Vec<CollisionEvent> {
         // Phase 1: Integrate
         for body in self.bodies.values_mut() {
             body.integrate(dt);
         }
 
         // Phase 2 & 3: Collision detection and resolution
-        // Collect body IDs for iteration (need to borrow mutably later).
         let ids: Vec<BodyId> = self.bodies.keys().copied().collect();
+        let mut current_contacts = HashSet::new();
+        let mut events = Vec::new();
 
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 let id_a = ids[i];
                 let id_b = ids[j];
 
-                // Read shapes and positions
-                let (shape_a, pos_a, shape_b, pos_b) = {
+                // Read shapes, positions, layers, and one-way info
+                let (
+                    shape_a,
+                    pos_a,
+                    shape_b,
+                    pos_b,
+                    layer_a,
+                    mask_a,
+                    layer_b,
+                    mask_b,
+                    ow_a,
+                    ow_dir_a,
+                    ow_b,
+                    ow_dir_b,
+                    vel_a,
+                    vel_b,
+                ) = {
                     let a = &self.bodies[&id_a];
                     let b = &self.bodies[&id_b];
-                    (a.shape, a.position, b.shape, b.position)
+                    (
+                        a.shape,
+                        a.position,
+                        b.shape,
+                        b.position,
+                        a.collision_layer,
+                        a.collision_mask,
+                        b.collision_layer,
+                        b.collision_mask,
+                        a.one_way_collision,
+                        a.one_way_direction,
+                        b.one_way_collision,
+                        b.one_way_direction,
+                        a.linear_velocity,
+                        b.linear_velocity,
+                    )
                 };
+
+                // Collision layer/mask filtering
+                if (layer_a & mask_b) == 0 && (layer_b & mask_a) == 0 {
+                    continue;
+                }
 
                 let tf_a = Transform2D::translated(pos_a);
                 let tf_b = Transform2D::translated(pos_b);
 
                 if let Some(result) = collision::test_collision(&shape_a, &tf_a, &shape_b, &tf_b) {
                     if result.colliding && result.depth > 0.0 {
-                        // We need to split the borrow to get two mutable refs.
+                        // One-way collision check
+                        let approach_dir = vel_b - vel_a;
+                        if ow_a && approach_dir.dot(ow_dir_a) >= 0.0 {
+                            continue; // Body B is not approaching from the correct side of A
+                        }
+                        if ow_b && (-approach_dir).dot(ow_dir_b) >= 0.0 {
+                            continue; // Body A is not approaching from the correct side of B
+                        }
+
+                        let pair = if id_a.0 < id_b.0 {
+                            (id_a, id_b)
+                        } else {
+                            (id_b, id_a)
+                        };
+                        current_contacts.insert(pair);
+
+                        let state = if self.previous_contacts.contains(&pair) {
+                            ContactState::Persisting
+                        } else {
+                            ContactState::Entered
+                        };
+
+                        events.push(CollisionEvent {
+                            body_a: id_a,
+                            body_b: id_b,
+                            contact_point: result.point,
+                            normal: result.normal,
+                            state,
+                        });
+
                         // SAFETY: id_a != id_b because i != j and IDs are unique.
                         let ptr = &mut self.bodies as *mut HashMap<BodyId, PhysicsBody2D>;
                         // SAFETY: We guarantee id_a != id_b, so these are disjoint entries.
@@ -112,6 +208,22 @@ impl PhysicsWorld2D {
                 }
             }
         }
+
+        // Detect exited contacts
+        for &pair in &self.previous_contacts {
+            if !current_contacts.contains(&pair) {
+                events.push(CollisionEvent {
+                    body_a: pair.0,
+                    body_b: pair.1,
+                    contact_point: Vector2::ZERO,
+                    normal: Vector2::ZERO,
+                    state: ContactState::Exited,
+                });
+            }
+        }
+
+        self.previous_contacts = current_contacts;
+        events
     }
 
     /// Casts a ray and returns the closest hit, if any.
@@ -409,6 +521,139 @@ mod tests {
 
         let hit = world.raycast(Vector2::ZERO, Vector2::new(1.0, 0.0), 10.0);
         assert!(hit.is_none(), "Body is beyond max_distance");
+    }
+
+    #[test]
+    fn collision_layers_prevent_collision() {
+        let mut world = PhysicsWorld2D::new();
+
+        let mut body_a = make_rigid_circle(Vector2::new(0.0, 0.0), 5.0);
+        body_a.collision_layer = 1;
+        body_a.collision_mask = 1;
+
+        let mut body_b = make_rigid_circle(Vector2::new(8.0, 0.0), 5.0);
+        body_b.collision_layer = 2; // Different layer
+        body_b.collision_mask = 2;
+
+        let id_a = world.add_body(body_a);
+        let id_b = world.add_body(body_b);
+
+        let events = world.step(0.0);
+        assert!(
+            events.is_empty(),
+            "Bodies on different layers should not collide"
+        );
+
+        // Positions should be unchanged
+        let a = world.get_body(id_a).unwrap();
+        assert!(approx_eq(a.position.x, 0.0));
+        let b = world.get_body(id_b).unwrap();
+        assert!(approx_eq(b.position.x, 8.0));
+    }
+
+    #[test]
+    fn collision_layers_allow_matching_pairs() {
+        let mut world = PhysicsWorld2D::new();
+
+        let mut body_a = make_rigid_circle(Vector2::new(0.0, 0.0), 5.0);
+        body_a.collision_layer = 1;
+        body_a.collision_mask = 2; // Scans layer 2
+
+        let mut body_b = make_rigid_circle(Vector2::new(8.0, 0.0), 5.0);
+        body_b.collision_layer = 2; // On layer 2
+        body_b.collision_mask = 1;
+
+        let id_a = world.add_body(body_a);
+        let id_b = world.add_body(body_b);
+
+        let events = world.step(0.0);
+        assert!(
+            !events.is_empty(),
+            "Matching layer/mask should produce collision events"
+        );
+
+        let a = world.get_body(id_a).unwrap();
+        let b = world.get_body(id_b).unwrap();
+        let dist = (b.position - a.position).length();
+        assert!(dist >= 10.0 - EPSILON, "Bodies should be separated");
+    }
+
+    #[test]
+    fn step_returns_collision_events() {
+        let mut world = PhysicsWorld2D::new();
+        world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        world.add_body(make_rigid_circle(Vector2::new(8.0, 0.0), 5.0));
+
+        let events = world.step(0.0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state, ContactState::Entered);
+    }
+
+    #[test]
+    fn persisting_contact_detected() {
+        let mut world = PhysicsWorld2D::new();
+        // Two overlapping static rects — they won't move apart
+        let id_a = world.add_body(make_static_rect(Vector2::new(0.0, 0.0), 5.0));
+        let id_b = world.add_body(make_static_rect(Vector2::new(4.0, 0.0), 5.0));
+
+        let events1 = world.step(0.0);
+        assert!(events1.iter().any(|e| e.state == ContactState::Entered));
+
+        // Second step: still overlapping
+        let events2 = world.step(0.0);
+        assert!(
+            events2.iter().any(|e| e.state == ContactState::Persisting),
+            "Should detect persisting contact, got {:?}",
+            events2
+        );
+
+        // Cleanup: ensure IDs are valid
+        assert!(world.get_body(id_a).is_some());
+        assert!(world.get_body(id_b).is_some());
+    }
+
+    #[test]
+    fn exited_contact_detected() {
+        let mut world = PhysicsWorld2D::new();
+        let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        let id_b = world.add_body(make_rigid_circle(Vector2::new(8.0, 0.0), 5.0));
+
+        // First step: collision
+        let events = world.step(0.0);
+        assert!(!events.is_empty());
+
+        // Move them far apart
+        world.get_body_mut(id_a).unwrap().position = Vector2::new(-100.0, 0.0);
+        world.get_body_mut(id_b).unwrap().position = Vector2::new(100.0, 0.0);
+        world.get_body_mut(id_a).unwrap().linear_velocity = Vector2::ZERO;
+        world.get_body_mut(id_b).unwrap().linear_velocity = Vector2::ZERO;
+
+        let events2 = world.step(0.0);
+        assert!(events2.iter().any(|e| e.state == ContactState::Exited));
+    }
+
+    #[test]
+    fn one_way_collision_allows_pass_through() {
+        let mut world = PhysicsWorld2D::new();
+
+        // Platform with one-way collision (only collide from above, i.e. body approaching in +Y)
+        let mut platform = make_static_rect(Vector2::new(0.0, 10.0), 5.0);
+        platform.one_way_collision = true;
+        platform.one_way_direction = Vector2::new(0.0, -1.0); // Normal points up
+
+        // Body moving upward through the platform
+        let mut body = make_rigid_circle(Vector2::new(0.0, 12.0), 1.0);
+        body.linear_velocity = Vector2::new(0.0, -10.0); // Moving up
+
+        let id_body = world.add_body(body);
+        world.add_body(platform);
+
+        let events = world.step(0.0);
+        // The body is moving upward, approaching from below — should pass through
+        let body = world.get_body(id_body).unwrap();
+        // Either no collision events or body wasn't pushed
+        // (since approach direction dot one_way_direction >= 0 means skip)
+        assert!(events.is_empty() || body.position.y < 12.0);
     }
 
     #[test]

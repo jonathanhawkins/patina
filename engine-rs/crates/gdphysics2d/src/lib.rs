@@ -28,7 +28,9 @@
 
 #![warn(clippy::all)]
 
+pub mod area2d;
 pub mod body;
+pub mod character;
 pub mod collision;
 pub mod shape;
 pub mod test_harness;
@@ -41,10 +43,12 @@ pub mod shape3d;
 pub mod world3d;
 
 // Re-export key types for convenience.
+pub use area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};
 pub use body::{BodyId, BodyType, PhysicsBody2D};
+pub use character::CharacterBody2D;
 pub use collision::CollisionResult;
 pub use shape::Shape2D;
-pub use world::{PhysicsWorld2D, RaycastHit};
+pub use world::{CollisionEvent, ContactState, PhysicsWorld2D, RaycastHit};
 
 // 3D re-exports.
 pub use body3d::{BodyId3D, BodyType3D, PhysicsBody3D};

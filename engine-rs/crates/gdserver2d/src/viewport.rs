@@ -1,11 +1,12 @@
 //! Viewport management and coordinate mapping.
 //!
-//! A viewport owns a collection of canvas items and provides
+//! A viewport owns a collection of canvas items and canvas layers, and provides
 //! z-index-sorted iteration for the rendering pipeline.
 
-use gdcore::math::Color;
+use gdcore::math::{Color, Vector2};
 
 use crate::canvas::{CanvasItem, CanvasItemId};
+use crate::canvas_layer::CanvasLayer;
 
 /// A rendering viewport that holds canvas items and their draw order.
 #[derive(Debug, Clone)]
@@ -18,6 +19,14 @@ pub struct Viewport {
     pub clear_color: Color,
     /// Canvas items owned by this viewport.
     canvas_items: Vec<CanvasItem>,
+    /// Canvas layers for grouping items.
+    canvas_layers: Vec<CanvasLayer>,
+    /// Camera position in world space.
+    pub camera_position: Vector2,
+    /// Camera zoom factor (1.0 = no zoom).
+    pub camera_zoom: Vector2,
+    /// Camera rotation in radians.
+    pub camera_rotation: f32,
 }
 
 impl Viewport {
@@ -28,6 +37,10 @@ impl Viewport {
             height,
             clear_color,
             canvas_items: Vec::new(),
+            canvas_layers: Vec::new(),
+            camera_position: Vector2::ZERO,
+            camera_zoom: Vector2::ONE,
+            camera_rotation: 0.0,
         }
     }
 
@@ -48,9 +61,62 @@ impl Viewport {
         self.canvas_items.iter_mut().find(|item| item.id == id)
     }
 
+    /// Returns a reference to a canvas item by ID.
+    pub fn get_canvas_item(&self, id: CanvasItemId) -> Option<&CanvasItem> {
+        self.canvas_items.iter().find(|item| item.id == id)
+    }
+
     /// Returns canvas items sorted by z_index (ascending) for rendering.
     pub fn get_sorted_items(&self) -> Vec<&CanvasItem> {
         let mut items: Vec<&CanvasItem> = self.canvas_items.iter().collect();
+        items.sort_by_key(|item| item.z_index);
+        items
+    }
+
+    /// Adds a canvas layer to the viewport.
+    pub fn add_canvas_layer(&mut self, layer: CanvasLayer) {
+        self.canvas_layers.push(layer);
+    }
+
+    /// Removes a canvas layer by ID. Returns `true` if found and removed.
+    pub fn remove_canvas_layer(&mut self, layer_id: u64) -> bool {
+        let len_before = self.canvas_layers.len();
+        self.canvas_layers.retain(|l| l.layer_id != layer_id);
+        self.canvas_layers.len() < len_before
+    }
+
+    /// Returns a mutable reference to a canvas layer by ID.
+    pub fn get_canvas_layer_mut(&mut self, layer_id: u64) -> Option<&mut CanvasLayer> {
+        self.canvas_layers
+            .iter_mut()
+            .find(|l| l.layer_id == layer_id)
+    }
+
+    /// Returns canvas layers sorted by z_order (ascending) for rendering.
+    pub fn get_sorted_layers(&self) -> Vec<&CanvasLayer> {
+        let mut layers: Vec<&CanvasLayer> = self.canvas_layers.iter().collect();
+        layers.sort_by_key(|l| l.z_order);
+        layers
+    }
+
+    /// Returns canvas items belonging to a specific layer, sorted by z_index.
+    pub fn get_items_for_layer(&self, layer_id: u64) -> Vec<&CanvasItem> {
+        let mut items: Vec<&CanvasItem> = self
+            .canvas_items
+            .iter()
+            .filter(|item| item.layer_id == Some(layer_id))
+            .collect();
+        items.sort_by_key(|item| item.z_index);
+        items
+    }
+
+    /// Returns canvas items that don't belong to any layer, sorted by z_index.
+    pub fn get_unlayered_items(&self) -> Vec<&CanvasItem> {
+        let mut items: Vec<&CanvasItem> = self
+            .canvas_items
+            .iter()
+            .filter(|item| item.layer_id.is_none())
+            .collect();
         items.sort_by_key(|item| item.z_index);
         items
     }

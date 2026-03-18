@@ -126,6 +126,7 @@ dependencies = [
  "gdcore",
  "gdobject",
  "gdvariant",
+ "tempfile",
  "thiserror",
  "tracing",
 ]
