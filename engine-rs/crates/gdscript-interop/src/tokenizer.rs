@@ -114,6 +114,8 @@ pub enum Token {
     Arrow,
     /// `@`
     AtSign,
+    /// `$` — get_node shorthand.
+    Dollar,
 
     // Punctuation
     /// `(`
@@ -200,6 +202,7 @@ impl fmt::Display for Token {
             Token::MinusAssign => write!(f, "-="),
             Token::Arrow => write!(f, "->"),
             Token::AtSign => write!(f, "@"),
+            Token::Dollar => write!(f, "$"),
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
             Token::LBracket => write!(f, "["),
@@ -632,6 +635,7 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             '.' => Token::Dot,
             ';' => Token::Semicolon,
             '@' => Token::AtSign,
+            '$' => Token::Dollar,
             _ => {
                 return Err(LexError::UnexpectedChar { ch, line, col });
             }

@@ -13,7 +13,12 @@ pub mod interpreter;
 pub mod parser;
 pub mod tokenizer;
 
-pub use bindings::{MethodFlags, MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo};
+pub use bindings::{
+    MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
+};
 pub use bridge::{NativeScript, NativeScriptBuilder, ScriptBridge};
-pub use parser::{Annotation, AssignOp, BinOp, Expr, ParseError, Parser, Stmt, UnaryOp};
+pub use interpreter::{RuntimeError, RuntimeErrorKind, ScriptWarning, SourceLocation, StackFrame};
+pub use parser::{
+    Annotation, AssignOp, BinOp, Expr, MatchArm, MatchPattern, ParseError, Parser, Stmt, UnaryOp,
+};
 pub use tokenizer::{tokenize, LexError, Token, TokenSpan};

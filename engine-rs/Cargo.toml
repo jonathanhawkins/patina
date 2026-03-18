@@ -65,3 +65,7 @@ path = "examples/platformer_demo.rs"
 [[example]]
 name = "hello_gdscript"
 path = "examples/hello_gdscript.rs"
+
+[[example]]
+name = "space_shooter"
+path = "examples/space_shooter.rs"

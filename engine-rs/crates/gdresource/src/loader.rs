@@ -44,7 +44,8 @@ impl TresLoader {
         let mut current_sub_id = String::new();
         let mut current_sub = Option::<Resource>::None;
 
-        for line in source.lines() {
+        for (line_num, line) in source.lines().enumerate() {
+            let line_num = line_num + 1; // 1-based
             let line = line.trim();
 
             // Skip empty lines and comments.
@@ -86,7 +87,9 @@ impl TresLoader {
             if let Some((key, value_str)) = line.split_once('=') {
                 let key = key.trim();
                 let value_str = value_str.trim();
-                let value = parse_variant_value(value_str)?;
+                let value = parse_variant_value(value_str).map_err(|e| {
+                    EngineError::Parse(format!("{} (at line {} in {})", e, line_num, path))
+                })?;
 
                 match current_section {
                     Section::Resource => {
@@ -1137,6 +1140,27 @@ nothing = null
                 assert_eq!(map["label"], Variant::String("test".into()));
             }
             other => panic!("expected Dictionary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tres_error_includes_line_number() {
+        let source = "[gd_resource type=\"Resource\" format=3]\n\n[resource]\nvalue = totally_invalid_value\n";
+        let loader = TresLoader;
+        let result = loader.parse_str(source, "test.tres");
+        match result {
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(
+                    msg.contains("line 4"),
+                    "error should mention line 4, got: {msg}"
+                );
+                assert!(
+                    msg.contains("test.tres"),
+                    "error should mention file path, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected error for invalid value"),
         }
     }
 }
