@@ -12,18 +12,22 @@
 //! - [`lifecycle`] — [`LifecycleManager`](lifecycle::LifecycleManager) for
 //!   dispatching enter-tree, ready, and exit-tree notifications in the
 //!   correct Godot-compatible order.
+//! - [`main_loop`] — [`MainLoop`](main_loop::MainLoop) for driving
+//!   deterministic frame execution with fixed-timestep physics.
 //! - [`packed_scene`] — [`PackedScene`](packed_scene::PackedScene) for
 //!   parsing `.tscn` files and instantiating node subtrees.
 
 #![warn(clippy::all)]
 
 pub mod lifecycle;
+pub mod main_loop;
 pub mod node;
 pub mod packed_scene;
 pub mod scene_tree;
 
 // Re-export the most-used types at the crate root.
 pub use lifecycle::LifecycleManager;
+pub use main_loop::MainLoop;
 pub use node::{Node, NodeId};
 pub use packed_scene::{add_packed_scene_to_tree, PackedScene};
 pub use scene_tree::SceneTree;

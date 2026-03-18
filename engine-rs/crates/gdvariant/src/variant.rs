@@ -6,6 +6,8 @@
 
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
 use gdcore::id::ObjectId;
+use gdcore::node_path::NodePath;
+use gdcore::string_name::StringName;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -20,6 +22,8 @@ pub enum VariantType {
     Int,
     Float,
     String,
+    StringName,
+    NodePath,
     Vector2,
     Vector3,
     Rect2,
@@ -43,6 +47,10 @@ pub enum Variant {
     Float(f64),
     /// A UTF-8 string.
     String(String),
+    /// An interned string name.
+    StringName(StringName),
+    /// A scene-tree node path.
+    NodePath(NodePath),
     /// A 2D vector.
     Vector2(Vector2),
     /// A 3D vector.
@@ -70,6 +78,8 @@ impl Variant {
             Self::Int(_) => VariantType::Int,
             Self::Float(_) => VariantType::Float,
             Self::String(_) => VariantType::String,
+            Self::StringName(_) => VariantType::StringName,
+            Self::NodePath(_) => VariantType::NodePath,
             Self::Vector2(_) => VariantType::Vector2,
             Self::Vector3(_) => VariantType::Vector3,
             Self::Rect2(_) => VariantType::Rect2,
@@ -96,6 +106,8 @@ impl Variant {
             Self::Int(i) => *i != 0,
             Self::Float(f) => *f != 0.0,
             Self::String(s) => !s.is_empty(),
+            Self::StringName(sn) => !sn.as_str().is_empty(),
+            Self::NodePath(np) => !np.is_empty(),
             Self::Array(a) => !a.is_empty(),
             Self::Dictionary(d) => !d.is_empty(),
             _ => true,
@@ -117,6 +129,8 @@ impl fmt::Display for Variant {
             Self::Int(i) => write!(f, "{i}"),
             Self::Float(v) => write!(f, "{v}"),
             Self::String(s) => write!(f, "{s}"),
+            Self::StringName(sn) => write!(f, "&{sn}"),
+            Self::NodePath(np) => write!(f, "NodePath(\"{np}\")"),
             Self::Vector2(v) => write!(f, "({}, {})", v.x, v.y),
             Self::Vector3(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
             Self::Rect2(r) => write!(f, "[({}, {}), ({}, {})]", r.position.x, r.position.y, r.size.x, r.size.y),
@@ -137,6 +151,8 @@ impl fmt::Display for VariantType {
             Self::Int => "int",
             Self::Float => "float",
             Self::String => "String",
+            Self::StringName => "StringName",
+            Self::NodePath => "NodePath",
             Self::Vector2 => "Vector2",
             Self::Vector3 => "Vector3",
             Self::Rect2 => "Rect2",
@@ -181,5 +197,29 @@ mod tests {
     #[test]
     fn default_is_nil() {
         assert!(Variant::default().is_nil());
+    }
+
+    #[test]
+    fn variant_string_name_type_tag() {
+        let sn = StringName::new("test");
+        assert_eq!(Variant::StringName(sn).variant_type(), VariantType::StringName);
+    }
+
+    #[test]
+    fn variant_node_path_type_tag() {
+        let np = NodePath::new("/root/Player");
+        assert_eq!(Variant::NodePath(np).variant_type(), VariantType::NodePath);
+    }
+
+    #[test]
+    fn string_name_truthy() {
+        assert!(Variant::StringName(StringName::new("x")).is_truthy());
+        assert!(!Variant::StringName(StringName::new("")).is_truthy());
+    }
+
+    #[test]
+    fn node_path_truthy() {
+        assert!(Variant::NodePath(NodePath::new("/root")).is_truthy());
+        assert!(!Variant::NodePath(NodePath::new("")).is_truthy());
     }
 }

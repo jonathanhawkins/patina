@@ -1,0 +1,20 @@
+[package]
+name = "patina-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "patina-runner"
+path = "src/main.rs"
+
+[dependencies]
+gdcore = { path = "../gdcore" }
+gdvariant = { path = "../gdvariant" }
+gdobject = { path = "../gdobject" }
+gdresource = { path = "../gdresource" }
+gdscene = { path = "../gdscene" }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

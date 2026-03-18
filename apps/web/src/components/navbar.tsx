@@ -51,6 +51,7 @@ export function Navbar() {
           <Button
             variant="ghost"
             size="icon"
+            nativeButton={false}
             render={
               <a
                 href="https://github.com/patinaengine/patina"
@@ -64,6 +65,7 @@ export function Navbar() {
           </Button>
           <Button
             size="sm"
+            nativeButton={false}
             className="hidden bg-brand text-brand-foreground hover:bg-brand/80 sm:inline-flex"
             render={
               <a

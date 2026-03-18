@@ -20,6 +20,8 @@ pub fn to_json(v: &Variant) -> Value {
         Variant::Int(i) => json!({ "type": "Int", "value": i }),
         Variant::Float(f) => json!({ "type": "Float", "value": f }),
         Variant::String(s) => json!({ "type": "String", "value": s }),
+        Variant::StringName(sn) => json!({ "type": "StringName", "value": sn.as_str() }),
+        Variant::NodePath(np) => json!({ "type": "NodePath", "value": np.to_string() }),
         Variant::Vector2(v) => json!({ "type": "Vector2", "value": [v.x, v.y] }),
         Variant::Vector3(v) => json!({ "type": "Vector3", "value": [v.x, v.y, v.z] }),
         Variant::Rect2(r) => json!({
@@ -66,6 +68,14 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         "Int" => Some(Variant::Int(obj.get("value")?.as_i64()?)),
         "Float" => Some(Variant::Float(obj.get("value")?.as_f64()?)),
         "String" => Some(Variant::String(obj.get("value")?.as_str()?.to_owned())),
+        "StringName" => {
+            let s = obj.get("value")?.as_str()?;
+            Some(Variant::StringName(gdcore::StringName::new(s)))
+        }
+        "NodePath" => {
+            let s = obj.get("value")?.as_str()?;
+            Some(Variant::NodePath(gdcore::NodePath::new(s)))
+        }
         "Vector2" => {
             let arr = obj.get("value")?.as_array()?;
             if arr.len() != 2 { return None; }
@@ -191,6 +201,20 @@ mod tests {
         dict.insert("version".into(), Variant::Int(1));
         let v = Variant::Dictionary(dict);
         assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_string_name() {
+        let v = Variant::StringName(gdcore::StringName::new("player"));
+        let rt = roundtrip(v.clone());
+        assert_eq!(rt, v);
+    }
+
+    #[test]
+    fn roundtrip_node_path() {
+        let v = Variant::NodePath(gdcore::NodePath::new("/root/Player:position"));
+        let rt = roundtrip(v.clone());
+        assert_eq!(rt, v);
     }
 
     #[test]

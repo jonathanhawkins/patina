@@ -13,6 +13,7 @@ members = [
     "crates/gdplatform",
     "crates/gdscript-interop",
     "crates/gdeditor",
+    "crates/patina-runner",
 ]
 
 [workspace.package]

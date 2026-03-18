@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
-use gdcore::math::{Color, Vector2, Vector3};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
+use gdcore::node_path::NodePath;
 use gdcore::ResourceUid;
 use gdvariant::Variant;
 
@@ -225,14 +226,7 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
 
     // Quoted string
     if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        let inner = &s[1..s.len() - 1];
-        // Handle basic escape sequences.
-        let unescaped = inner
-            .replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
-        return Ok(Variant::String(unescaped));
+        return Ok(Variant::String(unescape_string(&s[1..s.len() - 1])));
     }
 
     // Boolean
@@ -243,8 +237,8 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         return Ok(Variant::Bool(false));
     }
 
-    // Null
-    if s == "null" || s == "nil" {
+    // Null / Nil
+    if s == "null" || s == "nil" || s == "Nil" {
         return Ok(Variant::Nil);
     }
 
@@ -290,6 +284,81 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         return Err(EngineError::Parse(format!("invalid Color: {s}")));
     }
 
+    // Rect2(x, y, w, h)
+    if let Some(inner) = try_strip_call(s, "Rect2") {
+        let parts = split_args(inner);
+        if parts.len() == 4 {
+            let x = parse_f32(&parts[0])?;
+            let y = parse_f32(&parts[1])?;
+            let w = parse_f32(&parts[2])?;
+            let h = parse_f32(&parts[3])?;
+            return Ok(Variant::Rect2(Rect2::new(
+                Vector2::new(x, y),
+                Vector2::new(w, h),
+            )));
+        }
+        return Err(EngineError::Parse(format!("invalid Rect2: {s}")));
+    }
+
+    // Transform2D(xx, xy, yx, yy, ox, oy)
+    if let Some(inner) = try_strip_call(s, "Transform2D") {
+        let parts = split_args(inner);
+        if parts.len() == 6 {
+            let xx = parse_f32(&parts[0])?;
+            let xy = parse_f32(&parts[1])?;
+            let yx = parse_f32(&parts[2])?;
+            let yy = parse_f32(&parts[3])?;
+            let ox = parse_f32(&parts[4])?;
+            let oy = parse_f32(&parts[5])?;
+            return Ok(Variant::Transform2D(Transform2D {
+                x: Vector2::new(xx, xy),
+                y: Vector2::new(yx, yy),
+                origin: Vector2::new(ox, oy),
+            }));
+        }
+        return Err(EngineError::Parse(format!("invalid Transform2D: {s}")));
+    }
+
+    // NodePath("path") — stored as Variant::NodePath
+    if let Some(inner) = try_strip_call(s, "NodePath") {
+        let inner = inner.trim();
+        if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
+            let path_str = unescape_string(&inner[1..inner.len() - 1]);
+            return Ok(Variant::NodePath(NodePath::new(&path_str)));
+        }
+        return Err(EngineError::Parse(format!("invalid NodePath: {s}")));
+    }
+
+    // ExtResource("id") — stored as Variant::String with "ExtResource:" prefix
+    if let Some(inner) = try_strip_call(s, "ExtResource") {
+        let inner = inner.trim();
+        if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
+            let id = unescape_string(&inner[1..inner.len() - 1]);
+            return Ok(Variant::String(format!("ExtResource:{id}")));
+        }
+        return Err(EngineError::Parse(format!("invalid ExtResource: {s}")));
+    }
+
+    // SubResource("id") — stored as Variant::String with "SubResource:" prefix
+    if let Some(inner) = try_strip_call(s, "SubResource") {
+        let inner = inner.trim();
+        if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
+            let id = unescape_string(&inner[1..inner.len() - 1]);
+            return Ok(Variant::String(format!("SubResource:{id}")));
+        }
+        return Err(EngineError::Parse(format!("invalid SubResource: {s}")));
+    }
+
+    // Array: [elem, elem, ...]
+    if s.starts_with('[') && s.ends_with(']') {
+        return parse_array(&s[1..s.len() - 1]);
+    }
+
+    // Dictionary: {key: value, ...}
+    if s.starts_with('{') && s.ends_with('}') {
+        return parse_dictionary(&s[1..s.len() - 1]);
+    }
+
     // Integer (no decimal point)
     if let Ok(i) = s.parse::<i64>() {
         return Ok(Variant::Int(i));
@@ -304,20 +373,97 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
 }
 
 /// Tries to strip a function-call wrapper, e.g. `Vector2(1, 2)` -> `"1, 2"`.
+///
+/// Uses balanced parenthesis matching so nested calls like
+/// `ExtResource("id")` inside arrays work correctly.
 fn try_strip_call<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     let s = s.trim();
-    if s.starts_with(name) && s.ends_with(')') {
-        let rest = &s[name.len()..];
-        if rest.starts_with('(') {
-            return Some(&rest[1..rest.len() - 1]);
+    if !s.starts_with(name) {
+        return None;
+    }
+    let rest = &s[name.len()..];
+    if !rest.starts_with('(') {
+        return None;
+    }
+    // Find the matching closing paren.
+    let bytes = rest.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if b == b'\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if b == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                // Only match if this closing paren is the last character.
+                if i == rest.len() - 1 {
+                    return Some(&rest[1..i]);
+                }
+                return None;
+            }
         }
     }
     None
 }
 
-/// Splits comma-separated arguments, trimming whitespace.
+/// Splits top-level comma-separated arguments, respecting nested parens,
+/// brackets, braces, and quoted strings.
 fn split_args(s: &str) -> Vec<String> {
-    s.split(',').map(|p| p.trim().to_string()).collect()
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut start = 0;
+
+    for (i, c) in s.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    let tail = s[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail.to_string());
+    }
+
+    parts
 }
 
 /// Parses a float from a string, providing a nice error.
@@ -327,9 +473,103 @@ fn parse_f32(s: &str) -> EngineResult<f32> {
         .map_err(|_| EngineError::Parse(format!("expected float, got: {s}")))
 }
 
+/// Unescapes a Godot-style string (inner content, without surrounding quotes).
+fn unescape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('r') => out.push('\r'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Parses an array body (content between `[` and `]`) into `Variant::Array`.
+fn parse_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Array(Vec::new()));
+    }
+    let elements = split_args(s);
+    let mut result = Vec::with_capacity(elements.len());
+    for elem in &elements {
+        result.push(parse_variant_value(elem)?);
+    }
+    Ok(Variant::Array(result))
+}
+
+/// Parses a dictionary body (content between `{` and `}`) into `Variant::Dictionary`.
+///
+/// Expects `"key": value` pairs separated by commas. Keys must be quoted strings.
+fn parse_dictionary(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::Dictionary(HashMap::new()));
+    }
+    let pairs = split_args(s);
+    let mut map = HashMap::new();
+    for pair in &pairs {
+        let pair = pair.trim();
+        // Find the colon separating key from value, but only outside of the key string.
+        if !pair.starts_with('"') {
+            return Err(EngineError::Parse(format!(
+                "dictionary key must be a quoted string: {pair}"
+            )));
+        }
+        // Find end of key string.
+        let key_end = find_closing_quote(pair, 1).ok_or_else(|| {
+            EngineError::Parse(format!("unterminated dictionary key: {pair}"))
+        })?;
+        let key = unescape_string(&pair[1..key_end]);
+        let rest = pair[key_end + 1..].trim();
+        let rest = rest
+            .strip_prefix(':')
+            .ok_or_else(|| {
+                EngineError::Parse(format!("expected ':' after dictionary key: {pair}"))
+            })?
+            .trim();
+        let value = parse_variant_value(rest)?;
+        map.insert(key, value);
+    }
+    Ok(Variant::Dictionary(map))
+}
+
+/// Finds the index of the closing quote in a string, starting search at `start`.
+/// Handles escape sequences.
+fn find_closing_quote(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2; // skip escaped char
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gdcore::math::Rect2;
 
     #[test]
     fn parse_string_value() {
@@ -372,6 +612,122 @@ mod tests {
     fn parse_color_value() {
         let v = parse_variant_value("Color(0.2, 0.3, 0.4, 1)").unwrap();
         assert_eq!(v, Variant::Color(Color::new(0.2, 0.3, 0.4, 1.0)));
+    }
+
+    #[test]
+    fn parse_rect2_value() {
+        let v = parse_variant_value("Rect2(10, 20, 100, 50)").unwrap();
+        assert_eq!(
+            v,
+            Variant::Rect2(Rect2::new(
+                Vector2::new(10.0, 20.0),
+                Vector2::new(100.0, 50.0)
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_transform2d_value() {
+        let v = parse_variant_value("Transform2D(1, 0, 0, 1, 10, 20)").unwrap();
+        assert_eq!(
+            v,
+            Variant::Transform2D(Transform2D {
+                x: Vector2::new(1.0, 0.0),
+                y: Vector2::new(0.0, 1.0),
+                origin: Vector2::new(10.0, 20.0),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_node_path_value() {
+        let v = parse_variant_value(r#"NodePath("Player/Sprite")"#).unwrap();
+        assert_eq!(v, Variant::NodePath(gdcore::node_path::NodePath::new("Player/Sprite")));
+    }
+
+    #[test]
+    fn parse_ext_resource_value() {
+        let v = parse_variant_value(r#"ExtResource("1_abc")"#).unwrap();
+        assert_eq!(v, Variant::String("ExtResource:1_abc".into()));
+    }
+
+    #[test]
+    fn parse_sub_resource_value() {
+        let v = parse_variant_value(r#"SubResource("StyleBoxFlat_abc")"#).unwrap();
+        assert_eq!(v, Variant::String("SubResource:StyleBoxFlat_abc".into()));
+    }
+
+    #[test]
+    fn parse_null_nil() {
+        assert_eq!(parse_variant_value("null").unwrap(), Variant::Nil);
+        assert_eq!(parse_variant_value("nil").unwrap(), Variant::Nil);
+        assert_eq!(parse_variant_value("Nil").unwrap(), Variant::Nil);
+    }
+
+    #[test]
+    fn parse_string_escape_sequences() {
+        let v = parse_variant_value(r#""line1\nline2\ttab\\slash\"quote""#).unwrap();
+        assert_eq!(
+            v,
+            Variant::String("line1\nline2\ttab\\slash\"quote".into())
+        );
+    }
+
+    #[test]
+    fn parse_array_mixed_types() {
+        let v = parse_variant_value(r#"[1, 2.5, "three", Vector2(1, 2), true, null]"#).unwrap();
+        match v {
+            Variant::Array(ref items) => {
+                assert_eq!(items.len(), 6);
+                assert_eq!(items[0], Variant::Int(1));
+                assert_eq!(items[1], Variant::Float(2.5));
+                assert_eq!(items[2], Variant::String("three".into()));
+                assert_eq!(items[3], Variant::Vector2(Vector2::new(1.0, 2.0)));
+                assert_eq!(items[4], Variant::Bool(true));
+                assert_eq!(items[5], Variant::Nil);
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_empty_array() {
+        assert_eq!(parse_variant_value("[]").unwrap(), Variant::Array(vec![]));
+    }
+
+    #[test]
+    fn parse_dictionary() {
+        let v = parse_variant_value(r#"{"name": "Player", "health": 100, "alive": true}"#).unwrap();
+        match v {
+            Variant::Dictionary(ref map) => {
+                assert_eq!(map.len(), 3);
+                assert_eq!(map["name"], Variant::String("Player".into()));
+                assert_eq!(map["health"], Variant::Int(100));
+                assert_eq!(map["alive"], Variant::Bool(true));
+            }
+            other => panic!("expected Dictionary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_empty_dictionary() {
+        assert_eq!(
+            parse_variant_value("{}").unwrap(),
+            Variant::Dictionary(HashMap::new())
+        );
+    }
+
+    #[test]
+    fn parse_array_with_ext_resource() {
+        let v = parse_variant_value(r#"[ExtResource("1"), ExtResource("2")]"#).unwrap();
+        match v {
+            Variant::Array(ref items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], Variant::String("ExtResource:1".into()));
+                assert_eq!(items[1], Variant::String("ExtResource:2".into()));
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
     }
 
     #[test]
@@ -421,5 +777,79 @@ position = Vector2(10, 20)
             sub.get_property("bg_color"),
             Some(&Variant::Color(Color::new(0.2, 0.3, 0.4, 1.0)))
         );
+    }
+
+    #[test]
+    fn parse_tres_with_new_types() {
+        let source = r#"
+[gd_resource type="Resource" format=3 uid="uid://newtest"]
+
+[ext_resource type="Texture2D" uid="uid://tex1" path="res://icon.png" id="tex_1"]
+
+[sub_resource type="RectangleShape2D" id="shape_1"]
+size = Vector2(64, 64)
+
+[resource]
+region = Rect2(0, 0, 256, 256)
+xform = Transform2D(1, 0, 0, 1, 50, 100)
+target = NodePath("Player/Sprite")
+texture = ExtResource("tex_1")
+style = SubResource("shape_1")
+items = [1, "two", Vector2(3, 4)]
+metadata = {"version": 2, "label": "test"}
+nothing = null
+"#;
+        let loader = TresLoader::new();
+        let res = loader.parse_str(source, "res://new.tres").unwrap();
+
+        assert_eq!(
+            res.get_property("region"),
+            Some(&Variant::Rect2(Rect2::new(
+                Vector2::new(0.0, 0.0),
+                Vector2::new(256.0, 256.0)
+            )))
+        );
+        assert_eq!(
+            res.get_property("xform"),
+            Some(&Variant::Transform2D(Transform2D {
+                x: Vector2::new(1.0, 0.0),
+                y: Vector2::new(0.0, 1.0),
+                origin: Vector2::new(50.0, 100.0),
+            }))
+        );
+        assert_eq!(
+            res.get_property("target"),
+            Some(&Variant::NodePath(gdcore::node_path::NodePath::new("Player/Sprite")))
+        );
+        assert_eq!(
+            res.get_property("texture"),
+            Some(&Variant::String("ExtResource:tex_1".into()))
+        );
+        assert_eq!(
+            res.get_property("style"),
+            Some(&Variant::String("SubResource:shape_1".into()))
+        );
+        assert_eq!(res.get_property("nothing"), Some(&Variant::Nil));
+
+        // Array property
+        match res.get_property("items") {
+            Some(Variant::Array(items)) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Variant::Int(1));
+                assert_eq!(items[1], Variant::String("two".into()));
+                assert_eq!(items[2], Variant::Vector2(Vector2::new(3.0, 4.0)));
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+
+        // Dictionary property
+        match res.get_property("metadata") {
+            Some(Variant::Dictionary(map)) => {
+                assert_eq!(map.len(), 2);
+                assert_eq!(map["version"], Variant::Int(2));
+                assert_eq!(map["label"], Variant::String("test".into()));
+            }
+            other => panic!("expected Dictionary, got {other:?}"),
+        }
     }
 }

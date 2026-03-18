@@ -67,6 +67,14 @@ impl From<gdcore::math::Color> for Variant {
     fn from(v: gdcore::math::Color) -> Self { Self::Color(v) }
 }
 
+impl From<gdcore::StringName> for Variant {
+    fn from(v: gdcore::StringName) -> Self { Self::StringName(v) }
+}
+
+impl From<gdcore::NodePath> for Variant {
+    fn from(v: gdcore::NodePath) -> Self { Self::NodePath(v) }
+}
+
 impl From<Vec<Variant>> for Variant {
     fn from(v: Vec<Variant>) -> Self { Self::Array(v) }
 }
@@ -117,6 +125,28 @@ impl TryFrom<Variant> for String {
             Variant::String(s) => Ok(s),
             // Godot allows converting most types to string via str().
             other => Ok(other.to_string()),
+        }
+    }
+}
+
+impl TryFrom<Variant> for gdcore::StringName {
+    type Error = ConversionError;
+    fn try_from(v: Variant) -> Result<Self, Self::Error> {
+        match v {
+            Variant::StringName(sn) => Ok(sn),
+            Variant::String(s) => Ok(gdcore::StringName::new(&s)),
+            other => Err(ConversionError::new(other.variant_type(), VariantType::StringName)),
+        }
+    }
+}
+
+impl TryFrom<Variant> for gdcore::NodePath {
+    type Error = ConversionError;
+    fn try_from(v: Variant) -> Result<Self, Self::Error> {
+        match v {
+            Variant::NodePath(np) => Ok(np),
+            Variant::String(s) => Ok(gdcore::NodePath::new(&s)),
+            other => Err(ConversionError::new(other.variant_type(), VariantType::NodePath)),
         }
     }
 }
@@ -185,5 +215,43 @@ mod tests {
         let v = Vector2::new(1.0, 2.0);
         assert_eq!(Vector2::try_from(Variant::Vector2(v)).unwrap(), v);
         assert!(Vector2::try_from(Variant::Int(0)).is_err());
+    }
+
+    #[test]
+    fn from_string_name() {
+        let sn = gdcore::StringName::new("test");
+        assert_eq!(Variant::from(sn), Variant::StringName(sn));
+    }
+
+    #[test]
+    fn try_from_string_name() {
+        let sn = gdcore::StringName::new("hello");
+        let v = Variant::StringName(sn);
+        let extracted = gdcore::StringName::try_from(v).unwrap();
+        assert_eq!(extracted, sn);
+    }
+
+    #[test]
+    fn try_from_string_name_from_string() {
+        let v = Variant::String("coerced".into());
+        let sn = gdcore::StringName::try_from(v).unwrap();
+        assert_eq!(sn.as_str(), "coerced");
+    }
+
+    #[test]
+    fn from_node_path() {
+        let np = gdcore::NodePath::new("/root/Player");
+        assert_eq!(
+            Variant::from(np.clone()),
+            Variant::NodePath(gdcore::NodePath::new("/root/Player")),
+        );
+    }
+
+    #[test]
+    fn try_from_node_path() {
+        let np = gdcore::NodePath::new("/root/Player");
+        let v = Variant::NodePath(np.clone());
+        let extracted = gdcore::NodePath::try_from(v).unwrap();
+        assert_eq!(extracted, np);
     }
 }

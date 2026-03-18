@@ -315,6 +315,19 @@ impl SceneTree {
             }
         }
     }
+
+    /// Dispatches [`NOTIFICATION_PHYSICS_PROCESS`](gdobject::NOTIFICATION_PHYSICS_PROCESS)
+    /// to every node in tree order.
+    ///
+    /// Called once per fixed-timestep physics tick.
+    pub fn process_physics_frame(&mut self) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_PHYSICS_PROCESS);
+            }
+        }
+    }
 }
 
 impl Default for SceneTree {
