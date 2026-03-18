@@ -336,7 +336,7 @@ fn rotation_90_moves_rect_position() {
     // Rotate 90 degrees: (x,y) → (-y,x). Then translate to keep in viewport.
     let rot = Transform2D::rotated(std::f32::consts::FRAC_PI_2);
     let translate = Transform2D::translated(Vector2::new(10.0, 0.0));
-    item.transform = translate.mul(rot);
+    item.transform = translate * rot;
     // Point at (5,0) after 90° rotation → (0,5), then translate → (10,5).
     item.commands.push(DrawCommand::DrawRect {
         rect: Rect2::new(Vector2::new(5.0, 0.0), Vector2::new(3.0, 3.0)),

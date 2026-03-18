@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod main_loop;
 pub mod node;
 pub mod node2d;
+pub mod node3d;
 pub mod packed_scene;
 pub mod scene_tree;
 

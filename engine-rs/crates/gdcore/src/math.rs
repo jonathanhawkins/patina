@@ -267,21 +267,6 @@ impl Transform2D {
         )
     }
 
-    /// Multiplies two transforms.
-    pub fn mul(self, other: Self) -> Self {
-        Self {
-            x: Vector2::new(
-                self.x.x * other.x.x + self.y.x * other.x.y,
-                self.x.y * other.x.x + self.y.y * other.x.y,
-            ),
-            y: Vector2::new(
-                self.x.x * other.y.x + self.y.x * other.y.y,
-                self.x.y * other.y.x + self.y.y * other.y.y,
-            ),
-            origin: self.xform(other.origin),
-        }
-    }
-
     /// Creates a translation-only transform.
     pub fn translated(offset: Vector2) -> Self {
         Self {
@@ -327,6 +312,23 @@ impl Transform2D {
             x: ix,
             y: iy,
             origin: io,
+        }
+    }
+}
+
+impl Mul for Transform2D {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        Self {
+            x: Vector2::new(
+                self.x.x * rhs.x.x + self.y.x * rhs.x.y,
+                self.x.y * rhs.x.x + self.y.y * rhs.x.y,
+            ),
+            y: Vector2::new(
+                self.x.x * rhs.y.x + self.y.x * rhs.y.y,
+                self.x.y * rhs.y.x + self.y.y * rhs.y.y,
+            ),
+            origin: self.xform(rhs.origin),
         }
     }
 }
@@ -463,7 +465,7 @@ mod tests {
     fn transform2d_compose() {
         let t = Transform2D::translated(Vector2::new(5.0, 0.0));
         let r = Transform2D::rotated(std::f32::consts::FRAC_PI_2);
-        let combined = t.mul(r);
+        let combined = t * r;
         let p = combined.xform(Vector2::ZERO);
         // Origin of r is (0,0), translated by t → (5,0)
         assert!(approx_eq(p.x, 5.0));
@@ -659,7 +661,7 @@ mod tests {
 
     #[test]
     fn transform2d_identity_mul_identity() {
-        let result = Transform2D::IDENTITY.mul(Transform2D::IDENTITY);
+        let result = Transform2D::IDENTITY * Transform2D::IDENTITY;
         assert_eq!(result, Transform2D::IDENTITY);
     }
 
@@ -675,7 +677,7 @@ mod tests {
     fn transform2d_translate_then_scale() {
         let t = Transform2D::translated(Vector2::new(10.0, 0.0));
         let s = Transform2D::scaled(Vector2::new(2.0, 2.0));
-        let combined = t.mul(s);
+        let combined = t * s;
         let p = combined.xform(Vector2::new(1.0, 0.0));
         assert!(approx_eq(p.x, 12.0)); // 1*2 + 10
         assert!(approx_eq(p.y, 0.0));

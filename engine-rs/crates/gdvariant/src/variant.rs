@@ -5,6 +5,7 @@
 //! runtime): scalars, strings, math types, collections, and object refs.
 
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
+use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::id::ObjectId;
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
@@ -29,15 +30,21 @@ pub enum VariantType {
     Rect2,
     Transform2D,
     Color,
+    Basis,
+    Transform3D,
+    Quaternion,
+    Aabb,
+    Plane,
     ObjectId,
     Array,
     Dictionary,
 }
 
 /// A dynamically-typed engine value, analogous to Godot's `Variant`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Variant {
     /// The null / default value.
+    #[default]
     Nil,
     /// Boolean.
     Bool(bool),
@@ -61,6 +68,16 @@ pub enum Variant {
     Transform2D(Transform2D),
     /// An RGBA color.
     Color(Color),
+    /// A 3×3 rotation/scale matrix.
+    Basis(Basis),
+    /// A 3D affine transform.
+    Transform3D(Transform3D),
+    /// A quaternion rotation.
+    Quaternion(Quaternion),
+    /// An axis-aligned bounding box.
+    Aabb(Aabb),
+    /// An infinite plane.
+    Plane(Plane),
     /// A reference to an engine object by ID.
     ObjectId(ObjectId),
     /// A heterogeneous ordered list.
@@ -85,6 +102,11 @@ impl Variant {
             Self::Rect2(_) => VariantType::Rect2,
             Self::Transform2D(_) => VariantType::Transform2D,
             Self::Color(_) => VariantType::Color,
+            Self::Basis(_) => VariantType::Basis,
+            Self::Transform3D(_) => VariantType::Transform3D,
+            Self::Quaternion(_) => VariantType::Quaternion,
+            Self::Aabb(_) => VariantType::Aabb,
+            Self::Plane(_) => VariantType::Plane,
             Self::ObjectId(_) => VariantType::ObjectId,
             Self::Array(_) => VariantType::Array,
             Self::Dictionary(_) => VariantType::Dictionary,
@@ -115,12 +137,6 @@ impl Variant {
     }
 }
 
-impl Default for Variant {
-    fn default() -> Self {
-        Self::Nil
-    }
-}
-
 impl fmt::Display for Variant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -136,6 +152,11 @@ impl fmt::Display for Variant {
             Self::Rect2(r) => write!(f, "[({}, {}), ({}, {})]", r.position.x, r.position.y, r.size.x, r.size.y),
             Self::Transform2D(_) => write!(f, "<Transform2D>"),
             Self::Color(c) => write!(f, "Color({}, {}, {}, {})", c.r, c.g, c.b, c.a),
+            Self::Basis(_) => write!(f, "<Basis>"),
+            Self::Transform3D(_) => write!(f, "<Transform3D>"),
+            Self::Quaternion(q) => write!(f, "Quaternion({}, {}, {}, {})", q.x, q.y, q.z, q.w),
+            Self::Aabb(a) => write!(f, "AABB(({}, {}, {}), ({}, {}, {}))", a.position.x, a.position.y, a.position.z, a.size.x, a.size.y, a.size.z),
+            Self::Plane(p) => write!(f, "Plane(({}, {}, {}), {})", p.normal.x, p.normal.y, p.normal.z, p.d),
             Self::ObjectId(id) => write!(f, "<Object#{id}>"),
             Self::Array(a) => write!(f, "[Array; len={}]", a.len()),
             Self::Dictionary(d) => write!(f, "{{Dict; len={}}}", d.len()),
@@ -158,6 +179,11 @@ impl fmt::Display for VariantType {
             Self::Rect2 => "Rect2",
             Self::Transform2D => "Transform2D",
             Self::Color => "Color",
+            Self::Basis => "Basis",
+            Self::Transform3D => "Transform3D",
+            Self::Quaternion => "Quaternion",
+            Self::Aabb => "AABB",
+            Self::Plane => "Plane",
             Self::ObjectId => "ObjectId",
             Self::Array => "Array",
             Self::Dictionary => "Dictionary",

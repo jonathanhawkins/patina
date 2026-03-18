@@ -76,8 +76,8 @@ pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
     let scl = get_scale(tree, node_id);
 
     Transform2D::translated(pos)
-        .mul(Transform2D::rotated(rot))
-        .mul(Transform2D::scaled(scl))
+        * Transform2D::rotated(rot)
+        * Transform2D::scaled(scl)
 }
 
 /// Computes the global transform by walking the parent chain and multiplying
@@ -97,7 +97,7 @@ pub fn get_global_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
     chain.reverse();
     let mut global = Transform2D::IDENTITY;
     for id in chain {
-        global = global.mul(get_local_transform(tree, id));
+        global = global * get_local_transform(tree, id);
     }
     global
 }

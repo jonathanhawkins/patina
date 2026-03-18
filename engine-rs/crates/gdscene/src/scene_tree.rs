@@ -341,6 +341,96 @@ impl SceneTree {
             .map_or_else(Vec::new, |store| store.emit(signal_name, args))
     }
 
+    // -- get_node_or_null ---------------------------------------------------
+
+    /// Resolves a relative path from `from`, returning `None` instead of
+    /// panicking when the path is invalid. This is the non-panicking
+    /// counterpart to Godot's `get_node()`.
+    pub fn get_node_or_null(&self, from: NodeId, path: &str) -> Option<NodeId> {
+        if path.starts_with('/') {
+            // Absolute path — delegate to get_node_by_path.
+            self.get_node_by_path(path)
+        } else {
+            self.get_node_relative(from, path)
+        }
+    }
+
+    // -- get_index ----------------------------------------------------------
+
+    /// Returns the index of `node_id` among its parent's children, or `None`
+    /// if the node has no parent or is not found.
+    pub fn get_index(&self, node_id: NodeId) -> Option<usize> {
+        let node = self.nodes.get(&node_id)?;
+        let parent_id = node.parent()?;
+        let parent = self.nodes.get(&parent_id)?;
+        parent.children().iter().position(|&c| c == node_id)
+    }
+
+    // -- duplicate_subtree --------------------------------------------------
+
+    /// Deep-clones a node and all its descendants, assigning fresh IDs.
+    ///
+    /// Returns the cloned nodes as a flat `Vec` with parent/child
+    /// relationships already wired (using the new IDs). The first element
+    /// is the clone of `root_id`. The cloned nodes are **not** inserted
+    /// into the tree — the caller can add them via [`add_child`].
+    pub fn duplicate_subtree(&self, root_id: NodeId) -> EngineResult<Vec<Node>> {
+        let _source = self
+            .nodes
+            .get(&root_id)
+            .ok_or_else(|| EngineError::NotFound(format!("node {root_id} not found")))?;
+
+        // Collect subtree in top-down order.
+        let mut ids = Vec::new();
+        self.collect_subtree_top_down(root_id, &mut ids);
+
+        let mut old_to_new: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut cloned: Vec<Node> = Vec::with_capacity(ids.len());
+
+        for &old_id in &ids {
+            let original = self
+                .nodes
+                .get(&old_id)
+                .ok_or_else(|| EngineError::NotFound(format!("node {old_id} disappeared")))?;
+
+            let mut clone = Node::new(original.name(), original.class_name());
+            // Copy properties.
+            for (key, value) in original.properties() {
+                clone.set_property(key, value.clone());
+            }
+            // Copy groups.
+            for group in original.groups() {
+                clone.add_to_group(group.clone());
+            }
+            // Copy unique_name flag.
+            clone.set_unique_name(original.is_unique_name());
+
+            let new_id = clone.id();
+            old_to_new.insert(old_id, new_id);
+
+            // Wire parent (skip the root of the subtree — it has no parent
+            // in the cloned output).
+            if old_id != root_id {
+                if let Some(old_parent) = original.parent() {
+                    if let Some(&new_parent) = old_to_new.get(&old_parent) {
+                        clone.set_parent(Some(new_parent));
+                        // Also add as child of the new parent.
+                        if let Some(parent_clone) = cloned
+                            .iter_mut()
+                            .find(|n| n.id() == new_parent)
+                        {
+                            parent_clone.add_child_id(new_id);
+                        }
+                    }
+                }
+            }
+
+            cloned.push(clone);
+        }
+
+        Ok(cloned)
+    }
+
     // -- process stub -------------------------------------------------------
 
     /// Dispatches [`NOTIFICATION_PROCESS`](gdobject::NOTIFICATION_PROCESS)

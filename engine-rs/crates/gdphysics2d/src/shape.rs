@@ -69,7 +69,7 @@ impl Shape2D {
                 } else {
                     ap.dot(ab) / ab.length_squared()
                 };
-                if t < 0.0 || t > 1.0 {
+                if !(0.0..=1.0).contains(&t) {
                     return false;
                 }
                 let closest = a + ab * t;

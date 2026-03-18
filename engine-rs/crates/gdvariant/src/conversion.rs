@@ -67,6 +67,26 @@ impl From<gdcore::math::Color> for Variant {
     fn from(v: gdcore::math::Color) -> Self { Self::Color(v) }
 }
 
+impl From<gdcore::math3d::Basis> for Variant {
+    fn from(v: gdcore::math3d::Basis) -> Self { Self::Basis(v) }
+}
+
+impl From<gdcore::math3d::Transform3D> for Variant {
+    fn from(v: gdcore::math3d::Transform3D) -> Self { Self::Transform3D(v) }
+}
+
+impl From<gdcore::math3d::Quaternion> for Variant {
+    fn from(v: gdcore::math3d::Quaternion) -> Self { Self::Quaternion(v) }
+}
+
+impl From<gdcore::math3d::Aabb> for Variant {
+    fn from(v: gdcore::math3d::Aabb) -> Self { Self::Aabb(v) }
+}
+
+impl From<gdcore::math3d::Plane> for Variant {
+    fn from(v: gdcore::math3d::Plane) -> Self { Self::Plane(v) }
+}
+
 impl From<gdcore::StringName> for Variant {
     fn from(v: gdcore::StringName) -> Self { Self::StringName(v) }
 }
