@@ -5,6 +5,7 @@
 
 #![warn(clippy::all)]
 
+pub mod backend;
 pub mod display;
 pub mod export;
 pub mod input;
@@ -17,6 +18,7 @@ pub mod window;
 pub mod winit_backend;
 
 // Re-export key types at the crate root.
+pub use backend::{HeadlessPlatform, PlatformBackend};
 pub use display::{DisplayServer, VsyncMode};
 pub use export::{BuildProfile, ExportConfig, ExportTemplate, PackageResult};
 pub use input::{ActionBinding, InputEvent, InputMap, InputSnapshot, InputState, Key, MouseButton};

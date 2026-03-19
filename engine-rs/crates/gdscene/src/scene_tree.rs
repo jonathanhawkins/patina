@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use gdcore::error::{EngineError, EngineResult};
 use gdobject::notification::{
-    NOTIFICATION_MOVED_IN_PARENT, NOTIFICATION_PARENTED, NOTIFICATION_UNPARENTED,
+    NOTIFICATION_CHILD_ORDER_CHANGED, NOTIFICATION_MOVED_IN_PARENT, NOTIFICATION_PARENTED,
+    NOTIFICATION_UNPARENTED,
 };
 use gdobject::signal::SignalStore;
 use gdscript_interop::bindings::ScriptInstance;
@@ -180,6 +181,16 @@ impl SceneTree {
             child.receive_notification(NOTIFICATION_PARENTED);
         }
 
+        // NOTIFICATION_CHILD_ORDER_CHANGED fires on the parent when a child is added.
+        self.trace_record(
+            parent_id,
+            TraceEventType::Notification,
+            "CHILD_ORDER_CHANGED",
+        );
+        if let Some(parent) = self.nodes.get_mut(&parent_id) {
+            parent.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
+        }
+
         let should_enter_tree = self
             .nodes
             .get(&parent_id)
@@ -285,10 +296,123 @@ impl SceneTree {
         self.trace_record(node_id, TraceEventType::Notification, "PARENTED");
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.receive_notification(NOTIFICATION_PARENTED);
+        }
+
+        // MOVED_IN_PARENT fires after PARENTED during reparent.
+        self.trace_record(node_id, TraceEventType::Notification, "MOVED_IN_PARENT");
+        if let Some(node) = self.nodes.get_mut(&node_id) {
             node.receive_notification(NOTIFICATION_MOVED_IN_PARENT);
         }
 
+        // CHILD_ORDER_CHANGED fires on the new parent.
+        self.trace_record(
+            new_parent_id,
+            TraceEventType::Notification,
+            "CHILD_ORDER_CHANGED",
+        );
+        if let Some(parent) = self.nodes.get_mut(&new_parent_id) {
+            parent.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
+        }
+
         Ok(())
+    }
+
+    // -- child ordering operations -------------------------------------------
+
+    /// Moves a child to a new position within its parent's child list.
+    ///
+    /// Matches Godot's `Node.move_child(child, to_index)`. Dispatches:
+    /// - `NOTIFICATION_MOVED_IN_PARENT` to the moved child
+    /// - `NOTIFICATION_CHILD_ORDER_CHANGED` to the parent
+    pub fn move_child(
+        &mut self,
+        parent_id: NodeId,
+        child_id: NodeId,
+        to_index: usize,
+    ) -> EngineResult<()> {
+        // Validate parent exists and child is actually a child of parent.
+        let parent = self
+            .nodes
+            .get(&parent_id)
+            .ok_or_else(|| EngineError::NotFound(format!("parent node {parent_id} not found")))?;
+        let children = parent.children().to_vec();
+        let from_index = children
+            .iter()
+            .position(|&c| c == child_id)
+            .ok_or_else(|| {
+                EngineError::InvalidOperation(format!(
+                    "node {child_id} is not a child of {parent_id}"
+                ))
+            })?;
+
+        if from_index == to_index {
+            return Ok(());
+        }
+
+        let clamped = to_index.min(children.len() - 1);
+
+        // Perform the move in the parent's child list.
+        if let Some(parent) = self.nodes.get_mut(&parent_id) {
+            let list = parent.children_mut();
+            let id = list.remove(from_index);
+            list.insert(clamped, id);
+        }
+
+        // Dispatch MOVED_IN_PARENT to the child.
+        self.trace_record(child_id, TraceEventType::Notification, "MOVED_IN_PARENT");
+        if let Some(node) = self.nodes.get_mut(&child_id) {
+            node.receive_notification(NOTIFICATION_MOVED_IN_PARENT);
+        }
+
+        // Dispatch CHILD_ORDER_CHANGED to the parent.
+        self.trace_record(
+            parent_id,
+            TraceEventType::Notification,
+            "CHILD_ORDER_CHANGED",
+        );
+        if let Some(parent) = self.nodes.get_mut(&parent_id) {
+            parent.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
+        }
+
+        Ok(())
+    }
+
+    /// Moves a node to be the last child of its parent (highest index).
+    ///
+    /// Matches Godot's `Node.raise()`. Equivalent to
+    /// `move_child(parent, child, last_index)`.
+    pub fn raise(&mut self, node_id: NodeId) -> EngineResult<()> {
+        let parent_id = self
+            .nodes
+            .get(&node_id)
+            .and_then(|n| n.parent())
+            .ok_or_else(|| {
+                EngineError::InvalidOperation(format!("node {node_id} has no parent"))
+            })?;
+        let child_count = self
+            .nodes
+            .get(&parent_id)
+            .map(|p| p.children().len())
+            .unwrap_or(0);
+        if child_count == 0 {
+            return Ok(());
+        }
+        self.move_child(parent_id, node_id, child_count - 1)
+    }
+
+    /// Moves a node to be the first child of its parent (index 0).
+    ///
+    /// Matches Godot's implicit "lower" pattern. Equivalent to
+    /// `move_child(parent, child, 0)`.
+    pub fn lower(&mut self, node_id: NodeId) -> EngineResult<()> {
+        let parent_id = self
+            .nodes
+            .get(&node_id)
+            .and_then(|n| n.parent())
+            .ok_or_else(|| {
+                EngineError::InvalidOperation(format!("node {node_id} has no parent"))
+            })?;
+        self.move_child(parent_id, node_id, 0)
     }
 
     // -- path operations ----------------------------------------------------
@@ -1245,8 +1369,10 @@ mod tests {
         tree.process_frame();
 
         let root_log = tree.get_node(root).unwrap().notification_log();
-        assert_eq!(root_log.len(), 1);
-        assert_eq!(root_log[0], gdobject::NOTIFICATION_PROCESS);
+        // CHILD_ORDER_CHANGED from add_child + PROCESS from process_frame
+        assert_eq!(root_log.len(), 2);
+        assert_eq!(root_log[0], gdobject::NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(root_log[1], gdobject::NOTIFICATION_PROCESS);
 
         let child_log = tree.get_node(child_id).unwrap().notification_log();
         // PARENTED from add_child + PROCESS from process_frame

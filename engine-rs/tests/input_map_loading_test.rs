@@ -486,3 +486,187 @@ fn aro_mouse_move_then_button_preserves_position() {
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
     assert!(ml.input_state().is_action_pressed("shoot"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// pat-vih: Edge cases — missing actions, overlapping bindings, empty map
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn vih_missing_action_returns_false() {
+    let map = load_fixture_input_map();
+
+    // Query a nonexistent action — should return None / false, not panic
+    assert!(map.get_bindings("nonexistent_action").is_none());
+    assert_eq!(map.get_deadzone("nonexistent_action"), 0.0);
+
+    let evt = InputEvent::Key {
+        key: Key::Space,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
+    assert!(!map.event_matches_action(&evt, "nonexistent_action"));
+}
+
+#[test]
+fn vih_missing_action_via_push_event_does_not_panic() {
+    let (mut ml, _) = build_scene_with_json_input_map();
+
+    // Query an action that doesn't exist in the loaded map
+    assert!(!ml.input_state().is_action_pressed("totally_bogus"));
+    assert!(!ml.input_state().is_action_just_pressed("totally_bogus"));
+
+    // Push an event and step — should not panic even though no action matches
+    ml.push_event(InputEvent::Key {
+        key: Key::Z,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    });
+    ml.step(DT);
+    assert!(!ml.input_state().is_action_pressed("totally_bogus"));
+}
+
+#[test]
+fn vih_overlapping_bindings_same_key_two_actions() {
+    // Two different actions bound to the same key — both should activate
+    let json = r#"{
+        "actions": {
+            "action_a": { "keys": ["Space"] },
+            "action_b": { "keys": ["Space", "Enter"] }
+        }
+    }"#;
+    let map = InputMap::load_from_json(json).unwrap();
+
+    let evt_space = InputEvent::Key {
+        key: Key::Space,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
+    assert!(map.event_matches_action(&evt_space, "action_a"));
+    assert!(map.event_matches_action(&evt_space, "action_b"));
+
+    // Enter only matches action_b
+    let evt_enter = InputEvent::Key {
+        key: Key::Enter,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
+    assert!(!map.event_matches_action(&evt_enter, "action_a"));
+    assert!(map.event_matches_action(&evt_enter, "action_b"));
+}
+
+#[test]
+fn vih_overlapping_bindings_resolve_via_input_state() {
+    // Verify overlapping bindings work through InputState (not just InputMap)
+    let json = r#"{
+        "actions": {
+            "fire": { "keys": ["Space"] },
+            "confirm": { "keys": ["Space"] }
+        }
+    }"#;
+    let map = InputMap::load_from_json(json).unwrap();
+
+    let mut state = gdplatform::input::InputState::new();
+    state.set_input_map(map);
+
+    state.process_event(InputEvent::Key {
+        key: Key::Space,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    });
+
+    assert!(state.is_action_pressed("fire"));
+    assert!(state.is_action_pressed("confirm"));
+}
+
+#[test]
+fn vih_empty_map_has_no_actions() {
+    let json = r#"{ "actions": {} }"#;
+    let map = InputMap::load_from_json(json).unwrap();
+
+    assert_eq!(map.actions().count(), 0);
+    assert!(map.get_bindings("anything").is_none());
+
+    let evt = InputEvent::Key {
+        key: Key::A,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
+    assert!(!map.event_matches_action(&evt, "anything"));
+}
+
+#[test]
+fn vih_empty_map_does_not_break_main_loop() {
+    let json = r#"{ "actions": {} }"#;
+    let empty_map = InputMap::load_from_json(json).unwrap();
+
+    let packed = gdscene::packed_scene::PackedScene::from_tscn(SCENE_SOURCE).expect("parse scene");
+    let mut tree = gdscene::SceneTree::new();
+    let root_id = tree.root_id();
+    gdscene::packed_scene::add_packed_scene_to_tree(&mut tree, root_id, &packed).expect("instance");
+
+    let all = tree.all_nodes_in_tree_order();
+    for &nid in &all {
+        tree.process_script_enter_tree(nid);
+    }
+
+    let mut ml = gdscene::main_loop::MainLoop::new(tree);
+    ml.set_input_map(empty_map);
+
+    // Push events and step — nothing should panic
+    ml.push_event(InputEvent::Key {
+        key: Key::Space,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    });
+    ml.step(DT);
+    assert!(!ml.input_state().is_action_pressed("jump"));
+}
+
+#[test]
+fn vih_invalid_json_returns_errors() {
+    assert!(InputMap::load_from_json("not json at all").is_err());
+    assert!(InputMap::load_from_json("{}").is_err());
+    assert!(InputMap::load_from_json(r#"{"actions": "string_not_object"}"#).is_err());
+}
+
+#[test]
+fn vih_load_from_nonexistent_file_returns_error() {
+    let result =
+        InputMap::load_from_json_file(std::path::Path::new("/tmp/does_not_exist_12345.json"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vih_action_with_no_bindings() {
+    // An action defined with no keys and no mouse_buttons should exist but have empty bindings
+    let json = r#"{ "actions": { "empty_action": {} } }"#;
+    let map = InputMap::load_from_json(json).unwrap();
+
+    assert_eq!(map.actions().count(), 1);
+    let bindings = map.get_bindings("empty_action").unwrap();
+    assert_eq!(bindings.len(), 0);
+
+    // No event should match this action
+    let evt = InputEvent::Key {
+        key: Key::A,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
+    assert!(!map.event_matches_action(&evt, "empty_action"));
+}

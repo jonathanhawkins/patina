@@ -1,7 +1,7 @@
-// TODO(pat-oa3): Normalize display and window state flow — DisplayServer should
-// be the single authority for window state. Examples/tests should not create
-// windows directly. Resize, vsync, and focus state should flow through
-// DisplayServer events. See PLATFORM_ROADMAP.md.
+// pat-oa3: Window state now flows through PlatformBackend. WinitPlatform
+// implements PlatformBackend and reports window size, events, and quit state.
+// DisplayServer remains for multi-window headless management. Resize/focus
+// events flow through PlatformBackend::poll_events(). See PLATFORM_ROADMAP.md.
 
 //! Display server for multi-window management and input routing.
 //!

@@ -170,6 +170,8 @@ fn scene_goldens_are_fresh() {
         ("ui_menu.json", "scenes/ui_menu.tscn"),
         ("physics_playground.json", "scenes/physics_playground.tscn"),
         ("signals_complex.json", "scenes/signals_complex.tscn"),
+        // character_body_test, space_shooter, test_scripts goldens are oracle-generated
+        // (different property set) — validated by oracle_parity_test instead.
     ];
 
     fn dump_node(tree: &SceneTree, node_id: gdscene::node::NodeId) -> Value {
@@ -260,6 +262,47 @@ fn scene_goldens_are_fresh() {
         "Found {} stale scene golden(s) — regenerate with the golden test suite:\n  - {}",
         stale.len(),
         stale.join("\n  - ")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Every fixture scene has a corresponding golden file
+// ---------------------------------------------------------------------------
+//
+// Ensures that every .tscn file in fixtures/scenes/ has a matching .json golden
+// in fixtures/golden/scenes/. A missing golden means test coverage has a gap.
+
+#[test]
+fn fixture_scenes_have_goldens() {
+    let root = repo_root();
+    let scenes_dir = root.join("fixtures").join("scenes");
+    let golden_scenes_dir = golden_dir().join("scenes");
+
+    if !scenes_dir.is_dir() {
+        panic!("fixtures/scenes/ directory does not exist");
+    }
+
+    let mut missing = Vec::new();
+
+    for entry in std::fs::read_dir(&scenes_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("tscn") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let golden_path = golden_scenes_dir.join(format!("{stem}.json"));
+        if !golden_path.exists() {
+            missing.push(stem.to_string());
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "Found {} fixture scene(s) with no golden file in fixtures/golden/scenes/:\n  - {}\n\
+         Regenerate goldens with: cargo test --workspace -- golden",
+        missing.len(),
+        missing.join("\n  - ")
     );
 }
 

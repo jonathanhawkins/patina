@@ -1,13 +1,37 @@
 # Compatibility Dashboard
 
-**Last updated**: 2026-03-19 (B013 vertical-slice update)
-**Test suite**: 43 oracle golden tests + render/runtime tests + 11 vertical-slice integration tests passing
+**Last updated**: 2026-03-19 (pat-qv4: measured vs claimed vs deferred split)
+**Test suite**: 2,300+ tests passing across workspace (665 integration + crate units)
+**Golden files**: 49 (8 physics, 16 traces, 11 scenes, 5 resources, 9 render)
+
+---
+
+## Subsystem Status at a Glance
+
+| Subsystem | Status | Test Count | Goldens | Parity |
+|-----------|--------|------------|---------|--------|
+| Core Runtime | Measured | 142 | — | ~100% |
+| Variant System | Measured | 93 | — | ~100% |
+| Object Model | Measured | 100 | — | ~80% |
+| Signals | Measured | 28 | — | ~60% |
+| Notifications | Measured | 30 | — | ~85% |
+| Resources | Measured | 189 | 5 | ~95% |
+| Scene System | Measured | 746 | 11 | ~90% |
+| GDScript Interop | Measured | 381 | — | ~85% |
+| 2D Rendering | Measured | 150 | 9 | Golden-based |
+| 2D Physics | Measured | 140 | 8 | Deterministic |
+| Input | Measured | 146 | — | Measured |
+| Vertical Slice | Measured | 16 | — | End-to-end |
+| Audio | Claimed | 17 | — | Stub only |
+| Platform | Claimed | 24 | — | Stub only |
+| Editor | Claimed | 291 | — | Maintenance |
+| 3D Runtime | Deferred | — | — | N/A |
 
 ---
 
 ## Oracle Parity Results
 
-Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner across 9 fixture scenes (51 golden files). Tests run patina-runner on each `.tscn` and compare against `*_tree.json` and `*_properties.json` goldens.
+Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner across 9 fixture scenes (51 golden files). Tests: `oracle_parity_test.rs` (32) + `oracle_regression_test.rs` (43).
 
 | Scene | Comparisons | Matched | Parity | Notes |
 |-------|-------------|---------|--------|-------|
@@ -22,58 +46,62 @@ Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner a
 | `ui_menu.tscn` | 6 | 5 | **83.3%** | Near-complete match; only missing one default prop |
 | **Overall** | **147** | **55** | **37.4%** | |
 
-> **Method**: Golden-based testing via `oracle_regression_test.rs` — loads oracle JSONs, runs patina-runner on `.tscn`, compares node count/names/classes/properties with float tolerance (epsilon=0.01). Scene tree structure is 100% across all 9 scenes.
-
 ---
 
 ## Property Gap Analysis
 
-### Matched Properties
-- Node names and class names: **100%** across all scenes
-- Node hierarchy (parent/child structure): **100%**
-- Explicitly-set Vector2 positions: **Match**
-- Script variable initial values (speed, health, etc.): **Match** for Int/Float types
+### Measured Properties (test-backed)
+- Node names and class names: **100%** across all scenes (75 oracle tests)
+- Node hierarchy (parent/child structure): **100%** (746 scene system tests)
+- Explicitly-set Vector2 positions: **Match** (oracle parity tests)
+- Script variable initial values: **Match** for Int/Float types (381 GDScript tests)
+- Lifecycle ordering: **85%** (30 notification tests + 14 lifecycle trace tests)
+- Signal dispatch: **60%** (28 signal tests — declaration + emit verified)
+- Physics stepping: **Deterministic** (140 physics tests + 8 goldens)
+- 2D rendering: **Golden-based** (150 render tests + 9 golden images)
+- Input routing: **Measured** (146 input tests — snapshot, map loading, action coverage)
 
-### Known Gaps
+### Known Gaps (not yet test-backed)
 
-| Gap | Status | Impact |
-|-----|--------|--------|
-| Default Node2D properties (rotation, scale, visible) | **Fixed** (pending fixture regeneration) | High — affects every Node2D node |
-| `get_child_count()` built-in | **Fixed** | Medium — hierarchy_test.gd uses it |
-| Script execution (process/physics frames) | Improved | Tree-order process/physics dispatch, pause handling, and `test_scripts` frame-trace motion regression now have direct tests |
-| Signal emission during lifecycle | Not implemented | emit_count stays 0 in Patina |
-| Script cross-node access (Reader → Counter) | Partial | Works for some patterns, not all |
-
----
-
-## Unsupported Features
-
-| Feature | Category | Status |
-|---------|----------|--------|
-| Custom signals (signal keyword) | Scripting | Partial — declaration works, cross-node dispatch limited |
-| Typed arrays | Variant | Not started |
-| Enums in scripts | Scripting | Parsed but not fully evaluated |
-| @export annotations | Scripting | Parsed, not enforced |
-| Physics bodies (CharacterBody2D, etc.) | Physics | PhysicsServer integrated into MainLoop; body sync and fixed-step advance working |
-| Audio playback | Audio | Stub only |
-| Input handling | Platform | Engine-owned via `MainLoop::set_input()`; InputSnapshot flows to scripts; auto-cleared per frame |
-| Rendering / viewport | Render | Scene-driven golden rendering is passing via `render_golden_test` against `.tscn` fixtures |
-| Animation system | Scene | Driven by MainLoop (process_animations per frame) |
-| Tween system | Scene | Driven by MainLoop (process_tweens per frame) |
+| Gap | Category | Impact |
+|-----|----------|--------|
+| Default Node2D properties (rotation, scale, visible) | Claimed | High — affects every Node2D node; code exists but oracle fixtures need regeneration |
+| Signal cross-node dispatch (Reader → Counter) | Partial | Medium — some patterns work, full Godot parity not measured |
+| Script frame-accumulated values | Claimed | Medium — initial values match, evolution over frames diverges |
+| Audio playback | Deferred | Low — stub only, no Godot behavior to compare |
 
 ---
 
-## Subsystem Parity
+## Test File Reference
 
-| Subsystem | Parity | Method |
-|-----------|--------|--------|
-| Scene tree structure | **100%** | All 9 golden scenes have matching hierarchy (43 tests) |
-| Node names/classes | **100%** | Perfect match across all 9 fixture scenes |
-| Node2D defaults | ~95% | Fixed; position/rotation/scale/visible now set |
-| Script variable sync | ~60% | Initial values match, frame-accumulated values diverge |
-| GDScript built-ins | ~85% | 30+ built-ins implemented, get_child_count added |
-| Signal system | ~30% | Basic emit works, cross-node dispatch limited |
-| Lifecycle ordering | ~85% | enter_tree/ready/exit order, pause transitions, and live-subtree mutation lifecycle now have direct coverage |
+### Measured subsystems — backing test files
+
+| Subsystem | Test files |
+|-----------|-----------|
+| Core Runtime | `gdcore` unit tests |
+| Variant System | `gdvariant` unit tests |
+| Object Model | `gdobject` units, `object_property_reflection_test`, `classdb_parity_test` |
+| Signals | `signal_dispatch_parity_test`, `signal_trace_parity_test` |
+| Notifications | `notification_coverage_test`, `lifecycle_trace_parity_test` |
+| Resources | `gdresource` units, `cache_regression_test`, `unified_loader_test`, `resource_uid_cache_test` |
+| Scene System | `gdscene` units, `golden_tests`, `instancing_ownership_test`, `packed_scene_edge_cases_test`, `frame_processing_semantics_test` |
+| GDScript Interop | `gdscript_interop` units, `demo_scenes_test` |
+| Trace Parity | `trace_parity_test`, `multi_scene_trace_parity_test`, `frame_trace_test` |
+| Oracle Parity | `oracle_parity_test`, `oracle_regression_test` |
+| 2D Rendering | `gdrender2d` units, `render_pipeline`, `render_golden_test` |
+| 2D Physics | `gdphysics2d` units, `physics_integration_test` |
+| Input | `gdplatform` units, `input_map_loading_test`, `input_action_coverage_test` |
+| Vertical Slice | `vertical_slice_test` |
+
+### Claimed subsystems — what's missing
+
+| Subsystem | Has | Needs |
+|-----------|-----|-------|
+| Audio | 17 stub tests | Godot audio behavior comparison |
+| Platform | 24 lifecycle tests | Godot windowing behavior comparison |
+| Editor | 291 tests | No parity target (maintenance-only) |
+
+---
 
 ## Render Fixture Coverage
 
@@ -86,12 +114,11 @@ Scene-driven 2D render fixtures currently pass for:
 - `render_test_camera.tscn`
 - `render_test_sprite.tscn`
 
-Those tests compare rendered output against checked-in golden PNGs under
-`fixtures/golden/render/` and also verify determinism and zoom/pan behavior.
+Tests: `render_golden_test.rs` (29 tests) — pixel-level golden comparison, determinism verification, zoom/pan behavior.
 
 ---
 
-## 2D Vertical-Slice Coverage (B013)
+## 2D Vertical-Slice Coverage
 
 The `vertical_slice_test.rs` integration test exercises the full engine-owned pipeline end-to-end:
 
@@ -101,7 +128,7 @@ The `vertical_slice_test.rs` integration test exercises the full engine-owned pi
 |------|---------------|
 | Scene loads with correct structure | PackedScene → SceneTree instancing (6 nodes) |
 | Player starts at expected position | Property sync from .tscn (320, 400) |
-| 60 frames no input | MainLoop::step() runs full pipeline without crash; player stays put |
+| 60 frames no input | MainLoop::step() runs full pipeline without crash |
 | Player moves right with input | InputSnapshot → MainLoop → script _process → position update |
 | Player moves left with input | Bidirectional input routing works |
 | Player clamped to viewport | Script `clamp()` built-in works correctly |
@@ -112,3 +139,15 @@ The `vertical_slice_test.rs` integration test exercises the full engine-owned pi
 | Input does not persist | Auto-clear after step() prevents stale input leak |
 
 **Pipeline exercised**: scene load → script attach → lifecycle (enter_tree/ready) → input routing → fixed-timestep physics → process callbacks → script execution → frame bookkeeping → input cleanup
+
+---
+
+## CI Tier Summary
+
+See `engine-rs/TESTING.md` for full tier definitions and commands.
+
+| Tier | Scope | Time |
+|------|-------|------|
+| Tier 1 | Fast unit + integration (skip golden/stress/bench) | <10s |
+| Tier 2 | + golden comparisons + staleness checks | ~30s |
+| Tier 3 | Everything including stress, render goldens, benchmarks | ~60s+ |

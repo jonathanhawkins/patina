@@ -205,18 +205,23 @@ impl MainLoop {
     }
 
     /// Sets the paused state and dispatches pause transition notifications.
+    ///
+    /// Matches Godot's behavior: when `SceneTree.paused` changes, all nodes
+    /// in tree order receive `NOTIFICATION_PAUSED` or `NOTIFICATION_UNPAUSED`.
     pub fn set_paused(&mut self, paused: bool) {
         if self.paused == paused {
             return;
         }
         self.paused = paused;
-        let notification = if paused {
-            NOTIFICATION_PAUSED
+        let (notification, detail) = if paused {
+            (NOTIFICATION_PAUSED, "PAUSED")
         } else {
-            NOTIFICATION_UNPAUSED
+            (NOTIFICATION_UNPAUSED, "UNPAUSED")
         };
         let ids = self.tree.all_nodes_in_tree_order();
         for id in ids {
+            self.tree
+                .trace_record(id, crate::trace::TraceEventType::Notification, detail);
             if let Some(node) = self.tree.get_node_mut(id) {
                 node.receive_notification(notification);
             }
@@ -427,6 +432,120 @@ impl MainLoop {
     pub fn run_frames(&mut self, n: u64, delta: f64) {
         for _ in 0..n {
             self.step(delta);
+        }
+    }
+
+    /// Advances one frame and returns a [`FrameRecord`] capturing per-frame
+    /// trace events and end-of-frame node properties.
+    ///
+    /// This enables frame-by-frame property evolution validation. The event
+    /// trace is automatically enabled for the duration of the step and the
+    /// events for this frame are captured into the returned record.
+    pub fn step_traced(&mut self, delta_secs: f64) -> FrameRecord {
+        // Enable tracing for this frame.
+        let was_enabled = self.tree.event_trace().is_enabled();
+        self.tree.event_trace_mut().enable();
+        let events_before = self.tree.event_trace().events().len();
+
+        let output = self.step(delta_secs);
+
+        // Capture events that occurred during this frame.
+        let all_events = self.tree.event_trace().events();
+        let frame_events: Vec<TraceEvent> = all_events[events_before..].to_vec();
+
+        // Capture node property snapshots.
+        let node_snapshots = self.snapshot_nodes();
+
+        // Restore previous trace state.
+        if !was_enabled {
+            self.tree.event_trace_mut().disable();
+        }
+
+        FrameRecord {
+            frame_number: output.frame_count,
+            delta: output.delta,
+            physics_ticks: output.physics_steps,
+            cumulative_process_time: self.process_time,
+            cumulative_physics_time: self.physics_time,
+            paused: self.paused,
+            events: frame_events,
+            node_snapshots,
+        }
+    }
+
+    /// Runs `n` frames with the given `delta` and returns a [`FrameTrace`]
+    /// capturing per-frame evolution data.
+    ///
+    /// This is the primary entry point for validating frame-by-frame property
+    /// evolution against Godot contracts.
+    pub fn run_frames_traced(&mut self, n: u64, delta: f64) -> FrameTrace {
+        let mut trace = FrameTrace::default();
+        for _ in 0..n {
+            trace.frames.push(self.step_traced(delta));
+        }
+        trace
+    }
+
+    /// Captures a snapshot of all nodes' properties at the current moment.
+    fn snapshot_nodes(&self) -> Vec<NodeSnapshot> {
+        let ids = self.tree.all_nodes_in_tree_order();
+        let mut snapshots = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(node) = self.tree.get_node(id) {
+                let path = self.tree.node_path(id).unwrap_or_else(|| format!("<{id}>"));
+                let mut properties = HashMap::new();
+                for (k, v) in node.properties() {
+                    properties.insert(k.clone(), v.clone());
+                }
+                snapshots.push(NodeSnapshot {
+                    path,
+                    class_name: node.class_name().to_string(),
+                    properties,
+                });
+            }
+        }
+        snapshots
+    }
+
+    /// Runs one frame using a [`PlatformBackend`] for event sourcing.
+    ///
+    /// 1. Drains window events from the backend and pushes input events
+    ///    into the engine-owned [`InputState`].
+    /// 2. Calls [`step`](Self::step) with the given `delta_secs`.
+    /// 3. Signals `end_frame()` on the backend.
+    ///
+    /// Returns the [`FrameOutput`] from the step.
+    ///
+    /// Callback-driven backends (e.g. winit) should call this inside their
+    /// per-frame callback. Pull-based backends can use [`run`](Self::run).
+    pub fn run_frame(
+        &mut self,
+        backend: &mut dyn gdplatform::PlatformBackend,
+        delta_secs: f64,
+    ) -> FrameOutput {
+        // Drain platform events into engine-owned input.
+        for event in backend.poll_events() {
+            if let Some(input_event) = event.to_input_event() {
+                self.push_event(input_event);
+            }
+        }
+
+        let output = self.step(delta_secs);
+        backend.end_frame();
+        output
+    }
+
+    /// Runs a pull-based frame loop until the backend signals quit.
+    ///
+    /// Each iteration calls [`run_frame`](Self::run_frame) with the given
+    /// fixed `delta_secs`. This is the single entry point for headless
+    /// runners and batch simulations.
+    ///
+    /// For callback-driven platforms (e.g. winit), use `run_frame` directly
+    /// inside the platform's event callback instead.
+    pub fn run(&mut self, backend: &mut dyn gdplatform::PlatformBackend, delta_secs: f64) {
+        while !backend.should_quit() {
+            self.run_frame(backend, delta_secs);
         }
     }
 
@@ -847,8 +966,9 @@ mod tests {
         let parent_log = ml.tree().get_node(parent_id).unwrap().notification_log();
         let child_log = ml.tree().get_node(child_id).unwrap().notification_log();
 
-        // Both must have PARENTED + the full set of frame notifications.
-        assert_eq!(parent_log.len(), 5);
+        // Parent: PARENTED + CHILD_ORDER_CHANGED + 4 frame notifications = 6
+        // Child: PARENTED + 4 frame notifications = 5
+        assert_eq!(parent_log.len(), 6);
         assert_eq!(child_log.len(), 5);
 
         // Verify tree order via all_nodes_in_tree_order.
@@ -1118,11 +1238,14 @@ mod tests {
         assert!(a_pos < b_pos, "A before B");
         assert!(b_pos < c_pos, "B before C");
 
-        // Each node gets PARENTED + the full notification set.
-        for &id in &[a_id, b_id, c_id] {
-            let log = ml.tree().get_node(id).unwrap().notification_log();
-            assert_eq!(log.len(), 5);
-        }
+        // Each node gets PARENTED + possibly CHILD_ORDER_CHANGED + 4 frame notifications.
+        // A and B each have one child added, so they get CHILD_ORDER_CHANGED too.
+        let a_log = ml.tree().get_node(a_id).unwrap().notification_log();
+        assert_eq!(a_log.len(), 6); // PARENTED + CHILD_ORDER_CHANGED + 4 frame
+        let b_log = ml.tree().get_node(b_id).unwrap().notification_log();
+        assert_eq!(b_log.len(), 6); // PARENTED + CHILD_ORDER_CHANGED + 4 frame
+        let c_log = ml.tree().get_node(c_id).unwrap().notification_log();
+        assert_eq!(c_log.len(), 5); // PARENTED + 4 frame (no children)
     }
 
     #[test]
@@ -1460,5 +1583,75 @@ mod tests {
             .input_state()
             .is_key_just_pressed(gdplatform::input::Key::A));
         assert!(ml.input_state().is_key_pressed(gdplatform::input::Key::A));
+    }
+
+    // --- PlatformBackend integration ---
+
+    #[test]
+    fn run_frame_drains_backend_events_into_input() {
+        let (mut ml, _) = make_loop_with_child();
+
+        use gdplatform::input::{ActionBinding, Key};
+        let mut input_map = gdplatform::input::InputMap::new();
+        input_map.add_action("jump", 0.0);
+        input_map.action_add_event("jump", ActionBinding::KeyBinding(Key::Space));
+        ml.set_input_map(input_map);
+
+        let mut backend = gdplatform::HeadlessPlatform::new(640, 480);
+        backend.push_event(gdplatform::WindowEvent::KeyInput {
+            key: Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        });
+
+        let output = ml.run_frame(&mut backend, 1.0 / 60.0);
+        assert_eq!(output.frame_count, 1);
+        assert_eq!(backend.frames_run(), 1);
+        // Input was flushed by step(), so just_pressed is cleared.
+        assert!(!ml.input_state().is_key_just_pressed(Key::Space));
+    }
+
+    #[test]
+    fn run_respects_max_frames() {
+        use gdplatform::PlatformBackend;
+        let (mut ml, _) = make_loop_with_child();
+        let mut backend = gdplatform::HeadlessPlatform::new(640, 480).with_max_frames(10);
+
+        ml.run(&mut backend, 1.0 / 60.0);
+
+        assert_eq!(ml.frame_count(), 10);
+        assert_eq!(backend.frames_run(), 10);
+        assert!(backend.should_quit());
+    }
+
+    #[test]
+    fn run_stops_on_quit_request() {
+        let (mut ml, _) = make_loop_with_child();
+        let mut backend = gdplatform::HeadlessPlatform::new(640, 480);
+        backend.request_quit();
+
+        ml.run(&mut backend, 1.0 / 60.0);
+
+        assert_eq!(ml.frame_count(), 0);
+    }
+
+    #[test]
+    fn run_frame_ignores_non_input_events() {
+        let (mut ml, _) = make_loop_with_child();
+        let mut backend = gdplatform::HeadlessPlatform::new(640, 480);
+        backend.push_event(gdplatform::WindowEvent::FocusGained);
+        backend.push_event(gdplatform::WindowEvent::Resized {
+            width: 800,
+            height: 600,
+        });
+
+        let output = ml.run_frame(&mut backend, 1.0 / 60.0);
+        assert_eq!(output.frame_count, 1);
+        // No input events were pushed, so no keys are pressed.
+        assert!(!ml
+            .input_state()
+            .is_key_pressed(gdplatform::input::Key::Space));
     }
 }

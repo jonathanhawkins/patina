@@ -7,7 +7,7 @@ Tests are organized into three tiers by execution time and resource requirements
 Runs all workspace tests excluding golden comparisons and stress tests.
 
 ```bash
-cargo test --workspace -- --skip golden --skip stress --skip render_golden --skip staleness
+cargo test --workspace -- --skip golden --skip stress --skip render_golden --skip staleness --skip bench_
 ```
 
 Use for: local development, pre-commit checks, rapid iteration.
@@ -17,10 +17,10 @@ scripting, lifecycle notifications, resource loading, cache behavior.
 
 ## Tier 2 — Golden comparison tests (~30s)
 
-Runs all workspace tests except stress tests and render goldens.
+Runs all workspace tests except stress tests, render goldens, and benchmarks.
 
 ```bash
-cargo test --workspace -- --skip stress --skip render_golden
+cargo test --workspace -- --skip stress --skip render_golden --skip bench_
 ```
 
 Use for: CI pull-request checks, verifying golden parity before merge.
@@ -39,7 +39,27 @@ cargo test --workspace
 Use for: release validation, nightly CI, full regression sweeps.
 
 Adds to Tier 2: render golden image comparison, stress/concurrency tests,
-benchmark fixtures.
+runtime benchmarks.
+
+**CI coverage**: The `rust` job in `.github/workflows/ci.yml` runs
+`cargo test --workspace` on every push/PR to `main`, which includes all
+render golden tests (`tests/render_golden_test.rs`). These tests verify
+texture drawing, camera/viewport parity, draw ordering, visibility, layer
+semantics, determinism, and golden image comparison. No additional CI
+configuration is needed — render goldens are covered by the existing workflow.
+
+## Runtime benchmarks
+
+The `bench_runtime_baselines` test (Tier 3) measures wall-clock time for:
+- Stepping 1000 frames on each fixture scene
+- Loading + instancing each `.tscn` file (100 iterations)
+- Stepping 100 physics frames per scene
+- Parsing each `.gd` script file (100 iterations)
+
+Benchmarks always pass — run with `--nocapture` to see timing output:
+```bash
+cargo test --test bench_runtime_baselines -- --nocapture
+```
 
 ## Golden staleness checks
 
@@ -54,8 +74,6 @@ If a golden is stale, regenerate it by running the corresponding test with
 
 ## Naming conventions
 
-- Tests containing `golden` in their name are Tier 2.
-- Tests containing `stress` in their name are Tier 3.
-- Tests containing `render_golden` in their name are Tier 3.
-- Tests containing `staleness` in their name are Tier 2.
+- Tests containing `golden` or `staleness` in their name are Tier 2.
+- Tests containing `stress`, `render_golden`, or `bench_` in their name are Tier 3.
 - All other tests are Tier 1.
