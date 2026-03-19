@@ -69,3 +69,7 @@ path = "examples/hello_gdscript.rs"
 [[example]]
 name = "space_shooter"
 path = "examples/space_shooter.rs"
+
+[[example]]
+name = "space_shooter_live"
+path = "examples/space_shooter_live.rs"
