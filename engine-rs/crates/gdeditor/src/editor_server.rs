@@ -3875,9 +3875,7 @@ fn api_tilemap_data(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut T
     let nr: u64 = query
         .split('&')
         .find_map(|p| {
-            let mut kv = p.splitn(2, '=');
-            let k = kv.next()?;
-            let v = kv.next()?;
+            let (k, v) = p.split_once('=')?;
             if k == "node_id" {
                 v.parse().ok()
             } else {
