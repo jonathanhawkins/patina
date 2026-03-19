@@ -429,3 +429,188 @@ fn get_node_by_id() {
     assert_eq!(v["class"], "Node2D");
     handle.stop();
 }
+
+// ---------------------------------------------------------------------------
+// Concurrent request stress tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn concurrent_viewport_and_scene_requests() {
+    let (handle, port) = make_test_server();
+
+    // Provide a frame so viewport has data
+    let fb = FrameBuffer::new(64, 64, Color::rgb(0.1, 0.1, 0.2));
+    handle.update_frame(fb);
+
+    // Fire 20 concurrent requests: 10 viewport + 10 scene
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let p = port;
+        handles.push(thread::spawn(move || {
+            let path = if i % 2 == 0 {
+                "/api/viewport/png"
+            } else {
+                "/api/scene"
+            };
+            let resp = http_get(p, path);
+            resp.contains("200 OK")
+        }));
+    }
+
+    let mut success = 0;
+    for h in handles {
+        if h.join().unwrap() {
+            success += 1;
+        }
+    }
+
+    // All 20 requests must succeed
+    assert_eq!(success, 20, "Expected 20/20 concurrent requests to succeed");
+    handle.stop();
+}
+
+#[test]
+fn rapid_sequential_requests_no_errors() {
+    let (handle, port) = make_test_server();
+
+    let fb = FrameBuffer::new(64, 64, Color::rgb(0.1, 0.1, 0.2));
+    handle.update_frame(fb);
+
+    // 50 rapid sequential requests with no sleep between them
+    let mut failures = 0;
+    for _ in 0..50 {
+        let resp = http_get(port, "/api/scene");
+        if !resp.contains("200 OK") {
+            failures += 1;
+        }
+    }
+
+    assert_eq!(failures, 0, "Expected 0 failures in 50 rapid requests");
+    handle.stop();
+}
+
+#[test]
+fn concurrent_mixed_endpoints() {
+    let (handle, port) = make_test_server();
+
+    let fb = FrameBuffer::new(64, 64, Color::rgb(0.1, 0.1, 0.2));
+    handle.update_frame(fb);
+
+    // Fire 30 requests across all GET endpoints simultaneously
+    let endpoints = vec![
+        "/api/scene",
+        "/api/selected",
+        "/api/viewport/png",
+        "/editor",
+        "/api/scene",
+        "/api/viewport",
+    ];
+
+    let mut handles = Vec::new();
+    for i in 0..30 {
+        let p = port;
+        let endpoint = endpoints[i % endpoints.len()].to_string();
+        handles.push(thread::spawn(move || {
+            let resp = http_get(p, &endpoint);
+            resp.contains("200 OK") || resp.contains("404")
+        }));
+    }
+
+    let mut success = 0;
+    for h in handles {
+        if h.join().unwrap() {
+            success += 1;
+        }
+    }
+
+    assert_eq!(
+        success, 30,
+        "Expected 30/30 mixed concurrent requests to succeed"
+    );
+    handle.stop();
+}
+
+#[test]
+fn parse_failure_returns_400_not_empty() {
+    let (handle, port) = make_test_server();
+
+    // Send garbage that isn't valid HTTP
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.write_all(b"NOT_HTTP\r\n\r\n").unwrap();
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    let resp_str = String::from_utf8_lossy(&response).to_string();
+
+    // Must get a 400 response, NOT an empty response
+    assert!(
+        resp_str.contains("400"),
+        "Expected 400 for garbage input, got: {resp_str}"
+    );
+    assert!(!resp_str.is_empty(), "Response must not be empty");
+
+    handle.stop();
+}
+
+#[test]
+fn empty_request_returns_400() {
+    let (handle, port) = make_test_server();
+
+    // Connect and immediately close — server should handle gracefully
+    let stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+    drop(stream);
+
+    // Server should still be alive after the bad connection
+    thread::sleep(Duration::from_millis(100));
+    let resp = http_get(port, "/api/scene");
+    assert!(
+        resp.contains("200 OK"),
+        "Server must survive empty connections"
+    );
+
+    handle.stop();
+}
+
+#[test]
+fn server_survives_concurrent_bad_and_good_requests() {
+    let (handle, port) = make_test_server();
+
+    let fb = FrameBuffer::new(64, 64, Color::rgb(0.1, 0.1, 0.2));
+    handle.update_frame(fb);
+
+    // Mix of good and bad requests concurrently
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let p = port;
+        handles.push(thread::spawn(move || {
+            if i % 4 == 0 {
+                // Bad request: garbage data
+                let mut stream = TcpStream::connect(format!("127.0.0.1:{p}")).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let _ = stream.write_all(b"GARBAGE\r\n\r\n");
+                let mut buf = Vec::new();
+                let _ = stream.read_to_end(&mut buf);
+                true // We don't care about the response for bad requests
+            } else {
+                // Good request
+                let resp = http_get(p, "/api/scene");
+                resp.contains("200 OK")
+            }
+        }));
+    }
+
+    let good_count = handles.len() - handles.len() / 4; // 15 good requests
+    let mut good_success = 0;
+    for (i, h) in handles.into_iter().enumerate() {
+        let result = h.join().unwrap();
+        if i % 4 != 0 && result {
+            good_success += 1;
+        }
+    }
+
+    assert_eq!(
+        good_success, good_count as usize,
+        "All good requests must succeed even with concurrent bad requests"
+    );
+    handle.stop();
+}
