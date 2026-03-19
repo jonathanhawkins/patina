@@ -1212,6 +1212,89 @@ fn godot_keycode_to_key(code: i64) -> Option<Key> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// InputMap: JSON loader
+// ---------------------------------------------------------------------------
+
+impl InputMap {
+    /// Loads an input map from a JSON string.
+    ///
+    /// Expected format:
+    /// ```json
+    /// {
+    ///   "actions": {
+    ///     "move_left": {
+    ///       "deadzone": 0.5,
+    ///       "keys": ["A", "ArrowLeft"]
+    ///     },
+    ///     "jump": {
+    ///       "keys": ["Space"]
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// Key names use the same strings as [`Key::from_name`].
+    /// The `deadzone` field is optional (defaults to 0.0).
+    pub fn load_from_json(json: &str) -> Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
+
+        let actions = value
+            .get("actions")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| "missing \"actions\" object".to_string())?;
+
+        let mut map = InputMap::new();
+
+        for (action_name, action_def) in actions {
+            let deadzone = action_def
+                .get("deadzone")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+
+            map.add_action(action_name, deadzone);
+
+            if let Some(keys) = action_def.get("keys").and_then(|v| v.as_array()) {
+                for key_val in keys {
+                    if let Some(key_name) = key_val.as_str() {
+                        if let Some(key) = Key::from_name(key_name) {
+                            map.action_add_event(action_name, ActionBinding::KeyBinding(key));
+                        }
+                    }
+                }
+            }
+
+            if let Some(mouse) = action_def.get("mouse_buttons").and_then(|v| v.as_array()) {
+                for btn_val in mouse {
+                    if let Some(btn_name) = btn_val.as_str() {
+                        let btn = match btn_name {
+                            "Left" | "left" => Some(MouseButton::Left),
+                            "Right" | "right" => Some(MouseButton::Right),
+                            "Middle" | "middle" => Some(MouseButton::Middle),
+                            "WheelUp" | "wheel_up" => Some(MouseButton::WheelUp),
+                            "WheelDown" | "wheel_down" => Some(MouseButton::WheelDown),
+                            _ => None,
+                        };
+                        if let Some(b) = btn {
+                            map.action_add_event(action_name, ActionBinding::MouseBinding(b));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(map)
+    }
+
+    /// Loads an input map from a JSON file on disk.
+    pub fn load_from_json_file(path: &std::path::Path) -> Result<Self, String> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("failed to read {:?}: {e}", path))?;
+        Self::load_from_json(&content)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2377,5 +2460,196 @@ ui_accept={
         state.flush_frame();
         assert!(!state.is_mouse_button_just_pressed(MouseButton::Middle));
         assert!(state.is_mouse_button_pressed(MouseButton::Middle));
+    }
+
+    // -----------------------------------------------------------------------
+    // pat-vih: JSON input map loading
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_json_basic_actions() {
+        let json = r#"{
+            "actions": {
+                "jump": { "keys": ["Space"] },
+                "move_left": { "keys": ["A"] }
+            }
+        }"#;
+        let map = InputMap::load_from_json(json).unwrap();
+        assert!(map.get_bindings("jump").is_some());
+        assert!(map.get_bindings("move_left").is_some());
+        assert_eq!(map.get_bindings("jump").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn load_json_multiple_keys_per_action() {
+        let json = r#"{
+            "actions": {
+                "move_left": { "keys": ["A", "ArrowLeft"] }
+            }
+        }"#;
+        let map = InputMap::load_from_json(json).unwrap();
+        let bindings = map.get_bindings("move_left").unwrap();
+        assert_eq!(bindings.len(), 2);
+
+        let evt_a = InputEvent::Key {
+            key: Key::A,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        let evt_left = InputEvent::Key {
+            key: Key::Left,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        assert!(map.event_matches_action(&evt_a, "move_left"));
+        assert!(map.event_matches_action(&evt_left, "move_left"));
+    }
+
+    #[test]
+    fn load_json_deadzone() {
+        let json = r#"{
+            "actions": {
+                "dash": { "deadzone": 0.3, "keys": ["Shift"] }
+            }
+        }"#;
+        let map = InputMap::load_from_json(json).unwrap();
+        assert!((map.get_deadzone("dash") - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_json_deadzone_defaults_to_zero() {
+        let json = r#"{ "actions": { "jump": { "keys": ["Space"] } } }"#;
+        let map = InputMap::load_from_json(json).unwrap();
+        assert_eq!(map.get_deadzone("jump"), 0.0);
+    }
+
+    #[test]
+    fn load_json_mouse_button_binding() {
+        let json = r#"{
+            "actions": {
+                "shoot": { "keys": ["Enter"], "mouse_buttons": ["Left"] }
+            }
+        }"#;
+        let map = InputMap::load_from_json(json).unwrap();
+        let bindings = map.get_bindings("shoot").unwrap();
+        assert_eq!(bindings.len(), 2); // Enter + Left mouse
+
+        let evt = InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+            position: Vector2::ZERO,
+        };
+        assert!(map.event_matches_action(&evt, "shoot"));
+    }
+
+    #[test]
+    fn load_json_overrides_default_map() {
+        // Start with a default map that has "jump" → W
+        let mut default_map = InputMap::new();
+        default_map.add_action("jump", 0.0);
+        default_map.action_add_event("jump", ActionBinding::KeyBinding(Key::W));
+
+        // Load a JSON map with "jump" → Space
+        let json = r#"{ "actions": { "jump": { "keys": ["Space"] } } }"#;
+        let custom_map = InputMap::load_from_json(json).unwrap();
+
+        // Custom map should NOT match W, should match Space
+        let evt_w = InputEvent::Key {
+            key: Key::W,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        let evt_space = InputEvent::Key {
+            key: Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        assert!(!custom_map.event_matches_action(&evt_w, "jump"));
+        assert!(custom_map.event_matches_action(&evt_space, "jump"));
+
+        // Original default still works with W
+        assert!(default_map.event_matches_action(&evt_w, "jump"));
+    }
+
+    #[test]
+    fn load_json_integrates_with_input_state() {
+        let json = r#"{
+            "actions": {
+                "fire": { "keys": ["Enter"] },
+                "move_right": { "keys": ["D"] }
+            }
+        }"#;
+        let map = InputMap::load_from_json(json).unwrap();
+
+        let mut state = InputState::new();
+        state.set_input_map(map);
+
+        state.process_event(InputEvent::Key {
+            key: Key::D,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        });
+        assert!(state.is_action_pressed("move_right"));
+        assert!(!state.is_action_pressed("fire"));
+
+        state.process_event(InputEvent::Key {
+            key: Key::Enter,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        });
+        assert!(state.is_action_pressed("fire"));
+    }
+
+    #[test]
+    fn load_json_invalid_returns_error() {
+        assert!(InputMap::load_from_json("not json").is_err());
+        assert!(InputMap::load_from_json("{}").is_err()); // missing "actions"
+        assert!(InputMap::load_from_json(r#"{"actions": "bad"}"#).is_err());
+    }
+
+    #[test]
+    fn load_json_file_from_disk() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/input_map.json");
+        let map = InputMap::load_from_json_file(&path).unwrap();
+
+        // Verify actions from the fixture
+        assert!(map.get_bindings("move_left").is_some());
+        assert!(map.get_bindings("move_right").is_some());
+        assert!(map.get_bindings("jump").is_some());
+        assert!(map.get_bindings("shoot").is_some());
+        assert!(map.get_bindings("dash").is_some());
+        assert!(map.get_bindings("pause").is_some());
+
+        // move_left has 2 keys (A, ArrowLeft)
+        assert_eq!(map.get_bindings("move_left").unwrap().len(), 2);
+
+        // shoot has key + mouse = 2 bindings
+        assert_eq!(map.get_bindings("shoot").unwrap().len(), 2);
+
+        // dash has deadzone 0.2
+        assert!((map.get_deadzone("dash") - 0.2).abs() < 1e-6);
+
+        // Verify action resolution
+        let evt = InputEvent::Key {
+            key: Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        assert!(map.event_matches_action(&evt, "jump"));
     }
 }

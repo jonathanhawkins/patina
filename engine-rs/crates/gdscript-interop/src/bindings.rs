@@ -145,6 +145,11 @@ pub trait ScriptInstance {
     /// Returns the human-readable name of this script.
     fn get_script_name(&self) -> &str;
 
+    /// Returns `true` if the script defines a method with the given name.
+    fn has_method(&self, name: &str) -> bool {
+        self.list_methods().iter().any(|m| m.name == name)
+    }
+
     /// Inject scene-tree access so the script can call get_node / emit_signal.
     fn set_scene_access(&mut self, _access: Box<dyn SceneAccess>, _node_id: u64) {}
 
@@ -210,6 +215,16 @@ pub trait SceneAccess {
 
     /// Returns `true` if the raw key `key` is currently held.
     fn is_input_key_pressed(&self, _key: &str) -> bool {
+        false
+    }
+
+    /// Returns the global mouse position as (x, y).
+    fn get_global_mouse_position(&self) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+
+    /// Returns `true` if the given mouse button index is pressed.
+    fn is_mouse_button_pressed(&self, _button_index: i64) -> bool {
         false
     }
 

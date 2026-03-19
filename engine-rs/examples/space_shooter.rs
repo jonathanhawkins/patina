@@ -1,3 +1,7 @@
+// TODO(pat-4y7): Migrate to EngineRuntime when available — remove example-local
+// loop orchestration (process/physics/render contract) and consume the
+// engine-owned main loop instead. See FIXTURE_MAP.md for fixture targets.
+
 //! Space shooter mini-game exercising all Patina Engine subsystems.
 //!
 //! Demonstrates: scene tree, physics (Area2D overlap), input, rendering,

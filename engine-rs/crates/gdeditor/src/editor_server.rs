@@ -264,10 +264,7 @@ impl EditorState {
             map.add_action(action, 0.0);
             for key_name in keys {
                 if let Some(typed_key) = gdplatform::input::Key::from_name(key_name) {
-                    map.action_add_event(
-                        action,
-                        gdplatform::ActionBinding::KeyBinding(typed_key),
-                    );
+                    map.action_add_event(action, gdplatform::ActionBinding::KeyBinding(typed_key));
                 }
             }
         }
@@ -297,6 +294,8 @@ impl EditorState {
             pressed_keys: self.pressed_keys.clone(),
             just_pressed_keys: self.just_pressed_keys.clone(),
             input_map: self.input_map.clone(),
+            mouse_position: Default::default(),
+            mouse_buttons_pressed: Default::default(),
         }
     }
 

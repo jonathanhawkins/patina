@@ -47,3 +47,6 @@ pub use scene_tree::SceneTree;
 pub use scripting::{GDScriptNodeInstance, InputSnapshot};
 pub use tilemap::{default_color_tileset, ColorTile, ColorTileSet, TileGrid, TileGridStore};
 pub use trace::{EventTrace, TraceEvent, TraceEventType};
+
+// Re-export signal types for integration tests.
+pub use gdobject::signal::Connection as SignalConnection;

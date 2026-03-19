@@ -1,3 +1,8 @@
+// TODO(pat-oa3): Normalize display and window state flow — DisplayServer should
+// be the single authority for window state. Examples/tests should not create
+// windows directly. Resize, vsync, and focus state should flow through
+// DisplayServer events. See PLATFORM_ROADMAP.md.
+
 //! Display server for multi-window management and input routing.
 //!
 //! The `DisplayServer` manages multiple windows through the `WindowManager`

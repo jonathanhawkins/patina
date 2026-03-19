@@ -115,6 +115,36 @@ fn find_collision_shape(tree: &SceneTree, parent_id: NodeId) -> Option<Shape2D> 
     None
 }
 
+/// Scales a collision shape by the given scale vector.
+///
+/// For circles, the larger of `scale.x` and `scale.y` is used (matching Godot).
+/// For rectangles, each axis is scaled independently.
+fn scale_shape(shape: Shape2D, scale: Vector2) -> Shape2D {
+    match shape {
+        Shape2D::Circle { radius } => {
+            let s = scale.x.abs().max(scale.y.abs());
+            Shape2D::Circle { radius: radius * s }
+        }
+        Shape2D::Rectangle { half_extents } => Shape2D::Rectangle {
+            half_extents: Vector2::new(
+                half_extents.x * scale.x.abs(),
+                half_extents.y * scale.y.abs(),
+            ),
+        },
+        Shape2D::Segment { a, b } => Shape2D::Segment {
+            a: Vector2::new(a.x * scale.x, a.y * scale.y),
+            b: Vector2::new(b.x * scale.x, b.y * scale.y),
+        },
+        Shape2D::Capsule { radius, height } => {
+            let s = scale.x.abs().max(scale.y.abs());
+            Shape2D::Capsule {
+                radius: radius * s,
+                height: height * scale.y.abs(),
+            }
+        }
+    }
+}
+
 /// A physics trace record for one body at one frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhysicsTraceEntry {
@@ -249,8 +279,10 @@ impl PhysicsServer {
                     continue;
                 }
                 let pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
-                let shape =
+                let base_shape =
                     find_collision_shape(tree, node_id).unwrap_or(Shape2D::Circle { radius: 16.0 });
+                let node_scale = vec2_prop(tree, node_id, "scale", Vector2::new(1.0, 1.0));
+                let shape = scale_shape(base_shape, node_scale);
 
                 let mass = float_prop(tree, node_id, "mass", 1.0) as f32;
                 let mut body = PhysicsBody2D::new(BodyId(0), body_type, pos, shape, mass);
@@ -259,6 +291,8 @@ impl PhysicsServer {
                 body.bounce = float_prop(tree, node_id, "bounce", 0.0) as f32;
                 body.friction = float_prop(tree, node_id, "friction", 0.5) as f32;
                 body.linear_velocity = vec2_prop(tree, node_id, "linear_velocity", Vector2::ZERO);
+                body.rotation = float_prop(tree, node_id, "rotation", 0.0) as f32;
+                body.angular_velocity = float_prop(tree, node_id, "angular_velocity", 0.0) as f32;
 
                 let body_id = self.world.add_body(body);
                 self.node_to_body.insert(node_id, body_id);
@@ -281,15 +315,15 @@ impl PhysicsServer {
         }
     }
 
-    /// Pushes scene tree node positions into the physics world.
+    /// Pushes scene tree node transforms into the physics world.
     pub fn sync_to_physics(&mut self, tree: &SceneTree) {
         for (&node_id, &body_id) in &self.node_to_body {
-            let pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
             if let Some(body) = self.world.get_body_mut(body_id) {
-                // Only sync kinematic body positions from the scene tree.
+                // Only sync kinematic body transforms from the scene tree.
                 // Rigid bodies are driven by the physics engine.
                 if body.body_type == BodyType::Kinematic {
-                    body.position = pos;
+                    body.position = vec2_prop(tree, node_id, "position", Vector2::ZERO);
+                    body.rotation = float_prop(tree, node_id, "rotation", 0.0) as f32;
                 }
             }
         }
@@ -312,17 +346,22 @@ impl PhysicsServer {
         self.trace_frame += 1;
     }
 
-    /// Pulls physics body positions back into the scene tree.
+    /// Pulls physics body transforms back into the scene tree.
     pub fn sync_from_physics(&self, tree: &mut SceneTree) {
         for (&node_id, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
-                // Don't write back static body positions (they don't move).
+                // Don't write back static body properties (they don't move).
                 if body.body_type == BodyType::Static {
                     continue;
                 }
                 if let Some(node) = tree.get_node_mut(node_id) {
                     node.set_property("position", Variant::Vector2(body.position));
+                    node.set_property("rotation", Variant::Float(body.rotation as f64));
                     node.set_property("linear_velocity", Variant::Vector2(body.linear_velocity));
+                    node.set_property(
+                        "angular_velocity",
+                        Variant::Float(body.angular_velocity as f64),
+                    );
                 }
             }
         }

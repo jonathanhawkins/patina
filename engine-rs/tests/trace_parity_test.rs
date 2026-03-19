@@ -78,11 +78,11 @@ fn patina_vs_upstream_mock_full_comparison() {
     // Print the full report for visibility.
     eprintln!("\n{report}");
 
-    // This test documents known differences — it should NOT fail.
-    // Instead, it asserts specific known parity gaps.
+    // Full parity achieved — no structural differences remain.
     assert!(
-        !diffs.is_empty(),
-        "expected parity differences between mock upstream and Patina"
+        diffs.is_empty(),
+        "expected full parity between Patina and upstream, but got {} diffs:\n{report}",
+        diffs.len()
     );
 }
 
@@ -200,73 +200,50 @@ fn process_interleaving_matches_godot() {
     );
 }
 
-/// Document known parity gap: Patina calls _physics_process on scripts that don't define it.
+/// FIXED: Patina no longer generates _physics_process calls for scripts that don't define it.
 #[test]
-fn known_gap_spurious_physics_process_calls() {
+fn no_spurious_physics_process_calls() {
     let patina_json = load_trace("test_scripts_patina.json");
-    let upstream_json = load_trace("test_scripts_upstream_mock.json");
 
     let patina_events = parse_events(&patina_json["event_trace"]);
-    let upstream_events = parse_events(&upstream_json["event_trace"]);
 
     let patina_phys_scripts: Vec<_> = patina_events
         .iter()
         .filter(|e| e.detail == "_physics_process" && e.event_type == "script_call")
         .collect();
-    let upstream_phys_scripts: Vec<_> = upstream_events
-        .iter()
-        .filter(|e| e.detail == "_physics_process" && e.event_type == "script_call")
-        .collect();
 
-    // Patina generates _physics_process calls even though neither script defines it.
     assert!(
-        !patina_phys_scripts.is_empty(),
-        "KNOWN GAP: Patina generates _physics_process script calls for scripts that don't define it"
-    );
-    assert!(
-        upstream_phys_scripts.is_empty(),
-        "Upstream should NOT have _physics_process calls (scripts don't define it)"
+        patina_phys_scripts.is_empty(),
+        "Patina should NOT generate _physics_process script calls for scripts that don't define it, got {}",
+        patina_phys_scripts.len()
     );
 }
 
-/// Document known parity gap: Patina generates _enter_tree script calls even though
-/// neither script defines _enter_tree.
+/// FIXED: Patina no longer generates _enter_tree calls for scripts that don't define it.
 #[test]
-fn known_gap_spurious_enter_tree_calls() {
+fn no_spurious_enter_tree_calls() {
     let patina_json = load_trace("test_scripts_patina.json");
-    let upstream_json = load_trace("test_scripts_upstream_mock.json");
 
     let patina_events = parse_events(&patina_json["event_trace"]);
-    let upstream_events = parse_events(&upstream_json["event_trace"]);
 
     let patina_enter_scripts: Vec<_> = patina_events
         .iter()
         .filter(|e| e.detail == "_enter_tree" && e.event_type == "script_call")
         .collect();
-    let upstream_enter_scripts: Vec<_> = upstream_events
-        .iter()
-        .filter(|e| e.detail == "_enter_tree" && e.event_type == "script_call")
-        .collect();
 
     assert!(
-        !patina_enter_scripts.is_empty(),
-        "KNOWN GAP: Patina generates _enter_tree script calls for scripts that don't define it"
-    );
-    assert!(
-        upstream_enter_scripts.is_empty(),
-        "Upstream should NOT have _enter_tree calls (scripts don't define it)"
+        patina_enter_scripts.is_empty(),
+        "Patina should NOT generate _enter_tree script calls for scripts that don't define it, got {}",
+        patina_enter_scripts.len()
     );
 }
 
-/// Document known parity gap: Patina calls _ready on Mover, but test_movement.gd
-/// does not define _ready.
+/// FIXED: Patina no longer calls _ready on Mover (test_movement.gd doesn't define _ready).
 #[test]
-fn known_gap_spurious_ready_call_mover() {
+fn no_spurious_ready_call_mover() {
     let patina_json = load_trace("test_scripts_patina.json");
-    let upstream_json = load_trace("test_scripts_upstream_mock.json");
 
     let patina_events = parse_events(&patina_json["event_trace"]);
-    let upstream_events = parse_events(&upstream_json["event_trace"]);
 
     let patina_mover_ready: Vec<_> = patina_events
         .iter()
@@ -276,62 +253,27 @@ fn known_gap_spurious_ready_call_mover() {
                 && e.node_path == "/root/TestScene/Mover"
         })
         .collect();
-    let upstream_mover_ready: Vec<_> = upstream_events
-        .iter()
-        .filter(|e| {
-            e.detail == "_ready"
-                && e.event_type == "script_call"
-                && e.node_path == "/root/TestScene/Mover"
-        })
-        .collect();
 
     assert!(
-        !patina_mover_ready.is_empty(),
-        "KNOWN GAP: Patina calls _ready on Mover even though test_movement.gd doesn't define it"
-    );
-    assert!(
-        upstream_mover_ready.is_empty(),
-        "Upstream should NOT call _ready on Mover (test_movement.gd doesn't define it)"
+        patina_mover_ready.is_empty(),
+        "Patina should NOT call _ready on Mover (test_movement.gd doesn't define it)"
     );
 }
 
-/// Event count difference is explained by the known gaps.
+/// Event counts now match between Patina and upstream mock golden.
 #[test]
-fn event_count_difference_explained() {
+fn event_count_matches_upstream() {
     let patina_json = load_trace("test_scripts_patina.json");
     let upstream_json = load_trace("test_scripts_upstream_mock.json");
 
     let patina_events = parse_events(&patina_json["event_trace"]);
     let upstream_events = parse_events(&upstream_json["event_trace"]);
 
-    let diff = patina_events.len() as i64 - upstream_events.len() as i64;
-
-    // Count the spurious events that explain the difference:
-    // - _enter_tree call/return for 2 nodes = 4
-    // - _ready call/return for Mover = 2
-    // - _physics_process call/return for 2 nodes * 10 frames = 40
-    // Total extra: 46, diff should be 46
-    let spurious_enter = patina_events
-        .iter()
-        .filter(|e| e.detail == "_enter_tree")
-        .count() as i64;
-    let spurious_mover_ready = patina_events
-        .iter()
-        .filter(|e| {
-            e.detail == "_ready"
-                && e.node_path == "/root/TestScene/Mover"
-                && (e.event_type == "script_call" || e.event_type == "script_return")
-        })
-        .count() as i64;
-    let spurious_phys = patina_events
-        .iter()
-        .filter(|e| e.detail == "_physics_process")
-        .count() as i64;
-
-    let explained = spurious_enter + spurious_mover_ready + spurious_phys;
-
     assert_eq!(
-        diff, explained,
-        "event count difference ({diff}) should be fully explained by known spurious calls ({explained})"
+        patina_events.len(),
+        upstream_events.len(),
+        "Patina event count ({}) should match upstream ({})",
+        patina_events.len(),
+        upstream_events.len()
     );
 }

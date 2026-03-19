@@ -16,11 +16,15 @@
 //!    [`NOTIFICATION_PROCESS`](gdobject::NOTIFICATION_PROCESS) exactly once.
 //! 3. Frame counter and elapsed-time accumulators are updated.
 
+use std::collections::HashMap;
+
 use crate::physics_server::PhysicsServer;
 use crate::scene_tree::SceneTree;
 use crate::scripting::InputSnapshot;
+use crate::trace::{TraceEvent, TraceEventType};
 use gdobject::notification::{NOTIFICATION_PAUSED, NOTIFICATION_UNPAUSED};
 use gdplatform::input::{InputEvent, InputMap, InputState};
+use gdvariant::Variant;
 
 /// Output returned by [`MainLoop::step`] after each frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +35,91 @@ pub struct FrameOutput {
     pub delta: f64,
     /// Number of physics ticks that ran during this frame.
     pub physics_steps: u32,
+}
+
+/// A snapshot of a single node's properties at a given frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeSnapshot {
+    /// The path of the node in the scene tree.
+    pub path: String,
+    /// The class name of the node.
+    pub class_name: String,
+    /// Property values at the end of this frame.
+    pub properties: HashMap<String, Variant>,
+}
+
+/// A record of everything that happened during a single frame.
+///
+/// This captures the full per-frame evolution data needed to validate
+/// Godot-compatible frame processing semantics: which notifications fired,
+/// which scripts ran, property values at end-of-frame, and physics tick counts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameRecord {
+    /// The frame number (1-indexed).
+    pub frame_number: u64,
+    /// The delta time used for this frame.
+    pub delta: f64,
+    /// Number of physics ticks that ran during this frame.
+    pub physics_ticks: u32,
+    /// Cumulative process time after this frame.
+    pub cumulative_process_time: f64,
+    /// Cumulative physics time after this frame.
+    pub cumulative_physics_time: f64,
+    /// Whether the loop was paused during this frame.
+    pub paused: bool,
+    /// Trace events that occurred during this frame (notifications, script calls, etc.).
+    pub events: Vec<TraceEvent>,
+    /// Per-node property snapshots at the end of this frame.
+    pub node_snapshots: Vec<NodeSnapshot>,
+}
+
+/// A complete frame-by-frame trace of scene execution.
+///
+/// Use [`MainLoop::run_frames_traced`] to produce this trace. Each entry
+/// captures the full state evolution at that frame, enabling frame-by-frame
+/// property evolution validation rather than only end-state checks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FrameTrace {
+    /// One [`FrameRecord`] per frame, in order.
+    pub frames: Vec<FrameRecord>,
+}
+
+impl FrameTrace {
+    /// Returns the total number of recorded frames.
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Returns true if no frames were recorded.
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// Returns notification details from all events across all frames, in order.
+    pub fn all_notification_details(&self) -> Vec<&str> {
+        self.frames
+            .iter()
+            .flat_map(|f| {
+                f.events.iter().filter_map(|e| {
+                    if e.event_type == TraceEventType::Notification {
+                        Some(e.detail.as_str())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Returns events for a specific frame (0-indexed into the frames vec).
+    pub fn frame_events(&self, index: usize) -> &[TraceEvent] {
+        &self.frames[index].events
+    }
+
+    /// Returns the total number of physics ticks across all frames.
+    pub fn total_physics_ticks(&self) -> u32 {
+        self.frames.iter().map(|f| f.physics_ticks).sum()
+    }
 }
 
 /// Drives a [`SceneTree`] through a deterministic frame loop.
@@ -223,12 +312,32 @@ impl MainLoop {
         if !self.tree.has_input_snapshot() {
             let platform_snap = self.input_state.snapshot();
             // Convert gdplatform::InputSnapshot → gdscene::scripting::InputSnapshot.
+            // Convert mouse buttons to Godot button index strings (1=Left, 2=Right, 3=Middle).
+            let mut mouse_buttons_pressed = std::collections::HashSet::new();
+            use gdplatform::input::MouseButton;
+            for (btn, idx) in [
+                (MouseButton::Left, "1"),
+                (MouseButton::Right, "2"),
+                (MouseButton::Middle, "3"),
+            ] {
+                if platform_snap.is_mouse_button_pressed(btn) {
+                    mouse_buttons_pressed.insert(idx.to_string());
+                }
+            }
+            let mouse_pos = platform_snap.get_mouse_position();
+
             let script_snap = InputSnapshot {
                 pressed_keys: platform_snap.pressed_key_names().into_iter().collect(),
                 just_pressed_keys: platform_snap.just_pressed_key_names().into_iter().collect(),
                 input_map: platform_snap.action_pressed_key_map(),
+                mouse_position: mouse_pos,
+                mouse_buttons_pressed,
             };
-            if !script_snap.pressed_keys.is_empty() || !script_snap.just_pressed_keys.is_empty() {
+            let has_input = !script_snap.pressed_keys.is_empty()
+                || !script_snap.just_pressed_keys.is_empty()
+                || !script_snap.mouse_buttons_pressed.is_empty()
+                || mouse_pos != gdcore::math::Vector2::ZERO;
+            if has_input {
                 self.tree.set_input_snapshot(script_snap);
             }
         }
@@ -348,7 +457,7 @@ mod tests {
     use crate::node::Node;
     use gdobject::notification::{
         NOTIFICATION_INTERNAL_PHYSICS_PROCESS, NOTIFICATION_INTERNAL_PROCESS,
-        NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_PROCESS,
+        NOTIFICATION_PARENTED, NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_PROCESS,
     };
 
     /// Helper: build a MainLoop with a tree containing root + one child.
@@ -472,13 +581,14 @@ mod tests {
         ml.step(1.0 / 60.0);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        // With delta = 1/60 at 60 TPS: Godot fires in this order per frame:
+        // PARENTED fires during add_child, then per frame:
         // INTERNAL_PHYSICS_PROCESS -> PHYSICS_PROCESS -> INTERNAL_PROCESS -> PROCESS
-        assert_eq!(log.len(), 4);
-        assert_eq!(log[0], NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
-        assert_eq!(log[1], NOTIFICATION_PHYSICS_PROCESS);
-        assert_eq!(log[2], NOTIFICATION_INTERNAL_PROCESS);
-        assert_eq!(log[3], NOTIFICATION_PROCESS);
+        assert_eq!(log.len(), 5);
+        assert_eq!(log[0], NOTIFICATION_PARENTED);
+        assert_eq!(log[1], NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
+        assert_eq!(log[2], NOTIFICATION_PHYSICS_PROCESS);
+        assert_eq!(log[3], NOTIFICATION_INTERNAL_PROCESS);
+        assert_eq!(log[4], NOTIFICATION_PROCESS);
     }
 
     #[test]
@@ -536,7 +646,8 @@ mod tests {
 
         assert_eq!(ml.frame_count(), 0);
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        assert!(log.is_empty());
+        // Only PARENTED from add_child, no frame notifications.
+        assert_eq!(log, &[NOTIFICATION_PARENTED]);
     }
 
     #[test]
@@ -673,6 +784,7 @@ mod tests {
         assert_eq!(
             log,
             &[
+                NOTIFICATION_PARENTED,
                 NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
                 NOTIFICATION_PHYSICS_PROCESS,
                 NOTIFICATION_INTERNAL_PROCESS,
@@ -687,10 +799,11 @@ mod tests {
         ml.run_frames(5, 1.0 / 60.0);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        // Every PROCESS should come after the last PHYSICS_PROCESS in each frame.
+        // First entry is PARENTED from add_child, then per-frame notifications.
         // With 1 physics tick per frame, the pattern repeats every 4 notifications.
+        assert_eq!(log[0], NOTIFICATION_PARENTED);
         for frame in 0..5 {
-            let base = frame * 4;
+            let base = 1 + frame * 4; // +1 for leading PARENTED
             assert_eq!(
                 log[base], NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
                 "frame {frame}: expected INTERNAL_PHYSICS_PROCESS at pos {base}"
@@ -734,9 +847,9 @@ mod tests {
         let parent_log = ml.tree().get_node(parent_id).unwrap().notification_log();
         let child_log = ml.tree().get_node(child_id).unwrap().notification_log();
 
-        // Both must have the full set of notifications.
-        assert_eq!(parent_log.len(), 4);
-        assert_eq!(child_log.len(), 4);
+        // Both must have PARENTED + the full set of frame notifications.
+        assert_eq!(parent_log.len(), 5);
+        assert_eq!(child_log.len(), 5);
 
         // Verify tree order via all_nodes_in_tree_order.
         let order = ml.tree().all_nodes_in_tree_order();
@@ -795,8 +908,8 @@ mod tests {
             assert_eq!(ml.frame_count(), frame);
 
             let log = ml.tree().get_node(child_id).unwrap().notification_log();
-            // Each frame adds 4 notifications (with 1 physics tick per frame).
-            let expected_len = (frame as usize) * 4;
+            // 1 PARENTED from add_child + each frame adds 4 notifications.
+            let expected_len = 1 + (frame as usize) * 4;
             assert_eq!(
                 log.len(),
                 expected_len,
@@ -1005,10 +1118,10 @@ mod tests {
         assert!(a_pos < b_pos, "A before B");
         assert!(b_pos < c_pos, "B before C");
 
-        // Each node gets the full notification set.
+        // Each node gets PARENTED + the full notification set.
         for &id in &[a_id, b_id, c_id] {
             let log = ml.tree().get_node(id).unwrap().notification_log();
-            assert_eq!(log.len(), 4);
+            assert_eq!(log.len(), 5);
         }
     }
 

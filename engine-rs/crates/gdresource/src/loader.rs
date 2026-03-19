@@ -209,7 +209,8 @@ fn parse_sub_resource_header(header: &str) -> EngineResult<(String, String)> {
 /// Converts a `uid://...` string into a [`ResourceUid`].
 ///
 /// For simplicity we hash the string portion to produce a numeric UID.
-fn parse_uid_string(uid_str: &str) -> ResourceUid {
+/// Also available as [`parse_uid_string`] for public use.
+pub fn parse_uid_string(uid_str: &str) -> ResourceUid {
     if let Some(rest) = uid_str.strip_prefix("uid://") {
         // Simple hash to produce a stable numeric UID.
         let hash: i64 = rest

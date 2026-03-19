@@ -366,8 +366,14 @@ fn push_event_diagonal_movement() {
     }
 
     let (end_x, end_y) = get_position(&main_loop, player_id);
-    assert!(end_x > start_x, "player should move right: {start_x} -> {end_x}");
-    assert!(end_y < start_y, "player should move up: {start_y} -> {end_y}");
+    assert!(
+        end_x > start_x,
+        "player should move right: {start_x} -> {end_x}"
+    );
+    assert!(
+        end_y < start_y,
+        "player should move up: {start_y} -> {end_y}"
+    );
 }
 
 #[test]

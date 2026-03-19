@@ -31,6 +31,9 @@ pub struct Connection {
     /// Optional direct callback. When present, `emit` invokes this instead
     /// of requiring a method-resolution lookup.
     callback: Option<SignalCallback>,
+    /// When `true`, the connection auto-disconnects after the first emission
+    /// (Godot's `CONNECT_ONE_SHOT` flag).
+    pub one_shot: bool,
 }
 
 impl Connection {
@@ -40,6 +43,7 @@ impl Connection {
             target_id,
             method: method.into(),
             callback: None,
+            one_shot: false,
         }
     }
 
@@ -53,7 +57,14 @@ impl Connection {
             target_id,
             method: method.into(),
             callback: Some(Arc::new(callback)),
+            one_shot: false,
         }
+    }
+
+    /// Returns a copy of this connection with the one-shot flag set.
+    pub fn as_one_shot(mut self) -> Self {
+        self.one_shot = true;
+        self
     }
 
     /// Invokes this connection's callback (if present) with the given arguments.
@@ -88,6 +99,7 @@ impl Clone for Connection {
             target_id: self.target_id,
             method: self.method.clone(),
             callback: self.callback.clone(),
+            one_shot: self.one_shot,
         }
     }
 }
@@ -149,8 +161,12 @@ impl Signal {
     ///
     /// Returns a `Vec` of return values from each connection. Connections
     /// without a callback produce `Variant::Nil`.
-    pub fn emit(&self, args: &[Variant]) -> Vec<Variant> {
-        self.connections.iter().map(|c| c.call(args)).collect()
+    ///
+    /// One-shot connections are automatically removed after firing.
+    pub fn emit(&mut self, args: &[Variant]) -> Vec<Variant> {
+        let results: Vec<Variant> = self.connections.iter().map(|c| c.call(args)).collect();
+        self.connections.retain(|c| !c.one_shot);
+        results
     }
 
     /// Returns the number of active connections.
@@ -213,9 +229,11 @@ impl SignalStore {
     ///
     /// If the signal does not exist, returns an empty vec (matching Godot's
     /// behavior of silently ignoring emission on undeclared signals).
-    pub fn emit(&self, signal_name: &str, args: &[Variant]) -> Vec<Variant> {
+    ///
+    /// One-shot connections are automatically removed after firing.
+    pub fn emit(&mut self, signal_name: &str, args: &[Variant]) -> Vec<Variant> {
         self.signals
-            .get(signal_name)
+            .get_mut(signal_name)
             .map_or_else(Vec::new, |s| s.emit(args))
     }
 
@@ -270,8 +288,8 @@ pub trait SignalEmitter {
     }
 
     /// Emits a signal with the given arguments.
-    fn emit_signal(&self, signal_name: &str, args: &[Variant]) -> Vec<Variant> {
-        self.signal_store().emit(signal_name, args)
+    fn emit_signal(&mut self, signal_name: &str, args: &[Variant]) -> Vec<Variant> {
+        self.signal_store_mut().emit(signal_name, args)
     }
 }
 
@@ -423,14 +441,14 @@ mod tests {
 
     #[test]
     fn emit_with_no_connections_returns_empty() {
-        let signal = Signal::new("empty_signal");
+        let mut signal = Signal::new("empty_signal");
         let results = signal.emit(&[Variant::Int(42)]);
         assert!(results.is_empty());
     }
 
     #[test]
     fn emit_nonexistent_signal_on_store_returns_empty() {
-        let store = SignalStore::new();
+        let mut store = SignalStore::new();
         let results = store.emit("nonexistent", &[Variant::Bool(true)]);
         assert!(results.is_empty());
     }

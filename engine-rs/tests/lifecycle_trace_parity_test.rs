@@ -22,7 +22,13 @@ use gdscene::{LifecycleManager, MainLoop};
 ///       ├── Child1 (Node2D)
 ///       │   └── GrandChild (Node2D)
 ///       └── Child2 (Node2D)
-fn build_hierarchy() -> (SceneTree, gdscene::node::NodeId, gdscene::node::NodeId, gdscene::node::NodeId, gdscene::node::NodeId) {
+fn build_hierarchy() -> (
+    SceneTree,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+) {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
@@ -210,10 +216,7 @@ fn exit_tree_subtree() {
     let paths = event_paths(&tree, "EXIT_TREE", TraceEventType::Notification);
     assert_eq!(
         paths,
-        vec![
-            "/root/Parent/Child1/GrandChild",
-            "/root/Parent/Child1",
-        ],
+        vec!["/root/Parent/Child1/GrandChild", "/root/Parent/Child1",],
         "EXIT_TREE for subtree should fire bottom-up for all descendants"
     );
 }
@@ -266,7 +269,10 @@ fn exit_tree_calls_script_exit_tree() {
         .iter()
         .position(|e| e.detail == "EXIT_TREE" && e.node_path == "/root/Parent")
         .expect("parent EXIT_TREE");
-    assert!(child_exit_idx < parent_exit_idx, "child EXIT_TREE before parent");
+    assert!(
+        child_exit_idx < parent_exit_idx,
+        "child EXIT_TREE before parent"
+    );
 }
 
 // ===========================================================================
@@ -411,9 +417,7 @@ fn full_lifecycle_sequence() {
         .iter()
         .filter(|e| {
             e.event_type == TraceEventType::Notification
-                && (e.detail == "ENTER_TREE"
-                    || e.detail == "READY"
-                    || e.detail == "EXIT_TREE")
+                && (e.detail == "ENTER_TREE" || e.detail == "READY" || e.detail == "EXIT_TREE")
         })
         .map(|e| format!("{}:{}", e.detail, e.node_path))
         .collect();
@@ -459,14 +463,26 @@ fn deep_hierarchy_enter_ready_exit() {
     let enter_paths = event_paths(&tree, "ENTER_TREE", TraceEventType::Notification);
     assert_eq!(
         enter_paths,
-        vec!["/root/L1", "/root/L1/L2", "/root/L1/L2/L3", "/root/L1/L2/L3/L4", "/root/L1/L2/L3/L4/L5"],
+        vec![
+            "/root/L1",
+            "/root/L1/L2",
+            "/root/L1/L2/L3",
+            "/root/L1/L2/L3/L4",
+            "/root/L1/L2/L3/L4/L5"
+        ],
         "ENTER_TREE: L1 → L2 → L3 → L4 → L5 (top-down)"
     );
 
     let ready_paths = event_paths(&tree, "READY", TraceEventType::Notification);
     assert_eq!(
         ready_paths,
-        vec!["/root/L1/L2/L3/L4/L5", "/root/L1/L2/L3/L4", "/root/L1/L2/L3", "/root/L1/L2", "/root/L1"],
+        vec![
+            "/root/L1/L2/L3/L4/L5",
+            "/root/L1/L2/L3/L4",
+            "/root/L1/L2/L3",
+            "/root/L1/L2",
+            "/root/L1"
+        ],
         "READY: L5 → L4 → L3 → L2 → L1 (bottom-up)"
     );
 
@@ -476,7 +492,13 @@ fn deep_hierarchy_enter_ready_exit() {
     let exit_paths = event_paths(&tree, "EXIT_TREE", TraceEventType::Notification);
     assert_eq!(
         exit_paths,
-        vec!["/root/L1/L2/L3/L4/L5", "/root/L1/L2/L3/L4", "/root/L1/L2/L3", "/root/L1/L2", "/root/L1"],
+        vec![
+            "/root/L1/L2/L3/L4/L5",
+            "/root/L1/L2/L3/L4",
+            "/root/L1/L2/L3",
+            "/root/L1/L2",
+            "/root/L1"
+        ],
         "EXIT_TREE: L5 → L4 → L3 → L2 → L1 (bottom-up)"
     );
 }
@@ -526,8 +548,12 @@ fn ready_script_calls_only_for_nodes_with_ready() {
     let root = tree.root_id();
 
     let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
-    let scripted = tree.add_child(parent, Node::new("Scripted", "Node2D")).unwrap();
-    let _unscripted = tree.add_child(parent, Node::new("Plain", "Node2D")).unwrap();
+    let scripted = tree
+        .add_child(parent, Node::new("Scripted", "Node2D"))
+        .unwrap();
+    let _unscripted = tree
+        .add_child(parent, Node::new("Plain", "Node2D"))
+        .unwrap();
 
     let script_src = "extends Node2D\nfunc _ready():\n    pass\n";
     let script = GDScriptNodeInstance::from_source(script_src, scripted).unwrap();

@@ -67,7 +67,7 @@ impl Neg for Vector2i {
 // ---------------------------------------------------------------------------
 
 /// A 2D vector with `f32` components, matching Godot's `Vector2`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Vector2 {
     /// The X component.
     pub x: f32,

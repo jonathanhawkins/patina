@@ -10,10 +10,17 @@
 
 use std::collections::{HashMap, HashSet};
 
+use gdcore::math::{Color, Rect2, Vector2};
+use gdrender2d::renderer::SoftwareRenderer;
+use gdrender2d::test_adapter::{capture_frame, pixel_at};
 use gdscene::main_loop::MainLoop;
+use gdscene::node::Node;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
+use gdscene::physics_server::PhysicsTraceEntry;
 use gdscene::scripting::{GDScriptNodeInstance, InputSnapshot};
 use gdscene::SceneTree;
+use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
+use gdserver2d::viewport::Viewport;
 use gdvariant::Variant;
 
 const SCENE_SOURCE: &str = include_str!("../fixtures/scenes/space_shooter.tscn");
@@ -105,6 +112,8 @@ fn make_input(actions: &[&str], input_map: &HashMap<String, Vec<String>>) -> Inp
         pressed_keys,
         just_pressed_keys: just_pressed,
         input_map: input_map.clone(),
+        mouse_position: Default::default(),
+        mouse_buttons_pressed: Default::default(),
     }
 }
 
@@ -363,4 +372,261 @@ fn vertical_slice_input_does_not_persist() {
         (first_move - total_move).abs() < 0.01,
         "input should not persist: first_move={first_move}, total_move={total_move}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 exit criteria tests: physics bodies, rendered frames, script vars
+// ---------------------------------------------------------------------------
+
+/// Builds the physics_playground scene programmatically:
+///   World (Node)
+///     Ball (RigidBody2D) at (400, 100) with CircleShape2D(radius=16)
+///     Wall (StaticBody2D) at (800, 300) with RectangleShape2D(size=20x400)
+///     Floor (StaticBody2D) at (400, 600) with RectangleShape2D(size=800x20)
+fn build_physics_playground() -> (MainLoop, gdscene::NodeId) {
+    let mut tree = SceneTree::new();
+    let root_id = tree.root_id();
+
+    // World root
+    let world = Node::new("World", "Node");
+    let world_id = tree.add_child(root_id, world).unwrap();
+
+    // Ball — RigidBody2D at (400, 100) with downward velocity (simulating gravity).
+    let mut ball = Node::new("Ball", "RigidBody2D");
+    ball.set_property("position", Variant::Vector2(Vector2::new(400.0, 100.0)));
+    ball.set_property("mass", Variant::Float(1.0));
+    ball.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(0.0, 200.0)),
+    );
+    let ball_id = tree.add_child(world_id, ball).unwrap();
+
+    let mut ball_shape = Node::new("CollisionShape2D", "CollisionShape2D");
+    ball_shape.set_property("radius", Variant::Float(16.0));
+    tree.add_child(ball_id, ball_shape).unwrap();
+
+    // Wall — StaticBody2D at (800, 300)
+    let mut wall = Node::new("Wall", "StaticBody2D");
+    wall.set_property("position", Variant::Vector2(Vector2::new(800.0, 300.0)));
+    let wall_id = tree.add_child(world_id, wall).unwrap();
+
+    let mut wall_shape = Node::new("CollisionShape2D", "CollisionShape2D");
+    wall_shape.set_property("size", Variant::Vector2(Vector2::new(20.0, 400.0)));
+    tree.add_child(wall_id, wall_shape).unwrap();
+
+    // Floor — StaticBody2D at (400, 600)
+    let mut floor = Node::new("Floor", "StaticBody2D");
+    floor.set_property("position", Variant::Vector2(Vector2::new(400.0, 600.0)));
+    let floor_id = tree.add_child(world_id, floor).unwrap();
+
+    let mut floor_shape = Node::new("CollisionShape2D", "CollisionShape2D");
+    floor_shape.set_property("size", Variant::Vector2(Vector2::new(800.0, 20.0)));
+    tree.add_child(floor_id, floor_shape).unwrap();
+
+    let mut main_loop = MainLoop::new(tree);
+    main_loop.register_physics_bodies();
+
+    (main_loop, ball_id)
+}
+
+#[test]
+fn vertical_slice_physics_playground_bodies_move() {
+    let (mut main_loop, ball_id) = build_physics_playground();
+
+    // Record initial Ball position.
+    let start_y = get_position(&main_loop, ball_id).1;
+
+    // Run 10 frames — the Ball's downward velocity should move it.
+    main_loop.run_frames(10, DT);
+
+    let end_y = get_position(&main_loop, ball_id).1;
+    assert!(
+        end_y > start_y,
+        "Ball should move downward due to velocity: start_y={start_y}, end_y={end_y}"
+    );
+
+    // Verify physics bodies were registered (3 bodies: Ball, Wall, Floor).
+    assert_eq!(
+        main_loop.physics_server().body_count(),
+        3,
+        "should register Ball, Wall, and Floor"
+    );
+}
+
+#[test]
+fn vertical_slice_physics_trace_recording() {
+    let (mut main_loop, _ball_id) = build_physics_playground();
+
+    // Enable tracing BEFORE running frames.
+    main_loop.physics_server_mut().set_tracing(true);
+
+    // Run 10 frames.
+    main_loop.run_frames(10, DT);
+
+    let trace = main_loop.physics_server().trace();
+    assert!(
+        !trace.is_empty(),
+        "trace should contain entries after 10 frames with tracing enabled"
+    );
+
+    // Verify there are trace entries for "Ball".
+    let ball_entries: Vec<&PhysicsTraceEntry> = trace.iter().filter(|e| e.name == "Ball").collect();
+    assert!(
+        ball_entries.len() >= 10,
+        "should have at least 10 Ball trace entries (one per frame), got {}",
+        ball_entries.len()
+    );
+
+    // Ball should be moving downward — later frames should have higher y.
+    let first_y = ball_entries.first().unwrap().position.y;
+    let last_y = ball_entries.last().unwrap().position.y;
+    assert!(
+        last_y > first_y,
+        "Ball trace should show downward motion: first_y={first_y}, last_y={last_y}"
+    );
+}
+
+#[test]
+fn vertical_slice_script_vars_updated_after_frames() {
+    let (mut main_loop, _) = build_space_shooter();
+
+    // Run 30 frames (0.5 seconds at 60fps).
+    main_loop.run_frames(30, DT);
+
+    // Find the EnemySpawner node and check that spawn_timer has advanced.
+    let tree = main_loop.tree();
+    let spawner_id = tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .find(|&id| {
+            tree.get_node(id)
+                .map(|n| n.name() == "EnemySpawner")
+                .unwrap_or(false)
+        })
+        .expect("EnemySpawner not found");
+
+    let node = tree.get_node(spawner_id).unwrap();
+    let timer_val = match node.get_property("spawn_timer") {
+        Variant::Float(t) => t,
+        Variant::Int(t) => t as f64,
+        other => panic!("unexpected spawn_timer type: {other:?}"),
+    };
+
+    // After 30 frames at 1/60s each => 0.5 seconds elapsed.
+    // spawn_timer should be approximately 0.5.
+    assert!(
+        timer_val > 0.3 && timer_val < 0.7,
+        "spawn_timer should be ~0.5 after 30 frames, got {timer_val}"
+    );
+    // Verify it is strictly positive (script vars are being updated).
+    assert!(
+        timer_val > 0.0,
+        "spawn_timer must have advanced from 0, got {timer_val}"
+    );
+}
+
+#[test]
+fn vertical_slice_rendered_frame_non_empty() {
+    let mut renderer = SoftwareRenderer::new();
+    let mut viewport = Viewport::new(64, 64, Color::BLACK);
+
+    // Add a red filled rectangle covering part of the viewport.
+    let mut item = CanvasItem::new(CanvasItemId(1));
+    item.commands.push(DrawCommand::DrawRect {
+        rect: Rect2::new(Vector2::new(10.0, 10.0), Vector2::new(30.0, 30.0)),
+        color: Color::rgb(1.0, 0.0, 0.0),
+        filled: true,
+    });
+    viewport.add_canvas_item(item);
+
+    let fb = capture_frame(&mut renderer, &viewport);
+
+    // Verify non-zero dimensions.
+    assert_eq!(fb.width, 64);
+    assert_eq!(fb.height, 64);
+    assert_eq!(fb.pixels.len(), (64 * 64) as usize);
+
+    // Verify at least some non-black pixels exist (the red rect).
+    let non_black_count = fb
+        .pixels
+        .iter()
+        .filter(|c| c.r > 0.0 || c.g > 0.0 || c.b > 0.0)
+        .count();
+    assert!(
+        non_black_count > 0,
+        "framebuffer should contain non-black pixels from the red rect"
+    );
+
+    // Verify the red rect area has red pixels.
+    let center_pixel = pixel_at(&fb, 20, 20);
+    assert!(
+        center_pixel.r > 0.9 && center_pixel.g < 0.1 && center_pixel.b < 0.1,
+        "pixel at (20,20) should be red, got {:?}",
+        center_pixel
+    );
+
+    // Verify a corner outside the rect is still black.
+    let corner_pixel = pixel_at(&fb, 0, 0);
+    assert!(
+        corner_pixel.r < 0.01 && corner_pixel.g < 0.01 && corner_pixel.b < 0.01,
+        "pixel at (0,0) should be black, got {:?}",
+        corner_pixel
+    );
+}
+
+#[test]
+fn vertical_slice_physics_playground_hierarchy() {
+    let (main_loop, _ball_id) = build_physics_playground();
+    let tree = main_loop.tree();
+
+    // Collect all node names and types (excluding the implicit SceneTree root).
+    let all_ids = tree.all_nodes_in_tree_order();
+    let mut nodes: Vec<(String, String)> = Vec::new();
+    for &id in &all_ids {
+        if let Some(node) = tree.get_node(id) {
+            let name = node.name().to_string();
+            let class = node.class_name().to_string();
+            // Skip the SceneTree's implicit root node.
+            if name == "root" {
+                continue;
+            }
+            nodes.push((name, class));
+        }
+    }
+
+    // Expected hierarchy:
+    //   World (Node)
+    //     Ball (RigidBody2D)
+    //       CollisionShape2D (CollisionShape2D)
+    //     Wall (StaticBody2D)
+    //       CollisionShape2D (CollisionShape2D)
+    //     Floor (StaticBody2D)
+    //       CollisionShape2D (CollisionShape2D)
+    let expected = vec![
+        ("World", "Node"),
+        ("Ball", "RigidBody2D"),
+        ("CollisionShape2D", "CollisionShape2D"),
+        ("Wall", "StaticBody2D"),
+        ("CollisionShape2D", "CollisionShape2D"),
+        ("Floor", "StaticBody2D"),
+        ("CollisionShape2D", "CollisionShape2D"),
+    ];
+
+    assert_eq!(
+        nodes.len(),
+        expected.len(),
+        "node count mismatch: got {nodes:?}"
+    );
+
+    for (i, ((name, class), (exp_name, exp_class))) in nodes.iter().zip(expected.iter()).enumerate()
+    {
+        assert_eq!(
+            name, exp_name,
+            "node {i} name mismatch: got {name}, expected {exp_name}"
+        );
+        assert_eq!(
+            class, exp_class,
+            "node {i} class mismatch: got {class}, expected {exp_class}"
+        );
+    }
 }
