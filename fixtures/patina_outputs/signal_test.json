@@ -1,0 +1,114 @@
+{
+  "frame_count": 2,
+  "physics_time": 0.03333333333333333,
+  "process_time": 0.03333333333333333,
+  "scene_file": "/Users/bone/dev/games/godot/test-00/signal_test.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "Emitter",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/Root/Emitter",
+            "properties": {
+              "_script_path": {
+                "type": "String",
+                "value": "res://scripts/emitter.gd"
+              },
+              "emit_count": {
+                "type": "Int",
+                "value": 0
+              },
+              "script": {
+                "type": "String",
+                "value": "ExtResource(\"1\")"
+              }
+            },
+            "script_vars": {
+              "emit_count": {
+                "type": "Int",
+                "value": 0
+              }
+            }
+          },
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "Listener",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/Root/Listener",
+            "properties": {
+              "_script_path": {
+                "type": "String",
+                "value": "res://scripts/listener.gd"
+              },
+              "last_value": {
+                "type": "Int",
+                "value": 0
+              },
+              "received_count": {
+                "type": "Int",
+                "value": 0
+              },
+              "script": {
+                "type": "String",
+                "value": "ExtResource(\"2\")"
+              }
+            },
+            "script_vars": {
+              "last_value": {
+                "type": "Int",
+                "value": 0
+              },
+              "received_count": {
+                "type": "Int",
+                "value": 0
+              }
+            }
+          }
+        ],
+        "class": "Node2D",
+        "name": "Root",
+        "notifications": [
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/Root",
+        "properties": {},
+        "script_vars": {}
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}

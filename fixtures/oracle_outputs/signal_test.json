@@ -1,0 +1,40 @@
+{
+  "children": [
+    {
+      "children": [],
+      "class": "Node2D",
+      "name": "Emitter",
+      "path": "/root/Root/Emitter",
+      "properties": {
+        "emit_count": "1",
+        "position": "Vector2(0, 0)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    },
+    {
+      "children": [],
+      "class": "Node2D",
+      "name": "Listener",
+      "path": "/root/Root/Listener",
+      "properties": {
+        "last_value": "0",
+        "position": "Vector2(0, 0)",
+        "received_count": "0",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    }
+  ],
+  "class": "Node2D",
+  "name": "Root",
+  "path": "/root/Root",
+  "properties": {
+    "position": "Vector2(0, 0)",
+    "rotation": "0.0",
+    "scale": "Vector2(1, 1)",
+    "visible": "true"
+  }
+}

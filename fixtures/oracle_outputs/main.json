@@ -1,0 +1,52 @@
+{
+  "children": [
+    {
+      "children": [],
+      "class": "Sprite2D",
+      "name": "Player",
+      "path": "/root/World/Player",
+      "properties": {
+        "direction": "Vector2(1, 0)",
+        "health": "100",
+        "position": "Vector2(100, 200)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "speed": "200.42582666666667",
+        "visible": "true"
+      }
+    },
+    {
+      "children": [],
+      "class": "CharacterBody2D",
+      "name": "Enemy",
+      "path": "/root/World/Enemy",
+      "properties": {
+        "position": "Vector2(400, 200)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    },
+    {
+      "children": [],
+      "class": "StaticBody2D",
+      "name": "Ground",
+      "path": "/root/World/Ground",
+      "properties": {
+        "position": "Vector2(0, 500)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    }
+  ],
+  "class": "Node2D",
+  "name": "World",
+  "path": "/root/World",
+  "properties": {
+    "position": "Vector2(0, 0)",
+    "rotation": "0.0",
+    "scale": "Vector2(1, 1)",
+    "visible": "true"
+  }
+}

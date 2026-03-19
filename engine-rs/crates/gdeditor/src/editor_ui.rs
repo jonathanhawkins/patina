@@ -1153,6 +1153,14 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   var dragStartX = 0;
   var dragStartY = 0;
   var DRAG_THRESHOLD = 3;
+  var viewportZoom = 1.0;
+  var viewportPanX = 0;
+  var viewportPanY = 0;
+  var isPanning = false;
+  var panStartX = 0;
+  var panStartY = 0;
+  var panStartPanX = 0;
+  var panStartPanY = 0;
 
   function viewportCoords(e) {
     var rect = viewportImg.getBoundingClientRect();
@@ -1200,6 +1208,74 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       isDragging = false; dragStartX = 0; dragStartY = 0;
     });
     container.appendChild(viewportImg);
+
+    // Zoom with mouse wheel
+    container.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      var delta = e.deltaY > 0 ? -0.1 : 0.1;
+      viewportZoom = Math.max(0.1, Math.min(16.0, viewportZoom + delta * viewportZoom));
+      api('POST', '/api/viewport/zoom', { zoom: viewportZoom });
+      updateZoomIndicator();
+    }, { passive: false });
+
+    // Pan with middle-mouse or Shift+left drag
+    container.addEventListener('mousedown', function(e) {
+      if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+        e.preventDefault();
+        isPanning = true;
+        panStartX = e.clientX; panStartY = e.clientY;
+        panStartPanX = viewportPanX; panStartPanY = viewportPanY;
+      }
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!isPanning) return;
+      viewportPanX = panStartPanX + (e.clientX - panStartX);
+      viewportPanY = panStartPanY + (e.clientY - panStartY);
+      api('POST', '/api/viewport/pan', { x: viewportPanX, y: viewportPanY });
+    });
+    document.addEventListener('mouseup', function(e) {
+      if (isPanning) { isPanning = false; }
+    });
+
+    // Zoom indicator
+    var zoomIndicator = document.createElement('div');
+    zoomIndicator.id = 'zoom-indicator';
+    zoomIndicator.style.cssText = 'position:absolute;bottom:8px;right:8px;background:var(--panel);border:1px solid var(--border);padding:2px 8px;font-size:11px;color:var(--text-dim);border-radius:3px;display:flex;gap:4px;align-items:center;z-index:10;';
+    zoomIndicator.innerHTML = '<button id="zoom-out" style="background:none;border:none;color:var(--text);cursor:pointer;padding:0 2px;font-size:13px">-</button><span id="zoom-label">100%</span><button id="zoom-in" style="background:none;border:none;color:var(--text);cursor:pointer;padding:0 2px;font-size:13px">+</button><button id="zoom-reset" style="background:none;border:none;color:var(--text-dim);cursor:pointer;padding:0 4px;font-size:10px">Reset</button>';
+    container.style.position = 'relative';
+    container.appendChild(zoomIndicator);
+
+    document.getElementById('zoom-in').addEventListener('click', function() {
+      viewportZoom = Math.min(16.0, viewportZoom * 1.25);
+      api('POST', '/api/viewport/zoom', { zoom: viewportZoom });
+      updateZoomIndicator();
+    });
+    document.getElementById('zoom-out').addEventListener('click', function() {
+      viewportZoom = Math.max(0.1, viewportZoom / 1.25);
+      api('POST', '/api/viewport/zoom', { zoom: viewportZoom });
+      updateZoomIndicator();
+    });
+    document.getElementById('zoom-reset').addEventListener('click', function() {
+      viewportZoom = 1.0; viewportPanX = 0; viewportPanY = 0;
+      api('POST', '/api/viewport/zoom', { zoom: 1.0 });
+      api('POST', '/api/viewport/pan', { x: 0, y: 0 });
+      updateZoomIndicator();
+    });
+
+    // Fetch initial zoom/pan
+    api('GET', '/api/viewport/zoom_pan').then(function(data) {
+      if (data) {
+        viewportZoom = data.zoom || 1.0;
+        viewportPanX = data.pan_x || 0;
+        viewportPanY = data.pan_y || 0;
+        updateZoomIndicator();
+      }
+    });
+  }
+
+  function updateZoomIndicator() {
+    var label = document.getElementById('zoom-label');
+    if (label) label.textContent = Math.round(viewportZoom * 100) + '%';
   }
 
   function refreshViewport() {
@@ -1413,6 +1489,20 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
         e.preventDefault(); api('POST', '/api/redo').then(function() { fetchScene(); if (selectedNodeId) fetchSelected(); }); return;
       }
       if (e.ctrlKey && e.key === 's') { e.preventDefault(); document.getElementById('btn-save').click(); return; }
+
+      // Zoom shortcuts
+      if (e.ctrlKey && (e.key === '=' || e.key === '+')) {
+        e.preventDefault(); viewportZoom = Math.min(16.0, viewportZoom * 1.25);
+        api('POST', '/api/viewport/zoom', { zoom: viewportZoom }); updateZoomIndicator(); return;
+      }
+      if (e.ctrlKey && e.key === '-') {
+        e.preventDefault(); viewportZoom = Math.max(0.1, viewportZoom / 1.25);
+        api('POST', '/api/viewport/zoom', { zoom: viewportZoom }); updateZoomIndicator(); return;
+      }
+      if (e.ctrlKey && e.key === '0') {
+        e.preventDefault(); viewportZoom = 1.0; viewportPanX = 0; viewportPanY = 0;
+        api('POST', '/api/viewport/zoom', { zoom: 1.0 }); api('POST', '/api/viewport/pan', { x: 0, y: 0 }); updateZoomIndicator(); return;
+      }
 
       // Tool mode shortcuts
       if (e.key === 'q' || e.key === 'Q') { setToolMode('select'); return; }

@@ -98,7 +98,16 @@ fn main() {
             let fb = {
                 let state = handle.state().lock().unwrap();
                 let selected = state.selected_node;
-                gdeditor::scene_renderer::render_scene(&state.scene_tree, selected, WIDTH, HEIGHT)
+                let zoom = state.viewport_zoom;
+                let pan = state.viewport_pan;
+                gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                    &state.scene_tree,
+                    selected,
+                    WIDTH,
+                    HEIGHT,
+                    zoom,
+                    pan,
+                )
                 // Lock released at end of block
             };
             handle.update_frame(fb);

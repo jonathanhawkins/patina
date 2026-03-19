@@ -1,0 +1,149 @@
+{
+  "frame_count": 2,
+  "physics_time": 0.03333333333333333,
+  "process_time": 0.03333333333333333,
+  "scene_file": "/Users/bone/dev/games/godot/test-00/main.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [],
+            "class": "Sprite2D",
+            "name": "Player",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/World/Player",
+            "properties": {
+              "_script_path": {
+                "type": "String",
+                "value": "res://player.gd"
+              },
+              "direction": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  0.0
+                ]
+              },
+              "health": {
+                "type": "Int",
+                "value": 100
+              },
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  100.0,
+                  200.0
+                ]
+              },
+              "script": {
+                "type": "String",
+                "value": "ExtResource(\"1\")"
+              },
+              "speed": {
+                "type": "Float",
+                "value": 200.33333333333331
+              }
+            },
+            "script_vars": {
+              "direction": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  0.0
+                ]
+              },
+              "health": {
+                "type": "Int",
+                "value": 100
+              },
+              "speed": {
+                "type": "Float",
+                "value": 200.33333333333331
+              }
+            }
+          },
+          {
+            "children": [],
+            "class": "CharacterBody2D",
+            "name": "Enemy",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/World/Enemy",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  400.0,
+                  200.0
+                ]
+              }
+            },
+            "script_vars": {}
+          },
+          {
+            "children": [],
+            "class": "StaticBody2D",
+            "name": "Ground",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/World/Ground",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  0.0,
+                  500.0
+                ]
+              }
+            },
+            "script_vars": {}
+          }
+        ],
+        "class": "Node2D",
+        "name": "World",
+        "notifications": [
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/World",
+        "properties": {},
+        "script_vars": {}
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}
