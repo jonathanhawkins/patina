@@ -83,7 +83,8 @@ mod tests {
     use crate::node::Node;
     use crate::scene_tree::SceneTree;
     use gdobject::notification::{
-        NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_READY,
+        NOTIFICATION_CHILD_ORDER_CHANGED, NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE,
+        NOTIFICATION_PARENTED, NOTIFICATION_READY, NOTIFICATION_UNPARENTED,
     };
 
     /// Helper: build a small tree and return (tree, root, parent, child1, child2).
@@ -109,25 +110,21 @@ mod tests {
 
         LifecycleManager::enter_tree(&mut tree, parent_id);
 
-        // ENTER_TREE should be the first notification for parent.
+        // Parent: PARENTED (add to root) + 2x CHILD_ORDER_CHANGED (child1, child2 added) + ENTER_TREE + READY
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert_eq!(parent_log[0], NOTIFICATION_ENTER_TREE);
+        assert_eq!(parent_log[0], NOTIFICATION_PARENTED);
+        assert_eq!(parent_log[1], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log[2], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log[3], NOTIFICATION_ENTER_TREE);
 
+        // Children: PARENTED + ENTER_TREE
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log[0], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c1_log[0], NOTIFICATION_PARENTED);
+        assert_eq!(c1_log[1], NOTIFICATION_ENTER_TREE);
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
-        assert_eq!(c2_log[0], NOTIFICATION_ENTER_TREE);
-
-        // Verify ordering: parent's ENTER_TREE comes before children's.
-        // Since each node's log is independent, we verify by collecting
-        // global order from the traversal.
-        // The top-down order is [Parent, Child1, Child2].
-        // The bottom-up order is [Child1, Child2, Parent].
-        // Full notification sequence per node:
-        //   Parent: ENTER_TREE (pos 0), READY (pos 5)
-        //   Child1: ENTER_TREE (pos 1), READY (pos 3)
-        //   Child2: ENTER_TREE (pos 2), READY (pos 4)
+        assert_eq!(c2_log[0], NOTIFICATION_PARENTED);
+        assert_eq!(c2_log[1], NOTIFICATION_ENTER_TREE);
     }
 
     #[test]
@@ -136,21 +133,27 @@ mod tests {
 
         LifecycleManager::enter_tree(&mut tree, parent_id);
 
-        // After enter_tree, each node should have [ENTER_TREE, READY].
+        // Parent: PARENTED + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY = 5
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert_eq!(parent_log.len(), 2);
-        assert_eq!(parent_log[0], NOTIFICATION_ENTER_TREE);
-        assert_eq!(parent_log[1], NOTIFICATION_READY);
+        assert_eq!(parent_log.len(), 5);
+        assert_eq!(parent_log[0], NOTIFICATION_PARENTED);
+        assert_eq!(parent_log[1], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log[2], NOTIFICATION_CHILD_ORDER_CHANGED);
+        assert_eq!(parent_log[3], NOTIFICATION_ENTER_TREE);
+        assert_eq!(parent_log[4], NOTIFICATION_READY);
 
+        // Children: PARENTED + ENTER_TREE + READY = 3
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log.len(), 2);
-        assert_eq!(c1_log[0], NOTIFICATION_ENTER_TREE);
-        assert_eq!(c1_log[1], NOTIFICATION_READY);
+        assert_eq!(c1_log.len(), 3);
+        assert_eq!(c1_log[0], NOTIFICATION_PARENTED);
+        assert_eq!(c1_log[1], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c1_log[2], NOTIFICATION_READY);
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
-        assert_eq!(c2_log.len(), 2);
-        assert_eq!(c2_log[0], NOTIFICATION_ENTER_TREE);
-        assert_eq!(c2_log[1], NOTIFICATION_READY);
+        assert_eq!(c2_log.len(), 3);
+        assert_eq!(c2_log[0], NOTIFICATION_PARENTED);
+        assert_eq!(c2_log[1], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c2_log[2], NOTIFICATION_READY);
     }
 
     #[test]
@@ -175,10 +178,34 @@ mod tests {
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
 
-        // All should have received both notifications.
-        assert_eq!(parent_log, &[NOTIFICATION_ENTER_TREE, NOTIFICATION_READY]);
-        assert_eq!(c1_log, &[NOTIFICATION_ENTER_TREE, NOTIFICATION_READY]);
-        assert_eq!(c2_log, &[NOTIFICATION_ENTER_TREE, NOTIFICATION_READY]);
+        // Parent: PARENTED + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY
+        assert_eq!(
+            parent_log,
+            &[
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_CHILD_ORDER_CHANGED,
+                NOTIFICATION_CHILD_ORDER_CHANGED,
+                NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_READY
+            ]
+        );
+        // Children: PARENTED + ENTER_TREE + READY
+        assert_eq!(
+            c1_log,
+            &[
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_READY
+            ]
+        );
+        assert_eq!(
+            c2_log,
+            &[
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_READY
+            ]
+        );
     }
 
     #[test]
@@ -188,13 +215,21 @@ mod tests {
         LifecycleManager::exit_tree(&mut tree, parent_id);
 
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert_eq!(parent_log, &[NOTIFICATION_EXIT_TREE]);
+        assert_eq!(
+            parent_log,
+            &[
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_CHILD_ORDER_CHANGED,
+                NOTIFICATION_CHILD_ORDER_CHANGED,
+                NOTIFICATION_EXIT_TREE
+            ]
+        );
 
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log, &[NOTIFICATION_EXIT_TREE]);
+        assert_eq!(c1_log, &[NOTIFICATION_PARENTED, NOTIFICATION_EXIT_TREE]);
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
-        assert_eq!(c2_log, &[NOTIFICATION_EXIT_TREE]);
+        assert_eq!(c2_log, &[NOTIFICATION_PARENTED, NOTIFICATION_EXIT_TREE]);
 
         // Bottom-up means children exit before parent.
         let mut bottom_up = Vec::new();
@@ -212,9 +247,10 @@ mod tests {
         LifecycleManager::enter_tree(&mut tree, leaf_id);
 
         let log = tree.get_node(leaf_id).unwrap().notification_log();
-        assert_eq!(log.len(), 2);
-        assert_eq!(log[0], NOTIFICATION_ENTER_TREE);
-        assert_eq!(log[1], NOTIFICATION_READY);
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0], NOTIFICATION_PARENTED);
+        assert_eq!(log[1], NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[2], NOTIFICATION_READY);
         assert!(tree.get_node(leaf_id).unwrap().is_inside_tree());
         assert!(tree.get_node(leaf_id).unwrap().is_ready());
     }
@@ -231,11 +267,14 @@ mod tests {
         LifecycleManager::exit_tree(&mut tree, leaf_id);
 
         let leaf_log = tree.get_node(leaf_id).unwrap().notification_log();
-        assert_eq!(leaf_log, &[NOTIFICATION_EXIT_TREE]);
+        assert_eq!(leaf_log, &[NOTIFICATION_PARENTED, NOTIFICATION_EXIT_TREE]);
 
-        // Parent should not have received any notification
+        // Parent should have PARENTED from add_child + CHILD_ORDER_CHANGED from adding leaf
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert!(parent_log.is_empty());
+        assert_eq!(
+            parent_log,
+            &[NOTIFICATION_PARENTED, NOTIFICATION_CHILD_ORDER_CHANGED]
+        );
     }
 
     #[test]
@@ -249,6 +288,7 @@ mod tests {
         assert_eq!(
             c1_log,
             &[
+                NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
                 NOTIFICATION_READY,
                 NOTIFICATION_EXIT_TREE,
@@ -259,6 +299,9 @@ mod tests {
         assert_eq!(
             parent_log,
             &[
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_CHILD_ORDER_CHANGED,
+                NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_ENTER_TREE,
                 NOTIFICATION_READY,
                 NOTIFICATION_EXIT_TREE,

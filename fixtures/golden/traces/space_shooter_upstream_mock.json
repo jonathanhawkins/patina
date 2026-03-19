@@ -1,0 +1,767 @@
+{
+  "event_trace": [
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Background"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/Player"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/EnemySpawner"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/SpaceShooter/ScoreLabel"
+    }
+  ],
+  "frame_count": 3,
+  "physics_time": 0.05,
+  "process_time": 0.05,
+  "scene_file": "/Users/bone/dev/games/patina/fixtures/scenes/space_shooter.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "Background",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/SpaceShooter/Background",
+            "properties": {},
+            "script_vars": {}
+          },
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "Player",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/SpaceShooter/Player",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  320.0,
+                  400.0
+                ]
+              }
+            },
+            "script_vars": {
+              "can_shoot": {
+                "type": "Bool",
+                "value": true
+              },
+              "shoot_cooldown": {
+                "type": "Float",
+                "value": 0.0
+              },
+              "speed": {
+                "type": "Float",
+                "value": 200.0
+              }
+            }
+          },
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "EnemySpawner",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/SpaceShooter/EnemySpawner",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  320.0,
+                  0.0
+                ]
+              }
+            },
+            "script_vars": {
+              "spawn_interval": {
+                "type": "Float",
+                "value": 2.0
+              },
+              "spawn_timer": {
+                "type": "Float",
+                "value": 0.05
+              }
+            }
+          },
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "ScoreLabel",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/SpaceShooter/ScoreLabel",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  10.0,
+                  10.0
+                ]
+              }
+            },
+            "script_vars": {}
+          }
+        ],
+        "class": "Node2D",
+        "name": "SpaceShooter",
+        "notifications": [
+          "NOTIFICATION_PARENTED",
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/SpaceShooter",
+        "properties": {},
+        "script_vars": {}
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}

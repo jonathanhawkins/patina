@@ -2331,6 +2331,39 @@ impl Interpreter {
                     Ok(Variant::Bool(false))
                 }
             }
+            "get_global_mouse_position" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_global_mouse_position() takes 0 arguments".into(),
+                    )));
+                }
+                if let Some(ref access) = self.scene_access {
+                    let (x, y) = access.get_global_mouse_position();
+                    Ok(Variant::Vector2(gdcore::math::Vector2::new(x, y)))
+                } else {
+                    Ok(Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)))
+                }
+            }
+            "is_mouse_button_pressed" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.is_mouse_button_pressed() takes 1 argument".into(),
+                    )));
+                }
+                let button_index = match &args[0] {
+                    Variant::Int(i) => *i,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.is_mouse_button_pressed() argument must be an integer".into(),
+                        )))
+                    }
+                };
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Bool(access.is_mouse_button_pressed(button_index)))
+                } else {
+                    Ok(Variant::Bool(false))
+                }
+            }
             "get_vector" => {
                 if args.len() != 4 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(

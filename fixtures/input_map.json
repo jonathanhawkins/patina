@@ -1,0 +1,36 @@
+{
+  "actions": {
+    "move_left": {
+      "deadzone": 0.0,
+      "keys": ["A", "ArrowLeft"]
+    },
+    "move_right": {
+      "deadzone": 0.0,
+      "keys": ["D", "ArrowRight"]
+    },
+    "move_up": {
+      "deadzone": 0.0,
+      "keys": ["W", "ArrowUp"]
+    },
+    "move_down": {
+      "deadzone": 0.0,
+      "keys": ["S", "ArrowDown"]
+    },
+    "jump": {
+      "deadzone": 0.0,
+      "keys": ["Space"]
+    },
+    "shoot": {
+      "deadzone": 0.0,
+      "keys": ["Enter"],
+      "mouse_buttons": ["Left"]
+    },
+    "dash": {
+      "deadzone": 0.2,
+      "keys": ["Shift"]
+    },
+    "pause": {
+      "keys": ["Escape"]
+    }
+  }
+}
