@@ -7,11 +7,13 @@
 use std::collections::{HashMap, HashSet};
 
 use gdcore::error::{EngineError, EngineResult};
+use gdobject::notification::NOTIFICATION_MOVED_IN_PARENT;
 use gdobject::signal::SignalStore;
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
 use crate::animation::AnimationPlayer;
+use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
 use crate::tween::{Tween, TweenId};
 
@@ -107,6 +109,15 @@ impl SceneTree {
             parent.add_child_id(child_id);
         }
 
+        let should_enter_tree = self
+            .nodes
+            .get(&parent_id)
+            .map(|parent| parent.is_inside_tree())
+            .unwrap_or(false);
+        if should_enter_tree {
+            LifecycleManager::enter_tree(self, child_id);
+        }
+
         Ok(child_id)
     }
 
@@ -122,6 +133,15 @@ impl SceneTree {
         }
         if !self.nodes.contains_key(&id) {
             return Err(EngineError::NotFound(format!("node {id} not found")));
+        }
+
+        let should_exit_tree = self
+            .nodes
+            .get(&id)
+            .map(|node| node.is_inside_tree())
+            .unwrap_or(false);
+        if should_exit_tree {
+            LifecycleManager::exit_tree(self, id);
         }
 
         // Collect subtree in depth-first order (children before parent).
@@ -178,6 +198,7 @@ impl SceneTree {
         }
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.set_parent(Some(new_parent_id));
+            node.receive_notification(NOTIFICATION_MOVED_IN_PARENT);
         }
 
         Ok(())
@@ -355,17 +376,49 @@ impl SceneTree {
             .connect(signal_name, connection);
     }
 
-    /// Emits a signal on the given node, returning the collected return
-    /// values from all connected callbacks.
+    /// Emits a signal on the given node. For each connection:
+    /// - If the connection has a callback closure, invoke it directly.
+    /// - If the connection has no callback (e.g. from a `.tscn` `[connection]`),
+    ///   look up the target node's script and call the named method on it.
+    ///
+    /// Returns the collected return values from callback connections.
     pub fn emit_signal(
-        &self,
+        &mut self,
         source: NodeId,
         signal_name: &str,
         args: &[gdvariant::Variant],
     ) -> Vec<gdvariant::Variant> {
-        self.signal_stores
+        // Collect connection info to avoid borrow conflicts.
+        let connections: Vec<(gdcore::id::ObjectId, String, bool)> = self
+            .signal_stores
             .get(&source)
-            .map_or_else(Vec::new, |store| store.emit(signal_name, args))
+            .and_then(|store| store.get_signal(signal_name))
+            .map(|signal| {
+                signal
+                    .connections()
+                    .iter()
+                    .map(|c| (c.target_id, c.method.clone(), c.has_callback()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Fire callback-based connections (existing behavior).
+        let results = self
+            .signal_stores
+            .get(&source)
+            .map_or_else(Vec::new, |store| store.emit(signal_name, args));
+
+        // For connections without callbacks, dispatch to target node scripts.
+        for (target_id, method, has_callback) in connections {
+            if !has_callback {
+                let target_node_id = NodeId::from_object_id(target_id);
+                if self.scripts.contains_key(&target_node_id) {
+                    self.call_script_with_access(target_node_id, &method, args);
+                }
+            }
+        }
+
+        results
     }
 
     // -- get_node_or_null ---------------------------------------------------
@@ -640,7 +693,11 @@ impl SceneTree {
 
     /// Calls `_process(delta)` on all nodes that have attached scripts.
     pub fn process_all_scripts_process(&mut self, delta: f64) {
-        let ids: Vec<NodeId> = self.scripts.keys().copied().collect();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_tree_order()
+            .into_iter()
+            .filter(|id| self.scripts.contains_key(id))
+            .collect();
         for id in ids {
             self.process_script_process(id, delta);
         }
@@ -648,19 +705,63 @@ impl SceneTree {
 
     /// Calls `_physics_process(delta)` on all nodes that have attached scripts.
     pub fn process_all_scripts_physics_process(&mut self, delta: f64) {
-        let ids: Vec<NodeId> = self.scripts.keys().copied().collect();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_tree_order()
+            .into_iter()
+            .filter(|id| self.scripts.contains_key(id))
+            .collect();
         for id in ids {
             self.process_script_physics_process(id, delta);
         }
     }
 
-    // -- process stub -------------------------------------------------------
+    // -- process dispatch ----------------------------------------------------
+
+    /// Dispatches [`NOTIFICATION_INTERNAL_PHYSICS_PROCESS`](gdobject::NOTIFICATION_INTERNAL_PHYSICS_PROCESS)
+    /// to every node in tree order.
+    ///
+    /// Called once per fixed-timestep physics tick, **before** user
+    /// `NOTIFICATION_PHYSICS_PROCESS`. This matches Godot's per-frame
+    /// ordering: internal physics -> user physics -> internal process -> user process.
+    pub fn process_internal_physics_frame(&mut self) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
+            }
+        }
+    }
+
+    /// Dispatches [`NOTIFICATION_PHYSICS_PROCESS`](gdobject::NOTIFICATION_PHYSICS_PROCESS)
+    /// to every node in tree order.
+    ///
+    /// Called once per fixed-timestep physics tick, after internal physics processing.
+    pub fn process_physics_frame(&mut self) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_PHYSICS_PROCESS);
+            }
+        }
+    }
+
+    /// Dispatches [`NOTIFICATION_INTERNAL_PROCESS`](gdobject::NOTIFICATION_INTERNAL_PROCESS)
+    /// to every node in tree order.
+    ///
+    /// Called once per visual frame, **before** user `NOTIFICATION_PROCESS`.
+    pub fn process_internal_frame(&mut self) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_INTERNAL_PROCESS);
+            }
+        }
+    }
 
     /// Dispatches [`NOTIFICATION_PROCESS`](gdobject::NOTIFICATION_PROCESS)
     /// to every node in tree order.
     ///
-    /// This is a simplified stub — a real implementation would track
-    /// `delta` time and respect pause mode.
+    /// Called once per visual frame, after internal process.
     pub fn process_frame(&mut self) {
         let ids = self.all_nodes_in_tree_order();
         for id in ids {
@@ -670,17 +771,21 @@ impl SceneTree {
         }
     }
 
-    /// Dispatches [`NOTIFICATION_PHYSICS_PROCESS`](gdobject::NOTIFICATION_PHYSICS_PROCESS)
-    /// to every node in tree order.
+    // -- deferred calls (stub) ----------------------------------------------
+
+    /// Stub for Godot's `call_deferred()` mechanism.
     ///
-    /// Called once per fixed-timestep physics tick.
-    pub fn process_physics_frame(&mut self) {
-        let ids = self.all_nodes_in_tree_order();
-        for id in ids {
-            if let Some(node) = self.nodes.get_mut(&id) {
-                node.receive_notification(gdobject::NOTIFICATION_PHYSICS_PROCESS);
-            }
-        }
+    /// In Godot, deferred calls are queued during the current frame and
+    /// executed at the end of the frame (after all process callbacks).
+    /// This is a placeholder -- deferred call queuing and execution is not
+    /// yet implemented.
+    ///
+    /// TODO: Implement a deferred call queue that collects callables during
+    /// the frame and flushes them after the process phase in `MainLoop::step()`.
+    pub fn call_deferred(&mut self, _node_id: NodeId, _method: &str, _args: &[Variant]) {
+        // Stub: deferred calls are not yet queued or executed.
+        // When implemented, this should push onto a Vec<DeferredCall> that
+        // MainLoop::step() flushes after the process phase.
     }
 }
 
@@ -773,6 +878,39 @@ mod tests {
     }
 
     #[test]
+    fn add_child_to_live_parent_auto_enters_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let child = Node::new("Child", "Node");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let child = tree.get_node(child_id).unwrap();
+        assert!(child.is_inside_tree());
+        assert!(child.is_ready());
+        assert!(child
+            .notification_log()
+            .contains(&gdobject::NOTIFICATION_ENTER_TREE));
+        assert!(child.notification_log().contains(&gdobject::NOTIFICATION_READY));
+    }
+
+    #[test]
+    fn remove_live_subtree_auto_exits_tree_before_removal() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let parent = Node::new("Parent", "Node");
+        let parent_id = tree.add_child(root, parent).unwrap();
+        let child = Node::new("Child", "Node");
+        let child_id = tree.add_child(parent_id, child).unwrap();
+
+        let removed = tree.remove_node(parent_id).unwrap();
+        assert_eq!(removed, vec![child_id, parent_id]);
+    }
+
+    #[test]
     fn cannot_remove_root() {
         let mut tree = SceneTree::new();
         let result = tree.remove_node(tree.root_id());
@@ -799,6 +937,11 @@ mod tests {
         assert_eq!(tree.get_node(a_id).unwrap().children().len(), 0);
         assert_eq!(tree.get_node(b_id).unwrap().children(), &[c_id]);
         assert_eq!(tree.node_path(c_id).unwrap(), "/root/B/C");
+        assert!(tree
+            .get_node(c_id)
+            .unwrap()
+            .notification_log()
+            .contains(&gdobject::NOTIFICATION_MOVED_IN_PARENT));
     }
 
     #[test]

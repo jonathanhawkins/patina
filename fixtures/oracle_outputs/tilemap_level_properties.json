@@ -1,0 +1,252 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "ParallaxLayer",
+							"name": "BackgroundLayer",
+							"path": "/root/TileMapLevel/Background/BackgroundLayer",
+							"properties": {
+								"motion_scale": {
+									"class_type": "",
+									"hint": 5,
+									"type": "Vector2",
+									"value": {
+										"x": 0.5,
+										"y": 0.5
+									}
+								}
+							}
+						}
+					],
+					"class": "ParallaxBackground",
+					"name": "Background",
+					"path": "/root/TileMapLevel/Background",
+					"properties": {
+
+					}
+				},
+				{
+					"children": [],
+					"class": "TileMapLayer",
+					"name": "TileMapLayer",
+					"path": "/root/TileMapLevel/TileMapLayer",
+					"properties": {
+
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Area2D",
+							"name": "Coin1",
+							"path": "/root/TileMapLevel/Collectibles/Coin1",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 128.0,
+										"y": 192.0
+									}
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Area2D",
+							"name": "Coin2",
+							"path": "/root/TileMapLevel/Collectibles/Coin2",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 256.0,
+										"y": 128.0
+									}
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Area2D",
+							"name": "Coin3",
+							"path": "/root/TileMapLevel/Collectibles/Coin3",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 384.0,
+										"y": 192.0
+									}
+								}
+							}
+						}
+					],
+					"class": "Node2D",
+					"name": "Collectibles",
+					"path": "/root/TileMapLevel/Collectibles",
+					"properties": {
+
+					}
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"name": "SpawnPoints",
+					"path": "/root/TileMapLevel/SpawnPoints",
+					"properties": {
+						"metadata/enemy_types": {
+							"class_type": "",
+							"hint": 0,
+							"type": "PackedStringArray",
+							"value": "[\"slime\", \"bat\", \"skeleton\"]"
+						},
+						"metadata/spawn_positions": {
+							"class_type": "",
+							"hint": 0,
+							"type": "PackedVector2Array",
+							"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"name": "Boundaries",
+					"path": "/root/TileMapLevel/Boundaries",
+					"properties": {
+						"metadata/level_bounds": {
+							"class_type": "",
+							"hint": 0,
+							"type": "PackedFloat32Array",
+							"value": "[0.0, 0.0, 1024.0, 640.0]"
+						},
+						"metadata/tile_indices": {
+							"class_type": "",
+							"hint": 0,
+							"type": "PackedInt32Array",
+							"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+						}
+					}
+				}
+			],
+			"class": "Node2D",
+			"name": "TileMapLevel",
+			"path": "/root/TileMapLevel",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

@@ -658,7 +658,11 @@ fn oracle_scene_tree_contract_matches_generated_simple_hierarchy_fixture() {
     let patina =
         load_json_fixture(&fixtures_dir().join(Path::new("patina_outputs/simple_hierarchy.json")));
 
-    let g_nodes = flatten_tree(&godot);
+    let g_root = godot["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .expect("generated scene fixture should expose a root node in data.nodes");
+    let g_nodes = flatten_godot_tree(g_root);
     let p_nodes = flatten_patina_tree(&patina);
     let results = compare_scene(&g_nodes, &p_nodes);
 

@@ -2544,4 +2544,192 @@ mod tests {
             "render_scene should still produce visible output"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Collision shape rendering tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_collision_shape_circle() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("circle".to_string()));
+        node.set_property("shape_radius", Variant::Float(30.0));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // Should have green collision outline pixels.
+        let has_green = fb
+            .pixels
+            .iter()
+            .any(|&p| p.g > 0.5 && p.r < 0.2 && p.b < 0.5);
+        assert!(
+            has_green,
+            "circle CollisionShape2D should render green outline"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_rectangle() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("rectangle".to_string()));
+        node.set_property("shape_extents", Variant::Vector2(Vector2::new(40.0, 30.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // Should have green collision outline pixels.
+        let green_count = fb
+            .pixels
+            .iter()
+            .filter(|&&p| p.g > 0.5 && p.r < 0.2)
+            .count();
+        assert!(
+            green_count > 10,
+            "rectangle CollisionShape2D should render green outline, got {green_count}"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_capsule() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("capsule".to_string()));
+        node.set_property("shape_radius", Variant::Float(10.0));
+        node.set_property("shape_height", Variant::Float(40.0));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        let green_count = fb
+            .pixels
+            .iter()
+            .filter(|&&p| p.g > 0.5 && p.r < 0.2)
+            .count();
+        assert!(
+            green_count > 10,
+            "capsule CollisionShape2D should render green shape, got {green_count}"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_default_when_no_type() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        // No shape_type set — should fall back to default circle.
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        let has_green = fb
+            .pixels
+            .iter()
+            .any(|&p| p.g > 0.5 && p.r < 0.2 && p.b < 0.5);
+        assert!(
+            has_green,
+            "CollisionShape2D without shape_type should render default circle"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_selected_has_handles() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("circle".to_string()));
+        node.set_property("shape_radius", Variant::Float(30.0));
+        let shape_id = tree.add_child(root, node).unwrap();
+
+        let fb_no_sel = render_scene(&tree, None, 300, 300);
+        let fb_sel = render_scene(&tree, Some(shape_id), 300, 300);
+
+        // Selected version should have more colored pixels (handles + selection highlight).
+        let count_sel = fb_sel.pixels.iter().filter(|&&p| p != BG_COLOR).count();
+        let count_no_sel = fb_no_sel.pixels.iter().filter(|&&p| p != BG_COLOR).count();
+        assert!(
+            count_sel > count_no_sel,
+            "selected CollisionShape2D should have more rendered pixels (handles)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Physics body rendering tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_character_body_2d() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "CharacterBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // CharacterBody2D should render blue outline.
+        let has_blue = fb.pixels.iter().any(|&p| p.b > 0.5 && p.r < 0.5);
+        assert!(has_blue, "CharacterBody2D should render blue outline");
+    }
+
+    #[test]
+    fn render_rigid_body_2d() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ball", "RigidBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // RigidBody2D should render yellow outline + gravity arrow.
+        let has_yellow = fb
+            .pixels
+            .iter()
+            .any(|&p| p.r > 0.8 && p.g > 0.7 && p.b < 0.3);
+        assert!(has_yellow, "RigidBody2D should render yellow outline");
+    }
+
+    #[test]
+    fn render_static_body_2d() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ground", "StaticBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // StaticBody2D should render gray outline.
+        let has_gray = fb
+            .pixels
+            .iter()
+            .any(|&p| p.r > 0.4 && p.r < 0.6 && p.g > 0.4 && p.g < 0.6 && p.b > 0.4 && p.b < 0.6);
+        assert!(has_gray, "StaticBody2D should render gray outline");
+    }
+
+    #[test]
+    fn render_rigid_body_with_velocity_arrow() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ball", "RigidBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("velocity", Variant::Vector2(Vector2::new(50.0, 0.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        let yellow_count = fb
+            .pixels
+            .iter()
+            .filter(|&&p| p.r > 0.7 && p.g > 0.6 && p.b < 0.3)
+            .count();
+        // With velocity arrow there should be significantly more yellow pixels.
+        assert!(
+            yellow_count > 20,
+            "RigidBody2D with velocity should render arrow, got {yellow_count} yellow pixels"
+        );
+    }
 }

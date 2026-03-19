@@ -5668,4 +5668,291 @@ mod tests {
         state.clear_all_input();
         assert!(!state.is_action_pressed("ui_left"));
     }
+
+    // -----------------------------------------------------------------------
+    // Scene instancing endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_instance_scene_from_file() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Create a temp .tscn file.
+        let tscn_content = r#"
+[gd_scene format=3]
+
+[node name="Enemy" type="Node2D"]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+position = Vector2(10, 20)
+"#;
+        let dir = std::env::temp_dir().join("patina_test_instance");
+        let _ = std::fs::create_dir_all(&dir);
+        let tscn_path = dir.join("enemy.tscn");
+        std::fs::write(&tscn_path, tscn_content).unwrap();
+
+        let body = format!(
+            r#"{{"path":"{}","parent_id":{}}}"#,
+            tscn_path.to_string_lossy().replace('\\', "\\\\"),
+            main_id
+        );
+        let resp = http_post(port, "/api/scene/instance", &body);
+        assert!(resp.contains("200 OK"), "expected 200, got: {}", resp);
+        let resp_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(resp_body).unwrap();
+        assert!(
+            v["id"].as_u64().is_some(),
+            "should return instanced root id"
+        );
+
+        // Verify the instanced nodes appear in the tree.
+        let scene_resp = http_get(port, "/api/scene");
+        assert!(
+            scene_resp.contains("Enemy"),
+            "tree should contain Enemy node"
+        );
+        assert!(
+            scene_resp.contains("Sprite"),
+            "tree should contain Sprite node"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_instance_scene_undo() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let tscn_content = r#"
+[gd_scene format=3]
+
+[node name="Instanced" type="Node2D"]
+"#;
+        let dir = std::env::temp_dir().join("patina_test_instance_undo");
+        let _ = std::fs::create_dir_all(&dir);
+        let tscn_path = dir.join("simple.tscn");
+        std::fs::write(&tscn_path, tscn_content).unwrap();
+
+        let body = format!(
+            r#"{{"path":"{}","parent_id":{}}}"#,
+            tscn_path.to_string_lossy().replace('\\', "\\\\"),
+            main_id
+        );
+        let resp = http_post(port, "/api/scene/instance", &body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify node exists.
+        let scene_resp = http_get(port, "/api/scene");
+        assert!(scene_resp.contains("Instanced"));
+
+        // Undo should remove it.
+        let undo_resp = http_post(port, "/api/undo", "{}");
+        assert!(undo_resp.contains("200 OK"));
+
+        let scene_after = http_get(port, "/api/scene");
+        assert!(
+            !scene_after.contains("Instanced"),
+            "undo should remove instanced node"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_instance_scene_missing_file() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(
+            r#"{{"path":"/nonexistent/path/scene.tscn","parent_id":{}}}"#,
+            main_id
+        );
+        let resp = http_post(port, "/api/scene/instance", &body);
+        assert!(resp.contains("400"), "should return error for missing file");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_instance_scene_missing_parent() {
+        let (handle, port) = make_server();
+
+        let tscn_content = "[gd_scene format=3]\n\n[node name=\"X\" type=\"Node\"]\n";
+        let dir = std::env::temp_dir().join("patina_test_instance_noparent");
+        let _ = std::fs::create_dir_all(&dir);
+        let tscn_path = dir.join("x.tscn");
+        std::fs::write(&tscn_path, tscn_content).unwrap();
+
+        let body = format!(
+            r#"{{"path":"{}","parent_id":99999999}}"#,
+            tscn_path.to_string_lossy().replace('\\', "\\\\")
+        );
+        let resp = http_post(port, "/api/scene/instance", &body);
+        assert!(resp.contains("404"), "should return 404 for missing parent");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        handle.stop();
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape resize endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_shape_resize_radius() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a CollisionShape2D node.
+        let add_body = format!(
+            r#"{{"parent_id":{},"name":"Shape","class_name":"CollisionShape2D"}}"#,
+            main_id
+        );
+        let add_resp = http_post(port, "/api/node/add", &add_body);
+        let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let shape_id = add_json["id"].as_u64().unwrap();
+
+        // Resize radius.
+        let resize_body = format!(
+            r#"{{"node_id":{},"handle":"radius","value":42.0}}"#,
+            shape_id
+        );
+        let resp = http_post(port, "/api/viewport/shape_resize", &resize_body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify property was set.
+        let node_resp = http_get(port, &format!("/api/node/{}", shape_id));
+        let body = extract_body(&node_resp);
+        assert!(
+            body.contains("shape_radius"),
+            "should have shape_radius property"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_shape_resize_extents() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add_body = format!(
+            r#"{{"parent_id":{},"name":"RectShape","class_name":"CollisionShape2D"}}"#,
+            main_id
+        );
+        let add_resp = http_post(port, "/api/node/add", &add_body);
+        let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let shape_id = add_json["id"].as_u64().unwrap();
+
+        let resize_body = format!(
+            r#"{{"node_id":{},"handle":"extents","value":[30,20]}}"#,
+            shape_id
+        );
+        let resp = http_post(port, "/api/viewport/shape_resize", &resize_body);
+        assert!(resp.contains("200 OK"));
+
+        let node_resp = http_get(port, &format!("/api/node/{}", shape_id));
+        let body = extract_body(&node_resp);
+        assert!(
+            body.contains("shape_extents"),
+            "should have shape_extents property"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_shape_resize_undo() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add_body = format!(
+            r#"{{"parent_id":{},"name":"UndoShape","class_name":"CollisionShape2D"}}"#,
+            main_id
+        );
+        let add_resp = http_post(port, "/api/node/add", &add_body);
+        let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let shape_id = add_json["id"].as_u64().unwrap();
+
+        // Set radius.
+        let resize_body = format!(
+            r#"{{"node_id":{},"handle":"radius","value":50.0}}"#,
+            shape_id
+        );
+        http_post(port, "/api/viewport/shape_resize", &resize_body);
+
+        // Undo should revert.
+        let undo_resp = http_post(port, "/api/undo", "{}");
+        assert!(undo_resp.contains("200 OK"));
+
+        // The property should be reverted (Nil = not present in response or null).
+        let node_resp = http_get(port, &format!("/api/node/{}", shape_id));
+        let body = extract_body(&node_resp);
+        // After undo, shape_radius should not be set (reverted to Nil).
+        // The property list should either not contain shape_radius or show it as null.
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let props = v["properties"].as_array().unwrap();
+        let has_radius = props
+            .iter()
+            .any(|p| p["name"] == "shape_radius" && p["value"]["type"] != "Nil");
+        assert!(
+            !has_radius,
+            "after undo, shape_radius should be reverted to Nil"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_shape_resize_unknown_handle() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(
+            r#"{{"node_id":{},"handle":"invalid","value":10.0}}"#,
+            main_id
+        );
+        let resp = http_post(port, "/api/viewport/shape_resize", &body);
+        assert!(
+            resp.contains("400"),
+            "unknown handle should return 400 error"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_is_instance_flag_in_tree_json() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Create a temp .tscn file and instance it.
+        let tscn_content = "[gd_scene format=3]\n\n[node name=\"Sub\" type=\"Node2D\"]\n";
+        let dir = std::env::temp_dir().join("patina_test_is_instance");
+        let _ = std::fs::create_dir_all(&dir);
+        let tscn_path = dir.join("sub.tscn");
+        std::fs::write(&tscn_path, tscn_content).unwrap();
+
+        let body = format!(
+            r#"{{"path":"{}","parent_id":{}}}"#,
+            tscn_path.to_string_lossy().replace('\\', "\\\\"),
+            main_id
+        );
+        http_post(port, "/api/scene/instance", &body);
+
+        // Check that the tree JSON has is_instance=true for the instanced node.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        assert!(
+            scene_body.contains(r#""is_instance":true"#),
+            "instanced node should have is_instance=true"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        handle.stop();
+    }
 }

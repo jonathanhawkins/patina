@@ -1,0 +1,20 @@
+{
+	"children": [
+		{
+			"children": [],
+			"class": "Node",
+			"groups": [],
+			"name": "Root",
+			"owner": "/root",
+			"path": "/root/Root"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

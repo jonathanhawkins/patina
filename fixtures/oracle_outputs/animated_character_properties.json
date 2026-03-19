@@ -1,0 +1,177 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "AnimatedSprite2D",
+					"name": "AnimatedSprite",
+					"path": "/root/Character/AnimatedSprite",
+					"properties": {
+						"animation": {
+							"class_type": "",
+							"hint": 2,
+							"type": "StringName",
+							"value": ""
+						},
+						"autoplay": {
+							"class_type": "",
+							"hint": 0,
+							"type": "String",
+							"value": "idle"
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "AnimationPlayer",
+					"name": "AnimationPlayer",
+					"path": "/root/Character/AnimationPlayer",
+					"properties": {
+						"libraries/": {
+							"class_type": "AnimationLibrary",
+							"hint": 17,
+							"type": "Object",
+							"value": {
+								"_resource_class": "AnimationLibrary",
+								"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "Node",
+					"name": "StateMachine",
+					"path": "/root/Character/StateMachine",
+					"properties": {
+						"metadata/current_state": {
+							"class_type": "",
+							"hint": 0,
+							"type": "String",
+							"value": "idle"
+						},
+						"metadata/states": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Array",
+							"value": [
+								"idle",
+								"run",
+								"jump",
+								"fall"
+							]
+						}
+					}
+				}
+			],
+			"class": "Node2D",
+			"name": "Character",
+			"path": "/root/Character",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

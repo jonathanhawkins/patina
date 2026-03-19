@@ -777,4 +777,155 @@ mod tests {
             Variant::Int(2)
         );
     }
+
+    // -----------------------------------------------------------------------
+    // InstanceScene command tests
+    // -----------------------------------------------------------------------
+
+    const INSTANCE_TSCN: &str = r#"
+[gd_scene format=3]
+
+[node name="Enemy" type="Node2D"]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+position = Vector2(10, 20)
+"#;
+
+    #[test]
+    fn instance_scene_adds_nodes() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let before = editor.tree().node_count();
+
+        editor
+            .execute(EditorCommand::InstanceScene {
+                parent_id: main_id,
+                tscn_source: INSTANCE_TSCN.to_string(),
+                created_ids: Vec::new(),
+                root_id: None,
+            })
+            .unwrap();
+
+        // Should have added 2 nodes (Enemy + Sprite).
+        assert_eq!(editor.tree().node_count(), before + 2);
+    }
+
+    #[test]
+    fn instance_scene_returns_root_id() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        let mut cmd = EditorCommand::InstanceScene {
+            parent_id: main_id,
+            tscn_source: INSTANCE_TSCN.to_string(),
+            created_ids: Vec::new(),
+            root_id: None,
+        };
+        cmd.execute(editor.tree_mut()).unwrap();
+
+        let root_id = match &cmd {
+            EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
+            _ => unreachable!(),
+        };
+
+        let node = editor.tree().get_node(root_id).unwrap();
+        assert_eq!(node.name(), "Enemy");
+        assert_eq!(node.class_name(), "Node2D");
+        assert_eq!(
+            node.get_property("_instance_source"),
+            Variant::String("instanced".to_string())
+        );
+    }
+
+    #[test]
+    fn instance_scene_undo_removes_nodes() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let before = editor.tree().node_count();
+
+        editor
+            .execute(EditorCommand::InstanceScene {
+                parent_id: main_id,
+                tscn_source: INSTANCE_TSCN.to_string(),
+                created_ids: Vec::new(),
+                root_id: None,
+            })
+            .unwrap();
+
+        assert_eq!(editor.tree().node_count(), before + 2);
+
+        editor.undo().unwrap();
+        assert_eq!(editor.tree().node_count(), before);
+    }
+
+    #[test]
+    fn instance_scene_redo_restores_nodes() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let before = editor.tree().node_count();
+
+        editor
+            .execute(EditorCommand::InstanceScene {
+                parent_id: main_id,
+                tscn_source: INSTANCE_TSCN.to_string(),
+                created_ids: Vec::new(),
+                root_id: None,
+            })
+            .unwrap();
+
+        editor.undo().unwrap();
+        assert_eq!(editor.tree().node_count(), before);
+
+        editor.redo().unwrap();
+        assert_eq!(editor.tree().node_count(), before + 2);
+    }
+
+    #[test]
+    fn instance_scene_invalid_tscn_fails() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        let result = editor.execute(EditorCommand::InstanceScene {
+            parent_id: main_id,
+            tscn_source: "not valid tscn".to_string(),
+            created_ids: Vec::new(),
+            root_id: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn instance_scene_hierarchy_correct() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        let mut cmd = EditorCommand::InstanceScene {
+            parent_id: main_id,
+            tscn_source: INSTANCE_TSCN.to_string(),
+            created_ids: Vec::new(),
+            root_id: None,
+        };
+        cmd.execute(editor.tree_mut()).unwrap();
+
+        let enemy_id = match &cmd {
+            EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
+            _ => unreachable!(),
+        };
+
+        // Enemy should be a child of Main.
+        let enemy = editor.tree().get_node(enemy_id).unwrap();
+        assert_eq!(enemy.parent(), Some(main_id));
+
+        // Sprite should be a child of Enemy.
+        let sprite_id = enemy.children()[0];
+        let sprite = editor.tree().get_node(sprite_id).unwrap();
+        assert_eq!(sprite.name(), "Sprite");
+        assert_eq!(sprite.parent(), Some(enemy_id));
+    }
 }

@@ -1,0 +1,55 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Background",
+					"owner": "/root/SpaceShooter",
+					"path": "/root/SpaceShooter/Background"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Player",
+					"owner": "/root/SpaceShooter",
+					"path": "/root/SpaceShooter/Player"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "EnemySpawner",
+					"owner": "/root/SpaceShooter",
+					"path": "/root/SpaceShooter/EnemySpawner"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "ScoreLabel",
+					"owner": "/root/SpaceShooter",
+					"path": "/root/SpaceShooter/ScoreLabel"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "SpaceShooter",
+			"owner": "/root",
+			"path": "/root/SpaceShooter"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

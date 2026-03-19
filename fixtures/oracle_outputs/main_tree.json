@@ -1,0 +1,48 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Player",
+					"owner": "/root/World",
+					"path": "/root/World/Player",
+					"script": "res://scripts/player.gd"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Enemy",
+					"owner": "/root/World",
+					"path": "/root/World/Enemy"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Ground",
+					"owner": "/root/World",
+					"path": "/root/World/Ground"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "World",
+			"owner": "/root",
+			"path": "/root/World"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

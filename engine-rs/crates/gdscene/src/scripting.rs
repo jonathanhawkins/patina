@@ -262,7 +262,7 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn emit_signal(&mut self, node: u64, signal: &str, args: &[Variant]) {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
-        self.tree_mut().signal_store_mut(nid).emit(signal, args);
+        self.tree_mut().emit_signal(nid, signal, args);
     }
 
     fn connect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str) {
@@ -2099,6 +2099,819 @@ func _process(delta):
         assert_eq!(
             tree.get_script(id2).unwrap().get_property("count"),
             Some(Variant::Int(4))
+        );
+    }
+
+    #[test]
+    fn process_callbacks_follow_tree_order() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root)
+            .unwrap()
+            .set_property("counter", Variant::Int(0));
+
+        let first = Node::new("First", "Node2D");
+        let first_id = tree.add_child(root, first).unwrap();
+        let second = Node::new("Second", "Node2D");
+        let second_id = tree.add_child(root, second).unwrap();
+
+        let script_src = "\
+extends Node2D
+var seen_order = 0
+func _process(delta):
+    var parent = get_parent()
+    parent.counter = parent.counter + 1
+    self.seen_order = parent.counter
+";
+        let first_script = GDScriptNodeInstance::from_source(script_src, first_id).unwrap();
+        let second_script = GDScriptNodeInstance::from_source(script_src, second_id).unwrap();
+        tree.attach_script(first_id, Box::new(first_script));
+        tree.attach_script(second_id, Box::new(second_script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        assert_eq!(
+            tree.get_script(first_id)
+                .unwrap()
+                .get_property("seen_order"),
+            Some(Variant::Int(1))
+        );
+        assert_eq!(
+            tree.get_script(second_id)
+                .unwrap()
+                .get_property("seen_order"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn physics_process_callbacks_follow_tree_order() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root)
+            .unwrap()
+            .set_property("counter", Variant::Int(0));
+
+        let first = Node::new("First", "Node2D");
+        let first_id = tree.add_child(root, first).unwrap();
+        let second = Node::new("Second", "Node2D");
+        let second_id = tree.add_child(root, second).unwrap();
+
+        let script_src = "\
+extends Node2D
+var seen_order = 0
+func _physics_process(delta):
+    var parent = get_parent()
+    parent.counter = parent.counter + 1
+    self.seen_order = parent.counter
+";
+        let first_script = GDScriptNodeInstance::from_source(script_src, first_id).unwrap();
+        let second_script = GDScriptNodeInstance::from_source(script_src, second_id).unwrap();
+        tree.attach_script(first_id, Box::new(first_script));
+        tree.attach_script(second_id, Box::new(second_script));
+
+        tree.process_all_scripts_physics_process(1.0 / 60.0);
+
+        assert_eq!(
+            tree.get_script(first_id)
+                .unwrap()
+                .get_property("seen_order"),
+            Some(Variant::Int(1))
+        );
+        assert_eq!(
+            tree.get_script(second_id)
+                .unwrap()
+                .get_property("seen_order"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scene-aware signal dispatch tests (Bead B005)
+    // -----------------------------------------------------------------------
+
+    /// Signal connect and emit across two nodes: Emitter emits, Listener
+    /// receives via script method dispatch.
+    #[test]
+    fn signal_cross_node_emit_dispatches_to_target_script() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        // Listener has a script with an _on_hit method.
+        let listener_script = "\
+extends Node2D
+var got_hit = false
+func _on_hit():
+    self.got_hit = true
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        // Wire: Emitter.hit -> Listener._on_hit (no callback, just target+method).
+        tree.connect_signal(
+            emitter_id,
+            "hit",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_hit"),
+        );
+
+        // Emit the signal.
+        tree.emit_signal(emitter_id, "hit", &[]);
+
+        // Listener's script should have been called.
+        assert_eq!(
+            tree.get_script(listener_id)
+                .unwrap()
+                .get_property("got_hit"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Signal from .tscn [connection] fires on instancing.
+    #[test]
+    fn tscn_connection_dispatches_to_script_on_emit() {
+        let tscn = "\
+[gd_scene format=3]
+
+[node name=\"Root\" type=\"Node\"]
+
+[node name=\"Emitter\" type=\"Node2D\" parent=\".\"]
+
+[node name=\"Listener\" type=\"Node2D\" parent=\".\"]
+
+[connection signal=\"fired\" from=\"Emitter\" to=\"Listener\" method=\"_on_fired\"]
+";
+        let scene = crate::packed_scene::PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root =
+            crate::packed_scene::add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let emitter_id = tree.get_node_by_path("/root/Root/Emitter").unwrap();
+        let listener_id = tree.get_node_by_path("/root/Root/Listener").unwrap();
+
+        // Attach a script to the listener.
+        let listener_script = "\
+extends Node2D
+var received = false
+func _on_fired():
+    self.received = true
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        // Emit from Emitter.
+        tree.emit_signal(emitter_id, "fired", &[]);
+
+        assert_eq!(
+            tree.get_script(listener_id)
+                .unwrap()
+                .get_property("received"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Signal with arguments passed correctly to target script method.
+    #[test]
+    fn signal_args_passed_to_target_script() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        let listener_script = "\
+extends Node2D
+var damage_amount = 0
+func _on_damage(amount):
+    self.damage_amount = amount
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        tree.connect_signal(
+            emitter_id,
+            "damage",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_damage"),
+        );
+
+        tree.emit_signal(emitter_id, "damage", &[Variant::Int(42)]);
+
+        assert_eq!(
+            tree.get_script(listener_id)
+                .unwrap()
+                .get_property("damage_amount"),
+            Some(Variant::Int(42))
+        );
+    }
+
+    /// Multiple connections on the same signal all fire.
+    #[test]
+    fn signal_multiple_connections_all_fire() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener_a = Node::new("A", "Node2D");
+        let a_id = tree.add_child(root, listener_a).unwrap();
+        let listener_b = Node::new("B", "Node2D");
+        let b_id = tree.add_child(root, listener_b).unwrap();
+
+        let script_a = "\
+extends Node2D
+var heard = false
+func _on_ping():
+    self.heard = true
+";
+        let script_b = "\
+extends Node2D
+var heard = false
+func _on_ping():
+    self.heard = true
+";
+        let sa = GDScriptNodeInstance::from_source(script_a, a_id).unwrap();
+        let sb = GDScriptNodeInstance::from_source(script_b, b_id).unwrap();
+        tree.attach_script(a_id, Box::new(sa));
+        tree.attach_script(b_id, Box::new(sb));
+
+        tree.connect_signal(
+            emitter_id,
+            "ping",
+            gdobject::signal::Connection::new(a_id.object_id(), "_on_ping"),
+        );
+        tree.connect_signal(
+            emitter_id,
+            "ping",
+            gdobject::signal::Connection::new(b_id.object_id(), "_on_ping"),
+        );
+
+        tree.emit_signal(emitter_id, "ping", &[]);
+
+        assert_eq!(
+            tree.get_script(a_id).unwrap().get_property("heard"),
+            Some(Variant::Bool(true))
+        );
+        assert_eq!(
+            tree.get_script(b_id).unwrap().get_property("heard"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Disconnect removes the connection so it no longer fires.
+    #[test]
+    fn signal_disconnect_stops_dispatch() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        let listener_script = "\
+extends Node2D
+var count = 0
+func _on_tick():
+    self.count = self.count + 1
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        tree.connect_signal(
+            emitter_id,
+            "tick",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_tick"),
+        );
+
+        // Emit once — should increment.
+        tree.emit_signal(emitter_id, "tick", &[]);
+        assert_eq!(
+            tree.get_script(listener_id).unwrap().get_property("count"),
+            Some(Variant::Int(1))
+        );
+
+        // Disconnect.
+        tree.signal_store_mut(emitter_id)
+            .disconnect("tick", listener_id.object_id(), "_on_tick");
+
+        // Emit again — should NOT increment.
+        tree.emit_signal(emitter_id, "tick", &[]);
+        assert_eq!(
+            tree.get_script(listener_id).unwrap().get_property("count"),
+            Some(Variant::Int(1))
+        );
+    }
+
+    /// Signal from parent to child dispatches correctly.
+    #[test]
+    fn signal_parent_to_child() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let parent = Node::new("Parent", "Node2D");
+        let parent_id = tree.add_child(root, parent).unwrap();
+        let child = Node::new("Child", "Node2D");
+        let child_id = tree.add_child(parent_id, child).unwrap();
+
+        let child_script = "\
+extends Node2D
+var notified = false
+func _on_parent_event():
+    self.notified = true
+";
+        let cs = GDScriptNodeInstance::from_source(child_script, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(cs));
+
+        tree.connect_signal(
+            parent_id,
+            "parent_event",
+            gdobject::signal::Connection::new(child_id.object_id(), "_on_parent_event"),
+        );
+
+        tree.emit_signal(parent_id, "parent_event", &[]);
+
+        assert_eq!(
+            tree.get_script(child_id).unwrap().get_property("notified"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Signal from child to parent dispatches correctly.
+    #[test]
+    fn signal_child_to_parent() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let parent = Node::new("Parent", "Node2D");
+        let parent_id = tree.add_child(root, parent).unwrap();
+        let child = Node::new("Child", "Node2D");
+        let child_id = tree.add_child(parent_id, child).unwrap();
+
+        let parent_script = "\
+extends Node2D
+var child_done = false
+func _on_child_done():
+    self.child_done = true
+";
+        let ps = GDScriptNodeInstance::from_source(parent_script, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(ps));
+
+        tree.connect_signal(
+            child_id,
+            "done",
+            gdobject::signal::Connection::new(parent_id.object_id(), "_on_child_done"),
+        );
+
+        tree.emit_signal(child_id, "done", &[]);
+
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("child_done"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// emit_signal from GDScript fires cross-node.
+    #[test]
+    fn emit_signal_from_gdscript_fires_cross_node() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        // Listener script receives the signal.
+        let listener_script = "\
+extends Node2D
+var received = false
+func _on_boom():
+    self.received = true
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        // Wire the connection (no callback, script dispatch).
+        tree.connect_signal(
+            emitter_id,
+            "boom",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_boom"),
+        );
+
+        // Emitter script calls emit_signal("boom").
+        let emitter_script = "\
+extends Node2D
+func _ready():
+    emit_signal(\"boom\")
+";
+        let es = GDScriptNodeInstance::from_source(emitter_script, emitter_id).unwrap();
+        tree.attach_script(emitter_id, Box::new(es));
+        LifecycleManager::enter_tree(&mut tree, emitter_id);
+
+        assert_eq!(
+            tree.get_script(listener_id)
+                .unwrap()
+                .get_property("received"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// connect() from GDScript _ready wires a working connection that
+    /// dispatches to the target script when emitted.
+    #[test]
+    fn connect_from_gdscript_ready_then_emit() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let parent = Node::new("Parent", "Node2D");
+        let parent_id = tree.add_child(root, parent).unwrap();
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(parent_id, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(parent_id, listener).unwrap();
+
+        // Listener has the target method.
+        let listener_script = "\
+extends Node2D
+var received = false
+func _on_signal_from_emitter():
+    self.received = true
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        // Emitter's script connects signal via obj.connect() in _ready.
+        // In GDScript: `self_node.connect(signal, target, method)`.
+        // Since bare connect() is a method on ObjectId, we use
+        // `get_parent().get_node("Emitter").connect(...)`.
+        let emitter_script = "\
+extends Node2D
+func _ready():
+    var p = get_parent()
+    var me = p.get_node(\"Emitter\")
+    var listener = p.get_node(\"Listener\")
+    me.connect(\"my_signal\", listener, \"_on_signal_from_emitter\")
+func _process(delta):
+    emit_signal(\"my_signal\")
+";
+        let es = GDScriptNodeInstance::from_source(emitter_script, emitter_id).unwrap();
+        tree.attach_script(emitter_id, Box::new(es));
+
+        // _ready wires the connection.
+        LifecycleManager::enter_tree(&mut tree, emitter_id);
+
+        // Verify connection is registered.
+        let store = tree.signal_store(emitter_id).unwrap();
+        assert!(store.has_signal("my_signal"));
+
+        // _process emits the signal.
+        tree.process_script_process(emitter_id, 0.016);
+
+        assert_eq!(
+            tree.get_script(listener_id)
+                .unwrap()
+                .get_property("received"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Signal from .tscn [connection] between siblings.
+    #[test]
+    fn tscn_connection_sibling_signal() {
+        let tscn = "\
+[gd_scene format=3]
+
+[node name=\"Root\" type=\"Node\"]
+
+[node name=\"Button\" type=\"Node2D\" parent=\".\"]
+
+[node name=\"Display\" type=\"Node2D\" parent=\".\"]
+
+[connection signal=\"pressed\" from=\"Button\" to=\"Display\" method=\"_on_button_pressed\"]
+";
+        let scene = crate::packed_scene::PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        crate::packed_scene::add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let button_id = tree.get_node_by_path("/root/Root/Button").unwrap();
+        let display_id = tree.get_node_by_path("/root/Root/Display").unwrap();
+
+        let display_script = "\
+extends Node2D
+var pressed_count = 0
+func _on_button_pressed():
+    self.pressed_count = self.pressed_count + 1
+";
+        let ds = GDScriptNodeInstance::from_source(display_script, display_id).unwrap();
+        tree.attach_script(display_id, Box::new(ds));
+
+        // Emit twice.
+        tree.emit_signal(button_id, "pressed", &[]);
+        tree.emit_signal(button_id, "pressed", &[]);
+
+        assert_eq!(
+            tree.get_script(display_id)
+                .unwrap()
+                .get_property("pressed_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    /// Both callback and script connections fire for the same signal.
+    #[test]
+    fn signal_callback_and_script_both_fire() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        let listener_script = "\
+extends Node2D
+var script_fired = false
+func _on_event():
+    self.script_fired = true
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        // Script-dispatched connection (no callback).
+        tree.connect_signal(
+            emitter_id,
+            "event",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_event"),
+        );
+
+        // Callback-based connection.
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let cc = callback_count.clone();
+        tree.connect_signal(
+            emitter_id,
+            "event",
+            gdobject::signal::Connection::with_callback(
+                listener_id.object_id(),
+                "_callback",
+                move |_| {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    Variant::Nil
+                },
+            ),
+        );
+
+        tree.emit_signal(emitter_id, "event", &[]);
+
+        // Both should have fired.
+        assert_eq!(
+            tree.get_script(listener_id)
+                .unwrap()
+                .get_property("script_fired"),
+            Some(Variant::Bool(true))
+        );
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Emit signal with no connections is a no-op (no crash).
+    #[test]
+    fn signal_emit_no_connections_no_crash() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = Node::new("Lonely", "Node2D");
+        let node_id = tree.add_child(root, node).unwrap();
+
+        let results = tree.emit_signal(node_id, "nonexistent_signal", &[]);
+        assert!(results.is_empty());
+    }
+
+    /// Signal with multiple arguments dispatches all args.
+    #[test]
+    fn signal_multiple_args_dispatched() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        let listener_script = "\
+extends Node2D
+var total = 0
+func _on_data(a, b):
+    self.total = a + b
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        tree.connect_signal(
+            emitter_id,
+            "data",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_data"),
+        );
+
+        tree.emit_signal(emitter_id, "data", &[Variant::Int(10), Variant::Int(32)]);
+
+        assert_eq!(
+            tree.get_script(listener_id).unwrap().get_property("total"),
+            Some(Variant::Int(42))
+        );
+    }
+
+    /// Signal dispatches to a node 3 levels deep in the tree.
+    #[test]
+    fn signal_deep_hierarchy_dispatch() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let a = Node::new("A", "Node");
+        let a_id = tree.add_child(root, a).unwrap();
+        let b = Node::new("B", "Node");
+        let b_id = tree.add_child(a_id, b).unwrap();
+        let c = Node::new("C", "Node2D");
+        let c_id = tree.add_child(b_id, c).unwrap();
+
+        let c_script = "\
+extends Node2D
+var pinged = false
+func _on_ping():
+    self.pinged = true
+";
+        let cs = GDScriptNodeInstance::from_source(c_script, c_id).unwrap();
+        tree.attach_script(c_id, Box::new(cs));
+
+        // Signal on root dispatches to deeply nested node C.
+        tree.connect_signal(
+            root,
+            "ping",
+            gdobject::signal::Connection::new(c_id.object_id(), "_on_ping"),
+        );
+        tree.emit_signal(root, "ping", &[]);
+
+        assert_eq!(
+            tree.get_script(c_id).unwrap().get_property("pinged"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Signal fires multiple times, accumulating state in target script.
+    #[test]
+    fn signal_fires_multiple_times_accumulates() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        let listener_script = "\
+extends Node2D
+var count = 0
+func _on_tick():
+    self.count = self.count + 1
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        tree.connect_signal(
+            emitter_id,
+            "tick",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_tick"),
+        );
+
+        for _ in 0..5 {
+            tree.emit_signal(emitter_id, "tick", &[]);
+        }
+
+        assert_eq!(
+            tree.get_script(listener_id).unwrap().get_property("count"),
+            Some(Variant::Int(5))
+        );
+    }
+
+    /// Signal to node without script (no crash, graceful no-op).
+    #[test]
+    fn signal_to_node_without_script_no_crash() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let target = Node::new("Target", "Node2D");
+        let target_id = tree.add_child(root, target).unwrap();
+
+        // Connect but target has no script.
+        tree.connect_signal(
+            emitter_id,
+            "boom",
+            gdobject::signal::Connection::new(target_id.object_id(), "_on_boom"),
+        );
+
+        // Should not crash. The callback-less connection returns Nil.
+        let results = tree.emit_signal(emitter_id, "boom", &[]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], Variant::Nil);
+    }
+
+    /// Full .tscn signal test: Emitter emits signal, Listener receives.
+    #[test]
+    fn tscn_full_signal_test_emitter_listener() {
+        let tscn = "\
+[gd_scene format=3]
+
+[node name=\"Game\" type=\"Node\"]
+
+[node name=\"Emitter\" type=\"Node2D\" parent=\".\"]
+
+[node name=\"Listener\" type=\"Node2D\" parent=\".\"]
+
+[connection signal=\"game_over\" from=\"Emitter\" to=\"Listener\" method=\"_on_game_over\"]
+";
+        let scene = crate::packed_scene::PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        crate::packed_scene::add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let emitter_id = tree.get_node_by_path("/root/Game/Emitter").unwrap();
+        let listener_id = tree.get_node_by_path("/root/Game/Listener").unwrap();
+
+        // Emitter script emits in _ready.
+        let emitter_script = "\
+extends Node2D
+func _ready():
+    emit_signal(\"game_over\")
+";
+        let es = GDScriptNodeInstance::from_source(emitter_script, emitter_id).unwrap();
+        tree.attach_script(emitter_id, Box::new(es));
+
+        // Listener script handles the signal.
+        let listener_script = "\
+extends Node2D
+var game_ended = false
+func _on_game_over():
+    self.game_ended = true
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        // Fire _ready on emitter — this calls emit_signal("game_over")
+        // which should dispatch to listener's script.
+        LifecycleManager::enter_tree(&mut tree, emitter_id);
+
+        assert_eq!(
+            tree.get_script(listener_id)
+                .unwrap()
+                .get_property("game_ended"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Signal with string argument dispatched correctly.
+    #[test]
+    fn signal_string_arg_dispatched() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let emitter = Node::new("Emitter", "Node2D");
+        let emitter_id = tree.add_child(root, emitter).unwrap();
+        let listener = Node::new("Listener", "Node2D");
+        let listener_id = tree.add_child(root, listener).unwrap();
+
+        let listener_script = "\
+extends Node2D
+var msg = \"\"
+func _on_message(text):
+    self.msg = text
+";
+        let ls = GDScriptNodeInstance::from_source(listener_script, listener_id).unwrap();
+        tree.attach_script(listener_id, Box::new(ls));
+
+        tree.connect_signal(
+            emitter_id,
+            "message",
+            gdobject::signal::Connection::new(listener_id.object_id(), "_on_message"),
+        );
+
+        tree.emit_signal(emitter_id, "message", &[Variant::String("hello".into())]);
+
+        assert_eq!(
+            tree.get_script(listener_id).unwrap().get_property("msg"),
+            Some(Variant::String("hello".into()))
         );
     }
 }

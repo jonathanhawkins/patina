@@ -1,0 +1,83 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Player",
+					"owner": "/root/World",
+					"path": "/root/World/Player"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Platform1",
+					"owner": "/root/World",
+					"path": "/root/World/Platform1"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Platform2",
+					"owner": "/root/World",
+					"path": "/root/World/Platform2"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Platform3",
+					"owner": "/root/World",
+					"path": "/root/World/Platform3"
+				},
+				{
+					"children": [],
+					"class": "Camera2D",
+					"groups": [
+						"_root_canvas77309411328",
+						"__cameras_81604378624",
+						"__cameras_c77309411328"
+					],
+					"name": "Camera",
+					"owner": "/root/World",
+					"path": "/root/World/Camera"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Collectible",
+					"owner": "/root/World",
+					"path": "/root/World/Collectible"
+				}
+			],
+			"class": "Node",
+			"groups": [],
+			"name": "World",
+			"owner": "/root",
+			"path": "/root/World"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

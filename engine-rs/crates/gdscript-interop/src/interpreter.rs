@@ -1918,6 +1918,22 @@ impl Interpreter {
                     )))
                 }
             }
+            "deg_to_rad" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "deg_to_rad() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.to_radians())))
+            }
+            "rad_to_deg" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "rad_to_deg() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Float(to_float(&args[0])?.to_degrees())))
+            }
             "Vector2" => {
                 if args.len() != 2 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(

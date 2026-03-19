@@ -41,6 +41,8 @@ impl fmt::Display for Notification {
             26 => "DRAG_BEGIN",
             27 => "DRAG_END",
             30 => "DRAW",
+            35 => "INTERNAL_PROCESS",
+            36 => "INTERNAL_PHYSICS_PROCESS",
             _ => return write!(f, "Notification({})", self.0),
         };
         write!(f, "NOTIFICATION_{name}")
@@ -96,6 +98,12 @@ pub const NOTIFICATION_DRAG_END: Notification = Notification::new(27);
 
 /// Request to draw (2D).
 pub const NOTIFICATION_DRAW: Notification = Notification::new(30);
+
+/// Called every frame for internal engine processing (before user `_process`).
+pub const NOTIFICATION_INTERNAL_PROCESS: Notification = Notification::new(35);
+
+/// Called every physics tick for internal engine processing (before user `_physics_process`).
+pub const NOTIFICATION_INTERNAL_PHYSICS_PROCESS: Notification = Notification::new(36);
 
 /// Trait for types that can receive and handle notifications.
 ///

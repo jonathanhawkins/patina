@@ -90,6 +90,10 @@ pub struct Node {
     owner: Option<NodeId>,
     /// Whether this node has a scene-unique name (the `%` prefix in Godot).
     unique_name: bool,
+    /// Whether this node is currently inside the active scene tree.
+    inside_tree: bool,
+    /// Whether this node has completed its ready phase.
+    ready: bool,
 }
 
 impl Node {
@@ -106,6 +110,8 @@ impl Node {
             notification_log: Vec::new(),
             owner: None,
             unique_name: false,
+            inside_tree: false,
+            ready: false,
         }
     }
 
@@ -122,6 +128,8 @@ impl Node {
             notification_log: Vec::new(),
             owner: None,
             unique_name: false,
+            inside_tree: false,
+            ready: false,
         }
     }
 
@@ -254,6 +262,26 @@ impl Node {
         self.unique_name = unique;
     }
 
+    /// Returns whether this node is currently inside the active scene tree.
+    pub fn is_inside_tree(&self) -> bool {
+        self.inside_tree
+    }
+
+    /// Marks whether this node is currently inside the active scene tree.
+    pub(crate) fn set_inside_tree(&mut self, inside_tree: bool) {
+        self.inside_tree = inside_tree;
+    }
+
+    /// Returns whether this node has completed its ready phase.
+    pub fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// Marks whether this node has completed its ready phase.
+    pub(crate) fn set_ready(&mut self, ready: bool) {
+        self.ready = ready;
+    }
+
     // -- notifications ------------------------------------------------------
 
     /// Records a notification (called by lifecycle manager).
@@ -379,6 +407,13 @@ mod tests {
         assert_eq!(log[0], gdobject::NOTIFICATION_ENTER_TREE);
         assert_eq!(log[1], gdobject::NOTIFICATION_READY);
         assert_eq!(log[2], gdobject::NOTIFICATION_EXIT_TREE);
+    }
+
+    #[test]
+    fn node_tree_state_flags_default_false() {
+        let node = Node::new("N", "Node");
+        assert!(!node.is_inside_tree());
+        assert!(!node.is_ready());
     }
 
     #[test]

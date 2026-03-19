@@ -38,6 +38,8 @@ struct Args {
     frames: u64,
     /// Delta time per frame in seconds (default 1/60).
     delta: f64,
+    /// Whether to emit a per-frame trace of tree state.
+    trace_frames: bool,
 }
 
 /// Parses command-line arguments manually (no extra dependency).
@@ -54,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
     let scene_path = args[1].clone();
     let mut frames: u64 = 10;
     let mut delta: f64 = 1.0 / 60.0;
+    let mut trace_frames = false;
 
     let mut i = 2;
     while i < args.len() {
@@ -74,6 +77,9 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("invalid --delta value: {e}"))?;
             }
+            "--trace-frames" => {
+                trace_frames = true;
+            }
             other => {
                 return Err(format!("unknown argument: {other}"));
             }
@@ -85,6 +91,7 @@ fn parse_args() -> Result<Args, String> {
         scene_path,
         frames,
         delta,
+        trace_frames,
     })
 }
 
@@ -204,6 +211,25 @@ fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
     project_dir.join(relative)
 }
 
+fn run_main_loop(
+    main_loop: &mut MainLoop,
+    frames: u64,
+    delta: f64,
+    trace_frames: bool,
+) -> Vec<Value> {
+    let mut frame_trace = Vec::new();
+    for _ in 0..frames {
+        main_loop.step(delta);
+        if trace_frames {
+            frame_trace.push(json!({
+                "frame": main_loop.frame_count(),
+                "tree": dump_tree_json(main_loop.tree()),
+            }));
+        }
+    }
+    frame_trace
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -271,7 +297,7 @@ fn main() {
 
     // Create the main loop and run frames.
     let mut main_loop = MainLoop::new(tree);
-    main_loop.run_frames(args.frames, args.delta);
+    let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
 
     tracing::info!(
         frame_count = main_loop.frame_count(),
@@ -288,6 +314,13 @@ fn main() {
         "process_time": main_loop.process_time(),
         "tree": dump_tree_json(main_loop.tree()),
     });
+    let output = if args.trace_frames {
+        let mut output = output;
+        output["frame_trace"] = Value::Array(frame_trace);
+        output
+    } else {
+        output
+    };
 
     println!(
         "{}",
@@ -371,5 +404,21 @@ func _ready():
         // Both script_vars and properties should have speed=300
         assert_eq!(player["script_vars"]["speed"]["value"], json!(300));
         assert_eq!(player["properties"]["speed"]["value"], json!(300));
+    }
+
+    #[test]
+    fn run_main_loop_with_trace_captures_every_frame() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Child", "Node");
+        tree.add_child(root, child).unwrap();
+
+        let mut main_loop = MainLoop::new(tree);
+        let trace = run_main_loop(&mut main_loop, 2, 1.0 / 60.0, true);
+
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0]["frame"], json!(1));
+        assert_eq!(trace[1]["frame"], json!(2));
+        assert_eq!(trace[0]["tree"]["children"][0]["name"], json!("Child"));
     }
 }

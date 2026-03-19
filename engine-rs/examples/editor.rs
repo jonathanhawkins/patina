@@ -149,6 +149,7 @@ fn main() {
                     tree.process_frame();
                 }
                 state.runtime_frame_count += 1;
+                state.clear_frame_input();
             }
             let fb = {
                 let state = handle.state().lock().unwrap();

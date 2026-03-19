@@ -35,6 +35,7 @@ impl LifecycleManager {
 
         for &id in &top_down {
             if let Some(node) = tree.get_node_mut(id) {
+                node.set_inside_tree(true);
                 node.receive_notification(NOTIFICATION_ENTER_TREE);
             }
             tree.process_script_enter_tree(id);
@@ -46,6 +47,7 @@ impl LifecycleManager {
 
         for &id in &bottom_up {
             if let Some(node) = tree.get_node_mut(id) {
+                node.set_ready(true);
                 node.receive_notification(NOTIFICATION_READY);
             }
             tree.process_script_ready(id);
@@ -62,6 +64,8 @@ impl LifecycleManager {
 
         for &id in &bottom_up {
             if let Some(node) = tree.get_node_mut(id) {
+                node.set_ready(false);
+                node.set_inside_tree(false);
                 node.receive_notification(NOTIFICATION_EXIT_TREE);
             }
             tree.process_script_exit_tree(id);
@@ -207,6 +211,8 @@ mod tests {
         assert_eq!(log.len(), 2);
         assert_eq!(log[0], NOTIFICATION_ENTER_TREE);
         assert_eq!(log[1], NOTIFICATION_READY);
+        assert!(tree.get_node(leaf_id).unwrap().is_inside_tree());
+        assert!(tree.get_node(leaf_id).unwrap().is_ready());
     }
 
     #[test]
@@ -254,5 +260,7 @@ mod tests {
                 NOTIFICATION_EXIT_TREE,
             ]
         );
+        assert!(!tree.get_node(child1_id).unwrap().is_inside_tree());
+        assert!(!tree.get_node(child1_id).unwrap().is_ready());
     }
 }

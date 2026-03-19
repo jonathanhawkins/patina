@@ -1,0 +1,68 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Node2D",
+							"groups": [],
+							"name": "TriggerZone",
+							"owner": "/root/Root",
+							"path": "/root/Root/Player/TriggerZone"
+						}
+					],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Player",
+					"owner": "/root/Root",
+					"path": "/root/Root/Player"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Enemy",
+					"owner": "/root/Root",
+					"path": "/root/Root/Enemy"
+				},
+				{
+					"children": [],
+					"class": "Node",
+					"groups": [],
+					"name": "HUD",
+					"owner": "/root/Root",
+					"path": "/root/Root/HUD"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "ItemDrop",
+					"owner": "/root/Root",
+					"path": "/root/Root/ItemDrop"
+				}
+			],
+			"class": "Node",
+			"groups": [],
+			"name": "Root",
+			"owner": "/root",
+			"path": "/root/Root"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}
