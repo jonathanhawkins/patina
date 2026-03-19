@@ -142,6 +142,12 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 #viewport-placeholder {
   color: var(--text-dim); font-size: 14px; text-align: center;
 }
+#viewport-placeholder .loading-spinner {
+  display: inline-block; width: 24px; height: 24px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%; animation: vp-spin 0.8s linear infinite;
+  margin-bottom: 8px;
+}
+@keyframes vp-spin { to { transform: rotate(360deg); } }
 
 /* Inspector panel */
 #inspector-panel {
@@ -413,6 +419,32 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #444; }
 
+/* Help dialog */
+#help-dialog {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.6); z-index: 300; align-items: center; justify-content: center;
+}
+#help-dialog.open { display: flex; }
+#help-dialog-inner {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  width: 520px; max-height: 80vh; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+#help-dialog-header {
+  padding: 10px 14px; font-weight: bold; font-size: 13px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+#help-dialog-header button {
+  background: transparent; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; padding: 0 4px;
+}
+#help-dialog-header button:hover { color: var(--text); background: transparent; border: none; }
+#help-dialog-body { overflow: auto; padding: 10px 14px; }
+.help-category { margin-bottom: 12px; }
+.help-category-title { font-weight: bold; font-size: 11px; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; letter-spacing: 0.5px; }
+.help-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 12px; }
+.help-key { color: var(--text); font-family: monospace; background: var(--bg); padding: 1px 6px; border-radius: 2px; border: 1px solid var(--border); font-size: 11px; }
+.help-desc { color: var(--text-dim); }
+
 /* Inspector/Node tabs */
 .right-panel-tabs {
   display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
@@ -579,6 +611,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <div class="ctx-item" data-action="delete">Delete<span class="ctx-shortcut">Del</span></div>
   <div class="ctx-separator"></div>
   <div class="ctx-item" data-action="add-child">Add Child Node</div>
+  <div class="ctx-item" data-action="instance-scene">Instance Child Scene</div>
   <div class="ctx-separator"></div>
   <div class="ctx-item" data-action="move-up">Move Up</div>
   <div class="ctx-item" data-action="move-down">Move Down</div>
@@ -599,6 +632,58 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     <div id="add-node-dialog-footer">
       <button id="add-node-cancel">Cancel</button>
       <button id="add-node-create" style="border-color:var(--accent);color:var(--accent)">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Help Dialog -->
+<div id="help-dialog">
+  <div id="help-dialog-inner">
+    <div id="help-dialog-header">
+      <span>Keyboard Shortcuts</span>
+      <button id="help-close" title="Close">&times;</button>
+    </div>
+    <div id="help-dialog-body">
+      <div class="help-category">
+        <div class="help-category-title">File</div>
+        <div class="help-row"><span class="help-desc">Save scene</span><span class="help-key">Ctrl+S</span></div>
+        <div class="help-row"><span class="help-desc">Search nodes</span><span class="help-key">Ctrl+F</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Edit</div>
+        <div class="help-row"><span class="help-desc">Undo</span><span class="help-key">Ctrl+Z</span></div>
+        <div class="help-row"><span class="help-desc">Redo</span><span class="help-key">Ctrl+Y / Ctrl+Shift+Z</span></div>
+        <div class="help-row"><span class="help-desc">Duplicate node</span><span class="help-key">Ctrl+D</span></div>
+        <div class="help-row"><span class="help-desc">Copy</span><span class="help-key">Ctrl+C</span></div>
+        <div class="help-row"><span class="help-desc">Paste</span><span class="help-key">Ctrl+V</span></div>
+        <div class="help-row"><span class="help-desc">Cut</span><span class="help-key">Ctrl+X</span></div>
+        <div class="help-row"><span class="help-desc">Delete node</span><span class="help-key">Delete</span></div>
+        <div class="help-row"><span class="help-desc">Rename node</span><span class="help-key">F2</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">View</div>
+        <div class="help-row"><span class="help-desc">Zoom in</span><span class="help-key">Ctrl+ +</span></div>
+        <div class="help-row"><span class="help-desc">Zoom out</span><span class="help-key">Ctrl+ -</span></div>
+        <div class="help-row"><span class="help-desc">Reset zoom &amp; pan</span><span class="help-key">Ctrl+0</span></div>
+        <div class="help-row"><span class="help-desc">Pan viewport</span><span class="help-key">Middle-click drag / Shift+drag</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Tools</div>
+        <div class="help-row"><span class="help-desc">Select tool</span><span class="help-key">Q</span></div>
+        <div class="help-row"><span class="help-desc">Move tool</span><span class="help-key">W</span></div>
+        <div class="help-row"><span class="help-desc">Rotate tool</span><span class="help-key">E</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Runtime</div>
+        <div class="help-row"><span class="help-desc">Play</span><span class="help-key">F5</span></div>
+        <div class="help-row"><span class="help-desc">Play current scene</span><span class="help-key">F6</span></div>
+        <div class="help-row"><span class="help-desc">Pause</span><span class="help-key">F7</span></div>
+        <div class="help-row"><span class="help-desc">Stop</span><span class="help-key">F8</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Help</div>
+        <div class="help-row"><span class="help-desc">Show this dialog</span><span class="help-key">F1 / ?</span></div>
+      </div>
     </div>
   </div>
 </div>
@@ -629,7 +714,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     <div id="viewport-panel">
       <div class="panel-header">Viewport</div>
       <div id="viewport-container">
-        <div id="viewport-placeholder">No frame available</div>
+        <div id="viewport-placeholder"><div class="loading-spinner"></div><div>Loading viewport...</div></div>
       </div>
     </div>
 
@@ -741,6 +826,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <span>Tool: <span id="status-tool">Select</span></span>
   <span>Snap: <span id="status-snap">Off</span></span>
   <span>Zoom: <span id="status-zoom">100%</span></span>
+  <span id="status-cursor" style="display:none">Cursor: <span id="status-cursor-pos">(0, 0)</span></span>
 </div>
 
 <script>
@@ -757,7 +843,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var contextNodeId = null;
   var currentToolMode = 'select';
   var collapsedSections = {};
-  var lastLogCount = 0;
+  var lastLogCount = -1;
 
   // Editor settings
   var editorSettings = { grid_snap_enabled: false, grid_snap_size: 8, grid_visible: true, rulers_visible: true, background_color: [0.08,0.08,0.1,1], font_size: 'medium' };
@@ -911,7 +997,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
 
     var iconWrapper = document.createElement('span');
-    iconWrapper.innerHTML = classIconHtml(node['class']);
+    if (node.is_instance) {
+      iconWrapper.innerHTML = '<span class="tree-icon" style="color:#d4a574" title="Instanced Scene">&#128279;</span>';
+    } else {
+      iconWrapper.innerHTML = classIconHtml(node['class']);
+    }
     var icon = iconWrapper.firstChild;
 
     var name = document.createElement('span');
@@ -985,14 +1075,21 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       treeDragNodeId = null;
     });
     row.addEventListener('dragover', (function(nid) { return function(e) {
-      if (treeDragNodeId === null || treeDragNodeId === nid) return;
+      // Accept both tree node drags and filesystem .tscn drags.
+      var hasFsDrag = false;
+      try { var types = e.dataTransfer.types; hasFsDrag = types && types.indexOf('text/plain') >= 0 && treeDragNodeId === null; } catch(ex) {}
+      if (treeDragNodeId === null && !hasFsDrag) return;
+      if (treeDragNodeId === nid) return;
       e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
+      e.dataTransfer.dropEffect = hasFsDrag ? 'copy' : 'move';
       var rect = row.getBoundingClientRect();
       var y = e.clientY - rect.top;
       var h = rect.height;
       clearDragIndicators();
-      if (y < h * 0.25) { row.classList.add('drag-over-above'); treeDragZone = 'above'; }
+      if (hasFsDrag) {
+        // For filesystem drops, always go inside.
+        row.classList.add('drag-over-inside'); treeDragZone = 'inside';
+      } else if (y < h * 0.25) { row.classList.add('drag-over-above'); treeDragZone = 'above'; }
       else if (y > h * 0.75) { row.classList.add('drag-over-below'); treeDragZone = 'below'; }
       else { row.classList.add('drag-over-inside'); treeDragZone = 'inside'; }
       treeDragOverRow = row;
@@ -1003,6 +1100,21 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     row.addEventListener('drop', (function(nid) { return function(e) {
       e.preventDefault();
       clearDragIndicators();
+      // Check for filesystem .tscn drop.
+      try {
+        var rawData = e.dataTransfer.getData('text/plain');
+        if (rawData) {
+          var parsed = JSON.parse(rawData);
+          if (parsed && parsed.type === 'tscn_instance' && parsed.path) {
+            api('POST', '/api/scene/instance', { path: parsed.path.replace('res://', ''), parent_id: nid }).then(function(result) {
+              if (result && result.id) { selectedNodeId = result.id; logMessage('info', 'Instanced: ' + parsed.path); }
+              expandedNodes.add(nid); fetchScene(); if (selectedNodeId) fetchSelected();
+            });
+            treeDragNodeId = null; treeDragZone = null;
+            return;
+          }
+        }
+      } catch(ex) { /* not JSON, fall through to tree drag */ }
       if (treeDragNodeId === null || treeDragNodeId === nid) return;
       if (treeDragZone === 'inside') {
         api('POST', '/api/node/reparent', { node_id: treeDragNodeId, new_parent_id: nid })
@@ -1118,7 +1230,20 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         await api('POST', '/api/node/reorder', { node_id: nodeId, direction: 'down' });
         await fetchScene(); break;
       case 'attach-script': doAttachScript(nodeId); break;
+      case 'instance-scene': doInstanceScene(nodeId); break;
     }
+  }
+
+  async function doInstanceScene(parentNodeId) {
+    var path = prompt('Enter .tscn file path to instance:');
+    if (!path) return;
+    var result = await api('POST', '/api/scene/instance', { path: path, parent_id: parentNodeId });
+    if (result && result.id) {
+      logMessage('info', 'Instanced scene: ' + path);
+      selectedNodeId = result.id;
+    }
+    await fetchScene();
+    if (selectedNodeId) await fetchSelected();
   }
 
   async function doRename(nodeId) {
@@ -1189,13 +1314,25 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       // Refresh node dock if visible.
       if (currentRightTab === 'node') fetchNodeDock();
       // Check for script property and load it.
+      // Prefer _script_path (real file path) over script (may be ExtResource ref).
       var scriptPath = null;
       if (data.properties) {
         for (var pi = 0; pi < data.properties.length; pi++) {
-          if (data.properties[pi].name === 'script') {
-            var sv = data.properties[pi].value;
-            if (sv && sv.value && typeof sv.value === 'string') scriptPath = sv.value;
-            break;
+          if (data.properties[pi].name === '_script_path') {
+            var sp = data.properties[pi].value;
+            if (sp && sp.value && typeof sp.value === 'string') { scriptPath = sp.value; break; }
+          }
+        }
+        if (!scriptPath) {
+          for (var pi = 0; pi < data.properties.length; pi++) {
+            if (data.properties[pi].name === 'script') {
+              var sv = data.properties[pi].value;
+              if (sv && sv.value && typeof sv.value === 'string') {
+                // Ignore ExtResource references like 'ExtResource("1_player")'
+                if (sv.value.indexOf('ExtResource') === -1) scriptPath = sv.value;
+              }
+              break;
+            }
           }
         }
       }
@@ -1756,6 +1893,29 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         updateZoomIndicator();
       }
     });
+
+    // Cursor position in status bar
+    var cursorEl = document.getElementById('status-cursor');
+    var cursorPosEl = document.getElementById('status-cursor-pos');
+    container.addEventListener('mousemove', function(e) {
+      if (!viewportImg || viewportImg.style.display === 'none') return;
+      var rect = viewportImg.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+        cursorEl.style.display = 'none'; return;
+      }
+      var scaleX = viewportImg.naturalWidth / rect.width;
+      var scaleY = viewportImg.naturalHeight / rect.height;
+      var px = Math.round((e.clientX - rect.left) * scaleX);
+      var py = Math.round((e.clientY - rect.top) * scaleY);
+      // Convert pixel coords to world coords using zoom/pan
+      var wx = Math.round((px - viewportPanX) / viewportZoom);
+      var wy = Math.round((py - viewportPanY) / viewportZoom);
+      cursorPosEl.textContent = '(' + wx + ', ' + wy + ')';
+      cursorEl.style.display = '';
+    });
+    container.addEventListener('mouseleave', function() {
+      cursorEl.style.display = 'none';
+    });
   }
 
   function updateZoomIndicator() {
@@ -2084,6 +2244,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 
       if (!entry.is_dir) {
         (function(e) {
+          // Single click: load as main scene.
           row.addEventListener('click', function() {
             var ext = e.name.split('.').pop();
             if (ext === 'tscn') {
@@ -2094,6 +2255,27 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
               });
             }
           });
+          // Double click: instance under selected node (or root).
+          row.addEventListener('dblclick', function(ev) {
+            ev.stopPropagation();
+            var ext = e.name.split('.').pop();
+            if (ext === 'tscn') {
+              var parentId = selectedNodeId || (sceneData && sceneData.nodes ? sceneData.nodes.id : null);
+              if (!parentId) return;
+              api('POST', '/api/scene/instance', { path: e.path.replace('res://', ''), parent_id: parentId }).then(function(result) {
+                if (result && result.id) { selectedNodeId = result.id; logMessage('info', 'Instanced: ' + e.name); }
+                fetchScene(); if (selectedNodeId) fetchSelected();
+              });
+            }
+          });
+          // Drag support for .tscn files.
+          var ext = e.name.split('.').pop();
+          if (ext === 'tscn') {
+            row.setAttribute('draggable', 'true');
+            row.addEventListener('dragstart', function(ev) {
+              ev.dataTransfer.setData('text/plain', JSON.stringify({ type: 'tscn_instance', path: e.path }));
+            });
+          }
         })(entry);
       }
 
@@ -2199,7 +2381,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   async function pollRuntimeStatus() {
     if (!runtimeRunning) return;
     var r = await api('GET', '/api/runtime/status');
-    if (r) { runtimeRunning = r.running; runtimePaused = r.paused; runtimeFrameCount = r.frame_count; runtimeFps = r.fps; updatePlayButtonStates(); showPlayingOverlay(runtimeRunning); updateRuntimeStatusBar(); if (!runtimeRunning) { setRuntimeEditingDisabled(false); stopRuntimePolling(); } }
+    if (r) { runtimeRunning = r.running; runtimePaused = r.paused; runtimeFrameCount = r.frame_count; runtimeFps = r.fps; updatePlayButtonStates(); showPlayingOverlay(runtimeRunning); updateRuntimeStatusBar(); if (!runtimeRunning) { setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); } }
   }
   function startRuntimePolling() { if (runtimeStatusInterval) return; runtimeStatusInterval = setInterval(pollRuntimeStatus, 200); }
   function stopRuntimePolling() { if (runtimeStatusInterval) { clearInterval(runtimeStatusInterval); runtimeStatusInterval = null; } }
@@ -2209,7 +2391,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     document.getElementById('btn-play').addEventListener('click', async function() {
       if (runtimeRunning) return;
       var r = await api('POST', '/api/runtime/play');
-      if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play started (F5)'); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); }
+      if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play started (F5)'); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     document.getElementById('btn-pause').addEventListener('click', async function() {
       if (!runtimeRunning) return;
@@ -2218,13 +2400,96 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
     document.getElementById('btn-stop').addEventListener('click', async function() {
       var r = await api('POST', '/api/runtime/stop');
-      if (r && r.ok) { runtimeRunning = false; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Stopped (F8)'); updatePlayButtonStates(); showPlayingOverlay(false); updateRuntimeStatusBar(); setRuntimeEditingDisabled(false); stopRuntimePolling(); }
+      if (r && r.ok) { runtimeRunning = false; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Stopped (F8)'); updatePlayButtonStates(); showPlayingOverlay(false); updateRuntimeStatusBar(); setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); }
     });
     document.getElementById('btn-play-current').addEventListener('click', async function() {
       if (runtimeRunning) return;
       var r = await api('POST', '/api/runtime/play');
-      if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play Current Scene (F6)'); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); }
+      if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play Current Scene (F6)'); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
+  }
+
+  // ---- Game Input Capture ----
+  var gameInputActive = false;
+  var gameInputKeydownHandler = null;
+  var gameInputKeyupHandler = null;
+  var gameInputMousemoveHandler = null;
+  var gameInputMousedownHandler = null;
+  var gameInputMouseupHandler = null;
+  var GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' ','Tab']);
+
+  function startGameInput() {
+    if (gameInputActive) return;
+    gameInputActive = true;
+    gameInputKeydownHandler = function(e) {
+      if (!runtimeRunning) return;
+      if (e.key === 'F5' || e.key === 'F6' || e.key === 'F7' || e.key === 'F8') return;
+      var tag = document.activeElement ? document.activeElement.tagName : '';
+      if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && !GAME_KEYS.has(e.key)) return;
+      if (GAME_KEYS.has(e.key)) e.preventDefault();
+      api('POST', '/api/runtime/input/key_down', { key: e.key });
+    };
+    gameInputKeyupHandler = function(e) {
+      if (!runtimeRunning) return;
+      if (e.key === 'F5' || e.key === 'F6' || e.key === 'F7' || e.key === 'F8') return;
+      api('POST', '/api/runtime/input/key_up', { key: e.key });
+    };
+    document.addEventListener('keydown', gameInputKeydownHandler, true);
+    document.addEventListener('keyup', gameInputKeyupHandler, true);
+    var vp = document.getElementById('viewport-container');
+    if (vp) {
+      gameInputMousemoveHandler = function(e) {
+        if (!runtimeRunning) return;
+        var rect = vp.getBoundingClientRect();
+        api('POST', '/api/runtime/input/mouse_move', { x: e.clientX - rect.left, y: e.clientY - rect.top });
+      };
+      gameInputMousedownHandler = function(e) {
+        if (!runtimeRunning) return;
+        api('POST', '/api/runtime/input/mouse_down', { button: e.button });
+      };
+      gameInputMouseupHandler = function(e) {
+        if (!runtimeRunning) return;
+        api('POST', '/api/runtime/input/mouse_up', { button: e.button });
+      };
+      vp.addEventListener('mousemove', gameInputMousemoveHandler);
+      vp.addEventListener('mousedown', gameInputMousedownHandler);
+      vp.addEventListener('mouseup', gameInputMouseupHandler);
+    }
+    showGameInputIndicator(true);
+  }
+
+  function stopGameInput() {
+    if (!gameInputActive) return;
+    gameInputActive = false;
+    if (gameInputKeydownHandler) { document.removeEventListener('keydown', gameInputKeydownHandler, true); gameInputKeydownHandler = null; }
+    if (gameInputKeyupHandler) { document.removeEventListener('keyup', gameInputKeyupHandler, true); gameInputKeyupHandler = null; }
+    var vp = document.getElementById('viewport-container');
+    if (vp) {
+      if (gameInputMousemoveHandler) { vp.removeEventListener('mousemove', gameInputMousemoveHandler); gameInputMousemoveHandler = null; }
+      if (gameInputMousedownHandler) { vp.removeEventListener('mousedown', gameInputMousedownHandler); gameInputMousedownHandler = null; }
+      if (gameInputMouseupHandler) { vp.removeEventListener('mouseup', gameInputMouseupHandler); gameInputMouseupHandler = null; }
+    }
+    showGameInputIndicator(false);
+  }
+
+  function showGameInputIndicator(show) {
+    var existing = document.getElementById('game-input-indicator');
+    if (show) {
+      if (!existing) {
+        var ind = document.createElement('div');
+        ind.id = 'game-input-indicator';
+        ind.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:rgba(80,160,255,0.85);color:#fff;padding:2px 10px;border-radius:3px;font-size:11px;font-weight:bold;z-index:20;letter-spacing:0.5px;pointer-events:none;';
+        ind.textContent = 'GAME INPUT ACTIVE';
+        var c = document.getElementById('viewport-container');
+        if (c) { c.style.position = 'relative'; c.appendChild(ind); }
+      }
+      var vc = document.getElementById('viewport-container');
+      if (vc) vc.style.boxShadow = 'inset 0 0 0 2px rgba(80,160,255,0.6)';
+    } else {
+      if (existing) existing.remove();
+      var vc = document.getElementById('viewport-container');
+      if (vc) vc.style.boxShadow = '';
+    }
   }
 
   function logMessage(level, message) {
@@ -2334,6 +2599,23 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (e.key === 'F6') { e.preventDefault(); document.getElementById('btn-play-current').click(); return; }
       if (e.key === 'F7') { e.preventDefault(); document.getElementById('btn-pause').click(); return; }
       if (e.key === 'F8') { e.preventDefault(); document.getElementById('btn-stop').click(); return; }
+
+      // Help shortcut
+      if (e.key === 'F1' || e.key === '?') { e.preventDefault(); toggleHelpDialog(); return; }
+    });
+  }
+
+  // ---- Help dialog ----
+  function toggleHelpDialog() {
+    var dlg = document.getElementById('help-dialog');
+    dlg.classList.toggle('open');
+  }
+  function setupHelpDialog() {
+    document.getElementById('help-close').addEventListener('click', function() {
+      document.getElementById('help-dialog').classList.remove('open');
+    });
+    document.getElementById('help-dialog').addEventListener('click', function(e) {
+      if (e.target === this) this.classList.remove('open');
     });
   }
 
@@ -2841,7 +3123,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   setupAnimationPanel();
   refreshAnimationList();
   setupSettingsDialog();
+  setupHelpDialog();
   setupLeftDivider();
+  logMessage('info', 'Editor ready');
   fetchScene();
   fetchSelected();
   refreshViewport();

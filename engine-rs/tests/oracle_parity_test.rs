@@ -4,7 +4,11 @@
 //! The comparison logic can diff two scene trees and report per-node,
 //! per-property matches with float tolerance.
 
+mod oracle_fixture;
+
 use serde_json::Value;
+
+use oracle_fixture::load_generated_scene_fixture;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -432,6 +436,18 @@ fn compare_identical_trees() {
         "all comparisons should match for identical trees: {:?}",
         results.iter().filter(|r| !r.matches).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn generated_scene_fixture_smoke_test_uses_real_oracle_artifact() {
+    let tree = load_generated_scene_fixture("scene_simple_hierarchy_01.json");
+    let flat = flatten_tree(&tree);
+    assert_eq!(
+        flat.len(),
+        4,
+        "generated scene fixture should flatten to four nodes"
+    );
+    assert_eq!(flat[0].path, "/root/Root");
 }
 
 #[test]

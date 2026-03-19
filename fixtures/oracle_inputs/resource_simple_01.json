@@ -1,0 +1,16 @@
+{
+  "class_name": "Resource",
+  "properties": {
+    "name": "SimpleResource",
+    "value": 42,
+    "position": {
+      "type": "Vector2",
+      "value": [
+        10.0,
+        20.0
+      ]
+    },
+    "flag": true
+  },
+  "subresources": {}
+}

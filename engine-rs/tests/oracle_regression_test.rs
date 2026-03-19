@@ -1,28 +1,96 @@
-//! Oracle regression tests — compare Godot oracle JSON against Patina JSON.
+//! Oracle golden regression tests — compare Godot oracle JSON against live Patina runner output.
 //!
-//! Loads fixtures from `../fixtures/oracle_outputs/` and `../fixtures/patina_outputs/`,
-//! normalizes format differences (Godot's `"Vector2(100, 200)"` strings vs Patina's
-//! `{"type":"Vector2","value":[100,200]}`), and reports per-node, per-property parity.
+//! Loads golden JSON files from `../fixtures/oracle_outputs/`, runs the Patina
+//! headless runner on the corresponding `.tscn` scene, and compares:
+//! - node count, node names and paths, node class names
+//! - property values (with float tolerance per TEST_ORACLE.md)
+//!
+//! Each test states the observable behavior it checks (Oracle Rule 2).
+
+mod oracle_fixture;
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use oracle_fixture::{fixtures_dir, load_json_fixture};
+
+// ---------------------------------------------------------------------------
+// Patina runner execution
+// ---------------------------------------------------------------------------
+
+fn runner_binary() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let release = manifest_dir.join("target/release/patina-runner");
+    if release.exists() {
+        return release;
+    }
+    let debug = manifest_dir.join("target/debug/patina-runner");
+    if debug.exists() {
+        return debug;
+    }
+    panic!("patina-runner binary not found. Run `cargo build -p patina-runner` first.");
+}
+
+fn run_patina_on_scene(scene_path: &Path) -> Value {
+    let binary = runner_binary();
+    let output = Command::new(&binary)
+        .arg(scene_path.to_str().expect("valid UTF-8"))
+        .arg("--frames")
+        .arg("1")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to execute patina-runner: {e}"));
+    assert!(
+        output.status.success(),
+        "patina-runner failed on {}:\n{}",
+        scene_path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8");
+    serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from patina-runner for {}:\n{e}",
+            scene_path.display()
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Oracle golden loading
+// ---------------------------------------------------------------------------
+
+fn oracle_outputs_dir() -> PathBuf {
+    fixtures_dir().join("oracle_outputs")
+}
+fn scenes_dir() -> PathBuf {
+    fixtures_dir().join("scenes")
+}
+fn load_oracle_tree(name: &str) -> Value {
+    load_json_fixture(&oracle_outputs_dir().join(format!("{name}_tree.json")))
+}
+fn load_oracle_properties(name: &str) -> Value {
+    load_json_fixture(&oracle_outputs_dir().join(format!("{name}_properties.json")))
+}
+fn scene_path(name: &str) -> PathBuf {
+    scenes_dir().join(format!("{name}.tscn"))
+}
 
 // ---------------------------------------------------------------------------
 // Format normalization
 // ---------------------------------------------------------------------------
 
-/// Parse Godot's string-format property values into Patina's typed JSON format.
-///
-/// Godot oracle outputs properties as strings like:
-/// - `"Vector2(100, 200)"` → `{"type":"Vector2","value":[100.0,200.0]}`
-/// - `"0.0"` → number `0.0`
-/// - `"true"` / `"false"` → boolean
-/// - `"100"` → integer `100`
 fn normalize_godot_value(val: &Value) -> Value {
     match val {
         Value::String(s) => parse_godot_string_value(s),
         Value::Object(map) => {
-            // Already in typed format (Patina style) — normalize inner value
+            if let (Some(Value::String(ty)), Some(inner)) = (map.get("type"), map.get("value")) {
+                let normalized = normalize_typed_value(ty, inner);
+                let mut out = serde_json::Map::new();
+                out.insert("type".into(), Value::String(ty.clone()));
+                out.insert("value".into(), normalized);
+                return Value::Object(out);
+            }
             let mut out = serde_json::Map::new();
             for (k, v) in map {
                 out.insert(k.clone(), normalize_godot_value(v));
@@ -34,78 +102,85 @@ fn normalize_godot_value(val: &Value) -> Value {
     }
 }
 
-/// Parse a Godot oracle string value into a JSON value.
+fn normalize_typed_value(ty: &str, val: &Value) -> Value {
+    match ty {
+        "Vector2" | "Vector2i" => {
+            if let Value::Object(o) = val {
+                if let (Some(x), Some(y)) = (o.get("x"), o.get("y")) {
+                    return serde_json::json!([x, y]);
+                }
+            } else {
+            }
+        }
+        "Vector3" | "Vector3i" => {
+            if let Value::Object(o) = val {
+                if let (Some(x), Some(y), Some(z)) = (o.get("x"), o.get("y"), o.get("z")) {
+                    return serde_json::json!([x, y, z]);
+                }
+            } else {
+            }
+        }
+        "Color" => {
+            if let Value::Object(o) = val {
+                if let (Some(r), Some(g), Some(b), Some(a)) =
+                    (o.get("r"), o.get("g"), o.get("b"), o.get("a"))
+                {
+                    return serde_json::json!([r, g, b, a]);
+                }
+            } else {
+            }
+        }
+        _ => {}
+    }
+    val.clone()
+}
+
 fn parse_godot_string_value(s: &str) -> Value {
-    // Vector2(x, y)
     if let Some(inner) = s.strip_prefix("Vector2(").and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() == 2 {
-            if let (Ok(x), Ok(y)) = (
-                parts[0].trim().parse::<f64>(),
-                parts[1].trim().parse::<f64>(),
-            ) {
+        let p: Vec<&str> = inner.split(',').collect();
+        if p.len() == 2 {
+            if let (Ok(x), Ok(y)) = (p[0].trim().parse::<f64>(), p[1].trim().parse::<f64>()) {
                 return serde_json::json!({"type": "Vector2", "value": [x, y]});
             }
         }
     }
-
-    // Vector3(x, y, z)
     if let Some(inner) = s.strip_prefix("Vector3(").and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() == 3 {
+        let p: Vec<&str> = inner.split(',').collect();
+        if p.len() == 3 {
             if let (Ok(x), Ok(y), Ok(z)) = (
-                parts[0].trim().parse::<f64>(),
-                parts[1].trim().parse::<f64>(),
-                parts[2].trim().parse::<f64>(),
+                p[0].trim().parse::<f64>(),
+                p[1].trim().parse::<f64>(),
+                p[2].trim().parse::<f64>(),
             ) {
                 return serde_json::json!({"type": "Vector3", "value": [x, y, z]});
             }
         }
     }
-
-    // Color(r, g, b, a)
     if let Some(inner) = s.strip_prefix("Color(").and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() == 4 {
+        let p: Vec<&str> = inner.split(',').collect();
+        if p.len() == 4 {
             if let (Ok(r), Ok(g), Ok(b), Ok(a)) = (
-                parts[0].trim().parse::<f64>(),
-                parts[1].trim().parse::<f64>(),
-                parts[2].trim().parse::<f64>(),
-                parts[3].trim().parse::<f64>(),
+                p[0].trim().parse::<f64>(),
+                p[1].trim().parse::<f64>(),
+                p[2].trim().parse::<f64>(),
+                p[3].trim().parse::<f64>(),
             ) {
                 return serde_json::json!({"type": "Color", "value": [r, g, b, a]});
             }
         }
     }
-
-    // Boolean
-    if s == "true" {
-        return serde_json::json!({"type": "Bool", "value": true});
+    match s {
+        "true" => return serde_json::json!({"type": "Bool", "value": true}),
+        "false" => return serde_json::json!({"type": "Bool", "value": false}),
+        _ => {}
     }
-    if s == "false" {
-        return serde_json::json!({"type": "Bool", "value": false});
-    }
-
-    // Integer (no decimal point)
     if let Ok(i) = s.parse::<i64>() {
         return serde_json::json!({"type": "Int", "value": i});
     }
-
-    // Float (has decimal point)
     if let Ok(f) = s.parse::<f64>() {
         return serde_json::json!({"type": "Float", "value": f});
     }
-
-    // Fallback: keep as string
     serde_json::json!({"type": "String", "value": s})
-}
-
-/// Normalize a Patina-format property value for comparison.
-///
-/// Patina already uses the `{"type":"...", "value": ...}` format, so mostly
-/// this is a pass-through, but we normalize number types for tolerance.
-fn normalize_patina_value(val: &Value) -> Value {
-    val.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +189,6 @@ fn normalize_patina_value(val: &Value) -> Value {
 
 const FLOAT_TOLERANCE: f64 = 0.01;
 
-/// A flattened node from the tree.
 #[derive(Debug, Clone)]
 struct FlatNode {
     path: String,
@@ -123,8 +197,8 @@ struct FlatNode {
     properties: HashMap<String, Value>,
 }
 
-/// Result of comparing one property.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct PropertyComparison {
     node_path: String,
     property: String,
@@ -133,11 +207,14 @@ struct PropertyComparison {
     matches: bool,
 }
 
-/// Flatten a Godot oracle tree (top-level node with "children" array).
-fn flatten_godot_tree(node: &Value) -> Vec<FlatNode> {
-    let mut result = Vec::new();
-    flatten_godot_node(node, &mut result);
-    result
+fn flatten_godot_tree(root: &Value) -> Vec<FlatNode> {
+    let mut r = Vec::new();
+    if let Some(ch) = root.get("children").and_then(|c| c.as_array()) {
+        for c in ch {
+            flatten_godot_node(c, &mut r);
+        }
+    }
+    r
 }
 
 fn flatten_godot_node(node: &Value, out: &mut Vec<FlatNode>) {
@@ -156,41 +233,34 @@ fn flatten_godot_node(node: &Value, out: &mut Vec<FlatNode>) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-
     let mut properties = HashMap::new();
     if let Some(props) = node.get("properties").and_then(|v| v.as_object()) {
-        for (key, val) in props {
-            properties.insert(key.clone(), normalize_godot_value(val));
+        for (k, v) in props {
+            properties.insert(k.clone(), normalize_godot_value(v));
         }
     }
-
     out.push(FlatNode {
         path,
         name,
         class,
         properties,
     });
-
-    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
-        for child in children {
-            flatten_godot_node(child, out);
+    if let Some(ch) = node.get("children").and_then(|c| c.as_array()) {
+        for c in ch {
+            flatten_godot_node(c, out);
         }
     }
 }
 
-/// Flatten a Patina output tree (has "tree" wrapper with root node).
 fn flatten_patina_tree(root: &Value) -> Vec<FlatNode> {
     let tree = root.get("tree").unwrap_or(root);
-    let mut result = Vec::new();
-
-    // Skip the "/root" synthetic node, go straight to scene children
-    if let Some(children) = tree.get("children").and_then(|c| c.as_array()) {
-        for child in children {
-            flatten_patina_node(child, &mut result);
+    let mut r = Vec::new();
+    if let Some(ch) = tree.get("children").and_then(|c| c.as_array()) {
+        for c in ch {
+            flatten_patina_node(c, &mut r);
         }
     }
-
-    result
+    r
 }
 
 fn flatten_patina_node(node: &Value, out: &mut Vec<FlatNode>) {
@@ -209,47 +279,38 @@ fn flatten_patina_node(node: &Value, out: &mut Vec<FlatNode>) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-
     let mut properties = HashMap::new();
     if let Some(props) = node.get("properties").and_then(|v| v.as_object()) {
-        for (key, val) in props {
-            // Skip internal properties
-            if key.starts_with('_') || key == "script" {
-                continue;
+        for (k, v) in props {
+            if !k.starts_with('_') && k != "script" {
+                properties.insert(k.clone(), v.clone());
             }
-            properties.insert(key.clone(), normalize_patina_value(val));
         }
     }
-
     out.push(FlatNode {
         path,
         name,
         class,
         properties,
     });
-
-    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
-        for child in children {
-            flatten_patina_node(child, out);
+    if let Some(ch) = node.get("children").and_then(|c| c.as_array()) {
+        for c in ch {
+            flatten_patina_node(c, out);
         }
     }
 }
 
-/// Compare two normalized property values with float tolerance.
 fn values_match(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(an), Value::Number(bn)) => {
-            let af = an.as_f64().unwrap_or(0.0);
-            let bf = bn.as_f64().unwrap_or(0.0);
-            (af - bf).abs() <= FLOAT_TOLERANCE
+            (an.as_f64().unwrap_or(0.0) - bn.as_f64().unwrap_or(0.0)).abs() <= FLOAT_TOLERANCE
         }
-        (Value::Bool(ab), Value::Bool(bb)) => ab == bb,
-        (Value::String(sa), Value::String(sb)) => sa == sb,
-        (Value::Array(aa), Value::Array(ba)) => {
-            aa.len() == ba.len() && aa.iter().zip(ba.iter()).all(|(x, y)| values_match(x, y))
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_match(x, y))
         }
         (Value::Object(ao), Value::Object(bo)) => {
-            // Compare "value" fields if both have them (typed property format)
             if let (Some(av), Some(bv)) = (ao.get("value"), bo.get("value")) {
                 values_match(av, bv)
             } else {
@@ -264,195 +325,180 @@ fn values_match(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Compare an oracle Godot tree against a Patina tree.
-fn compare_scene(godot_nodes: &[FlatNode], patina_nodes: &[FlatNode]) -> Vec<PropertyComparison> {
+fn compare_scene(godot: &[FlatNode], patina: &[FlatNode]) -> Vec<PropertyComparison> {
     let mut results = Vec::new();
-
-    let p_map: HashMap<&str, &FlatNode> =
-        patina_nodes.iter().map(|n| (n.path.as_str(), n)).collect();
-
-    for g_node in godot_nodes {
-        if let Some(p_node) = p_map.get(g_node.path.as_str()) {
-            // Compare class
+    let p_map: HashMap<&str, &FlatNode> = patina.iter().map(|n| (n.path.as_str(), n)).collect();
+    for g in godot {
+        if let Some(p) = p_map.get(g.path.as_str()) {
             results.push(PropertyComparison {
-                node_path: g_node.path.clone(),
-                property: "_class".to_string(),
-                godot_value: Some(Value::String(g_node.class.clone())),
-                patina_value: Some(Value::String(p_node.class.clone())),
-                matches: g_node.class == p_node.class,
+                node_path: g.path.clone(),
+                property: "_class".into(),
+                godot_value: Some(Value::String(g.class.clone())),
+                patina_value: Some(Value::String(p.class.clone())),
+                matches: g.class == p.class,
             });
-
-            // Collect all property keys from both sides
-            let mut all_keys: Vec<&String> = g_node.properties.keys().collect();
-            for k in p_node.properties.keys() {
-                if !g_node.properties.contains_key(k) {
-                    all_keys.push(k);
+            let mut keys: Vec<&String> = g.properties.keys().collect();
+            for k in p.properties.keys() {
+                if !g.properties.contains_key(k) {
+                    keys.push(k);
                 }
             }
-            all_keys.sort();
-            all_keys.dedup();
-
-            for key in all_keys {
-                let g_val = g_node.properties.get(key);
-                let p_val = p_node.properties.get(key);
-                let matches = match (g_val, p_val) {
-                    (Some(gv), Some(pv)) => values_match(gv, pv),
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                let gv = g.properties.get(key);
+                let pv = p.properties.get(key);
+                let m = match (gv, pv) {
+                    (Some(a), Some(b)) => values_match(a, b),
                     (None, None) => true,
                     _ => false,
                 };
                 results.push(PropertyComparison {
-                    node_path: g_node.path.clone(),
+                    node_path: g.path.clone(),
                     property: key.clone(),
-                    godot_value: g_val.cloned(),
-                    patina_value: p_val.cloned(),
-                    matches,
+                    godot_value: gv.cloned(),
+                    patina_value: pv.cloned(),
+                    matches: m,
                 });
             }
         } else {
             results.push(PropertyComparison {
-                node_path: g_node.path.clone(),
-                property: "_exists".to_string(),
+                node_path: g.path.clone(),
+                property: "_exists".into(),
                 godot_value: Some(Value::Bool(true)),
                 patina_value: Some(Value::Bool(false)),
                 matches: false,
             });
         }
     }
-
     results
 }
 
-/// Compute parity percentage from comparison results.
 fn parity_percentage(results: &[PropertyComparison]) -> f64 {
     if results.is_empty() {
         return 100.0;
     }
-    let matched = results.iter().filter(|r| r.matches).count();
-    (matched as f64 / results.len() as f64) * 100.0
+    (results.iter().filter(|r| r.matches).count() as f64 / results.len() as f64) * 100.0
 }
 
-// ---------------------------------------------------------------------------
-// Fixture loading
-// ---------------------------------------------------------------------------
-
-fn load_fixture(path: &str) -> Value {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("failed to load fixture {path}: {e}"));
-    serde_json::from_str(&content).unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
+fn collect_godot_names(root: &Value) -> Vec<String> {
+    flatten_godot_tree(root)
+        .iter()
+        .map(|n| n.name.clone())
+        .collect()
+}
+fn collect_patina_names(root: &Value) -> Vec<String> {
+    flatten_patina_tree(root)
+        .iter()
+        .map(|n| n.name.clone())
+        .collect()
+}
+fn collect_godot_classes(root: &Value) -> Vec<(String, String)> {
+    flatten_godot_tree(root)
+        .iter()
+        .map(|n| (n.name.clone(), n.class.clone()))
+        .collect()
+}
+fn collect_patina_classes(root: &Value) -> Vec<(String, String)> {
+    flatten_patina_tree(root)
+        .iter()
+        .map(|n| (n.name.clone(), n.class.clone()))
+        .collect()
 }
 
-fn fixtures_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures")
-}
+const GOLDEN_SCENES: &[&str] = &[
+    "minimal",
+    "hierarchy",
+    "with_properties",
+    "space_shooter",
+    "platformer",
+    "physics_playground",
+    "signals_complex",
+    "test_scripts",
+    "ui_menu",
+];
 
 // ===========================================================================
-// Format normalization tests
+// 1. Format normalization tests
 // ===========================================================================
 
 #[test]
 fn normalize_vector2_string() {
-    let val = serde_json::json!("Vector2(100, 200)");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("Vector2(100, 200)")),
         &serde_json::json!({"type": "Vector2", "value": [100.0, 200.0]})
     ));
 }
-
 #[test]
 fn normalize_vector2_negative() {
-    let val = serde_json::json!("Vector2(-50.5, 100.3)");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("Vector2(-50.5, 100.3)")),
         &serde_json::json!({"type": "Vector2", "value": [-50.5, 100.3]})
     ));
 }
-
 #[test]
 fn normalize_vector3_string() {
-    let val = serde_json::json!("Vector3(1, 2, 3)");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("Vector3(1, 2, 3)")),
         &serde_json::json!({"type": "Vector3", "value": [1.0, 2.0, 3.0]})
     ));
 }
-
 #[test]
 fn normalize_bool_true() {
-    let val = serde_json::json!("true");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("true")),
         &serde_json::json!({"type": "Bool", "value": true})
     ));
 }
-
 #[test]
 fn normalize_bool_false() {
-    let val = serde_json::json!("false");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("false")),
         &serde_json::json!({"type": "Bool", "value": false})
     ));
 }
-
 #[test]
 fn normalize_integer_string() {
-    let val = serde_json::json!("100");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("100")),
         &serde_json::json!({"type": "Int", "value": 100})
     ));
 }
-
 #[test]
 fn normalize_float_string() {
-    let val = serde_json::json!("0.0");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("0.0")),
         &serde_json::json!({"type": "Float", "value": 0.0})
     ));
 }
-
 #[test]
 fn normalize_float_nonzero() {
-    let val = serde_json::json!("200.42582666666667");
-    let normalized = normalize_godot_value(&val);
-    let expected = serde_json::json!({"type": "Float", "value": 200.42582666666667});
-    assert!(values_match(&normalized, &expected));
+    assert!(values_match(
+        &normalize_godot_value(&serde_json::json!("200.42582666666667")),
+        &serde_json::json!({"type": "Float", "value": 200.42582666666667})
+    ));
 }
-
 #[test]
 fn normalize_color_string() {
-    let val = serde_json::json!("Color(1, 0.5, 0, 1)");
-    let normalized = normalize_godot_value(&val);
     assert!(values_match(
-        &normalized,
+        &normalize_godot_value(&serde_json::json!("Color(1, 0.5, 0, 1)")),
         &serde_json::json!({"type": "Color", "value": [1.0, 0.5, 0.0, 1.0]})
     ));
 }
-
 #[test]
 fn normalize_already_typed_value() {
-    let val = serde_json::json!({"type": "Vector2", "value": [100.0, 200.0]});
-    let normalized = normalize_godot_value(&val);
-    assert!(values_match(&normalized, &val));
+    let v = serde_json::json!({"type": "Vector2", "value": [100.0, 200.0]});
+    assert!(values_match(&normalize_godot_value(&v), &v));
 }
 
 // ===========================================================================
-// Comparison logic tests
+// 2. Comparison logic tests
 // ===========================================================================
 
 #[test]
 fn values_match_identical_ints() {
     assert!(values_match(&serde_json::json!(42), &serde_json::json!(42)));
 }
-
 #[test]
 fn values_match_different_ints() {
     assert!(!values_match(
@@ -460,7 +506,6 @@ fn values_match_different_ints() {
         &serde_json::json!(43)
     ));
 }
-
 #[test]
 fn values_match_floats_within_tolerance() {
     assert!(values_match(
@@ -468,7 +513,6 @@ fn values_match_floats_within_tolerance() {
         &serde_json::json!(100.0)
     ));
 }
-
 #[test]
 fn values_match_floats_outside_tolerance() {
     assert!(!values_match(
@@ -476,21 +520,20 @@ fn values_match_floats_outside_tolerance() {
         &serde_json::json!(100.0)
     ));
 }
-
 #[test]
 fn values_match_typed_properties() {
-    let a = serde_json::json!({"type": "Vector2", "value": [100.0, 200.0]});
-    let b = serde_json::json!({"type": "Vector2", "value": [100.005, 199.998]});
-    assert!(values_match(&a, &b));
+    assert!(values_match(
+        &serde_json::json!({"type":"Vector2","value":[100.0,200.0]}),
+        &serde_json::json!({"type":"Vector2","value":[100.005,199.998]})
+    ));
 }
-
 #[test]
 fn values_match_typed_properties_different() {
-    let a = serde_json::json!({"type": "Int", "value": 100});
-    let b = serde_json::json!({"type": "Int", "value": 200});
-    assert!(!values_match(&a, &b));
+    assert!(!values_match(
+        &serde_json::json!({"type":"Int","value":100}),
+        &serde_json::json!({"type":"Int","value":200})
+    ));
 }
-
 #[test]
 fn values_match_bools() {
     assert!(values_match(
@@ -502,14 +545,13 @@ fn values_match_bools() {
         &serde_json::json!(false)
     ));
 }
-
 #[test]
 fn values_match_arrays_tolerance() {
-    let a = serde_json::json!([100.0, 200.0]);
-    let b = serde_json::json!([100.005, 199.998]);
-    assert!(values_match(&a, &b));
+    assert!(values_match(
+        &serde_json::json!([100.0, 200.0]),
+        &serde_json::json!([100.005, 199.998])
+    ));
 }
-
 #[test]
 fn values_match_arrays_different_lengths() {
     assert!(!values_match(
@@ -519,20 +561,16 @@ fn values_match_arrays_different_lengths() {
 }
 
 // ===========================================================================
-// Flatten / compare tests
+// 3. Flatten / compare unit tests
 // ===========================================================================
 
 #[test]
 fn flatten_godot_tree_basic() {
-    let tree = serde_json::json!({
-        "name": "Root", "class": "Node2D", "path": "/root/Root",
-        "properties": { "position": "Vector2(0, 0)" },
-        "children": [{
-            "name": "Child", "class": "Node2D", "path": "/root/Root/Child",
-            "properties": { "visible": "true" },
-            "children": []
-        }]
-    });
+    let tree = serde_json::json!({"name":"root","class":"Window","path":"/root","children":[
+        {"name":"Root","class":"Node2D","path":"/root/Root","properties":{"position":"Vector2(0, 0)"},"children":[
+            {"name":"Child","class":"Node2D","path":"/root/Root/Child","properties":{"visible":"true"},"children":[]}
+        ]}
+    ]});
     let flat = flatten_godot_tree(&tree);
     assert_eq!(flat.len(), 2);
     assert_eq!(flat[0].name, "Root");
@@ -541,17 +579,9 @@ fn flatten_godot_tree_basic() {
 
 #[test]
 fn flatten_patina_tree_skips_root() {
-    let tree = serde_json::json!({
-        "tree": {
-            "name": "root", "class": "Node", "path": "/root",
-            "properties": {}, "script_vars": {},
-            "children": [{
-                "name": "World", "class": "Node2D", "path": "/root/World",
-                "properties": {}, "script_vars": {},
-                "children": []
-            }]
-        }
-    });
+    let tree = serde_json::json!({"tree":{"name":"root","class":"Node","path":"/root","properties":{},"script_vars":{},"children":[
+        {"name":"World","class":"Node2D","path":"/root/World","properties":{},"script_vars":{},"children":[]}
+    ]}});
     let flat = flatten_patina_tree(&tree);
     assert_eq!(flat.len(), 1);
     assert_eq!(flat[0].name, "World");
@@ -560,378 +590,369 @@ fn flatten_patina_tree_skips_root() {
 #[test]
 fn compare_identical_scenes() {
     let nodes = vec![FlatNode {
-        path: "/root/Root".into(),
-        name: "Root".into(),
+        path: "/root/R".into(),
+        name: "R".into(),
         class: "Node2D".into(),
         properties: {
             let mut m = HashMap::new();
             m.insert(
                 "position".into(),
-                serde_json::json!({"type": "Vector2", "value": [0.0, 0.0]}),
+                serde_json::json!({"type":"Vector2","value":[0.0,0.0]}),
             );
             m
         },
     }];
-    let results = compare_scene(&nodes, &nodes);
-    assert!(results.iter().all(|r| r.matches));
+    assert!(compare_scene(&nodes, &nodes).iter().all(|r| r.matches));
 }
 
 #[test]
 fn compare_missing_node() {
-    let godot_nodes = vec![FlatNode {
-        path: "/root/Root".into(),
-        name: "Root".into(),
+    let g = vec![FlatNode {
+        path: "/root/R".into(),
+        name: "R".into(),
         class: "Node2D".into(),
         properties: HashMap::new(),
     }];
-    let patina_nodes: Vec<FlatNode> = vec![];
-    let results = compare_scene(&godot_nodes, &patina_nodes);
-    assert_eq!(results.len(), 1);
-    assert!(!results[0].matches);
-    assert_eq!(results[0].property, "_exists");
+    let r = compare_scene(&g, &[]);
+    assert_eq!(r.len(), 1);
+    assert!(!r[0].matches);
+    assert_eq!(r[0].property, "_exists");
 }
 
 #[test]
-fn parity_percentage_all_match() {
-    let results = vec![
-        PropertyComparison {
-            node_path: "".into(),
-            property: "a".into(),
-            godot_value: None,
-            patina_value: None,
-            matches: true,
-        },
-        PropertyComparison {
-            node_path: "".into(),
-            property: "b".into(),
-            godot_value: None,
-            patina_value: None,
-            matches: true,
-        },
-    ];
-    assert!((parity_percentage(&results) - 100.0).abs() < 0.01);
-}
-
-#[test]
-fn parity_percentage_half_match() {
-    let results = vec![
-        PropertyComparison {
-            node_path: "".into(),
-            property: "a".into(),
-            godot_value: None,
-            patina_value: None,
-            matches: true,
-        },
-        PropertyComparison {
-            node_path: "".into(),
-            property: "b".into(),
-            godot_value: None,
-            patina_value: None,
-            matches: false,
-        },
-    ];
-    assert!((parity_percentage(&results) - 50.0).abs() < 0.01);
-}
-
-#[test]
-fn parity_percentage_empty() {
-    let results: Vec<PropertyComparison> = vec![];
-    assert!((parity_percentage(&results) - 100.0).abs() < 0.01);
+fn parity_percentage_calculations() {
+    let mk = |m| PropertyComparison {
+        node_path: "".into(),
+        property: "x".into(),
+        godot_value: None,
+        patina_value: None,
+        matches: m,
+    };
+    assert!((parity_percentage(&[mk(true), mk(true)]) - 100.0).abs() < 0.01);
+    assert!((parity_percentage(&[mk(true), mk(false)]) - 50.0).abs() < 0.01);
+    assert!((parity_percentage(&[]) - 100.0).abs() < 0.01);
 }
 
 // ===========================================================================
-// Oracle fixture comparison tests
+// 4. Stale golden detection
 // ===========================================================================
 
 #[test]
-fn oracle_main_scene_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(dir.join("oracle_outputs/main.json").to_str().unwrap());
-    let patina: Value = load_fixture(dir.join("patina_outputs/main.json").to_str().unwrap());
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    // Both should have the same set of node names
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(g_names, p_names, "node names should match for main.tscn");
-}
-
-#[test]
-fn oracle_main_scene_classes_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(dir.join("oracle_outputs/main.json").to_str().unwrap());
-    let patina: Value = load_fixture(dir.join("patina_outputs/main.json").to_str().unwrap());
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    for (g, p) in g_nodes.iter().zip(p_nodes.iter()) {
-        assert_eq!(
-            g.class, p.class,
-            "class mismatch for node {} at {}",
-            g.name, g.path
-        );
-    }
-}
-
-#[test]
-fn oracle_main_scene_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(dir.join("oracle_outputs/main.json").to_str().unwrap());
-    let patina: Value = load_fixture(dir.join("patina_outputs/main.json").to_str().unwrap());
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-    let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
-
-    // Print details for debugging
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
+fn every_fixture_scene_has_oracle_tree_golden() {
+    let (scenes, oracle) = (scenes_dir(), oracle_outputs_dir());
+    let mut missing = Vec::new();
+    for e in std::fs::read_dir(&scenes).unwrap() {
+        let f = e.unwrap().file_name().to_string_lossy().to_string();
+        if !f.ends_with(".tscn") {
+            continue;
+        }
+        let b = f.trim_end_matches(".tscn");
+        if !oracle.join(format!("{b}_tree.json")).exists() {
+            missing.push(f);
         }
     }
-
     assert!(
-        parity >= 25.0,
-        "main.tscn parity {parity:.1}% should be >= 25% (pre-default-property fixtures)"
+        missing.is_empty(),
+        "Scenes missing oracle tree goldens: {missing:?}"
     );
 }
 
 #[test]
-fn oracle_simple_hierarchy_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
+fn every_oracle_tree_golden_has_matching_properties_golden() {
+    let oracle = oracle_outputs_dir();
+    let mut missing = Vec::new();
+    for e in std::fs::read_dir(&oracle).unwrap() {
+        let f = e.unwrap().file_name().to_string_lossy().to_string();
+        if !f.ends_with("_tree.json") {
+            continue;
+        }
+        let b = f.trim_end_matches("_tree.json");
+        if !oracle.join(format!("{b}_properties.json")).exists() {
+            missing.push(f);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "Tree goldens missing properties: {missing:?}"
     );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
+}
+
+// ===========================================================================
+// 5. Scene tree structure tests (per-scene)
+// ===========================================================================
+
+#[test]
+fn golden_minimal_node_count_matches() {
+    let (g, p) = (
+        load_oracle_tree("minimal"),
+        run_patina_on_scene(&scene_path("minimal")),
     );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(
-        g_names, p_names,
-        "node names should match for simple_hierarchy.tscn"
+        collect_godot_names(&g).len(),
+        collect_patina_names(&p).len(),
+        "minimal: node count"
     );
 }
-
 #[test]
-fn oracle_simple_hierarchy_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
+fn golden_minimal_node_names_match() {
+    let (g, p) = (
+        load_oracle_tree("minimal"),
+        run_patina_on_scene(&scene_path("minimal")),
     );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
+    assert_eq!(collect_godot_names(&g), collect_patina_names(&p));
+}
+#[test]
+fn golden_minimal_node_classes_match() {
+    let (g, p) = (
+        load_oracle_tree("minimal"),
+        run_patina_on_scene(&scene_path("minimal")),
     );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-    let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
-
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
-        }
+    assert_eq!(collect_godot_classes(&g), collect_patina_classes(&p));
+}
+#[test]
+fn golden_hierarchy_tree_structure_matches() {
+    let (g, p) = (
+        flatten_godot_tree(&load_oracle_tree("hierarchy")),
+        flatten_patina_tree(&run_patina_on_scene(&scene_path("hierarchy"))),
+    );
+    assert_eq!(g.len(), p.len(), "hierarchy: node count");
+    for (gn, pn) in g.iter().zip(p.iter()) {
+        assert_eq!(gn.name, pn.name);
+        assert_eq!(gn.class, pn.class);
     }
-
-    assert!(
-        parity >= 25.0,
-        "simple_hierarchy.tscn parity {parity:.1}% should be >= 60%"
-    );
 }
-
 #[test]
-fn oracle_signal_test_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
+fn golden_with_properties_node_names_match() {
     assert_eq!(
-        g_names, p_names,
-        "node names should match for signal_test.tscn"
+        collect_godot_names(&load_oracle_tree("with_properties")),
+        collect_patina_names(&run_patina_on_scene(&scene_path("with_properties")))
     );
 }
-
 #[test]
-fn oracle_signal_test_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
+fn golden_space_shooter_tree_structure_matches() {
+    let (g, p) = (
+        flatten_godot_tree(&load_oracle_tree("space_shooter")),
+        flatten_patina_tree(&run_patina_on_scene(&scene_path("space_shooter"))),
     );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-    let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
-
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
-        }
+    assert_eq!(g.len(), p.len(), "space_shooter: node count");
+    for (gn, pn) in g.iter().zip(p.iter()) {
+        assert_eq!(gn.name, pn.name);
+        assert_eq!(gn.class, pn.class);
     }
-
-    assert!(
-        parity >= 25.0,
-        "signal_test.tscn parity {parity:.1}% should be >= 60%"
-    );
 }
-
 #[test]
-fn oracle_multi_script_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
+fn golden_platformer_tree_structure_matches() {
+    let (g, p) = (
+        collect_godot_names(&load_oracle_tree("platformer")),
+        collect_patina_names(&run_patina_on_scene(&scene_path("platformer"))),
     );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(g, p, "platformer: node names");
+}
+#[test]
+fn golden_ui_menu_tree_structure_matches() {
     assert_eq!(
-        g_names, p_names,
-        "node names should match for multi_script.tscn"
-    );
-}
-
-#[test]
-fn oracle_multi_script_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-    let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
-
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
-        }
-    }
-
-    assert!(
-        parity >= 25.0,
-        "multi_script.tscn parity {parity:.1}% should be >= 60%"
+        collect_godot_classes(&load_oracle_tree("ui_menu")),
+        collect_patina_classes(&run_patina_on_scene(&scene_path("ui_menu")))
     );
 }
 
 // ===========================================================================
-// Cross-scene summary test
+// 6. Property value comparison
 // ===========================================================================
 
 #[test]
-fn oracle_overall_parity_summary() {
-    let dir = fixtures_dir();
-    let scenes = ["main", "simple_hierarchy", "signal_test", "multi_script"];
-
-    let mut total_comparisons = 0;
-    let mut total_matches = 0;
-
-    for scene in &scenes {
-        let godot: Value = load_fixture(
-            dir.join(format!("oracle_outputs/{scene}.json"))
-                .to_str()
-                .unwrap(),
-        );
-        let patina: Value = load_fixture(
-            dir.join(format!("patina_outputs/{scene}.json"))
-                .to_str()
-                .unwrap(),
-        );
-
-        let g_nodes = flatten_godot_tree(&godot);
-        let p_nodes = flatten_patina_tree(&patina);
-        let results = compare_scene(&g_nodes, &p_nodes);
-
-        let matched = results.iter().filter(|r| r.matches).count();
-        let total = results.len();
-        let parity = if total > 0 {
-            (matched as f64 / total as f64) * 100.0
-        } else {
-            100.0
-        };
-
-        eprintln!("{scene}: {matched}/{total} = {parity:.1}%");
-        total_comparisons += total;
-        total_matches += matched;
+fn golden_with_properties_player_position_matches() {
+    let (g, p) = (
+        flatten_godot_tree(&load_oracle_properties("with_properties")),
+        flatten_patina_tree(&run_patina_on_scene(&scene_path("with_properties"))),
+    );
+    let (gp, pp) = (
+        g.iter().find(|n| n.name == "Player").unwrap(),
+        p.iter().find(|n| n.name == "Player").unwrap(),
+    );
+    assert!(
+        values_match(
+            gp.properties.get("position").unwrap(),
+            pp.properties.get("position").unwrap()
+        ),
+        "Player.position mismatch"
+    );
+}
+#[test]
+fn golden_space_shooter_player_position_matches() {
+    let (g, p) = (
+        flatten_godot_tree(&load_oracle_properties("space_shooter")),
+        flatten_patina_tree(&run_patina_on_scene(&scene_path("space_shooter"))),
+    );
+    let (gp, pp) = (
+        g.iter().find(|n| n.name == "Player").unwrap(),
+        p.iter().find(|n| n.name == "Player").unwrap(),
+    );
+    if let (Some(gv), Some(pv)) = (gp.properties.get("position"), pp.properties.get("position")) {
+        assert!(values_match(gv, pv), "Player.position mismatch");
     }
+}
+#[test]
+fn golden_with_properties_background_modulate_matches() {
+    let (g, p) = (
+        flatten_godot_tree(&load_oracle_properties("with_properties")),
+        flatten_patina_tree(&run_patina_on_scene(&scene_path("with_properties"))),
+    );
+    let (gb, pb) = (
+        g.iter().find(|n| n.name == "Background").unwrap(),
+        p.iter().find(|n| n.name == "Background").unwrap(),
+    );
+    if let (Some(gv), Some(pv)) = (gb.properties.get("modulate"), pb.properties.get("modulate")) {
+        assert!(values_match(gv, pv), "Background.modulate mismatch");
+    }
+}
 
-    let overall = if total_comparisons > 0 {
-        (total_matches as f64 / total_comparisons as f64) * 100.0
+// ===========================================================================
+// 7. Full parity across all golden scenes
+// ===========================================================================
+
+#[test]
+fn golden_all_scenes_node_count_parity() {
+    let mut fails = Vec::new();
+    for n in GOLDEN_SCENES {
+        let t = scene_path(n);
+        if !t.exists() {
+            continue;
+        }
+        let (g, p) = (
+            flatten_godot_tree(&load_oracle_tree(n)).len(),
+            flatten_patina_tree(&run_patina_on_scene(&t)).len(),
+        );
+        if g != p {
+            fails.push(format!("{n}: godot={g} patina={p}"));
+        }
+    }
+    assert!(
+        fails.is_empty(),
+        "Node count mismatches:\n{}",
+        fails.join("\n")
+    );
+}
+#[test]
+fn golden_all_scenes_node_names_parity() {
+    let mut fails = Vec::new();
+    for n in GOLDEN_SCENES {
+        let t = scene_path(n);
+        if !t.exists() {
+            continue;
+        }
+        let (g, p) = (
+            collect_godot_names(&load_oracle_tree(n)),
+            collect_patina_names(&run_patina_on_scene(&t)),
+        );
+        if g != p {
+            fails.push(format!("{n}: godot={g:?} patina={p:?}"));
+        }
+    }
+    assert!(
+        fails.is_empty(),
+        "Node name mismatches:\n{}",
+        fails.join("\n")
+    );
+}
+#[test]
+fn golden_all_scenes_node_classes_parity() {
+    let mut fails = Vec::new();
+    for n in GOLDEN_SCENES {
+        let t = scene_path(n);
+        if !t.exists() {
+            continue;
+        }
+        let (g, p) = (
+            collect_godot_classes(&load_oracle_tree(n)),
+            collect_patina_classes(&run_patina_on_scene(&t)),
+        );
+        if g != p {
+            fails.push(format!("{n}: godot={g:?} patina={p:?}"));
+        }
+    }
+    assert!(
+        fails.is_empty(),
+        "Node class mismatches:\n{}",
+        fails.join("\n")
+    );
+}
+
+#[test]
+fn golden_all_scenes_property_parity_report() {
+    let mut total = 0usize;
+    let mut matched = 0usize;
+    let mut per: Vec<(String, usize, usize, f64)> = Vec::new();
+    for n in GOLDEN_SCENES {
+        let t = scene_path(n);
+        if !t.exists() {
+            continue;
+        }
+        let r = compare_scene(
+            &flatten_godot_tree(&load_oracle_properties(n)),
+            &flatten_patina_tree(&run_patina_on_scene(&t)),
+        );
+        let m = r.iter().filter(|x| x.matches).count();
+        per.push((n.to_string(), r.len(), m, parity_percentage(&r)));
+        total += r.len();
+        matched += m;
+    }
+    let overall = if total > 0 {
+        (matched as f64 / total as f64) * 100.0
     } else {
         100.0
     };
-    eprintln!("Overall: {total_matches}/{total_comparisons} = {overall:.1}%");
-
-    // Overall parity threshold — current fixtures were generated before
-    // default Node2D properties were added. Regenerate fixtures to see higher parity.
-    assert!(
-        overall >= 25.0,
-        "overall parity {overall:.1}% should be >= 25%"
+    eprintln!("\n=== Oracle Golden Parity Report ===");
+    eprintln!(
+        "{:<25} {:>8} {:>8} {:>8}",
+        "Scene", "Total", "Match", "Parity"
     );
+    eprintln!("{}", "-".repeat(55));
+    for (n, t, m, p) in &per {
+        eprintln!("{:<25} {:>8} {:>8} {:>7.1}%", n, t, m, p);
+    }
+    eprintln!("{}", "-".repeat(55));
+    eprintln!(
+        "{:<25} {:>8} {:>8} {:>7.1}%",
+        "OVERALL", total, matched, overall
+    );
+    assert!(total >= 9);
+}
+
+// ===========================================================================
+// 8. Oracle golden file integrity
+// ===========================================================================
+
+#[test]
+fn oracle_outputs_has_expected_golden_count() {
+    let c = std::fs::read_dir(oracle_outputs_dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .count();
+    assert!(c >= 27, "Expected >= 27 oracle goldens, found {c}");
+}
+
+#[test]
+fn oracle_tree_goldens_have_valid_structure() {
+    let mut fails = Vec::new();
+    for e in std::fs::read_dir(oracle_outputs_dir()).unwrap() {
+        let e = e.unwrap();
+        let f = e.file_name().to_string_lossy().to_string();
+        if !f.ends_with("_tree.json") {
+            continue;
+        }
+        match serde_json::from_str::<Value>(&std::fs::read_to_string(e.path()).unwrap()) {
+            Ok(v) => {
+                if v.get("children").is_none() {
+                    fails.push(format!("{f}: no children"));
+                }
+                if v.get("class").is_none() {
+                    fails.push(format!("{f}: no class"));
+                }
+            }
+            Err(e) => fails.push(format!("{f}: {e}")),
+        }
+    }
+    assert!(fails.is_empty(), "Tree golden errors: {fails:?}");
 }

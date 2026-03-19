@@ -1,0 +1,39 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Mover",
+					"owner": "/root/TestScene",
+					"path": "/root/TestScene/Mover"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "VarTest",
+					"owner": "/root/TestScene",
+					"path": "/root/TestScene/VarTest"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "TestScene",
+			"owner": "/root",
+			"path": "/root/TestScene"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

@@ -1,0 +1,9 @@
+; Patina Engine fixture project for oracle capture.
+config_version=5
+
+[application]
+config/name="Patina Fixtures"
+run/main_scene="res://scenes/minimal.tscn"
+
+[rendering]
+renderer/rendering_method="mobile"

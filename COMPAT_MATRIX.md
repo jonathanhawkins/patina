@@ -2,7 +2,7 @@
 
 This document tracks the implementation and compatibility status of each Patina Engine subsystem relative to upstream Godot behavior.
 
-**Last updated**: 2026-03-19 (oracle parity measurement)
+**Last updated**: 2026-03-19 (oracle/render/runtime verification)
 
 ---
 
@@ -27,9 +27,9 @@ This document tracks the implementation and compatibility status of each Patina 
 | Signals | `gdobject` | **Partial** | signal_test.tscn | ~30% | Declaration + emit work; cross-node dispatch limited |
 | Notifications | `gdobject` | **Partial** | 4 scenes | ~80% | enter_tree/ready/process/physics_process implemented |
 | Resources | `gdresource` | **Partial** | 3 .tres fixtures | ~95% | .tres/.tscn parsing works; UID/caching not yet implemented |
-| Scene System | `gdscene` | **Partial** | 4 scenes | ~90% | Node hierarchy, SceneTree, lifecycle, PackedScene all working; default Node2D props added |
+| Scene System | `gdscene` | **Partial** | 4 oracle scenes + runtime unit coverage | ~90% | Node hierarchy, SceneTree, lifecycle, PackedScene working; tree-order script dispatch, pause handling, live-subtree lifecycle mutation tests, and traced scripted frame evolution now covered |
 | GDScript Interop | `gdscript-interop` | **Partial** | 4 scenes | ~85% | 30+ built-ins, get_child_count added; class system, cross-node access |
-| 2D Rendering | `gdrender2d` | In Progress | 1 frame | -- | Basic frame capture; no full 2D rendering pipeline |
+| 2D Rendering | `gdrender2d` | **Partial** | 6 `.tscn` render fixtures | Golden-based | Scene-driven rendering is covered by `render_golden_test`; fixture scenes render to golden PNGs for demo_2d, hierarchy, space_shooter, render_test_simple, render_test_camera, and render_test_sprite |
 | 2D Physics | `gdphysics2d` | Not Started | -- | -- | Shapes, collision detection stub only |
 | Audio | `gdaudio` | Not Started | -- | -- | Stub only |
 | Input | `gdplatform` | Not Started | -- | -- | Stub only |
@@ -48,7 +48,7 @@ Measured against 4 Godot oracle outputs (main, simple_hierarchy, signal_test, mu
 - **Explicit properties**: ~70% (positions, script vars match)
 - **Default properties**: Fixed but fixtures need regeneration
 
-> Parity will increase significantly when Patina output fixtures are regenerated with the default Node2D property fix.
+> Headless oracle parity still needs broader fixture regeneration, but the runtime frame/lifecycle contract and scene-driven 2D render golden path are now both covered by passing tests.
 
 ---
 

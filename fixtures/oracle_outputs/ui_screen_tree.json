@@ -1,0 +1,80 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "ColorRect",
+					"groups": [],
+					"name": "Background",
+					"owner": "/root/UIRoot",
+					"path": "/root/UIRoot/Background"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "TextureRect",
+							"groups": [],
+							"name": "Logo",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/VBoxContainer/Logo"
+						},
+						{
+							"children": [],
+							"class": "Label",
+							"groups": [],
+							"name": "Title",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/VBoxContainer/Title"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "StartButton",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/VBoxContainer/StartButton"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "OptionsButton",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/VBoxContainer/OptionsButton"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "QuitButton",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/VBoxContainer/QuitButton"
+						}
+					],
+					"class": "VBoxContainer",
+					"groups": [],
+					"name": "VBoxContainer",
+					"owner": "/root/UIRoot",
+					"path": "/root/UIRoot/VBoxContainer"
+				}
+			],
+			"class": "Control",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "UIRoot",
+			"owner": "/root",
+			"path": "/root/UIRoot"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

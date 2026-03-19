@@ -1,0 +1,11 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = "4.2"
+
+[libraries]
+linux.debug.x86_64 = "res://target/debug/libpatina_godot_lab.so"
+linux.release.x86_64 = "res://target/release/libpatina_godot_lab.so"
+macos.debug = "res://target/debug/libpatina_godot_lab.dylib"
+macos.release = "res://target/release/libpatina_godot_lab.dylib"
+windows.debug.x86_64 = "res://target/debug/patina_godot_lab.dll"
+windows.release.x86_64 = "res://target/release/patina_godot_lab.dll"

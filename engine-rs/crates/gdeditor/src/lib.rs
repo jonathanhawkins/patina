@@ -125,6 +125,17 @@ pub enum EditorCommand {
         /// The IDs of nodes created (populated on execute, for undo).
         created_ids: Vec<NodeId>,
     },
+    /// Instance a packed scene (from `.tscn` source) under a parent node.
+    InstanceScene {
+        /// The parent node to instance under.
+        parent_id: NodeId,
+        /// The `.tscn` source text.
+        tscn_source: String,
+        /// The IDs of nodes created (populated on execute, for undo).
+        created_ids: Vec<NodeId>,
+        /// The root node of the instanced scene (populated on execute).
+        root_id: Option<NodeId>,
+    },
 }
 
 impl EditorCommand {
@@ -253,6 +264,44 @@ impl EditorCommand {
                 tracing::debug!("DuplicateNode {:?} -> {:?}", source_id, created_ids);
                 Ok(())
             }
+            EditorCommand::InstanceScene {
+                parent_id,
+                tscn_source,
+                created_ids,
+                root_id,
+            } => {
+                use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
+                let packed = PackedScene::from_tscn(tscn_source).map_err(|e| {
+                    gdcore::error::EngineError::InvalidOperation(format!(
+                        "failed to parse tscn: {e}"
+                    ))
+                })?;
+                let scene_root = add_packed_scene_to_tree(tree, *parent_id, &packed)?;
+                *root_id = Some(scene_root);
+
+                // Mark the instanced root with a source indicator for the UI.
+                if let Some(node) = tree.get_node_mut(scene_root) {
+                    node.set_property("_instance_source", Variant::String("instanced".to_string()));
+                }
+
+                // Collect all created node IDs for undo.
+                fn collect_subtree_ids(tree: &SceneTree, nid: NodeId, out: &mut Vec<NodeId>) {
+                    out.push(nid);
+                    if let Some(node) = tree.get_node(nid) {
+                        for &child in node.children() {
+                            collect_subtree_ids(tree, child, out);
+                        }
+                    }
+                }
+                created_ids.clear();
+                collect_subtree_ids(tree, scene_root, created_ids);
+                tracing::debug!(
+                    "InstanceScene root {:?} ({} nodes)",
+                    scene_root,
+                    created_ids.len()
+                );
+                Ok(())
+            }
         }
     }
 
@@ -310,7 +359,8 @@ impl EditorCommand {
                 node.set_name(old_name.as_str());
                 Ok(())
             }
-            EditorCommand::DuplicateNode { created_ids, .. } => {
+            EditorCommand::DuplicateNode { created_ids, .. }
+            | EditorCommand::InstanceScene { created_ids, .. } => {
                 // Remove all created nodes in reverse order (children first).
                 for &id in created_ids.iter().rev() {
                     let _ = tree.remove_node(id);
@@ -726,5 +776,156 @@ mod tests {
             editor.tree().get_node(main_id).unwrap().get_property("b"),
             Variant::Int(2)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // InstanceScene command tests
+    // -----------------------------------------------------------------------
+
+    const INSTANCE_TSCN: &str = r#"
+[gd_scene format=3]
+
+[node name="Enemy" type="Node2D"]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+position = Vector2(10, 20)
+"#;
+
+    #[test]
+    fn instance_scene_adds_nodes() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let before = editor.tree().node_count();
+
+        editor
+            .execute(EditorCommand::InstanceScene {
+                parent_id: main_id,
+                tscn_source: INSTANCE_TSCN.to_string(),
+                created_ids: Vec::new(),
+                root_id: None,
+            })
+            .unwrap();
+
+        // Should have added 2 nodes (Enemy + Sprite).
+        assert_eq!(editor.tree().node_count(), before + 2);
+    }
+
+    #[test]
+    fn instance_scene_returns_root_id() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        let mut cmd = EditorCommand::InstanceScene {
+            parent_id: main_id,
+            tscn_source: INSTANCE_TSCN.to_string(),
+            created_ids: Vec::new(),
+            root_id: None,
+        };
+        cmd.execute(editor.tree_mut()).unwrap();
+
+        let root_id = match &cmd {
+            EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
+            _ => unreachable!(),
+        };
+
+        let node = editor.tree().get_node(root_id).unwrap();
+        assert_eq!(node.name(), "Enemy");
+        assert_eq!(node.class_name(), "Node2D");
+        assert_eq!(
+            node.get_property("_instance_source"),
+            Variant::String("instanced".to_string())
+        );
+    }
+
+    #[test]
+    fn instance_scene_undo_removes_nodes() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let before = editor.tree().node_count();
+
+        editor
+            .execute(EditorCommand::InstanceScene {
+                parent_id: main_id,
+                tscn_source: INSTANCE_TSCN.to_string(),
+                created_ids: Vec::new(),
+                root_id: None,
+            })
+            .unwrap();
+
+        assert_eq!(editor.tree().node_count(), before + 2);
+
+        editor.undo().unwrap();
+        assert_eq!(editor.tree().node_count(), before);
+    }
+
+    #[test]
+    fn instance_scene_redo_restores_nodes() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+        let before = editor.tree().node_count();
+
+        editor
+            .execute(EditorCommand::InstanceScene {
+                parent_id: main_id,
+                tscn_source: INSTANCE_TSCN.to_string(),
+                created_ids: Vec::new(),
+                root_id: None,
+            })
+            .unwrap();
+
+        editor.undo().unwrap();
+        assert_eq!(editor.tree().node_count(), before);
+
+        editor.redo().unwrap();
+        assert_eq!(editor.tree().node_count(), before + 2);
+    }
+
+    #[test]
+    fn instance_scene_invalid_tscn_fails() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        let result = editor.execute(EditorCommand::InstanceScene {
+            parent_id: main_id,
+            tscn_source: "not valid tscn".to_string(),
+            created_ids: Vec::new(),
+            root_id: None,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn instance_scene_hierarchy_correct() {
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        let mut cmd = EditorCommand::InstanceScene {
+            parent_id: main_id,
+            tscn_source: INSTANCE_TSCN.to_string(),
+            created_ids: Vec::new(),
+            root_id: None,
+        };
+        cmd.execute(editor.tree_mut()).unwrap();
+
+        let enemy_id = match &cmd {
+            EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
+            _ => unreachable!(),
+        };
+
+        // Enemy should be a child of Main.
+        let enemy = editor.tree().get_node(enemy_id).unwrap();
+        assert_eq!(enemy.parent(), Some(main_id));
+
+        // Sprite should be a child of Enemy.
+        let sprite_id = enemy.children()[0];
+        let sprite = editor.tree().get_node(sprite_id).unwrap();
+        assert_eq!(sprite.name(), "Sprite");
+        assert_eq!(sprite.parent(), Some(enemy_id));
     }
 }

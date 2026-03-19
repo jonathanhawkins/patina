@@ -1,0 +1,101 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "ParallaxLayer",
+							"groups": [
+								"_root_canvas103079215105"
+							],
+							"name": "BackgroundLayer",
+							"owner": "/root/TileMapLevel",
+							"path": "/root/TileMapLevel/Background/BackgroundLayer"
+						}
+					],
+					"class": "ParallaxBackground",
+					"groups": [
+						"__cameras_81604378624"
+					],
+					"name": "Background",
+					"owner": "/root/TileMapLevel",
+					"path": "/root/TileMapLevel/Background"
+				},
+				{
+					"children": [],
+					"class": "TileMapLayer",
+					"groups": [],
+					"name": "TileMapLayer",
+					"owner": "/root/TileMapLevel",
+					"path": "/root/TileMapLevel/TileMapLayer"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Area2D",
+							"groups": [],
+							"name": "Coin1",
+							"owner": "/root/TileMapLevel",
+							"path": "/root/TileMapLevel/Collectibles/Coin1"
+						},
+						{
+							"children": [],
+							"class": "Area2D",
+							"groups": [],
+							"name": "Coin2",
+							"owner": "/root/TileMapLevel",
+							"path": "/root/TileMapLevel/Collectibles/Coin2"
+						},
+						{
+							"children": [],
+							"class": "Area2D",
+							"groups": [],
+							"name": "Coin3",
+							"owner": "/root/TileMapLevel",
+							"path": "/root/TileMapLevel/Collectibles/Coin3"
+						}
+					],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Collectibles",
+					"owner": "/root/TileMapLevel",
+					"path": "/root/TileMapLevel/Collectibles"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "SpawnPoints",
+					"owner": "/root/TileMapLevel",
+					"path": "/root/TileMapLevel/SpawnPoints"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Boundaries",
+					"owner": "/root/TileMapLevel",
+					"path": "/root/TileMapLevel/Boundaries"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "TileMapLevel",
+			"owner": "/root",
+			"path": "/root/TileMapLevel"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

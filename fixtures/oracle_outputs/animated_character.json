@@ -1,0 +1,932 @@
+{
+	"capture_type": "full",
+	"fixture_id": "animated_character",
+	"frames_captured": 10,
+	"generated_at": "2026-03-19T13:37:27",
+	"notification_trace": [],
+	"properties": {
+		"children": [
+			{
+				"children": [
+					{
+						"children": [],
+						"class": "AnimatedSprite2D",
+						"name": "AnimatedSprite",
+						"path": "/root/Character/AnimatedSprite",
+						"properties": {
+							"animation": {
+								"type": "StringName",
+								"value": ""
+							},
+							"auto_translate_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"autoplay": {
+								"type": "String",
+								"value": "idle"
+							},
+							"centered": {
+								"type": "bool",
+								"value": true
+							},
+							"clip_children": {
+								"type": "int",
+								"value": 0
+							},
+							"editor_description": {
+								"type": "String",
+								"value": ""
+							},
+							"flip_h": {
+								"type": "bool",
+								"value": false
+							},
+							"flip_v": {
+								"type": "bool",
+								"value": false
+							},
+							"frame": {
+								"type": "int",
+								"value": 0
+							},
+							"frame_progress": {
+								"type": "float",
+								"value": 0.0
+							},
+							"light_mask": {
+								"type": "int",
+								"value": 1
+							},
+							"material": {
+								"type": "Object",
+								"value": null
+							},
+							"modulate": {
+								"type": "Color",
+								"value": {
+									"a": 1.0,
+									"b": 1.0,
+									"g": 1.0,
+									"r": 1.0
+								}
+							},
+							"offset": {
+								"type": "Vector2",
+								"value": {
+									"x": 0.0,
+									"y": 0.0
+								}
+							},
+							"physics_interpolation_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"position": {
+								"type": "Vector2",
+								"value": {
+									"x": 0.0,
+									"y": 0.0
+								}
+							},
+							"process_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"process_physics_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_thread_group": {
+								"type": "int",
+								"value": 0
+							},
+							"rotation": {
+								"type": "float",
+								"value": 0.0
+							},
+							"scale": {
+								"type": "Vector2",
+								"value": {
+									"x": 1.0,
+									"y": 1.0
+								}
+							},
+							"self_modulate": {
+								"type": "Color",
+								"value": {
+									"a": 1.0,
+									"b": 1.0,
+									"g": 1.0,
+									"r": 1.0
+								}
+							},
+							"show_behind_parent": {
+								"type": "bool",
+								"value": false
+							},
+							"skew": {
+								"type": "float",
+								"value": 0.0
+							},
+							"speed_scale": {
+								"type": "float",
+								"value": 1.0
+							},
+							"sprite_frames": {
+								"type": "Object",
+								"value": null
+							},
+							"texture_filter": {
+								"type": "int",
+								"value": 0
+							},
+							"texture_repeat": {
+								"type": "int",
+								"value": 0
+							},
+							"top_level": {
+								"type": "bool",
+								"value": false
+							},
+							"unique_name_in_owner": {
+								"type": "bool",
+								"value": false
+							},
+							"use_parent_material": {
+								"type": "bool",
+								"value": false
+							},
+							"visibility_layer": {
+								"type": "int",
+								"value": 1
+							},
+							"visible": {
+								"type": "bool",
+								"value": true
+							},
+							"y_sort_enabled": {
+								"type": "bool",
+								"value": false
+							},
+							"z_as_relative": {
+								"type": "bool",
+								"value": true
+							},
+							"z_index": {
+								"type": "int",
+								"value": 0
+							}
+						}
+					},
+					{
+						"children": [],
+						"class": "AnimationPlayer",
+						"name": "AnimationPlayer",
+						"path": "/root/Character/AnimationPlayer",
+						"properties": {
+							"active": {
+								"type": "bool",
+								"value": true
+							},
+							"audio_max_polyphony": {
+								"type": "int",
+								"value": 32
+							},
+							"auto_translate_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"autoplay": {
+								"type": "StringName",
+								"value": ""
+							},
+							"blend_times": {
+								"type": "Array",
+								"value": []
+							},
+							"callback_mode_discrete": {
+								"type": "int",
+								"value": 1
+							},
+							"callback_mode_method": {
+								"type": "int",
+								"value": 0
+							},
+							"callback_mode_process": {
+								"type": "int",
+								"value": 1
+							},
+							"deterministic": {
+								"type": "bool",
+								"value": false
+							},
+							"editor_description": {
+								"type": "String",
+								"value": ""
+							},
+							"libraries/": {
+								"type": "Object",
+								"value": {
+									"_resource_class": "AnimationLibrary",
+									"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
+								}
+							},
+							"movie_quit_on_finish": {
+								"type": "bool",
+								"value": false
+							},
+							"physics_interpolation_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"playback_auto_capture": {
+								"type": "bool",
+								"value": true
+							},
+							"playback_auto_capture_duration": {
+								"type": "float",
+								"value": -1.0
+							},
+							"playback_auto_capture_ease_type": {
+								"type": "int",
+								"value": 0
+							},
+							"playback_auto_capture_transition_type": {
+								"type": "int",
+								"value": 0
+							},
+							"playback_default_blend_time": {
+								"type": "float",
+								"value": 0.0
+							},
+							"process_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"process_physics_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_thread_group": {
+								"type": "int",
+								"value": 0
+							},
+							"reset_on_save": {
+								"type": "bool",
+								"value": true
+							},
+							"root_motion_local": {
+								"type": "bool",
+								"value": false
+							},
+							"root_motion_track": {
+								"type": "NodePath",
+								"value": ""
+							},
+							"root_node": {
+								"type": "NodePath",
+								"value": ".."
+							},
+							"speed_scale": {
+								"type": "float",
+								"value": 1.0
+							},
+							"unique_name_in_owner": {
+								"type": "bool",
+								"value": false
+							}
+						}
+					},
+					{
+						"children": [],
+						"class": "Node",
+						"name": "StateMachine",
+						"path": "/root/Character/StateMachine",
+						"properties": {
+							"auto_translate_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"editor_description": {
+								"type": "String",
+								"value": ""
+							},
+							"metadata/current_state": {
+								"type": "String",
+								"value": "idle"
+							},
+							"metadata/states": {
+								"type": "Array",
+								"value": [
+									"idle",
+									"run",
+									"jump",
+									"fall"
+								]
+							},
+							"physics_interpolation_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"process_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"process_physics_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_thread_group": {
+								"type": "int",
+								"value": 0
+							},
+							"unique_name_in_owner": {
+								"type": "bool",
+								"value": false
+							}
+						}
+					}
+				],
+				"class": "Node2D",
+				"name": "Character",
+				"path": "/root/Character",
+				"properties": {
+					"auto_translate_mode": {
+						"type": "int",
+						"value": 0
+					},
+					"clip_children": {
+						"type": "int",
+						"value": 0
+					},
+					"editor_description": {
+						"type": "String",
+						"value": ""
+					},
+					"light_mask": {
+						"type": "int",
+						"value": 1
+					},
+					"material": {
+						"type": "Object",
+						"value": null
+					},
+					"modulate": {
+						"type": "Color",
+						"value": {
+							"a": 1.0,
+							"b": 1.0,
+							"g": 1.0,
+							"r": 1.0
+						}
+					},
+					"physics_interpolation_mode": {
+						"type": "int",
+						"value": 0
+					},
+					"position": {
+						"type": "Vector2",
+						"value": {
+							"x": 0.0,
+							"y": 0.0
+						}
+					},
+					"process_mode": {
+						"type": "int",
+						"value": 0
+					},
+					"process_physics_priority": {
+						"type": "int",
+						"value": 0
+					},
+					"process_priority": {
+						"type": "int",
+						"value": 0
+					},
+					"process_thread_group": {
+						"type": "int",
+						"value": 0
+					},
+					"rotation": {
+						"type": "float",
+						"value": 0.0
+					},
+					"scale": {
+						"type": "Vector2",
+						"value": {
+							"x": 1.0,
+							"y": 1.0
+						}
+					},
+					"self_modulate": {
+						"type": "Color",
+						"value": {
+							"a": 1.0,
+							"b": 1.0,
+							"g": 1.0,
+							"r": 1.0
+						}
+					},
+					"show_behind_parent": {
+						"type": "bool",
+						"value": false
+					},
+					"skew": {
+						"type": "float",
+						"value": 0.0
+					},
+					"texture_filter": {
+						"type": "int",
+						"value": 0
+					},
+					"texture_repeat": {
+						"type": "int",
+						"value": 0
+					},
+					"top_level": {
+						"type": "bool",
+						"value": false
+					},
+					"unique_name_in_owner": {
+						"type": "bool",
+						"value": false
+					},
+					"use_parent_material": {
+						"type": "bool",
+						"value": false
+					},
+					"visibility_layer": {
+						"type": "int",
+						"value": 1
+					},
+					"visible": {
+						"type": "bool",
+						"value": true
+					},
+					"y_sort_enabled": {
+						"type": "bool",
+						"value": false
+					},
+					"z_as_relative": {
+						"type": "bool",
+						"value": true
+					},
+					"z_index": {
+						"type": "int",
+						"value": 0
+					}
+				}
+			}
+		],
+		"class": "Window",
+		"name": "root",
+		"path": "/root",
+		"properties": {
+			"accessibility_description": {
+				"type": "String",
+				"value": ""
+			},
+			"accessibility_name": {
+				"type": "String",
+				"value": ""
+			},
+			"always_on_top": {
+				"type": "bool",
+				"value": false
+			},
+			"anisotropic_filtering_level": {
+				"type": "int",
+				"value": 2
+			},
+			"audio_listener_enable_2d": {
+				"type": "bool",
+				"value": true
+			},
+			"audio_listener_enable_3d": {
+				"type": "bool",
+				"value": true
+			},
+			"auto_translate_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"borderless": {
+				"type": "bool",
+				"value": false
+			},
+			"canvas_cull_mask": {
+				"type": "int",
+				"value": 4294967295
+			},
+			"canvas_item_default_texture_filter": {
+				"type": "int",
+				"value": 1
+			},
+			"canvas_item_default_texture_repeat": {
+				"type": "int",
+				"value": 0
+			},
+			"content_scale_aspect": {
+				"type": "int",
+				"value": 1
+			},
+			"content_scale_factor": {
+				"type": "float",
+				"value": 1.0
+			},
+			"content_scale_mode": {
+				"type": "int",
+				"value": 0
+			},
+			"content_scale_size": {
+				"type": "Vector2i",
+				"value": "(1152, 648)"
+			},
+			"content_scale_stretch": {
+				"type": "int",
+				"value": 0
+			},
+			"debug_draw": {
+				"type": "int",
+				"value": 0
+			},
+			"disable_3d": {
+				"type": "bool",
+				"value": false
+			},
+			"editor_description": {
+				"type": "String",
+				"value": ""
+			},
+			"exclude_from_capture": {
+				"type": "bool",
+				"value": false
+			},
+			"exclusive": {
+				"type": "bool",
+				"value": false
+			},
+			"extend_to_title": {
+				"type": "bool",
+				"value": false
+			},
+			"force_native": {
+				"type": "bool",
+				"value": false
+			},
+			"fsr_sharpness": {
+				"type": "float",
+				"value": 0.200000002980232
+			},
+			"gui_disable_input": {
+				"type": "bool",
+				"value": false
+			},
+			"gui_drag_threshold": {
+				"type": "int",
+				"value": 10
+			},
+			"gui_embed_subwindows": {
+				"type": "bool",
+				"value": true
+			},
+			"gui_snap_controls_to_pixels": {
+				"type": "bool",
+				"value": true
+			},
+			"handle_input_locally": {
+				"type": "bool",
+				"value": true
+			},
+			"initial_position": {
+				"type": "int",
+				"value": 0
+			},
+			"keep_title_visible": {
+				"type": "bool",
+				"value": false
+			},
+			"max_size": {
+				"type": "Vector2i",
+				"value": "(0, 0)"
+			},
+			"maximize_disabled": {
+				"type": "bool",
+				"value": false
+			},
+			"mesh_lod_threshold": {
+				"type": "float",
+				"value": 1.0
+			},
+			"min_size": {
+				"type": "Vector2i",
+				"value": "(64, 64)"
+			},
+			"minimize_disabled": {
+				"type": "bool",
+				"value": false
+			},
+			"mode": {
+				"type": "int",
+				"value": 1
+			},
+			"mouse_passthrough": {
+				"type": "bool",
+				"value": false
+			},
+			"mouse_passthrough_polygon": {
+				"type": "PackedVector2Array",
+				"value": "[]"
+			},
+			"msaa_2d": {
+				"type": "int",
+				"value": 0
+			},
+			"msaa_3d": {
+				"type": "int",
+				"value": 0
+			},
+			"nonclient_area": {
+				"type": "Rect2i",
+				"value": "[P: (0, 0), S: (0, 0)]"
+			},
+			"oversampling": {
+				"type": "bool",
+				"value": true
+			},
+			"oversampling_override": {
+				"type": "float",
+				"value": 0.0
+			},
+			"own_world_3d": {
+				"type": "bool",
+				"value": false
+			},
+			"physics_interpolation_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"physics_object_picking": {
+				"type": "bool",
+				"value": true
+			},
+			"physics_object_picking_first_only": {
+				"type": "bool",
+				"value": false
+			},
+			"physics_object_picking_sort": {
+				"type": "bool",
+				"value": false
+			},
+			"popup_window": {
+				"type": "bool",
+				"value": false
+			},
+			"popup_wm_hint": {
+				"type": "bool",
+				"value": false
+			},
+			"position": {
+				"type": "Vector2i",
+				"value": "(0, 0)"
+			},
+			"positional_shadow_atlas_16_bits": {
+				"type": "bool",
+				"value": true
+			},
+			"positional_shadow_atlas_quad_0": {
+				"type": "int",
+				"value": 2
+			},
+			"positional_shadow_atlas_quad_1": {
+				"type": "int",
+				"value": 2
+			},
+			"positional_shadow_atlas_quad_2": {
+				"type": "int",
+				"value": 3
+			},
+			"positional_shadow_atlas_quad_3": {
+				"type": "int",
+				"value": 4
+			},
+			"positional_shadow_atlas_size": {
+				"type": "int",
+				"value": 4096
+			},
+			"process_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"process_physics_priority": {
+				"type": "int",
+				"value": 0
+			},
+			"process_priority": {
+				"type": "int",
+				"value": 0
+			},
+			"process_thread_group": {
+				"type": "int",
+				"value": 0
+			},
+			"scaling_3d_mode": {
+				"type": "int",
+				"value": 0
+			},
+			"scaling_3d_scale": {
+				"type": "float",
+				"value": 1.0
+			},
+			"screen_space_aa": {
+				"type": "int",
+				"value": 0
+			},
+			"sdf_oversize": {
+				"type": "int",
+				"value": 1
+			},
+			"sdf_scale": {
+				"type": "int",
+				"value": 1
+			},
+			"sharp_corners": {
+				"type": "bool",
+				"value": false
+			},
+			"size": {
+				"type": "Vector2i",
+				"value": "(64, 64)"
+			},
+			"snap_2d_transforms_to_pixel": {
+				"type": "bool",
+				"value": false
+			},
+			"snap_2d_vertices_to_pixel": {
+				"type": "bool",
+				"value": false
+			},
+			"texture_mipmap_bias": {
+				"type": "float",
+				"value": 0.0
+			},
+			"theme": {
+				"type": "Object",
+				"value": null
+			},
+			"theme_type_variation": {
+				"type": "StringName",
+				"value": ""
+			},
+			"title": {
+				"type": "String",
+				"value": "Patina Fixtures"
+			},
+			"transient": {
+				"type": "bool",
+				"value": false
+			},
+			"transient_to_focused": {
+				"type": "bool",
+				"value": false
+			},
+			"transparent": {
+				"type": "bool",
+				"value": false
+			},
+			"transparent_bg": {
+				"type": "bool",
+				"value": false
+			},
+			"unfocusable": {
+				"type": "bool",
+				"value": false
+			},
+			"unique_name_in_owner": {
+				"type": "bool",
+				"value": false
+			},
+			"unresizable": {
+				"type": "bool",
+				"value": false
+			},
+			"use_debanding": {
+				"type": "bool",
+				"value": false
+			},
+			"use_hdr_2d": {
+				"type": "bool",
+				"value": false
+			},
+			"use_occlusion_culling": {
+				"type": "bool",
+				"value": false
+			},
+			"use_taa": {
+				"type": "bool",
+				"value": false
+			},
+			"use_xr": {
+				"type": "bool",
+				"value": false
+			},
+			"visible": {
+				"type": "bool",
+				"value": true
+			},
+			"vrs_mode": {
+				"type": "int",
+				"value": 0
+			},
+			"vrs_texture": {
+				"type": "Object",
+				"value": null
+			},
+			"vrs_update_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"world_3d": {
+				"type": "Object",
+				"value": {
+					"_resource_class": "World3D",
+					"_resource_path": ""
+				}
+			},
+			"wrap_controls": {
+				"type": "bool",
+				"value": false
+			}
+		}
+	},
+	"scene_tree": {
+		"children": [
+			{
+				"children": [
+					{
+						"children": [],
+						"class": "AnimatedSprite2D",
+						"groups": [],
+						"name": "AnimatedSprite",
+						"path": "/root/Character/AnimatedSprite"
+					},
+					{
+						"children": [],
+						"class": "AnimationPlayer",
+						"groups": [],
+						"name": "AnimationPlayer",
+						"path": "/root/Character/AnimationPlayer"
+					},
+					{
+						"children": [],
+						"class": "Node",
+						"groups": [],
+						"name": "StateMachine",
+						"path": "/root/Character/StateMachine"
+					}
+				],
+				"class": "Node2D",
+				"groups": [
+					"_root_canvas77309411328"
+				],
+				"name": "Character",
+				"path": "/root/Character"
+			}
+		],
+		"class": "Window",
+		"groups": [
+			"_picking_viewports",
+			"_viewports"
+		],
+		"name": "root",
+		"path": "/root"
+	},
+	"signal_trace": [
+		{
+			"args": [],
+			"frame_number": 0,
+			"signal_name": "draw",
+			"source_path": "/root/Character"
+		},
+		{
+			"args": [],
+			"frame_number": 0,
+			"signal_name": "draw",
+			"source_path": "/root/Character/AnimatedSprite"
+		}
+	],
+	"upstream_version": "4.5.1-stable"
+}

@@ -1,0 +1,41 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Player",
+					"owner": "/root/Root",
+					"path": "/root/Root/Player"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Background",
+					"owner": "/root/Root",
+					"path": "/root/Root/Background"
+				}
+			],
+			"class": "Node",
+			"groups": [],
+			"name": "Root",
+			"owner": "/root",
+			"path": "/root/Root"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

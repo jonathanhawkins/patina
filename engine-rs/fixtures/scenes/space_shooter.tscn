@@ -1,0 +1,21 @@
+[gd_scene format=3 uid="uid://space_shooter"]
+
+[ext_resource type="Script" path="res://fixtures/scripts/player.gd" id="1_player"]
+[ext_resource type="Script" path="res://fixtures/scripts/enemy_spawner.gd" id="2_spawner"]
+
+[node name="SpaceShooter" type="Node2D"]
+
+[node name="Background" type="Node2D" parent="."]
+position = Vector2(0, 0)
+
+[node name="Player" type="Node2D" parent="."]
+position = Vector2(320, 400)
+speed = 200
+script = ExtResource("1_player")
+
+[node name="EnemySpawner" type="Node2D" parent="."]
+position = Vector2(320, 0)
+script = ExtResource("2_spawner")
+
+[node name="ScoreLabel" type="Node2D" parent="."]
+position = Vector2(10, 10)

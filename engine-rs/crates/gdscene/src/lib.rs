@@ -18,6 +18,7 @@
 #![warn(clippy::all)]
 
 pub mod animation;
+pub mod collision;
 pub mod control;
 pub mod lifecycle;
 pub mod main_loop;
@@ -40,4 +41,4 @@ pub use node::{Node, NodeId};
 pub use packed_scene::{add_packed_scene_to_tree, wire_connections, PackedScene, SceneConnection};
 pub use scene_saver::TscnSaver;
 pub use scene_tree::SceneTree;
-pub use scripting::GDScriptNodeInstance;
+pub use scripting::{GDScriptNodeInstance, InputSnapshot};

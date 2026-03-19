@@ -32,11 +32,11 @@
       "name": "Mover",
       "path": "/root/World/Mover",
       "properties": {
-        "position": "Vector2(200, 100)",
+        "position": "Vector2(202.09093, 100)",
         "rotation": "0.0",
         "scale": "Vector2(1, 1)",
         "speed": "50.0",
-        "total_moved": "2.130333333333333",
+        "total_moved": "2.0909333333333335",
         "visible": "true"
       }
     }

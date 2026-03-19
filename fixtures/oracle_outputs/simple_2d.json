@@ -1,0 +1,1410 @@
+{
+	"capture_type": "full",
+	"fixture_id": "simple_2d",
+	"frames_captured": 10,
+	"generated_at": "2026-03-19T13:37:29",
+	"notification_trace": [],
+	"properties": {
+		"children": [
+			{
+				"children": [
+					{
+						"children": [
+							{
+								"children": [],
+								"class": "Sprite2D",
+								"name": "Sprite",
+								"path": "/root/Level/Player/Sprite",
+								"properties": {
+									"auto_translate_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"centered": {
+										"type": "bool",
+										"value": true
+									},
+									"clip_children": {
+										"type": "int",
+										"value": 0
+									},
+									"editor_description": {
+										"type": "String",
+										"value": ""
+									},
+									"flip_h": {
+										"type": "bool",
+										"value": false
+									},
+									"flip_v": {
+										"type": "bool",
+										"value": false
+									},
+									"frame": {
+										"type": "int",
+										"value": 0
+									},
+									"hframes": {
+										"type": "int",
+										"value": 1
+									},
+									"light_mask": {
+										"type": "int",
+										"value": 1
+									},
+									"material": {
+										"type": "Object",
+										"value": null
+									},
+									"modulate": {
+										"type": "Color",
+										"value": {
+											"a": 1.0,
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
+										}
+									},
+									"offset": {
+										"type": "Vector2",
+										"value": {
+											"x": 0.0,
+											"y": -16.0
+										}
+									},
+									"physics_interpolation_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"position": {
+										"type": "Vector2",
+										"value": {
+											"x": 0.0,
+											"y": 0.0
+										}
+									},
+									"process_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"process_physics_priority": {
+										"type": "int",
+										"value": 0
+									},
+									"process_priority": {
+										"type": "int",
+										"value": 0
+									},
+									"process_thread_group": {
+										"type": "int",
+										"value": 0
+									},
+									"region_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"region_filter_clip_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"region_rect": {
+										"type": "Rect2",
+										"value": {
+											"position": {
+												"x": 0.0,
+												"y": 0.0
+											},
+											"size": {
+												"x": 0.0,
+												"y": 0.0
+											}
+										}
+									},
+									"rotation": {
+										"type": "float",
+										"value": 0.0
+									},
+									"scale": {
+										"type": "Vector2",
+										"value": {
+											"x": 1.0,
+											"y": 1.0
+										}
+									},
+									"self_modulate": {
+										"type": "Color",
+										"value": {
+											"a": 1.0,
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
+										}
+									},
+									"show_behind_parent": {
+										"type": "bool",
+										"value": false
+									},
+									"skew": {
+										"type": "float",
+										"value": 0.0
+									},
+									"texture": {
+										"type": "Object",
+										"value": null
+									},
+									"texture_filter": {
+										"type": "int",
+										"value": 0
+									},
+									"texture_repeat": {
+										"type": "int",
+										"value": 0
+									},
+									"top_level": {
+										"type": "bool",
+										"value": false
+									},
+									"unique_name_in_owner": {
+										"type": "bool",
+										"value": false
+									},
+									"use_parent_material": {
+										"type": "bool",
+										"value": false
+									},
+									"vframes": {
+										"type": "int",
+										"value": 1
+									},
+									"visibility_layer": {
+										"type": "int",
+										"value": 1
+									},
+									"visible": {
+										"type": "bool",
+										"value": true
+									},
+									"y_sort_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"z_as_relative": {
+										"type": "bool",
+										"value": true
+									},
+									"z_index": {
+										"type": "int",
+										"value": 0
+									}
+								}
+							},
+							{
+								"children": [],
+								"class": "CollisionShape2D",
+								"name": "CollisionShape",
+								"path": "/root/Level/Player/CollisionShape",
+								"properties": {
+									"auto_translate_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"disabled": {
+										"type": "bool",
+										"value": false
+									},
+									"editor_description": {
+										"type": "String",
+										"value": ""
+									},
+									"light_mask": {
+										"type": "int",
+										"value": 1
+									},
+									"material": {
+										"type": "Object",
+										"value": null
+									},
+									"modulate": {
+										"type": "Color",
+										"value": {
+											"a": 1.0,
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
+										}
+									},
+									"one_way_collision": {
+										"type": "bool",
+										"value": false
+									},
+									"one_way_collision_margin": {
+										"type": "float",
+										"value": 1.0
+									},
+									"physics_interpolation_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"position": {
+										"type": "Vector2",
+										"value": {
+											"x": 0.0,
+											"y": 0.0
+										}
+									},
+									"process_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"process_physics_priority": {
+										"type": "int",
+										"value": 0
+									},
+									"process_priority": {
+										"type": "int",
+										"value": 0
+									},
+									"process_thread_group": {
+										"type": "int",
+										"value": 0
+									},
+									"rotation": {
+										"type": "float",
+										"value": 0.0
+									},
+									"scale": {
+										"type": "Vector2",
+										"value": {
+											"x": 1.0,
+											"y": 1.0
+										}
+									},
+									"self_modulate": {
+										"type": "Color",
+										"value": {
+											"a": 1.0,
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
+										}
+									},
+									"shape": {
+										"type": "Object",
+										"value": {
+											"_resource_class": "CircleShape2D",
+											"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
+										}
+									},
+									"show_behind_parent": {
+										"type": "bool",
+										"value": false
+									},
+									"skew": {
+										"type": "float",
+										"value": 0.0
+									},
+									"texture_filter": {
+										"type": "int",
+										"value": 0
+									},
+									"texture_repeat": {
+										"type": "int",
+										"value": 0
+									},
+									"top_level": {
+										"type": "bool",
+										"value": false
+									},
+									"unique_name_in_owner": {
+										"type": "bool",
+										"value": false
+									},
+									"use_parent_material": {
+										"type": "bool",
+										"value": false
+									},
+									"visibility_layer": {
+										"type": "int",
+										"value": 1
+									},
+									"visible": {
+										"type": "bool",
+										"value": true
+									},
+									"y_sort_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"z_as_relative": {
+										"type": "bool",
+										"value": true
+									},
+									"z_index": {
+										"type": "int",
+										"value": 0
+									}
+								}
+							},
+							{
+								"children": [],
+								"class": "Camera2D",
+								"name": "Camera",
+								"path": "/root/Level/Player/Camera",
+								"properties": {
+									"anchor_mode": {
+										"type": "int",
+										"value": 1
+									},
+									"auto_translate_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"drag_bottom_margin": {
+										"type": "float",
+										"value": 0.200000002980232
+									},
+									"drag_horizontal_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"drag_horizontal_offset": {
+										"type": "float",
+										"value": 0.0
+									},
+									"drag_left_margin": {
+										"type": "float",
+										"value": 0.200000002980232
+									},
+									"drag_right_margin": {
+										"type": "float",
+										"value": 0.200000002980232
+									},
+									"drag_top_margin": {
+										"type": "float",
+										"value": 0.200000002980232
+									},
+									"drag_vertical_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"drag_vertical_offset": {
+										"type": "float",
+										"value": 0.0
+									},
+									"editor_description": {
+										"type": "String",
+										"value": ""
+									},
+									"editor_draw_drag_margin": {
+										"type": "bool",
+										"value": false
+									},
+									"editor_draw_limits": {
+										"type": "bool",
+										"value": false
+									},
+									"editor_draw_screen": {
+										"type": "bool",
+										"value": true
+									},
+									"enabled": {
+										"type": "bool",
+										"value": true
+									},
+									"ignore_rotation": {
+										"type": "bool",
+										"value": true
+									},
+									"light_mask": {
+										"type": "int",
+										"value": 1
+									},
+									"limit_bottom": {
+										"type": "int",
+										"value": 10000000
+									},
+									"limit_enabled": {
+										"type": "bool",
+										"value": true
+									},
+									"limit_left": {
+										"type": "int",
+										"value": -10000000
+									},
+									"limit_right": {
+										"type": "int",
+										"value": 10000000
+									},
+									"limit_smoothed": {
+										"type": "bool",
+										"value": false
+									},
+									"limit_top": {
+										"type": "int",
+										"value": -10000000
+									},
+									"material": {
+										"type": "Object",
+										"value": null
+									},
+									"modulate": {
+										"type": "Color",
+										"value": {
+											"a": 1.0,
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
+										}
+									},
+									"offset": {
+										"type": "Vector2",
+										"value": {
+											"x": 0.0,
+											"y": 0.0
+										}
+									},
+									"physics_interpolation_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"position": {
+										"type": "Vector2",
+										"value": {
+											"x": 0.0,
+											"y": 0.0
+										}
+									},
+									"position_smoothing_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"position_smoothing_speed": {
+										"type": "float",
+										"value": 5.0
+									},
+									"process_callback": {
+										"type": "int",
+										"value": 1
+									},
+									"process_mode": {
+										"type": "int",
+										"value": 0
+									},
+									"process_physics_priority": {
+										"type": "int",
+										"value": 0
+									},
+									"process_priority": {
+										"type": "int",
+										"value": 0
+									},
+									"process_thread_group": {
+										"type": "int",
+										"value": 0
+									},
+									"rotation": {
+										"type": "float",
+										"value": 0.0
+									},
+									"rotation_smoothing_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"rotation_smoothing_speed": {
+										"type": "float",
+										"value": 5.0
+									},
+									"scale": {
+										"type": "Vector2",
+										"value": {
+											"x": 1.0,
+											"y": 1.0
+										}
+									},
+									"self_modulate": {
+										"type": "Color",
+										"value": {
+											"a": 1.0,
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
+										}
+									},
+									"show_behind_parent": {
+										"type": "bool",
+										"value": false
+									},
+									"skew": {
+										"type": "float",
+										"value": 0.0
+									},
+									"texture_filter": {
+										"type": "int",
+										"value": 0
+									},
+									"texture_repeat": {
+										"type": "int",
+										"value": 0
+									},
+									"top_level": {
+										"type": "bool",
+										"value": false
+									},
+									"unique_name_in_owner": {
+										"type": "bool",
+										"value": false
+									},
+									"use_parent_material": {
+										"type": "bool",
+										"value": false
+									},
+									"visibility_layer": {
+										"type": "int",
+										"value": 1
+									},
+									"visible": {
+										"type": "bool",
+										"value": true
+									},
+									"y_sort_enabled": {
+										"type": "bool",
+										"value": false
+									},
+									"z_as_relative": {
+										"type": "bool",
+										"value": true
+									},
+									"z_index": {
+										"type": "int",
+										"value": 0
+									},
+									"zoom": {
+										"type": "Vector2",
+										"value": {
+											"x": 2.0,
+											"y": 2.0
+										}
+									}
+								}
+							}
+						],
+						"class": "CharacterBody2D",
+						"name": "Player",
+						"path": "/root/Level/Player",
+						"properties": {
+							"auto_translate_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"collision_layer": {
+								"type": "int",
+								"value": 1
+							},
+							"collision_mask": {
+								"type": "int",
+								"value": 1
+							},
+							"collision_priority": {
+								"type": "float",
+								"value": 1.0
+							},
+							"disable_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"editor_description": {
+								"type": "String",
+								"value": ""
+							},
+							"floor_block_on_wall": {
+								"type": "bool",
+								"value": true
+							},
+							"floor_constant_speed": {
+								"type": "bool",
+								"value": false
+							},
+							"floor_max_angle": {
+								"type": "float",
+								"value": 0.785398185253143
+							},
+							"floor_snap_length": {
+								"type": "float",
+								"value": 1.0
+							},
+							"floor_stop_on_slope": {
+								"type": "bool",
+								"value": true
+							},
+							"input_pickable": {
+								"type": "bool",
+								"value": false
+							},
+							"light_mask": {
+								"type": "int",
+								"value": 1
+							},
+							"material": {
+								"type": "Object",
+								"value": null
+							},
+							"max_slides": {
+								"type": "int",
+								"value": 4
+							},
+							"metadata/jump_force": {
+								"type": "float",
+								"value": -450.0
+							},
+							"metadata/move_speed": {
+								"type": "float",
+								"value": 300.0
+							},
+							"modulate": {
+								"type": "Color",
+								"value": {
+									"a": 1.0,
+									"b": 1.0,
+									"g": 1.0,
+									"r": 1.0
+								}
+							},
+							"motion_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"physics_interpolation_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"platform_floor_layers": {
+								"type": "int",
+								"value": 4294967295
+							},
+							"platform_on_leave": {
+								"type": "int",
+								"value": 0
+							},
+							"platform_wall_layers": {
+								"type": "int",
+								"value": 0
+							},
+							"position": {
+								"type": "Vector2",
+								"value": {
+									"x": 100.0,
+									"y": 200.0
+								}
+							},
+							"process_mode": {
+								"type": "int",
+								"value": 0
+							},
+							"process_physics_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_priority": {
+								"type": "int",
+								"value": 0
+							},
+							"process_thread_group": {
+								"type": "int",
+								"value": 0
+							},
+							"rotation": {
+								"type": "float",
+								"value": 0.0
+							},
+							"safe_margin": {
+								"type": "float",
+								"value": 0.0799999982118607
+							},
+							"scale": {
+								"type": "Vector2",
+								"value": {
+									"x": 1.0,
+									"y": 1.0
+								}
+							},
+							"self_modulate": {
+								"type": "Color",
+								"value": {
+									"a": 1.0,
+									"b": 1.0,
+									"g": 1.0,
+									"r": 1.0
+								}
+							},
+							"show_behind_parent": {
+								"type": "bool",
+								"value": false
+							},
+							"skew": {
+								"type": "float",
+								"value": 0.0
+							},
+							"slide_on_ceiling": {
+								"type": "bool",
+								"value": true
+							},
+							"texture_filter": {
+								"type": "int",
+								"value": 0
+							},
+							"texture_repeat": {
+								"type": "int",
+								"value": 0
+							},
+							"top_level": {
+								"type": "bool",
+								"value": false
+							},
+							"unique_name_in_owner": {
+								"type": "bool",
+								"value": false
+							},
+							"up_direction": {
+								"type": "Vector2",
+								"value": {
+									"x": 0.0,
+									"y": -1.0
+								}
+							},
+							"use_parent_material": {
+								"type": "bool",
+								"value": false
+							},
+							"velocity": {
+								"type": "Vector2",
+								"value": {
+									"x": 0.0,
+									"y": 0.0
+								}
+							},
+							"visibility_layer": {
+								"type": "int",
+								"value": 1
+							},
+							"visible": {
+								"type": "bool",
+								"value": true
+							},
+							"wall_min_slide_angle": {
+								"type": "float",
+								"value": 0.261799395084381
+							},
+							"y_sort_enabled": {
+								"type": "bool",
+								"value": false
+							},
+							"z_as_relative": {
+								"type": "bool",
+								"value": true
+							},
+							"z_index": {
+								"type": "int",
+								"value": 0
+							}
+						}
+					}
+				],
+				"class": "Node2D",
+				"name": "Level",
+				"path": "/root/Level",
+				"properties": {
+					"auto_translate_mode": {
+						"type": "int",
+						"value": 0
+					},
+					"clip_children": {
+						"type": "int",
+						"value": 0
+					},
+					"editor_description": {
+						"type": "String",
+						"value": ""
+					},
+					"light_mask": {
+						"type": "int",
+						"value": 1
+					},
+					"material": {
+						"type": "Object",
+						"value": null
+					},
+					"modulate": {
+						"type": "Color",
+						"value": {
+							"a": 1.0,
+							"b": 1.0,
+							"g": 1.0,
+							"r": 1.0
+						}
+					},
+					"physics_interpolation_mode": {
+						"type": "int",
+						"value": 0
+					},
+					"position": {
+						"type": "Vector2",
+						"value": {
+							"x": 0.0,
+							"y": 0.0
+						}
+					},
+					"process_mode": {
+						"type": "int",
+						"value": 0
+					},
+					"process_physics_priority": {
+						"type": "int",
+						"value": 0
+					},
+					"process_priority": {
+						"type": "int",
+						"value": 0
+					},
+					"process_thread_group": {
+						"type": "int",
+						"value": 0
+					},
+					"rotation": {
+						"type": "float",
+						"value": 0.0
+					},
+					"scale": {
+						"type": "Vector2",
+						"value": {
+							"x": 1.0,
+							"y": 1.0
+						}
+					},
+					"self_modulate": {
+						"type": "Color",
+						"value": {
+							"a": 1.0,
+							"b": 1.0,
+							"g": 1.0,
+							"r": 1.0
+						}
+					},
+					"show_behind_parent": {
+						"type": "bool",
+						"value": false
+					},
+					"skew": {
+						"type": "float",
+						"value": 0.0
+					},
+					"texture_filter": {
+						"type": "int",
+						"value": 0
+					},
+					"texture_repeat": {
+						"type": "int",
+						"value": 0
+					},
+					"top_level": {
+						"type": "bool",
+						"value": false
+					},
+					"unique_name_in_owner": {
+						"type": "bool",
+						"value": false
+					},
+					"use_parent_material": {
+						"type": "bool",
+						"value": false
+					},
+					"visibility_layer": {
+						"type": "int",
+						"value": 1
+					},
+					"visible": {
+						"type": "bool",
+						"value": true
+					},
+					"y_sort_enabled": {
+						"type": "bool",
+						"value": false
+					},
+					"z_as_relative": {
+						"type": "bool",
+						"value": true
+					},
+					"z_index": {
+						"type": "int",
+						"value": 0
+					}
+				}
+			}
+		],
+		"class": "Window",
+		"name": "root",
+		"path": "/root",
+		"properties": {
+			"accessibility_description": {
+				"type": "String",
+				"value": ""
+			},
+			"accessibility_name": {
+				"type": "String",
+				"value": ""
+			},
+			"always_on_top": {
+				"type": "bool",
+				"value": false
+			},
+			"anisotropic_filtering_level": {
+				"type": "int",
+				"value": 2
+			},
+			"audio_listener_enable_2d": {
+				"type": "bool",
+				"value": true
+			},
+			"audio_listener_enable_3d": {
+				"type": "bool",
+				"value": true
+			},
+			"auto_translate_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"borderless": {
+				"type": "bool",
+				"value": false
+			},
+			"canvas_cull_mask": {
+				"type": "int",
+				"value": 4294967295
+			},
+			"canvas_item_default_texture_filter": {
+				"type": "int",
+				"value": 1
+			},
+			"canvas_item_default_texture_repeat": {
+				"type": "int",
+				"value": 0
+			},
+			"content_scale_aspect": {
+				"type": "int",
+				"value": 1
+			},
+			"content_scale_factor": {
+				"type": "float",
+				"value": 1.0
+			},
+			"content_scale_mode": {
+				"type": "int",
+				"value": 0
+			},
+			"content_scale_size": {
+				"type": "Vector2i",
+				"value": "(1152, 648)"
+			},
+			"content_scale_stretch": {
+				"type": "int",
+				"value": 0
+			},
+			"debug_draw": {
+				"type": "int",
+				"value": 0
+			},
+			"disable_3d": {
+				"type": "bool",
+				"value": false
+			},
+			"editor_description": {
+				"type": "String",
+				"value": ""
+			},
+			"exclude_from_capture": {
+				"type": "bool",
+				"value": false
+			},
+			"exclusive": {
+				"type": "bool",
+				"value": false
+			},
+			"extend_to_title": {
+				"type": "bool",
+				"value": false
+			},
+			"force_native": {
+				"type": "bool",
+				"value": false
+			},
+			"fsr_sharpness": {
+				"type": "float",
+				"value": 0.200000002980232
+			},
+			"gui_disable_input": {
+				"type": "bool",
+				"value": false
+			},
+			"gui_drag_threshold": {
+				"type": "int",
+				"value": 10
+			},
+			"gui_embed_subwindows": {
+				"type": "bool",
+				"value": true
+			},
+			"gui_snap_controls_to_pixels": {
+				"type": "bool",
+				"value": true
+			},
+			"handle_input_locally": {
+				"type": "bool",
+				"value": true
+			},
+			"initial_position": {
+				"type": "int",
+				"value": 0
+			},
+			"keep_title_visible": {
+				"type": "bool",
+				"value": false
+			},
+			"max_size": {
+				"type": "Vector2i",
+				"value": "(0, 0)"
+			},
+			"maximize_disabled": {
+				"type": "bool",
+				"value": false
+			},
+			"mesh_lod_threshold": {
+				"type": "float",
+				"value": 1.0
+			},
+			"min_size": {
+				"type": "Vector2i",
+				"value": "(64, 64)"
+			},
+			"minimize_disabled": {
+				"type": "bool",
+				"value": false
+			},
+			"mode": {
+				"type": "int",
+				"value": 1
+			},
+			"mouse_passthrough": {
+				"type": "bool",
+				"value": false
+			},
+			"mouse_passthrough_polygon": {
+				"type": "PackedVector2Array",
+				"value": "[]"
+			},
+			"msaa_2d": {
+				"type": "int",
+				"value": 0
+			},
+			"msaa_3d": {
+				"type": "int",
+				"value": 0
+			},
+			"nonclient_area": {
+				"type": "Rect2i",
+				"value": "[P: (0, 0), S: (0, 0)]"
+			},
+			"oversampling": {
+				"type": "bool",
+				"value": true
+			},
+			"oversampling_override": {
+				"type": "float",
+				"value": 0.0
+			},
+			"own_world_3d": {
+				"type": "bool",
+				"value": false
+			},
+			"physics_interpolation_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"physics_object_picking": {
+				"type": "bool",
+				"value": true
+			},
+			"physics_object_picking_first_only": {
+				"type": "bool",
+				"value": false
+			},
+			"physics_object_picking_sort": {
+				"type": "bool",
+				"value": false
+			},
+			"popup_window": {
+				"type": "bool",
+				"value": false
+			},
+			"popup_wm_hint": {
+				"type": "bool",
+				"value": false
+			},
+			"position": {
+				"type": "Vector2i",
+				"value": "(0, 0)"
+			},
+			"positional_shadow_atlas_16_bits": {
+				"type": "bool",
+				"value": true
+			},
+			"positional_shadow_atlas_quad_0": {
+				"type": "int",
+				"value": 2
+			},
+			"positional_shadow_atlas_quad_1": {
+				"type": "int",
+				"value": 2
+			},
+			"positional_shadow_atlas_quad_2": {
+				"type": "int",
+				"value": 3
+			},
+			"positional_shadow_atlas_quad_3": {
+				"type": "int",
+				"value": 4
+			},
+			"positional_shadow_atlas_size": {
+				"type": "int",
+				"value": 4096
+			},
+			"process_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"process_physics_priority": {
+				"type": "int",
+				"value": 0
+			},
+			"process_priority": {
+				"type": "int",
+				"value": 0
+			},
+			"process_thread_group": {
+				"type": "int",
+				"value": 0
+			},
+			"scaling_3d_mode": {
+				"type": "int",
+				"value": 0
+			},
+			"scaling_3d_scale": {
+				"type": "float",
+				"value": 1.0
+			},
+			"screen_space_aa": {
+				"type": "int",
+				"value": 0
+			},
+			"sdf_oversize": {
+				"type": "int",
+				"value": 1
+			},
+			"sdf_scale": {
+				"type": "int",
+				"value": 1
+			},
+			"sharp_corners": {
+				"type": "bool",
+				"value": false
+			},
+			"size": {
+				"type": "Vector2i",
+				"value": "(64, 64)"
+			},
+			"snap_2d_transforms_to_pixel": {
+				"type": "bool",
+				"value": false
+			},
+			"snap_2d_vertices_to_pixel": {
+				"type": "bool",
+				"value": false
+			},
+			"texture_mipmap_bias": {
+				"type": "float",
+				"value": 0.0
+			},
+			"theme": {
+				"type": "Object",
+				"value": null
+			},
+			"theme_type_variation": {
+				"type": "StringName",
+				"value": ""
+			},
+			"title": {
+				"type": "String",
+				"value": "Patina Fixtures"
+			},
+			"transient": {
+				"type": "bool",
+				"value": false
+			},
+			"transient_to_focused": {
+				"type": "bool",
+				"value": false
+			},
+			"transparent": {
+				"type": "bool",
+				"value": false
+			},
+			"transparent_bg": {
+				"type": "bool",
+				"value": false
+			},
+			"unfocusable": {
+				"type": "bool",
+				"value": false
+			},
+			"unique_name_in_owner": {
+				"type": "bool",
+				"value": false
+			},
+			"unresizable": {
+				"type": "bool",
+				"value": false
+			},
+			"use_debanding": {
+				"type": "bool",
+				"value": false
+			},
+			"use_hdr_2d": {
+				"type": "bool",
+				"value": false
+			},
+			"use_occlusion_culling": {
+				"type": "bool",
+				"value": false
+			},
+			"use_taa": {
+				"type": "bool",
+				"value": false
+			},
+			"use_xr": {
+				"type": "bool",
+				"value": false
+			},
+			"visible": {
+				"type": "bool",
+				"value": true
+			},
+			"vrs_mode": {
+				"type": "int",
+				"value": 0
+			},
+			"vrs_texture": {
+				"type": "Object",
+				"value": null
+			},
+			"vrs_update_mode": {
+				"type": "int",
+				"value": 1
+			},
+			"world_3d": {
+				"type": "Object",
+				"value": {
+					"_resource_class": "World3D",
+					"_resource_path": ""
+				}
+			},
+			"wrap_controls": {
+				"type": "bool",
+				"value": false
+			}
+		}
+	},
+	"scene_tree": {
+		"children": [
+			{
+				"children": [
+					{
+						"children": [
+							{
+								"children": [],
+								"class": "Sprite2D",
+								"groups": [],
+								"name": "Sprite",
+								"path": "/root/Level/Player/Sprite"
+							},
+							{
+								"children": [],
+								"class": "CollisionShape2D",
+								"groups": [],
+								"name": "CollisionShape",
+								"path": "/root/Level/Player/CollisionShape"
+							},
+							{
+								"children": [],
+								"class": "Camera2D",
+								"groups": [
+									"__cameras_81604378624",
+									"__cameras_c77309411328"
+								],
+								"name": "Camera",
+								"path": "/root/Level/Player/Camera"
+							}
+						],
+						"class": "CharacterBody2D",
+						"groups": [],
+						"name": "Player",
+						"path": "/root/Level/Player"
+					}
+				],
+				"class": "Node2D",
+				"groups": [
+					"_root_canvas77309411328"
+				],
+				"name": "Level",
+				"path": "/root/Level"
+			}
+		],
+		"class": "Window",
+		"groups": [
+			"_picking_viewports",
+			"_viewports"
+		],
+		"name": "root",
+		"path": "/root"
+	},
+	"signal_trace": [
+		{
+			"args": [],
+			"frame_number": 0,
+			"signal_name": "draw",
+			"source_path": "/root/Level"
+		},
+		{
+			"args": [],
+			"frame_number": 0,
+			"signal_name": "draw",
+			"source_path": "/root/Level/Player"
+		},
+		{
+			"args": [],
+			"frame_number": 0,
+			"signal_name": "draw",
+			"source_path": "/root/Level/Player/Sprite"
+		},
+		{
+			"args": [],
+			"frame_number": 0,
+			"signal_name": "draw",
+			"source_path": "/root/Level/Player/CollisionShape"
+		},
+		{
+			"args": [],
+			"frame_number": 0,
+			"signal_name": "draw",
+			"source_path": "/root/Level/Player/Camera"
+		}
+	],
+	"upstream_version": "4.5.1-stable"
+}

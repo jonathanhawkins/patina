@@ -40,6 +40,9 @@ const COLOR_SPRITE2D: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue
 const COLOR_CAMERA2D: Color = Color::new(0.2, 0.9, 0.3, 1.0); // green
 const COLOR_COLLISION: Color = Color::new(0.0, 0.85, 0.3, 0.7); // green outline
 const COLOR_AREA2D: Color = Color::new(0.3, 0.5, 1.0, 0.15); // blue tint
+const COLOR_CHARBODY: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue outline
+const COLOR_RIGIDBODY: Color = Color::new(1.0, 0.85, 0.0, 1.0); // yellow outline
+const COLOR_STATICBODY: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray outline
 const COLOR_CONTROL: Color = Color::new(0.7, 0.3, 0.9, 1.0); // purple
 const COLOR_DEFAULT: Color = Color::new(0.8, 0.8, 0.8, 1.0); // white-ish
 const COLOR_SELECTED: Color = Color::new(1.0, 0.85, 0.0, 1.0); // bright amber
@@ -158,7 +161,12 @@ fn render_scene_inner(
                 draw_sprite2d_with_texture(&mut fb, node, pos, z, &mut texture_cache);
             }
             "Camera2D" => draw_camera2d_icon(&mut fb, pos, COLOR_CAMERA2D, z),
-            "CollisionShape2D" => draw_collision_shape(&mut fb, pos, z),
+            "CollisionShape2D" => {
+                draw_collision_shape_from_node(&mut fb, node, pos, z, is_selected)
+            }
+            "CharacterBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_CHARBODY, node),
+            "RigidBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_RIGIDBODY, node),
+            "StaticBody2D" => draw_static_body(&mut fb, pos, z),
             "Area2D" => draw_area2d(&mut fb, pos, z),
             "Label" => {
                 let size = extract_size(node);
@@ -582,20 +590,184 @@ fn draw_dashed_line(fb: &mut FrameBuffer, from: Vector2, to: Vector2, color: Col
 }
 
 /// Draws a CollisionShape2D: green outline circle (default shape).
+/// Kept for backwards compatibility.
+#[allow(dead_code)]
 fn draw_collision_shape(fb: &mut FrameBuffer, pos: Vector2, zoom: f32) {
-    let radius = (16.0 * zoom).max(6.0);
-    // Draw circle outline by drawing lines around the circumference.
-    let segments = 24;
+    draw_circle_outline(fb, pos, (16.0 * zoom).max(6.0), COLOR_COLLISION);
+    draw_center_diamond(fb, pos, 3.0, COLOR_COLLISION);
+}
+
+/// Draws a CollisionShape2D reading shape properties from the node.
+///
+/// Supports `shape_type` property values: "circle", "rectangle", "capsule".
+/// Falls back to a default circle when no shape_type is set.
+/// When `selected`, also draws resize handles.
+fn draw_collision_shape_from_node(
+    fb: &mut FrameBuffer,
+    node: &gdscene::node::Node,
+    pos: Vector2,
+    zoom: f32,
+    selected: bool,
+) {
     let color = COLOR_COLLISION;
+    let shape_type = match node.get_property("shape_type") {
+        Variant::String(s) => s,
+        _ => String::new(),
+    };
+
+    match shape_type.as_str() {
+        "rectangle" => {
+            let extents = match node.get_property("shape_extents") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::new(16.0, 16.0),
+            };
+            let hw = (extents.x * zoom).max(4.0);
+            let hh = (extents.y * zoom).max(4.0);
+            let rect = Rect2::new(
+                Vector2::new(pos.x - hw, pos.y - hh),
+                Vector2::new(hw * 2.0, hh * 2.0),
+            );
+            draw::draw_rect_outline_blended(fb, rect, color, 1.0);
+            draw_center_diamond(fb, pos, 3.0, color);
+
+            // Draw resize handles when selected.
+            if selected {
+                let handle_size = 3.0;
+                let corners = [
+                    Vector2::new(pos.x - hw, pos.y - hh),
+                    Vector2::new(pos.x + hw, pos.y - hh),
+                    Vector2::new(pos.x + hw, pos.y + hh),
+                    Vector2::new(pos.x - hw, pos.y + hh),
+                ];
+                for c in &corners {
+                    draw::fill_rect(
+                        fb,
+                        Rect2::new(
+                            Vector2::new(c.x - handle_size, c.y - handle_size),
+                            Vector2::new(handle_size * 2.0, handle_size * 2.0),
+                        ),
+                        color,
+                    );
+                }
+                // Edge midpoint handles.
+                let edges = [
+                    Vector2::new(pos.x, pos.y - hh),
+                    Vector2::new(pos.x + hw, pos.y),
+                    Vector2::new(pos.x, pos.y + hh),
+                    Vector2::new(pos.x - hw, pos.y),
+                ];
+                for e in &edges {
+                    draw::fill_rect(
+                        fb,
+                        Rect2::new(Vector2::new(e.x - 2.0, e.y - 2.0), Vector2::new(4.0, 4.0)),
+                        color,
+                    );
+                }
+            }
+        }
+        "capsule" => {
+            let radius = match node.get_property("shape_radius") {
+                Variant::Float(r) => r as f32,
+                _ => 10.0,
+            };
+            let height = match node.get_property("shape_height") {
+                Variant::Float(h) => h as f32,
+                _ => 40.0,
+            };
+            let r = (radius * zoom).max(4.0);
+            let half_h = ((height / 2.0 - radius).max(0.0)) * zoom;
+
+            // Top semicircle.
+            let segments = 12;
+            for i in 0..segments {
+                let a0 = std::f32::consts::PI + (i as f32 / segments as f32) * std::f32::consts::PI;
+                let a1 = std::f32::consts::PI
+                    + ((i + 1) as f32 / segments as f32) * std::f32::consts::PI;
+                let p0 = Vector2::new(pos.x + r * a0.cos(), pos.y - half_h + r * a0.sin());
+                let p1 = Vector2::new(pos.x + r * a1.cos(), pos.y - half_h + r * a1.sin());
+                draw::draw_line(fb, p0, p1, color, 1.0);
+            }
+            // Bottom semicircle.
+            for i in 0..segments {
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::PI;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::PI;
+                let p0 = Vector2::new(pos.x + r * a0.cos(), pos.y + half_h + r * a0.sin());
+                let p1 = Vector2::new(pos.x + r * a1.cos(), pos.y + half_h + r * a1.sin());
+                draw::draw_line(fb, p0, p1, color, 1.0);
+            }
+            // Connecting lines.
+            draw::draw_line(
+                fb,
+                Vector2::new(pos.x - r, pos.y - half_h),
+                Vector2::new(pos.x - r, pos.y + half_h),
+                color,
+                1.0,
+            );
+            draw::draw_line(
+                fb,
+                Vector2::new(pos.x + r, pos.y - half_h),
+                Vector2::new(pos.x + r, pos.y + half_h),
+                color,
+                1.0,
+            );
+            draw_center_diamond(fb, pos, 3.0, color);
+        }
+        "segment" => {
+            let a = match node.get_property("shape_point_a") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::new(-20.0, 0.0),
+            };
+            let b = match node.get_property("shape_point_b") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::new(20.0, 0.0),
+            };
+            let pa = Vector2::new(pos.x + a.x * zoom, pos.y + a.y * zoom);
+            let pb = Vector2::new(pos.x + b.x * zoom, pos.y + b.y * zoom);
+            draw::draw_line(fb, pa, pb, color, 1.0);
+            // Endpoint dots.
+            draw::fill_circle(fb, pa, 3.0, color);
+            draw::fill_circle(fb, pb, 3.0, color);
+        }
+        _ => {
+            // Default: circle shape (also handles "circle" explicitly).
+            let radius = match node.get_property("shape_radius") {
+                Variant::Float(r) => r as f32,
+                _ => 16.0,
+            };
+            let r = (radius * zoom).max(6.0);
+            draw_circle_outline(fb, pos, r, color);
+            draw_center_diamond(fb, pos, 3.0, color);
+
+            // Draw radius handle when selected.
+            if selected {
+                let handle_pos = Vector2::new(pos.x + r, pos.y);
+                draw::fill_rect(
+                    fb,
+                    Rect2::new(
+                        Vector2::new(handle_pos.x - 3.0, handle_pos.y - 3.0),
+                        Vector2::new(6.0, 6.0),
+                    ),
+                    color,
+                );
+            }
+        }
+    }
+}
+
+/// Draws a circle outline using line segments.
+fn draw_circle_outline(fb: &mut FrameBuffer, center: Vector2, radius: f32, color: Color) {
+    let segments = 24;
     for i in 0..segments {
         let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
         let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-        let p0 = Vector2::new(pos.x + radius * a0.cos(), pos.y + radius * a0.sin());
-        let p1 = Vector2::new(pos.x + radius * a1.cos(), pos.y + radius * a1.sin());
+        let p0 = Vector2::new(center.x + radius * a0.cos(), center.y + radius * a0.sin());
+        let p1 = Vector2::new(center.x + radius * a1.cos(), center.y + radius * a1.sin());
         draw::draw_line(fb, p0, p1, color, 1.0);
     }
-    // Small diamond at center.
-    let s = 3.0;
+}
+
+/// Draws a small diamond at center.
+fn draw_center_diamond(fb: &mut FrameBuffer, pos: Vector2, s: f32, color: Color) {
     draw::draw_line(
         fb,
         Vector2::new(pos.x, pos.y - s),
@@ -622,6 +794,125 @@ fn draw_collision_shape(fb: &mut FrameBuffer, pos: Vector2, zoom: f32) {
         Vector2::new(pos.x - s, pos.y),
         Vector2::new(pos.x, pos.y - s),
         color,
+        1.0,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Physics body rendering
+// ---------------------------------------------------------------------------
+
+/// Draws a CharacterBody2D or RigidBody2D: colored outline + optional arrow.
+fn draw_physics_body(
+    fb: &mut FrameBuffer,
+    pos: Vector2,
+    zoom: f32,
+    color: Color,
+    node: &gdscene::node::Node,
+) {
+    let half = (14.0 * zoom).max(8.0);
+    let rect = Rect2::new(
+        Vector2::new(pos.x - half, pos.y - half),
+        Vector2::new(half * 2.0, half * 2.0),
+    );
+    // Outline.
+    draw::draw_rect_outline_blended(fb, rect, color, 1.0);
+    // Diamond center.
+    draw_node2d_diamond(fb, pos, color);
+
+    // Draw velocity arrow for CharacterBody2D or gravity arrow for RigidBody2D.
+    let arrow_vec = match node.get_property("velocity") {
+        Variant::Vector2(v) if v.length_squared() > 0.01 => Some(v),
+        _ => None,
+    };
+    if let Some(vel) = arrow_vec {
+        let len = vel.length().min(60.0) * zoom;
+        let dir = Vector2::new(vel.x / vel.length(), vel.y / vel.length());
+        let end = Vector2::new(pos.x + dir.x * len, pos.y + dir.y * len);
+        let arrow_color = Color::new(color.r, color.g, color.b, 0.7);
+        draw::draw_line(fb, pos, end, arrow_color, 1.0);
+        // Arrowhead.
+        let head = 6.0;
+        let perp = Vector2::new(-dir.y, dir.x);
+        draw::draw_line(
+            fb,
+            end,
+            Vector2::new(
+                end.x - dir.x * head + perp.x * head * 0.4,
+                end.y - dir.y * head + perp.y * head * 0.4,
+            ),
+            arrow_color,
+            1.0,
+        );
+        draw::draw_line(
+            fb,
+            end,
+            Vector2::new(
+                end.x - dir.x * head - perp.x * head * 0.4,
+                end.y - dir.y * head - perp.y * head * 0.4,
+            ),
+            arrow_color,
+            1.0,
+        );
+    }
+
+    // Gravity indicator for RigidBody2D (always draw a small down arrow).
+    if node.class_name() == "RigidBody2D" && arrow_vec.is_none() {
+        let grav_len = 12.0 * zoom;
+        let grav_end = Vector2::new(pos.x, pos.y + half + grav_len);
+        let grav_color = Color::new(color.r, color.g, color.b, 0.5);
+        draw::draw_line(
+            fb,
+            Vector2::new(pos.x, pos.y + half),
+            grav_end,
+            grav_color,
+            1.0,
+        );
+        draw::draw_line(
+            fb,
+            grav_end,
+            Vector2::new(grav_end.x - 4.0, grav_end.y - 5.0),
+            grav_color,
+            1.0,
+        );
+        draw::draw_line(
+            fb,
+            grav_end,
+            Vector2::new(grav_end.x + 4.0, grav_end.y - 5.0),
+            grav_color,
+            1.0,
+        );
+    }
+}
+
+/// Draws a StaticBody2D: solid gray outline indicating immovable.
+fn draw_static_body(fb: &mut FrameBuffer, pos: Vector2, zoom: f32) {
+    let half = (14.0 * zoom).max(8.0);
+    let rect = Rect2::new(
+        Vector2::new(pos.x - half, pos.y - half),
+        Vector2::new(half * 2.0, half * 2.0),
+    );
+    // Solid gray outline (2 lines thick for emphasis).
+    draw::draw_rect_outline_blended(fb, rect, COLOR_STATICBODY, 1.0);
+    let inner = Rect2::new(
+        Vector2::new(pos.x - half + 1.0, pos.y - half + 1.0),
+        Vector2::new(half * 2.0 - 2.0, half * 2.0 - 2.0),
+    );
+    draw::draw_rect_outline_blended(fb, inner, COLOR_STATICBODY, 1.0);
+    // Small anchor symbol at center (cross).
+    let s = 4.0;
+    draw::draw_line(
+        fb,
+        Vector2::new(pos.x - s, pos.y),
+        Vector2::new(pos.x + s, pos.y),
+        COLOR_STATICBODY,
+        1.0,
+    );
+    draw::draw_line(
+        fb,
+        Vector2::new(pos.x, pos.y - s),
+        Vector2::new(pos.x, pos.y + s),
+        COLOR_STATICBODY,
         1.0,
     );
 }
@@ -677,6 +968,9 @@ fn draw_selection_highlight(fb: &mut FrameBuffer, pos: Vector2, class: &str, zoo
         "Node2D" => (11.0, 11.0),
         "Camera2D" => (12.0, 12.0),
         "CollisionShape2D" => ((18.0 * zoom).max(8.0), (18.0 * zoom).max(8.0)),
+        "CharacterBody2D" | "RigidBody2D" | "StaticBody2D" => {
+            ((18.0 * zoom).max(10.0), (18.0 * zoom).max(10.0))
+        }
         "Area2D" => ((22.0 * zoom).max(10.0), (22.0 * zoom).max(10.0)),
         _ => (8.0, 8.0),
     };
@@ -2248,6 +2542,194 @@ mod tests {
         assert!(
             non_bg > 100,
             "render_scene should still produce visible output"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Collision shape rendering tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_collision_shape_circle() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("circle".to_string()));
+        node.set_property("shape_radius", Variant::Float(30.0));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // Should have green collision outline pixels.
+        let has_green = fb
+            .pixels
+            .iter()
+            .any(|&p| p.g > 0.5 && p.r < 0.2 && p.b < 0.5);
+        assert!(
+            has_green,
+            "circle CollisionShape2D should render green outline"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_rectangle() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("rectangle".to_string()));
+        node.set_property("shape_extents", Variant::Vector2(Vector2::new(40.0, 30.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // Should have green collision outline pixels.
+        let green_count = fb
+            .pixels
+            .iter()
+            .filter(|&&p| p.g > 0.5 && p.r < 0.2)
+            .count();
+        assert!(
+            green_count > 10,
+            "rectangle CollisionShape2D should render green outline, got {green_count}"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_capsule() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("capsule".to_string()));
+        node.set_property("shape_radius", Variant::Float(10.0));
+        node.set_property("shape_height", Variant::Float(40.0));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        let green_count = fb
+            .pixels
+            .iter()
+            .filter(|&&p| p.g > 0.5 && p.r < 0.2)
+            .count();
+        assert!(
+            green_count > 10,
+            "capsule CollisionShape2D should render green shape, got {green_count}"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_default_when_no_type() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        // No shape_type set — should fall back to default circle.
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        let has_green = fb
+            .pixels
+            .iter()
+            .any(|&p| p.g > 0.5 && p.r < 0.2 && p.b < 0.5);
+        assert!(
+            has_green,
+            "CollisionShape2D without shape_type should render default circle"
+        );
+    }
+
+    #[test]
+    fn render_collision_shape_selected_has_handles() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Shape", "CollisionShape2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("shape_type", Variant::String("circle".to_string()));
+        node.set_property("shape_radius", Variant::Float(30.0));
+        let shape_id = tree.add_child(root, node).unwrap();
+
+        let fb_no_sel = render_scene(&tree, None, 300, 300);
+        let fb_sel = render_scene(&tree, Some(shape_id), 300, 300);
+
+        // Selected version should have more colored pixels (handles + selection highlight).
+        let count_sel = fb_sel.pixels.iter().filter(|&&p| p != BG_COLOR).count();
+        let count_no_sel = fb_no_sel.pixels.iter().filter(|&&p| p != BG_COLOR).count();
+        assert!(
+            count_sel > count_no_sel,
+            "selected CollisionShape2D should have more rendered pixels (handles)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Physics body rendering tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_character_body_2d() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "CharacterBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // CharacterBody2D should render blue outline.
+        let has_blue = fb.pixels.iter().any(|&p| p.b > 0.5 && p.r < 0.5);
+        assert!(has_blue, "CharacterBody2D should render blue outline");
+    }
+
+    #[test]
+    fn render_rigid_body_2d() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ball", "RigidBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // RigidBody2D should render yellow outline + gravity arrow.
+        let has_yellow = fb
+            .pixels
+            .iter()
+            .any(|&p| p.r > 0.8 && p.g > 0.7 && p.b < 0.3);
+        assert!(has_yellow, "RigidBody2D should render yellow outline");
+    }
+
+    #[test]
+    fn render_static_body_2d() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ground", "StaticBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        // StaticBody2D should render gray outline.
+        let has_gray = fb
+            .pixels
+            .iter()
+            .any(|&p| p.r > 0.4 && p.r < 0.6 && p.g > 0.4 && p.g < 0.6 && p.b > 0.4 && p.b < 0.6);
+        assert!(has_gray, "StaticBody2D should render gray outline");
+    }
+
+    #[test]
+    fn render_rigid_body_with_velocity_arrow() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ball", "RigidBody2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        node.set_property("velocity", Variant::Vector2(Vector2::new(50.0, 0.0)));
+        tree.add_child(root, node).unwrap();
+
+        let fb = render_scene(&tree, None, 300, 300);
+        let yellow_count = fb
+            .pixels
+            .iter()
+            .filter(|&&p| p.r > 0.7 && p.g > 0.6 && p.b < 0.3)
+            .count();
+        // With velocity arrow there should be significantly more yellow pixels.
+        assert!(
+            yellow_count > 20,
+            "RigidBody2D with velocity should render arrow, got {yellow_count} yellow pixels"
         );
     }
 }
