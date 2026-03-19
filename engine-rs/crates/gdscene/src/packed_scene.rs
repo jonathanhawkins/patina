@@ -20,6 +20,70 @@ use gdvariant::Variant;
 use crate::node::{Node, NodeId};
 
 // ---------------------------------------------------------------------------
+// Node2D default properties
+// ---------------------------------------------------------------------------
+
+/// Class names that inherit from Node2D (and thus have position/rotation/scale/visible).
+const NODE2D_DERIVED: &[&str] = &[
+    "Node2D",
+    "Sprite2D",
+    "AnimatedSprite2D",
+    "CharacterBody2D",
+    "StaticBody2D",
+    "RigidBody2D",
+    "Area2D",
+    "Camera2D",
+    "CollisionShape2D",
+    "CollisionPolygon2D",
+    "RayCast2D",
+    "Path2D",
+    "PathFollow2D",
+    "Line2D",
+    "Polygon2D",
+    "Light2D",
+    "PointLight2D",
+    "DirectionalLight2D",
+    "AudioStreamPlayer2D",
+    "NavigationAgent2D",
+    "TileMap",
+    "Marker2D",
+    "RemoteTransform2D",
+    "VisibleOnScreenNotifier2D",
+    "GPUParticles2D",
+    "CPUParticles2D",
+    "Parallax2D",
+];
+
+/// Returns `true` if the given class name inherits from Node2D.
+fn is_node2d_class(class_name: &str) -> bool {
+    NODE2D_DERIVED.contains(&class_name)
+}
+
+/// Applies default Node2D properties to a node if the class is Node2D-derived
+/// and the property is not already explicitly set.
+fn apply_node2d_defaults(node: &mut Node) {
+    if !is_node2d_class(node.class_name()) {
+        return;
+    }
+    // position defaults to Vector2(0, 0)
+    if matches!(node.get_property("position"), Variant::Nil) {
+        node.set_property("position", Variant::Vector2(gdcore::math::Vector2::ZERO));
+    }
+    // rotation defaults to 0.0
+    if matches!(node.get_property("rotation"), Variant::Nil) {
+        node.set_property("rotation", Variant::Float(0.0));
+    }
+    // scale defaults to Vector2(1, 1)
+    if matches!(node.get_property("scale"), Variant::Nil) {
+        node.set_property("scale", Variant::Vector2(gdcore::math::Vector2::ONE));
+    }
+    // visible defaults to true
+    if matches!(node.get_property("visible"), Variant::Nil) {
+        node.set_property("visible", Variant::Bool(true));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SceneConnection
 // ---------------------------------------------------------------------------
 
@@ -301,6 +365,7 @@ impl PackedScene {
         if let Some(ref script_path) = root_tmpl.script_path {
             root_node.set_property("_script_path", Variant::String(script_path.clone()));
         }
+        apply_node2d_defaults(&mut root_node);
         // Root node owns itself (owner = None signals it IS the owner).
         path_to_index.insert(".".into(), 0);
         // Also map by name for child lookup.
@@ -332,6 +397,7 @@ impl PackedScene {
             if let Some(ref script_path) = tmpl.script_path {
                 node.set_property("_script_path", Variant::String(script_path.clone()));
             }
+            apply_node2d_defaults(&mut node);
             // Owner is the scene root for all non-root nodes.
             node.set_owner(Some(root_id));
 
@@ -1779,5 +1845,175 @@ value = 42
     fn ui_theme_load_steps_ignored_gracefully() {
         let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
         assert!(scene.node_count() > 0);
+    }
+
+    // -- Default Node2D property tests ------------------------------------
+
+    #[test]
+    fn node2d_gets_default_position() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        // Sprite (Node2D child) should have default position even without explicit set
+        let sprite = &nodes[2]; // Sprite2D
+        assert_eq!(sprite.class_name(), "Sprite2D");
+        // Position defaults to Vector2(0,0) when not explicitly set
+        assert_eq!(
+            sprite.get_property("position"),
+            Variant::Vector2(Vector2::ZERO)
+        );
+    }
+
+    #[test]
+    fn node2d_gets_default_rotation() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        let player = &nodes[1]; // Node2D
+        assert_eq!(player.get_property("rotation"), Variant::Float(0.0));
+    }
+
+    #[test]
+    fn node2d_gets_default_scale() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        let player = &nodes[1];
+        assert_eq!(player.get_property("scale"), Variant::Vector2(Vector2::ONE));
+    }
+
+    #[test]
+    fn node2d_gets_default_visible() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        let player = &nodes[1];
+        assert_eq!(player.get_property("visible"), Variant::Bool(true));
+    }
+
+    #[test]
+    fn node_class_does_not_get_node2d_defaults() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        let root = &nodes[0]; // Node (not Node2D)
+        assert_eq!(root.class_name(), "Node");
+        // Node class should NOT have position/rotation/scale/visible defaults
+        assert_eq!(root.get_property("position"), Variant::Nil);
+        assert_eq!(root.get_property("rotation"), Variant::Nil);
+    }
+
+    #[test]
+    fn explicit_position_preserved_not_overwritten() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        let player = &nodes[1];
+        // Player has position = Vector2(100, 200) set explicitly
+        assert_eq!(
+            player.get_property("position"),
+            Variant::Vector2(Vector2::new(100.0, 200.0))
+        );
+    }
+
+    #[test]
+    fn sprite2d_gets_node2d_defaults() {
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let nodes = scene.instance().unwrap();
+        let sprite = &nodes[2];
+        assert_eq!(sprite.class_name(), "Sprite2D");
+        assert_eq!(sprite.get_property("rotation"), Variant::Float(0.0));
+        assert_eq!(sprite.get_property("scale"), Variant::Vector2(Vector2::ONE));
+        assert_eq!(sprite.get_property("visible"), Variant::Bool(true));
+    }
+
+    #[test]
+    fn characterbody2d_gets_node2d_defaults() {
+        let tscn = "\
+[gd_scene format=3]
+
+[node name=\"Root\" type=\"Node\"]
+
+[node name=\"Enemy\" type=\"CharacterBody2D\" parent=\".\"]
+position = Vector2(400, 200)
+";
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let enemy = &nodes[1];
+        assert_eq!(enemy.class_name(), "CharacterBody2D");
+        assert_eq!(
+            enemy.get_property("position"),
+            Variant::Vector2(Vector2::new(400.0, 200.0))
+        );
+        assert_eq!(enemy.get_property("rotation"), Variant::Float(0.0));
+        assert_eq!(enemy.get_property("scale"), Variant::Vector2(Vector2::ONE));
+        assert_eq!(enemy.get_property("visible"), Variant::Bool(true));
+    }
+
+    #[test]
+    fn staticbody2d_gets_node2d_defaults() {
+        let tscn = "\
+[gd_scene format=3]
+
+[node name=\"Root\" type=\"Node\"]
+
+[node name=\"Ground\" type=\"StaticBody2D\" parent=\".\"]
+";
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let ground = &nodes[1];
+        assert_eq!(ground.class_name(), "StaticBody2D");
+        assert_eq!(
+            ground.get_property("position"),
+            Variant::Vector2(Vector2::ZERO)
+        );
+        assert_eq!(ground.get_property("rotation"), Variant::Float(0.0));
+        assert_eq!(ground.get_property("scale"), Variant::Vector2(Vector2::ONE));
+        assert_eq!(ground.get_property("visible"), Variant::Bool(true));
+    }
+
+    #[test]
+    fn area2d_gets_node2d_defaults() {
+        let tscn = "\
+[gd_scene format=3]
+
+[node name=\"Root\" type=\"Node\"]
+
+[node name=\"Zone\" type=\"Area2D\" parent=\".\"]
+";
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let zone = &nodes[1];
+        assert_eq!(zone.class_name(), "Area2D");
+        assert_eq!(zone.get_property("visible"), Variant::Bool(true));
+        assert_eq!(zone.get_property("rotation"), Variant::Float(0.0));
+    }
+
+    #[test]
+    fn camera2d_gets_node2d_defaults() {
+        let tscn = "\
+[gd_scene format=3]
+
+[node name=\"Root\" type=\"Node\"]
+
+[node name=\"Cam\" type=\"Camera2D\" parent=\".\"]
+";
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let cam = &nodes[1];
+        assert_eq!(cam.class_name(), "Camera2D");
+        assert_eq!(cam.get_property("visible"), Variant::Bool(true));
+        assert_eq!(cam.get_property("rotation"), Variant::Float(0.0));
+        assert_eq!(cam.get_property("scale"), Variant::Vector2(Vector2::ONE));
+    }
+
+    #[test]
+    fn is_node2d_class_recognizes_derived() {
+        assert!(is_node2d_class("Node2D"));
+        assert!(is_node2d_class("Sprite2D"));
+        assert!(is_node2d_class("CharacterBody2D"));
+        assert!(is_node2d_class("StaticBody2D"));
+        assert!(is_node2d_class("RigidBody2D"));
+        assert!(is_node2d_class("Area2D"));
+        assert!(is_node2d_class("Camera2D"));
+        assert!(is_node2d_class("CollisionShape2D"));
+        assert!(!is_node2d_class("Node"));
+        assert!(!is_node2d_class("Control"));
+        assert!(!is_node2d_class("Button"));
+        assert!(!is_node2d_class("Node3D"));
     }
 }

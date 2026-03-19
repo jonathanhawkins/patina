@@ -1,0 +1,204 @@
+{
+  "frame_count": 2,
+  "physics_time": 0.03333333333333333,
+  "process_time": 0.03333333333333333,
+  "scene_file": "/Users/bone/dev/games/godot/test-00/simple_hierarchy.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [
+              {
+                "children": [],
+                "class": "Node2D",
+                "name": "GrandChild",
+                "notifications": [
+                  "NOTIFICATION_ENTER_TREE",
+                  "NOTIFICATION_READY",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_PROCESS"
+                ],
+                "path": "/root/Root/Child1/GrandChild",
+                "properties": {
+                  "position": {
+                    "type": "Vector2",
+                    "value": [
+                      10.0,
+                      20.0
+                    ]
+                  },
+                  "rotation": {
+                    "type": "Float",
+                    "value": 0.0
+                  },
+                  "scale": {
+                    "type": "Vector2",
+                    "value": [
+                      1.0,
+                      1.0
+                    ]
+                  },
+                  "visible": {
+                    "type": "Bool",
+                    "value": true
+                  }
+                },
+                "script_vars": {}
+              }
+            ],
+            "class": "Node2D",
+            "name": "Child1",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/Root/Child1",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  50.0,
+                  100.0
+                ]
+              },
+              "rotation": {
+                "type": "Float",
+                "value": 0.0
+              },
+              "scale": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  1.0
+                ]
+              },
+              "visible": {
+                "type": "Bool",
+                "value": true
+              }
+            },
+            "script_vars": {}
+          },
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "Child2",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/Root/Child2",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  200.0,
+                  300.0
+                ]
+              },
+              "rotation": {
+                "type": "Float",
+                "value": 0.0
+              },
+              "scale": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  1.0
+                ]
+              },
+              "visible": {
+                "type": "Bool",
+                "value": true
+              }
+            },
+            "script_vars": {}
+          }
+        ],
+        "class": "Node2D",
+        "name": "Root",
+        "notifications": [
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/Root",
+        "properties": {
+          "_script_path": {
+            "type": "String",
+            "value": "res://scripts/hierarchy_test.gd"
+          },
+          "child_count": {
+            "type": "Int",
+            "value": 0
+          },
+          "position": {
+            "type": "Vector2",
+            "value": [
+              0.0,
+              0.0
+            ]
+          },
+          "rotation": {
+            "type": "Float",
+            "value": 0.0
+          },
+          "scale": {
+            "type": "Vector2",
+            "value": [
+              1.0,
+              1.0
+            ]
+          },
+          "script": {
+            "type": "String",
+            "value": "ExtResource(\"1\")"
+          },
+          "tree_ready": {
+            "type": "Bool",
+            "value": false
+          },
+          "visible": {
+            "type": "Bool",
+            "value": true
+          }
+        },
+        "script_vars": {
+          "child_count": {
+            "type": "Int",
+            "value": 0
+          },
+          "tree_ready": {
+            "type": "Bool",
+            "value": false
+          }
+        }
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}

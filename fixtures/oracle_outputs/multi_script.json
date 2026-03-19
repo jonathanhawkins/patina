@@ -1,0 +1,53 @@
+{
+  "children": [
+    {
+      "children": [],
+      "class": "Node2D",
+      "name": "Counter",
+      "path": "/root/World/Counter",
+      "properties": {
+        "count": "11",
+        "position": "Vector2(0, 0)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    },
+    {
+      "children": [],
+      "class": "Node2D",
+      "name": "Reader",
+      "path": "/root/World/Reader",
+      "properties": {
+        "last_read": "1",
+        "position": "Vector2(100, 0)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    },
+    {
+      "children": [],
+      "class": "Node2D",
+      "name": "Mover",
+      "path": "/root/World/Mover",
+      "properties": {
+        "position": "Vector2(202.07643, 100)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "speed": "50.0",
+        "total_moved": "2.076433333333333",
+        "visible": "true"
+      }
+    }
+  ],
+  "class": "Node2D",
+  "name": "World",
+  "path": "/root/World",
+  "properties": {
+    "position": "Vector2(0, 0)",
+    "rotation": "0.0",
+    "scale": "Vector2(1, 1)",
+    "visible": "true"
+  }
+}

@@ -18,10 +18,20 @@
               "class": "Sprite2D",
               "path": "/root/Root/Player/Sprite",
               "children": [],
-              "properties": {}
+              "properties": {
+                "position": { "type": "Vector2", "value": [0.0, 0.0] },
+                "rotation": { "type": "Float", "value": 0.0 },
+                "scale": { "type": "Vector2", "value": [1.0, 1.0] },
+                "visible": { "type": "Bool", "value": true }
+              }
             }
           ],
-          "properties": {}
+          "properties": {
+            "position": { "type": "Vector2", "value": [0.0, 0.0] },
+            "rotation": { "type": "Float", "value": 0.0 },
+            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
+            "visible": { "type": "Bool", "value": true }
+          }
         }
       ],
       "properties": {}

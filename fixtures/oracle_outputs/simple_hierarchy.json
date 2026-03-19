@@ -1,0 +1,52 @@
+{
+  "children": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "GrandChild",
+          "path": "/root/Root/Child1/GrandChild",
+          "properties": {
+            "position": "Vector2(10, 20)",
+            "rotation": "0.0",
+            "scale": "Vector2(1, 1)",
+            "visible": "true"
+          }
+        }
+      ],
+      "class": "Node2D",
+      "name": "Child1",
+      "path": "/root/Root/Child1",
+      "properties": {
+        "position": "Vector2(50, 100)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    },
+    {
+      "children": [],
+      "class": "Node2D",
+      "name": "Child2",
+      "path": "/root/Root/Child2",
+      "properties": {
+        "position": "Vector2(200, 300)",
+        "rotation": "0.0",
+        "scale": "Vector2(1, 1)",
+        "visible": "true"
+      }
+    }
+  ],
+  "class": "Node2D",
+  "name": "Root",
+  "path": "/root/Root",
+  "properties": {
+    "child_count": "2",
+    "position": "Vector2(0, 0)",
+    "rotation": "0.0",
+    "scale": "Vector2(1, 1)",
+    "tree_ready": "true",
+    "visible": "true"
+  }
+}

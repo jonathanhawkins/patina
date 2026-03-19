@@ -1234,6 +1234,81 @@ func _physics_process(delta):
     }
 
     #[test]
+    fn get_child_count_builtin() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var count = 0
+func _ready():
+    self.count = get_child_count()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, parent_id);
+        assert_eq!(
+            tree.get_script(parent_id).unwrap().get_property("count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn get_child_count_on_leaf_node() {
+        let (mut tree, _parent_id, c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var count = -1
+func _ready():
+    self.count = get_child_count()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id).unwrap().get_property("count"),
+            Some(Variant::Int(0))
+        );
+    }
+
+    #[test]
+    fn get_child_count_on_object_id() {
+        let (mut tree, parent_id, c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var parent_child_count = 0
+func _ready():
+    var p = get_parent()
+    self.parent_child_count = p.get_child_count()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, c1_id).unwrap();
+        tree.attach_script(c1_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c1_id);
+        assert_eq!(
+            tree.get_script(c1_id)
+                .unwrap()
+                .get_property("parent_child_count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
+    fn get_child_count_during_process() {
+        let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+        let script_src = "\
+extends Node2D
+var count = 0
+func _process(delta):
+    self.count = get_child_count()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        tree.process_script_process(parent_id, 0.016);
+        assert_eq!(
+            tree.get_script(parent_id).unwrap().get_property("count"),
+            Some(Variant::Int(2))
+        );
+    }
+
+    #[test]
     fn scene_access_during_enter_tree() {
         let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
         let script_src = "\

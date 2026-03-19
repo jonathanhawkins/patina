@@ -165,6 +165,97 @@ pub fn draw_texture_region(
     }
 }
 
+/// Fills a rectangular region with alpha blending (source-over).
+pub fn fill_rect_blended(fb: &mut FrameBuffer, rect: Rect2, color: Color) {
+    let x_min = (rect.position.x as i32).max(0) as u32;
+    let y_min = (rect.position.y as i32).max(0) as u32;
+    let x_max = ((rect.position.x + rect.size.x) as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((rect.position.y + rect.size.y) as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
+
+    for py in y_min..y_max {
+        for px in x_min..x_max {
+            fb.blend_pixel(px, py, color);
+        }
+    }
+}
+
+/// Draws a line with alpha blending (source-over).
+pub fn draw_line_blended(
+    fb: &mut FrameBuffer,
+    from: Vector2,
+    to: Vector2,
+    color: Color,
+    _width: f32,
+) {
+    let mut x0 = from.x as i32;
+    let mut y0 = from.y as i32;
+    let x1 = to.x as i32;
+    let y1 = to.y as i32;
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as u32) < fb.width && (y0 as u32) < fb.height {
+            fb.blend_pixel(x0 as u32, y0 as u32, color);
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/// Fills a circle with alpha blending (source-over).
+pub fn fill_circle_blended(fb: &mut FrameBuffer, center: Vector2, radius: f32, color: Color) {
+    let r_sq = radius * radius;
+    let x_min = ((center.x - radius) as i32).max(0) as u32;
+    let y_min = ((center.y - radius) as i32).max(0) as u32;
+    let x_max = ((center.x + radius).ceil() as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((center.y + radius).ceil() as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
+
+    for py in y_min..y_max {
+        for px in x_min..x_max {
+            let dx = px as f32 + 0.5 - center.x;
+            let dy = py as f32 + 0.5 - center.y;
+            if dx * dx + dy * dy <= r_sq {
+                fb.blend_pixel(px, py, color);
+            }
+        }
+    }
+}
+
+/// Draws a rectangle outline with alpha blending.
+pub fn draw_rect_outline_blended(fb: &mut FrameBuffer, rect: Rect2, color: Color, _width: f32) {
+    let tl = rect.position;
+    let tr = Vector2::new(rect.position.x + rect.size.x, rect.position.y);
+    let br = Vector2::new(rect.position.x + rect.size.x, rect.position.y + rect.size.y);
+    let bl = Vector2::new(rect.position.x, rect.position.y + rect.size.y);
+    draw_line_blended(fb, tl, tr, color, 1.0);
+    draw_line_blended(fb, tr, br, color, 1.0);
+    draw_line_blended(fb, br, bl, color, 1.0);
+    draw_line_blended(fb, bl, tl, color, 1.0);
+}
+
 /// Fills a rotated rectangle on the framebuffer.
 ///
 /// Uses a 2D rotation matrix to test whether each pixel in the bounding box

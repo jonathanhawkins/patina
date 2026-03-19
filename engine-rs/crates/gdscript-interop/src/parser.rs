@@ -527,9 +527,18 @@ impl Parser {
             self.advance();
             if !self.check(&Token::RParen) {
                 params.push(self.eat_ident()?);
+                // Skip optional type annotation `: Type`
+                if self.check(&Token::Colon) {
+                    self.advance();
+                    let _ = self.eat_ident(); // consume type name
+                }
                 while self.check(&Token::Comma) {
                     self.advance();
                     params.push(self.eat_ident()?);
+                    if self.check(&Token::Colon) {
+                        self.advance();
+                        let _ = self.eat_ident();
+                    }
                 }
             }
             self.expect(&Token::RParen)?;

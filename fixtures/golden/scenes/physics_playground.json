@@ -16,7 +16,10 @@
           "properties": {
             "position": { "type": "Vector2", "value": [400.0, 100.0] },
             "radius": { "type": "Int", "value": 16 },
-            "velocity": { "type": "Vector2", "value": [50.0, 0.0] }
+            "rotation": { "type": "Float", "value": 0.0 },
+            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
+            "velocity": { "type": "Vector2", "value": [50.0, 0.0] },
+            "visible": { "type": "Bool", "value": true }
           }
         },
         {
@@ -25,7 +28,10 @@
           "path": "/root/World/Wall",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [800.0, 300.0] }
+            "position": { "type": "Vector2", "value": [800.0, 300.0] },
+            "rotation": { "type": "Float", "value": 0.0 },
+            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
+            "visible": { "type": "Bool", "value": true }
           }
         },
         {
@@ -34,7 +40,10 @@
           "path": "/root/World/Floor",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [400.0, 600.0] }
+            "position": { "type": "Vector2", "value": [400.0, 600.0] },
+            "rotation": { "type": "Float", "value": 0.0 },
+            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
+            "visible": { "type": "Bool", "value": true }
           }
         }
       ],

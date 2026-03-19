@@ -44,6 +44,25 @@ impl FrameBuffer {
         }
     }
 
+    /// Alpha-blends a pixel on top of the existing pixel at `(x, y)`.
+    ///
+    /// Uses standard "source over" compositing: `out = src * src.a + dst * (1 - src.a)`.
+    /// No-op if out of bounds.
+    pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
+        if x < self.width && y < self.height {
+            let idx = (y * self.width + x) as usize;
+            let dst = self.pixels[idx];
+            let a = color.a;
+            let inv_a = 1.0 - a;
+            self.pixels[idx] = Color::new(
+                color.r * a + dst.r * inv_a,
+                color.g * a + dst.g * inv_a,
+                color.b * a + dst.b * inv_a,
+                (a + dst.a * inv_a).min(1.0),
+            );
+        }
+    }
+
     /// Returns the color at `(x, y)`.
     ///
     /// # Panics
