@@ -18,6 +18,12 @@ Patina is a monorepo for a Rust-native Godot-compatible game engine, its marketi
 - Engine test: `cd engine-rs && cargo test`
 - Lint all: `pnpm lint` (root)
 
+## Debugging Rules
+- When debugging HTTP/browser issues, ALWAYS check browser console logs via Claude in Chrome (read_console_messages or javascript_tool) BEFORE attempting fixes
+- When the editor server has errors, check BOTH server-side (Rust stderr) AND client-side (browser console) logs
+- Never assume a fix works — verify in the browser with error tracking active for at least 15 seconds
+- For network errors (ERR_CONNECTION_RESET, ERR_EMPTY_RESPONSE), the root cause is almost always server-side — check Rust panic/error output
+
 ## Important
 - Always read AGENTS.md first for safety rules and conventions
 - This project uses the Agent Flywheel methodology — see docs/
