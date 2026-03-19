@@ -11,6 +11,8 @@ gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
 gdscript-interop = { path = "../gdscript-interop" }
+gdphysics2d = { path = "../gdphysics2d" }
+gdplatform = { path = "../gdplatform" }
 thiserror.workspace = true
 tracing.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,1785 @@
+{
+  "event_trace": [
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_enter_tree",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_enter_tree",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_enter_tree",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_enter_tree",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_ready",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_ready",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_ready",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_ready",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 0,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 1,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 1,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 2,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 2,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 3,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 3,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 4,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 4,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 5,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 5,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 6,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 6,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 7,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 7,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 8,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 8,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_call",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_physics_process",
+      "event_type": "script_return",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 9,
+      "node_path": "/root/TestScene/Mover"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_call",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    },
+    {
+      "detail": "_process",
+      "event_type": "script_return",
+      "frame": 9,
+      "node_path": "/root/TestScene/VarTest"
+    }
+  ],
+  "frame_count": 10,
+  "physics_time": 0.16666666666666666,
+  "process_time": 0.16666666666666666,
+  "scene_file": "fixtures/scenes/test_scripts.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "Mover",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/TestScene/Mover",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  108.33335876464844,
+                  200.0
+                ]
+              }
+            },
+            "script_vars": {
+              "direction": {
+                "type": "Float",
+                "value": 1.0
+              },
+              "speed": {
+                "type": "Float",
+                "value": 50.0
+              }
+            }
+          },
+          {
+            "children": [],
+            "class": "Node2D",
+            "name": "VarTest",
+            "notifications": [
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/TestScene/VarTest",
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  300.0,
+                  200.0
+                ]
+              }
+            },
+            "script_vars": {
+              "health": {
+                "type": "Int",
+                "value": 100
+              },
+              "is_alive": {
+                "type": "Bool",
+                "value": true
+              },
+              "name_str": {
+                "type": "String",
+                "value": "Player"
+              },
+              "velocity": {
+                "type": "Vector2",
+                "value": [
+                  0.0,
+                  0.0
+                ]
+              }
+            }
+          }
+        ],
+        "class": "Node2D",
+        "name": "TestScene",
+        "notifications": [
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/TestScene",
+        "properties": {},
+        "script_vars": {}
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}

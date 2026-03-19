@@ -99,6 +99,16 @@ impl SceneTree {
         self.input_snapshot = None;
     }
 
+    /// Returns `true` if an input snapshot is currently set.
+    pub fn has_input_snapshot(&self) -> bool {
+        self.input_snapshot.is_some()
+    }
+
+    /// Returns a reference to the current input snapshot, if any.
+    pub fn input_snapshot(&self) -> Option<&crate::scripting::InputSnapshot> {
+        self.input_snapshot.as_ref()
+    }
+
     /// Returns a reference to the event trace.
     pub fn event_trace(&self) -> &EventTrace {
         &self.event_trace
@@ -858,6 +868,44 @@ impl SceneTree {
         }
     }
 
+    /// Dispatches [`NOTIFICATION_PROCESS`](gdobject::NOTIFICATION_PROCESS) to
+    /// every node in tree order, interleaving `_process(delta)` script calls
+    /// immediately after each node's notification.
+    ///
+    /// This matches Godot's per-node dispatch: each node receives its PROCESS
+    /// notification and has its `_process()` called before the next node is
+    /// processed.
+    pub fn process_frame_with_scripts(&mut self, delta: f64) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "PROCESS");
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_PROCESS);
+            }
+            if self.scripts.contains_key(&id) {
+                self.process_script_process(id, delta);
+            }
+        }
+    }
+
+    /// Dispatches [`NOTIFICATION_PHYSICS_PROCESS`](gdobject::NOTIFICATION_PHYSICS_PROCESS) to
+    /// every node in tree order, interleaving `_physics_process(delta)` script calls
+    /// immediately after each node's notification.
+    ///
+    /// This matches Godot's per-node dispatch for physics processing.
+    pub fn process_physics_frame_with_scripts(&mut self, delta: f64) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "PHYSICS_PROCESS");
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_PHYSICS_PROCESS);
+            }
+            if self.scripts.contains_key(&id) {
+                self.process_script_physics_process(id, delta);
+            }
+        }
+    }
+
     // -- collision detection -----------------------------------------------
 
     /// Runs simple distance-based collision detection on all nodes that
@@ -932,7 +980,31 @@ impl SceneTree {
             if !self.nodes.contains_key(&id) {
                 continue;
             }
-            // Detach scripts for the entire subtree before removal.
+
+            // Fire EXIT_TREE lifecycle (bottom-up) while scripts are still
+            // attached, matching Godot's queue_free() behavior.
+            let should_exit = self
+                .nodes
+                .get(&id)
+                .map(|n| n.is_inside_tree())
+                .unwrap_or(false);
+            if should_exit {
+                LifecycleManager::exit_tree(self, id);
+            }
+
+            // Fire PREDELETE notification (bottom-up) after EXIT_TREE.
+            let mut bottom_up = Vec::new();
+            self.collect_subtree_bottom_up(id, &mut bottom_up);
+            for &nid in &bottom_up {
+                self.trace_record(nid, TraceEventType::Notification, "PREDELETE");
+                if let Some(node) = self.nodes.get_mut(&nid) {
+                    node.receive_notification(gdobject::NOTIFICATION_PREDELETE);
+                }
+            }
+
+            // Now remove scripts and the node itself.
+            // exit_tree already marked nodes as outside tree, so
+            // remove_node will skip the redundant EXIT_TREE call.
             let mut subtree = Vec::new();
             self.collect_subtree_top_down(id, &mut subtree);
             for &nid in &subtree {
