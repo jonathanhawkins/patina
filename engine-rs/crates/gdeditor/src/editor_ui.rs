@@ -514,19 +514,74 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   let viewportImg = null;
   let viewportTimer = null;
 
+  let isDragging = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  const DRAG_THRESHOLD = 3;
+
+  function viewportCoords(e) {
+    const rect = viewportImg.getBoundingClientRect();
+    const scaleX = viewportImg.naturalWidth / rect.width;
+    const scaleY = viewportImg.naturalHeight / rect.height;
+    return { x: Math.round((e.clientX - rect.left) * scaleX), y: Math.round((e.clientY - rect.top) * scaleY) };
+  }
+
   function setupViewport() {
     const container = document.getElementById('viewport-container');
     viewportImg = document.createElement('img');
     viewportImg.id = 'viewport-img';
     viewportImg.style.display = 'none';
-    viewportImg.addEventListener('click', function(e) {
-      const rect = viewportImg.getBoundingClientRect();
-      const scaleX = viewportImg.naturalWidth / rect.width;
-      const scaleY = viewportImg.naturalHeight / rect.height;
-      const x = (e.clientX - rect.left) * scaleX;
-      const y = (e.clientY - rect.top) * scaleY;
-      api('POST', '/api/viewport/click', { x: Math.round(x), y: Math.round(y) }).catch(function(){});
+    viewportImg.draggable = false;
+
+    viewportImg.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      const c = viewportCoords(e);
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      isDragging = false;
+      api('POST', '/api/viewport/drag_start', c);
     });
+
+    document.addEventListener('mousemove', function(e) {
+      if (dragStartX === 0 && dragStartY === 0) return;
+      if (!viewportImg) return;
+      const dx = e.clientX - dragStartX;
+      const dy = e.clientY - dragStartY;
+      if (!isDragging && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+        isDragging = true;
+      }
+      if (isDragging) {
+        const c = viewportCoords(e);
+        api('POST', '/api/viewport/drag', c);
+      }
+    });
+
+    document.addEventListener('mouseup', function(e) {
+      if (dragStartX === 0 && dragStartY === 0) return;
+      if (!viewportImg) return;
+      const c = viewportCoords(e);
+      if (isDragging) {
+        api('POST', '/api/viewport/drag_end', c).then(function() {
+          fetchScene();
+          if (selectedNodeId) fetchSelected();
+        });
+      } else {
+        api('POST', '/api/viewport/click', c).then(function(result) {
+          if (result && result.selected) {
+            selectedNodeId = result.selected;
+          } else {
+            selectedNodeId = null;
+          }
+          refreshTree();
+          fetchSelected();
+          fetchScene();
+        });
+      }
+      isDragging = false;
+      dragStartX = 0;
+      dragStartY = 0;
+    });
+
     container.appendChild(viewportImg);
   }
 
