@@ -94,7 +94,10 @@ static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyL
         let mut v = physics_body_2d.clone();
         v.extend([
             ("motion_mode", Variant::Int(0)),
-            ("floor_max_angle", Variant::Float(std::f64::consts::FRAC_PI_4)),
+            (
+                "floor_max_angle",
+                Variant::Float(std::f64::consts::FRAC_PI_4),
+            ),
             ("velocity", Variant::Vector2(gdcore::math::Vector2::ZERO)),
         ]);
         v
