@@ -1,0 +1,32 @@
+[gd_scene load_steps=5 format=3 uid="uid://abc123"]
+
+[ext_resource type="Script" uid="uid://def456" path="res://player.gd" id="1_abc"]
+[ext_resource type="Texture2D" uid="uid://ghi789" path="res://icon.svg" id="2_xyz"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_abc"]
+size = Vector2(32, 32)
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_def"]
+radius = 16.0
+
+[node name="World" type="Node2D"]
+
+[node name="Player" type="CharacterBody2D" parent="." groups=["player", "damageable"]]
+position = Vector2(100, 200)
+script = ExtResource("1_abc")
+metadata/custom_tag = "hero"
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Player"]
+shape = SubResource("RectangleShape2D_abc")
+
+[node name="Sprite" type="Sprite2D" parent="Player"]
+texture = ExtResource("2_xyz")
+offset = Vector2(0, -16)
+
+[node name="Enemy" type="CharacterBody2D" parent="." groups=["enemy", "damageable"]]
+position = Vector2(400, 200)
+
+[node name="EnemyCollision" type="CollisionShape2D" parent="Enemy"]
+shape = SubResource("CircleShape2D_def")
+
+[connection signal="body_entered" from="Player" to="." method="_on_player_body_entered"]

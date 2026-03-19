@@ -1,0 +1,55 @@
+[gd_scene load_steps=3 format=3 uid="uid://ui_theme_test"]
+
+[ext_resource type="Script" uid="uid://ui_script" path="res://ui/main_menu.gd" id="1_menu"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.1, 0.1, 0.1, 0.9)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[node name="MainMenu" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1_menu")
+
+[node name="Background" type="Panel" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+
+[node name="VBox" type="VBoxContainer" parent="."]
+anchor_left = 0.5
+anchor_top = 0.3
+anchor_right = 0.5
+anchor_bottom = 0.7
+offset_left = -150.0
+offset_top = 0.0
+offset_right = 150.0
+offset_bottom = 0.0
+
+[node name="Title" type="Label" parent="VBox"]
+text = "My Game"
+horizontal_alignment = 1
+theme_override_font_sizes/font_size = 48
+
+[node name="PlayButton" type="Button" parent="VBox"]
+text = "Play"
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+
+[node name="QuitButton" type="Button" parent="VBox"]
+text = "Quit"
+
+[node name="Version" type="Label" parent="." groups=["ui_labels"]]
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -100.0
+offset_top = -30.0
+text = "v1.0.0"
+metadata/auto_update = true
+
+[connection signal="pressed" from="VBox/PlayButton" to="." method="_on_play_pressed"]
+[connection signal="pressed" from="VBox/QuitButton" to="." method="_on_quit_pressed"]

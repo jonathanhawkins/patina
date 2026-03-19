@@ -116,6 +116,14 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
         props.insert(key.clone(), to_json(value));
     }
 
+    // Collect script variables if a script is attached.
+    let mut script_vars = serde_json::Map::new();
+    if let Some(script) = tree.get_script(id) {
+        for prop_info in script.list_properties() {
+            script_vars.insert(prop_info.name.clone(), to_json(&prop_info.default_value));
+        }
+    }
+
     // Notification log as human-readable strings.
     let notifications: Vec<String> = node
         .notification_log()
@@ -135,6 +143,7 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
         "class": node.class_name(),
         "path": path,
         "properties": props,
+        "script_vars": script_vars,
         "notifications": notifications,
         "children": children,
     })
@@ -284,4 +293,83 @@ fn main() {
         "{}",
         serde_json::to_string_pretty(&output).expect("JSON serialization failed")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdscene::node::Node;
+
+    /// dump_tree_json includes script_vars for nodes with scripts.
+    #[test]
+    fn dump_tree_json_includes_script_vars() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 200
+func _ready():
+    self.speed = 300
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        gdscene::LifecycleManager::enter_tree(&mut tree, child_id);
+
+        let output = dump_tree_json(&tree);
+        // Navigate to the child node
+        let children = output["children"].as_array().unwrap();
+        let player = &children[0];
+
+        // script_vars should contain speed=300
+        let script_vars = &player["script_vars"];
+        assert_eq!(script_vars["speed"]["value"], json!(300));
+    }
+
+    /// dump_tree_json has empty script_vars for nodes without scripts.
+    #[test]
+    fn dump_tree_json_no_script_empty_script_vars() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Plain", "Node2D");
+        let _child_id = tree.add_child(root, child).unwrap();
+
+        let output = dump_tree_json(&tree);
+        let children = output["children"].as_array().unwrap();
+        let plain = &children[0];
+
+        // script_vars should be an empty object
+        assert_eq!(plain["script_vars"], json!({}));
+    }
+
+    /// Script vars are also synced to node properties in dump output.
+    #[test]
+    fn dump_tree_json_script_vars_also_in_properties() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 200
+func _ready():
+    self.speed = 300
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        gdscene::LifecycleManager::enter_tree(&mut tree, child_id);
+
+        let output = dump_tree_json(&tree);
+        let children = output["children"].as_array().unwrap();
+        let player = &children[0];
+
+        // Both script_vars and properties should have speed=300
+        assert_eq!(player["script_vars"]["speed"]["value"], json!(300));
+        assert_eq!(player["properties"]["speed"]["value"], json!(300));
+    }
 }

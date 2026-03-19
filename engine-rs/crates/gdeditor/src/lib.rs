@@ -108,6 +108,22 @@ pub enum EditorCommand {
         /// The old parent (populated on execute).
         old_parent_id: Option<NodeId>,
     },
+    /// Rename a node.
+    RenameNode {
+        /// The node to rename.
+        node_id: NodeId,
+        /// The new name.
+        new_name: String,
+        /// The old name (populated on execute).
+        old_name: String,
+    },
+    /// Duplicate a node (and its subtree) as a sibling.
+    DuplicateNode {
+        /// The node to duplicate.
+        source_id: NodeId,
+        /// The IDs of nodes created (populated on execute, for undo).
+        created_ids: Vec<NodeId>,
+    },
 }
 
 impl EditorCommand {
@@ -164,6 +180,78 @@ impl EditorCommand {
                 tracing::debug!("ReparentNode {:?} -> {:?}", node_id, new_parent_id);
                 Ok(())
             }
+            EditorCommand::RenameNode {
+                node_id,
+                new_name,
+                old_name,
+            } => {
+                let node = tree
+                    .get_node_mut(*node_id)
+                    .ok_or_else(|| gdcore::error::EngineError::NotFound("node not found".into()))?;
+                *old_name = node.name().to_string();
+                node.set_name(new_name.as_str());
+                tracing::debug!("RenameNode {:?} '{}' -> '{}'", node_id, old_name, new_name);
+                Ok(())
+            }
+            EditorCommand::DuplicateNode {
+                source_id,
+                created_ids,
+            } => {
+                // Find the parent of the source node.
+                let parent_id = tree
+                    .get_node(*source_id)
+                    .and_then(|n| n.parent())
+                    .ok_or_else(|| {
+                        gdcore::error::EngineError::InvalidOperation(
+                            "cannot duplicate root node".into(),
+                        )
+                    })?;
+
+                // Recursively duplicate the subtree.
+                fn duplicate_subtree(
+                    tree: &mut SceneTree,
+                    src_id: NodeId,
+                    dest_parent: NodeId,
+                    created: &mut Vec<NodeId>,
+                ) -> EditorResult<NodeId> {
+                    let (name, class_name, props) = {
+                        let node = tree.get_node(src_id).ok_or_else(|| {
+                            gdcore::error::EngineError::NotFound("node not found".into())
+                        })?;
+                        let name = node.name().to_string();
+                        let class = node.class_name().to_string();
+                        let props: Vec<(String, Variant)> = node
+                            .properties()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        (name, class, props)
+                    };
+
+                    // Get children before mutating tree.
+                    let children: Vec<NodeId> = tree
+                        .get_node(src_id)
+                        .map(|n| n.children().to_vec())
+                        .unwrap_or_default();
+
+                    let mut new_node = Node::new(name, class_name);
+                    for (k, v) in props {
+                        new_node.set_property(&k, v);
+                    }
+                    let new_id = tree.add_child(dest_parent, new_node)?;
+                    created.push(new_id);
+
+                    for child_id in children {
+                        duplicate_subtree(tree, child_id, new_id, created)?;
+                    }
+
+                    Ok(new_id)
+                }
+
+                created_ids.clear();
+                duplicate_subtree(tree, *source_id, parent_id, created_ids)?;
+                tracing::debug!("DuplicateNode {:?} -> {:?}", source_id, created_ids);
+                Ok(())
+            }
         }
     }
 
@@ -209,6 +297,22 @@ impl EditorCommand {
             } => {
                 if let Some(old_pid) = old_parent_id {
                     tree.reparent(*node_id, *old_pid)?;
+                }
+                Ok(())
+            }
+            EditorCommand::RenameNode {
+                node_id, old_name, ..
+            } => {
+                let node = tree
+                    .get_node_mut(*node_id)
+                    .ok_or_else(|| gdcore::error::EngineError::NotFound("node not found".into()))?;
+                node.set_name(old_name.as_str());
+                Ok(())
+            }
+            EditorCommand::DuplicateNode { created_ids, .. } => {
+                // Remove all created nodes in reverse order (children first).
+                for &id in created_ids.iter().rev() {
+                    let _ = tree.remove_node(id);
                 }
                 Ok(())
             }

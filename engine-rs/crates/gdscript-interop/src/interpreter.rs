@@ -12,7 +12,9 @@ use gdvariant::Variant;
 use crate::bindings::{
     MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
 };
-use crate::parser::{Annotation, AssignOp, BinOp, Expr, MatchPattern, Parser, Stmt, UnaryOp};
+use crate::parser::{
+    Annotation, AssignOp, BinOp, Expr, FuncParam, MatchPattern, Parser, Stmt, UnaryOp,
+};
 use crate::tokenizer::tokenize;
 
 /// Maximum call-stack depth before we bail out.
@@ -297,8 +299,29 @@ impl Clone for Interpreter {
 pub struct FuncDef {
     /// Parameter names.
     pub params: Vec<String>,
+    /// Default value expressions for each parameter (None = required).
+    pub defaults: Vec<Option<Expr>>,
     /// Function body statements.
     pub body: Vec<Stmt>,
+    /// Whether this is a static function.
+    pub is_static: bool,
+}
+
+impl FuncDef {
+    /// Constructs a `FuncDef` from parsed [`FuncParam`]s.
+    pub fn from_params(params: &[FuncParam], body: &[Stmt], is_static: bool) -> Self {
+        Self {
+            params: params.iter().map(|p| p.name.clone()).collect(),
+            defaults: params.iter().map(|p| p.default.clone()).collect(),
+            body: body.to_vec(),
+            is_static,
+        }
+    }
+
+    /// Returns the minimum number of required arguments (those without defaults).
+    pub fn min_args(&self) -> usize {
+        self.defaults.iter().take_while(|d| d.is_none()).count()
+    }
 }
 
 /// Information about an exported variable.
@@ -555,15 +578,14 @@ impl Interpreter {
             }
 
             Stmt::FuncDef {
-                name, params, body, ..
+                name,
+                params,
+                body,
+                is_static,
+                ..
             } => {
-                self.function_registry.insert(
-                    name.clone(),
-                    FuncDef {
-                        params: params.clone(),
-                        body: body.clone(),
-                    },
-                );
+                self.function_registry
+                    .insert(name.clone(), FuncDef::from_params(params, body, *is_static));
                 Ok(None)
             }
 
@@ -845,6 +867,8 @@ impl Interpreter {
                     UnaryOp::Neg => match val {
                         Variant::Int(i) => Ok(Variant::Int(-i)),
                         Variant::Float(f) => Ok(Variant::Float(-f)),
+                        Variant::Vector2(v) => Ok(Variant::Vector2(-v)),
+                        Variant::Vector3(v) => Ok(Variant::Vector3(-v)),
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot negate {}",
                             val.variant_type()
@@ -897,6 +921,12 @@ impl Interpreter {
                         )));
                     }
                 }
+                // Handle static type member access (Vector2.ZERO, etc.)
+                if let Expr::Ident(type_name) = object.as_ref() {
+                    if let Some(v) = try_static_member(type_name, member) {
+                        return Ok(v);
+                    }
+                }
                 let obj = self.eval_expr(object)?;
                 // ObjectId property access via scene_access
                 if let Variant::ObjectId(oid) = &obj {
@@ -906,6 +936,30 @@ impl Interpreter {
                     }
                 }
                 match &obj {
+                    Variant::Vector2(v) => match member.as_str() {
+                        "x" => Ok(Variant::Float(v.x as f64)),
+                        "y" => Ok(Variant::Float(v.y as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Vector2 has no member '{member}'"
+                        )))),
+                    },
+                    Variant::Vector3(v) => match member.as_str() {
+                        "x" => Ok(Variant::Float(v.x as f64)),
+                        "y" => Ok(Variant::Float(v.y as f64)),
+                        "z" => Ok(Variant::Float(v.z as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Vector3 has no member '{member}'"
+                        )))),
+                    },
+                    Variant::Color(c) => match member.as_str() {
+                        "r" => Ok(Variant::Float(c.r as f64)),
+                        "g" => Ok(Variant::Float(c.g as f64)),
+                        "b" => Ok(Variant::Float(c.b as f64)),
+                        "a" => Ok(Variant::Float(c.a as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Color has no member '{member}'"
+                        )))),
+                    },
                     Variant::Dictionary(d) => d.get(member).cloned().ok_or_else(|| {
                         RuntimeError::new(RuntimeErrorKind::UndefinedVariable(member.clone()))
                     }),
@@ -1038,6 +1092,8 @@ impl Interpreter {
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 + b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a + *b as f64)),
             (Variant::String(a), Variant::String(b)) => Ok(Variant::String(format!("{a}{b}"))),
+            (Variant::Vector2(a), Variant::Vector2(b)) => Ok(Variant::Vector2(*a + *b)),
+            (Variant::Vector3(a), Variant::Vector3(b)) => Ok(Variant::Vector3(*a + *b)),
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot add {} and {}",
                 lhs.variant_type(),
@@ -1052,6 +1108,8 @@ impl Interpreter {
             (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a - b)),
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 - b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a - *b as f64)),
+            (Variant::Vector2(a), Variant::Vector2(b)) => Ok(Variant::Vector2(*a - *b)),
+            (Variant::Vector3(a), Variant::Vector3(b)) => Ok(Variant::Vector3(*a - *b)),
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot subtract {} from {}",
                 rhs.variant_type(),
@@ -1066,6 +1124,16 @@ impl Interpreter {
             (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a * b)),
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 * b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a * *b as f64)),
+            // Vector2 * scalar and scalar * Vector2
+            (Variant::Vector2(v), Variant::Float(s)) => Ok(Variant::Vector2(*v * *s as f32)),
+            (Variant::Vector2(v), Variant::Int(s)) => Ok(Variant::Vector2(*v * *s as f32)),
+            (Variant::Float(s), Variant::Vector2(v)) => Ok(Variant::Vector2(*v * *s as f32)),
+            (Variant::Int(s), Variant::Vector2(v)) => Ok(Variant::Vector2(*v * *s as f32)),
+            // Vector3 * scalar and scalar * Vector3
+            (Variant::Vector3(v), Variant::Float(s)) => Ok(Variant::Vector3(*v * *s as f32)),
+            (Variant::Vector3(v), Variant::Int(s)) => Ok(Variant::Vector3(*v * *s as f32)),
+            (Variant::Float(s), Variant::Vector3(v)) => Ok(Variant::Vector3(*v * *s as f32)),
+            (Variant::Int(s), Variant::Vector3(v)) => Ok(Variant::Vector3(*v * *s as f32)),
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot multiply {} and {}",
                 lhs.variant_type(),
@@ -1099,6 +1167,32 @@ impl Interpreter {
                     return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
                 Ok(Variant::Float(a / *b as f64))
+            }
+            // Vector2 / scalar
+            (Variant::Vector2(v), Variant::Float(s)) => {
+                if *s == 0.0 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
+                }
+                Ok(Variant::Vector2(*v / *s as f32))
+            }
+            (Variant::Vector2(v), Variant::Int(s)) => {
+                if *s == 0 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
+                }
+                Ok(Variant::Vector2(*v / *s as f32))
+            }
+            // Vector3 / scalar
+            (Variant::Vector3(v), Variant::Float(s)) => {
+                if *s == 0.0 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
+                }
+                Ok(Variant::Vector3(*v / *s as f32))
+            }
+            (Variant::Vector3(v), Variant::Int(s)) => {
+                if *s == 0 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
+                }
+                Ok(Variant::Vector3(*v / *s as f32))
             }
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot divide {} by {}",
@@ -1589,6 +1683,45 @@ impl Interpreter {
                     )))
                 }
             }
+            "Vector2" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Vector2() takes 2 arguments".into(),
+                    )));
+                }
+                let x = to_float(&args[0])? as f32;
+                let y = to_float(&args[1])? as f32;
+                Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(x, y))))
+            }
+            "Vector3" => {
+                if args.len() != 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Vector3() takes 3 arguments".into(),
+                    )));
+                }
+                let x = to_float(&args[0])? as f32;
+                let y = to_float(&args[1])? as f32;
+                let z = to_float(&args[2])? as f32;
+                Ok(Some(Variant::Vector3(gdcore::math::Vector3::new(x, y, z))))
+            }
+            "Color" => match args.len() {
+                3 => {
+                    let r = to_float(&args[0])? as f32;
+                    let g = to_float(&args[1])? as f32;
+                    let b = to_float(&args[2])? as f32;
+                    Ok(Some(Variant::Color(gdcore::math::Color::rgb(r, g, b))))
+                }
+                4 => {
+                    let r = to_float(&args[0])? as f32;
+                    let g = to_float(&args[1])? as f32;
+                    let b = to_float(&args[2])? as f32;
+                    let a = to_float(&args[3])? as f32;
+                    Ok(Some(Variant::Color(gdcore::math::Color::new(r, g, b, a))))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Color() takes 3 or 4 arguments".into(),
+                ))),
+            },
             _ => Ok(None), // Not a built-in
         }
     }
@@ -1605,7 +1738,7 @@ impl Interpreter {
             RuntimeError::new(RuntimeErrorKind::UndefinedFunction(name.to_string()))
         })?;
 
-        if args.len() != func.params.len() {
+        if args.len() < func.min_args() || args.len() > func.params.len() {
             return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "{}() takes {} arguments, got {}",
                 name,
@@ -1622,8 +1755,15 @@ impl Interpreter {
         self.call_depth += 1;
 
         self.environment.push_scope();
-        for (param, arg) in func.params.iter().zip(args.iter()) {
-            self.environment.define(param.clone(), arg.clone());
+        for (i, param) in func.params.iter().enumerate() {
+            let val = if i < args.len() {
+                args[i].clone()
+            } else if let Some(Some(default_expr)) = func.defaults.get(i) {
+                self.eval_expr(default_expr)?
+            } else {
+                Variant::Nil
+            };
+            self.environment.define(param.clone(), val);
         }
 
         let mut return_val = Variant::Nil;
@@ -1970,6 +2110,133 @@ impl Interpreter {
                     format!("Dictionary.{method}"),
                 ))),
             },
+            Variant::Vector2(v) => match method {
+                "length" => Ok(Variant::Float(v.length() as f64)),
+                "length_squared" => Ok(Variant::Float(v.length_squared() as f64)),
+                "normalized" => Ok(Variant::Vector2(v.normalized())),
+                "dot" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "dot() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Vector2(other) => Ok(Variant::Float(v.dot(*other) as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "dot() argument must be Vector2".into(),
+                        ))),
+                    }
+                }
+                "distance_to" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "distance_to() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Vector2(other) => Ok(Variant::Float(v.distance_to(*other) as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "distance_to() argument must be Vector2".into(),
+                        ))),
+                    }
+                }
+                "lerp" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "lerp() takes 2 arguments".into(),
+                        )));
+                    }
+                    match (&args[0], &args[1]) {
+                        (Variant::Vector2(to), t) => {
+                            let t = to_float(t)? as f32;
+                            Ok(Variant::Vector2(v.lerp(*to, t)))
+                        }
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "lerp() first argument must be Vector2".into(),
+                        ))),
+                    }
+                }
+                "angle" => Ok(Variant::Float(v.angle() as f64)),
+                "cross" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "cross() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Vector2(other) => Ok(Variant::Float(v.cross(*other) as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "cross() argument must be Vector2".into(),
+                        ))),
+                    }
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("Vector2.{method}"),
+                ))),
+            },
+            Variant::Vector3(v) => match method {
+                "length" => Ok(Variant::Float(v.length() as f64)),
+                "length_squared" => Ok(Variant::Float(v.length_squared() as f64)),
+                "normalized" => Ok(Variant::Vector3(v.normalized())),
+                "dot" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "dot() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Vector3(other) => Ok(Variant::Float(v.dot(*other) as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "dot() argument must be Vector3".into(),
+                        ))),
+                    }
+                }
+                "cross" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "cross() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Vector3(other) => Ok(Variant::Vector3(v.cross(*other))),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "cross() argument must be Vector3".into(),
+                        ))),
+                    }
+                }
+                "distance_to" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "distance_to() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Vector3(other) => Ok(Variant::Float(v.distance_to(*other) as f64)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "distance_to() argument must be Vector3".into(),
+                        ))),
+                    }
+                }
+                "lerp" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "lerp() takes 2 arguments".into(),
+                        )));
+                    }
+                    match (&args[0], &args[1]) {
+                        (Variant::Vector3(to), t) => {
+                            let t = to_float(t)? as f32;
+                            Ok(Variant::Vector3(v.lerp(*to, t)))
+                        }
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "lerp() first argument must be Vector3".into(),
+                        ))),
+                    }
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("Vector3.{method}"),
+                ))),
+            },
             Variant::ObjectId(oid) => {
                 let id = oid.raw();
                 match method {
@@ -2135,15 +2402,15 @@ impl Interpreter {
                     class_def.enums.insert(name.clone(), map);
                 }
                 Stmt::FuncDef {
-                    name, params, body, ..
+                    name,
+                    params,
+                    body,
+                    is_static,
+                    ..
                 } => {
-                    class_def.methods.insert(
-                        name.clone(),
-                        FuncDef {
-                            params: params.clone(),
-                            body: body.clone(),
-                        },
-                    );
+                    class_def
+                        .methods
+                        .insert(name.clone(), FuncDef::from_params(params, body, *is_static));
                 }
                 Stmt::VarDecl {
                     name,
@@ -2211,7 +2478,7 @@ impl Interpreter {
                 RuntimeError::new(RuntimeErrorKind::UndefinedFunction(method_name.to_string()))
             })?;
 
-        if args.len() != func.params.len() {
+        if args.len() < func.min_args() || args.len() > func.params.len() {
             return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "{}() takes {} arguments, got {}",
                 method_name,
@@ -2236,8 +2503,15 @@ impl Interpreter {
         }
 
         self.environment.push_scope();
-        for (param, arg) in func.params.iter().zip(args.iter()) {
-            self.environment.define(param.clone(), arg.clone());
+        for (i, param) in func.params.iter().enumerate() {
+            let val = if i < args.len() {
+                args[i].clone()
+            } else if let Some(Some(default_expr)) = func.defaults.get(i) {
+                self.eval_expr(default_expr)?
+            } else {
+                Variant::Nil
+            };
+            self.environment.define(param.clone(), val);
         }
         for (name, val) in &instance.properties {
             self.environment.define(name.clone(), val.clone());
@@ -2284,7 +2558,7 @@ impl Interpreter {
             })?;
 
         if let Some(func) = parent_def.methods.get("_init") {
-            if args.len() != func.params.len() {
+            if args.len() < func.min_args() || args.len() > func.params.len() {
                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                     "super() takes {} arguments, got {}",
                     func.params.len(),
@@ -2292,8 +2566,15 @@ impl Interpreter {
                 ))));
             }
             self.environment.push_scope();
-            for (param, arg) in func.params.iter().zip(args.iter()) {
-                self.environment.define(param.clone(), arg.clone());
+            for (i, param) in func.params.iter().enumerate() {
+                let val = if i < args.len() {
+                    args[i].clone()
+                } else if let Some(Some(default_expr)) = func.defaults.get(i) {
+                    self.eval_expr(default_expr)?
+                } else {
+                    Variant::Nil
+                };
+                self.environment.define(param.clone(), val);
             }
             let mut return_val = Variant::Nil;
             for stmt in &func.body {
@@ -2493,6 +2774,40 @@ fn string_format(fmt: &str, values: &[Variant]) -> String {
     result
 }
 
+/// Resolves static member access on built-in type names (e.g. `Vector2.ZERO`).
+fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
+    use gdcore::math::{Color, Vector2, Vector3};
+    match type_name {
+        "Vector2" => match member {
+            "ZERO" => Some(Variant::Vector2(Vector2::ZERO)),
+            "ONE" => Some(Variant::Vector2(Vector2::ONE)),
+            "UP" => Some(Variant::Vector2(Vector2::UP)),
+            "DOWN" => Some(Variant::Vector2(Vector2::DOWN)),
+            "LEFT" => Some(Variant::Vector2(Vector2::LEFT)),
+            "RIGHT" => Some(Variant::Vector2(Vector2::RIGHT)),
+            _ => None,
+        },
+        "Vector3" => match member {
+            "ZERO" => Some(Variant::Vector3(Vector3::ZERO)),
+            "ONE" => Some(Variant::Vector3(Vector3::ONE)),
+            "UP" => Some(Variant::Vector3(Vector3::UP)),
+            "DOWN" => Some(Variant::Vector3(Vector3::DOWN)),
+            "FORWARD" => Some(Variant::Vector3(Vector3::FORWARD)),
+            _ => None,
+        },
+        "Color" => match member {
+            "WHITE" => Some(Variant::Color(Color::WHITE)),
+            "BLACK" => Some(Variant::Color(Color::BLACK)),
+            "TRANSPARENT" => Some(Variant::Color(Color::TRANSPARENT)),
+            "RED" => Some(Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0))),
+            "GREEN" => Some(Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0))),
+            "BLUE" => Some(Variant::Color(Color::new(0.0, 0.0, 1.0, 1.0))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn variant_eq(a: &Variant, b: &Variant) -> bool {
     match (a, b) {
         (Variant::Nil, Variant::Nil) => true,
@@ -2502,6 +2817,9 @@ fn variant_eq(a: &Variant, b: &Variant) -> bool {
         (Variant::Int(a), Variant::Float(b)) => (*a as f64) == *b,
         (Variant::Float(a), Variant::Int(b)) => *a == (*b as f64),
         (Variant::String(a), Variant::String(b)) => a == b,
+        (Variant::Vector2(a), Variant::Vector2(b)) => a == b,
+        (Variant::Vector3(a), Variant::Vector3(b)) => a == b,
+        (Variant::Color(a), Variant::Color(b)) => a == b,
         _ => false,
     }
 }
@@ -4003,5 +4321,561 @@ var speed = 10
             .run("var x = 10 if true else 20\nprint(x)\n")
             .unwrap();
         assert_eq!(res.output, vec!["10"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Vector2 / Vector3 / Color built-in type tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vector2_constructor() {
+        let v = run_val("return Vector2(3.0, 4.0)");
+        assert!(matches!(v, Variant::Vector2(v) if v.x == 3.0 && v.y == 4.0));
+    }
+
+    #[test]
+    fn vector2_constructor_from_int() {
+        let v = run_val("return Vector2(3, 4)");
+        assert!(matches!(v, Variant::Vector2(v) if v.x == 3.0 && v.y == 4.0));
+    }
+
+    #[test]
+    fn vector3_constructor() {
+        let v = run_val("return Vector3(1.0, 2.0, 3.0)");
+        assert!(matches!(v, Variant::Vector3(v) if v.x == 1.0 && v.y == 2.0 && v.z == 3.0));
+    }
+
+    #[test]
+    fn color_constructor_rgb() {
+        let v = run_val("return Color(1.0, 0.0, 0.0)");
+        assert!(
+            matches!(v, Variant::Color(c) if c.r == 1.0 && c.g == 0.0 && c.b == 0.0 && c.a == 1.0)
+        );
+    }
+
+    #[test]
+    fn color_constructor_rgba() {
+        let v = run_val("return Color(1.0, 0.5, 0.0, 0.8)");
+        if let Variant::Color(c) = v {
+            assert!((c.r - 1.0).abs() < 1e-6);
+            assert!((c.g - 0.5).abs() < 1e-6);
+            assert!((c.b - 0.0).abs() < 1e-6);
+            assert!((c.a - 0.8).abs() < 1e-6);
+        } else {
+            panic!("expected Color");
+        }
+    }
+
+    #[test]
+    fn vector2_static_zero() {
+        assert_eq!(
+            run_val("return Vector2.ZERO"),
+            Variant::Vector2(gdcore::math::Vector2::ZERO)
+        );
+    }
+
+    #[test]
+    fn vector2_static_one() {
+        assert_eq!(
+            run_val("return Vector2.ONE"),
+            Variant::Vector2(gdcore::math::Vector2::ONE)
+        );
+    }
+
+    #[test]
+    fn vector2_static_directions() {
+        assert_eq!(
+            run_val("return Vector2.UP"),
+            Variant::Vector2(gdcore::math::Vector2::UP)
+        );
+        assert_eq!(
+            run_val("return Vector2.DOWN"),
+            Variant::Vector2(gdcore::math::Vector2::DOWN)
+        );
+        assert_eq!(
+            run_val("return Vector2.LEFT"),
+            Variant::Vector2(gdcore::math::Vector2::LEFT)
+        );
+        assert_eq!(
+            run_val("return Vector2.RIGHT"),
+            Variant::Vector2(gdcore::math::Vector2::RIGHT)
+        );
+    }
+
+    #[test]
+    fn vector3_static_constants() {
+        assert_eq!(
+            run_val("return Vector3.ZERO"),
+            Variant::Vector3(gdcore::math::Vector3::ZERO)
+        );
+        assert_eq!(
+            run_val("return Vector3.ONE"),
+            Variant::Vector3(gdcore::math::Vector3::ONE)
+        );
+        assert_eq!(
+            run_val("return Vector3.UP"),
+            Variant::Vector3(gdcore::math::Vector3::UP)
+        );
+        assert_eq!(
+            run_val("return Vector3.DOWN"),
+            Variant::Vector3(gdcore::math::Vector3::DOWN)
+        );
+        assert_eq!(
+            run_val("return Vector3.FORWARD"),
+            Variant::Vector3(gdcore::math::Vector3::FORWARD)
+        );
+    }
+
+    #[test]
+    fn color_static_constants() {
+        assert_eq!(
+            run_val("return Color.WHITE"),
+            Variant::Color(gdcore::math::Color::WHITE)
+        );
+        assert_eq!(
+            run_val("return Color.BLACK"),
+            Variant::Color(gdcore::math::Color::BLACK)
+        );
+        assert_eq!(
+            run_val("return Color.RED"),
+            Variant::Color(gdcore::math::Color::new(1.0, 0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            run_val("return Color.GREEN"),
+            Variant::Color(gdcore::math::Color::new(0.0, 1.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            run_val("return Color.BLUE"),
+            Variant::Color(gdcore::math::Color::new(0.0, 0.0, 1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn vector2_property_access_xy() {
+        let r = run("var v = Vector2(3.0, 4.0)\nprint(v.x)\nprint(v.y)\n");
+        assert_eq!(r.output, vec!["3", "4"]);
+    }
+
+    #[test]
+    fn vector3_property_access_xyz() {
+        let r = run("var v = Vector3(1.0, 2.0, 3.0)\nprint(v.x)\nprint(v.y)\nprint(v.z)\n");
+        assert_eq!(r.output, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn color_property_access_rgba() {
+        let v = run_val("var c = Color(0.25, 0.5, 0.75, 1.0)\nreturn c.g");
+        if let Variant::Float(f) = v {
+            assert!((f - 0.5).abs() < 1e-5);
+        } else {
+            panic!("expected Float");
+        }
+    }
+
+    #[test]
+    fn vector2_add_op() {
+        let v = run_val("return Vector2(1.0, 2.0) + Vector2(3.0, 4.0)");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(4.0, 6.0)));
+    }
+
+    #[test]
+    fn vector2_sub_op() {
+        let v = run_val("return Vector2(5.0, 7.0) - Vector2(2.0, 3.0)");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(3.0, 4.0)));
+    }
+
+    #[test]
+    fn vector2_mul_scalar_op() {
+        let v = run_val("return Vector2(1.0, 2.0) * 3.0");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(3.0, 6.0)));
+    }
+
+    #[test]
+    fn scalar_mul_vector2_op() {
+        let v = run_val("return 2.0 * Vector2(3.0, 4.0)");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(6.0, 8.0)));
+    }
+
+    #[test]
+    fn vector2_div_scalar_op() {
+        let v = run_val("return Vector2(6.0, 8.0) / 2.0");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(3.0, 4.0)));
+    }
+
+    #[test]
+    fn vector2_negate_op() {
+        let v = run_val("return -Vector2(1.0, 2.0)");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(-1.0, -2.0)));
+    }
+
+    #[test]
+    fn vector2_length_method() {
+        let v = run_val("var v = Vector2(3.0, 4.0)\nreturn v.length()");
+        assert_eq!(v, Variant::Float(5.0));
+    }
+
+    #[test]
+    fn vector2_length_squared_method() {
+        let v = run_val("var v = Vector2(3.0, 4.0)\nreturn v.length_squared()");
+        assert_eq!(v, Variant::Float(25.0));
+    }
+
+    #[test]
+    fn vector2_normalized_method() {
+        let v = run_val("var v = Vector2(3.0, 4.0)\nvar n = v.normalized()\nreturn n.length()");
+        if let Variant::Float(f) = v {
+            assert!((f - 1.0).abs() < 1e-5);
+        } else {
+            panic!("expected Float");
+        }
+    }
+
+    #[test]
+    fn vector2_dot_method() {
+        let v = run_val("return Vector2(1.0, 0.0).dot(Vector2(0.0, 1.0))");
+        assert_eq!(v, Variant::Float(0.0));
+    }
+
+    #[test]
+    fn vector2_distance_to_method() {
+        let v = run_val("return Vector2(0.0, 0.0).distance_to(Vector2(3.0, 4.0))");
+        assert_eq!(v, Variant::Float(5.0));
+    }
+
+    #[test]
+    fn vector2_lerp_method() {
+        let v = run_val("return Vector2(0.0, 0.0).lerp(Vector2(10.0, 20.0), 0.5)");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(5.0, 10.0)));
+    }
+
+    #[test]
+    fn vector2_angle_method() {
+        let v = run_val("return Vector2(1.0, 0.0).angle()");
+        assert_eq!(v, Variant::Float(0.0));
+    }
+
+    #[test]
+    fn vector2_cross_method() {
+        let v = run_val("return Vector2(1.0, 0.0).cross(Vector2(0.0, 1.0))");
+        assert_eq!(v, Variant::Float(1.0));
+    }
+
+    #[test]
+    fn vector3_add_op() {
+        let v = run_val("return Vector3(1.0, 2.0, 3.0) + Vector3(4.0, 5.0, 6.0)");
+        assert_eq!(
+            v,
+            Variant::Vector3(gdcore::math::Vector3::new(5.0, 7.0, 9.0))
+        );
+    }
+
+    #[test]
+    fn vector3_mul_scalar_op() {
+        let v = run_val("return Vector3(1.0, 2.0, 3.0) * 2.0");
+        assert_eq!(
+            v,
+            Variant::Vector3(gdcore::math::Vector3::new(2.0, 4.0, 6.0))
+        );
+    }
+
+    #[test]
+    fn vector3_div_scalar_op() {
+        let v = run_val("return Vector3(6.0, 8.0, 10.0) / 2.0");
+        assert_eq!(
+            v,
+            Variant::Vector3(gdcore::math::Vector3::new(3.0, 4.0, 5.0))
+        );
+    }
+
+    #[test]
+    fn vector3_negate_op() {
+        let v = run_val("return -Vector3(1.0, 2.0, 3.0)");
+        assert_eq!(
+            v,
+            Variant::Vector3(gdcore::math::Vector3::new(-1.0, -2.0, -3.0))
+        );
+    }
+
+    #[test]
+    fn vector3_length_method() {
+        let v = run_val("return Vector3(1.0, 2.0, 2.0).length()");
+        if let Variant::Float(f) = v {
+            assert!((f - 3.0).abs() < 1e-5);
+        } else {
+            panic!("expected Float");
+        }
+    }
+
+    #[test]
+    fn vector3_dot_method() {
+        let v = run_val("return Vector3(1.0, 0.0, 0.0).dot(Vector3(0.0, 1.0, 0.0))");
+        assert_eq!(v, Variant::Float(0.0));
+    }
+
+    #[test]
+    fn vector3_cross_method() {
+        let v = run_val("return Vector3(1.0, 0.0, 0.0).cross(Vector3(0.0, 1.0, 0.0))");
+        assert_eq!(
+            v,
+            Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn vector2_equality_op() {
+        assert_eq!(
+            run_val("return Vector2(1.0, 2.0) == Vector2(1.0, 2.0)"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return Vector2(1.0, 2.0) == Vector2(3.0, 4.0)"),
+            Variant::Bool(false)
+        );
+        assert_eq!(
+            run_val("return Vector2(1.0, 2.0) != Vector2(3.0, 4.0)"),
+            Variant::Bool(true)
+        );
+    }
+
+    #[test]
+    fn vector2_int_mul_op() {
+        let v = run_val("return Vector2(1.0, 2.0) * 3");
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(3.0, 6.0)));
+    }
+
+    #[test]
+    fn vector2_div_zero_error() {
+        let err = run_err("return Vector2(1.0, 2.0) / 0.0");
+        assert!(matches!(err.kind, RuntimeErrorKind::DivisionByZero));
+    }
+
+    #[test]
+    fn vector2_complex_expression() {
+        let v = run_val(
+            "var a = Vector2(1.0, 2.0)\nvar b = Vector2(3.0, 4.0)\nvar c = (a + b) * 2.0\nreturn c",
+        );
+        assert_eq!(v, Variant::Vector2(gdcore::math::Vector2::new(8.0, 12.0)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Default parameter values (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_param_used_when_no_arg() {
+        let v = run_val("func foo(x = 42):\n    return x\nreturn foo()\n");
+        assert_eq!(v, Variant::Int(42));
+    }
+
+    #[test]
+    fn default_param_overridden_by_arg() {
+        let v = run_val("func foo(x = 42):\n    return x\nreturn foo(99)\n");
+        assert_eq!(v, Variant::Int(99));
+    }
+
+    #[test]
+    fn default_param_string() {
+        let v = run_val("func greet(name = \"world\"):\n    return name\nreturn greet()\n");
+        assert_eq!(v, Variant::String("world".into()));
+    }
+
+    #[test]
+    fn default_param_mixed_required_and_default() {
+        let v = run_val("func add(a, b = 10):\n    return a + b\nreturn add(5)\n");
+        assert_eq!(v, Variant::Int(15));
+    }
+
+    #[test]
+    fn default_param_mixed_all_provided() {
+        let v = run_val("func add(a, b = 10):\n    return a + b\nreturn add(5, 20)\n");
+        assert_eq!(v, Variant::Int(25));
+    }
+
+    #[test]
+    fn default_param_multiple_defaults() {
+        let v = run_val("func make(x = 1, y = 2, z = 3):\n    return x + y + z\nreturn make()\n");
+        assert_eq!(v, Variant::Int(6));
+    }
+
+    #[test]
+    fn default_param_partial_override() {
+        let v = run_val("func make(x = 1, y = 2, z = 3):\n    return x + y + z\nreturn make(10)\n");
+        assert_eq!(v, Variant::Int(15));
+    }
+
+    #[test]
+    fn default_param_negative_value() {
+        let v = run_val("func offset(x = -5):\n    return x\nreturn offset()\n");
+        assert_eq!(v, Variant::Int(-5));
+    }
+
+    #[test]
+    fn default_param_too_many_args_error() {
+        let err = run_err("func foo(x = 1):\n    return x\nreturn foo(1, 2)\n");
+        assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
+    }
+
+    #[test]
+    fn default_param_too_few_args_error() {
+        let err = run_err("func foo(a, b, c = 1):\n    return a\nreturn foo()\n");
+        assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Static functions (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn static_func_executes() {
+        let v = run_val("static func helper() -> int:\n    return 42\nreturn helper()\n");
+        assert_eq!(v, Variant::Int(42));
+    }
+
+    #[test]
+    fn static_func_with_params() {
+        let v = run_val(
+            "static func add(a: int, b: int) -> int:\n    return a + b\nreturn add(3, 4)\n",
+        );
+        assert_eq!(v, Variant::Int(7));
+    }
+
+    #[test]
+    fn static_func_in_class() {
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class("class_name Util\nstatic func double(x: int) -> int:\n    return x * 2\n")
+            .unwrap();
+        assert!(class_def.methods.contains_key("double"));
+        assert!(class_def.methods["double"].is_static);
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty return (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_return_yields_nil() {
+        let v = run_val("func foo():\n    return\nreturn foo()\n");
+        assert_eq!(v, Variant::Nil);
+    }
+
+    #[test]
+    fn empty_return_exits_early() {
+        let r =
+            run("func foo():\n    print(\"before\")\n    return\n    print(\"after\")\nfoo()\n");
+        assert_eq!(r.output, vec!["before"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative number literals (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn negative_int_in_var() {
+        let v = run_val("var x = -10\nreturn x\n");
+        assert_eq!(v, Variant::Int(-10));
+    }
+
+    #[test]
+    fn negative_float_in_var() {
+        let v = run_val("var x = -3.14\nreturn x\n");
+        assert_eq!(v, Variant::Float(-3.14));
+    }
+
+    #[test]
+    fn negative_in_expression() {
+        let v = run_val("return 5 + -3\n");
+        assert_eq!(v, Variant::Int(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // print() with multiple args (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn print_zero_args() {
+        let r = run("print()\n");
+        assert_eq!(r.output, vec![""]);
+    }
+
+    #[test]
+    fn print_mixed_types() {
+        let r = run("print(\"count:\", 42, true, null)\n");
+        assert_eq!(r.output, vec!["count: 42 true <null>"]);
+    }
+
+    #[test]
+    fn print_many_string_args() {
+        let r = run("print(\"a\", \"b\", \"c\", \"d\", \"e\")\n");
+        assert_eq!(r.output, vec!["a b c d e"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // @onready in class context (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn onready_var_parsed_in_class() {
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class("extends Node\n@onready\nvar label = null\n")
+            .unwrap();
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert_eq!(class_def.instance_vars[0].name, "label");
+        assert!(class_def.instance_vars[0]
+            .annotations
+            .iter()
+            .any(|a| a.name == "onready"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Typed var declarations (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn typed_var_float_in_class() {
+        let mut interp = Interpreter::new();
+        let class_def = interp.run_class("var speed: float = 200.0\n").unwrap();
+        assert_eq!(class_def.instance_vars[0].name, "speed");
+        assert_eq!(
+            class_def.instance_vars[0].type_hint.as_deref(),
+            Some("float")
+        );
+    }
+
+    #[test]
+    fn typed_var_initialized() {
+        let v = run_val("var speed: float = 200.0\nreturn speed\n");
+        assert_eq!(v, Variant::Float(200.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Default params in class methods (interpreter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn class_method_default_params() {
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class("class_name Calc\nfunc add(a, b = 10):\n    return a + b\n")
+            .unwrap();
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "add", &[Variant::Int(5)])
+            .unwrap();
+        assert_eq!(result, Variant::Int(15));
+    }
+
+    #[test]
+    fn class_method_default_params_overridden() {
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class("class_name Calc\nfunc add(a, b = 10):\n    return a + b\n")
+            .unwrap();
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "add", &[Variant::Int(5), Variant::Int(20)])
+            .unwrap();
+        assert_eq!(result, Variant::Int(25));
     }
 }

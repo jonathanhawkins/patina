@@ -128,6 +128,17 @@ pub struct Annotation {
     pub name: String,
 }
 
+/// A function parameter with optional type hint and default value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FuncParam {
+    /// Parameter name.
+    pub name: String,
+    /// Optional type hint (e.g. `int`, `String`).
+    pub type_hint: Option<String>,
+    /// Optional default value expression.
+    pub default: Option<Expr>,
+}
+
 /// A statement node in the GDScript AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -184,12 +195,14 @@ pub enum Stmt {
     FuncDef {
         /// Function name.
         name: String,
-        /// Parameter names.
-        params: Vec<String>,
+        /// Function parameters with optional type hints and defaults.
+        params: Vec<FuncParam>,
         /// Optional return type hint.
         return_type: Option<String>,
         /// Function body.
         body: Vec<Stmt>,
+        /// Whether this is a static function.
+        is_static: bool,
     },
     /// `extends ClassName` or `extends "ClassName"`.
     Extends {
@@ -376,7 +389,8 @@ impl Parser {
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
             Token::Return => self.parse_return(),
-            Token::Func => self.parse_func_def(),
+            Token::Func => self.parse_func_def(false),
+            Token::Static => self.parse_static_func(),
             Token::Extends => self.parse_extends(),
             Token::ClassName => self.parse_class_name_decl(),
             Token::Signal => self.parse_signal_decl(),
@@ -419,9 +433,14 @@ impl Parser {
             annotations.push(Annotation { name });
             self.skip_newlines();
         }
-        // After annotations, expect a var decl (or could be func, etc.)
+        // After annotations, expect a var decl or func def
         match self.peek().clone() {
             Token::Var => self.parse_var_decl_with_annotations(annotations),
+            Token::Func => {
+                // Annotations on func defs are ignored for now but parsed
+                self.parse_func_def(false)
+            }
+            Token::Static => self.parse_static_func(),
             _ => {
                 let ts = self.tokens.get(self.pos);
                 let (token, line, col) = match ts {
@@ -430,7 +449,7 @@ impl Parser {
                 };
                 Err(ParseError::UnexpectedToken {
                     token,
-                    expected: "var declaration after annotation".to_string(),
+                    expected: "var or func declaration after annotation".to_string(),
                     line,
                     col,
                     source_line: None,
@@ -606,27 +625,57 @@ impl Parser {
         Ok(Stmt::Return(value))
     }
 
-    fn parse_func_def(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_static_func(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `static`
+        if !self.check(&Token::Func) {
+            let ts = self.tokens.get(self.pos);
+            let (token, line, col) = match ts {
+                Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                None => ("EOF".to_string(), 0, 0),
+            };
+            return Err(ParseError::UnexpectedToken {
+                token,
+                expected: "func after static".to_string(),
+                line,
+                col,
+                source_line: None,
+            });
+        }
+        self.parse_func_def(true)
+    }
+
+    fn parse_func_param(&mut self) -> Result<FuncParam, ParseError> {
+        let name = self.eat_ident()?;
+        let type_hint = if self.check(&Token::Colon) {
+            self.advance();
+            Some(self.eat_ident()?)
+        } else {
+            None
+        };
+        let default = if self.check(&Token::Assign) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(FuncParam {
+            name,
+            type_hint,
+            default,
+        })
+    }
+
+    fn parse_func_def(&mut self, is_static: bool) -> Result<Stmt, ParseError> {
         self.advance(); // consume `func`
         let name = self.eat_ident()?;
         self.expect(&Token::LParen)?;
 
         let mut params = Vec::new();
         if !self.check(&Token::RParen) {
-            params.push(self.eat_ident()?);
-            // Skip optional type annotation `: Type`
-            if self.check(&Token::Colon) {
-                self.advance();
-                let _ = self.eat_ident(); // consume type name
-            }
+            params.push(self.parse_func_param()?);
             while self.check(&Token::Comma) {
                 self.advance();
-                params.push(self.eat_ident()?);
-                // Skip optional type annotation `: Type`
-                if self.check(&Token::Colon) {
-                    self.advance();
-                    let _ = self.eat_ident(); // consume type name
-                }
+                params.push(self.parse_func_param()?);
             }
         }
         self.expect(&Token::RParen)?;
@@ -645,6 +694,7 @@ impl Parser {
             params,
             return_type,
             body,
+            is_static,
         })
     }
 
@@ -1296,7 +1346,11 @@ mod tests {
         } = &stmts[0]
         {
             assert_eq!(name, "add");
-            assert_eq!(params, &["a", "b"]);
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].name, "a");
+            assert_eq!(params[1].name, "b");
+            assert!(params[0].type_hint.is_none());
+            assert!(params[0].default.is_none());
             assert_eq!(body.len(), 1);
         } else {
             panic!("expected func def");
@@ -1490,5 +1544,586 @@ mod tests {
     fn parse_match_stmt() {
         let s = parse("match x:\n    1:\n        pass\n    _:\n        pass\n");
         assert!(matches!(&s[0], Stmt::Match { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Default parameter values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_func_default_int() {
+        let stmts = parse("func foo(x: int = 5):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].name, "x");
+            assert_eq!(params[0].type_hint.as_deref(), Some("int"));
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::Literal(Variant::Int(5)))
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_default_string() {
+        let stmts = parse("func greet(name: String = \"hello\"):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params[0].name, "name");
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::Literal(Variant::String(s))) if s == "hello"
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_default_float() {
+        let stmts = parse("func speed(v: float = 3.14):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::Literal(Variant::Float(f))) if (*f - 3.14).abs() < 1e-10
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_default_bool() {
+        let stmts = parse("func toggle(on = true):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params[0].name, "on");
+            assert!(params[0].type_hint.is_none());
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::Literal(Variant::Bool(true)))
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_default_null() {
+        let stmts = parse("func maybe(val = null):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::Literal(Variant::Nil))
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_mixed_default_and_required() {
+        let stmts = parse("func foo(a, b: int, c: int = 10, d = \"hi\"):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params.len(), 4);
+            assert_eq!(params[0].name, "a");
+            assert!(params[0].default.is_none());
+            assert_eq!(params[1].name, "b");
+            assert!(params[1].default.is_none());
+            assert_eq!(params[2].name, "c");
+            assert!(params[2].default.is_some());
+            assert_eq!(params[3].name, "d");
+            assert!(params[3].default.is_some());
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_default_negative_number() {
+        let stmts = parse("func offset(x = -10):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            // -10 parses as UnaryOp(Neg, Literal(Int(10)))
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::UnaryOp {
+                    op: UnaryOp::Neg,
+                    ..
+                })
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_default_expression() {
+        let stmts = parse("func compute(x = 2 + 3):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::BinaryOp { op: BinOp::Add, .. })
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Static functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_static_func_simple() {
+        let stmts = parse("static func helper() -> int:\n    return 42\n");
+        if let Stmt::FuncDef {
+            name,
+            is_static,
+            return_type,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "helper");
+            assert!(is_static);
+            assert_eq!(return_type.as_deref(), Some("int"));
+        } else {
+            panic!("expected static FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_static_func_with_params() {
+        let stmts = parse("static func add(a: int, b: int) -> int:\n    return a + b\n");
+        if let Stmt::FuncDef {
+            name,
+            params,
+            is_static,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "add");
+            assert!(is_static);
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].name, "a");
+            assert_eq!(params[1].name, "b");
+        } else {
+            panic!("expected static FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_regular_func_not_static() {
+        let stmts = parse("func foo():\n    pass\n");
+        if let Stmt::FuncDef { is_static, .. } = &stmts[0] {
+            assert!(!is_static);
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_static_func_with_defaults() {
+        let stmts = parse("static func create(name: String = \"default\"):\n    return name\n");
+        if let Stmt::FuncDef {
+            is_static, params, ..
+        } = &stmts[0]
+        {
+            assert!(is_static);
+            assert_eq!(params.len(), 1);
+            assert!(params[0].default.is_some());
+        } else {
+            panic!("expected static FuncDef");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // @onready annotation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_onready_var() {
+        let stmts = parse("@onready\nvar label = $Label\n");
+        if let Stmt::VarDecl {
+            name,
+            annotations,
+            value,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "label");
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].name, "onready");
+            assert!(matches!(value, Some(Expr::GetNode(ref p)) if p == "Label"));
+        } else {
+            panic!("expected VarDecl with @onready");
+        }
+    }
+
+    #[test]
+    fn parse_onready_var_with_path() {
+        let stmts = parse("@onready\nvar btn = $UI/Button\n");
+        if let Stmt::VarDecl {
+            annotations, value, ..
+        } = &stmts[0]
+        {
+            assert_eq!(annotations[0].name, "onready");
+            assert!(matches!(value, Some(Expr::GetNode(ref p)) if p == "UI/Button"));
+        } else {
+            panic!("expected VarDecl with @onready");
+        }
+    }
+
+    #[test]
+    fn parse_onready_var_string_path() {
+        let stmts = parse("@onready\nvar node = $\"Path/To/Node\"\n");
+        if let Stmt::VarDecl {
+            annotations, value, ..
+        } = &stmts[0]
+        {
+            assert_eq!(annotations[0].name, "onready");
+            assert!(matches!(value, Some(Expr::GetNode(ref p)) if p == "Path/To/Node"));
+        } else {
+            panic!("expected VarDecl with @onready");
+        }
+    }
+
+    #[test]
+    fn parse_onready_with_type() {
+        let stmts = parse("@onready\nvar label: Label = $Label\n");
+        if let Stmt::VarDecl {
+            name,
+            type_hint,
+            annotations,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "label");
+            assert_eq!(type_hint.as_deref(), Some("Label"));
+            assert_eq!(annotations[0].name, "onready");
+        } else {
+            panic!("expected VarDecl with @onready and type");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Typed var declarations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_typed_var_float() {
+        let stmts = parse("var speed: float = 200.0\n");
+        if let Stmt::VarDecl {
+            name,
+            type_hint,
+            value,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "speed");
+            assert_eq!(type_hint.as_deref(), Some("float"));
+            assert!(matches!(
+                value,
+                Some(Expr::Literal(Variant::Float(f))) if (*f - 200.0).abs() < 1e-10
+            ));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_typed_var_string() {
+        let stmts = parse("var name: String = \"player\"\n");
+        if let Stmt::VarDecl {
+            name,
+            type_hint,
+            value,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "name");
+            assert_eq!(type_hint.as_deref(), Some("String"));
+            assert!(matches!(
+                value,
+                Some(Expr::Literal(Variant::String(ref s))) if s == "player"
+            ));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_typed_var_no_value() {
+        let stmts = parse("var count: int\n");
+        if let Stmt::VarDecl {
+            name,
+            type_hint,
+            value,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "count");
+            assert_eq!(type_hint.as_deref(), Some("int"));
+            assert!(value.is_none());
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_typed_var_bool() {
+        let stmts = parse("var active: bool = false\n");
+        if let Stmt::VarDecl {
+            type_hint, value, ..
+        } = &stmts[0]
+        {
+            assert_eq!(type_hint.as_deref(), Some("bool"));
+            assert!(matches!(value, Some(Expr::Literal(Variant::Bool(false)))));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty return
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_empty_return() {
+        let stmts = parse("func foo():\n    return\n");
+        if let Stmt::FuncDef { body, .. } = &stmts[0] {
+            assert!(matches!(&body[0], Stmt::Return(None)));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_empty_return_before_other_stmt() {
+        let stmts = parse("func foo():\n    return\n    pass\n");
+        if let Stmt::FuncDef { body, .. } = &stmts[0] {
+            assert!(matches!(&body[0], Stmt::Return(None)));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_return_with_value_still_works() {
+        let stmts = parse("func foo():\n    return 42\n");
+        if let Stmt::FuncDef { body, .. } = &stmts[0] {
+            assert!(matches!(&body[0], Stmt::Return(Some(_))));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative number literals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_negative_int_literal() {
+        let expr = parse_expr_str("-5");
+        assert!(matches!(
+            expr,
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                ref expr
+            } if matches!(**expr, Expr::Literal(Variant::Int(5)))
+        ));
+    }
+
+    #[test]
+    fn parse_negative_float_literal() {
+        let expr = parse_expr_str("-3.14");
+        assert!(matches!(
+            &expr,
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_var_with_negative_init() {
+        let stmts = parse("var x = -10\n");
+        if let Stmt::VarDecl { name, value, .. } = &stmts[0] {
+            assert_eq!(name, "x");
+            assert!(matches!(
+                value,
+                Some(Expr::UnaryOp {
+                    op: UnaryOp::Neg,
+                    ..
+                })
+            ));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_negative_in_default_param() {
+        let stmts = parse("func offset(x: int = -5):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert!(matches!(
+                &params[0].default,
+                Some(Expr::UnaryOp {
+                    op: UnaryOp::Neg,
+                    ..
+                })
+            ));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_negative_in_array() {
+        let expr = parse_expr_str("[-1, -2, -3]");
+        if let Expr::ArrayLiteral(elems) = &expr {
+            assert_eq!(elems.len(), 3);
+            assert!(matches!(
+                &elems[0],
+                Expr::UnaryOp {
+                    op: UnaryOp::Neg,
+                    ..
+                }
+            ));
+        } else {
+            panic!("expected array literal");
+        }
+    }
+
+    #[test]
+    fn parse_double_negation() {
+        let expr = parse_expr_str("--5");
+        // Should be Neg(Neg(5))
+        assert!(matches!(
+            &expr,
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                expr: inner
+            } if matches!(**inner, Expr::UnaryOp { op: UnaryOp::Neg, .. })
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-arg print (parser side: just a normal call)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_print_multiple_args() {
+        let expr = parse_expr_str("print(\"a\", \"b\", 42)");
+        if let Expr::Call { callee, args } = &expr {
+            assert!(matches!(**callee, Expr::Ident(ref n) if n == "print"));
+            assert_eq!(args.len(), 3);
+        } else {
+            panic!("expected Call");
+        }
+    }
+
+    #[test]
+    fn parse_print_no_args() {
+        let expr = parse_expr_str("print()");
+        if let Expr::Call { args, .. } = &expr {
+            assert!(args.is_empty());
+        } else {
+            panic!("expected Call");
+        }
+    }
+
+    #[test]
+    fn parse_print_single_arg() {
+        let expr = parse_expr_str("print(\"hello\")");
+        if let Expr::Call { args, .. } = &expr {
+            assert_eq!(args.len(), 1);
+        } else {
+            panic!("expected Call");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Combined feature tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_static_func_with_typed_params_and_defaults() {
+        let stmts = parse(
+            "static func create(name: String = \"default\", count: int = 1) -> Node:\n    pass\n",
+        );
+        if let Stmt::FuncDef {
+            name,
+            params,
+            is_static,
+            return_type,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "create");
+            assert!(is_static);
+            assert_eq!(return_type.as_deref(), Some("Node"));
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].name, "name");
+            assert_eq!(params[0].type_hint.as_deref(), Some("String"));
+            assert!(params[0].default.is_some());
+            assert_eq!(params[1].name, "count");
+            assert_eq!(params[1].type_hint.as_deref(), Some("int"));
+            assert!(params[1].default.is_some());
+        } else {
+            panic!("expected static FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_class_with_onready_and_static() {
+        let src = "extends Node\nclass_name Player\n@onready\nvar label = $Label\nvar speed: float = 200.0\nstatic func helper() -> int:\n    return 42\nfunc _ready():\n    pass\n";
+        let stmts = parse(src);
+        assert!(matches!(&stmts[0], Stmt::Extends { .. }));
+        assert!(matches!(&stmts[1], Stmt::ClassNameDecl { .. }));
+        assert!(
+            matches!(&stmts[2], Stmt::VarDecl { annotations, .. } if annotations[0].name == "onready")
+        );
+        assert!(matches!(&stmts[3], Stmt::VarDecl { type_hint: Some(t), .. } if t == "float"));
+        assert!(matches!(
+            &stmts[4],
+            Stmt::FuncDef {
+                is_static: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &stmts[5],
+            Stmt::FuncDef {
+                is_static: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_func_all_defaults() {
+        let stmts = parse("func foo(a = 1, b = 2, c = 3):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params.len(), 3);
+            for p in params {
+                assert!(p.default.is_some());
+                assert!(p.type_hint.is_none());
+            }
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_func_param_types_preserved() {
+        let stmts = parse("func process(delta: float, speed: int, name: String):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params[0].type_hint.as_deref(), Some("float"));
+            assert_eq!(params[1].type_hint.as_deref(), Some("int"));
+            assert_eq!(params[2].type_hint.as_deref(), Some("String"));
+        } else {
+            panic!("expected FuncDef");
+        }
     }
 }

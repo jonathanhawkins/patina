@@ -1367,4 +1367,417 @@ value = 42
         assert_ne!(cloned[0].id(), a_id);
         assert!(cloned[0].children().is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Real Godot 4.6.1 export format fixtures
+    // -----------------------------------------------------------------------
+
+    const COMPLEX_2D: &str = include_str!("../fixtures/real_godot/complex_2d.tscn");
+    const UI_WITH_THEME: &str = include_str!("../fixtures/real_godot/ui_with_theme.tscn");
+
+    #[test]
+    fn complex_2d_parses_successfully() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        assert_eq!(scene.node_count(), 6);
+        assert_eq!(scene.uid.as_deref(), Some("uid://abc123"));
+    }
+
+    #[test]
+    fn complex_2d_node_names_and_types() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+        assert_eq!(nodes.len(), 6);
+
+        assert_eq!(nodes[0].name(), "World");
+        assert_eq!(nodes[0].class_name(), "Node2D");
+
+        assert_eq!(nodes[1].name(), "Player");
+        assert_eq!(nodes[1].class_name(), "CharacterBody2D");
+
+        assert_eq!(nodes[2].name(), "CollisionShape");
+        assert_eq!(nodes[2].class_name(), "CollisionShape2D");
+
+        assert_eq!(nodes[3].name(), "Sprite");
+        assert_eq!(nodes[3].class_name(), "Sprite2D");
+
+        assert_eq!(nodes[4].name(), "Enemy");
+        assert_eq!(nodes[4].class_name(), "CharacterBody2D");
+
+        assert_eq!(nodes[5].name(), "EnemyCollision");
+        assert_eq!(nodes[5].class_name(), "CollisionShape2D");
+    }
+
+    #[test]
+    fn complex_2d_hierarchy() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // World (root) has Player and Enemy as children.
+        assert!(nodes[0].parent().is_none());
+        assert_eq!(nodes[0].children().len(), 2);
+
+        // Player is child of World.
+        assert_eq!(nodes[1].parent(), Some(nodes[0].id()));
+        // Player has CollisionShape and Sprite children.
+        assert_eq!(nodes[1].children().len(), 2);
+
+        // CollisionShape is child of Player.
+        assert_eq!(nodes[2].parent(), Some(nodes[1].id()));
+
+        // Sprite is child of Player.
+        assert_eq!(nodes[3].parent(), Some(nodes[1].id()));
+
+        // Enemy is child of World.
+        assert_eq!(nodes[4].parent(), Some(nodes[0].id()));
+        assert_eq!(nodes[4].children().len(), 1);
+
+        // EnemyCollision is child of Enemy.
+        assert_eq!(nodes[5].parent(), Some(nodes[4].id()));
+    }
+
+    #[test]
+    fn complex_2d_player_groups() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert!(nodes[1].is_in_group("player"));
+        assert!(nodes[1].is_in_group("damageable"));
+        assert!(!nodes[1].is_in_group("enemy"));
+    }
+
+    #[test]
+    fn complex_2d_enemy_groups() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert!(nodes[4].is_in_group("enemy"));
+        assert!(nodes[4].is_in_group("damageable"));
+        assert!(!nodes[4].is_in_group("player"));
+    }
+
+    #[test]
+    fn complex_2d_player_position() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert_eq!(
+            nodes[1].get_property("position"),
+            Variant::Vector2(Vector2::new(100.0, 200.0))
+        );
+    }
+
+    #[test]
+    fn complex_2d_enemy_position() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert_eq!(
+            nodes[4].get_property("position"),
+            Variant::Vector2(Vector2::new(400.0, 200.0))
+        );
+    }
+
+    #[test]
+    fn complex_2d_script_property() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // Player should have script resolved to its path.
+        assert_eq!(
+            nodes[1].get_property("_script_path"),
+            Variant::String("res://player.gd".into())
+        );
+    }
+
+    #[test]
+    fn complex_2d_subresource_references() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // CollisionShape's shape = SubResource("RectangleShape2D_abc")
+        // This is parsed by parse_variant_value into "SubResource:RectangleShape2D_abc".
+        assert_eq!(
+            nodes[2].get_property("shape"),
+            Variant::String("SubResource:RectangleShape2D_abc".into())
+        );
+
+        // EnemyCollision's shape = SubResource("CircleShape2D_def")
+        assert_eq!(
+            nodes[5].get_property("shape"),
+            Variant::String("SubResource:CircleShape2D_def".into())
+        );
+    }
+
+    #[test]
+    fn complex_2d_ext_resource_ids_with_underscores() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+
+        // Verify ext_resources were parsed with underscore IDs.
+        assert_eq!(scene.ext_resources.len(), 2);
+        assert!(scene.ext_resources.contains_key("1_abc"));
+        assert!(scene.ext_resources.contains_key("2_xyz"));
+
+        assert_eq!(scene.ext_resources["1_abc"].res_type, "Script");
+        assert_eq!(scene.ext_resources["1_abc"].path, "res://player.gd");
+        assert_eq!(scene.ext_resources["2_xyz"].res_type, "Texture2D");
+        assert_eq!(scene.ext_resources["2_xyz"].path, "res://icon.svg");
+    }
+
+    #[test]
+    fn complex_2d_metadata_slash_property() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // metadata/custom_tag = "hero" — key has a slash.
+        assert_eq!(
+            nodes[1].get_property("metadata/custom_tag"),
+            Variant::String("hero".into())
+        );
+    }
+
+    #[test]
+    fn complex_2d_sprite_offset() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert_eq!(
+            nodes[3].get_property("offset"),
+            Variant::Vector2(Vector2::new(0.0, -16.0))
+        );
+    }
+
+    #[test]
+    fn complex_2d_connection() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        assert_eq!(scene.connection_count(), 1);
+
+        let conn = &scene.connections()[0];
+        assert_eq!(conn.signal_name, "body_entered");
+        assert_eq!(conn.from_path, "Player");
+        assert_eq!(conn.to_path, ".");
+        assert_eq!(conn.method_name, "_on_player_body_entered");
+    }
+
+    #[test]
+    fn complex_2d_add_to_tree() {
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+        // 1 tree root + 6 scene nodes = 7 total.
+        assert_eq!(tree.node_count(), 7);
+
+        // Verify nested paths work.
+        let collision = tree
+            .get_node_by_path("/root/World/Player/CollisionShape")
+            .unwrap();
+        let collision_node = tree.get_node(collision).unwrap();
+        assert_eq!(collision_node.class_name(), "CollisionShape2D");
+
+        // Verify connection was wired.
+        let player_id = tree.get_node_by_path("/root/World/Player").unwrap();
+        let store = tree
+            .signal_store(player_id)
+            .expect("Player should have signal store");
+        let sig = store.get_signal("body_entered").unwrap();
+        assert_eq!(sig.connection_count(), 1);
+        assert_eq!(sig.connections()[0].target_id, scene_root.object_id());
+    }
+
+    // -----------------------------------------------------------------------
+    // UI with theme fixture tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ui_theme_parses_successfully() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        // MainMenu, Background, VBox, Title, PlayButton, QuitButton, Version = 7 nodes.
+        assert_eq!(scene.node_count(), 7);
+        assert_eq!(scene.uid.as_deref(), Some("uid://ui_theme_test"));
+    }
+
+    #[test]
+    fn ui_theme_node_names() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert_eq!(nodes[0].name(), "MainMenu");
+        assert_eq!(nodes[1].name(), "Background");
+        assert_eq!(nodes[2].name(), "VBox");
+        assert_eq!(nodes[3].name(), "Title");
+        assert_eq!(nodes[4].name(), "PlayButton");
+        assert_eq!(nodes[5].name(), "QuitButton");
+        assert_eq!(nodes[6].name(), "Version");
+    }
+
+    #[test]
+    fn ui_theme_anchor_properties() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // MainMenu: anchor_right = 1.0, anchor_bottom = 1.0
+        assert_eq!(nodes[0].get_property("anchor_right"), Variant::Float(1.0));
+        assert_eq!(nodes[0].get_property("anchor_bottom"), Variant::Float(1.0));
+
+        // VBox has fractional anchors.
+        assert_eq!(nodes[2].get_property("anchor_left"), Variant::Float(0.5));
+        assert_eq!(nodes[2].get_property("anchor_top"), Variant::Float(0.3));
+    }
+
+    #[test]
+    fn ui_theme_offset_properties() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // VBox offsets.
+        assert_eq!(nodes[2].get_property("offset_left"), Variant::Float(-150.0));
+        assert_eq!(nodes[2].get_property("offset_right"), Variant::Float(150.0));
+    }
+
+    #[test]
+    fn ui_theme_text_properties() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert_eq!(
+            nodes[3].get_property("text"),
+            Variant::String("My Game".into())
+        );
+        assert_eq!(
+            nodes[4].get_property("text"),
+            Variant::String("Play".into())
+        );
+        assert_eq!(
+            nodes[5].get_property("text"),
+            Variant::String("Quit".into())
+        );
+        assert_eq!(
+            nodes[6].get_property("text"),
+            Variant::String("v1.0.0".into())
+        );
+    }
+
+    #[test]
+    fn ui_theme_override_slash_properties() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+        assert_eq!(
+            nodes[1].get_property("theme_override_styles/panel"),
+            Variant::String("SubResource:StyleBoxFlat_panel".into())
+        );
+
+        // theme_override_font_sizes/font_size = 48
+        assert_eq!(
+            nodes[3].get_property("theme_override_font_sizes/font_size"),
+            Variant::Int(48)
+        );
+
+        // theme_override_colors/font_color = Color(1, 1, 1, 1)
+        assert_eq!(
+            nodes[4].get_property("theme_override_colors/font_color"),
+            Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn ui_theme_horizontal_alignment() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert_eq!(
+            nodes[3].get_property("horizontal_alignment"),
+            Variant::Int(1)
+        );
+    }
+
+    #[test]
+    fn ui_theme_metadata_bool() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        // Version label: metadata/auto_update = true
+        assert_eq!(
+            nodes[6].get_property("metadata/auto_update"),
+            Variant::Bool(true)
+        );
+    }
+
+    #[test]
+    fn ui_theme_groups() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert!(nodes[6].is_in_group("ui_labels"));
+        // Other nodes should not be in that group.
+        assert!(!nodes[0].is_in_group("ui_labels"));
+    }
+
+    #[test]
+    fn ui_theme_connections() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        assert_eq!(scene.connection_count(), 2);
+
+        assert_eq!(scene.connections()[0].signal_name, "pressed");
+        assert_eq!(scene.connections()[0].from_path, "VBox/PlayButton");
+        assert_eq!(scene.connections()[0].to_path, ".");
+        assert_eq!(scene.connections()[0].method_name, "_on_play_pressed");
+
+        assert_eq!(scene.connections()[1].signal_name, "pressed");
+        assert_eq!(scene.connections()[1].from_path, "VBox/QuitButton");
+        assert_eq!(scene.connections()[1].method_name, "_on_quit_pressed");
+    }
+
+    #[test]
+    fn ui_theme_script_resolved() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let nodes = scene.instance().unwrap();
+
+        assert_eq!(
+            nodes[0].get_property("_script_path"),
+            Variant::String("res://ui/main_menu.gd".into())
+        );
+    }
+
+    #[test]
+    fn ui_theme_add_to_tree() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+        // 1 tree root + 7 scene nodes = 8.
+        assert_eq!(tree.node_count(), 8);
+
+        // Deep path works.
+        let play = tree
+            .get_node_by_path("/root/MainMenu/VBox/PlayButton")
+            .unwrap();
+        let play_node = tree.get_node(play).unwrap();
+        assert_eq!(play_node.class_name(), "Button");
+
+        // Connections wired.
+        let store = tree
+            .signal_store(play)
+            .expect("PlayButton should have signal store");
+        let sig = store.get_signal("pressed").unwrap();
+        assert_eq!(sig.connection_count(), 1);
+        assert_eq!(sig.connections()[0].target_id, scene_root.object_id());
+    }
+
+    #[test]
+    fn complex_2d_load_steps_ignored_gracefully() {
+        // The load_steps=5 attribute should be parsed but ignored.
+        // The scene should still parse without errors.
+        let scene = PackedScene::from_tscn(COMPLEX_2D).unwrap();
+        assert!(scene.node_count() > 0);
+    }
+
+    #[test]
+    fn ui_theme_load_steps_ignored_gracefully() {
+        let scene = PackedScene::from_tscn(UI_WITH_THEME).unwrap();
+        assert!(scene.node_count() > 0);
+    }
 }

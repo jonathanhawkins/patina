@@ -41,7 +41,7 @@ export const metadata: Metadata = {
     type: "website",
     images: [
       {
-        url: "https://patinaengine.com/og-image.png",
+        url: "https://patinaengine.com/opengraph-image",
         width: 1200,
         height: 630,
         alt: "Patina Engine — Rust-Native, Godot-Compatible Game Engine",
@@ -53,7 +53,7 @@ export const metadata: Metadata = {
     title: "Patina Engine — Rust-Native, Godot-Compatible Game Engine",
     description:
       "A memory-safe, high-performance game engine built in Rust with full Godot scene compatibility. Open source and community driven.",
-    images: ["https://patinaengine.com/og-image.png"],
+    images: ["https://patinaengine.com/opengraph-image"],
   },
   metadataBase: new URL("https://patinaengine.com"),
   robots: {

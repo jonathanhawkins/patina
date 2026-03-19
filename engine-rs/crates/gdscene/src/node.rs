@@ -164,6 +164,11 @@ impl Node {
         &self.children
     }
 
+    /// Returns a mutable reference to the ordered list of child IDs.
+    pub fn children_mut(&mut self) -> &mut Vec<NodeId> {
+        &mut self.children
+    }
+
     /// Appends a child ID (called by [`SceneTree`](crate::scene_tree::SceneTree)).
     pub(crate) fn add_child_id(&mut self, child: NodeId) {
         self.children.push(child);
