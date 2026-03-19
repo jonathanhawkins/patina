@@ -1,0 +1,9 @@
+; Patina Godot lab project.
+config_version=5
+
+[application]
+config/name="Patina Godot Lab"
+run/main_scene="res://scenes/smoke_probe.tscn"
+
+[rendering]
+renderer/rendering_method="mobile"

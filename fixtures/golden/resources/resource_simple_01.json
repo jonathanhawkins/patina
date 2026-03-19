@@ -1,0 +1,32 @@
+{
+  "fixture_id": "resource_simple_01",
+  "upstream_version": "4.5.1-stable",
+  "upstream_commit": "f62fdbde15035c5576dad93e586201f4d41ef0cb",
+  "capture_type": "resource",
+  "generated_at": "2026-03-19T13:07:37+00:00",
+  "data": {
+    "class_name": "Resource",
+    "properties": {
+      "name": {
+        "type": "String",
+        "value": "SimpleResource"
+      },
+      "value": {
+        "type": "Int",
+        "value": 42
+      },
+      "position": {
+        "type": "Vector2",
+        "value": [
+          10.0,
+          20.0
+        ]
+      },
+      "flag": {
+        "type": "Bool",
+        "value": true
+      }
+    },
+    "subresources": {}
+  }
+}

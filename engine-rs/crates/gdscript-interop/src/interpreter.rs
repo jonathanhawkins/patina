@@ -1093,12 +1093,24 @@ impl Interpreter {
             }
 
             Expr::MemberAccess { object, member } => {
-                // Handle self.member specially
+                // Handle self.member: try instance properties, then scene_access for Node props
                 if matches!(object.as_ref(), Expr::SelfRef) {
                     if let Some(ref inst) = self.self_instance {
-                        return inst.properties.get(member).cloned().ok_or_else(|| {
-                            RuntimeError::new(RuntimeErrorKind::UndefinedVariable(member.clone()))
-                        });
+                        if let Some(val) = inst.properties.get(member) {
+                            return Ok(val.clone());
+                        }
+                        // Fallback: property may be on the Node (e.g. position, rotation)
+                        if let (Some(ref access), Some(node_id)) =
+                            (&self.scene_access, self.current_node_id)
+                        {
+                            let val = access.get_node_property(node_id, member);
+                            if !val.is_nil() {
+                                return Ok(val);
+                            }
+                        }
+                        return Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
+                            member.clone(),
+                        )));
                     } else {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "'self' used outside of a class instance".into(),
@@ -1144,9 +1156,28 @@ impl Interpreter {
                             "Color has no member '{member}'"
                         )))),
                     },
-                    Variant::Dictionary(d) => d.get(member).cloned().ok_or_else(|| {
-                        RuntimeError::new(RuntimeErrorKind::UndefinedVariable(member.clone()))
-                    }),
+                    Variant::Dictionary(d) => {
+                        // Try dictionary key first
+                        if let Some(val) = d.get(member) {
+                            Ok(val.clone())
+                        } else if let (Some(ref access), Some(node_id)) =
+                            (&self.scene_access, self.current_node_id)
+                        {
+                            // Fallback: self is Dictionary but property may be on the Node
+                            let val = access.get_node_property(node_id, member);
+                            if !val.is_nil() {
+                                Ok(val)
+                            } else {
+                                Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
+                                    member.clone(),
+                                )))
+                            }
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
+                                member.clone(),
+                            )))
+                        }
+                    }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "cannot access member on {}",
                         obj.variant_type()
@@ -5581,5 +5612,61 @@ func fade(alpha):
         } else {
             panic!("expected Color, got {:?}", result);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // deg_to_rad / rad_to_deg
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn builtin_deg_to_rad() {
+        let r = run("var x = deg_to_rad(180.0)\n");
+        assert!(r.output.is_empty());
+    }
+
+    #[test]
+    fn builtin_deg_to_rad_value() {
+        let src = "var x = deg_to_rad(180.0)\nprint(x)\n";
+        let r = run(src);
+        let val: f64 = r.output[0].parse().unwrap();
+        assert!(
+            (val - std::f64::consts::PI).abs() < 1e-6,
+            "expected PI, got {val}"
+        );
+    }
+
+    #[test]
+    fn builtin_rad_to_deg_value() {
+        let src = "var x = rad_to_deg(3.14159265358979)\nprint(x)\n";
+        let r = run(src);
+        let val: f64 = r.output[0].parse().unwrap();
+        assert!((val - 180.0).abs() < 0.01, "expected 180, got {val}");
+    }
+
+    #[test]
+    fn builtin_deg_to_rad_zero() {
+        let src = "var x = deg_to_rad(0)\nprint(x)\n";
+        let r = run(src);
+        let val: f64 = r.output[0].parse().unwrap();
+        assert!(val.abs() < 1e-10, "expected 0, got {val}");
+    }
+
+    #[test]
+    fn builtin_rad_to_deg_zero() {
+        let src = "var x = rad_to_deg(0)\nprint(x)\n";
+        let r = run(src);
+        let val: f64 = r.output[0].parse().unwrap();
+        assert!(val.abs() < 1e-10, "expected 0, got {val}");
+    }
+
+    #[test]
+    fn builtin_deg_to_rad_90() {
+        let src = "var x = deg_to_rad(90.0)\nprint(x)\n";
+        let r = run(src);
+        let val: f64 = r.output[0].parse().unwrap();
+        assert!(
+            (val - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
+            "expected PI/2, got {val}"
+        );
     }
 }

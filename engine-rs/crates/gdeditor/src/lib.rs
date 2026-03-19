@@ -125,6 +125,17 @@ pub enum EditorCommand {
         /// The IDs of nodes created (populated on execute, for undo).
         created_ids: Vec<NodeId>,
     },
+    /// Instance a packed scene (from `.tscn` source) under a parent node.
+    InstanceScene {
+        /// The parent node to instance under.
+        parent_id: NodeId,
+        /// The `.tscn` source text.
+        tscn_source: String,
+        /// The IDs of nodes created (populated on execute, for undo).
+        created_ids: Vec<NodeId>,
+        /// The root node of the instanced scene (populated on execute).
+        root_id: Option<NodeId>,
+    },
 }
 
 impl EditorCommand {
@@ -253,6 +264,44 @@ impl EditorCommand {
                 tracing::debug!("DuplicateNode {:?} -> {:?}", source_id, created_ids);
                 Ok(())
             }
+            EditorCommand::InstanceScene {
+                parent_id,
+                tscn_source,
+                created_ids,
+                root_id,
+            } => {
+                use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
+                let packed = PackedScene::from_tscn(tscn_source).map_err(|e| {
+                    gdcore::error::EngineError::InvalidOperation(format!(
+                        "failed to parse tscn: {e}"
+                    ))
+                })?;
+                let scene_root = add_packed_scene_to_tree(tree, *parent_id, &packed)?;
+                *root_id = Some(scene_root);
+
+                // Mark the instanced root with a source indicator for the UI.
+                if let Some(node) = tree.get_node_mut(scene_root) {
+                    node.set_property("_instance_source", Variant::String("instanced".to_string()));
+                }
+
+                // Collect all created node IDs for undo.
+                fn collect_subtree_ids(tree: &SceneTree, nid: NodeId, out: &mut Vec<NodeId>) {
+                    out.push(nid);
+                    if let Some(node) = tree.get_node(nid) {
+                        for &child in node.children() {
+                            collect_subtree_ids(tree, child, out);
+                        }
+                    }
+                }
+                created_ids.clear();
+                collect_subtree_ids(tree, scene_root, created_ids);
+                tracing::debug!(
+                    "InstanceScene root {:?} ({} nodes)",
+                    scene_root,
+                    created_ids.len()
+                );
+                Ok(())
+            }
         }
     }
 
@@ -310,7 +359,8 @@ impl EditorCommand {
                 node.set_name(old_name.as_str());
                 Ok(())
             }
-            EditorCommand::DuplicateNode { created_ids, .. } => {
+            EditorCommand::DuplicateNode { created_ids, .. }
+            | EditorCommand::InstanceScene { created_ids, .. } => {
                 // Remove all created nodes in reverse order (children first).
                 for &id in created_ids.iter().rev() {
                     let _ = tree.remove_node(id);

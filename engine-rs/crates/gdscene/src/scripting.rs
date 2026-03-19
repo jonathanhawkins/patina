@@ -1745,4 +1745,360 @@ func _ready():
         assert_eq!(node.get_property("flag"), Variant::Bool(true));
         assert_eq!(node.get_property("label"), Variant::String("world".into()));
     }
+
+    // -----------------------------------------------------------------------
+    // Script execution integration tests (Play button wiring)
+    // -----------------------------------------------------------------------
+
+    /// Test that a script with _process modifying position works end-to-end.
+    /// This simulates what happens when the editor Play button is pressed:
+    /// parse script -> attach to node -> call _ready -> call _process per frame.
+    #[test]
+    fn script_position_x_moves_over_frames() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut child = Node::new("Mover", "Node2D");
+        child.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+        );
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 100.0
+func _process(delta):
+    self.position.x = self.position.x + speed * delta
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        // Run 10 frames at 1/60
+        let delta = 1.0 / 60.0;
+        for _ in 0..10 {
+            tree.process_script_process(child_id, delta);
+        }
+
+        // Position.x should have moved by speed * delta * 10
+        let expected_x = 100.0 * delta as f32 * 10.0;
+        match tree.get_node(child_id).unwrap().get_property("position") {
+            Variant::Vector2(v) => {
+                assert!(
+                    (v.x - expected_x).abs() < 0.01,
+                    "expected position.x ~{expected_x}, got {}",
+                    v.x
+                );
+            }
+            other => panic!("expected Vector2 position, got {other:?}"),
+        }
+    }
+
+    /// Test that _ready is called when we manually invoke it, simulating
+    /// what the Play button does.
+    #[test]
+    fn play_button_calls_ready_then_process() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var ready_called = false
+var frame_count = 0
+func _ready():
+    self.ready_called = true
+func _process(delta):
+    self.frame_count = self.frame_count + 1
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        // Simulate Play: call _ready first
+        tree.process_script_ready(child_id);
+
+        assert_eq!(
+            tree.get_script(child_id)
+                .unwrap()
+                .get_property("ready_called"),
+            Some(Variant::Bool(true))
+        );
+
+        // Then run 5 frames
+        for _ in 0..5 {
+            tree.process_script_process(child_id, 1.0 / 60.0);
+        }
+
+        assert_eq!(
+            tree.get_script(child_id)
+                .unwrap()
+                .get_property("frame_count"),
+            Some(Variant::Int(5))
+        );
+    }
+
+    /// Test that Vector2 constructor works in scripts.
+    #[test]
+    fn script_creates_vector2() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut child = Node::new("Setter", "Node2D");
+        child.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+        );
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+func _ready():
+    self.position = Vector2(100.0, 200.0)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+        tree.process_script_ready(child_id);
+
+        match tree.get_node(child_id).unwrap().get_property("position") {
+            Variant::Vector2(v) => {
+                assert!(
+                    (v.x - 100.0).abs() < 0.01 && (v.y - 200.0).abs() < 0.01,
+                    "expected (100, 200), got ({}, {})",
+                    v.x,
+                    v.y
+                );
+            }
+            other => panic!("expected Vector2, got {other:?}"),
+        }
+    }
+
+    /// Test that print() doesn't crash (output goes to interpreter's output buffer).
+    #[test]
+    fn script_print_does_not_crash() {
+        let node_id = NodeId::next();
+        let script_src = "\
+extends Node
+var done = false
+func _ready():
+    print(\"hello from script\")
+    self.done = true
+";
+        let mut inst = GDScriptNodeInstance::from_source(script_src, node_id).unwrap();
+        inst.call_method("_ready", &[]).unwrap();
+        assert_eq!(inst.get_property("done"), Some(Variant::Bool(true)));
+    }
+
+    /// Test that math builtins (abs, min, max, clamp) work in scripts.
+    #[test]
+    fn script_math_builtins() {
+        let node_id = NodeId::next();
+        let script_src = "\
+extends Node
+var abs_val = 0
+var min_val = 0
+var max_val = 0
+var clamped = 0
+func _ready():
+    self.abs_val = abs(-42)
+    self.min_val = min(3, 7)
+    self.max_val = max(3, 7)
+    self.clamped = clamp(15, 0, 10)
+";
+        let mut inst = GDScriptNodeInstance::from_source(script_src, node_id).unwrap();
+        inst.call_method("_ready", &[]).unwrap();
+        assert_eq!(inst.get_property("abs_val"), Some(Variant::Int(42)));
+        assert_eq!(inst.get_property("min_val"), Some(Variant::Int(3)));
+        assert_eq!(inst.get_property("max_val"), Some(Variant::Int(7)));
+        assert_eq!(inst.get_property("clamped"), Some(Variant::Int(10)));
+    }
+
+    /// Test deg_to_rad and rad_to_deg builtins.
+    #[test]
+    fn script_deg_rad_builtins() {
+        let node_id = NodeId::next();
+        let script_src = "\
+extends Node
+var radians = 0.0
+var degrees = 0.0
+func _ready():
+    self.radians = deg_to_rad(180.0)
+    self.degrees = rad_to_deg(3.14159265358979)
+";
+        let mut inst = GDScriptNodeInstance::from_source(script_src, node_id).unwrap();
+        inst.call_method("_ready", &[]).unwrap();
+
+        match inst.get_property("radians") {
+            Some(Variant::Float(v)) => assert!(
+                (v - std::f64::consts::PI).abs() < 1e-6,
+                "expected PI, got {v}"
+            ),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        match inst.get_property("degrees") {
+            Some(Variant::Float(v)) => assert!((v - 180.0).abs() < 0.01, "expected 180, got {v}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    /// Test that randf() and randi() return valid values.
+    #[test]
+    fn script_random_builtins() {
+        let node_id = NodeId::next();
+        let script_src = "\
+extends Node
+var rf = 0.0
+var ri = 0
+func _ready():
+    self.rf = randf()
+    self.ri = randi()
+";
+        let mut inst = GDScriptNodeInstance::from_source(script_src, node_id).unwrap();
+        inst.call_method("_ready", &[]).unwrap();
+        // randf should return a float (could be any value)
+        assert!(matches!(inst.get_property("rf"), Some(Variant::Float(_))));
+        assert!(matches!(inst.get_property("ri"), Some(Variant::Int(_))));
+    }
+
+    /// Test that get_node works during _process (simulating runtime).
+    #[test]
+    fn script_get_node_during_process() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = Node::new("Parent", "Node2D");
+        let parent_id = tree.add_child(root, parent).unwrap();
+        let child = Node::new("Child", "Node2D");
+        let child_id = tree.add_child(parent_id, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var found_child = false
+func _process(delta):
+    var c = get_node(\"Child\")
+    self.found_child = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+        tree.process_script_process(parent_id, 0.016);
+
+        assert_eq!(
+            tree.get_script(parent_id)
+                .unwrap()
+                .get_property("found_child"),
+            Some(Variant::Bool(true))
+        );
+    }
+
+    /// Test that script errors during _process don't crash; the method
+    /// returns an error but the tree remains intact.
+    #[test]
+    fn script_runtime_error_does_not_crash() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Buggy", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        // This script references an undefined variable
+        let script_src = "\
+extends Node2D
+var ok = true
+func _process(delta):
+    var x = undefined_var
+    self.ok = false
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        // _process should fail but not panic
+        tree.process_script_process(child_id, 0.016);
+
+        // ok should still be true because the error happens before self.ok = false
+        assert_eq!(
+            tree.get_script(child_id).unwrap().get_property("ok"),
+            Some(Variant::Bool(true))
+        );
+
+        // Tree is still functional
+        assert!(tree.has_script(child_id));
+    }
+
+    /// Test the fixture script test_move.gd can be loaded from disk.
+    #[test]
+    fn load_test_move_fixture_script() {
+        let script_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/scripts/test_move.gd"
+        );
+        let source = std::fs::read_to_string(script_path)
+            .unwrap_or_else(|e| panic!("Failed to read {script_path}: {e}"));
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Mover", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script = GDScriptNodeInstance::from_source(&source, child_id).unwrap();
+        assert!(script.has_method("_process"));
+
+        tree.attach_script(child_id, Box::new(script));
+
+        // Run a few frames and verify the speed property changes
+        // (test_move.gd does: self.speed = self.speed + delta)
+        let delta = 1.0 / 60.0;
+        for _ in 0..5 {
+            tree.process_script_process(child_id, delta);
+        }
+
+        let expected = 100.0 + delta * 5.0;
+        match tree.get_script(child_id).unwrap().get_property("speed") {
+            Some(Variant::Float(v)) => assert!(
+                (v - expected).abs() < 1e-9,
+                "expected speed ~{expected}, got {v}"
+            ),
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    /// Test that multiple scripts all get _ready and _process called
+    /// during a simulated play session.
+    #[test]
+    fn multi_script_play_simulation() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let n1 = Node::new("A", "Node2D");
+        let id1 = tree.add_child(root, n1).unwrap();
+        let n2 = Node::new("B", "Node2D");
+        let id2 = tree.add_child(root, n2).unwrap();
+
+        let script_src = "\
+extends Node2D
+var count = 0
+func _ready():
+    self.count = self.count + 1
+func _process(delta):
+    self.count = self.count + 1
+";
+        let s1 = GDScriptNodeInstance::from_source(script_src, id1).unwrap();
+        let s2 = GDScriptNodeInstance::from_source(script_src, id2).unwrap();
+        tree.attach_script(id1, Box::new(s1));
+        tree.attach_script(id2, Box::new(s2));
+
+        // Simulate Play: call _ready on all
+        tree.process_script_ready(id1);
+        tree.process_script_ready(id2);
+
+        // Run 3 frames
+        for _ in 0..3 {
+            tree.process_all_scripts_process(1.0 / 60.0);
+        }
+
+        // Each script: 1 (_ready) + 3 (_process) = 4
+        assert_eq!(
+            tree.get_script(id1).unwrap().get_property("count"),
+            Some(Variant::Int(4))
+        );
+        assert_eq!(
+            tree.get_script(id2).unwrap().get_property("count"),
+            Some(Variant::Int(4))
+        );
+    }
 }

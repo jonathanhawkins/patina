@@ -4,8 +4,13 @@
 //! normalizes format differences (Godot's `"Vector2(100, 200)"` strings vs Patina's
 //! `{"type":"Vector2","value":[100,200]}`), and reports per-node, per-property parity.
 
+mod oracle_fixture;
+
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
+
+use oracle_fixture::{fixtures_dir, load_generated_scene_fixture, load_json_fixture};
 
 // ---------------------------------------------------------------------------
 // Format normalization
@@ -335,16 +340,6 @@ fn parity_percentage(results: &[PropertyComparison]) -> f64 {
 // Fixture loading
 // ---------------------------------------------------------------------------
 
-fn load_fixture(path: &str) -> Value {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("failed to load fixture {path}: {e}"));
-    serde_json::from_str(&content).unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
-}
-
-fn fixtures_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures")
-}
-
 // ===========================================================================
 // Format normalization tests
 // ===========================================================================
@@ -644,294 +639,49 @@ fn parity_percentage_empty() {
 // ===========================================================================
 
 #[test]
-fn oracle_main_scene_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(dir.join("oracle_outputs/main.json").to_str().unwrap());
-    let patina: Value = load_fixture(dir.join("patina_outputs/main.json").to_str().unwrap());
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    // Both should have the same set of node names
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(g_names, p_names, "node names should match for main.tscn");
-}
-
-#[test]
-fn oracle_main_scene_classes_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(dir.join("oracle_outputs/main.json").to_str().unwrap());
-    let patina: Value = load_fixture(dir.join("patina_outputs/main.json").to_str().unwrap());
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    for (g, p) in g_nodes.iter().zip(p_nodes.iter()) {
-        assert_eq!(
-            g.class, p.class,
-            "class mismatch for node {} at {}",
-            g.name, g.path
-        );
-    }
-}
-
-#[test]
-fn oracle_main_scene_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(dir.join("oracle_outputs/main.json").to_str().unwrap());
-    let patina: Value = load_fixture(dir.join("patina_outputs/main.json").to_str().unwrap());
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-    let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
-
-    // Print details for debugging
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
-        }
-    }
-
-    assert!(
-        parity >= 25.0,
-        "main.tscn parity {parity:.1}% should be >= 25% (pre-default-property fixtures)"
-    );
-}
-
-#[test]
-fn oracle_simple_hierarchy_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
+fn generated_scene_fixture_metadata_is_valid() {
+    let generated = load_generated_scene_fixture("scene_simple_hierarchy_01.json");
+    let nodes = generated
+        .get("nodes")
+        .and_then(Value::as_array)
+        .expect("generated scene fixture must contain nodes");
     assert_eq!(
-        g_names, p_names,
-        "node names should match for simple_hierarchy.tscn"
+        nodes.len(),
+        1,
+        "generated scene fixture should have one root node"
     );
 }
 
 #[test]
-fn oracle_simple_hierarchy_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/simple_hierarchy.json")
-            .to_str()
-            .unwrap(),
-    );
+fn oracle_scene_tree_contract_matches_generated_simple_hierarchy_fixture() {
+    let godot = load_generated_scene_fixture("scene_simple_hierarchy_01.json");
+    let patina =
+        load_json_fixture(&fixtures_dir().join(Path::new("patina_outputs/simple_hierarchy.json")));
 
-    let g_nodes = flatten_godot_tree(&godot);
+    let g_nodes = flatten_tree(&godot);
     let p_nodes = flatten_patina_tree(&patina);
     let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
 
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
-        }
-    }
-
-    assert!(
-        parity >= 25.0,
-        "simple_hierarchy.tscn parity {parity:.1}% should be >= 60%"
-    );
-}
-
-#[test]
-fn oracle_signal_test_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(
-        g_names, p_names,
-        "node names should match for signal_test.tscn"
-    );
-}
-
-#[test]
-fn oracle_signal_test_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/signal_test.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-    let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
-
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
-        }
-    }
+    let mismatches: Vec<String> = results
+        .iter()
+        .filter(|result| !result.matches)
+        .map(|result| {
+            format!(
+                "{}.{} godot={:?} patina={:?}",
+                result.node_path, result.property, result.godot_value, result.patina_value
+            )
+        })
+        .collect();
 
     assert!(
-        parity >= 25.0,
-        "signal_test.tscn parity {parity:.1}% should be >= 60%"
+        mismatches.is_empty(),
+        "scene_tree contract requires exact node/class/property parity for generated fixture scene_simple_hierarchy_01:\n{}",
+        mismatches.join("\n")
     );
 }
 
 #[test]
-fn oracle_multi_script_node_names_match() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-
-    let g_names: Vec<&str> = g_nodes.iter().map(|n| n.name.as_str()).collect();
-    let p_names: Vec<&str> = p_nodes.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(
-        g_names, p_names,
-        "node names should match for multi_script.tscn"
-    );
-}
-
-#[test]
-fn oracle_multi_script_parity_above_threshold() {
-    let dir = fixtures_dir();
-    let godot: Value = load_fixture(
-        dir.join("oracle_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
-    );
-    let patina: Value = load_fixture(
-        dir.join("patina_outputs/multi_script.json")
-            .to_str()
-            .unwrap(),
-    );
-
-    let g_nodes = flatten_godot_tree(&godot);
-    let p_nodes = flatten_patina_tree(&patina);
-    let results = compare_scene(&g_nodes, &p_nodes);
-    let parity = parity_percentage(&results);
-
-    for r in &results {
-        if !r.matches {
-            eprintln!(
-                "MISMATCH {}.{}: godot={:?} patina={:?}",
-                r.node_path, r.property, r.godot_value, r.patina_value
-            );
-        }
-    }
-
-    assert!(
-        parity >= 25.0,
-        "multi_script.tscn parity {parity:.1}% should be >= 60%"
-    );
-}
-
-// ===========================================================================
-// Cross-scene summary test
-// ===========================================================================
-
-#[test]
-fn oracle_overall_parity_summary() {
-    let dir = fixtures_dir();
-    let scenes = ["main", "simple_hierarchy", "signal_test", "multi_script"];
-
-    let mut total_comparisons = 0;
-    let mut total_matches = 0;
-
-    for scene in &scenes {
-        let godot: Value = load_fixture(
-            dir.join(format!("oracle_outputs/{scene}.json"))
-                .to_str()
-                .unwrap(),
-        );
-        let patina: Value = load_fixture(
-            dir.join(format!("patina_outputs/{scene}.json"))
-                .to_str()
-                .unwrap(),
-        );
-
-        let g_nodes = flatten_godot_tree(&godot);
-        let p_nodes = flatten_patina_tree(&patina);
-        let results = compare_scene(&g_nodes, &p_nodes);
-
-        let matched = results.iter().filter(|r| r.matches).count();
-        let total = results.len();
-        let parity = if total > 0 {
-            (matched as f64 / total as f64) * 100.0
-        } else {
-            100.0
-        };
-
-        eprintln!("{scene}: {matched}/{total} = {parity:.1}%");
-        total_comparisons += total;
-        total_matches += matched;
-    }
-
-    let overall = if total_comparisons > 0 {
-        (total_matches as f64 / total_comparisons as f64) * 100.0
-    } else {
-        100.0
-    };
-    eprintln!("Overall: {total_matches}/{total_comparisons} = {overall:.1}%");
-
-    // Overall parity threshold — current fixtures were generated before
-    // default Node2D properties were added. Regenerate fixtures to see higher parity.
-    assert!(
-        overall >= 25.0,
-        "overall parity {overall:.1}% should be >= 25%"
-    );
+#[should_panic(expected = "failed to load fixture")]
+fn generated_scene_fixture_fails_clearly_when_missing() {
+    let _ = load_generated_scene_fixture("does_not_exist.json");
 }

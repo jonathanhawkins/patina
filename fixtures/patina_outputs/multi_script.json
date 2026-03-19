@@ -134,7 +134,7 @@
               "position": {
                 "type": "Vector2",
                 "value": [
-                  200.0,
+                  200.8333282470703,
                   100.0
                 ]
               },
@@ -167,6 +167,13 @@
               }
             },
             "script_vars": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  200.8333282470703,
+                  100.0
+                ]
+              },
               "speed": {
                 "type": "Float",
                 "value": 50.0

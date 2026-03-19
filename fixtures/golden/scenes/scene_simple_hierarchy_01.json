@@ -1,0 +1,141 @@
+{
+  "fixture_id": "scene_simple_hierarchy_01",
+  "upstream_version": "4.5.1-stable",
+  "upstream_commit": "f62fdbde15035c5576dad93e586201f4d41ef0cb",
+  "capture_type": "scene_tree",
+  "generated_at": "2026-03-19T13:07:37+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "Root",
+        "class": "Node2D",
+        "path": "/root/Root",
+        "children": [
+          {
+            "name": "Child1",
+            "class": "Node2D",
+            "path": "/root/Root/Child1",
+            "children": [
+              {
+                "name": "GrandChild",
+                "class": "Node2D",
+                "path": "/root/Root/Child1/GrandChild",
+                "children": [],
+                "properties": {
+                  "position": {
+                    "type": "Vector2",
+                    "value": [
+                      10.0,
+                      20.0
+                    ]
+                  },
+                  "rotation": {
+                    "type": "Float",
+                    "value": 0.0
+                  },
+                  "scale": {
+                    "type": "Vector2",
+                    "value": [
+                      1.0,
+                      1.0
+                    ]
+                  },
+                  "visible": {
+                    "type": "Bool",
+                    "value": true
+                  }
+                }
+              }
+            ],
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  50.0,
+                  100.0
+                ]
+              },
+              "rotation": {
+                "type": "Float",
+                "value": 0.0
+              },
+              "scale": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  1.0
+                ]
+              },
+              "visible": {
+                "type": "Bool",
+                "value": true
+              }
+            }
+          },
+          {
+            "name": "Child2",
+            "class": "Node2D",
+            "path": "/root/Root/Child2",
+            "children": [],
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  200.0,
+                  300.0
+                ]
+              },
+              "rotation": {
+                "type": "Float",
+                "value": 0.0
+              },
+              "scale": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  1.0
+                ]
+              },
+              "visible": {
+                "type": "Bool",
+                "value": true
+              }
+            }
+          }
+        ],
+        "properties": {
+          "child_count": {
+            "type": "Int",
+            "value": 2
+          },
+          "position": {
+            "type": "Vector2",
+            "value": [
+              0.0,
+              0.0
+            ]
+          },
+          "rotation": {
+            "type": "Float",
+            "value": 0.0
+          },
+          "scale": {
+            "type": "Vector2",
+            "value": [
+              1.0,
+              1.0
+            ]
+          },
+          "tree_ready": {
+            "type": "Bool",
+            "value": true
+          },
+          "visible": {
+            "type": "Bool",
+            "value": true
+          }
+        }
+      }
+    ]
+  }
+}

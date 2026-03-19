@@ -4,6 +4,7 @@
 //! viewport rendering, and scene save/load over a simple REST API.
 //! Uses the same `std::net::TcpListener` pattern as `gdrender2d::frame_server`.
 
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -28,6 +29,7 @@ use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
 use gdcore::math::Vector2;
+use gdscene::scripting::GDScriptNodeInstance;
 
 /// Animation playback state for the editor.
 #[derive(Debug, Clone)]
@@ -151,6 +153,18 @@ pub struct EditorState {
     pub animations: std::collections::HashMap<String, Animation>,
     /// Current animation playback state.
     pub animation_playback: AnimationPlaybackState,
+    /// Currently pressed keyboard keys.
+    pub pressed_keys: HashSet<String>,
+    /// Keys pressed this frame (cleared each frame).
+    pub just_pressed_keys: HashSet<String>,
+    /// Keys released this frame (cleared each frame).
+    pub just_released_keys: HashSet<String>,
+    /// Current mouse position in viewport coordinates.
+    pub mouse_position: (f64, f64),
+    /// Currently pressed mouse buttons (0=left, 1=middle, 2=right).
+    pub mouse_buttons: HashSet<u8>,
+    /// Input action map: action name -> list of key names.
+    pub input_map: HashMap<String, Vec<String>>,
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -194,7 +208,63 @@ impl EditorState {
                 current_time: 0.0,
                 recording: false,
             },
+            pressed_keys: HashSet::new(),
+            just_pressed_keys: HashSet::new(),
+            just_released_keys: HashSet::new(),
+            mouse_position: (0.0, 0.0),
+            mouse_buttons: HashSet::new(),
+            input_map: Self::default_input_map(),
         }
+    }
+
+    /// Returns the default input action map (Godot-style).
+    pub fn default_input_map() -> HashMap<String, Vec<String>> {
+        let mut map = HashMap::new();
+        map.insert("ui_left".into(), vec!["ArrowLeft".into(), "a".into()]);
+        map.insert("ui_right".into(), vec!["ArrowRight".into(), "d".into()]);
+        map.insert("ui_up".into(), vec!["ArrowUp".into(), "w".into()]);
+        map.insert("ui_down".into(), vec!["ArrowDown".into(), "s".into()]);
+        map.insert("ui_accept".into(), vec!["Enter".into(), " ".into()]);
+        map.insert("ui_cancel".into(), vec!["Escape".into()]);
+        map.insert("shoot".into(), vec![" ".into(), "x".into()]);
+        map.insert(
+            "jump".into(),
+            vec![" ".into(), "ArrowUp".into(), "w".into()],
+        );
+        map
+    }
+
+    /// Returns true if any key mapped to the given action is currently pressed.
+    pub fn is_action_pressed(&self, action: &str) -> bool {
+        if let Some(keys) = self.input_map.get(action) {
+            keys.iter().any(|k| self.pressed_keys.contains(k))
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if any key mapped to the given action was just pressed this frame.
+    pub fn is_action_just_pressed(&self, action: &str) -> bool {
+        if let Some(keys) = self.input_map.get(action) {
+            keys.iter().any(|k| self.just_pressed_keys.contains(k))
+        } else {
+            false
+        }
+    }
+
+    /// Clears per-frame input state (just_pressed and just_released).
+    pub fn clear_frame_input(&mut self) {
+        self.just_pressed_keys.clear();
+        self.just_released_keys.clear();
+    }
+
+    /// Resets all input state (called when runtime stops).
+    pub fn clear_all_input(&mut self) {
+        self.pressed_keys.clear();
+        self.just_pressed_keys.clear();
+        self.just_released_keys.clear();
+        self.mouse_position = (0.0, 0.0);
+        self.mouse_buttons.clear();
     }
 
     /// Adds a log entry to the ring buffer.
@@ -569,6 +639,25 @@ fn handle_connection(
         ("POST", "/api/runtime/pause") => api_runtime_pause(state, &mut stream),
         ("POST", "/api/runtime/step") => api_runtime_step(state, &mut stream),
         ("GET", "/api/runtime/status") => api_runtime_status(state, &mut stream),
+        // Input endpoints
+        ("POST", "/api/runtime/input/key_down") => {
+            api_input_key_down(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/runtime/input/key_up") => api_input_key_up(state, &req.body, &mut stream),
+        ("POST", "/api/runtime/input/mouse_move") => {
+            api_input_mouse_move(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/runtime/input/mouse_down") => {
+            api_input_mouse_down(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/runtime/input/mouse_up") => {
+            api_input_mouse_up(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/runtime/input/clear_frame") => api_input_clear_frame(state, &mut stream),
+        ("GET", "/api/runtime/input/state") => api_input_state(state, &mut stream),
+        // Scene instancing + collision shape editing
+        ("POST", "/api/scene/instance") => api_instance_scene(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/shape_resize") => api_shape_resize(state, &req.body, &mut stream),
         _ => serve_404(&mut stream),
     }
 }
@@ -660,12 +749,17 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
         _ => true, // default visible
     };
 
+    // Detect instanced scenes: nodes with _instance_source or _instance property.
+    let is_instance = !matches!(node.get_property("_instance_source"), Variant::Nil)
+        || !matches!(node.get_property("_instance"), Variant::Nil);
+
     serde_json::json!({
         "id": node_id.raw(),
         "name": node.name(),
         "class": node.class_name(),
         "path": path,
         "visible": visible,
+        "is_instance": is_instance,
         "children": children
     })
 }
@@ -3093,7 +3187,22 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         send_json(stream, r#"{"ok":true,"already_running":true}"#);
         return;
     }
-    let cloned = clone_scene_tree(&state.scene_tree);
+    let mut cloned = clone_scene_tree(&state.scene_tree);
+
+    // Attach GDScripts to nodes that have a `_script_path` property.
+    let project_root = state.texture_cache.project_root().to_string();
+    attach_scripts_to_tree(&mut cloned, &project_root, &mut state);
+
+    // Call _ready() on all scripted nodes.
+    let scripted_ids: Vec<NodeId> = cloned
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|id| cloned.has_script(*id))
+        .collect();
+    for id in &scripted_ids {
+        cloned.process_script_ready(*id);
+    }
+
     state.run_scene_tree = Some(cloned);
     state.is_running = true;
     state.is_paused = false;
@@ -3102,12 +3211,53 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(stream, r#"{"ok":true,"running":true}"#);
 }
 
+/// Walks all nodes in `tree`, finds those with `_script_path`, resolves
+/// the path relative to `project_root`, loads the `.gd` file, parses it,
+/// and attaches a `GDScriptNodeInstance` to the node.
+fn attach_scripts_to_tree(tree: &mut SceneTree, project_root: &str, state: &mut EditorState) {
+    let mut scripts_to_load: Vec<(NodeId, std::path::PathBuf)> = Vec::new();
+
+    for node_id in tree.all_nodes_in_tree_order() {
+        if let Some(node) = tree.get_node(node_id) {
+            if let Variant::String(res_path) = node.get_property("_script_path") {
+                let relative = res_path.strip_prefix("res://").unwrap_or(&res_path);
+                let abs_path = std::path::Path::new(project_root).join(relative);
+                scripts_to_load.push((node_id, abs_path));
+            }
+        }
+    }
+
+    for (node_id, path) in scripts_to_load {
+        match std::fs::read_to_string(&path) {
+            Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
+                Ok(instance) => {
+                    tree.attach_script(node_id, Box::new(instance));
+                    state.add_log("info", format!("Script loaded: {}", path.display()));
+                }
+                Err(e) => {
+                    state.add_log(
+                        "error",
+                        format!("Script parse error in {}: {}", path.display(), e),
+                    );
+                }
+            },
+            Err(e) => {
+                state.add_log(
+                    "error",
+                    format!("Failed to read script {}: {}", path.display(), e),
+                );
+            }
+        }
+    }
+}
+
 fn api_runtime_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut state = state.lock().unwrap();
     state.is_running = false;
     state.is_paused = false;
     state.run_scene_tree = None;
     state.runtime_frame_count = 0;
+    state.clear_all_input();
     state.add_log("info", "Runtime: stopped");
     send_json(stream, r#"{"ok":true,"running":false}"#);
 }
@@ -3193,6 +3343,384 @@ fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             r#"{{"running":{running},"paused":{paused},"frame_count":{frame_count},"fps":{fps:.1}}}"#
         ),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scene instancing endpoint
+// ---------------------------------------------------------------------------
+
+/// `POST /api/scene/instance` — instances a .tscn file as a child of a node.
+///
+/// Body: `{"path": "path/to/scene.tscn", "parent_id": 123}`
+/// Returns: `{"id": <root_node_id>}`
+fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let path = match parsed.get("path").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+
+    let parent_raw = match parsed.get("parent_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing parent_id");
+            return;
+        }
+    };
+
+    // Read the .tscn file.
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            send_error(stream, 400, &format!("failed to read: {e}"));
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "parent not found");
+            return;
+        }
+    };
+
+    let mut cmd = EditorCommand::InstanceScene {
+        parent_id,
+        tscn_source: source,
+        created_ids: Vec::new(),
+        root_id: None,
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    let root_id = match &cmd {
+        EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
+        _ => unreachable!(),
+    };
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log("info", format!("Instanced scene from '{}'", path));
+
+    let json = format!(r#"{{"id":{}}}"#, root_id.raw());
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// Collision shape resize endpoint
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/shape_resize` — resizes a collision shape.
+///
+/// Body: `{"node_id": 123, "handle": "radius", "value": 50.0}`
+///    or `{"node_id": 123, "handle": "extents", "value": [30, 20]}`
+fn api_shape_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let handle = match parsed.get("handle").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing handle");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    // Build the appropriate property set command based on handle type.
+    let (property, new_value) = match handle.as_str() {
+        "radius" => {
+            let val = match parsed.get("value").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => {
+                    send_error(stream, 400, "missing numeric value for radius");
+                    return;
+                }
+            };
+            ("shape_radius".to_string(), Variant::Float(val))
+        }
+        "extents" => {
+            let arr = match parsed.get("value").and_then(|v| v.as_array()) {
+                Some(v) => v,
+                None => {
+                    send_error(stream, 400, "missing array value for extents");
+                    return;
+                }
+            };
+            if arr.len() != 2 {
+                send_error(stream, 400, "extents must be [x, y]");
+                return;
+            }
+            let x = arr[0].as_f64().unwrap_or(0.0) as f32;
+            let y = arr[1].as_f64().unwrap_or(0.0) as f32;
+            (
+                "shape_extents".to_string(),
+                Variant::Vector2(Vector2::new(x, y)),
+            )
+        }
+        "height" => {
+            let val = match parsed.get("value").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => {
+                    send_error(stream, 400, "missing numeric value for height");
+                    return;
+                }
+            };
+            ("shape_height".to_string(), Variant::Float(val))
+        }
+        _ => {
+            send_error(stream, 400, &format!("unknown handle type: {handle}"));
+            return;
+        }
+    };
+
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: property.clone(),
+        new_value: new_value.clone(),
+        old_value: Variant::Nil,
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Shape resize: {} on node {}", handle, node_raw),
+    );
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// Input API endpoints
+// ---------------------------------------------------------------------------
+
+fn api_input_key_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let key = match v["key"].as_str() {
+        Some(k) => k.to_string(),
+        None => {
+            send_error(stream, 400, "missing key");
+            return;
+        }
+    };
+    if !state.pressed_keys.contains(&key) {
+        state.just_pressed_keys.insert(key.clone());
+    }
+    state.pressed_keys.insert(key);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_input_key_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let key = match v["key"].as_str() {
+        Some(k) => k.to_string(),
+        None => {
+            send_error(stream, 400, "missing key");
+            return;
+        }
+    };
+    state.pressed_keys.remove(&key);
+    state.just_released_keys.insert(key);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_input_mouse_move(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let x = match v["x"].as_f64() {
+        Some(x) => x,
+        None => {
+            send_error(stream, 400, "missing x");
+            return;
+        }
+    };
+    let y = match v["y"].as_f64() {
+        Some(y) => y,
+        None => {
+            send_error(stream, 400, "missing y");
+            return;
+        }
+    };
+    state.mouse_position = (x, y);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_input_mouse_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let button = match v["button"].as_u64() {
+        Some(b) if b <= 2 => b as u8,
+        _ => {
+            send_error(stream, 400, "invalid button (0-2)");
+            return;
+        }
+    };
+    state.mouse_buttons.insert(button);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_input_mouse_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let button = match v["button"].as_u64() {
+        Some(b) if b <= 2 => b as u8,
+        _ => {
+            send_error(stream, 400, "invalid button (0-2)");
+            return;
+        }
+    };
+    state.mouse_buttons.remove(&button);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_input_clear_frame(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    state.clear_frame_input();
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_input_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let state = state.lock().unwrap();
+    let mut pressed: Vec<&String> = state.pressed_keys.iter().collect();
+    pressed.sort();
+    let mut just_pressed: Vec<&String> = state.just_pressed_keys.iter().collect();
+    just_pressed.sort();
+    let mut mouse_btns: Vec<u8> = state.mouse_buttons.iter().copied().collect();
+    mouse_btns.sort();
+
+    // Build actions object with sorted keys for deterministic output
+    let mut actions = String::from("{");
+    let mut action_names: Vec<&String> = state.input_map.keys().collect();
+    action_names.sort();
+    let mut first = true;
+    for action in &action_names {
+        if !first {
+            actions.push(',');
+        }
+        first = false;
+        let pressed_val = state.is_action_pressed(action);
+        actions.push_str(&format!(r#""{}": {}"#, action, pressed_val));
+    }
+    actions.push('}');
+
+    let json = format!(
+        r#"{{"pressed_keys":[{}],"just_pressed":[{}],"mouse_position":[{},{}],"mouse_buttons":[{}],"actions":{}}}"#,
+        pressed
+            .iter()
+            .map(|k| format!(r#""{}""#, k))
+            .collect::<Vec<_>>()
+            .join(","),
+        just_pressed
+            .iter()
+            .map(|k| format!(r#""{}""#, k))
+            .collect::<Vec<_>>()
+            .join(","),
+        state.mouse_position.0,
+        state.mouse_position.1,
+        mouse_btns
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        actions,
+    );
+    send_json(stream, &json);
 }
 
 #[cfg(test)]
@@ -4842,5 +5370,302 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(v["loop_mode"], "pingpong");
         handle.stop();
+    }
+
+    #[test]
+    fn test_attach_scripts_to_tree() {
+        // Create a tree with a node that has a _script_path pointing to a
+        // fixture script on disk.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut child = Node::new("Mover", "Node2D");
+        // Point to the test_move.gd fixture
+        child.set_property(
+            "_script_path",
+            Variant::String("res://scripts/test_move.gd".into()),
+        );
+        tree.add_child(root, child).unwrap();
+
+        // The project root for fixtures is engine-rs/fixtures
+        let project_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures");
+        let mut state = EditorState::new(SceneTree::new());
+        attach_scripts_to_tree(&mut tree, project_root, &mut state);
+
+        // The node should now have an attached script
+        let mover_id = tree.get_node(root).unwrap().children()[0];
+        assert!(tree.has_script(mover_id), "script should be attached");
+
+        // Verify log entry mentions script loading
+        let has_loaded_log = state
+            .log_entries
+            .iter()
+            .any(|entry| entry.message.contains("Script loaded"));
+        assert!(has_loaded_log, "expected 'Script loaded' log entry");
+    }
+
+    #[test]
+    fn test_attach_scripts_missing_file_logs_error() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut child = Node::new("BadScript", "Node2D");
+        child.set_property(
+            "_script_path",
+            Variant::String("res://nonexistent.gd".into()),
+        );
+        tree.add_child(root, child).unwrap();
+
+        let mut state = EditorState::new(SceneTree::new());
+        attach_scripts_to_tree(&mut tree, "/tmp/no_such_project", &mut state);
+
+        // Should log an error about failing to read the file
+        let has_error = state.log_entries.iter().any(|entry| entry.level == "error");
+        assert!(has_error, "expected error log for missing script file");
+    }
+
+    #[test]
+    fn test_attach_scripts_parse_error_logs_error() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("bad.gd");
+        let mut f = std::fs::File::create(&script_path).unwrap();
+        writeln!(f, "this is not valid gdscript @@@ {{{{").unwrap();
+        drop(f);
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut child = Node::new("BadParse", "Node2D");
+        child.set_property("_script_path", Variant::String("res://bad.gd".into()));
+        tree.add_child(root, child).unwrap();
+
+        let mut state = EditorState::new(SceneTree::new());
+        attach_scripts_to_tree(&mut tree, &dir.path().to_string_lossy(), &mut state);
+
+        let has_error = state
+            .log_entries
+            .iter()
+            .any(|entry| entry.level == "error" && entry.message.contains("parse error"));
+        assert!(
+            has_error,
+            "expected error log for parse failure; got: {:?}",
+            state
+                .log_entries
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ---- Input tests ----
+
+    /// Helper: start runtime so input endpoints accept requests.
+    fn start_runtime(port: u16) {
+        http_post(port, "/api/runtime/play", "{}");
+    }
+
+    #[test]
+    fn test_input_key_down_requires_running() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/runtime/input/key_down", r#"{"key":"a"}"#);
+        assert!(resp.contains("400"), "should reject when not running");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_key_down_and_state() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        let resp = http_post(
+            port,
+            "/api/runtime/input/key_down",
+            r#"{"key":"ArrowLeft"}"#,
+        );
+        assert!(resp.contains("200 OK"));
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let pressed = v["pressed_keys"].as_array().unwrap();
+        assert!(pressed.iter().any(|k| k == "ArrowLeft"));
+        let just = v["just_pressed"].as_array().unwrap();
+        assert!(just.iter().any(|k| k == "ArrowLeft"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_key_up_removes_from_pressed() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        http_post(port, "/api/runtime/input/key_down", r#"{"key":"w"}"#);
+        http_post(port, "/api/runtime/input/key_up", r#"{"key":"w"}"#);
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let pressed = v["pressed_keys"].as_array().unwrap();
+        assert!(!pressed.iter().any(|k| k == "w"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_clear_frame() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        http_post(port, "/api/runtime/input/key_down", r#"{"key":"x"}"#);
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v["just_pressed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k == "x"));
+
+        http_post(port, "/api/runtime/input/clear_frame", "{}");
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v["just_pressed"].as_array().unwrap().is_empty());
+        assert!(v["pressed_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k == "x"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_mouse_move() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        let resp = http_post(
+            port,
+            "/api/runtime/input/mouse_move",
+            r#"{"x":150.5,"y":200.0}"#,
+        );
+        assert!(resp.contains("200 OK"));
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let pos = v["mouse_position"].as_array().unwrap();
+        assert_eq!(pos[0].as_f64().unwrap(), 150.5);
+        assert_eq!(pos[1].as_f64().unwrap(), 200.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_mouse_buttons() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        http_post(port, "/api/runtime/input/mouse_down", r#"{"button":0}"#);
+        http_post(port, "/api/runtime/input/mouse_down", r#"{"button":2}"#);
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let btns = v["mouse_buttons"].as_array().unwrap();
+        assert!(btns.iter().any(|b| b == 0));
+        assert!(btns.iter().any(|b| b == 2));
+
+        http_post(port, "/api/runtime/input/mouse_up", r#"{"button":0}"#);
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let btns = v["mouse_buttons"].as_array().unwrap();
+        assert!(!btns.iter().any(|b| b == 0));
+        assert!(btns.iter().any(|b| b == 2));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_mouse_button_invalid() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        let resp = http_post(port, "/api/runtime/input/mouse_down", r#"{"button":5}"#);
+        assert!(resp.contains("400"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_action_mapping() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        http_post(port, "/api/runtime/input/key_down", r#"{"key":"a"}"#);
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["actions"]["ui_left"], true);
+        assert_eq!(v["actions"]["ui_right"], false);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_stop_clears_all() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        http_post(port, "/api/runtime/input/key_down", r#"{"key":"a"}"#);
+        http_post(port, "/api/runtime/input/mouse_down", r#"{"button":0}"#);
+        http_post(
+            port,
+            "/api/runtime/input/mouse_move",
+            r#"{"x":100,"y":200}"#,
+        );
+
+        http_post(port, "/api/runtime/stop", "{}");
+
+        start_runtime(port);
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v["pressed_keys"].as_array().unwrap().is_empty());
+        assert!(v["mouse_buttons"].as_array().unwrap().is_empty());
+        let pos = v["mouse_position"].as_array().unwrap();
+        assert_eq!(pos[0].as_f64().unwrap(), 0.0);
+        assert_eq!(pos[1].as_f64().unwrap(), 0.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_duplicate_key_down_no_double_just_pressed() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+        http_post(port, "/api/runtime/input/key_down", r#"{"key":"a"}"#);
+        http_post(port, "/api/runtime/input/clear_frame", "{}");
+        http_post(port, "/api/runtime/input/key_down", r#"{"key":"a"}"#);
+
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            v["just_pressed"].as_array().unwrap().is_empty(),
+            "held key should not re-trigger just_pressed"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_state_helper_methods() {
+        let mut state = EditorState::new(SceneTree::new());
+        state.is_running = true;
+        state.pressed_keys.insert("ArrowLeft".into());
+        state.just_pressed_keys.insert("ArrowLeft".into());
+
+        assert!(state.is_action_pressed("ui_left"));
+        assert!(!state.is_action_pressed("ui_right"));
+        assert!(state.is_action_just_pressed("ui_left"));
+        assert!(!state.is_action_just_pressed("shoot"));
+
+        assert!(!state.is_action_pressed("nonexistent"));
+        assert!(!state.is_action_just_pressed("nonexistent"));
+
+        state.clear_frame_input();
+        assert!(!state.is_action_just_pressed("ui_left"));
+        assert!(state.is_action_pressed("ui_left"));
+
+        state.clear_all_input();
+        assert!(!state.is_action_pressed("ui_left"));
     }
 }
