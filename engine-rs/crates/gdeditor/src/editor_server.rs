@@ -168,35 +168,35 @@ fn run_server(
             return;
         }
     };
-    // Use a short blocking timeout so we can check the running flag periodically.
+    // Non-blocking so we can check the running flag, but we use a tight
+    // accept loop with minimal sleep to avoid missing connections.
     listener
-        .set_nonblocking(false)
-        .expect("failed to set blocking");
+        .set_nonblocking(true)
+        .expect("failed to set non-blocking");
 
-    while running.load(Ordering::SeqCst) {
-        // Set a short accept timeout so we can check the `running` flag.
-        listener
-            .set_nonblocking(true)
-            .expect("failed to set non-blocking");
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let state_clone = Arc::clone(&state);
-                let cache_clone = Arc::clone(&viewport_cache);
-                // Handle each connection in its own thread so concurrent
-                // requests (viewport poll + scene poll + inspector) don't block each other.
-                thread::spawn(move || {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        handle_connection(&state_clone, &cache_clone, stream);
-                    }));
-                });
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(e) => {
-                tracing::warn!("Accept error: {e}");
+    while running.load(Ordering::Relaxed) {
+        // Accept all pending connections before sleeping.
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let state_clone = Arc::clone(&state);
+                    let cache_clone = Arc::clone(&viewport_cache);
+                    thread::spawn(move || {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            handle_connection(&state_clone, &cache_clone, stream);
+                        }));
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break; // No more pending connections
+                }
+                Err(_) => {
+                    break;
+                }
             }
         }
+        // Short sleep — connections queue in the OS backlog during this time.
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -212,6 +212,9 @@ struct HttpRequest {
 }
 
 fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
+    // CRITICAL: Force blocking mode on the accepted socket.
+    // On some systems, nonblocking listener produces nonblocking sockets.
+    stream.set_nonblocking(false).ok();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
     // Read until we have the full headers (look for \r\n\r\n).
@@ -219,9 +222,17 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     let mut buf = [0u8; 4096];
     let mut header_end = None;
 
-    // Read headers
+    // Read headers — retry on WouldBlock (transient).
     loop {
-        let n = stream.read(&mut buf).ok()?;
+        let n = match stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
         if n == 0 {
             break;
         }
@@ -298,11 +309,18 @@ fn handle_connection(
 ) {
     let req = match parse_request(&mut stream) {
         Some(r) => r,
-        None => return,
+        None => {
+            // Always send something so the browser doesn't get ERR_EMPTY_RESPONSE.
+            let _ = stream.write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return;
+        }
     };
 
     match (req.method.as_str(), req.path.as_str()) {
         ("OPTIONS", _) => serve_cors_preflight(&mut stream),
+        ("GET", "/favicon.ico") => serve_404(&mut stream),
         ("GET", "/editor") => serve_editor_html(&mut stream),
         ("GET", "/api/scene") => api_get_scene(state, &mut stream),
         ("GET", p) if p.starts_with("/api/node/") && req.method == "GET" => {
@@ -479,10 +497,13 @@ fn find_node_by_raw_id(tree: &SceneTree, raw: u64) -> Option<NodeId> {
 
 /// `GET /api/scene` — returns the full scene tree as JSON.
 fn api_get_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let state = state.lock().unwrap();
-    let root_id = state.scene_tree.root_id();
-    let tree_json = node_to_json_tree(&state.scene_tree, root_id);
-    let json = serde_json::json!({ "nodes": tree_json }).to_string();
+    // Lock → build JSON → unlock → then send (minimizes lock hold time).
+    let json = {
+        let state = state.lock().unwrap();
+        let root_id = state.scene_tree.root_id();
+        let tree_json = node_to_json_tree(&state.scene_tree, root_id);
+        serde_json::json!({ "nodes": tree_json }).to_string()
+    };
     send_json(stream, &json);
 }
 
@@ -496,16 +517,17 @@ fn api_get_node(state: &Arc<Mutex<EditorState>>, id_str: &str, stream: &mut TcpS
         }
     };
 
-    let state = state.lock().unwrap();
-    let node_id = match find_node_by_raw_id(&state.scene_tree, raw) {
-        Some(id) => id,
-        None => {
-            send_error(stream, 404, "node not found");
-            return;
-        }
+    let json = {
+        let state = state.lock().unwrap();
+        let node_id = match find_node_by_raw_id(&state.scene_tree, raw) {
+            Some(id) => id,
+            None => {
+                send_error(stream, 404, "node not found");
+                return;
+            }
+        };
+        node_properties_json(&state.scene_tree, node_id).to_string()
     };
-
-    let json = node_properties_json(&state.scene_tree, node_id).to_string();
     send_json(stream, &json);
 }
 
@@ -658,16 +680,14 @@ fn api_select_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
 
 /// `GET /api/selected` — returns the selected node's info.
 fn api_get_selected(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let state = state.lock().unwrap();
-    match state.selected_node {
-        Some(node_id) => {
-            let json = node_properties_json(&state.scene_tree, node_id).to_string();
-            send_json(stream, &json);
+    let json = {
+        let state = state.lock().unwrap();
+        match state.selected_node {
+            Some(node_id) => node_properties_json(&state.scene_tree, node_id).to_string(),
+            None => "null".to_string(),
         }
-        None => {
-            send_json(stream, "null");
-        }
-    }
+    };
+    send_json(stream, &json);
 }
 
 /// `POST /api/node/reparent` — reparents a node.

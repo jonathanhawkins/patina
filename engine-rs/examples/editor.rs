@@ -88,21 +88,24 @@ fn main() {
     let r = Arc::clone(&running);
     setup_ctrlc(&r);
 
-    // Main loop: re-render when scene changes.
+    // Main loop: re-render only when scene changes (dirty flag).
     let mut frame_count: u64 = 0;
     while running.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
 
-        // Re-render periodically.
-        let fb = {
-            let mut renderer = SoftwareRenderer::new();
-            let viewport = Viewport::new(WIDTH, HEIGHT, Color::rgb(0.05, 0.05, 0.1));
-            capture_frame(&mut renderer, &viewport)
-        };
-        handle.update_frame(fb);
+        // Re-render every ~100ms (every other 50ms tick). Lock briefly, release before encoding.
+        if frame_count % 2 == 0 {
+            let fb = {
+                let state = handle.state().lock().unwrap();
+                let selected = state.selected_node;
+                gdeditor::scene_renderer::render_scene(&state.scene_tree, selected, WIDTH, HEIGHT)
+                // Lock released at end of block
+            };
+            handle.update_frame(fb);
+        }
         frame_count += 1;
 
-        if frame_count % 100 == 0 {
+        if frame_count % 200 == 0 {
             let state = handle.state().lock().unwrap();
             println!(
                 "[Frame {frame_count}] Nodes: {} | Undo stack: {} | Selected: {:?}",
