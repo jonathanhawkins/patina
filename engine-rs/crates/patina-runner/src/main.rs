@@ -15,12 +15,15 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use gdscene::node::NodeId;
 use gdscene::scene_tree::SceneTree;
+use gdscene::scripting::GDScriptNodeInstance;
 use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
+use gdvariant::Variant;
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -113,6 +116,14 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
         props.insert(key.clone(), to_json(value));
     }
 
+    // Collect script variables if a script is attached.
+    let mut script_vars = serde_json::Map::new();
+    if let Some(script) = tree.get_script(id) {
+        for prop_info in script.list_properties() {
+            script_vars.insert(prop_info.name.clone(), to_json(&prop_info.default_value));
+        }
+    }
+
     // Notification log as human-readable strings.
     let notifications: Vec<String> = node
         .notification_log()
@@ -132,9 +143,65 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
         "class": node.class_name(),
         "path": path,
         "properties": props,
+        "script_vars": script_vars,
         "notifications": notifications,
         "children": children,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Script attachment
+// ---------------------------------------------------------------------------
+
+/// Finds nodes with `_script_path` property, resolves `res://` to the
+/// project directory, loads the `.gd` source, and attaches a
+/// [`GDScriptNodeInstance`] to each node in the scene tree.
+fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) {
+    // Collect (node_id, script_path) pairs first to avoid borrow issues.
+    let mut scripts_to_load: Vec<(NodeId, PathBuf)> = Vec::new();
+
+    for node_id in tree.all_nodes_in_tree_order() {
+        if let Some(node) = tree.get_node(node_id) {
+            if let Variant::String(res_path) = node.get_property("_script_path") {
+                let abs_path = resolve_res_path(project_dir, &res_path);
+                scripts_to_load.push((node_id, abs_path));
+            }
+        }
+    }
+
+    for (node_id, path) in scripts_to_load {
+        match fs::read_to_string(&path) {
+            Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
+                Ok(instance) => {
+                    tree.attach_script(node_id, Box::new(instance));
+                    tracing::info!(
+                        path = %path.display(),
+                        "attached GDScript to node"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = format!("{e:?}"),
+                        "failed to parse GDScript"
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read GDScript file"
+                );
+            }
+        }
+    }
+}
+
+/// Resolves a `res://` path to an absolute filesystem path.
+fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
+    let relative = res_path.strip_prefix("res://").unwrap_or(res_path);
+    project_dir.join(relative)
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +258,12 @@ fn main() {
         }
     };
 
+    // Resolve and attach GDScript files to nodes that have _script_path.
+    let project_dir = Path::new(&args.scene_path)
+        .parent()
+        .unwrap_or(Path::new("."));
+    attach_scripts(&mut tree, project_dir);
+
     // Run lifecycle: enter_tree + ready.
     LifecycleManager::enter_tree(&mut tree, scene_root_id);
 
@@ -220,4 +293,83 @@ fn main() {
         "{}",
         serde_json::to_string_pretty(&output).expect("JSON serialization failed")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdscene::node::Node;
+
+    /// dump_tree_json includes script_vars for nodes with scripts.
+    #[test]
+    fn dump_tree_json_includes_script_vars() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 200
+func _ready():
+    self.speed = 300
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        gdscene::LifecycleManager::enter_tree(&mut tree, child_id);
+
+        let output = dump_tree_json(&tree);
+        // Navigate to the child node
+        let children = output["children"].as_array().unwrap();
+        let player = &children[0];
+
+        // script_vars should contain speed=300
+        let script_vars = &player["script_vars"];
+        assert_eq!(script_vars["speed"]["value"], json!(300));
+    }
+
+    /// dump_tree_json has empty script_vars for nodes without scripts.
+    #[test]
+    fn dump_tree_json_no_script_empty_script_vars() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Plain", "Node2D");
+        let _child_id = tree.add_child(root, child).unwrap();
+
+        let output = dump_tree_json(&tree);
+        let children = output["children"].as_array().unwrap();
+        let plain = &children[0];
+
+        // script_vars should be an empty object
+        assert_eq!(plain["script_vars"], json!({}));
+    }
+
+    /// Script vars are also synced to node properties in dump output.
+    #[test]
+    fn dump_tree_json_script_vars_also_in_properties() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 200
+func _ready():
+    self.speed = 300
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        gdscene::LifecycleManager::enter_tree(&mut tree, child_id);
+
+        let output = dump_tree_json(&tree);
+        let children = output["children"].as_array().unwrap();
+        let player = &children[0];
+
+        // Both script_vars and properties should have speed=300
+        assert_eq!(player["script_vars"]["speed"]["value"], json!(300));
+        assert_eq!(player["properties"]["speed"]["value"], json!(300));
+    }
 }

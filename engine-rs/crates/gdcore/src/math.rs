@@ -4,7 +4,7 @@
 //! vectors, transforms, rects, and colors. These mirror Godot's built-in
 //! math types and follow the same conventions (Y-up, right-handed for 3D).
 
-use std::ops::{Add, Mul, Neg, Sub};
+use std::ops::{Add, Div, Mul, Neg, Sub};
 
 // ---------------------------------------------------------------------------
 // Vector2i
@@ -128,6 +128,16 @@ impl Vector2 {
     pub fn lerp(self, to: Self, t: f32) -> Self {
         Self::new(self.x + (to.x - self.x) * t, self.y + (to.y - self.y) * t)
     }
+
+    /// Returns the angle of the vector (atan2(y, x)).
+    pub fn angle(self) -> f32 {
+        self.y.atan2(self.x)
+    }
+
+    /// Returns the distance to another vector.
+    pub fn distance_to(self, other: Self) -> f32 {
+        (self - other).length()
+    }
 }
 
 impl Add for Vector2 {
@@ -148,6 +158,20 @@ impl Mul<f32> for Vector2 {
     type Output = Self;
     fn mul(self, s: f32) -> Self {
         Self::new(self.x * s, self.y * s)
+    }
+}
+
+impl Div<f32> for Vector2 {
+    type Output = Self;
+    fn div(self, s: f32) -> Self {
+        Self::new(self.x / s, self.y / s)
+    }
+}
+
+impl Mul<Vector2> for f32 {
+    type Output = Vector2;
+    fn mul(self, v: Vector2) -> Vector2 {
+        Vector2::new(self * v.x, self * v.y)
     }
 }
 
@@ -252,6 +276,11 @@ impl Vector3 {
             self.z + (to.z - self.z) * t,
         )
     }
+
+    /// Returns the distance to another vector.
+    pub fn distance_to(self, other: Self) -> f32 {
+        (self - other).length()
+    }
 }
 
 impl Add for Vector3 {
@@ -272,6 +301,20 @@ impl Mul<f32> for Vector3 {
     type Output = Self;
     fn mul(self, s: f32) -> Self {
         Self::new(self.x * s, self.y * s, self.z * s)
+    }
+}
+
+impl Div<f32> for Vector3 {
+    type Output = Self;
+    fn div(self, s: f32) -> Self {
+        Self::new(self.x / s, self.y / s, self.z / s)
+    }
+}
+
+impl Mul<Vector3> for f32 {
+    type Output = Vector3;
+    fn mul(self, v: Vector3) -> Vector3 {
+        Vector3::new(self * v.x, self * v.y, self * v.z)
     }
 }
 

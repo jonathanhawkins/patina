@@ -4,12 +4,13 @@
 //! viewport rendering, and scene save/load over a simple REST API.
 //! Uses the same `std::net::TcpListener` pattern as `gdrender2d::frame_server`.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gdrender2d::export::{encode_bmp, encode_png};
 use gdrender2d::renderer::FrameBuffer;
@@ -37,6 +38,20 @@ pub struct DragState {
     pub camera_offset: Vector2,
 }
 
+/// A single log entry in the editor's operation log.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+    /// Log level: "info", "warn", or "error".
+    pub level: String,
+    /// Human-readable log message.
+    pub message: String,
+}
+
+/// Maximum number of log entries to keep.
+const MAX_LOG_ENTRIES: usize = 100;
+
 /// Shared editor state protected by a mutex.
 pub struct EditorState {
     /// The scene tree being edited.
@@ -59,6 +74,16 @@ pub struct EditorState {
     pub viewport_width: u32,
     /// Viewport height for hit testing.
     pub viewport_height: u32,
+    /// Current viewport zoom level (1.0 = 100%).
+    pub viewport_zoom: f64,
+    /// Current viewport pan offset in pixels (x, y).
+    pub viewport_pan: (f64, f64),
+    /// Ring buffer of recent editor log entries.
+    pub log_entries: VecDeque<LogEntry>,
+    /// The currently loaded scene file path, if any.
+    pub scene_file: Option<String>,
+    /// Whether the scene has unsaved modifications.
+    pub scene_modified: bool,
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -81,6 +106,27 @@ impl EditorState {
             drag_state: None,
             viewport_width: 800,
             viewport_height: 600,
+            viewport_zoom: 1.0,
+            viewport_pan: (0.0, 0.0),
+            log_entries: VecDeque::new(),
+            scene_file: None,
+            scene_modified: false,
+        }
+    }
+
+    /// Adds a log entry to the ring buffer.
+    pub fn add_log(&mut self, level: &str, message: impl Into<String>) {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.log_entries.push_back(LogEntry {
+            timestamp,
+            level: level.to_string(),
+            message: message.into(),
+        });
+        if self.log_entries.len() > MAX_LOG_ENTRIES {
+            self.log_entries.pop_front();
         }
     }
 }
@@ -335,6 +381,9 @@ fn handle_connection(
         ("POST", "/api/node/delete") => api_delete_node(state, &req.body, &mut stream),
         ("POST", "/api/node/select") => api_select_node(state, &req.body, &mut stream),
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/reorder") => api_reorder_node(state, &req.body, &mut stream),
         ("POST", "/api/property/set") => api_set_property(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
         ("POST", "/api/redo") => api_redo(state, &mut stream),
@@ -346,6 +395,11 @@ fn handle_connection(
         }
         ("POST", "/api/viewport/drag") => api_viewport_drag(state, &req.body, &mut stream),
         ("POST", "/api/viewport/drag_end") => api_viewport_drag_end(state, &req.body, &mut stream),
+        ("GET", "/api/viewport/zoom_pan") => api_get_zoom_pan(state, &mut stream),
+        ("POST", "/api/viewport/zoom") => api_set_zoom(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/pan") => api_set_pan(state, &req.body, &mut stream),
+        ("GET", "/api/logs") => api_get_logs(state, &mut stream),
+        ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
         _ => serve_404(&mut stream),
     }
 }
@@ -432,11 +486,17 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
         .map(|&cid| node_to_json_tree(tree, cid))
         .collect();
 
+    let visible = match node.get_property("visible") {
+        Variant::Bool(b) => b,
+        _ => true, // default visible
+    };
+
     serde_json::json!({
         "id": node_id.raw(),
         "name": node.name(),
         "class": node.class_name(),
         "path": path,
+        "visible": visible,
         "children": children
     })
 }
@@ -572,6 +632,8 @@ fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStr
         }
     };
 
+    let name_str = name.clone();
+    let class_name_str = class_name.clone();
     let mut cmd = EditorCommand::AddNode {
         parent_id,
         name,
@@ -591,6 +653,11 @@ fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStr
 
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Added {} node '{}'", class_name_str, name_str),
+    );
 
     let json = format!(r#"{{"id":{}}}"#, created_id.raw());
     send_json(stream, &json);
@@ -629,6 +696,7 @@ fn api_delete_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         (node.name().to_string(), node.class_name().to_string())
     };
 
+    let log_name = name.clone();
     let mut cmd = EditorCommand::RemoveNode {
         node_id,
         parent_id: None,
@@ -643,6 +711,8 @@ fn api_delete_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
 
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log("info", format!("Deleted node '{}'", log_name));
 
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -748,6 +818,205 @@ fn api_reparent_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     send_json(stream, r#"{"ok":true}"#);
 }
 
+/// `POST /api/node/rename` — renames a node.
+fn api_rename_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let new_name = match parsed.get("new_name").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing new_name");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let new_name_log = new_name.clone();
+    let mut cmd = EditorCommand::RenameNode {
+        node_id,
+        new_name,
+        old_name: String::new(),
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    let old_name_log = match &cmd {
+        EditorCommand::RenameNode { old_name, .. } => old_name.clone(),
+        _ => String::new(),
+    };
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Renamed '{}' to '{}'", old_name_log, new_name_log),
+    );
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/duplicate` — duplicates a node and its subtree as a sibling.
+fn api_duplicate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let mut cmd = EditorCommand::DuplicateNode {
+        source_id: node_id,
+        created_ids: Vec::new(),
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    let root_created = match &cmd {
+        EditorCommand::DuplicateNode { created_ids, .. } => {
+            created_ids.first().map(|id| id.raw()).unwrap_or(0)
+        }
+        _ => unreachable!(),
+    };
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+
+    let json = format!(r#"{{"id":{root_created}}}"#);
+    send_json(stream, &json);
+}
+
+/// `POST /api/node/reorder` — reorders a node within its parent's children.
+fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let direction = match parsed.get("direction").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing direction (up or down)");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let parent_id = match state.scene_tree.get_node(node_id).and_then(|n| n.parent()) {
+        Some(pid) => pid,
+        None => {
+            send_error(stream, 400, "node has no parent");
+            return;
+        }
+    };
+
+    // Get parent's children and find index.
+    let children: Vec<NodeId> = state
+        .scene_tree
+        .get_node(parent_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+
+    let idx = match children.iter().position(|&c| c == node_id) {
+        Some(i) => i,
+        None => {
+            send_error(stream, 500, "node not found in parent children");
+            return;
+        }
+    };
+
+    let new_idx = match direction.as_str() {
+        "up" => {
+            if idx == 0 {
+                send_json(stream, r#"{"ok":true}"#);
+                return;
+            }
+            idx - 1
+        }
+        "down" => {
+            if idx >= children.len() - 1 {
+                send_json(stream, r#"{"ok":true}"#);
+                return;
+            }
+            idx + 1
+        }
+        _ => {
+            send_error(stream, 400, "direction must be 'up' or 'down'");
+            return;
+        }
+    };
+
+    // Swap in the parent's children list.
+    if let Some(parent) = state.scene_tree.get_node_mut(parent_id) {
+        let children = parent.children_mut();
+        children.swap(idx, new_idx);
+    }
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
 /// `POST /api/property/set` — sets a property on a node.
 fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
@@ -796,6 +1065,7 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     };
 
+    let prop_name = property.clone();
     let mut cmd = EditorCommand::SetProperty {
         node_id,
         property,
@@ -810,6 +1080,8 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
 
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log("info", format!("Changed property '{}'", prop_name));
 
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -833,6 +1105,7 @@ fn api_undo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     }
 
     state.redo_stack.push(cmd);
+    state.add_log("info", "Undo");
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -854,6 +1127,7 @@ fn api_redo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     }
 
     state.undo_stack.push(cmd);
+    state.add_log("info", "Redo");
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -901,7 +1175,7 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         }
     };
 
-    let state = state.lock().unwrap();
+    let mut state = state.lock().unwrap();
     let root_id = state.scene_tree.root_id();
 
     // Find first child of root to use as scene root (the actual scene).
@@ -917,6 +1191,10 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         send_error(stream, 500, &format!("failed to write: {e}"));
         return;
     }
+
+    state.scene_file = Some(path.clone());
+    state.scene_modified = false;
+    state.add_log("info", format!("Saved scene to '{}'", path));
 
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -967,6 +1245,9 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
             state.selected_node = None;
             state.undo_stack.clear();
             state.redo_stack.clear();
+            state.scene_file = Some(path.clone());
+            state.scene_modified = false;
+            state.add_log("info", format!("Loaded scene from '{}'", path));
             send_json(stream, r#"{"ok":true}"#);
         }
         Err(e) => {
@@ -995,7 +1276,10 @@ fn api_viewport_click(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     let mut state = state.lock().unwrap();
     let vw = state.viewport_width;
     let vh = state.viewport_height;
-    let hit = crate::scene_renderer::hit_test(&state.scene_tree, vw, vh, x, y);
+    let zoom = state.viewport_zoom;
+    let pan = state.viewport_pan;
+    let hit =
+        crate::scene_renderer::hit_test_with_zoom_pan(&state.scene_tree, vw, vh, zoom, pan, x, y);
 
     state.selected_node = hit;
 
@@ -1021,11 +1305,20 @@ fn api_viewport_drag_start(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
     let mut state = state.lock().unwrap();
     let vw = state.viewport_width;
     let vh = state.viewport_height;
-    let hit = crate::scene_renderer::hit_test(&state.scene_tree, vw, vh, x, y);
+    let zoom = state.viewport_zoom;
+    let pan = state.viewport_pan;
+    let hit =
+        crate::scene_renderer::hit_test_with_zoom_pan(&state.scene_tree, vw, vh, zoom, pan, x, y);
 
     match hit {
         Some(node_id) => {
-            let offset = crate::scene_renderer::camera_offset(&state.scene_tree, vw, vh);
+            let offset = crate::scene_renderer::camera_offset_with_zoom_pan(
+                &state.scene_tree,
+                vw,
+                vh,
+                zoom,
+                pan,
+            );
             let node_pos = state
                 .scene_tree
                 .get_node(node_id)
@@ -1078,9 +1371,11 @@ fn api_viewport_drag(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         }
     };
 
-    // Use frozen camera offset so bounds changes don't affect pixel→scene.
+    // Pixel delta divided by zoom gives world-space delta.
+    let zoom = state.viewport_zoom as f32;
     let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
-    let new_pos = drag.start_node_pos + pixel_delta;
+    let world_delta = Vector2::new(pixel_delta.x / zoom, pixel_delta.y / zoom);
+    let new_pos = drag.start_node_pos + world_delta;
 
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
         node.set_property("position", Variant::Vector2(new_pos));
@@ -1115,9 +1410,11 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
         }
     };
 
-    // Use frozen camera offset so bounds changes don't affect pixel→scene.
+    // Pixel delta divided by zoom gives world-space delta.
+    let zoom = state.viewport_zoom as f32;
     let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
-    let new_pos = drag.start_node_pos + pixel_delta;
+    let world_delta = Vector2::new(pixel_delta.x / zoom, pixel_delta.y / zoom);
+    let new_pos = drag.start_node_pos + world_delta;
 
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
         node.set_property("position", Variant::Vector2(new_pos));
@@ -1127,6 +1424,124 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
         stream,
         &format!(r#"{{"ok":true,"x":{},"y":{}}}"#, new_pos.x, new_pos.y),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Viewport zoom/pan endpoints
+// ---------------------------------------------------------------------------
+
+/// `GET /api/viewport/zoom_pan` — returns current zoom and pan state.
+fn api_get_zoom_pan(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        format!(
+            r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
+            state.viewport_zoom, state.viewport_pan.0, state.viewport_pan.1
+        )
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/viewport/zoom` — sets the viewport zoom level.
+fn api_set_zoom(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let zoom = parsed.get("zoom").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let mut state = state.lock().unwrap();
+    state.viewport_zoom = zoom.clamp(0.1, 16.0);
+    let json = format!(
+        r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
+        state.viewport_zoom, state.viewport_pan.0, state.viewport_pan.1
+    );
+    send_json(stream, &json);
+}
+
+/// `POST /api/viewport/pan` — sets the viewport pan offset.
+fn api_set_pan(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut state = state.lock().unwrap();
+    state.viewport_pan = (x, y);
+    let json = format!(
+        r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
+        state.viewport_zoom, x, y
+    );
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// Log and scene info endpoints
+// ---------------------------------------------------------------------------
+
+/// `GET /api/logs` — returns recent editor operation log entries.
+fn api_get_logs(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        let entries: Vec<String> = state
+            .log_entries
+            .iter()
+            .map(|e| {
+                format!(
+                    r#"{{"timestamp":{},"level":"{}","message":"{}"}}"#,
+                    e.timestamp,
+                    e.level,
+                    e.message.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            })
+            .collect();
+        format!("[{}]", entries.join(","))
+    };
+    send_json(stream, &json);
+}
+
+/// `GET /api/scene/info` — returns scene statistics and metadata.
+fn api_get_scene_info(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        let total_nodes = state.scene_tree.node_count();
+
+        // Count nodes by type.
+        let mut type_counts = std::collections::HashMap::<String, usize>::new();
+        let all_nodes = state.scene_tree.all_nodes_in_tree_order();
+        for nid in &all_nodes {
+            if let Some(node) = state.scene_tree.get_node(*nid) {
+                *type_counts
+                    .entry(node.class_name().to_string())
+                    .or_default() += 1;
+            }
+        }
+        let types_json: Vec<String> = type_counts
+            .iter()
+            .map(|(k, v)| format!(r#""{}": {}"#, k, v))
+            .collect();
+
+        let scene_file = state
+            .scene_file
+            .as_deref()
+            .map(|s| format!(r#""{}""#, s.replace('\\', "\\\\").replace('"', "\\\"")))
+            .unwrap_or_else(|| "null".to_string());
+
+        format!(
+            r#"{{"node_count":{},"type_breakdown":{{{}}},"scene_file":{},"modified":{}}}"#,
+            total_nodes,
+            types_json.join(","),
+            scene_file,
+            state.scene_modified,
+        )
+    };
+    send_json(stream, &json);
 }
 
 #[cfg(test)]
@@ -1732,6 +2147,429 @@ mod tests {
         assert!(resp.contains("200 OK"));
         let body = extract_body(&resp);
         assert!(body.contains("\"ok\":true"));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_zoom_pan_get_defaults() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/viewport/zoom_pan");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["zoom"].as_f64().unwrap(), 1.0);
+        assert_eq!(v["pan_x"].as_f64().unwrap(), 0.0);
+        assert_eq!(v["pan_y"].as_f64().unwrap(), 0.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_set_zoom() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/zoom", r#"{"zoom":2.0}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["zoom"].as_f64().unwrap(), 2.0);
+
+        // Verify via GET.
+        let resp = http_get(port, "/api/viewport/zoom_pan");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["zoom"].as_f64().unwrap(), 2.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_set_zoom_clamp_min() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/zoom", r#"{"zoom":0.01}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            (v["zoom"].as_f64().unwrap() - 0.1).abs() < 0.001,
+            "zoom should clamp to 0.1"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_set_zoom_clamp_max() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/zoom", r#"{"zoom":100.0}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            (v["zoom"].as_f64().unwrap() - 16.0).abs() < 0.001,
+            "zoom should clamp to 16.0"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_set_pan() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/pan", r#"{"x":50.5,"y":-30.0}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["pan_x"].as_f64().unwrap(), 50.5);
+        assert_eq!(v["pan_y"].as_f64().unwrap(), -30.0);
+
+        // Verify via GET.
+        let resp = http_get(port, "/api/viewport/zoom_pan");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["pan_x"].as_f64().unwrap(), 50.5);
+        assert_eq!(v["pan_y"].as_f64().unwrap(), -30.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_zoom_affects_drag() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Set zoom to 2x.
+        http_post(port, "/api/viewport/zoom", r#"{"zoom":2.0}"#);
+
+        // Start drag on the node at pixel (400, 300).
+        let resp = http_post(port, "/api/viewport/drag_start", r#"{"x":400,"y":300}"#);
+        let body = extract_body(&resp);
+        assert!(body.contains("\"dragging\":true"));
+
+        // Drag 100px right in screen space = 50 world units at zoom 2x.
+        http_post(port, "/api/viewport/drag_end", r#"{"x":500,"y":300}"#);
+
+        // Verify position changed by ~50 in x (not 100).
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let node_body = extract_body(&node_resp);
+        let v: serde_json::Value = serde_json::from_str(node_body).unwrap();
+        let pos_prop = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "position")
+            .unwrap();
+        let pos_val = &pos_prop["value"]["value"];
+        let x = pos_val[0].as_f64().unwrap();
+        assert!(
+            (x - 60.0).abs() < 1.0,
+            "x should be ~60 (10 + 50 at 2x zoom), got {x}"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_rename_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Rename the node.
+        let body = format!(r#"{{"node_id":{main_id},"new_name":"Player"}}"#);
+        let resp = http_post(port, "/api/node/rename", &body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify the name changed.
+        let scene_resp = http_get(port, "/api/scene");
+        assert!(scene_resp.contains("Player"));
+        assert!(!extract_body(&scene_resp).contains("\"Main\""));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_rename_node_undo() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Rename.
+        let body = format!(r#"{{"node_id":{main_id},"new_name":"Renamed"}}"#);
+        http_post(port, "/api/node/rename", &body);
+
+        // Verify renamed.
+        let scene_resp = http_get(port, "/api/scene");
+        assert!(scene_resp.contains("Renamed"));
+
+        // Undo.
+        http_post(port, "/api/undo", "");
+
+        // Verify name is restored.
+        let scene_resp = http_get(port, "/api/scene");
+        assert!(scene_resp.contains("Main"));
+        assert!(!extract_body(&scene_resp).contains("\"Renamed\""));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_rename_node_missing_fields() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/node/rename", r#"{"node_id":1}"#);
+        assert!(resp.contains("400"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_rename_node_not_found() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/node/rename",
+            r#"{"node_id":99999,"new_name":"X"}"#,
+        );
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_duplicate_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a child to Main so we test subtree duplication.
+        let add_body =
+            format!(r#"{{"parent_id":{main_id},"name":"Child","class_name":"Sprite2D"}}"#);
+        http_post(port, "/api/node/add", &add_body);
+
+        // Duplicate Main (which now has a child).
+        let body = format!(r#"{{"node_id":{main_id}}}"#);
+        let resp = http_post(port, "/api/node/duplicate", &body);
+        assert!(resp.contains("200 OK"));
+        let resp_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(resp_body).unwrap();
+        assert!(v["id"].as_u64().is_some(), "should return new node id");
+
+        // Verify the duplicate exists in the tree.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let root_children = sv["nodes"]["children"].as_array().unwrap();
+        // Should have two children under root: original Main and duplicated Main.
+        assert!(
+            root_children.len() >= 2,
+            "root should have at least 2 children after duplicate, got {}",
+            root_children.len()
+        );
+
+        // Both should be named "Main".
+        let main_count = root_children.iter().filter(|c| c["name"] == "Main").count();
+        assert_eq!(main_count, 2, "should have two Main nodes");
+
+        // The duplicate should also have a Child child.
+        let dup = &root_children[1];
+        let dup_children = dup["children"].as_array().unwrap();
+        assert_eq!(dup_children.len(), 1, "duplicate should have 1 child");
+        assert_eq!(dup_children[0]["name"], "Child");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_duplicate_node_undo() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Duplicate.
+        let body = format!(r#"{{"node_id":{main_id}}}"#);
+        http_post(port, "/api/node/duplicate", &body);
+
+        // Verify duplicate exists.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let count_before = sv["nodes"]["children"].as_array().unwrap().len();
+        assert!(count_before >= 2);
+
+        // Undo.
+        http_post(port, "/api/undo", "");
+
+        // Verify it's gone.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let count_after = sv["nodes"]["children"].as_array().unwrap().len();
+        assert_eq!(count_after, 1, "should be back to 1 child after undo");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_duplicate_node_not_found() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/node/duplicate", r#"{"node_id":99999}"#);
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_reorder_node_down() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add two children.
+        let body_a = format!(r#"{{"parent_id":{main_id},"name":"A","class_name":"Node"}}"#);
+        http_post(port, "/api/node/add", &body_a);
+        let body_b = format!(r#"{{"parent_id":{main_id},"name":"B","class_name":"Node"}}"#);
+        let resp_b = http_post(port, "/api/node/add", &body_b);
+        let a_scene = http_get(port, "/api/scene");
+        let a_body = extract_body(&a_scene);
+        let av: serde_json::Value = serde_json::from_str(a_body).unwrap();
+        let main_children = av["nodes"]["children"][0]["children"].as_array().unwrap();
+        let a_id = main_children[0]["id"].as_u64().unwrap();
+
+        // A is first, B is second. Move A down.
+        let body = format!(r#"{{"node_id":{a_id},"direction":"down"}}"#);
+        let resp = http_post(port, "/api/node/reorder", &body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify order: B should now be first.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let children = sv["nodes"]["children"][0]["children"].as_array().unwrap();
+        assert_eq!(
+            children[0]["name"], "B",
+            "B should be first after move down"
+        );
+        assert_eq!(
+            children[1]["name"], "A",
+            "A should be second after move down"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_reorder_node_up() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add two children.
+        let body_a = format!(r#"{{"parent_id":{main_id},"name":"A","class_name":"Node"}}"#);
+        http_post(port, "/api/node/add", &body_a);
+        let body_b = format!(r#"{{"parent_id":{main_id},"name":"B","class_name":"Node"}}"#);
+        http_post(port, "/api/node/add", &body_b);
+
+        // Get B's id.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let main_children = sv["nodes"]["children"][0]["children"].as_array().unwrap();
+        let b_id = main_children[1]["id"].as_u64().unwrap();
+
+        // Move B up.
+        let body = format!(r#"{{"node_id":{b_id},"direction":"up"}}"#);
+        let resp = http_post(port, "/api/node/reorder", &body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify: B is now first.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let children = sv["nodes"]["children"][0]["children"].as_array().unwrap();
+        assert_eq!(children[0]["name"], "B", "B should be first after move up");
+        assert_eq!(children[1]["name"], "A", "A should be second after move up");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_reorder_at_boundary_is_noop() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add one child.
+        let body_a = format!(r#"{{"parent_id":{main_id},"name":"Only","class_name":"Node"}}"#);
+        http_post(port, "/api/node/add", &body_a);
+
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let only_id = sv["nodes"]["children"][0]["children"][0]["id"]
+            .as_u64()
+            .unwrap();
+
+        // Move up when already first.
+        let resp = http_post(
+            port,
+            "/api/node/reorder",
+            &format!(r#"{{"node_id":{only_id},"direction":"up"}}"#),
+        );
+        assert!(resp.contains("200 OK"));
+
+        // Move down when already last.
+        let resp = http_post(
+            port,
+            "/api/node/reorder",
+            &format!(r#"{{"node_id":{only_id},"direction":"down"}}"#),
+        );
+        assert!(resp.contains("200 OK"));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_scene_tree_visible_field() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Default: visible should be true.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        assert_eq!(
+            sv["nodes"]["children"][0]["visible"], true,
+            "default visibility should be true"
+        );
+
+        // Set visible to false.
+        let body = format!(
+            r#"{{"node_id":{main_id},"property":"visible","value":{{"type":"Bool","value":false}}}}"#
+        );
+        http_post(port, "/api/property/set", &body);
+
+        // Verify visible is false.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        assert_eq!(
+            sv["nodes"]["children"][0]["visible"], false,
+            "visibility should be false after setting"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_duplicate_preserves_properties() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Main already has position (10, 20). Duplicate it.
+        let body = format!(r#"{{"node_id":{main_id}}}"#);
+        let resp = http_post(port, "/api/node/duplicate", &body);
+        let resp_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(resp_body).unwrap();
+        let dup_id = v["id"].as_u64().unwrap();
+
+        // Check the duplicate has the same position.
+        let node_resp = http_get(port, &format!("/api/node/{dup_id}"));
+        let node_body = extract_body(&node_resp);
+        let nv: serde_json::Value = serde_json::from_str(node_body).unwrap();
+        let pos_prop = nv["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "position");
+        assert!(
+            pos_prop.is_some(),
+            "duplicate should have position property"
+        );
 
         handle.stop();
     }

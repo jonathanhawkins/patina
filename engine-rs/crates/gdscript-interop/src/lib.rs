@@ -19,6 +19,7 @@ pub use bindings::{
 pub use bridge::{NativeScript, NativeScriptBuilder, ScriptBridge};
 pub use interpreter::{RuntimeError, RuntimeErrorKind, ScriptWarning, SourceLocation, StackFrame};
 pub use parser::{
-    Annotation, AssignOp, BinOp, Expr, MatchArm, MatchPattern, ParseError, Parser, Stmt, UnaryOp,
+    Annotation, AssignOp, BinOp, Expr, FuncParam, MatchArm, MatchPattern, ParseError, Parser, Stmt,
+    UnaryOp,
 };
 pub use tokenizer::{tokenize, LexError, Token, TokenSpan};

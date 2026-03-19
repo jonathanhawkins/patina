@@ -15,6 +15,7 @@ gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
 gdscene = { path = "../gdscene" }
+gdscript-interop = { path = "../gdscript-interop" }
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

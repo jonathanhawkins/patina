@@ -594,6 +594,15 @@ impl SceneTree {
             script.set_scene_access(Box::new(accessor), node_id.raw());
             let _ = script.call_method(method, args);
             script.clear_scene_access();
+
+            // Sync script variables to node properties so they are visible
+            // as first-class node properties (matching Godot behavior).
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                for prop in script.list_properties() {
+                    node.set_property(&prop.name, prop.default_value.clone());
+                }
+            }
+
             self.scripts.insert(node_id, script);
         }
     }

@@ -35,27 +35,49 @@ const COLOR_DEFAULT: Color = Color::new(0.8, 0.8, 0.8, 1.0); // white-ish
 const COLOR_SELECTED: Color = Color::new(1.0, 0.85, 0.0, 1.0); // bright amber
 const COLOR_NODE_DOT: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray
 
+/// Gizmo colors for the transform arrows.
+const GIZMO_X_COLOR: Color = Color::new(1.0, 0.2, 0.2, 1.0); // red
+const GIZMO_Y_COLOR: Color = Color::new(0.2, 0.85, 0.2, 1.0); // green
+const GIZMO_CENTER_COLOR: Color = Color::new(1.0, 1.0, 0.3, 1.0); // yellow
+
 /// Renders the scene tree into a framebuffer for the editor viewport.
 ///
 /// Draws a grid background, visual representations of each node based on
 /// its class name, and highlights the selected node if any.
+/// Supports zoom and pan: `zoom` multiplies world coordinates, `pan` shifts them.
 pub fn render_scene(
     tree: &SceneTree,
     selected: Option<NodeId>,
     width: u32,
     height: u32,
 ) -> FrameBuffer {
-    let mut fb = FrameBuffer::new(width, height, BG_COLOR);
+    render_scene_with_zoom_pan(tree, selected, width, height, 1.0, (0.0, 0.0))
+}
 
-    // Compute camera offset to center the scene.
+/// Renders the scene tree with explicit zoom and pan parameters.
+///
+/// `zoom` scales world coordinates (1.0 = 100%). `pan` is an additional
+/// pixel offset applied after zoom.
+pub fn render_scene_with_zoom_pan(
+    tree: &SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> FrameBuffer {
+    let mut fb = FrameBuffer::new(width, height, BG_COLOR);
+    let z = zoom as f32;
+
+    // Compute camera offset to center the scene, then apply zoom/pan.
     let bounds = compute_scene_bounds(tree);
     let center_x = bounds.position.x + bounds.size.x / 2.0;
     let center_y = bounds.position.y + bounds.size.y / 2.0;
-    let offset_x = width as f32 / 2.0 - center_x;
-    let offset_y = height as f32 / 2.0 - center_y;
+    let offset_x = width as f32 / 2.0 - center_x * z + pan.0 as f32;
+    let offset_y = height as f32 / 2.0 - center_y * z + pan.1 as f32;
 
-    // Draw grid.
-    draw_grid(&mut fb, offset_x, offset_y);
+    // Draw grid (zoom-aware).
+    draw_grid_zoomed(&mut fb, offset_x, offset_y, z);
 
     // Walk all nodes in tree order and draw them.
     let node_ids = tree.all_nodes_in_tree_order();
@@ -65,18 +87,20 @@ pub fn render_scene(
             None => continue,
         };
 
-        let pos = extract_position(node) + Vector2::new(offset_x, offset_y);
+        let world_pos = extract_position(node);
+        let pos = Vector2::new(world_pos.x * z + offset_x, world_pos.y * z + offset_y);
         let class = node.class_name();
         let is_selected = selected == Some(node_id);
 
         // Draw node representation based on class.
         match class {
             "Node2D" => draw_node2d_diamond(&mut fb, pos, COLOR_NODE2D),
-            "Sprite2D" => draw_sprite2d_rect(&mut fb, pos, COLOR_SPRITE2D),
+            "Sprite2D" => draw_sprite2d_rect_zoomed(&mut fb, pos, COLOR_SPRITE2D, z),
             "Camera2D" => draw_camera2d_outline(&mut fb, pos, COLOR_CAMERA2D, width, height),
             "Control" | "Label" | "Button" => {
                 let size = extract_size(node);
-                draw_control_rect(&mut fb, pos, size, COLOR_CONTROL);
+                let scaled_size = Vector2::new(size.x * z, size.y * z);
+                draw_control_rect(&mut fb, pos, scaled_size, COLOR_CONTROL);
             }
             "Node" => {
                 // Skip root node, draw small circle for others.
@@ -92,13 +116,8 @@ pub fn render_scene(
         // Draw selection highlight.
         if is_selected {
             draw_selection_highlight(&mut fb, pos, class);
-            // Selected node dot (amber).
-            draw::fill_circle(
-                &mut fb,
-                Vector2::new(pos.x, pos.y - 16.0),
-                3.0,
-                COLOR_SELECTED,
-            );
+            // Draw transform gizmo at node position.
+            draw_move_gizmo(&mut fb, pos, z);
         } else if class != "Node" || node.parent().is_some() {
             // Gray dot above non-root nodes.
             draw::fill_circle(
@@ -166,7 +185,74 @@ fn extract_size(node: &gdscene::node::Node) -> Vector2 {
     }
 }
 
-/// Draws the background grid.
+/// Draws the background grid with zoom support.
+fn draw_grid_zoomed(fb: &mut FrameBuffer, offset_x: f32, offset_y: f32, zoom: f32) {
+    let w = fb.width;
+    let h = fb.height;
+
+    let minor = (GRID_MINOR as f32 * zoom).max(4.0);
+    let _major = (GRID_MAJOR as f32 * zoom).max(16.0);
+
+    // Vertical lines.
+    let start_world_x = -offset_x / zoom;
+    let start_x = (start_world_x / (GRID_MINOR as f32)).floor() as i32;
+    let end_x = ((w as f32 - offset_x) / zoom / (GRID_MINOR as f32)).ceil() as i32;
+    for ix in start_x..=end_x {
+        let wx = ix as f32 * GRID_MINOR as f32;
+        let sx = wx * zoom + offset_x;
+        if sx < 0.0 || sx >= w as f32 {
+            continue;
+        }
+        let is_major = ix as i64 % (GRID_MAJOR as i64 / GRID_MINOR as i64) == 0;
+        let color = if is_major {
+            GRID_COLOR_MAJOR
+        } else {
+            // Skip minor lines when too zoomed out.
+            if minor < 8.0 {
+                continue;
+            }
+            GRID_COLOR_MINOR
+        };
+        draw::draw_line(
+            fb,
+            Vector2::new(sx, 0.0),
+            Vector2::new(sx, h as f32 - 1.0),
+            color,
+            1.0,
+        );
+    }
+
+    // Horizontal lines.
+    let start_world_y = -offset_y / zoom;
+    let start_y = (start_world_y / (GRID_MINOR as f32)).floor() as i32;
+    let end_y = ((h as f32 - offset_y) / zoom / (GRID_MINOR as f32)).ceil() as i32;
+    for iy in start_y..=end_y {
+        let wy = iy as f32 * GRID_MINOR as f32;
+        let sy = wy * zoom + offset_y;
+        if sy < 0.0 || sy >= h as f32 {
+            continue;
+        }
+        let is_major = iy as i64 % (GRID_MAJOR as i64 / GRID_MINOR as i64) == 0;
+        let color = if is_major {
+            GRID_COLOR_MAJOR
+        } else {
+            if minor < 8.0 {
+                continue;
+            }
+            GRID_COLOR_MINOR
+        };
+        draw::draw_line(
+            fb,
+            Vector2::new(0.0, sy),
+            Vector2::new(w as f32 - 1.0, sy),
+            color,
+            1.0,
+        );
+    }
+}
+
+/// Draws the background grid (no zoom, kept for backwards compatibility).
+#[allow(dead_code)]
 fn draw_grid(fb: &mut FrameBuffer, offset_x: f32, offset_y: f32) {
     let w = fb.width;
     let h = fb.height;
@@ -229,11 +315,22 @@ fn draw_node2d_diamond(fb: &mut FrameBuffer, pos: Vector2, color: Color) {
     draw::draw_line(fb, left, top, color, 1.0);
 }
 
-/// Draws a filled rectangle for Sprite2D nodes.
+/// Draws a filled rectangle for Sprite2D nodes (without zoom).
+#[allow(dead_code)]
 fn draw_sprite2d_rect(fb: &mut FrameBuffer, pos: Vector2, color: Color) {
     let rect = Rect2::new(
         Vector2::new(pos.x - 10.0, pos.y - 10.0),
         Vector2::new(20.0, 20.0),
+    );
+    draw::fill_rect(fb, rect, color);
+}
+
+/// Draws a filled rectangle for Sprite2D nodes with zoom-aware sizing.
+fn draw_sprite2d_rect_zoomed(fb: &mut FrameBuffer, pos: Vector2, color: Color, zoom: f32) {
+    let half = 10.0 * zoom;
+    let rect = Rect2::new(
+        Vector2::new(pos.x - half, pos.y - half),
+        Vector2::new(half * 2.0, half * 2.0),
     );
     draw::fill_rect(fb, rect, color);
 }
@@ -275,6 +372,61 @@ fn draw_selection_highlight(fb: &mut FrameBuffer, pos: Vector2, class: &str) {
     draw::draw_line(fb, bl, tl, COLOR_SELECTED, 1.0);
 }
 
+/// Draws a move gizmo (X/Y arrows + center square) at the given screen position.
+///
+/// Arrow length is ~40px in screen space, independent of zoom.
+fn draw_move_gizmo(fb: &mut FrameBuffer, pos: Vector2, _zoom: f32) {
+    let arrow_len = 40.0;
+    let head_len = 8.0;
+    let head_half = 4.0;
+    let center_half = 3.0;
+
+    // X arrow (red) — rightward.
+    let x_end = Vector2::new(pos.x + arrow_len, pos.y);
+    draw::draw_line(fb, pos, x_end, GIZMO_X_COLOR, 1.5);
+    // Arrowhead.
+    draw::draw_line(
+        fb,
+        x_end,
+        Vector2::new(x_end.x - head_len, x_end.y - head_half),
+        GIZMO_X_COLOR,
+        1.5,
+    );
+    draw::draw_line(
+        fb,
+        x_end,
+        Vector2::new(x_end.x - head_len, x_end.y + head_half),
+        GIZMO_X_COLOR,
+        1.5,
+    );
+
+    // Y arrow (green) — downward.
+    let y_end = Vector2::new(pos.x, pos.y + arrow_len);
+    draw::draw_line(fb, pos, y_end, GIZMO_Y_COLOR, 1.5);
+    // Arrowhead.
+    draw::draw_line(
+        fb,
+        y_end,
+        Vector2::new(y_end.x - head_half, y_end.y - head_len),
+        GIZMO_Y_COLOR,
+        1.5,
+    );
+    draw::draw_line(
+        fb,
+        y_end,
+        Vector2::new(y_end.x + head_half, y_end.y - head_len),
+        GIZMO_Y_COLOR,
+        1.5,
+    );
+
+    // Center square.
+    let sq = Rect2::new(
+        Vector2::new(pos.x - center_half, pos.y - center_half),
+        Vector2::new(center_half * 2.0, center_half * 2.0),
+    );
+    draw::fill_rect(fb, sq, GIZMO_CENTER_COLOR);
+}
+
 /// Computes the camera offset used by [`render_scene`] to center the scene.
 pub fn camera_offset(tree: &SceneTree, viewport_width: u32, viewport_height: u32) -> Vector2 {
     let bounds = compute_scene_bounds(tree);
@@ -302,6 +454,121 @@ pub fn pixel_to_scene(
 /// Converts pixel coordinates to scene coordinates using a pre-computed offset.
 pub fn pixel_to_scene_with_offset(offset: Vector2, pixel_x: f32, pixel_y: f32) -> Vector2 {
     Vector2::new(pixel_x - offset.x, pixel_y - offset.y)
+}
+
+/// Computes the camera offset with zoom and pan.
+pub fn camera_offset_with_zoom_pan(
+    tree: &SceneTree,
+    viewport_width: u32,
+    viewport_height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> Vector2 {
+    let bounds = compute_scene_bounds(tree);
+    let z = zoom as f32;
+    let center_x = bounds.position.x + bounds.size.x / 2.0;
+    let center_y = bounds.position.y + bounds.size.y / 2.0;
+    Vector2::new(
+        viewport_width as f32 / 2.0 - center_x * z + pan.0 as f32,
+        viewport_height as f32 / 2.0 - center_y * z + pan.1 as f32,
+    )
+}
+
+/// Converts viewport pixel coordinates to scene (world) coordinates
+/// accounting for zoom and pan.
+pub fn pixel_to_scene_with_zoom_pan(
+    tree: &SceneTree,
+    viewport_width: u32,
+    viewport_height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    pixel_x: f32,
+    pixel_y: f32,
+) -> Vector2 {
+    let offset = camera_offset_with_zoom_pan(tree, viewport_width, viewport_height, zoom, pan);
+    let z = zoom as f32;
+    Vector2::new((pixel_x - offset.x) / z, (pixel_y - offset.y) / z)
+}
+
+/// Hit-tests with zoom and pan support.
+pub fn hit_test_with_zoom_pan(
+    tree: &SceneTree,
+    viewport_width: u32,
+    viewport_height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    click_x: f32,
+    click_y: f32,
+) -> Option<NodeId> {
+    let scene_pos = pixel_to_scene_with_zoom_pan(
+        tree,
+        viewport_width,
+        viewport_height,
+        zoom,
+        pan,
+        click_x,
+        click_y,
+    );
+    let node_ids = tree.all_nodes_in_tree_order();
+
+    // Scale hit radii inversely with zoom so they feel consistent.
+    let z = zoom as f32;
+
+    let mut best: Option<(NodeId, f32, i64)> = None;
+
+    for &node_id in &node_ids {
+        let node = match tree.get_node(node_id) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if node.parent().is_none() {
+            continue;
+        }
+
+        let class = node.class_name();
+        let node_pos = extract_position(node);
+
+        if matches!(class, "Control" | "Label" | "Button") {
+            let size = extract_size(node);
+            let rect = Rect2::new(node_pos, size);
+            if rect.contains_point(scene_pos) {
+                let center = Vector2::new(node_pos.x + size.x / 2.0, node_pos.y + size.y / 2.0);
+                let dist = (scene_pos - center).length();
+                let z_idx = extract_z_index(node);
+                if let Some((_, best_dist, best_z)) = best {
+                    if z_idx > best_z || (z_idx == best_z && dist < best_dist) {
+                        best = Some((node_id, dist, z_idx));
+                    }
+                } else {
+                    best = Some((node_id, dist, z_idx));
+                }
+            }
+            continue;
+        }
+
+        let base_radius = match class {
+            "Sprite2D" => 20.0,
+            _ => 15.0,
+        };
+        // Scale hit radius — at higher zoom, world-space radius shrinks
+        // so that the hit area stays ~constant in screen pixels.
+        let hit_radius = base_radius / z;
+
+        let dist = (scene_pos - node_pos).length();
+        if dist <= hit_radius {
+            let z_idx = extract_z_index(node);
+            if let Some((_, best_dist, best_z)) = best {
+                if z_idx > best_z || (z_idx == best_z && dist < best_dist) {
+                    best = Some((node_id, dist, z_idx));
+                }
+            } else {
+                best = Some((node_id, dist, z_idx));
+            }
+        }
+    }
+
+    best.map(|(id, _, _)| id)
 }
 
 /// Hit-tests the scene tree at the given viewport pixel coordinates.
@@ -728,5 +995,117 @@ mod tests {
         let scene = pixel_to_scene(&tree, 200, 200, 100.0, 100.0);
         assert!((scene.x - 100.0).abs() < 0.01);
         assert!((scene.y - 100.0).abs() < 0.01);
+    }
+
+    // -- zoom/pan tests ---------------------------------------------------
+
+    #[test]
+    fn render_with_zoom_does_not_panic() {
+        let (tree, node_id) = make_tree_with_node2d();
+        let fb = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 2.0, (0.0, 0.0));
+        assert_eq!(fb.width, 200);
+        assert_eq!(fb.height, 200);
+    }
+
+    #[test]
+    fn render_with_zoom_and_pan() {
+        let (tree, _) = make_tree_with_node2d();
+        let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 0.5, (50.0, -30.0));
+        assert_eq!(fb.width, 200);
+    }
+
+    #[test]
+    fn pixel_to_scene_with_zoom_pan_identity() {
+        let (tree, _) = make_tree_with_node2d();
+        // zoom=1, pan=(0,0) should match regular pixel_to_scene.
+        let a = pixel_to_scene(&tree, 200, 200, 100.0, 100.0);
+        let b = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
+        assert!((a.x - b.x).abs() < 0.01);
+        assert!((a.y - b.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn pixel_to_scene_zoom_scales_correctly() {
+        let (tree, _) = make_tree_with_node2d();
+        // At zoom=2, moving 10 pixels in screen space = 5 pixels in world space.
+        let a = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 2.0, (0.0, 0.0), 100.0, 100.0);
+        let b = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 2.0, (0.0, 0.0), 110.0, 100.0);
+        assert!(
+            (b.x - a.x - 5.0).abs() < 0.01,
+            "10px at zoom 2x = 5 world units"
+        );
+    }
+
+    #[test]
+    fn pixel_to_scene_pan_offsets() {
+        let (tree, _) = make_tree_with_node2d();
+        // Panning right by 20px should shift the scene left by 20 world units (at zoom=1).
+        let a = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
+        let b = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 1.0, (20.0, 0.0), 100.0, 100.0);
+        assert!(
+            (a.x - b.x - 20.0).abs() < 0.01,
+            "pan right = scene shifts left"
+        );
+    }
+
+    #[test]
+    fn hit_test_with_zoom_pan_finds_node() {
+        let (tree, node_id) = make_tree_with_node2d();
+        // At zoom=1, pan=(0,0), pixel (100,100) maps to scene (100,100) which is on the node.
+        let result = hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
+        assert_eq!(result, Some(node_id));
+    }
+
+    #[test]
+    fn hit_test_with_zoom_pan_zoom_in() {
+        let (tree, node_id) = make_tree_with_node2d();
+        // At zoom=2, the node at world (100,100) appears at pixel
+        // (100*2 + offset_x, 100*2 + offset_y) where offset = (100 - 100*2, 100 - 100*2) = (-100, -100).
+        // So screen pos = (200 - 100, 200 - 100) = (100, 100). Same pixel.
+        let result = hit_test_with_zoom_pan(&tree, 200, 200, 2.0, (0.0, 0.0), 100.0, 100.0);
+        assert_eq!(result, Some(node_id));
+    }
+
+    #[test]
+    fn hit_test_with_zoom_pan_miss_after_pan() {
+        let (tree, _) = make_tree_with_node2d();
+        // Pan far away — node should no longer be at pixel (100,100).
+        let result = hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (500.0, 500.0), 100.0, 100.0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn render_selected_has_gizmo() {
+        let (tree, node_id) = make_tree_with_node2d();
+        let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
+        let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
+        // Selected frame should have red gizmo pixels (X arrow).
+        let count_red = |fb: &FrameBuffer| {
+            fb.pixels
+                .iter()
+                .filter(|p| p.r > 0.9 && p.g < 0.3 && p.b < 0.3)
+                .count()
+        };
+        assert!(
+            count_red(&fb_sel) > count_red(&fb_no),
+            "selected node should have red gizmo arrow pixels"
+        );
+    }
+
+    #[test]
+    fn render_selected_has_green_gizmo() {
+        let (tree, node_id) = make_tree_with_node2d();
+        let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
+        let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
+        let count_green = |fb: &FrameBuffer| {
+            fb.pixels
+                .iter()
+                .filter(|p| p.g > 0.7 && p.r < 0.3 && p.b < 0.3)
+                .count()
+        };
+        assert!(
+            count_green(&fb_sel) > count_green(&fb_no),
+            "selected node should have green gizmo arrow pixels"
+        );
     }
 }

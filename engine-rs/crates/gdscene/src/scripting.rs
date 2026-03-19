@@ -1352,4 +1352,322 @@ func _ready():
             _ => panic!("expected ExprStmt with GetNode"),
         }
     }
+
+    // -- Script-to-node property sync tests ---------------------------------
+
+    /// After _ready sets self.speed = 300, the node should have speed=300
+    /// as a node property (synced from script).
+    #[test]
+    fn script_vars_sync_to_node_after_ready() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 200
+func _ready():
+    self.speed = 300
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        LifecycleManager::enter_tree(&mut tree, child_id);
+
+        // Script var should be 300
+        assert_eq!(
+            tree.get_script(child_id).unwrap().get_property("speed"),
+            Some(Variant::Int(300))
+        );
+        // Node property should also be 300 (synced)
+        assert_eq!(
+            tree.get_node(child_id).unwrap().get_property("speed"),
+            Variant::Int(300)
+        );
+    }
+
+    /// Script vars sync to node after _process calls too.
+    #[test]
+    fn script_vars_sync_to_node_after_process() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 100.0
+func _process(delta):
+    self.speed = self.speed + delta
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        tree.process_script_process(child_id, 0.5);
+
+        // Node property should reflect the updated value
+        assert_eq!(
+            tree.get_node(child_id).unwrap().get_property("speed"),
+            Variant::Float(100.5)
+        );
+    }
+
+    /// Script vars sync to node after _physics_process.
+    #[test]
+    fn script_vars_sync_to_node_after_physics_process() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Body", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script = GDScriptNodeInstance::from_source(PHYSICS_SCRIPT, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        let dt = 1.0 / 60.0;
+        tree.process_script_physics_process(child_id, dt);
+
+        let expected = dt * 10.0;
+        match tree.get_node(child_id).unwrap().get_property("velocity") {
+            Variant::Float(v) => assert!(
+                (v - expected).abs() < 1e-9,
+                "expected velocity ~{expected} on node, got {v}"
+            ),
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    /// Script vars sync to node after _enter_tree.
+    #[test]
+    fn script_vars_sync_to_node_after_enter_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Obj", "Node");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script = GDScriptNodeInstance::from_source(ENTER_EXIT_SCRIPT, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        tree.process_script_enter_tree(child_id);
+
+        assert_eq!(
+            tree.get_node(child_id).unwrap().get_property("entered"),
+            Variant::Bool(true)
+        );
+    }
+
+    /// Script vars sync to node after _exit_tree.
+    #[test]
+    fn script_vars_sync_to_node_after_exit_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Obj", "Node");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script = GDScriptNodeInstance::from_source(ENTER_EXIT_SCRIPT, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        tree.process_script_exit_tree(child_id);
+
+        assert_eq!(
+            tree.get_node(child_id).unwrap().get_property("exited"),
+            Variant::Bool(true)
+        );
+    }
+
+    /// Initial script variable values are synced even without calling methods,
+    /// when the first lifecycle callback fires.
+    #[test]
+    fn initial_script_vars_sync_on_first_callback() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 200
+var health = 100
+func _ready():
+    pass
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        // Before any lifecycle, node has no speed/health
+        assert_eq!(
+            tree.get_node(child_id).unwrap().get_property("speed"),
+            Variant::Nil
+        );
+
+        LifecycleManager::enter_tree(&mut tree, child_id);
+
+        // After lifecycle, initial values are synced
+        assert_eq!(
+            tree.get_node(child_id).unwrap().get_property("speed"),
+            Variant::Int(200)
+        );
+        assert_eq!(
+            tree.get_node(child_id).unwrap().get_property("health"),
+            Variant::Int(100)
+        );
+    }
+
+    /// Multiple script vars are all synced correctly after method call.
+    #[test]
+    fn multiple_script_vars_all_synced() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var x = 0
+var y = 0
+var z = 0
+func _ready():
+    self.x = 10
+    self.y = 20
+    self.z = 30
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        LifecycleManager::enter_tree(&mut tree, child_id);
+
+        let node = tree.get_node(child_id).unwrap();
+        assert_eq!(node.get_property("x"), Variant::Int(10));
+        assert_eq!(node.get_property("y"), Variant::Int(20));
+        assert_eq!(node.get_property("z"), Variant::Int(30));
+    }
+
+    /// Script vars accumulate over multiple frames via MainLoop.
+    #[test]
+    fn script_vars_sync_across_multiple_frames() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script = GDScriptNodeInstance::from_source(PLAYER_SCRIPT, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        let mut ml = MainLoop::new(tree);
+        let delta = 1.0 / 60.0;
+        ml.run_frames(5, delta);
+
+        let expected = 100.0 + delta * 5.0;
+        match ml.tree().get_node(child_id).unwrap().get_property("speed") {
+            Variant::Float(v) => assert!(
+                (v - expected).abs() < 1e-9,
+                "expected speed ~{expected} on node, got {v}"
+            ),
+            other => panic!("expected Float on node, got {other:?}"),
+        }
+    }
+
+    /// Two nodes with scripts: both have their vars synced independently.
+    #[test]
+    fn multiple_nodes_script_vars_sync_independently() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let n1 = Node::new("P1", "Node2D");
+        let id1 = tree.add_child(root, n1).unwrap();
+        let n2 = Node::new("P2", "Node2D");
+        let id2 = tree.add_child(root, n2).unwrap();
+
+        let script1_src = "\
+extends Node2D
+var score = 0
+func _ready():
+    self.score = 42
+";
+        let script2_src = "\
+extends Node2D
+var score = 0
+func _ready():
+    self.score = 99
+";
+        let s1 = GDScriptNodeInstance::from_source(script1_src, id1).unwrap();
+        let s2 = GDScriptNodeInstance::from_source(script2_src, id2).unwrap();
+        tree.attach_script(id1, Box::new(s1));
+        tree.attach_script(id2, Box::new(s2));
+
+        LifecycleManager::enter_tree(&mut tree, id1);
+        LifecycleManager::enter_tree(&mut tree, id2);
+
+        assert_eq!(
+            tree.get_node(id1).unwrap().get_property("score"),
+            Variant::Int(42)
+        );
+        assert_eq!(
+            tree.get_node(id2).unwrap().get_property("score"),
+            Variant::Int(99)
+        );
+    }
+
+    /// Verify script vars and node properties both appear after lifecycle,
+    /// and they agree on the value.
+    #[test]
+    fn script_and_node_properties_agree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Player", "Node2D");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 200
+func _ready():
+    self.speed = 300
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        LifecycleManager::enter_tree(&mut tree, child_id);
+
+        let script_val = tree
+            .get_script(child_id)
+            .unwrap()
+            .get_property("speed")
+            .unwrap();
+        let node_val = tree.get_node(child_id).unwrap().get_property("speed");
+
+        assert_eq!(script_val, node_val);
+        assert_eq!(script_val, Variant::Int(300));
+    }
+
+    /// Script vars of different types (int, float, bool, string) all sync.
+    #[test]
+    fn script_vars_different_types_sync() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = Node::new("Mixed", "Node");
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node
+var count = 0
+var ratio = 0.0
+var flag = false
+var label = \"hello\"
+func _ready():
+    self.count = 42
+    self.ratio = 3.14
+    self.flag = true
+    self.label = \"world\"
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        LifecycleManager::enter_tree(&mut tree, child_id);
+
+        let node = tree.get_node(child_id).unwrap();
+        assert_eq!(node.get_property("count"), Variant::Int(42));
+        assert_eq!(node.get_property("ratio"), Variant::Float(3.14));
+        assert_eq!(node.get_property("flag"), Variant::Bool(true));
+        assert_eq!(node.get_property("label"), Variant::String("world".into()));
+    }
 }
