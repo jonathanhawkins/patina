@@ -23,6 +23,7 @@ use std::process;
 use gdscene::node::NodeId;
 use gdscene::scene_tree::SceneTree;
 use gdscene::scripting::GDScriptNodeInstance;
+use gdscene::trace::TraceEventType;
 use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
 use gdvariant::Variant;
@@ -42,6 +43,8 @@ struct Args {
     delta: f64,
     /// Whether to emit a per-frame trace of tree state.
     trace_frames: bool,
+    /// Whether to emit the lifecycle event trace (notifications, script calls, signals).
+    event_trace: bool,
 }
 
 /// Parses command-line arguments manually (no extra dependency).
@@ -59,6 +62,7 @@ fn parse_args() -> Result<Args, String> {
     let mut frames: u64 = 10;
     let mut delta: f64 = 1.0 / 60.0;
     let mut trace_frames = false;
+    let mut event_trace = false;
 
     let mut i = 2;
     while i < args.len() {
@@ -82,6 +86,9 @@ fn parse_args() -> Result<Args, String> {
             "--trace-frames" => {
                 trace_frames = true;
             }
+            "--event-trace" => {
+                event_trace = true;
+            }
             other => {
                 return Err(format!("unknown argument: {other}"));
             }
@@ -94,6 +101,7 @@ fn parse_args() -> Result<Args, String> {
         frames,
         delta,
         trace_frames,
+        event_trace,
     })
 }
 
@@ -233,6 +241,29 @@ fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
     project_dir.join(relative)
 }
 
+/// Serializes the EventTrace events into a JSON array.
+fn serialize_event_trace(tree: &SceneTree) -> Value {
+    let events: Vec<Value> = tree
+        .event_trace()
+        .events()
+        .iter()
+        .map(|ev| {
+            json!({
+                "event_type": match ev.event_type {
+                    TraceEventType::Notification => "notification",
+                    TraceEventType::SignalEmit => "signal_emit",
+                    TraceEventType::ScriptCall => "script_call",
+                    TraceEventType::ScriptReturn => "script_return",
+                },
+                "node_path": ev.node_path,
+                "detail": ev.detail,
+                "frame": ev.frame,
+            })
+        })
+        .collect();
+    Value::Array(events)
+}
+
 fn run_main_loop(
     main_loop: &mut MainLoop,
     frames: u64,
@@ -316,6 +347,11 @@ fn main() {
         .to_path_buf();
     attach_scripts(&mut tree, &project_dir);
 
+    // Enable event tracing if requested (before lifecycle so we capture _ready etc.).
+    if args.event_trace {
+        tree.event_trace_mut().enable();
+    }
+
     // Run lifecycle: enter_tree + ready.
     LifecycleManager::enter_tree(&mut tree, scene_root_id);
 
@@ -340,13 +376,13 @@ fn main() {
         "process_time": main_loop.process_time(),
         "tree": dump_tree_json(main_loop.tree()),
     });
-    let output = if args.trace_frames {
-        let mut output = output;
+    let mut output = output;
+    if args.trace_frames {
         output["frame_trace"] = Value::Array(frame_trace);
-        output
-    } else {
-        output
-    };
+    }
+    if args.event_trace {
+        output["event_trace"] = serialize_event_trace(main_loop.tree());
+    }
 
     println!(
         "{}",

@@ -12,6 +12,8 @@ windowed = ["winit", "softbuffer", "gdrender2d"]
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdrender2d = { path = "../gdrender2d", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror.workspace = true
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }

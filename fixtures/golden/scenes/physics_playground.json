@@ -10,31 +10,66 @@
       "children": [
         {
           "name": "Ball",
-          "class": "Node2D",
+          "class": "RigidBody2D",
           "path": "/root/World/Ball",
-          "children": [],
+          "children": [
+            {
+              "name": "CollisionShape",
+              "class": "CollisionShape2D",
+              "path": "/root/World/Ball/CollisionShape",
+              "children": [],
+              "properties": {
+                "radius": { "type": "Float", "value": 16.0 }
+              }
+            }
+          ],
           "properties": {
             "position": { "type": "Vector2", "value": [400.0, 100.0] },
-            "radius": { "type": "Int", "value": 16 },
-            "velocity": { "type": "Vector2", "value": [50.0, 0.0] }
+            "mass": { "type": "Float", "value": 1.0 },
+            "collision_layer": { "type": "Int", "value": 1 },
+            "collision_mask": { "type": "Int", "value": 1 }
           }
         },
         {
           "name": "Wall",
-          "class": "Node2D",
+          "class": "StaticBody2D",
           "path": "/root/World/Wall",
-          "children": [],
+          "children": [
+            {
+              "name": "CollisionShape",
+              "class": "CollisionShape2D",
+              "path": "/root/World/Wall/CollisionShape",
+              "children": [],
+              "properties": {
+                "size": { "type": "Vector2", "value": [20.0, 400.0] }
+              }
+            }
+          ],
           "properties": {
-            "position": { "type": "Vector2", "value": [800.0, 300.0] }
+            "position": { "type": "Vector2", "value": [800.0, 300.0] },
+            "collision_layer": { "type": "Int", "value": 1 },
+            "collision_mask": { "type": "Int", "value": 0 }
           }
         },
         {
           "name": "Floor",
-          "class": "Node2D",
+          "class": "StaticBody2D",
           "path": "/root/World/Floor",
-          "children": [],
+          "children": [
+            {
+              "name": "CollisionShape",
+              "class": "CollisionShape2D",
+              "path": "/root/World/Floor/CollisionShape",
+              "children": [],
+              "properties": {
+                "size": { "type": "Vector2", "value": [800.0, 20.0] }
+              }
+            }
+          ],
           "properties": {
-            "position": { "type": "Vector2", "value": [400.0, 600.0] }
+            "position": { "type": "Vector2", "value": [400.0, 600.0] },
+            "collision_layer": { "type": "Int", "value": 1 },
+            "collision_mask": { "type": "Int", "value": 0 }
           }
         }
       ],

@@ -46,6 +46,7 @@ gdrender2d = { path = "crates/gdrender2d" }
 gdphysics2d = { path = "crates/gdphysics2d" }
 gdplatform = { path = "crates/gdplatform" }
 gdaudio = { path = "crates/gdaudio" }
+gdobject = { path = "crates/gdobject" }
 gdresource = { path = "crates/gdresource" }
 gdscript-interop = { path = "crates/gdscript-interop" }
 gdeditor = { path = "crates/gdeditor" }

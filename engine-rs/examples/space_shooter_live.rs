@@ -19,7 +19,7 @@ use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdphysics2d::area2d::{Area2D, AreaId, AreaStore, OverlapState};
 use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D};
 use gdphysics2d::shape::Shape2D;
-use gdplatform::input::{ActionBinding, InputEvent, InputMap, InputState, Key};
+use gdplatform::input::{ActionBinding, InputEvent, InputMap, Key};
 use gdrender2d::frame_server::{self, BrowserInputEvent, BrowserKey, FrameServerHandle};
 use gdrender2d::renderer::FrameBuffer;
 use gdrender2d::test_adapter::capture_frame;
@@ -190,7 +190,6 @@ pub fn browser_event_to_input(event: &BrowserInputEvent) -> InputEvent {
 /// Game state container for the live space shooter.
 pub struct LiveGame {
     pub main_loop: gdscene::MainLoop,
-    pub input_state: InputState,
     pub bodies: HashMap<BodyId, PhysicsBody2D>,
     pub area_store: AreaStore,
     pub bullets: Vec<Bullet>,
@@ -244,7 +243,7 @@ impl LiveGame {
         let particle_node = Node::new("ParticleSystem", "Node");
         let _particle_id = tree.add_child(game_root_id, particle_node).unwrap();
 
-        // Input setup
+        // Input setup (engine-owned via MainLoop)
         let mut input_map = InputMap::new();
         input_map.add_action("move_right", 0.0);
         input_map.add_action("move_left", 0.0);
@@ -252,9 +251,6 @@ impl LiveGame {
         input_map.action_add_event("move_right", ActionBinding::KeyBinding(Key::Right));
         input_map.action_add_event("move_left", ActionBinding::KeyBinding(Key::Left));
         input_map.action_add_event("shoot", ActionBinding::KeyBinding(Key::Space));
-
-        let mut input_state = InputState::new();
-        input_state.set_input_map(input_map);
 
         let explosion_emitter = ParticleEmitter {
             material: ParticleMaterial {
@@ -276,11 +272,11 @@ impl LiveGame {
             ..ParticleEmitter::default()
         };
 
-        let main_loop = gdscene::MainLoop::new(tree);
+        let mut main_loop = gdscene::MainLoop::new(tree);
+        main_loop.set_input_map(input_map);
 
         LiveGame {
             main_loop,
-            input_state,
             bodies: HashMap::new(),
             area_store: AreaStore::new(),
             bullets: Vec::new(),
@@ -308,11 +304,11 @@ impl LiveGame {
     pub fn step(&mut self) {
         let frame = self.frame_count;
 
-        // Move player
-        if self.input_state.is_action_pressed("move_right") {
+        // Move player (read from engine-owned InputState)
+        if self.main_loop.input_state().is_action_pressed("move_right") {
             self.player_x = (self.player_x + PLAYER_SPEED).min(WIDTH as f32 - 20.0);
         }
-        if self.input_state.is_action_pressed("move_left") {
+        if self.main_loop.input_state().is_action_pressed("move_left") {
             self.player_x = (self.player_x - PLAYER_SPEED).max(20.0);
         }
         set_position(
@@ -322,7 +318,7 @@ impl LiveGame {
         );
 
         // Shoot bullet (rate-limited)
-        if self.input_state.is_action_pressed("shoot")
+        if self.main_loop.input_state().is_action_pressed("shoot")
             && frame.saturating_sub(self.last_shoot_frame) >= SHOOT_INTERVAL
         {
             let bid = BodyId(self.next_body_id);
@@ -522,9 +518,9 @@ impl LiveGame {
             label.set_property("text", Variant::String(format!("Score: {}", self.score)));
         }
 
-        // Step main loop
+        // Step main loop (handles engine lifecycle: physics, tweens, animations,
+        // collisions, process notifications, and input flush).
         self.main_loop.step(DT as f64);
-        self.input_state.flush_frame();
         self.frame_count += 1;
     }
 
@@ -609,11 +605,11 @@ impl LiveGame {
         capture_frame(&mut renderer, &viewport)
     }
 
-    /// Processes browser input events from the frame server.
+    /// Processes browser input events via engine-owned input.
     pub fn process_browser_input(&mut self, events: &[BrowserInputEvent]) {
         for event in events {
             let input_event = browser_event_to_input(event);
-            self.input_state.process_event(input_event);
+            self.main_loop.push_event(input_event);
         }
     }
 }

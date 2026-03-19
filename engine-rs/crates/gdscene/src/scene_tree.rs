@@ -7,7 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use gdcore::error::{EngineError, EngineResult};
-use gdobject::notification::NOTIFICATION_MOVED_IN_PARENT;
+use gdobject::notification::{
+    NOTIFICATION_MOVED_IN_PARENT, NOTIFICATION_PARENTED, NOTIFICATION_UNPARENTED,
+};
 use gdobject::signal::SignalStore;
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
@@ -99,6 +101,16 @@ impl SceneTree {
         self.input_snapshot = None;
     }
 
+    /// Returns `true` if an input snapshot is currently set.
+    pub fn has_input_snapshot(&self) -> bool {
+        self.input_snapshot.is_some()
+    }
+
+    /// Returns a reference to the current input snapshot, if any.
+    pub fn input_snapshot(&self) -> Option<&crate::scripting::InputSnapshot> {
+        self.input_snapshot.as_ref()
+    }
+
     /// Returns a reference to the event trace.
     pub fn event_trace(&self) -> &EventTrace {
         &self.event_trace
@@ -162,6 +174,12 @@ impl SceneTree {
             parent.add_child_id(child_id);
         }
 
+        // NOTIFICATION_PARENTED fires when a node gains a parent.
+        self.trace_record(child_id, TraceEventType::Notification, "PARENTED");
+        if let Some(child) = self.nodes.get_mut(&child_id) {
+            child.receive_notification(NOTIFICATION_PARENTED);
+        }
+
         let should_enter_tree = self
             .nodes
             .get(&parent_id)
@@ -201,11 +219,15 @@ impl SceneTree {
         let mut removed = Vec::new();
         self.collect_subtree_bottom_up(id, &mut removed);
 
-        // Detach from parent.
+        // Detach from parent and fire UNPARENTED.
         if let Some(parent_id) = self.nodes.get(&id).and_then(|n| n.parent()) {
             if let Some(parent) = self.nodes.get_mut(&parent_id) {
                 parent.remove_child_id(id);
             }
+        }
+        self.trace_record(id, TraceEventType::Notification, "UNPARENTED");
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.receive_notification(NOTIFICATION_UNPARENTED);
         }
 
         // Remove all collected nodes from the arena and group index.
@@ -245,12 +267,24 @@ impl SceneTree {
             }
         }
 
+        // UNPARENTED fires when detached from old parent.
+        self.trace_record(node_id, TraceEventType::Notification, "UNPARENTED");
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.receive_notification(NOTIFICATION_UNPARENTED);
+        }
+
         // Attach to new parent.
         if let Some(new_parent) = self.nodes.get_mut(&new_parent_id) {
             new_parent.add_child_id(node_id);
         }
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.set_parent(Some(new_parent_id));
+        }
+
+        // PARENTED fires when attached to new parent.
+        self.trace_record(node_id, TraceEventType::Notification, "PARENTED");
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.receive_notification(NOTIFICATION_PARENTED);
             node.receive_notification(NOTIFICATION_MOVED_IN_PARENT);
         }
 
@@ -444,6 +478,7 @@ impl SceneTree {
         self.trace_record(source, TraceEventType::SignalEmit, signal_name);
 
         // Collect connection info to avoid borrow conflicts.
+        // Note: we snapshot before emit() so one-shot connections are included.
         let connections: Vec<(gdcore::id::ObjectId, String, bool)> = self
             .signal_stores
             .get(&source)
@@ -457,10 +492,10 @@ impl SceneTree {
             })
             .unwrap_or_default();
 
-        // Fire callback-based connections (existing behavior).
+        // Fire callback-based connections and remove one-shot connections.
         let results = self
             .signal_stores
-            .get(&source)
+            .get_mut(&source)
             .map_or_else(Vec::new, |store| store.emit(signal_name, args));
 
         // For connections without callbacks, dispatch to target node scripts.
@@ -712,6 +747,12 @@ impl SceneTree {
     /// (e.g. `get_node`, `emit_signal`) without violating borrow rules.
     fn call_script_with_access(&mut self, node_id: NodeId, method: &str, args: &[Variant]) {
         if let Some(mut script) = self.scripts.remove(&node_id) {
+            // Skip methods the script doesn't define, matching Godot which only
+            // dispatches lifecycle callbacks to scripts that actually override them.
+            if !script.has_method(method) {
+                self.scripts.insert(node_id, script);
+                return;
+            }
             self.trace_record(node_id, TraceEventType::ScriptCall, method);
 
             let snapshot_clone = self.input_snapshot.clone();
@@ -858,6 +899,44 @@ impl SceneTree {
         }
     }
 
+    /// Dispatches [`NOTIFICATION_PROCESS`](gdobject::NOTIFICATION_PROCESS) to
+    /// every node in tree order, interleaving `_process(delta)` script calls
+    /// immediately after each node's notification.
+    ///
+    /// This matches Godot's per-node dispatch: each node receives its PROCESS
+    /// notification and has its `_process()` called before the next node is
+    /// processed.
+    pub fn process_frame_with_scripts(&mut self, delta: f64) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "PROCESS");
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_PROCESS);
+            }
+            if self.scripts.contains_key(&id) {
+                self.process_script_process(id, delta);
+            }
+        }
+    }
+
+    /// Dispatches [`NOTIFICATION_PHYSICS_PROCESS`](gdobject::NOTIFICATION_PHYSICS_PROCESS) to
+    /// every node in tree order, interleaving `_physics_process(delta)` script calls
+    /// immediately after each node's notification.
+    ///
+    /// This matches Godot's per-node dispatch for physics processing.
+    pub fn process_physics_frame_with_scripts(&mut self, delta: f64) {
+        let ids = self.all_nodes_in_tree_order();
+        for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "PHYSICS_PROCESS");
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::NOTIFICATION_PHYSICS_PROCESS);
+            }
+            if self.scripts.contains_key(&id) {
+                self.process_script_physics_process(id, delta);
+            }
+        }
+    }
+
     // -- collision detection -----------------------------------------------
 
     /// Runs simple distance-based collision detection on all nodes that
@@ -932,7 +1011,31 @@ impl SceneTree {
             if !self.nodes.contains_key(&id) {
                 continue;
             }
-            // Detach scripts for the entire subtree before removal.
+
+            // Fire EXIT_TREE lifecycle (bottom-up) while scripts are still
+            // attached, matching Godot's queue_free() behavior.
+            let should_exit = self
+                .nodes
+                .get(&id)
+                .map(|n| n.is_inside_tree())
+                .unwrap_or(false);
+            if should_exit {
+                LifecycleManager::exit_tree(self, id);
+            }
+
+            // Fire PREDELETE notification (bottom-up) after EXIT_TREE.
+            let mut bottom_up = Vec::new();
+            self.collect_subtree_bottom_up(id, &mut bottom_up);
+            for &nid in &bottom_up {
+                self.trace_record(nid, TraceEventType::Notification, "PREDELETE");
+                if let Some(node) = self.nodes.get_mut(&nid) {
+                    node.receive_notification(gdobject::NOTIFICATION_PREDELETE);
+                }
+            }
+
+            // Now remove scripts and the node itself.
+            // exit_tree already marked nodes as outside tree, so
+            // remove_node will skip the redundant EXIT_TREE call.
             let mut subtree = Vec::new();
             self.collect_subtree_top_down(id, &mut subtree);
             for &nid in &subtree {
@@ -1146,8 +1249,10 @@ mod tests {
         assert_eq!(root_log[0], gdobject::NOTIFICATION_PROCESS);
 
         let child_log = tree.get_node(child_id).unwrap().notification_log();
-        assert_eq!(child_log.len(), 1);
-        assert_eq!(child_log[0], gdobject::NOTIFICATION_PROCESS);
+        // PARENTED from add_child + PROCESS from process_frame
+        assert_eq!(child_log.len(), 2);
+        assert_eq!(child_log[0], gdobject::NOTIFICATION_PARENTED);
+        assert_eq!(child_log[1], gdobject::NOTIFICATION_PROCESS);
     }
 
     #[test]
@@ -1248,8 +1353,10 @@ mod tests {
         tree.process_physics_frame();
 
         let log = tree.get_node(child_id).unwrap().notification_log();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0], gdobject::NOTIFICATION_PHYSICS_PROCESS);
+        // PARENTED from add_child + PHYSICS_PROCESS from process_physics_frame
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0], gdobject::NOTIFICATION_PARENTED);
+        assert_eq!(log[1], gdobject::NOTIFICATION_PHYSICS_PROCESS);
     }
 
     #[test]
@@ -2163,11 +2270,12 @@ mod tests {
         #[test]
         fn trace_frame_number_recorded() {
             let mut tree = SceneTree::new();
-            tree.event_trace_mut().enable();
             let root = tree.root_id();
             let child = Node::new("A", "Node");
             let _child_id = tree.add_child(root, child).unwrap();
 
+            // Enable tracing after add_child so PARENTED traces don't skew frame counts.
+            tree.event_trace_mut().enable();
             tree.set_trace_frame(0);
             tree.process_frame();
 

@@ -19,7 +19,7 @@ pub mod winit_backend;
 // Re-export key types at the crate root.
 pub use display::{DisplayServer, VsyncMode};
 pub use export::{BuildProfile, ExportConfig, ExportTemplate, PackageResult};
-pub use input::{ActionBinding, InputEvent, InputMap, InputState, Key, MouseButton};
+pub use input::{ActionBinding, InputEvent, InputMap, InputSnapshot, InputState, Key, MouseButton};
 pub use network::{
     ConnectionStatus, MockNetwork, MockNetworkPeer, MultiplayerAPI, MultiplayerSpawner,
     MultiplayerSynchronizer, NetworkError, NetworkPeer, Packet, PeerId, RPCCall, RPCConfig,

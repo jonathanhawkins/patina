@@ -1,3 +1,10 @@
+// TODO(pat-icz): Break this module into runtime-owned services:
+//   1. WindowService — window create/resize/close/focus
+//   2. InputService — raw event translation into InputState
+//   3. PresentationService — framebuffer blit/surface management
+// The winit backend should become a thin adapter driving these services
+// from the OS event loop. See PLATFORM_ROADMAP.md.
+
 //! Winit + softbuffer windowing backend.
 //!
 //! Gated behind the `windowed` feature. Provides a real OS window via
