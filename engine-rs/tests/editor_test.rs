@@ -40,7 +40,7 @@ fn make_test_server() -> (EditorServerHandle, u16) {
 
     let state = EditorState::new(tree);
     let handle = EditorServerHandle::start(port, state);
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(300));
     (handle, port)
 }
 
@@ -89,10 +89,18 @@ fn get_world_node_id(port: u16) -> u64 {
 fn get_player_node_id(port: u16) -> u64 {
     let resp = http_get(port, "/api/scene");
     let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).unwrap();
-    v["nodes"]["children"][0]["children"][0]["id"]
-        .as_u64()
-        .unwrap()
+    let v: serde_json::Value = serde_json::from_str(body).expect("scene JSON parse failed");
+    let world = &v["nodes"]["children"][0];
+    assert!(
+        world["name"].is_string(),
+        "World node not found in scene: {v}"
+    );
+    let player = &world["children"][0];
+    assert!(
+        player["name"].is_string(),
+        "Player node not found under World: {world}"
+    );
+    player["id"].as_u64().expect("Player node missing id")
 }
 
 // --- Tests ---
