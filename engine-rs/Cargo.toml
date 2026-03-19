@@ -48,6 +48,7 @@ gdplatform = { path = "crates/gdplatform" }
 gdaudio = { path = "crates/gdaudio" }
 gdresource = { path = "crates/gdresource" }
 gdscript-interop = { path = "crates/gdscript-interop" }
+gdeditor = { path = "crates/gdeditor" }
 serde_json.workspace = true
 
 [[example]]
@@ -73,3 +74,10 @@ path = "examples/space_shooter.rs"
 [[example]]
 name = "space_shooter_live"
 path = "examples/space_shooter_live.rs"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[example]]
+name = "editor"
+path = "examples/editor.rs"

@@ -10,6 +10,7 @@ gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdscene = { path = "../gdscene" }
+gdrender2d = { path = "../gdrender2d" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"
