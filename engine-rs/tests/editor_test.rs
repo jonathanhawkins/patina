@@ -80,10 +80,20 @@ fn extract_body(resp: &str) -> &str {
 }
 
 fn get_world_node_id(port: u16) -> u64 {
-    let resp = http_get(port, "/api/scene");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).unwrap();
-    v["nodes"]["children"][0]["id"].as_u64().unwrap()
+    // Retry a few times in case the server is still starting
+    for attempt in 0..3 {
+        let resp = http_get(port, "/api/scene");
+        let body = extract_body(&resp);
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(id) = v["nodes"]["children"][0]["id"].as_u64() {
+                return id;
+            }
+        }
+        if attempt < 2 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    panic!("Failed to get world node id after 3 attempts");
 }
 
 fn get_player_node_id(port: u16) -> u64 {
