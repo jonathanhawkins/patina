@@ -4577,7 +4577,11 @@ mod tests {
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 0);
-        let resp = http_post(port, "/api/animation/create", r#"{"name":"walk","length":2.0}"#);
+        let resp = http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"walk","length":2.0}"#,
+        );
         assert!(resp.contains("200 OK"));
         let resp = http_get(port, "/api/animations");
         let body = extract_body(&resp);
@@ -4590,8 +4594,16 @@ mod tests {
     #[test]
     fn test_animation_create_duplicate_fails() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"idle","length":1.0}"#);
-        let resp = http_post(port, "/api/animation/create", r#"{"name":"idle","length":1.0}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"idle","length":1.0}"#,
+        );
+        let resp = http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"idle","length":1.0}"#,
+        );
         assert!(resp.contains("400"));
         handle.stop();
     }
@@ -4599,7 +4611,11 @@ mod tests {
     #[test]
     fn test_animation_delete() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"run","length":1.5}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"run","length":1.5}"#,
+        );
         let resp = http_post(port, "/api/animation/delete", r#"{"name":"run"}"#);
         assert!(resp.contains("200 OK"));
         let resp = http_get(port, "/api/animations");
@@ -4620,7 +4636,11 @@ mod tests {
     #[test]
     fn test_animation_get_details() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"jump","length":0.5,"loop_mode":"loop"}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"jump","length":0.5,"loop_mode":"loop"}"#,
+        );
         let resp = http_get(port, "/api/animation?name=jump");
         assert!(resp.contains("200 OK"));
         let body = extract_body(&resp);
@@ -4634,12 +4654,22 @@ mod tests {
     #[test]
     fn test_animation_keyframe_add_and_get() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"move","length":2.0}"#);
-        let resp = http_post(port, "/api/animation/keyframe/add",
-            r#"{"animation":"move","track_node":"Player","track_property":"position","time":0.0,"value":{"type":"Float","value":0.0}}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"move","length":2.0}"#,
+        );
+        let resp = http_post(
+            port,
+            "/api/animation/keyframe/add",
+            r#"{"animation":"move","track_node":"Player","track_property":"position","time":0.0,"value":{"type":"Float","value":0.0}}"#,
+        );
         assert!(resp.contains("200 OK"));
-        http_post(port, "/api/animation/keyframe/add",
-            r#"{"animation":"move","track_node":"Player","track_property":"position","time":1.0,"value":{"type":"Float","value":100.0}}"#);
+        http_post(
+            port,
+            "/api/animation/keyframe/add",
+            r#"{"animation":"move","track_node":"Player","track_property":"position","time":1.0,"value":{"type":"Float","value":100.0}}"#,
+        );
         let resp = http_get(port, "/api/animation?name=move");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -4653,13 +4683,26 @@ mod tests {
     #[test]
     fn test_animation_keyframe_remove() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"rm","length":1.0}"#);
-        http_post(port, "/api/animation/keyframe/add",
-            r#"{"animation":"rm","track_node":"N","track_property":"p","time":0.0,"value":{"type":"Float","value":0.0}}"#);
-        http_post(port, "/api/animation/keyframe/add",
-            r#"{"animation":"rm","track_node":"N","track_property":"p","time":1.0,"value":{"type":"Float","value":1.0}}"#);
-        let resp = http_post(port, "/api/animation/keyframe/remove",
-            r#"{"animation":"rm","track_index":0,"keyframe_index":0}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"rm","length":1.0}"#,
+        );
+        http_post(
+            port,
+            "/api/animation/keyframe/add",
+            r#"{"animation":"rm","track_node":"N","track_property":"p","time":0.0,"value":{"type":"Float","value":0.0}}"#,
+        );
+        http_post(
+            port,
+            "/api/animation/keyframe/add",
+            r#"{"animation":"rm","track_node":"N","track_property":"p","time":1.0,"value":{"type":"Float","value":1.0}}"#,
+        );
+        let resp = http_post(
+            port,
+            "/api/animation/keyframe/remove",
+            r#"{"animation":"rm","track_index":0,"keyframe_index":0}"#,
+        );
         assert!(resp.contains("200 OK"));
         let resp = http_get(port, "/api/animation?name=rm");
         let body = extract_body(&resp);
@@ -4671,11 +4714,21 @@ mod tests {
     #[test]
     fn test_animation_keyframe_remove_cleans_empty_track() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"clean","length":1.0}"#);
-        http_post(port, "/api/animation/keyframe/add",
-            r#"{"animation":"clean","track_node":"N","track_property":"p","time":0.0,"value":{"type":"Float","value":0.0}}"#);
-        http_post(port, "/api/animation/keyframe/remove",
-            r#"{"animation":"clean","track_index":0,"keyframe_index":0}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"clean","length":1.0}"#,
+        );
+        http_post(
+            port,
+            "/api/animation/keyframe/add",
+            r#"{"animation":"clean","track_node":"N","track_property":"p","time":0.0,"value":{"type":"Float","value":0.0}}"#,
+        );
+        http_post(
+            port,
+            "/api/animation/keyframe/remove",
+            r#"{"animation":"clean","track_index":0,"keyframe_index":0}"#,
+        );
         let resp = http_get(port, "/api/animation?name=clean");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -4686,7 +4739,11 @@ mod tests {
     #[test]
     fn test_animation_play_and_status() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"anim","length":1.0}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"anim","length":1.0}"#,
+        );
         http_post(port, "/api/animation/play", r#"{"name":"anim"}"#);
         let resp = http_get(port, "/api/animation/status");
         let body = extract_body(&resp);
@@ -4699,7 +4756,11 @@ mod tests {
     #[test]
     fn test_animation_stop() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"s","length":1.0}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"s","length":1.0}"#,
+        );
         http_post(port, "/api/animation/play", r#"{"name":"s"}"#);
         http_post(port, "/api/animation/stop", "{}");
         let resp = http_get(port, "/api/animation/status");
@@ -4720,7 +4781,11 @@ mod tests {
     #[test]
     fn test_animation_seek() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"seek_test","length":2.0}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"seek_test","length":2.0}"#,
+        );
         http_post(port, "/api/animation/play", r#"{"name":"seek_test"}"#);
         http_post(port, "/api/animation/seek", r#"{"time":0.75}"#);
         let resp = http_get(port, "/api/animation/status");
@@ -4749,7 +4814,11 @@ mod tests {
     #[test]
     fn test_animation_delete_stops_playback() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"del_play","length":1.0}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"del_play","length":1.0}"#,
+        );
         http_post(port, "/api/animation/play", r#"{"name":"del_play"}"#);
         http_post(port, "/api/animation/delete", r#"{"name":"del_play"}"#);
         let resp = http_get(port, "/api/animation/status");
@@ -4763,12 +4832,15 @@ mod tests {
     #[test]
     fn test_animation_loop_mode_variants() {
         let (handle, port) = make_server();
-        http_post(port, "/api/animation/create", r#"{"name":"pp","length":1.0,"loop_mode":"pingpong"}"#);
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"pp","length":1.0,"loop_mode":"pingpong"}"#,
+        );
         let resp = http_get(port, "/api/animation?name=pp");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(v["loop_mode"], "pingpong");
         handle.stop();
     }
-
 }

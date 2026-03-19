@@ -474,20 +474,40 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 .connect-dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
 
 /* Script panel */
-.script-editor {
+#script-panel { display: flex; flex-direction: column; height: 100%; }
+.script-header {
+  display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+  font-size: 11px; color: var(--text-dim); border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.script-header .script-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.script-header .script-save-btn { padding: 2px 8px; font-size: 10px; border-radius: 2px; }
+.script-header .script-save-btn:hover { border-color: var(--accent); color: var(--accent); }
+.script-header .script-new-btn { padding: 2px 8px; font-size: 10px; border-radius: 2px; }
+.script-header .script-new-btn:hover { border-color: var(--accent); color: var(--accent); }
+.script-saved-indicator { color: #50c878; font-size: 10px; opacity: 0; transition: opacity 0.3s; }
+.script-saved-indicator.visible { opacity: 1; }
+.script-editor-wrap { position: relative; flex: 1; overflow: hidden; background: var(--bg); }
+.script-line-numbers {
+  position: absolute; top: 0; left: 0; width: 40px;
   font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
-  font-size: 12px; line-height: 1.6; padding: 0; margin: 0;
-  overflow: auto; background: var(--bg); flex: 1;
+  font-size: 12px; line-height: 1.6; color: var(--text-dim);
+  text-align: right; padding: 4px 8px 4px 0; user-select: none;
+  border-right: 1px solid var(--border); pointer-events: none; white-space: pre;
 }
-.script-line {
-  display: flex; white-space: pre;
+.script-highlight-layer {
+  position: absolute; top: 0; left: 48px; right: 0;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px; line-height: 1.6; padding: 4px 8px; white-space: pre-wrap;
+  word-wrap: break-word; pointer-events: none; color: transparent;
 }
-.script-line-number {
-  width: 40px; text-align: right; padding-right: 8px; color: var(--text-dim);
-  user-select: none; flex-shrink: 0; border-right: 1px solid var(--border);
-  margin-right: 8px;
+.script-textarea {
+  position: absolute; top: 0; left: 48px; right: 0; bottom: 0;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px; line-height: 1.6; padding: 4px 8px;
+  background: transparent; color: var(--text); border: none; outline: none;
+  resize: none; white-space: pre; overflow: auto; tab-size: 4; caret-color: var(--accent);
 }
-.script-line-content { flex: 1; }
+.script-textarea::selection { background: rgba(212,165,116,0.3); }
 .script-empty { color: var(--text-dim); font-style: italic; padding: 20px; text-align: center; }
 /* GDScript syntax highlighting */
 .gd-keyword { color: #569cd6; }
@@ -496,6 +516,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 .gd-number { color: #d19a66; }
 .gd-builtin { color: #dcdcaa; }
 .gd-nodepath { color: #c586c0; }
+.gd-annotation { color: #4ec9b0; }
+.gd-constant { color: #c586c0; }
+.gd-classname { color: #4fc1ff; }
+.gd-typehint { color: #4ec9b0; }
+.gd-arrow { color: #4ec9b0; }
 
 /* Settings dialog */
 #settings-dialog {
@@ -557,6 +582,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <div class="ctx-separator"></div>
   <div class="ctx-item" data-action="move-up">Move Up</div>
   <div class="ctx-item" data-action="move-down">Move Down</div>
+  <div class="ctx-separator"></div>
+  <div class="ctx-item" data-action="attach-script">Attach Script</div>
 </div>
 
 <!-- Add Node Dialog -->
@@ -612,7 +639,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       <div id="bottom-panel-header">
         <button class="bottom-tab active" data-tab="output">Output</button>
         <button class="bottom-tab" data-tab="scene-info">Scene Info</button>
-        <button class="bottom-tab" data-tab="script">Script</button>
+        <button class="bottom-tab" data-tab="script" id="script-tab-btn">Script</button>
         <button class="bottom-tab" data-tab="animation">Animation</button>
         <button id="bottom-toggle" title="Toggle panel">&#9650;</button>
       </div>
@@ -1090,6 +1117,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       case 'move-down':
         await api('POST', '/api/node/reorder', { node_id: nodeId, direction: 'down' });
         await fetchScene(); break;
+      case 'attach-script': doAttachScript(nodeId); break;
     }
   }
 
@@ -2537,425 +2565,265 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 
   // ---- Script panel ----
   var currentScriptPath = null;
+  var scriptOriginalContent = '';
+  var scriptModified = false;
 
   function highlightGDScript(line) {
     var result = '';
     var i = 0;
     while (i < line.length) {
-      if (line[i] === '#') {
-        result += '<span class="gd-comment">' + escapeHtml(line.substring(i)) + '</span>';
-        break;
-      }
+      if (line[i] === '#') { result += '<span class="gd-comment">' + escapeHtml(line.substring(i)) + '</span>'; break; }
       if (line[i] === '"' || line[i] === "'") {
-        var quote = line[i];
-        var end = line.indexOf(quote, i + 1);
+        var quote = line[i]; var end = line.indexOf(quote, i + 1);
         if (end === -1) end = line.length - 1;
         result += '<span class="gd-string">' + escapeHtml(line.substring(i, end + 1)) + '</span>';
-        i = end + 1;
-        continue;
+        i = end + 1; continue;
+      }
+      if (line[i] === '@') {
+        var annoMatch = line.substring(i).match(/^@[a-zA-Z_][a-zA-Z0-9_]*/);
+        if (annoMatch) { result += '<span class="gd-annotation">' + escapeHtml(annoMatch[0]) + '</span>'; i += annoMatch[0].length; continue; }
       }
       if (line[i] === '$') {
-        var match = line.substring(i).match(/^\$[A-Za-z0-9_/]+/);
-        if (match) {
-          result += '<span class="gd-nodepath">' + escapeHtml(match[0]) + '</span>';
-          i += match[0].length;
-          continue;
-        }
+        var npMatch = line.substring(i).match(/^\$[A-Za-z0-9_\/]+/);
+        if (npMatch) { result += '<span class="gd-nodepath">' + escapeHtml(npMatch[0]) + '</span>'; i += npMatch[0].length; continue; }
       }
-      if (/[0-9]/.test(line[i]) && (i === 0 || /[\s(,=+\-*/<>!&|^~\[]/.test(line[i-1]))) {
+      if (line[i] === '-' && i + 1 < line.length && line[i+1] === '>') {
+        result += '<span class="gd-arrow">-&gt;</span>'; i += 2; continue;
+      }
+      if (line[i] === ':' && i + 1 < line.length && line[i+1] === ' ') {
+        var thMatch = line.substring(i).match(/^:\s+([A-Z][a-zA-Z0-9_]*|int|float|bool|void|String|Array|Dictionary|Vector2|Vector3|Color|NodePath|Variant)/);
+        if (thMatch) { result += '<span class="gd-typehint">' + escapeHtml(thMatch[0]) + '</span>'; i += thMatch[0].length; continue; }
+      }
+      if (/[0-9]/.test(line[i]) && (i === 0 || /[\s(,=+\-*\/<>!&|^~\[]/.test(line[i-1]))) {
         var numMatch = line.substring(i).match(/^[0-9]+(\.[0-9]+)?/);
-        if (numMatch) {
-          result += '<span class="gd-number">' + escapeHtml(numMatch[0]) + '</span>';
-          i += numMatch[0].length;
-          continue;
-        }
+        if (numMatch) { result += '<span class="gd-number">' + escapeHtml(numMatch[0]) + '</span>'; i += numMatch[0].length; continue; }
       }
       if (/[a-zA-Z_]/.test(line[i])) {
         var wordMatch = line.substring(i).match(/^[a-zA-Z_][a-zA-Z0-9_]*/);
         if (wordMatch) {
           var word = wordMatch[0];
-          var keywords = ['func','var','if','else','elif','for','while','return','class','extends','signal','enum','match','const','static','onready','export','pass','break','continue','in','not','and','or','true','false','null','self','yield','await','class_name','preload','load'];
+          var keywords = ['func','var','if','else','elif','for','while','return','class','extends','match','const','static','pass','break','continue','in','not','and','or','yield','await','class_name','preload','load','setget','tool'];
+          var constants = ['self','super','true','false','null','PI','TAU','INF','NAN'];
+          var declKeywords = ['signal','enum','export','onready'];
           var builtins = ['print','str','int','float','len','range','abs','min','max','clamp','lerp','sign','round','ceil','floor','sqrt','pow','sin','cos','tan'];
-          if (keywords.indexOf(word) >= 0) {
-            result += '<span class="gd-keyword">' + escapeHtml(word) + '</span>';
-          } else if (builtins.indexOf(word) >= 0) {
-            result += '<span class="gd-builtin">' + escapeHtml(word) + '</span>';
-          } else {
-            result += escapeHtml(word);
-          }
-          i += word.length;
-          continue;
+          if (declKeywords.indexOf(word) >= 0) {
+            result += (word === 'signal' || word === 'enum') ? '<span class="gd-keyword">' + escapeHtml(word) + '</span>' : '<span class="gd-annotation">' + escapeHtml(word) + '</span>';
+          } else if (keywords.indexOf(word) >= 0) { result += '<span class="gd-keyword">' + escapeHtml(word) + '</span>';
+          } else if (constants.indexOf(word) >= 0) { result += '<span class="gd-constant">' + escapeHtml(word) + '</span>';
+          } else if (builtins.indexOf(word) >= 0) { result += '<span class="gd-builtin">' + escapeHtml(word) + '</span>';
+          } else if (/^[A-Z][a-zA-Z0-9]*$/.test(word) && word.length > 1) { result += '<span class="gd-classname">' + escapeHtml(word) + '</span>';
+          } else { result += escapeHtml(word); }
+          i += word.length; continue;
         }
       }
-      result += escapeHtml(line[i]);
-      i++;
+      result += escapeHtml(line[i]); i++;
     }
     return result;
   }
 
+  function highlightFullContent(content) {
+    var lines = content.split('\n'); var hl = [];
+    for (var li = 0; li < lines.length; li++) hl.push(highlightGDScript(lines[li]));
+    return hl.join('\n');
+  }
+  function updateLineNumbers(content) {
+    var el = document.getElementById('script-line-numbers'); if (!el) return;
+    var c = content.split('\n').length; var nums = [];
+    for (var ln = 1; ln <= c; ln++) nums.push(String(ln));
+    el.textContent = nums.join('\n');
+  }
+  function updateHighlight(content) {
+    var el = document.getElementById('script-highlight'); if (!el) return;
+    el.innerHTML = highlightFullContent(content) + '\n';
+  }
+  function markScriptModified(modified) {
+    scriptModified = modified;
+    var tabBtn = document.getElementById('script-tab-btn');
+    if (tabBtn) tabBtn.textContent = modified ? 'Script *' : 'Script';
+  }
+  async function saveScript() {
+    var textarea = document.getElementById('script-textarea');
+    if (!textarea || !currentScriptPath) return;
+    var content = textarea.value;
+    var result = await api('POST', '/api/script/save', { path: currentScriptPath, content: content });
+    if (result && result.ok) {
+      scriptOriginalContent = content; markScriptModified(false);
+      var indicator = document.getElementById('script-saved-indicator');
+      if (indicator) { indicator.classList.add('visible'); setTimeout(function() { indicator.classList.remove('visible'); }, 1500); }
+    }
+  }
   async function fetchScript(path) {
-    if (!path || path === currentScriptPath) return;
+    if (!path) return;
     currentScriptPath = path;
     var data = await api('GET', '/api/script?path=' + encodeURIComponent(path));
-    if (data && data.content !== undefined) {
-      renderScript(data.content, data.path);
-    } else {
-      document.getElementById('script-panel').innerHTML = '<div class="script-empty">Could not load script: ' + escapeHtml(path) + '</div>';
-    }
+    if (data && data.content !== undefined) { renderScript(data.content, data.path); }
+    else { document.getElementById('script-panel').innerHTML = '<div class="script-empty">Could not load script: ' + escapeHtml(path) + '</div>'; }
   }
-
   function renderScript(content, path) {
-    var el = document.getElementById('script-panel');
-    el.innerHTML = '';
-
-    var header = document.createElement('div');
-    header.style.cssText = 'padding:4px 8px;font-size:11px;color:var(--text-dim);border-bottom:1px solid var(--border);';
-    header.textContent = path || 'Script';
+    var el = document.getElementById('script-panel'); el.innerHTML = '';
+    scriptOriginalContent = content; markScriptModified(false);
+    var header = document.createElement('div'); header.className = 'script-header';
+    var pathSpan = document.createElement('span'); pathSpan.className = 'script-path';
+    pathSpan.textContent = path || 'Script'; pathSpan.title = path || ''; header.appendChild(pathSpan);
+    var savedInd = document.createElement('span'); savedInd.className = 'script-saved-indicator';
+    savedInd.id = 'script-saved-indicator'; savedInd.textContent = 'Saved'; header.appendChild(savedInd);
+    var saveBtn = document.createElement('button'); saveBtn.className = 'script-save-btn';
+    saveBtn.textContent = 'Save'; saveBtn.title = 'Save script (Ctrl+S)';
+    saveBtn.addEventListener('click', function() { saveScript(); }); header.appendChild(saveBtn);
+    var newBtn = document.createElement('button'); newBtn.className = 'script-new-btn';
+    newBtn.textContent = '+ New'; newBtn.title = 'Create new script';
+    newBtn.addEventListener('click', function() { createNewScript(); }); header.appendChild(newBtn);
     el.appendChild(header);
-
-    var editor = document.createElement('div');
-    editor.className = 'script-editor';
-
-    var lines = content.split('\n');
-    for (var i = 0; i < lines.length; i++) {
-      var lineDiv = document.createElement('div');
-      lineDiv.className = 'script-line';
-
-      var lineNum = document.createElement('span');
-      lineNum.className = 'script-line-number';
-      lineNum.textContent = String(i + 1);
-
-      var lineContent = document.createElement('span');
-      lineContent.className = 'script-line-content';
-      lineContent.innerHTML = highlightGDScript(lines[i]);
-
-      lineDiv.appendChild(lineNum);
-      lineDiv.appendChild(lineContent);
-      editor.appendChild(lineDiv);
-    }
-    el.appendChild(editor);
+    var wrap = document.createElement('div'); wrap.className = 'script-editor-wrap';
+    var lineNums = document.createElement('div'); lineNums.className = 'script-line-numbers';
+    lineNums.id = 'script-line-numbers'; wrap.appendChild(lineNums);
+    var hlLayer = document.createElement('div'); hlLayer.className = 'script-highlight-layer';
+    hlLayer.id = 'script-highlight'; wrap.appendChild(hlLayer);
+    var textarea = document.createElement('textarea'); textarea.className = 'script-textarea';
+    textarea.id = 'script-textarea'; textarea.spellcheck = false; textarea.autocomplete = 'off';
+    textarea.autocapitalize = 'off'; textarea.value = content; textarea.setAttribute('wrap', 'off');
+    textarea.addEventListener('scroll', function() {
+      hlLayer.style.transform = 'translate(' + (-textarea.scrollLeft) + 'px, ' + (-textarea.scrollTop) + 'px)';
+      lineNums.style.transform = 'translateY(' + (-textarea.scrollTop) + 'px)';
+    });
+    textarea.addEventListener('input', function() {
+      updateHighlight(textarea.value); updateLineNumbers(textarea.value);
+      markScriptModified(textarea.value !== scriptOriginalContent);
+    });
+    textarea.addEventListener('keydown', function(e) {
+      if (e.key === 'Tab') { e.preventDefault();
+        var start = textarea.selectionStart; var end = textarea.selectionEnd; var val = textarea.value;
+        textarea.value = val.substring(0, start) + '    ' + val.substring(end);
+        textarea.selectionStart = textarea.selectionEnd = start + 4;
+        textarea.dispatchEvent(new Event('input')); return;
+      }
+      if (e.key === 'Enter') { e.preventDefault();
+        var cStart = textarea.selectionStart; var val = textarea.value;
+        var lineStart = val.lastIndexOf('\n', cStart - 1) + 1;
+        var currentLine = val.substring(lineStart, cStart);
+        var indentMatch = currentLine.match(/^(\s*)/);
+        var indent = indentMatch ? indentMatch[1] : '';
+        if (currentLine.trimEnd().endsWith(':')) indent += '    ';
+        textarea.value = val.substring(0, cStart) + '\n' + indent + val.substring(textarea.selectionEnd);
+        textarea.selectionStart = textarea.selectionEnd = cStart + 1 + indent.length;
+        textarea.dispatchEvent(new Event('input')); return;
+      }
+      if (e.ctrlKey && e.key === 's') { e.preventDefault(); saveScript(); return; }
+    });
+    wrap.appendChild(textarea); el.appendChild(wrap);
+    updateHighlight(content); updateLineNumbers(content);
   }
-
+  async function createNewScript() {
+    var path = prompt('Script file path (e.g. res://scripts/player.gd):');
+    if (!path) return; if (!path.endsWith('.gd')) path += '.gd';
+    var template = 'extends Node2D\n\nfunc _ready():\n    pass\n\nfunc _process(delta):\n    pass\n';
+    var result = await api('POST', '/api/script/save', { path: path, content: template });
+    if (result && result.ok) {
+      currentScriptPath = path; renderScript(template, path);
+      if (selectedNodeId !== null) {
+        await api('POST', '/api/property/set', { node_id: selectedNodeId, property: 'script', value: { type: 'String', value: path } });
+        await fetchSelected();
+      }
+    }
+  }
+  async function doAttachScript(nodeId) {
+    var path = prompt('Script file path (e.g. res://scripts/player.gd):');
+    if (!path) return; if (!path.endsWith('.gd')) path += '.gd';
+    var existing = await api('GET', '/api/script?path=' + encodeURIComponent(path));
+    if (!existing || existing.error) {
+      var template = 'extends Node2D\n\nfunc _ready():\n    pass\n\nfunc _process(delta):\n    pass\n';
+      await api('POST', '/api/script/save', { path: path, content: template });
+    }
+    await api('POST', '/api/property/set', { node_id: nodeId, property: 'script', value: { type: 'String', value: path } });
+    await fetchSelected();
+  }
   function clearScript() {
-    currentScriptPath = null;
+    currentScriptPath = null; scriptOriginalContent = ''; markScriptModified(false);
     document.getElementById('script-panel').innerHTML = '<div class="script-empty">Select a node with a script to view its content</div>';
   }
 
-
-  // ---- Settings Dialog ----
-  function setupSettingsDialog() {
-    document.getElementById('btn-settings').addEventListener('click', function() {
-      var d = document.getElementById('settings-dialog');
-      d.classList.add('open');
-      document.getElementById('set-grid-snap').checked = editorSettings.grid_snap_enabled;
-      document.getElementById('set-snap-size').value = String(editorSettings.grid_snap_size);
-      document.getElementById('set-grid-visible').checked = editorSettings.grid_visible;
-      document.getElementById('set-rulers-visible').checked = editorSettings.rulers_visible;
-      document.getElementById('set-font-size').value = editorSettings.font_size;
-    });
-    document.getElementById('settings-close').addEventListener('click', function() {
-      document.getElementById('settings-dialog').classList.remove('open');
-    });
-    document.getElementById('settings-dialog').addEventListener('click', function(e) {
-      if (e.target === this) this.classList.remove('open');
-    });
-    document.getElementById('set-grid-snap').addEventListener('change', function() {
-      updateSetting('grid_snap_enabled', this.checked);
-      document.getElementById('status-snap').textContent = this.checked ? editorSettings.grid_snap_size + 'px' : 'Off';
-    });
-    document.getElementById('set-snap-size').addEventListener('change', function() {
-      updateSetting('grid_snap_size', parseInt(this.value));
-      if (editorSettings.grid_snap_enabled) document.getElementById('status-snap').textContent = this.value + 'px';
-    });
-    document.getElementById('set-grid-visible').addEventListener('change', function() { updateSetting('grid_visible', this.checked); });
-    document.getElementById('set-rulers-visible').addEventListener('change', function() { updateSetting('rulers_visible', this.checked); });
-    document.getElementById('set-font-size').addEventListener('change', function() {
-      updateSetting('font_size', this.value);
-      var sizes = { small: '11px', medium: '13px', large: '15px' };
-      document.body.style.fontSize = sizes[this.value] || '13px';
-    });
-  }
-
-
-  // ---- Animation Panel ----
-  var currentAnimName = null;
-  var animPlaying = false;
-  var animPlayInterval = null;
-
+  // ---- Animation panel stubs (endpoints exist, UI wiring pending) ----
   function setupAnimationPanel() {
-    var select = document.getElementById('anim-select');
-    var newBtn = document.getElementById('anim-new-btn');
-    var delBtn = document.getElementById('anim-delete-btn');
-    var recordBtn = document.getElementById('anim-record-btn');
-    var playBtn = document.getElementById('anim-play-btn');
-    var stopBtn = document.getElementById('anim-stop-btn');
-    var addTrackBtn = document.getElementById('anim-add-track-btn');
-
-    select.addEventListener('change', function() {
-      currentAnimName = this.value || null;
-      refreshAnimationPanel();
-    });
-
-    newBtn.addEventListener('click', function() {
-      var name = prompt('Animation name:', 'NewAnimation');
+    // Animation panel event wiring - endpoints available at /api/animation/*
+    var newBtn = document.getElementById('anim-new');
+    var delBtn = document.getElementById('anim-delete');
+    var playBtn = document.getElementById('anim-play');
+    var stopBtn = document.getElementById('anim-stop');
+    var recBtn = document.getElementById('anim-record');
+    var sel = document.getElementById('anim-select');
+    if (newBtn) newBtn.addEventListener('click', async function() {
+      var name = prompt('Animation name:', 'New Animation');
       if (!name) return;
-      var length = parseFloat(prompt('Length (seconds):', '1.0')) || 1.0;
-      api('POST', '/api/animation/create', { name: name, length: length }).then(function() {
-        refreshAnimationList().then(function() {
-          document.getElementById('anim-select').value = name;
-          currentAnimName = name;
-          refreshAnimationPanel();
-        });
-      });
+      await api('POST', '/api/animation/create', { name: name, length: 1.0 });
+      refreshAnimationList();
     });
-
-    delBtn.addEventListener('click', function() {
-      if (!currentAnimName) return;
-      if (!confirm('Delete animation "' + currentAnimName + '"?')) return;
-      api('POST', '/api/animation/delete', { name: currentAnimName }).then(function() {
-        currentAnimName = null;
-        refreshAnimationList();
-        refreshAnimationPanel();
-      });
+    if (delBtn) delBtn.addEventListener('click', async function() {
+      if (!sel || !sel.value) return;
+      await api('POST', '/api/animation/delete', { name: sel.value });
+      refreshAnimationList();
     });
-
-    recordBtn.addEventListener('click', function() {
-      var isActive = recordBtn.classList.toggle('active');
-      document.body.classList.toggle('anim-recording', isActive);
-      api('POST', '/api/animation/record', { enabled: isActive });
+    if (playBtn) playBtn.addEventListener('click', async function() {
+      if (!sel || !sel.value) return;
+      await api('POST', '/api/animation/play', { name: sel.value });
     });
-
-    playBtn.addEventListener('click', function() {
-      if (!currentAnimName) return;
-      api('POST', '/api/animation/play', { name: currentAnimName }).then(function() {
-        startAnimPlayback();
-      });
+    if (stopBtn) stopBtn.addEventListener('click', async function() {
+      await api('POST', '/api/animation/stop');
     });
-
-    stopBtn.addEventListener('click', function() {
-      api('POST', '/api/animation/stop', {}).then(function() {
-        stopAnimPlayback();
-      });
-    });
-
-    addTrackBtn.addEventListener('click', function() {
-      if (!currentAnimName) { alert('Select an animation first'); return; }
-      var nodeName = prompt('Node name (e.g. Player):');
-      if (!nodeName) return;
-      var prop = prompt('Property (e.g. position):');
-      if (!prop) return;
-      api('POST', '/api/animation/keyframe/add', {
-        animation: currentAnimName, track_node: nodeName, track_property: prop,
-        time: 0.0, value: { type: 'Float', value: 0 }
-      }).then(function() { refreshAnimationPanel(); });
-    });
-
-    // Timeline canvas click for scrubbing
-    var canvas = document.getElementById('anim-timeline-canvas');
-    canvas.addEventListener('mousedown', function(e) { scrubTimeline(e, canvas); });
-    canvas.addEventListener('mousemove', function(e) {
-      if (e.buttons === 1) scrubTimeline(e, canvas);
-    });
-    canvas.addEventListener('dblclick', function(e) { addKeyframeAtClick(e, canvas); });
-  }
-
-  function scrubTimeline(e, canvas) {
-    if (!currentAnimName) return;
-    var rect = canvas.getBoundingClientRect();
-    var x = e.clientX - rect.left;
-    api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName)).then(function(anim) {
-      if (!anim) return;
-      var time = (x / canvas.width) * anim.length;
-      time = Math.max(0, Math.min(anim.length, time));
-      api('POST', '/api/animation/seek', { time: time }).then(function() {
-        refreshAnimationPanel();
-        refreshViewport();
-      });
+    if (recBtn) recBtn.addEventListener('click', async function() {
+      await api('POST', '/api/animation/record');
     });
   }
-
-  function addKeyframeAtClick(e, canvas) {
-    if (!currentAnimName) return;
-    var rect = canvas.getBoundingClientRect();
-    var x = e.clientX - rect.left;
-    var y = e.clientY - rect.top;
-    api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName)).then(function(anim) {
-      if (!anim || !anim.tracks.length) return;
-      var time = (x / canvas.width) * anim.length;
-      var trackHeight = 24;
-      var trackIdx = Math.floor(y / trackHeight);
-      if (trackIdx >= anim.tracks.length) return;
-      var track = anim.tracks[trackIdx];
-      var val = prompt('Value for ' + track.node_path + '.' + track.property + ' at t=' + time.toFixed(2) + ':');
-      if (val === null) return;
-      var numVal = parseFloat(val);
-      api('POST', '/api/animation/keyframe/add', {
-        animation: currentAnimName, track_node: track.node_path, track_property: track.property,
-        time: time, value: { type: 'Float', value: isNaN(numVal) ? 0 : numVal }
-      }).then(function() { refreshAnimationPanel(); });
-    });
-  }
-
-  function startAnimPlayback() {
-    animPlaying = true;
-    if (animPlayInterval) clearInterval(animPlayInterval);
-    animPlayInterval = setInterval(function() {
-      api('GET', '/api/animation/status').then(function(status) {
-        if (!status || !status.playing) { stopAnimPlayback(); return; }
-        var newTime = status.current_time + (1.0 / 30.0);
-        api('POST', '/api/animation/seek', { time: newTime }).then(function() {
-          refreshAnimTimeline();
-          refreshViewport();
-        });
-      });
-    }, 1000 / 30);
-  }
-
-  function stopAnimPlayback() {
-    animPlaying = false;
-    if (animPlayInterval) { clearInterval(animPlayInterval); animPlayInterval = null; }
-    refreshAnimTimeline();
-  }
-
   async function refreshAnimationList() {
+    var sel = document.getElementById('anim-select');
+    if (!sel) return;
     var data = await api('GET', '/api/animations');
-    if (!data) return;
-    var select = document.getElementById('anim-select');
-    var cur = select.value;
-    select.innerHTML = '<option value="">-- No Animation --</option>';
-    for (var i = 0; i < data.length; i++) {
+    if (!data || !Array.isArray(data)) return;
+    var curVal = sel.value;
+    sel.innerHTML = '<option value="">--- No Animation ---</option>';
+    data.forEach(function(a) {
       var opt = document.createElement('option');
-      opt.value = data[i].name;
-      opt.textContent = data[i].name + ' (' + data[i].length.toFixed(1) + 's)';
-      select.appendChild(opt);
-    }
-    if (cur && data.some(function(a) { return a.name === cur; })) {
-      select.value = cur;
-    }
-  }
-
-  async function refreshAnimationPanel() {
-    if (!currentAnimName) {
-      document.getElementById('anim-tracks').innerHTML = '<div class="anim-empty">No animation selected</div>';
-      drawTimeline(null, 0);
-      document.getElementById('anim-time-display').textContent = '0.00 / 0.00';
-      return;
-    }
-    var anim = await api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName));
-    if (!anim) return;
-    var status = await api('GET', '/api/animation/status');
-    var curTime = (status && status.current_time) || 0;
-
-    // Track list
-    var tracksEl = document.getElementById('anim-tracks');
-    if (anim.tracks.length === 0) {
-      tracksEl.innerHTML = '<div class="anim-empty">No tracks. Click + Add Track.</div>';
-    } else {
-      var html = '';
-      for (var i = 0; i < anim.tracks.length; i++) {
-        html += '<div class="anim-track-row">' +
-          '<span class="anim-track-node">' + escapeHtml(anim.tracks[i].node_path) + '</span>' +
-          '<span class="anim-track-prop">.' + escapeHtml(anim.tracks[i].property) + '</span>' +
-          '</div>';
-      }
-      tracksEl.innerHTML = html;
-    }
-
-    // Time display
-    document.getElementById('anim-time-display').textContent =
-      curTime.toFixed(2) + ' / ' + anim.length.toFixed(2);
-
-    drawTimeline(anim, curTime);
-  }
-
-  function refreshAnimTimeline() {
-    if (!currentAnimName) return;
-    Promise.all([
-      api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName)),
-      api('GET', '/api/animation/status')
-    ]).then(function(results) {
-      var anim = results[0];
-      var status = results[1];
-      if (!anim) return;
-      var curTime = (status && status.current_time) || 0;
-      document.getElementById('anim-time-display').textContent =
-        curTime.toFixed(2) + ' / ' + anim.length.toFixed(2);
-      drawTimeline(anim, curTime);
+      opt.value = a.name; opt.textContent = a.name;
+      sel.appendChild(opt);
     });
+    if (curVal) sel.value = curVal;
   }
 
-  function drawTimeline(anim, currentTime) {
-    var canvas = document.getElementById('anim-timeline-canvas');
-    var ctx = canvas.getContext('2d');
-    var w = canvas.width;
-    var h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    if (!anim) return;
-
-    var length = anim.length || 1;
-    var trackHeight = 24;
-
-    // Background
-    ctx.fillStyle = '#111';
-    ctx.fillRect(0, 0, w, h);
-
-    // Time ruler
-    ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0, 0, w, 16);
-    ctx.strokeStyle = '#333';
-    ctx.fillStyle = '#666';
-    ctx.font = '9px monospace';
-    var step = 0.5;
-    if (length > 5) step = 1.0;
-    if (length > 20) step = 5.0;
-    for (var t = 0; t <= length; t += step) {
-      var x = (t / length) * w;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, 16);
-      ctx.stroke();
-      ctx.fillText(t.toFixed(1), x + 2, 12);
-    }
-
-    // Track rows
-    for (var i = 0; i < anim.tracks.length; i++) {
-      var y = 16 + i * trackHeight;
-      ctx.strokeStyle = '#2a2a2a';
-      ctx.beginPath();
-      ctx.moveTo(0, y + trackHeight);
-      ctx.lineTo(w, y + trackHeight);
-      ctx.stroke();
-
-      // Keyframe diamonds
-      var kfs = anim.tracks[i].keyframes;
-      for (var j = 0; j < kfs.length; j++) {
-        var kx = (kfs[j].time / length) * w;
-        var ky = y + trackHeight / 2;
-        ctx.fillStyle = '#d4a574';
-        ctx.beginPath();
-        ctx.moveTo(kx, ky - 5);
-        ctx.lineTo(kx + 5, ky);
-        ctx.lineTo(kx, ky + 5);
-        ctx.lineTo(kx - 5, ky);
-        ctx.closePath();
-        ctx.fill();
-      }
-    }
-
-    // Playhead
-    var phX = (currentTime / length) * w;
-    ctx.strokeStyle = '#d4a574';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(phX, 0);
-    ctx.lineTo(phX, h);
-    ctx.stroke();
-    ctx.lineWidth = 1;
-
-    // Update playhead div
-    var playhead = document.getElementById('anim-playhead');
-    playhead.style.left = phX + 'px';
+  // ---- Settings dialog ----
+  function setupSettingsDialog() {
+    var btn = document.getElementById('btn-settings');
+    var dialog = document.getElementById('settings-dialog');
+    if (!btn || !dialog) return;
+    btn.addEventListener('click', function() { dialog.style.display = 'flex'; });
+    var closeBtn = dialog.querySelector('.settings-close');
+    if (closeBtn) closeBtn.addEventListener('click', function() { dialog.style.display = 'none'; });
+    // Load settings
+    api('GET', '/api/settings').then(function(data) {
+      if (!data) return;
+      var snapCheck = document.getElementById('set-grid-snap');
+      var snapSize = document.getElementById('set-snap-size');
+      var gridVis = document.getElementById('set-grid-visible');
+      var rulerVis = document.getElementById('set-rulers-visible');
+      var fontSize = document.getElementById('set-font-size');
+      if (snapCheck) snapCheck.checked = !!data.grid_snap_enabled;
+      if (snapSize) snapSize.value = data.grid_snap_size || 8;
+      if (gridVis) gridVis.checked = data.grid_visible !== false;
+      if (rulerVis) rulerVis.checked = data.rulers_visible !== false;
+      if (fontSize) fontSize.value = data.font_size || 'medium';
+    });
+    // Save on change
+    dialog.addEventListener('change', function() {
+      var settings = {
+        grid_snap_enabled: !!(document.getElementById('set-grid-snap') || {}).checked,
+        grid_snap_size: parseInt((document.getElementById('set-snap-size') || {}).value) || 8,
+        grid_visible: !!(document.getElementById('set-grid-visible') || {}).checked,
+        rulers_visible: !!(document.getElementById('set-rulers-visible') || {}).checked,
+        font_size: (document.getElementById('set-font-size') || {}).value || 'medium'
+      };
+      api('POST', '/api/settings', settings);
+      // Update status bar
+      var snapEl = document.getElementById('status-snap');
+      if (snapEl) snapEl.textContent = settings.grid_snap_enabled ? settings.grid_snap_size + 'px' : 'Off';
+    });
   }
 
   // ---- Init ----
