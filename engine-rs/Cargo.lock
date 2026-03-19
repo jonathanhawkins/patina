@@ -1175,6 +1175,7 @@ dependencies = [
  "gdobject",
  "gdresource",
  "gdscene",
+ "gdscript-interop",
  "gdvariant",
  "serde_json",
  "tracing",

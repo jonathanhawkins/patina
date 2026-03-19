@@ -15,12 +15,15 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use gdscene::node::NodeId;
 use gdscene::scene_tree::SceneTree;
+use gdscene::scripting::GDScriptNodeInstance;
 use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
+use gdvariant::Variant;
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -138,6 +141,61 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Script attachment
+// ---------------------------------------------------------------------------
+
+/// Finds nodes with `_script_path` property, resolves `res://` to the
+/// project directory, loads the `.gd` source, and attaches a
+/// [`GDScriptNodeInstance`] to each node in the scene tree.
+fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) {
+    // Collect (node_id, script_path) pairs first to avoid borrow issues.
+    let mut scripts_to_load: Vec<(NodeId, PathBuf)> = Vec::new();
+
+    for node_id in tree.all_nodes_in_tree_order() {
+        if let Some(node) = tree.get_node(node_id) {
+            if let Variant::String(res_path) = node.get_property("_script_path") {
+                let abs_path = resolve_res_path(project_dir, &res_path);
+                scripts_to_load.push((node_id, abs_path));
+            }
+        }
+    }
+
+    for (node_id, path) in scripts_to_load {
+        match fs::read_to_string(&path) {
+            Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
+                Ok(instance) => {
+                    tree.attach_script(node_id, Box::new(instance));
+                    tracing::info!(
+                        path = %path.display(),
+                        "attached GDScript to node"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = format!("{e:?}"),
+                        "failed to parse GDScript"
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read GDScript file"
+                );
+            }
+        }
+    }
+}
+
+/// Resolves a `res://` path to an absolute filesystem path.
+fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
+    let relative = res_path.strip_prefix("res://").unwrap_or(res_path);
+    project_dir.join(relative)
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -190,6 +248,12 @@ fn main() {
             process::exit(1);
         }
     };
+
+    // Resolve and attach GDScript files to nodes that have _script_path.
+    let project_dir = Path::new(&args.scene_path)
+        .parent()
+        .unwrap_or(Path::new("."));
+    attach_scripts(&mut tree, project_dir);
 
     // Run lifecycle: enter_tree + ready.
     LifecycleManager::enter_tree(&mut tree, scene_root_id);
