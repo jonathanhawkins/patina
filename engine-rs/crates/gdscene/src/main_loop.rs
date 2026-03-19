@@ -131,6 +131,9 @@ impl MainLoop {
     /// 2. Dispatches `NOTIFICATION_PROCESS` once (variable timestep).
     /// 3. Increments the frame counter and elapsed time accumulators.
     pub fn step(&mut self, delta_secs: f64) {
+        // Sync trace frame counter so trace events have the correct frame.
+        self.tree.set_trace_frame(self.frame_counter);
+
         if self.paused {
             self.process_time += delta_secs;
             self.frame_counter += 1;

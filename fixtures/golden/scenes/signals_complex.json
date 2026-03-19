@@ -18,19 +18,11 @@
               "class": "Node2D",
               "path": "/root/Root/Player/TriggerZone",
               "children": [],
-              "properties": {
-                "position": { "type": "Vector2", "value": [0.0, 0.0] },
-                "rotation": { "type": "Float", "value": 0.0 },
-                "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-                "visible": { "type": "Bool", "value": true }
-              }
+              "properties": {}
             }
           ],
           "properties": {
-            "position": { "type": "Vector2", "value": [200.0, 300.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
+            "position": { "type": "Vector2", "value": [200.0, 300.0] }
           }
         },
         {
@@ -39,10 +31,7 @@
           "path": "/root/Root/Enemy",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [600.0, 300.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
+            "position": { "type": "Vector2", "value": [600.0, 300.0] }
           }
         },
         {
@@ -58,10 +47,7 @@
           "path": "/root/Root/ItemDrop",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [400.0, 200.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
+            "position": { "type": "Vector2", "value": [400.0, 200.0] }
           }
         }
       ],

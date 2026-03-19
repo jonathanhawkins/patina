@@ -15,6 +15,7 @@ use gdvariant::Variant;
 use crate::animation::AnimationPlayer;
 use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
+use crate::trace::{EventTrace, TraceEvent, TraceEventType};
 use crate::tween::{Tween, TweenId};
 
 /// The scene tree — an arena that owns every node and maintains the
@@ -43,6 +44,10 @@ pub struct SceneTree {
     /// Nodes marked for deferred deletion via `queue_free()`.
     /// They are removed at the end of the frame by `process_deletions()`.
     pending_deletions: Vec<NodeId>,
+    /// Global event trace for lifecycle/signal ordering verification.
+    event_trace: EventTrace,
+    /// Current frame number for trace recording.
+    trace_frame: u64,
 }
 
 impl std::fmt::Debug for SceneTree {
@@ -73,6 +78,8 @@ impl SceneTree {
             scripts: HashMap::new(),
             input_snapshot: None,
             pending_deletions: Vec::new(),
+            event_trace: EventTrace::new(),
+            trace_frame: 0,
         }
     }
 
@@ -90,6 +97,26 @@ impl SceneTree {
     /// Clears the input snapshot.
     pub fn clear_input_snapshot(&mut self) {
         self.input_snapshot = None;
+    }
+
+    /// Returns a reference to the event trace.
+    pub fn event_trace(&self) -> &EventTrace {
+        &self.event_trace
+    }
+
+    /// Returns a mutable reference to the event trace.
+    pub fn event_trace_mut(&mut self) -> &mut EventTrace {
+        &mut self.event_trace
+    }
+
+    /// Sets the current trace frame counter.
+    pub fn set_trace_frame(&mut self, frame: u64) {
+        self.trace_frame = frame;
+    }
+
+    /// Returns the current trace frame counter.
+    pub fn trace_frame(&self) -> u64 {
+        self.trace_frame
     }
 
     /// Returns a reference to a node by ID.
@@ -414,6 +441,8 @@ impl SceneTree {
         signal_name: &str,
         args: &[gdvariant::Variant],
     ) -> Vec<gdvariant::Variant> {
+        self.trace_record(source, TraceEventType::SignalEmit, signal_name);
+
         // Collect connection info to avoid borrow conflicts.
         let connections: Vec<(gdcore::id::ObjectId, String, bool)> = self
             .signal_stores
@@ -660,6 +689,21 @@ impl SceneTree {
         self.scripts.get_mut(&node_id)
     }
 
+    /// Records a trace event for the given node, if tracing is enabled.
+    pub fn trace_record(&mut self, node_id: NodeId, event_type: TraceEventType, detail: &str) {
+        if self.event_trace.is_enabled() {
+            let path = self
+                .node_path(node_id)
+                .unwrap_or_else(|| format!("<{node_id}>"));
+            self.event_trace.record(TraceEvent {
+                event_type,
+                node_path: path,
+                detail: detail.to_string(),
+                frame: self.trace_frame,
+            });
+        }
+    }
+
     // -- script callbacks ---------------------------------------------------
 
     /// Temporarily extracts a script, gives it scene-tree access via
@@ -668,6 +712,8 @@ impl SceneTree {
     /// (e.g. `get_node`, `emit_signal`) without violating borrow rules.
     fn call_script_with_access(&mut self, node_id: NodeId, method: &str, args: &[Variant]) {
         if let Some(mut script) = self.scripts.remove(&node_id) {
+            self.trace_record(node_id, TraceEventType::ScriptCall, method);
+
             let snapshot_clone = self.input_snapshot.clone();
             let accessor = if let Some(snapshot) = snapshot_clone {
                 unsafe {
@@ -682,6 +728,8 @@ impl SceneTree {
             script.set_scene_access(Box::new(accessor), node_id.raw());
             let _ = script.call_method(method, args);
             script.clear_scene_access();
+
+            self.trace_record(node_id, TraceEventType::ScriptReturn, method);
 
             // Sync script variables to node properties so they are visible
             // as first-class node properties (matching Godot behavior).
@@ -761,6 +809,7 @@ impl SceneTree {
     pub fn process_internal_physics_frame(&mut self) {
         let ids = self.all_nodes_in_tree_order();
         for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "INTERNAL_PHYSICS_PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.receive_notification(gdobject::NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
             }
@@ -774,6 +823,7 @@ impl SceneTree {
     pub fn process_physics_frame(&mut self) {
         let ids = self.all_nodes_in_tree_order();
         for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "PHYSICS_PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.receive_notification(gdobject::NOTIFICATION_PHYSICS_PROCESS);
             }
@@ -787,6 +837,7 @@ impl SceneTree {
     pub fn process_internal_frame(&mut self) {
         let ids = self.all_nodes_in_tree_order();
         for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "INTERNAL_PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.receive_notification(gdobject::NOTIFICATION_INTERNAL_PROCESS);
             }
@@ -800,6 +851,7 @@ impl SceneTree {
     pub fn process_frame(&mut self) {
         let ids = self.all_nodes_in_tree_order();
         for id in ids {
+            self.trace_record(id, TraceEventType::Notification, "PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.receive_notification(gdobject::NOTIFICATION_PROCESS);
             }
@@ -1923,6 +1975,287 @@ mod tests {
             // Calling again is safe and does nothing.
             tree.process_deletions();
             assert_eq!(tree.pending_deletion_count(), 0);
+        }
+    }
+
+    // ── B006: EventTrace integration tests ──────────────────────────────
+
+    mod trace_tests {
+        use super::*;
+        use crate::lifecycle::LifecycleManager;
+        use crate::trace::TraceEventType;
+
+        /// Helper: build a tree with root -> Parent -> (Child1, Child2) and
+        /// enable tracing.
+        fn build_traced_tree() -> (SceneTree, NodeId, NodeId, NodeId, NodeId) {
+            let mut tree = SceneTree::new();
+            tree.event_trace_mut().enable();
+            let root = tree.root_id();
+            let parent = Node::new("Parent", "Node");
+            let parent_id = tree.add_child(root, parent).unwrap();
+            let c1 = Node::new("Child1", "Node");
+            let c1_id = tree.add_child(parent_id, c1).unwrap();
+            let c2 = Node::new("Child2", "Node");
+            let c2_id = tree.add_child(parent_id, c2).unwrap();
+            // Clear trace events from add_child (if any triggered by auto-enter)
+            tree.event_trace_mut().clear();
+            (tree, root, parent_id, c1_id, c2_id)
+        }
+
+        #[test]
+        fn trace_enter_tree_top_down_order() {
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            let events = tree.event_trace().events();
+            let enter_events: Vec<_> = events
+                .iter()
+                .filter(|e| {
+                    e.event_type == TraceEventType::Notification && e.detail == "ENTER_TREE"
+                })
+                .collect();
+
+            // ENTER_TREE should fire parent first, then children (top-down).
+            assert_eq!(enter_events.len(), 3);
+            assert!(enter_events[0].node_path.ends_with("Parent"));
+            assert!(enter_events[1].node_path.ends_with("Child1"));
+            assert!(enter_events[2].node_path.ends_with("Child2"));
+        }
+
+        #[test]
+        fn trace_ready_bottom_up_order() {
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            let events = tree.event_trace().events();
+            let ready_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::Notification && e.detail == "READY")
+                .collect();
+
+            // READY should fire children first, then parent (bottom-up).
+            assert_eq!(ready_events.len(), 3);
+            assert!(ready_events[0].node_path.ends_with("Child1"));
+            assert!(ready_events[1].node_path.ends_with("Child2"));
+            assert!(ready_events[2].node_path.ends_with("Parent"));
+        }
+
+        #[test]
+        fn trace_exit_tree_bottom_up_order() {
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+            tree.event_trace_mut().clear();
+
+            LifecycleManager::exit_tree(&mut tree, parent_id);
+
+            let events = tree.event_trace().events();
+            let exit_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::Notification && e.detail == "EXIT_TREE")
+                .collect();
+
+            // EXIT_TREE fires bottom-up: children first, then parent.
+            assert_eq!(exit_events.len(), 3);
+            assert!(exit_events[0].node_path.ends_with("Child1"));
+            assert!(exit_events[1].node_path.ends_with("Child2"));
+            assert!(exit_events[2].node_path.ends_with("Parent"));
+        }
+
+        #[test]
+        fn trace_enter_then_ready_interleaving() {
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            let events = tree.event_trace().events();
+            let notif_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::Notification)
+                .collect();
+
+            // Godot contract: ALL ENTER_TREE first (top-down), then ALL READY (bottom-up).
+            // Find boundary: last ENTER_TREE should come before first READY.
+            let last_enter = notif_events
+                .iter()
+                .rposition(|e| e.detail == "ENTER_TREE")
+                .unwrap();
+            let first_ready = notif_events
+                .iter()
+                .position(|e| e.detail == "READY")
+                .unwrap();
+            assert!(
+                last_enter < first_ready,
+                "All ENTER_TREE must fire before any READY"
+            );
+        }
+
+        #[test]
+        fn trace_process_notification_order() {
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+            tree.event_trace_mut().clear();
+
+            // Run a frame's worth of notification dispatch.
+            tree.process_internal_physics_frame();
+            tree.process_physics_frame();
+            tree.process_internal_frame();
+            tree.process_frame();
+
+            let events = tree.event_trace().events();
+            let details: Vec<&str> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::Notification)
+                .map(|e| e.detail.as_str())
+                .collect();
+
+            // Per Godot contract: internal_physics -> physics -> internal_process -> process.
+            // Each dispatches to all nodes in tree order, so we see the pattern repeated.
+            // Find the first occurrence of each type.
+            let first_int_phys = details
+                .iter()
+                .position(|d| *d == "INTERNAL_PHYSICS_PROCESS")
+                .unwrap();
+            let first_phys = details
+                .iter()
+                .position(|d| *d == "PHYSICS_PROCESS")
+                .unwrap();
+            let first_int_proc = details
+                .iter()
+                .position(|d| *d == "INTERNAL_PROCESS")
+                .unwrap();
+            let first_proc = details.iter().position(|d| *d == "PROCESS").unwrap();
+
+            assert!(first_int_phys < first_phys);
+            assert!(first_phys < first_int_proc);
+            assert!(first_int_proc < first_proc);
+        }
+
+        #[test]
+        fn trace_signal_emit_recorded() {
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+
+            tree.emit_signal(parent_id, "test_signal", &[]);
+
+            let events = tree.event_trace().events();
+            let signal_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::SignalEmit)
+                .collect();
+
+            assert_eq!(signal_events.len(), 1);
+            assert_eq!(signal_events[0].detail, "test_signal");
+            assert!(signal_events[0].node_path.ends_with("Parent"));
+        }
+
+        #[test]
+        fn trace_disabled_records_nothing() {
+            let mut tree = SceneTree::new();
+            // Trace is disabled by default
+            let root = tree.root_id();
+            let child = Node::new("A", "Node");
+            let child_id = tree.add_child(root, child).unwrap();
+
+            tree.process_frame();
+            tree.emit_signal(child_id, "foo", &[]);
+
+            assert!(tree.event_trace().events().is_empty());
+        }
+
+        #[test]
+        fn trace_frame_number_recorded() {
+            let mut tree = SceneTree::new();
+            tree.event_trace_mut().enable();
+            let root = tree.root_id();
+            let child = Node::new("A", "Node");
+            let _child_id = tree.add_child(root, child).unwrap();
+
+            tree.set_trace_frame(0);
+            tree.process_frame();
+
+            tree.set_trace_frame(1);
+            tree.process_frame();
+
+            let events = tree.event_trace().events();
+            let frame0: Vec<_> = events.iter().filter(|e| e.frame == 0).collect();
+            let frame1: Vec<_> = events.iter().filter(|e| e.frame == 1).collect();
+
+            assert!(!frame0.is_empty());
+            assert!(!frame1.is_empty());
+            assert_eq!(frame0.len(), frame1.len());
+        }
+
+        #[test]
+        fn trace_clear_resets() {
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+            assert!(!tree.event_trace().events().is_empty());
+
+            tree.event_trace_mut().clear();
+            assert!(tree.event_trace().events().is_empty());
+        }
+
+        #[test]
+        fn trace_full_lifecycle_global_order() {
+            // Verify the complete lifecycle ordering matches Godot:
+            // ENTER_TREE(Parent) -> ENTER_TREE(C1) -> ENTER_TREE(C2) ->
+            // READY(C1) -> READY(C2) -> READY(Parent)
+            let (mut tree, _root, parent_id, _c1_id, _c2_id) = build_traced_tree();
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            let events = tree.event_trace().events();
+            let notif_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::Notification)
+                .map(|e| format!("{}:{}", e.detail, e.node_path.rsplit('/').next().unwrap()))
+                .collect();
+
+            assert_eq!(
+                notif_events,
+                vec![
+                    "ENTER_TREE:Parent",
+                    "ENTER_TREE:Child1",
+                    "ENTER_TREE:Child2",
+                    "READY:Child1",
+                    "READY:Child2",
+                    "READY:Parent",
+                ]
+            );
+        }
+
+        #[test]
+        fn trace_deep_tree_ordering() {
+            // root -> A -> B -> C
+            // ENTER_TREE should be A, B, C. READY should be C, B, A.
+            let mut tree = SceneTree::new();
+            tree.event_trace_mut().enable();
+            let root = tree.root_id();
+            let a = Node::new("A", "Node");
+            let a_id = tree.add_child(root, a).unwrap();
+            let b = Node::new("B", "Node");
+            let b_id = tree.add_child(a_id, b).unwrap();
+            let c = Node::new("C", "Node");
+            let _c_id = tree.add_child(b_id, c).unwrap();
+            tree.event_trace_mut().clear();
+
+            LifecycleManager::enter_tree(&mut tree, a_id);
+
+            let events = tree.event_trace().events();
+            let names: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::Notification)
+                .map(|e| format!("{}:{}", e.detail, e.node_path.rsplit('/').next().unwrap()))
+                .collect();
+
+            assert_eq!(
+                names,
+                vec![
+                    "ENTER_TREE:A",
+                    "ENTER_TREE:B",
+                    "ENTER_TREE:C",
+                    "READY:C",
+                    "READY:B",
+                    "READY:A",
+                ]
+            );
         }
     }
 }

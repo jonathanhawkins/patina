@@ -15,10 +15,7 @@
           "children": [],
           "properties": {
             "position": { "type": "Vector2", "value": [100.0, 300.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "speed": { "type": "Int", "value": 250 },
-            "visible": { "type": "Bool", "value": true }
+            "speed": { "type": "Int", "value": 250 }
           }
         },
         {
@@ -27,10 +24,7 @@
           "path": "/root/World/Platform1",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [0.0, 500.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
+            "position": { "type": "Vector2", "value": [0.0, 500.0] }
           }
         },
         {
@@ -39,10 +33,7 @@
           "path": "/root/World/Platform2",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [300.0, 400.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
+            "position": { "type": "Vector2", "value": [300.0, 400.0] }
           }
         },
         {
@@ -51,10 +42,7 @@
           "path": "/root/World/Platform3",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [600.0, 350.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
+            "position": { "type": "Vector2", "value": [600.0, 350.0] }
           }
         },
         {
@@ -62,12 +50,7 @@
           "class": "Camera2D",
           "path": "/root/World/Camera",
           "children": [],
-          "properties": {
-            "position": { "type": "Vector2", "value": [0.0, 0.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
-          }
+          "properties": {}
         },
         {
           "name": "Collectible",
@@ -75,10 +58,7 @@
           "path": "/root/World/Collectible",
           "children": [],
           "properties": {
-            "position": { "type": "Vector2", "value": [450.0, 250.0] },
-            "rotation": { "type": "Float", "value": 0.0 },
-            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
-            "visible": { "type": "Bool", "value": true }
+            "position": { "type": "Vector2", "value": [450.0, 250.0] }
           }
         }
       ],

@@ -32,6 +32,7 @@ pub mod scene_saver;
 pub mod scene_tree;
 pub mod scripting;
 pub mod tilemap;
+pub mod trace;
 pub mod tween;
 
 // Re-export the most-used types at the crate root.
@@ -42,3 +43,4 @@ pub use packed_scene::{add_packed_scene_to_tree, wire_connections, PackedScene, 
 pub use scene_saver::TscnSaver;
 pub use scene_tree::SceneTree;
 pub use scripting::{GDScriptNodeInstance, InputSnapshot};
+pub use trace::{EventTrace, TraceEvent, TraceEventType};
