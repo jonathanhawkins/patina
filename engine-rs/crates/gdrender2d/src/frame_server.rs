@@ -602,9 +602,15 @@ mod tests {
             body
         );
         let _ = http_request(port, &req);
-        thread::sleep(Duration::from_millis(50));
-
-        let events = handle.drain_input();
+        // Allow time for server to process on slower CI (macOS)
+        let mut events = Vec::new();
+        for _ in 0..5 {
+            thread::sleep(Duration::from_millis(100));
+            events = handle.drain_input();
+            if !events.is_empty() {
+                break;
+            }
+        }
         assert_eq!(events.len(), 1);
 
         let events2 = handle.drain_input();

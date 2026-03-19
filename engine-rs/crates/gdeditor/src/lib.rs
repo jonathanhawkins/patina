@@ -21,6 +21,7 @@ pub mod filesystem;
 pub mod import;
 pub mod inspector;
 pub mod scene_editor;
+pub mod scene_renderer;
 pub mod settings;
 
 use gdscene::node::{Node, NodeId};

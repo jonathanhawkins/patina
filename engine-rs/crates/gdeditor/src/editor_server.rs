@@ -22,6 +22,21 @@ use gdvariant::Variant;
 
 use crate::EditorCommand;
 
+use gdcore::math::Vector2;
+
+/// State for an in-progress drag operation.
+#[derive(Debug, Clone)]
+pub struct DragState {
+    /// The node being dragged.
+    pub node_id: NodeId,
+    /// The pixel position where the drag started.
+    pub start_pixel: Vector2,
+    /// The node's position when the drag started.
+    pub start_node_pos: Vector2,
+    /// Camera offset at drag start (frozen so bounds changes don't affect drag).
+    pub camera_offset: Vector2,
+}
+
 /// Shared editor state protected by a mutex.
 pub struct EditorState {
     /// The scene tree being edited.
@@ -34,6 +49,12 @@ pub struct EditorState {
     pub redo_stack: Vec<EditorCommand>,
     /// The latest rendered frame, if any.
     pub frame_buffer: Option<FrameBuffer>,
+    /// Current drag operation, if any.
+    pub drag_state: Option<DragState>,
+    /// Viewport width for hit testing.
+    pub viewport_width: u32,
+    /// Viewport height for hit testing.
+    pub viewport_height: u32,
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -51,6 +72,9 @@ impl EditorState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             frame_buffer: None,
+            drag_state: None,
+            viewport_width: 800,
+            viewport_height: 600,
         }
     }
 }
@@ -84,6 +108,8 @@ impl EditorServerHandle {
     /// Updates the latest frame buffer for viewport endpoints.
     pub fn update_frame(&self, fb: FrameBuffer) {
         let mut state = self.state.lock().unwrap();
+        state.viewport_width = fb.width;
+        state.viewport_height = fb.height;
         state.frame_buffer = Some(fb);
     }
 
@@ -218,6 +244,12 @@ fn handle_connection(state: &Arc<Mutex<EditorState>>, mut stream: TcpStream) {
         ("POST", "/api/redo") => api_redo(state, &mut stream),
         ("POST", "/api/scene/save") => api_save_scene(state, &req.body, &mut stream),
         ("POST", "/api/scene/load") => api_load_scene(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/click") => api_viewport_click(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/drag_start") => {
+            api_viewport_drag_start(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/drag") => api_viewport_drag(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/drag_end") => api_viewport_drag_end(state, &req.body, &mut stream),
         _ => serve_404(&mut stream),
     }
 }
@@ -844,6 +876,160 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     }
 }
 
+// ---------------------------------------------------------------------------
+// Viewport interaction endpoints
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/click` — hit-test and select node at pixel coords.
+fn api_viewport_click(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+    let mut state = state.lock().unwrap();
+    let vw = state.viewport_width;
+    let vh = state.viewport_height;
+    let hit = crate::scene_renderer::hit_test(&state.scene_tree, vw, vh, x, y);
+
+    state.selected_node = hit;
+
+    match hit {
+        Some(id) => send_json(stream, &format!(r#"{{"selected":{}}}"#, id.raw())),
+        None => send_json(stream, r#"{"selected":null}"#),
+    }
+}
+
+/// `POST /api/viewport/drag_start` — begin dragging a node.
+fn api_viewport_drag_start(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+    let mut state = state.lock().unwrap();
+    let vw = state.viewport_width;
+    let vh = state.viewport_height;
+    let hit = crate::scene_renderer::hit_test(&state.scene_tree, vw, vh, x, y);
+
+    match hit {
+        Some(node_id) => {
+            let offset = crate::scene_renderer::camera_offset(&state.scene_tree, vw, vh);
+            let node_pos = state
+                .scene_tree
+                .get_node(node_id)
+                .map(|n| match n.get_property("position") {
+                    Variant::Vector2(v) => v,
+                    _ => Vector2::ZERO,
+                })
+                .unwrap_or(Vector2::ZERO);
+
+            state.selected_node = Some(node_id);
+            state.drag_state = Some(DragState {
+                node_id,
+                start_pixel: Vector2::new(x, y),
+                start_node_pos: node_pos,
+                camera_offset: offset,
+            });
+
+            send_json(
+                stream,
+                &format!(r#"{{"dragging":true,"node_id":{}}}"#, node_id.raw()),
+            );
+        }
+        None => {
+            state.drag_state = None;
+            send_json(stream, r#"{"dragging":false}"#);
+        }
+    }
+}
+
+/// `POST /api/viewport/drag` — update node position during drag.
+fn api_viewport_drag(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+    let mut state = state.lock().unwrap();
+
+    let drag = match &state.drag_state {
+        Some(d) => d.clone(),
+        None => {
+            send_json(stream, r#"{"dragging":false}"#);
+            return;
+        }
+    };
+
+    // Use frozen camera offset so bounds changes don't affect pixel→scene.
+    let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
+    let new_pos = drag.start_node_pos + pixel_delta;
+
+    if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
+        node.set_property("position", Variant::Vector2(new_pos));
+    }
+
+    send_json(
+        stream,
+        &format!(r#"{{"dragging":true,"x":{},"y":{}}}"#, new_pos.x, new_pos.y),
+    );
+}
+
+/// `POST /api/viewport/drag_end` — finalize drag, clear drag state.
+fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+    let mut state = state.lock().unwrap();
+
+    let drag = match state.drag_state.take() {
+        Some(d) => d,
+        None => {
+            send_json(stream, r#"{"ok":true}"#);
+            return;
+        }
+    };
+
+    // Use frozen camera offset so bounds changes don't affect pixel→scene.
+    let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
+    let new_pos = drag.start_node_pos + pixel_delta;
+
+    if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
+        node.set_property("position", Variant::Vector2(new_pos));
+    }
+
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"x":{},"y":{}}}"#, new_pos.x, new_pos.y),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1367,6 +1553,86 @@ mod tests {
         let body = extract_body(&node_resp);
         assert!(body.contains(r#""a""#));
         assert!(body.contains(r#""b""#));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_click_selects_node() {
+        let (handle, port) = make_server();
+
+        // The Main node is at position (10, 20). Viewport defaults to 800x600.
+        // Bounds center = (10, 20), offset = (400-10, 300-20) = (390, 280).
+        // So pixel coords for scene (10, 20) = (400, 300).
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":400,"y":300}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v["selected"].is_number(), "should select the node");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_click_miss() {
+        let (handle, port) = make_server();
+
+        // Click far from the node.
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":0,"y":0}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v["selected"].is_null(), "should miss all nodes");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_drag_updates_position() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Start drag on the node at pixel (400, 300).
+        let resp = http_post(port, "/api/viewport/drag_start", r#"{"x":400,"y":300}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains("\"dragging\":true"));
+
+        // Drag to a new position (move 50px right).
+        let resp = http_post(port, "/api/viewport/drag", r#"{"x":450,"y":300}"#);
+        assert!(resp.contains("200 OK"));
+
+        // End drag.
+        let resp = http_post(port, "/api/viewport/drag_end", r#"{"x":450,"y":300}"#);
+        assert!(resp.contains("200 OK"));
+
+        // Verify the node position changed.
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let node_body = extract_body(&node_resp);
+        let v: serde_json::Value = serde_json::from_str(node_body).unwrap();
+        // Position should have moved by +50 in x.
+        let pos_prop = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "position")
+            .unwrap();
+        let pos_val = &pos_prop["value"]["value"];
+        let x = pos_val[0].as_f64().unwrap();
+        assert!((x - 60.0).abs() < 1.0, "x should be ~60 (10 + 50), got {x}");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_drag_end_no_drag() {
+        let (handle, port) = make_server();
+
+        // End drag with no active drag — should be ok.
+        let resp = http_post(port, "/api/viewport/drag_end", r#"{"x":100,"y":100}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains("\"ok\":true"));
 
         handle.stop();
     }
