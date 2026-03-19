@@ -1010,15 +1010,40 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   }
 
   async function fetchSelected() {
-    if (selectedNodeId === null) { renderInspectorEmpty(); return; }
+    if (selectedNodeId === null) {
+      renderInspectorEmpty();
+      renderNodeDockEmpty();
+      clearScript();
+      return;
+    }
     var data = await api('GET', '/api/selected');
     if (data) {
       selectedNodeData = data;
       renderInspector(data);
       document.getElementById('status-selected').textContent = data.name || 'None';
       document.getElementById('status-path').textContent = data.path || '\u2014';
+      // Refresh node dock if visible.
+      if (currentRightTab === 'node') fetchNodeDock();
+      // Check for script property and load it.
+      var scriptPath = null;
+      if (data.properties) {
+        for (var pi = 0; pi < data.properties.length; pi++) {
+          if (data.properties[pi].name === 'script') {
+            var sv = data.properties[pi].value;
+            if (sv && sv.value && typeof sv.value === 'string') scriptPath = sv.value;
+            break;
+          }
+        }
+      }
+      if (scriptPath) {
+        fetchScript(scriptPath);
+      } else {
+        clearScript();
+      }
     } else {
       renderInspectorEmpty();
+      renderNodeDockEmpty();
+      clearScript();
     }
   }
 
@@ -1103,6 +1128,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       var prop = propMap[propNames[pi]];
       if (prop.type === 'Nil') continue;
       var cat = getPropCategory(prop.name);
+      if (cat === 'Internal') continue;
       if (!categories[cat]) categories[cat] = [];
       categories[cat].push(prop);
     }
@@ -1349,7 +1375,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       colorDiv.appendChild(swatch); colorDiv.appendChild(picker);
       colorDiv.appendChild(hexInput); colorDiv.appendChild(alphaGroup);
       val.appendChild(colorDiv);
-    } else if (type === 'NodePath' || prop.name === 'texture' || prop.name.indexOf('path') >= 0) {
+    } else if (type === 'NodePath' || prop.name === 'texture' || prop.name === 'script' || prop.name.indexOf('path') >= 0) {
       var npDiv = document.createElement('div');
       npDiv.className = 'nodepath-editor';
       var npInput = document.createElement('input');
@@ -2057,6 +2083,281 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     setInterval(fetchFileSystem, 5000);
   }
 
+  // ---- Right panel tabs (Inspector / Node) ----
+  var currentRightTab = 'inspector';
+
+  function setupRightPanelTabs() {
+    var tabs = document.querySelectorAll('.right-panel-tab');
+    var contents = document.querySelectorAll('.right-panel-content');
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].addEventListener('click', function() {
+        var tabName = this.getAttribute('data-rptab');
+        currentRightTab = tabName;
+        for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('active', tabs[j].getAttribute('data-rptab') === tabName);
+        for (var j = 0; j < contents.length; j++) contents[j].classList.toggle('active', contents[j].getAttribute('data-rptab') === tabName);
+        if (tabName === 'node' && selectedNodeId !== null) fetchNodeDock();
+      });
+    }
+  }
+
+  // ---- Node Dock: Signals + Groups ----
+  var nodeDockData = null;
+
+  async function fetchNodeDock() {
+    if (selectedNodeId === null) {
+      renderNodeDockEmpty();
+      return;
+    }
+    var data = await api('GET', '/api/node/signals?node_id=' + selectedNodeId);
+    if (data) {
+      nodeDockData = data;
+      renderNodeDock(data);
+    } else {
+      renderNodeDockEmpty();
+    }
+  }
+
+  function renderNodeDockEmpty() {
+    document.getElementById('node-dock').innerHTML = '<div class="insp-empty">Select a node to view signals</div>';
+  }
+
+  function renderNodeDock(data) {
+    var el = document.getElementById('node-dock');
+    el.innerHTML = '';
+
+    // Signals section
+    var sigSection = createSection('Signals', 'node-signals');
+    var sigBody = sigSection.querySelector('.insp-section-body');
+
+    if (data.signals && data.signals.length > 0) {
+      for (var i = 0; i < data.signals.length; i++) {
+        var sig = data.signals[i];
+        var row = document.createElement('div');
+        row.className = 'signal-row';
+
+        var icon = document.createElement('span');
+        icon.className = 'signal-icon ' + (sig.connected ? 'connected' : 'disconnected');
+        icon.innerHTML = sig.connected ? '&#9889;&#8594;' : '&#9889;';
+
+        var name = document.createElement('span');
+        name.className = 'signal-name';
+        name.textContent = sig.name;
+
+        var connectBtn = document.createElement('button');
+        connectBtn.className = 'signal-connect-btn';
+        connectBtn.textContent = 'Connect...';
+        connectBtn.addEventListener('click', (function(sigName) { return function() {
+          openConnectDialog(sigName);
+        }; })(sig.name));
+
+        row.appendChild(icon);
+        row.appendChild(name);
+        row.appendChild(connectBtn);
+        sigBody.appendChild(row);
+      }
+    } else {
+      var empty = document.createElement('div');
+      empty.className = 'insp-empty';
+      empty.style.padding = '8px';
+      empty.textContent = 'No signals for this node type';
+      sigBody.appendChild(empty);
+    }
+    el.appendChild(sigSection);
+
+    // Groups section
+    var grpSection = createSection('Groups', 'node-groups');
+    var grpBody = grpSection.querySelector('.insp-section-body');
+    var groupsDiv = document.createElement('div');
+    groupsDiv.className = 'groups-section';
+
+    if (data.groups && data.groups.length > 0) {
+      for (var gi = 0; gi < data.groups.length; gi++) {
+        var tag = document.createElement('span');
+        tag.className = 'group-tag';
+        tag.textContent = data.groups[gi];
+        var removeBtn = document.createElement('span');
+        removeBtn.className = 'group-remove';
+        removeBtn.innerHTML = '&#10005;';
+        removeBtn.title = 'Remove group';
+        removeBtn.addEventListener('click', (function(group) { return function() {
+          api('POST', '/api/node/groups/remove', { node_id: selectedNodeId, group: group })
+            .then(function() { fetchNodeDock(); });
+        }; })(data.groups[gi]));
+        tag.appendChild(removeBtn);
+        groupsDiv.appendChild(tag);
+      }
+    }
+
+    var addRow = document.createElement('div');
+    addRow.className = 'group-add-row';
+    var addInput = document.createElement('input');
+    addInput.type = 'text';
+    addInput.placeholder = 'New group name...';
+    var addBtn = document.createElement('button');
+    addBtn.textContent = 'Add';
+    addBtn.addEventListener('click', function() {
+      var groupName = addInput.value.trim();
+      if (!groupName) return;
+      api('POST', '/api/node/groups/add', { node_id: selectedNodeId, group: groupName })
+        .then(function() { addInput.value = ''; fetchNodeDock(); });
+    });
+    addInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') addBtn.click();
+    });
+    addRow.appendChild(addInput);
+    addRow.appendChild(addBtn);
+    groupsDiv.appendChild(addRow);
+    grpBody.appendChild(groupsDiv);
+    el.appendChild(grpSection);
+  }
+
+  // ---- Connect dialog ----
+  var pendingConnectSignal = null;
+
+  function openConnectDialog(signalName) {
+    pendingConnectSignal = signalName;
+    document.getElementById('connect-signal-name').value = signalName;
+    var defaultMethod = '_on_' + (selectedNodeData ? selectedNodeData.name.toLowerCase().replace(/[^a-z0-9]/g, '_') : 'node') + '_' + signalName;
+    document.getElementById('connect-method-name').value = defaultMethod;
+    document.getElementById('connect-dialog-overlay').classList.add('open');
+    document.getElementById('connect-method-name').focus();
+  }
+
+  function closeConnectDialog() {
+    document.getElementById('connect-dialog-overlay').classList.remove('open');
+    pendingConnectSignal = null;
+  }
+
+  function setupConnectDialog() {
+    document.getElementById('connect-cancel').addEventListener('click', closeConnectDialog);
+    document.getElementById('connect-confirm').addEventListener('click', function() {
+      if (!pendingConnectSignal || !selectedNodeId) return;
+      var method = document.getElementById('connect-method-name').value.trim();
+      if (!method) return;
+      api('POST', '/api/node/signals/connect', {
+        node_id: selectedNodeId,
+        signal: pendingConnectSignal,
+        method: method
+      }).then(function() {
+        closeConnectDialog();
+        fetchNodeDock();
+      });
+    });
+    document.getElementById('connect-method-name').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') document.getElementById('connect-confirm').click();
+      if (e.key === 'Escape') closeConnectDialog();
+    });
+    document.getElementById('connect-dialog-overlay').addEventListener('click', function(e) {
+      if (e.target === this) closeConnectDialog();
+    });
+  }
+
+  // ---- Script panel ----
+  var currentScriptPath = null;
+
+  function highlightGDScript(line) {
+    var result = '';
+    var i = 0;
+    while (i < line.length) {
+      if (line[i] === '#') {
+        result += '<span class="gd-comment">' + escapeHtml(line.substring(i)) + '</span>';
+        break;
+      }
+      if (line[i] === '"' || line[i] === "'") {
+        var quote = line[i];
+        var end = line.indexOf(quote, i + 1);
+        if (end === -1) end = line.length - 1;
+        result += '<span class="gd-string">' + escapeHtml(line.substring(i, end + 1)) + '</span>';
+        i = end + 1;
+        continue;
+      }
+      if (line[i] === '$') {
+        var match = line.substring(i).match(/^\$[A-Za-z0-9_/]+/);
+        if (match) {
+          result += '<span class="gd-nodepath">' + escapeHtml(match[0]) + '</span>';
+          i += match[0].length;
+          continue;
+        }
+      }
+      if (/[0-9]/.test(line[i]) && (i === 0 || /[\s(,=+\-*/<>!&|^~\[]/.test(line[i-1]))) {
+        var numMatch = line.substring(i).match(/^[0-9]+(\.[0-9]+)?/);
+        if (numMatch) {
+          result += '<span class="gd-number">' + escapeHtml(numMatch[0]) + '</span>';
+          i += numMatch[0].length;
+          continue;
+        }
+      }
+      if (/[a-zA-Z_]/.test(line[i])) {
+        var wordMatch = line.substring(i).match(/^[a-zA-Z_][a-zA-Z0-9_]*/);
+        if (wordMatch) {
+          var word = wordMatch[0];
+          var keywords = ['func','var','if','else','elif','for','while','return','class','extends','signal','enum','match','const','static','onready','export','pass','break','continue','in','not','and','or','true','false','null','self','yield','await','class_name','preload','load'];
+          var builtins = ['print','str','int','float','len','range','abs','min','max','clamp','lerp','sign','round','ceil','floor','sqrt','pow','sin','cos','tan'];
+          if (keywords.indexOf(word) >= 0) {
+            result += '<span class="gd-keyword">' + escapeHtml(word) + '</span>';
+          } else if (builtins.indexOf(word) >= 0) {
+            result += '<span class="gd-builtin">' + escapeHtml(word) + '</span>';
+          } else {
+            result += escapeHtml(word);
+          }
+          i += word.length;
+          continue;
+        }
+      }
+      result += escapeHtml(line[i]);
+      i++;
+    }
+    return result;
+  }
+
+  async function fetchScript(path) {
+    if (!path || path === currentScriptPath) return;
+    currentScriptPath = path;
+    var data = await api('GET', '/api/script?path=' + encodeURIComponent(path));
+    if (data && data.content !== undefined) {
+      renderScript(data.content, data.path);
+    } else {
+      document.getElementById('script-panel').innerHTML = '<div class="script-empty">Could not load script: ' + escapeHtml(path) + '</div>';
+    }
+  }
+
+  function renderScript(content, path) {
+    var el = document.getElementById('script-panel');
+    el.innerHTML = '';
+
+    var header = document.createElement('div');
+    header.style.cssText = 'padding:4px 8px;font-size:11px;color:var(--text-dim);border-bottom:1px solid var(--border);';
+    header.textContent = path || 'Script';
+    el.appendChild(header);
+
+    var editor = document.createElement('div');
+    editor.className = 'script-editor';
+
+    var lines = content.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var lineDiv = document.createElement('div');
+      lineDiv.className = 'script-line';
+
+      var lineNum = document.createElement('span');
+      lineNum.className = 'script-line-number';
+      lineNum.textContent = String(i + 1);
+
+      var lineContent = document.createElement('span');
+      lineContent.className = 'script-line-content';
+      lineContent.innerHTML = highlightGDScript(lines[i]);
+
+      lineDiv.appendChild(lineNum);
+      lineDiv.appendChild(lineContent);
+      editor.appendChild(lineDiv);
+    }
+    el.appendChild(editor);
+  }
+
+  function clearScript() {
+    currentScriptPath = null;
+    document.getElementById('script-panel').innerHTML = '<div class="script-empty">Select a node with a script to view its content</div>';
+  }
+
   // ---- Init ----
   setupViewport();
   setupToolbar();
@@ -2065,6 +2366,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   setupSearch();
   setupKeyboardShortcuts();
   setupBottomPanel();
+  setupRightPanelTabs();
+  setupConnectDialog();
   setupAddNodeDialog();
   setupPlayButtons();
   setupLeftDivider();
