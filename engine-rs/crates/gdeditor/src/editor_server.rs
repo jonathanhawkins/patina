@@ -254,6 +254,7 @@ fn run_server(
 struct HttpRequest {
     method: String,
     path: String,
+    query: String,
     body: String,
 }
 
@@ -303,7 +304,13 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         return None;
     }
     let method = parts[0].to_string();
-    let path = parts[1].split('?').next().unwrap_or(parts[1]).to_string();
+    let full_url = parts[1];
+    let (path_part, query_part) = match full_url.find('?') {
+        Some(idx) => (&full_url[..idx], &full_url[idx + 1..]),
+        None => (full_url, ""),
+    };
+    let path = path_part.to_string();
+    let query = query_part.to_string();
 
     // Parse Content-Length from headers.
     let content_length: usize = header_str
@@ -336,7 +343,12 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         String::new()
     };
 
-    Some(HttpRequest { method, path, body })
+    Some(HttpRequest {
+        method,
+        path,
+        query,
+        body,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +412,12 @@ fn handle_connection(
         ("POST", "/api/viewport/pan") => api_set_pan(state, &req.body, &mut stream),
         ("GET", "/api/logs") => api_get_logs(state, &mut stream),
         ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
+        ("GET", "/api/filesystem") => api_get_filesystem(&mut stream),
+        ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
+        ("GET", "/api/node/signals") => api_get_node_signals(state, &req.query, &mut stream),
+        ("POST", "/api/node/signals/connect") => api_connect_signal(state, &req.body, &mut stream),
+        ("POST", "/api/node/groups/add") => api_add_group(state, &req.body, &mut stream),
+        ("POST", "/api/node/groups/remove") => api_remove_group(state, &req.body, &mut stream),
         _ => serve_404(&mut stream),
     }
 }
@@ -1544,6 +1562,499 @@ fn api_get_scene_info(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(stream, &json);
 }
 
+// ---------------------------------------------------------------------------
+// Filesystem endpoint
+// ---------------------------------------------------------------------------
+
+/// A filesystem entry for the JSON response.
+#[derive(Debug)]
+struct FsEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    children: Vec<FsEntry>,
+}
+
+impl FsEntry {
+    fn to_json(&self) -> String {
+        if self.is_dir {
+            let children_json: Vec<String> = self.children.iter().map(|c| c.to_json()).collect();
+            format!(
+                r#"{{"name":"{}","path":"{}","is_dir":true,"children":[{}]}}"#,
+                self.name.replace('\\', "\\\\").replace('"', "\\\""),
+                self.path.replace('\\', "\\\\").replace('"', "\\\""),
+                children_json.join(",")
+            )
+        } else {
+            format!(
+                r#"{{"name":"{}","path":"{}","is_dir":false}}"#,
+                self.name.replace('\\', "\\\\").replace('"', "\\\""),
+                self.path.replace('\\', "\\\\").replace('"', "\\\""),
+            )
+        }
+    }
+}
+
+/// Recursively scan a directory for .tscn, .gd, .tres files up to `max_depth` levels.
+fn scan_directory(
+    dir: &std::path::Path,
+    prefix: &str,
+    depth: usize,
+    max_depth: usize,
+) -> Vec<FsEntry> {
+    if depth > max_depth {
+        return Vec::new();
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip hidden files/directories.
+        if name.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            let child_prefix = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            let children = scan_directory(&path, &child_prefix, depth + 1, max_depth);
+            // Only include directories that have relevant files (directly or nested).
+            if !children.is_empty() {
+                dirs.push(FsEntry {
+                    name,
+                    path: format!("res://{}", child_prefix),
+                    is_dir: true,
+                    children,
+                });
+            }
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "tscn" | "gd" | "tres") {
+                let file_path = if prefix.is_empty() {
+                    format!("res://{}", name)
+                } else {
+                    format!("res://{}/{}", prefix, name)
+                };
+                files.push(FsEntry {
+                    name,
+                    path: file_path,
+                    is_dir: false,
+                    children: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Sort: directories first, then files, both alphabetically.
+    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dirs.extend(files);
+    dirs
+}
+
+/// `GET /api/filesystem` -- returns project files (.tscn, .gd, .tres) as a tree.
+fn api_get_filesystem(stream: &mut TcpStream) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let entries = scan_directory(&cwd, "", 0, 3);
+    let entries_json: Vec<String> = entries.iter().map(|e| e.to_json()).collect();
+    let json = format!(
+        r#"{{"root":"{}","files":[{}]}}"#,
+        cwd.display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\""),
+        entries_json.join(",")
+    );
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// Script endpoint
+// ---------------------------------------------------------------------------
+
+/// Parse a query string parameter by name.
+fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if key == name {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// URL-decode a percent-encoded string.
+fn url_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next().unwrap_or(0);
+            let lo = chars.next().unwrap_or(0);
+            let hex = [hi, lo];
+            if let Ok(s) = std::str::from_utf8(&hex) {
+                if let Ok(val) = u8::from_str_radix(s, 16) {
+                    result.push(val as char);
+                    continue;
+                }
+            }
+            result.push('%');
+            result.push(hi as char);
+            result.push(lo as char);
+        } else if b == b'+' {
+            result.push(' ');
+        } else {
+            result.push(b as char);
+        }
+    }
+    result
+}
+
+/// `GET /api/script?path=<path>` -- reads a .gd file and returns its content.
+fn api_get_script(query: &str, stream: &mut TcpStream) {
+    let raw_path = match query_param(query, "path") {
+        Some(p) => url_decode(p),
+        None => {
+            send_error(stream, 400, "missing path parameter");
+            return;
+        }
+    };
+
+    // Resolve res:// paths relative to cwd.
+    let file_path = if let Some(stripped) = raw_path.strip_prefix("res://") {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&raw_path)
+    };
+
+    // Security: only allow .gd files.
+    match file_path.extension().and_then(|e| e.to_str()) {
+        Some("gd") => {}
+        _ => {
+            send_error(stream, 400, "only .gd files are supported");
+            return;
+        }
+    }
+
+    match std::fs::read_to_string(&file_path) {
+        Ok(content) => {
+            let json = serde_json::json!({
+                "path": raw_path,
+                "content": content,
+                "lines": content.lines().count()
+            });
+            send_json(stream, &json.to_string());
+        }
+        Err(e) => {
+            send_error(stream, 404, &format!("failed to read script: {e}"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signals endpoint
+// ---------------------------------------------------------------------------
+
+/// Returns the list of common signals for a given node class name.
+fn signals_for_class(class_name: &str) -> Vec<&'static str> {
+    let mut signals = vec!["tree_entered", "tree_exiting", "ready"];
+
+    match class_name {
+        "Button" => {
+            signals.extend(&["pressed", "toggled", "button_down", "button_up"]);
+        }
+        "Area2D" => {
+            signals.extend(&["body_entered", "body_exited", "area_entered", "area_exited"]);
+        }
+        "Timer" => {
+            signals.push("timeout");
+        }
+        "CollisionObject2D" => {
+            signals.extend(&["input_event", "mouse_entered", "mouse_exited"]);
+        }
+        _ => {}
+    }
+
+    signals
+}
+
+/// `GET /api/node/signals?node_id=<id>` -- returns signals for a node.
+fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let node_raw: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+
+    let json = {
+        let state = state.lock().unwrap();
+        let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+            Some(id) => id,
+            None => {
+                send_error(stream, 404, "node not found");
+                return;
+            }
+        };
+
+        let node = state.scene_tree.get_node(node_id).unwrap();
+        let class_name = node.class_name().to_string();
+
+        // Get signals available for this class.
+        let available = signals_for_class(&class_name);
+
+        // Check for connections (stored as property signal_connections).
+        let connections_variant = node.get_property("signal_connections");
+        let connections_str = match &connections_variant {
+            Variant::String(s) => s.clone(),
+            _ => String::new(),
+        };
+
+        // Get groups.
+        let groups_variant = node.get_property("groups");
+        let groups: Vec<String> = match &groups_variant {
+            Variant::String(s) if !s.is_empty() => {
+                s.split(',').map(|g| g.trim().to_string()).collect()
+            }
+            _ => Vec::new(),
+        };
+
+        let signals_json: Vec<String> = available
+            .iter()
+            .map(|sig| {
+                let connected = connections_str.contains(sig);
+                format!(r#"{{"name":"{}","connected":{}}}"#, sig, connected,)
+            })
+            .collect();
+
+        let groups_json: Vec<String> = groups
+            .iter()
+            .map(|g| format!(r#""{}""#, g.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+
+        format!(
+            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}]}}"#,
+            node_raw,
+            class_name.replace('"', "\\\""),
+            signals_json.join(","),
+            groups_json.join(","),
+        )
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/node/signals/connect` -- connect a signal on a node.
+fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let signal_name = match parsed.get("signal").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing signal");
+            return;
+        }
+    };
+    let _target_raw = parsed.get("target_id").and_then(|v| v.as_u64());
+    let method = match parsed.get("method").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing method");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    // Store connection info as a property string (signal_connections).
+    let node = state.scene_tree.get_node_mut(node_id).unwrap();
+    let existing = match node.get_property("signal_connections") {
+        Variant::String(s) => s,
+        _ => String::new(),
+    };
+    let new_entry = format!("{}:{}", signal_name, method);
+    let updated = if existing.is_empty() {
+        new_entry
+    } else {
+        format!("{},{}", existing, new_entry)
+    };
+    node.set_property("signal_connections", Variant::String(updated));
+
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Connected signal '{}' to method '{}'", signal_name, method),
+    );
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// Groups endpoints
+// ---------------------------------------------------------------------------
+
+/// `POST /api/node/groups/add` -- add a group to a node.
+fn api_add_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let group = match parsed.get("group").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing group");
+            return;
+        }
+    };
+
+    if group.is_empty() {
+        send_error(stream, 400, "group name cannot be empty");
+        return;
+    }
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let node = state.scene_tree.get_node_mut(node_id).unwrap();
+    let existing = match node.get_property("groups") {
+        Variant::String(s) => s,
+        _ => String::new(),
+    };
+
+    let groups: Vec<&str> = if existing.is_empty() {
+        Vec::new()
+    } else {
+        existing.split(',').map(|g| g.trim()).collect()
+    };
+
+    // Don't add duplicates.
+    if groups.contains(&group.as_str()) {
+        send_json(stream, r#"{"ok":true,"added":false}"#);
+        return;
+    }
+
+    let updated = if existing.is_empty() {
+        group.clone()
+    } else {
+        format!("{},{}", existing, group)
+    };
+    node.set_property("groups", Variant::String(updated));
+
+    state.scene_modified = true;
+    state.add_log("info", format!("Added group '{}'", group));
+
+    send_json(stream, r#"{"ok":true,"added":true}"#);
+}
+
+/// `POST /api/node/groups/remove` -- remove a group from a node.
+fn api_remove_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let group = match parsed.get("group").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing group");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let node = state.scene_tree.get_node_mut(node_id).unwrap();
+    let existing = match node.get_property("groups") {
+        Variant::String(s) => s,
+        _ => String::new(),
+    };
+
+    let groups: Vec<&str> = if existing.is_empty() {
+        Vec::new()
+    } else {
+        existing.split(',').map(|g| g.trim()).collect()
+    };
+
+    let new_groups: Vec<&str> = groups
+        .into_iter()
+        .filter(|g| *g != group.as_str())
+        .collect();
+    let updated = new_groups.join(",");
+    node.set_property("groups", Variant::String(updated));
+
+    state.scene_modified = true;
+    state.add_log("info", format!("Removed group '{}'", group));
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2570,6 +3081,435 @@ mod tests {
             pos_prop.is_some(),
             "duplicate should have position property"
         );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_filesystem_endpoint_returns_json() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/filesystem");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v["root"].is_string(), "should have a root path");
+        assert!(v["files"].is_array(), "should have a files array");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_filesystem_finds_tscn_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("main.tscn"), "[gd_scene]").unwrap();
+        std::fs::write(tmp.path().join("player.gd"), "extends Node").unwrap();
+        std::fs::write(tmp.path().join("theme.tres"), "[gd_resource]").unwrap();
+        std::fs::write(tmp.path().join("readme.txt"), "ignore me").unwrap();
+        std::fs::create_dir_all(tmp.path().join("scenes")).unwrap();
+        std::fs::write(tmp.path().join("scenes/level1.tscn"), "[gd_scene]").unwrap();
+
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"main.tscn"),
+            "should find main.tscn, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"player.gd"),
+            "should find player.gd, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"theme.tres"),
+            "should find theme.tres, got {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"readme.txt"),
+            "should not include .txt files"
+        );
+        assert!(names.contains(&"scenes"), "should find scenes directory");
+
+        let scenes_dir = entries.iter().find(|e| e.name == "scenes").unwrap();
+        assert!(scenes_dir.is_dir);
+        assert_eq!(scenes_dir.children.len(), 1);
+        assert_eq!(scenes_dir.children[0].name, "level1.tscn");
+    }
+
+    #[test]
+    fn test_filesystem_respects_max_depth() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("a/b/c/d")).unwrap();
+        std::fs::write(tmp.path().join("a/b/c/d/deep.tscn"), "[gd_scene]").unwrap();
+        std::fs::write(tmp.path().join("a/top.tscn"), "[gd_scene]").unwrap();
+        // Add a file at depth 2 so intermediate dirs are included.
+        std::fs::write(tmp.path().join("a/b/mid.tscn"), "[gd_scene]").unwrap();
+
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        let a = entries.iter().find(|e| e.name == "a").unwrap();
+        assert!(
+            a.children.iter().any(|c| c.name == "top.tscn"),
+            "should find top.tscn"
+        );
+        let b = a.children.iter().find(|e| e.name == "b").unwrap();
+        assert!(
+            b.children.iter().any(|c| c.name == "mid.tscn"),
+            "should find mid.tscn at depth 2"
+        );
+        // c/ contains only d/ which has content beyond max_depth,
+        // so c/ is excluded (no reachable children).
+        assert!(
+            !b.children.iter().any(|c| c.name == "c"),
+            "c/ should be excluded since its content is beyond max depth"
+        );
+    }
+
+    #[test]
+    fn test_filesystem_skips_hidden_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".godot")).unwrap();
+        std::fs::write(tmp.path().join(".godot/cache.tscn"), "[gd_scene]").unwrap();
+        std::fs::write(tmp.path().join("visible.tscn"), "[gd_scene]").unwrap();
+
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"visible.tscn"));
+        assert!(!names.contains(&".godot"), "should skip hidden directories");
+    }
+
+    #[test]
+    fn test_filesystem_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        assert!(
+            entries.is_empty(),
+            "empty directory should return no entries"
+        );
+    }
+
+    #[test]
+    fn test_fs_entry_to_json() {
+        let entry = super::FsEntry {
+            name: "test.tscn".to_string(),
+            path: "res://test.tscn".to_string(),
+            is_dir: false,
+            children: Vec::new(),
+        };
+        let json = entry.to_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "test.tscn");
+        assert_eq!(v["path"], "res://test.tscn");
+        assert_eq!(v["is_dir"], false);
+    }
+
+    #[test]
+    fn test_fs_entry_dir_to_json() {
+        let entry = super::FsEntry {
+            name: "scenes".to_string(),
+            path: "res://scenes".to_string(),
+            is_dir: true,
+            children: vec![super::FsEntry {
+                name: "main.tscn".to_string(),
+                path: "res://scenes/main.tscn".to_string(),
+                is_dir: false,
+                children: Vec::new(),
+            }],
+        };
+        let json = entry.to_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "scenes");
+        assert_eq!(v["is_dir"], true);
+        assert_eq!(v["children"][0]["name"], "main.tscn");
+    }
+
+    // ------------------------------------------------------------------
+    // New endpoint tests: signals, groups, script
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_get_node_signals() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let resp = http_get(port, &format!("/api/node/signals?node_id={main_id}"));
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["class"], "Node2D");
+        let signals = v["signals"].as_array().unwrap();
+        assert!(signals.len() >= 3);
+        let names: Vec<&str> = signals
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"ready"));
+        assert!(names.contains(&"tree_entered"));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_node_signals_invalid_id() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/node/signals?node_id=99999999");
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_node_signals_missing_id() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/node/signals");
+        assert!(resp.contains("400"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_connect_signal() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(r#"{{"node_id":{main_id},"signal":"ready","method":"_on_ready"}}"#);
+        let resp = http_post(port, "/api/node/signals/connect", &body);
+        assert!(resp.contains("200 OK"));
+
+        let sig_resp = http_get(port, &format!("/api/node/signals?node_id={main_id}"));
+        let sig_body = extract_body(&sig_resp);
+        let v: serde_json::Value = serde_json::from_str(sig_body).unwrap();
+        let signals = v["signals"].as_array().unwrap();
+        let ready = signals.iter().find(|s| s["name"] == "ready").unwrap();
+        assert_eq!(ready["connected"], true);
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_connect_signal_missing_fields() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(r#"{{"node_id":{main_id},"signal":"ready"}}"#);
+        let resp = http_post(port, "/api/node/signals/connect", &body);
+        assert!(resp.contains("400"));
+
+        let body = format!(r#"{{"node_id":{main_id},"method":"_on_ready"}}"#);
+        let resp = http_post(port, "/api/node/signals/connect", &body);
+        assert!(resp.contains("400"));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_add_group() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(r#"{{"node_id":{main_id},"group":"enemy"}}"#);
+        let resp = http_post(port, "/api/node/groups/add", &body);
+        assert!(resp.contains("200 OK"));
+        let resp_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(resp_body).unwrap();
+        assert_eq!(v["added"], true);
+
+        let sig_resp = http_get(port, &format!("/api/node/signals?node_id={main_id}"));
+        let sig_body = extract_body(&sig_resp);
+        let v: serde_json::Value = serde_json::from_str(sig_body).unwrap();
+        let groups = v["groups"].as_array().unwrap();
+        assert!(groups.iter().any(|g| g.as_str() == Some("enemy")));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_add_group_duplicate() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(r#"{{"node_id":{main_id},"group":"player"}}"#);
+        http_post(port, "/api/node/groups/add", &body);
+
+        let resp = http_post(port, "/api/node/groups/add", &body);
+        let resp_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(resp_body).unwrap();
+        assert_eq!(v["added"], false);
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_add_group_empty_name() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(r#"{{"node_id":{main_id},"group":""}}"#);
+        let resp = http_post(port, "/api/node/groups/add", &body);
+        assert!(resp.contains("400"));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_remove_group() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(r#"{{"node_id":{main_id},"group":"enemy"}}"#);
+        http_post(port, "/api/node/groups/add", &body);
+        let body = format!(r#"{{"node_id":{main_id},"group":"damageable"}}"#);
+        http_post(port, "/api/node/groups/add", &body);
+
+        let body = format!(r#"{{"node_id":{main_id},"group":"enemy"}}"#);
+        let resp = http_post(port, "/api/node/groups/remove", &body);
+        assert!(resp.contains("200 OK"));
+
+        let sig_resp = http_get(port, &format!("/api/node/signals?node_id={main_id}"));
+        let sig_body = extract_body(&sig_resp);
+        let v: serde_json::Value = serde_json::from_str(sig_body).unwrap();
+        let groups = v["groups"].as_array().unwrap();
+        assert!(!groups.iter().any(|g| g.as_str() == Some("enemy")));
+        assert!(groups.iter().any(|g| g.as_str() == Some("damageable")));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_add_group_invalid_node() {
+        let (handle, port) = make_server();
+        let body = r#"{"node_id":99999999,"group":"test"}"#;
+        let resp = http_post(port, "/api/node/groups/add", body);
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_remove_group_invalid_node() {
+        let (handle, port) = make_server();
+        let body = r#"{"node_id":99999999,"group":"test"}"#;
+        let resp = http_post(port, "/api/node/groups/remove", body);
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_script_missing_path() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/script");
+        assert!(resp.contains("400"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_script_non_gd_file() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/script?path=test.rs");
+        assert!(resp.contains("400"));
+        assert!(resp.contains("only .gd files"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_script_not_found() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/script?path=nonexistent.gd");
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_script_reads_file() {
+        let dir = std::env::temp_dir().join("patina_test_script");
+        let _ = std::fs::create_dir_all(&dir);
+        let script_path = dir.join("test_script.gd");
+        std::fs::write(
+            &script_path,
+            "extends Node\n\nfunc _ready():\n    print(\"hello\")\n",
+        )
+        .unwrap();
+
+        let (handle, port) = make_server();
+        let encoded_path = script_path.to_str().unwrap().replace(' ', "%20");
+        let resp = http_get(port, &format!("/api/script?path={encoded_path}"));
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v["content"].as_str().unwrap().contains("extends Node"));
+        assert!(v["lines"].as_u64().unwrap() >= 4);
+
+        let _ = std::fs::remove_file(&script_path);
+        let _ = std::fs::remove_dir(&dir);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_query_param() {
+        assert_eq!(
+            super::query_param("path=hello.gd&foo=bar", "path"),
+            Some("hello.gd")
+        );
+        assert_eq!(
+            super::query_param("path=hello.gd&foo=bar", "foo"),
+            Some("bar")
+        );
+        assert_eq!(super::query_param("path=hello.gd", "missing"), None);
+        assert_eq!(super::query_param("", "path"), None);
+    }
+
+    #[test]
+    fn test_url_decode() {
+        assert_eq!(super::url_decode("hello%20world"), "hello world");
+        assert_eq!(super::url_decode("foo+bar"), "foo bar");
+        assert_eq!(super::url_decode("res%3A%2F%2Ftest.gd"), "res://test.gd");
+        assert_eq!(super::url_decode("plain"), "plain");
+    }
+
+    #[test]
+    fn test_signals_for_class() {
+        let node_signals = super::signals_for_class("Node");
+        assert!(node_signals.contains(&"ready"));
+        assert!(node_signals.contains(&"tree_entered"));
+
+        let button_signals = super::signals_for_class("Button");
+        assert!(button_signals.contains(&"pressed"));
+        assert!(button_signals.contains(&"toggled"));
+        assert!(button_signals.contains(&"ready"));
+
+        let area_signals = super::signals_for_class("Area2D");
+        assert!(area_signals.contains(&"body_entered"));
+        assert!(area_signals.contains(&"area_exited"));
+
+        let timer_signals = super::signals_for_class("Timer");
+        assert!(timer_signals.contains(&"timeout"));
+    }
+
+    #[test]
+    fn test_button_node_signals() {
+        let port = free_port();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let btn = Node::new("MyButton", "Button");
+        tree.add_child(root, btn).unwrap();
+        let state = EditorState::new(tree);
+        let handle = EditorServerHandle::start(port, state);
+        thread::sleep(Duration::from_millis(100));
+
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let sv: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let btn_id = sv["nodes"]["children"][0]["id"].as_u64().unwrap();
+
+        let resp = http_get(port, &format!("/api/node/signals?node_id={btn_id}"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        let signals = v["signals"].as_array().unwrap();
+        let names: Vec<&str> = signals
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"pressed"));
+        assert!(names.contains(&"toggled"));
+        assert!(names.contains(&"button_down"));
+        assert!(names.contains(&"button_up"));
+        assert!(names.contains(&"ready"));
 
         handle.stop();
     }

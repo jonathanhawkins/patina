@@ -1658,6 +1658,18 @@ impl Interpreter {
                     )))
                 }
             }
+            "get_child_count" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    let children = access.get_children(node_id);
+                    Ok(Some(Variant::Int(children.len() as i64)))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_child_count() requires scene access".into(),
+                    )))
+                }
+            }
             "emit_signal" => {
                 if args.is_empty() {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -2248,6 +2260,16 @@ impl Interpreter {
                                 .map(|c| Variant::ObjectId(gdcore::id::ObjectId::from_raw(*c)))
                                 .collect();
                             Ok(Variant::Array(arr))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_child_count" => {
+                        if let Some(ref access) = self.scene_access {
+                            let children = access.get_children(id);
+                            Ok(Variant::Int(children.len() as i64))
                         } else {
                             Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                 "no scene access".into(),

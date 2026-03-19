@@ -29,9 +29,31 @@
                 "type": "Int",
                 "value": 0
               },
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  0.0,
+                  0.0
+                ]
+              },
+              "rotation": {
+                "type": "Float",
+                "value": 0.0
+              },
+              "scale": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  1.0
+                ]
+              },
               "script": {
                 "type": "String",
                 "value": "ExtResource(\"1\")"
+              },
+              "visible": {
+                "type": "Bool",
+                "value": true
               }
             },
             "script_vars": {
@@ -63,13 +85,35 @@
                 "type": "Int",
                 "value": 0
               },
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  0.0,
+                  0.0
+                ]
+              },
               "received_count": {
                 "type": "Int",
                 "value": 0
               },
+              "rotation": {
+                "type": "Float",
+                "value": 0.0
+              },
+              "scale": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  1.0
+                ]
+              },
               "script": {
                 "type": "String",
                 "value": "ExtResource(\"2\")"
+              },
+              "visible": {
+                "type": "Bool",
+                "value": true
               }
             },
             "script_vars": {
@@ -95,7 +139,30 @@
           "NOTIFICATION_PROCESS"
         ],
         "path": "/root/Root",
-        "properties": {},
+        "properties": {
+          "position": {
+            "type": "Vector2",
+            "value": [
+              0.0,
+              0.0
+            ]
+          },
+          "rotation": {
+            "type": "Float",
+            "value": 0.0
+          },
+          "scale": {
+            "type": "Vector2",
+            "value": [
+              1.0,
+              1.0
+            ]
+          },
+          "visible": {
+            "type": "Bool",
+            "value": true
+          }
+        },
         "script_vars": {}
       }
     ],

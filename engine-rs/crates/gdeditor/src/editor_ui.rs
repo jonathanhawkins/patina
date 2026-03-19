@@ -75,8 +75,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 
 /* Scene tree panel */
 #scene-panel {
-  width: 240px; min-width: 160px; background: var(--panel);
-  border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0;
+  background: var(--panel);
+  display: flex; flex-direction: column; flex: 1; min-height: 80px; overflow: hidden;
 }
 #scene-panel .panel-header {
   padding: 6px 10px; font-weight: bold; font-size: 11px; text-transform: uppercase;
@@ -262,11 +262,205 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 }
 #statusbar .accent { color: var(--accent); }
 
+/* Left panel split: scene tree + filesystem */
+#left-panel {
+  width: 240px; min-width: 160px; display: flex; flex-direction: column;
+  flex-shrink: 0; border-right: 1px solid var(--border);
+}
+#left-divider {
+  height: 4px; cursor: ns-resize; background: var(--border); flex-shrink: 0;
+}
+#left-divider:hover { background: var(--accent); opacity: 0.5; }
+
+/* FileSystem dock */
+#filesystem-panel {
+  background: var(--panel); display: flex; flex-direction: column; flex: 1; min-height: 80px; overflow: hidden;
+}
+#filesystem-panel .panel-header {
+  padding: 6px 10px; font-weight: bold; font-size: 11px; text-transform: uppercase;
+  color: var(--text-dim); border-bottom: 1px solid var(--border); letter-spacing: 0.5px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+#filesystem-panel .panel-header .fs-path { font-weight: normal; font-size: 10px; color: var(--accent); }
+#fs-tree { flex: 1; overflow: auto; padding: 4px 0; }
+.fs-node { user-select: none; }
+.fs-row {
+  display: flex; align-items: center; padding: 2px 8px; cursor: pointer;
+  white-space: nowrap; gap: 4px; font-size: 12px;
+}
+.fs-row:hover { background: var(--hover); }
+.fs-row.selected { background: var(--selected); color: var(--accent); }
+.fs-toggle { width: 14px; text-align: center; font-size: 10px; color: var(--text-dim); flex-shrink: 0; cursor: pointer; }
+.fs-icon { font-size: 12px; flex-shrink: 0; width: 16px; text-align: center; }
+.fs-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+
+/* Scene tabs */
+#scene-tabs {
+  display: flex; align-items: center; background: #1a1a1a; border-bottom: 1px solid var(--border);
+  flex-shrink: 0; min-height: 28px; padding: 0 4px; gap: 0; overflow-x: auto;
+}
+.scene-tab {
+  display: flex; align-items: center; padding: 4px 14px; font-size: 12px; cursor: pointer;
+  color: var(--text-dim); border: none; background: transparent; border-bottom: 2px solid transparent;
+  font: inherit; white-space: nowrap; gap: 4px; flex-shrink: 0;
+}
+.scene-tab:hover { color: var(--text); background: var(--hover); }
+.scene-tab.active { color: var(--text); background: var(--panel); border-bottom-color: var(--accent); }
+.scene-tab .modified-indicator { color: var(--accent); font-size: 14px; }
+
+/* Add node dialog */
+#add-node-dialog {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5); z-index: 300; align-items: center; justify-content: center;
+}
+#add-node-dialog.open { display: flex; }
+#add-node-dialog-inner {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  width: 420px; max-height: 500px; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+#add-node-dialog-header {
+  padding: 10px 14px; font-weight: bold; font-size: 13px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+#add-node-dialog-header button {
+  background: transparent; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; padding: 0 4px;
+}
+#add-node-dialog-header button:hover { color: var(--text); background: transparent; border: none; }
+#add-node-search {
+  margin: 8px 12px 4px 12px; padding: 6px 10px; font-size: 12px; border-radius: 3px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+}
+#add-node-search:focus { border-color: var(--accent); }
+#add-node-list {
+  flex: 1; overflow: auto; padding: 4px 0; min-height: 200px; max-height: 340px;
+}
+.add-node-category {
+  padding: 4px 14px 2px 14px; font-size: 10px; font-weight: bold; text-transform: uppercase;
+  color: var(--text-dim); letter-spacing: 0.5px;
+}
+.add-node-item {
+  padding: 4px 14px 4px 24px; cursor: pointer; font-size: 12px;
+  display: flex; align-items: center; gap: 6px;
+}
+.add-node-item:hover { background: var(--hover); }
+.add-node-item.selected { background: var(--selected); color: var(--accent); }
+.add-node-item .node-type-icon { width: 16px; text-align: center; font-size: 12px; }
+#add-node-description {
+  padding: 8px 14px; border-top: 1px solid var(--border); font-size: 11px;
+  color: var(--text-dim); min-height: 40px; line-height: 1.4;
+}
+#add-node-dialog-footer {
+  padding: 8px 14px; border-top: 1px solid var(--border); display: flex;
+  justify-content: flex-end; gap: 6px;
+}
+
+/* Play buttons */
+.play-buttons {
+  display: flex; align-items: center; gap: 2px; margin-left: auto;
+}
+.play-btn {
+  padding: 4px 8px; font-size: 14px; min-width: 32px; text-align: center; border-radius: 3px;
+}
+.play-btn:hover { border-color: var(--accent); }
+.play-btn.play-main { color: #50c878; }
+.play-btn.play-main:hover { background: rgba(80,200,120,0.1); }
+.play-btn.pause-btn { color: #e0c050; }
+.play-btn.pause-btn:hover { background: rgba(224,192,80,0.1); }
+.play-btn.stop-btn { color: var(--error); }
+.play-btn.stop-btn:hover { background: rgba(224,80,80,0.1); }
+.play-btn.play-current { color: #8ebbff; }
+.play-btn.play-current:hover { background: rgba(142,187,255,0.1); }
+
 /* Scrollbar styling */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #444; }
+
+/* Inspector/Node tabs */
+.right-panel-tabs {
+  display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.right-panel-tab {
+  padding: 5px 14px; font-size: 11px; cursor: pointer; color: var(--text-dim);
+  border: none; background: transparent; border-bottom: 2px solid transparent;
+  font: inherit; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.right-panel-tab:hover { color: var(--text); background: transparent; border-color: transparent; }
+.right-panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.right-panel-content { display: none; flex: 1; overflow: auto; }
+.right-panel-content.active { display: flex; flex-direction: column; }
+
+/* Signals panel */
+.signal-row {
+  display: flex; align-items: center; padding: 3px 8px; gap: 6px; font-size: 12px;
+}
+.signal-row:hover { background: var(--hover); }
+.signal-icon { font-size: 12px; flex-shrink: 0; }
+.signal-icon.connected { color: #50c878; }
+.signal-icon.disconnected { color: var(--text-dim); }
+.signal-name { flex: 1; }
+.signal-connect-btn {
+  padding: 2px 6px; font-size: 10px; opacity: 0; transition: opacity 0.15s;
+}
+.signal-row:hover .signal-connect-btn { opacity: 1; }
+
+/* Groups panel */
+.groups-section { padding: 4px 8px; }
+.group-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+  padding: 2px 8px; margin: 2px 4px 2px 0; font-size: 11px;
+}
+.group-tag .group-remove {
+  cursor: pointer; color: var(--text-dim); font-size: 10px; padding: 0 2px;
+}
+.group-tag .group-remove:hover { color: var(--error); }
+.group-add-row { display: flex; gap: 4px; margin-top: 4px; }
+.group-add-row input { flex: 1; font-size: 11px; }
+.group-add-row button { font-size: 11px; padding: 2px 8px; }
+
+/* Connect dialog */
+.connect-dialog-overlay {
+  display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5); z-index: 300; align-items: center; justify-content: center;
+}
+.connect-dialog-overlay.open { display: flex; }
+.connect-dialog {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 16px; min-width: 320px; max-width: 400px; box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+}
+.connect-dialog h3 { font-size: 13px; color: var(--accent); margin-bottom: 12px; }
+.connect-dialog label { display: block; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.connect-dialog input, .connect-dialog select {
+  width: 100%; margin-bottom: 10px; padding: 4px 8px;
+}
+.connect-dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+
+/* Script panel */
+.script-editor {
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px; line-height: 1.6; padding: 0; margin: 0;
+  overflow: auto; background: var(--bg); flex: 1;
+}
+.script-line {
+  display: flex; white-space: pre;
+}
+.script-line-number {
+  width: 40px; text-align: right; padding-right: 8px; color: var(--text-dim);
+  user-select: none; flex-shrink: 0; border-right: 1px solid var(--border);
+  margin-right: 8px;
+}
+.script-line-content { flex: 1; }
+.script-empty { color: var(--text-dim); font-style: italic; padding: 20px; text-align: center; }
+/* GDScript syntax highlighting */
+.gd-keyword { color: #569cd6; }
+.gd-string { color: #6a9955; }
+.gd-comment { color: #6a6a6a; font-style: italic; }
+.gd-number { color: #d19a66; }
+.gd-builtin { color: #dcdcaa; }
+.gd-nodepath { color: #c586c0; }
 </style>
 </head>
 <body>
@@ -280,19 +474,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   <button class="tool-btn" data-tool="rotate" title="Rotate (E)">E</button>
   <button class="tool-btn" data-tool="scale" title="Scale (S)">S</button>
   <div class="sep"></div>
-  <div class="add-menu">
-    <button id="btn-add" title="Add Node">+ Add Node &#9662;</button>
-    <div class="add-menu-dropdown" id="add-dropdown">
-      <div data-class="Node">Node</div>
-      <div data-class="Node2D">Node2D</div>
-      <div data-class="Node3D">Node3D</div>
-      <div data-class="Sprite2D">Sprite2D</div>
-      <div data-class="Camera2D">Camera2D</div>
-      <div data-class="Control">Control</div>
-      <div data-class="Label">Label</div>
-      <div data-class="Button">Button</div>
-    </div>
-  </div>
+  <button id="btn-add" title="Add Node">+ Add Node</button>
   <button id="btn-delete" title="Delete Node (Del)">&#10005; Delete</button>
   <div class="sep"></div>
   <button id="btn-undo" title="Undo (Ctrl+Z)">&#8630; Undo</button>
@@ -301,6 +483,12 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   <button id="btn-save" title="Save Scene (Ctrl+S)">&#128190; Save</button>
   <button id="btn-load" title="Load Scene">&#128194; Load</button>
   <span id="scene-file-indicator"></span>
+  <div class="play-buttons">
+    <button class="play-btn play-main" id="btn-play" title="Play (F5)">&#9654;</button>
+    <button class="play-btn pause-btn" id="btn-pause" title="Pause (F7)">&#9208;</button>
+    <button class="play-btn stop-btn" id="btn-stop" title="Stop (F8)">&#9209;</button>
+    <button class="play-btn play-current" id="btn-play-current" title="Play Current Scene (F6)">&#9654;&#9998;</button>
+  </div>
 </div>
 
 <!-- Context menu -->
@@ -315,17 +503,45 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   <div class="ctx-item" data-action="move-down">Move Down</div>
 </div>
 
+<!-- Add Node Dialog -->
+<div id="add-node-dialog">
+  <div id="add-node-dialog-inner">
+    <div id="add-node-dialog-header">
+      <span>Create New Node</span>
+      <button id="add-node-close" title="Close">&times;</button>
+    </div>
+    <input type="text" id="add-node-search" placeholder="Search node type..." autocomplete="off">
+    <div id="add-node-list"></div>
+    <div id="add-node-description">Select a node type to see its description.</div>
+    <div id="add-node-dialog-footer">
+      <button id="add-node-cancel">Cancel</button>
+      <button id="add-node-create" style="border-color:var(--accent);color:var(--accent)">Create</button>
+    </div>
+  </div>
+</div>
+
 <!-- Main area -->
 <div id="main">
-  <!-- Scene tree -->
-  <div id="scene-panel">
-    <div class="panel-header">Scene Tree</div>
-    <input type="text" id="scene-search" placeholder="Filter nodes..." autocomplete="off">
-    <div id="scene-tree"></div>
+  <!-- Left panel: Scene tree + FileSystem -->
+  <div id="left-panel">
+    <div id="scene-panel">
+      <div class="panel-header">Scene Tree</div>
+      <input type="text" id="scene-search" placeholder="Filter nodes..." autocomplete="off">
+      <div id="scene-tree"></div>
+    </div>
+    <div id="left-divider"></div>
+    <div id="filesystem-panel">
+      <div class="panel-header"><span>FileSystem</span><span class="fs-path">res://</span></div>
+      <div id="fs-tree"></div>
+    </div>
   </div>
 
   <!-- Center: viewport + bottom panel -->
   <div id="center-area">
+    <!-- Scene tabs -->
+    <div id="scene-tabs">
+      <div class="scene-tab active" id="scene-tab-current">Untitled</div>
+    </div>
     <!-- Viewport -->
     <div id="viewport-panel">
       <div class="panel-header">Viewport</div>
@@ -340,6 +556,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       <div id="bottom-panel-header">
         <button class="bottom-tab active" data-tab="output">Output</button>
         <button class="bottom-tab" data-tab="scene-info">Scene Info</button>
+        <button class="bottom-tab" data-tab="script">Script</button>
         <button id="bottom-toggle" title="Toggle panel">&#9650;</button>
       </div>
       <div id="bottom-panel-content">
@@ -349,15 +566,45 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
         <div class="bottom-content-tab" data-tab="scene-info">
           <div id="scene-info"></div>
         </div>
+        <div class="bottom-content-tab" data-tab="script">
+          <div id="script-panel">
+            <div class="script-empty">Select a node with a script to view its content</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Inspector -->
+  <!-- Inspector / Node dock -->
   <div id="inspector-panel">
-    <div class="panel-header">Inspector</div>
-    <div id="inspector">
-      <div class="insp-empty">Select a node to inspect</div>
+    <div class="right-panel-tabs">
+      <button class="right-panel-tab active" data-rptab="inspector">Inspector</button>
+      <button class="right-panel-tab" data-rptab="node">Node</button>
+    </div>
+    <div id="inspector-content" class="right-panel-content active" data-rptab="inspector">
+      <div id="inspector">
+        <div class="insp-empty">Select a node to inspect</div>
+      </div>
+    </div>
+    <div id="node-dock-content" class="right-panel-content" data-rptab="node">
+      <div id="node-dock">
+        <div class="insp-empty">Select a node to view signals</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Connect signal dialog -->
+<div class="connect-dialog-overlay" id="connect-dialog-overlay">
+  <div class="connect-dialog">
+    <h3>Connect Signal</h3>
+    <label>Signal</label>
+    <input type="text" id="connect-signal-name" readonly>
+    <label>Target Method</label>
+    <input type="text" id="connect-method-name" placeholder="_on_signal_name">
+    <div class="connect-dialog-buttons">
+      <button id="connect-cancel">Cancel</button>
+      <button id="connect-confirm" style="border-color:var(--accent);color:var(--accent)">Connect</button>
     </div>
   </div>
 </div>
@@ -434,7 +681,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 
   function getPropCategory(name) {
     if (PROP_CATEGORIES[name]) return PROP_CATEGORIES[name];
-    if (name.startsWith('script_') || name.startsWith('metadata/')) return 'Script';
+    if (name === 'script' || name.startsWith('script_') || name.startsWith('metadata/')) return 'Script';
+    if (name === 'groups' || name === 'signal_connections') return 'Internal';
     return 'Misc';
   }
 
@@ -738,7 +986,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   }
 
   function doAddChild(parentId) {
-    document.getElementById('add-dropdown').classList.toggle('open');
+    openAddNodeDialog();
   }
 
   function findNodeInTree(node, id) {
@@ -1403,28 +1651,311 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     } else {
       el.innerHTML = modified ? '<span class="modified">* unsaved</span>' : '';
     }
+    // Update scene tab
+    var tab = document.getElementById('scene-tab-current');
+    if (tab) {
+      var tabName = file ? file.split('/').pop().split('\\').pop() : 'Untitled';
+      tab.innerHTML = escapeHtml(tabName) + (modified ? '<span class="modified-indicator"> *</span>' : '');
+    }
+  }
+
+  // ---- Add Node Dialog ----
+  var NODE_TYPES = {
+    'Node': { category: 'Node', desc: 'Base class for all scene objects. A node can contain other nodes as children.' },
+    'Node2D': { category: '2D', desc: 'A 2D game object. Base node for 2D game entities with position, rotation, and scale.' },
+    'Sprite2D': { category: '2D', desc: 'Displays a 2D texture. Can be used as a visual representation for game objects.' },
+    'AnimatedSprite2D': { category: '2D', desc: 'Sprite node that contains multiple textures as animation frames.' },
+    'Camera2D': { category: '2D', desc: 'Camera node for 2D scenes. Controls the viewport view.' },
+    'Light2D': { category: '2D', desc: 'Casts light in a 2D environment. Can be used for dynamic lighting effects.' },
+    'CanvasModulate': { category: '2D', desc: 'Applies a color tint to the entire canvas. Useful for day/night cycles.' },
+    'CharacterBody2D': { category: 'Physics 2D', desc: 'Specialized 2D physics body for characters controlled by script.' },
+    'RigidBody2D': { category: 'Physics 2D', desc: 'A 2D physics body that is moved by the physics engine simulation.' },
+    'StaticBody2D': { category: 'Physics 2D', desc: 'A 2D physics body that cannot be moved. Used for walls and floors.' },
+    'Area2D': { category: 'Physics 2D', desc: 'A 2D area that detects overlapping bodies and areas.' },
+    'CollisionShape2D': { category: 'Physics 2D', desc: 'Provides collision shape for 2D physics bodies.' },
+    'Control': { category: 'UI', desc: 'Base class for all UI-related nodes. Handles input events and anchoring.' },
+    'Button': { category: 'UI', desc: 'A standard themed button that can contain text and an icon.' },
+    'Label': { category: 'UI', desc: 'Displays plain text. Supports wrapping and alignment.' },
+    'TextEdit': { category: 'UI', desc: 'A multi-line text editing control with syntax highlighting support.' },
+    'LineEdit': { category: 'UI', desc: 'A single-line text input field.' },
+    'Panel': { category: 'UI', desc: 'A UI panel that draws a background style box.' },
+    'TextureRect': { category: 'UI', desc: 'Displays a texture inside a UI layout. Supports stretch modes.' },
+    'VBoxContainer': { category: 'UI', desc: 'Arranges child controls vertically.' },
+    'HBoxContainer': { category: 'UI', desc: 'Arranges child controls horizontally.' },
+    'GridContainer': { category: 'UI', desc: 'Arranges child controls in a grid pattern.' },
+    'ScrollContainer': { category: 'UI', desc: 'A container that provides scrollbars when content exceeds bounds.' },
+    'TabContainer': { category: 'UI', desc: 'A container with tabs at the top for switching between child controls.' },
+    'AudioStreamPlayer': { category: 'Audio', desc: 'Plays audio non-positionally. Useful for background music and UI sounds.' },
+    'AudioStreamPlayer2D': { category: 'Audio', desc: 'Plays audio with 2D positional effects.' },
+    'Timer': { category: 'Other', desc: 'Counts down a specified interval and emits a signal when it reaches 0.' },
+    'AnimationPlayer': { category: 'Other', desc: 'Plays animations. Can animate any property of any node.' },
+    'NavigationAgent2D': { category: 'Other', desc: 'Provides navigation and pathfinding for 2D characters.' },
+    'Node3D': { category: 'Other', desc: 'Base node for 3D game entities with 3D transform.' }
+  };
+
+  var CATEGORY_DISPLAY_ORDER = ['Node', '2D', 'Physics 2D', 'UI', 'Audio', 'Other'];
+  var addNodeSelectedType = null;
+
+  function openAddNodeDialog() {
+    addNodeSelectedType = null;
+    document.getElementById('add-node-search').value = '';
+    renderAddNodeList('');
+    document.getElementById('add-node-dialog').classList.add('open');
+    setTimeout(function() { document.getElementById('add-node-search').focus(); }, 50);
+  }
+
+  function closeAddNodeDialog() {
+    document.getElementById('add-node-dialog').classList.remove('open');
+    addNodeSelectedType = null;
+  }
+
+  function renderAddNodeList(filter) {
+    var list = document.getElementById('add-node-list');
+    list.innerHTML = '';
+    var lower = filter.toLowerCase();
+    var byCategory = {};
+    var types = Object.keys(NODE_TYPES);
+    for (var i = 0; i < types.length; i++) {
+      var t = types[i];
+      if (lower && t.toLowerCase().indexOf(lower) < 0) continue;
+      var cat = NODE_TYPES[t].category;
+      if (!byCategory[cat]) byCategory[cat] = [];
+      byCategory[cat].push(t);
+    }
+    for (var ci = 0; ci < CATEGORY_DISPLAY_ORDER.length; ci++) {
+      var catName = CATEGORY_DISPLAY_ORDER[ci];
+      var items = byCategory[catName];
+      if (!items || items.length === 0) continue;
+      var catEl = document.createElement('div');
+      catEl.className = 'add-node-category';
+      catEl.textContent = catName;
+      list.appendChild(catEl);
+      for (var j = 0; j < items.length; j++) {
+        (function(typeName) {
+          var item = document.createElement('div');
+          item.className = 'add-node-item' + (typeName === addNodeSelectedType ? ' selected' : '');
+          var icon = document.createElement('span');
+          icon.className = 'node-type-icon';
+          icon.innerHTML = classIconHtml(typeName).replace('tree-icon', 'node-type-icon');
+          var nameSpan = document.createElement('span');
+          nameSpan.textContent = typeName;
+          item.appendChild(icon);
+          item.appendChild(nameSpan);
+          item.addEventListener('click', function() {
+            addNodeSelectedType = typeName;
+            list.querySelectorAll('.add-node-item').forEach(function(el) { el.classList.remove('selected'); });
+            item.classList.add('selected');
+            document.getElementById('add-node-description').textContent = NODE_TYPES[typeName].desc;
+          });
+          item.addEventListener('dblclick', function() {
+            addNodeSelectedType = typeName;
+            createSelectedNode();
+          });
+          list.appendChild(item);
+        })(items[j]);
+      }
+    }
+    // Auto-select first if filter narrows
+    if (filter && !addNodeSelectedType) {
+      var first = list.querySelector('.add-node-item');
+      if (first) first.click();
+    }
+  }
+
+  async function createSelectedNode() {
+    if (!addNodeSelectedType) return;
+    var name = prompt('Node name:', addNodeSelectedType);
+    if (!name) return;
+    var parentId = selectedNodeId || (sceneData && sceneData.nodes ? sceneData.nodes.id : null);
+    if (parentId === null) return;
+    await api('POST', '/api/node/add', { parent_id: parentId, name: name, class_name: addNodeSelectedType });
+    if (selectedNodeId) expandedNodes.add(selectedNodeId);
+    closeAddNodeDialog();
+    await fetchScene();
+  }
+
+  function setupAddNodeDialog() {
+    document.getElementById('add-node-search').addEventListener('input', function() {
+      renderAddNodeList(this.value.trim());
+    });
+    document.getElementById('add-node-search').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); createSelectedNode(); }
+      if (e.key === 'Escape') { e.preventDefault(); closeAddNodeDialog(); }
+    });
+    document.getElementById('add-node-close').addEventListener('click', closeAddNodeDialog);
+    document.getElementById('add-node-cancel').addEventListener('click', closeAddNodeDialog);
+    document.getElementById('add-node-create').addEventListener('click', createSelectedNode);
+    document.getElementById('add-node-dialog').addEventListener('click', function(e) {
+      if (e.target === this) closeAddNodeDialog();
+    });
+  }
+
+  // ---- FileSystem dock ----
+  var fsData = null;
+  var fsExpandedDirs = new Set();
+
+  function fsIcon(entry) {
+    if (entry.is_dir) return '\uD83D\uDCC1';
+    var ext = entry.name.split('.').pop();
+    if (ext === 'tscn') return '\uD83D\uDCC4';
+    if (ext === 'gd') return '\uD83D\uDCDC';
+    if (ext === 'tres') return '\uD83D\uDCE6';
+    return '\uD83D\uDCC4';
+  }
+
+  function renderFsTree(entries, depth, container) {
+    if (!entries) return;
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      var node = document.createElement('div');
+      node.className = 'fs-node';
+      node.style.paddingLeft = (depth * 16) + 'px';
+
+      var row = document.createElement('div');
+      row.className = 'fs-row';
+
+      var toggle = document.createElement('span');
+      toggle.className = 'fs-toggle';
+      if (entry.is_dir) {
+        var isExpanded = fsExpandedDirs.has(entry.path);
+        toggle.textContent = isExpanded ? '\u25BC' : '\u25B6';
+        (function(e, t) {
+          t.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            if (fsExpandedDirs.has(e.path)) fsExpandedDirs.delete(e.path);
+            else fsExpandedDirs.add(e.path);
+            refreshFsTree();
+          });
+        })(entry, toggle);
+      }
+
+      var icon = document.createElement('span');
+      icon.className = 'fs-icon';
+      icon.textContent = fsIcon(entry);
+
+      var name = document.createElement('span');
+      name.className = 'fs-name';
+      name.textContent = entry.name;
+
+      row.appendChild(toggle);
+      row.appendChild(icon);
+      row.appendChild(name);
+
+      if (!entry.is_dir) {
+        (function(e) {
+          row.addEventListener('click', function() {
+            var ext = e.name.split('.').pop();
+            if (ext === 'tscn') {
+              api('POST', '/api/scene/load', { path: e.path.replace('res://', '') }).then(function() {
+                selectedNodeId = null; selectedNodeData = null;
+                expandedNodes.clear(); renderInspectorEmpty();
+                fetchScene(); fetchSceneInfo();
+              });
+            }
+          });
+        })(entry);
+      }
+
+      node.appendChild(row);
+      container.appendChild(node);
+
+      if (entry.is_dir && entry.children && fsExpandedDirs.has(entry.path)) {
+        var childContainer = document.createElement('div');
+        renderFsTree(entry.children, depth + 1, childContainer);
+        container.appendChild(childContainer);
+      }
+    }
+  }
+
+  function refreshFsTree() {
+    var el = document.getElementById('fs-tree');
+    el.innerHTML = '';
+    if (fsData && fsData.files) {
+      renderFsTree(fsData.files, 0, el);
+    }
+  }
+
+  async function fetchFileSystem() {
+    var data = await api('GET', '/api/filesystem');
+    if (data) {
+      fsData = data;
+      refreshFsTree();
+    }
+  }
+
+  // ---- Left panel divider resize ----
+  function setupLeftDivider() {
+    var divider = document.getElementById('left-divider');
+    var scenePanel = document.getElementById('scene-panel');
+    var fsPanel = document.getElementById('filesystem-panel');
+    var isResizing = false;
+    var startY = 0;
+    var startSceneH = 0;
+
+    divider.addEventListener('mousedown', function(e) {
+      isResizing = true;
+      startY = e.clientY;
+      startSceneH = scenePanel.offsetHeight;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!isResizing) return;
+      var delta = e.clientY - startY;
+      var newH = Math.max(80, startSceneH + delta);
+      scenePanel.style.flex = 'none';
+      scenePanel.style.height = newH + 'px';
+      fsPanel.style.flex = '1';
+    });
+    document.addEventListener('mouseup', function() { isResizing = false; });
+  }
+
+  // ---- Scene tabs ----
+  function updateSceneTab() {
+    var tab = document.getElementById('scene-tab-current');
+    if (!tab) return;
+    var info = sceneData;
+    var sceneInfo = document.getElementById('scene-info');
+    // Use scene file name or "Untitled"
+    var el = document.getElementById('scene-file-indicator');
+    var name = 'Untitled';
+    if (el && el.textContent && el.textContent.replace(/^\*\s*/, '').trim()) {
+      name = el.textContent.replace(/^\*\s*/, '').trim();
+    }
+    var modified = el && el.querySelector('.modified');
+    tab.innerHTML = escapeHtml(name) + (modified ? '<span class="modified-indicator"> *</span>' : '');
+  }
+
+  // ---- Play buttons ----
+  function setupPlayButtons() {
+    document.getElementById('btn-play').addEventListener('click', function() {
+      logMessage('info', 'Play pressed (F5)');
+    });
+    document.getElementById('btn-pause').addEventListener('click', function() {
+      logMessage('info', 'Pause pressed (F7)');
+    });
+    document.getElementById('btn-stop').addEventListener('click', function() {
+      logMessage('info', 'Stop pressed (F8)');
+    });
+    document.getElementById('btn-play-current').addEventListener('click', function() {
+      logMessage('info', 'Play Current Scene pressed (F6)');
+    });
+  }
+
+  function logMessage(level, message) {
+    // Add a log entry to the output panel directly
+    var logEl = document.getElementById('output-log');
+    var div = document.createElement('div');
+    div.className = 'log-entry';
+    var time = new Date();
+    var timeStr = time.toLocaleTimeString();
+    div.innerHTML = '<span class="log-time">[' + escapeHtml(timeStr) + ']</span><span class="log-msg">' + escapeHtml(message) + '</span>';
+    logEl.insertBefore(div, logEl.firstChild);
   }
 
   // ---- Toolbar actions ----
   function setupToolbar() {
     var btnAdd = document.getElementById('btn-add');
-    var dropdown = document.getElementById('add-dropdown');
-    btnAdd.addEventListener('click', function(e) { e.stopPropagation(); dropdown.classList.toggle('open'); });
-    document.addEventListener('click', function() { dropdown.classList.remove('open'); });
-
-    dropdown.querySelectorAll('[data-class]').forEach(function(item) {
-      item.addEventListener('click', async function(e) {
-        e.stopPropagation(); dropdown.classList.remove('open');
-        var className = item.getAttribute('data-class');
-        var name = prompt('Node name:', className);
-        if (!name) return;
-        var parentId = selectedNodeId || (sceneData && sceneData.nodes ? sceneData.nodes.id : null);
-        if (parentId === null) return;
-        await api('POST', '/api/node/add', { parent_id: parentId, name: name, class_name: className });
-        if (selectedNodeId) expandedNodes.add(selectedNodeId);
-        await fetchScene();
-      });
-    });
+    btnAdd.addEventListener('click', function(e) { e.stopPropagation(); openAddNodeDialog(); });
 
     document.getElementById('btn-delete').addEventListener('click', async function() {
       if (selectedNodeId === null) return;
@@ -1508,6 +2039,12 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       if (e.key === 'q' || e.key === 'Q') { setToolMode('select'); return; }
       if (e.key === 'w' || e.key === 'W') { setToolMode('move'); return; }
       if (e.key === 'e' || e.key === 'E') { setToolMode('rotate'); return; }
+
+      // Play shortcuts
+      if (e.key === 'F5') { e.preventDefault(); document.getElementById('btn-play').click(); return; }
+      if (e.key === 'F6') { e.preventDefault(); document.getElementById('btn-play-current').click(); return; }
+      if (e.key === 'F7') { e.preventDefault(); document.getElementById('btn-pause').click(); return; }
+      if (e.key === 'F8') { e.preventDefault(); document.getElementById('btn-stop').click(); return; }
     });
   }
 
@@ -1516,7 +2053,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     setInterval(fetchScene, 500);
     setInterval(refreshViewport, 200);
     setInterval(fetchLogs, 1000);
-    setInterval(fetchSceneInfo, 2000);
+    setInterval(function() { fetchSceneInfo(); updateSceneTab(); }, 2000);
+    setInterval(fetchFileSystem, 5000);
   }
 
   // ---- Init ----
@@ -1527,11 +2065,16 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   setupSearch();
   setupKeyboardShortcuts();
   setupBottomPanel();
+  setupAddNodeDialog();
+  setupPlayButtons();
+  setupLeftDivider();
   fetchScene();
   fetchSelected();
   refreshViewport();
   fetchLogs();
   fetchSceneInfo();
+  fetchFileSystem();
+  updateSceneTab();
   startPolling();
 })();
 </script>

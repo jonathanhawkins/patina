@@ -14,9 +14,12 @@
           "path": "/root/Root/Player",
           "children": [],
           "properties": {
+            "label": { "type": "String", "value": "Hero" },
             "position": { "type": "Vector2", "value": [100.0, 200.0] },
+            "rotation": { "type": "Float", "value": 0.0 },
+            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
             "speed": { "type": "Int", "value": 350 },
-            "label": { "type": "String", "value": "Hero" }
+            "visible": { "type": "Bool", "value": true }
           }
         },
         {
@@ -27,6 +30,9 @@
           "properties": {
             "modulate": { "type": "Color", "value": [0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 1.0] },
             "offset": { "type": "Vector2", "value": [0.0, -50.0] },
+            "position": { "type": "Vector2", "value": [0.0, 0.0] },
+            "rotation": { "type": "Float", "value": 0.0 },
+            "scale": { "type": "Vector2", "value": [1.0, 1.0] },
             "visible": { "type": "Bool", "value": true }
           }
         }
