@@ -12,6 +12,8 @@
 
 #![warn(clippy::all)]
 
+mod class_defaults;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -117,10 +119,14 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
     let path = tree.node_path(id).unwrap_or_default();
 
     // Collect properties in sorted order for deterministic output.
+    // Only include properties that are known Godot class properties with
+    // non-default values, matching the oracle property dump format.
     let mut props = serde_json::Map::new();
     let sorted_props: BTreeMap<&String, &gdvariant::Variant> = node.properties().collect();
     for (key, value) in sorted_props {
-        props.insert(key.clone(), to_json(value));
+        if class_defaults::should_output_property(node.class_name(), key, value) {
+            props.insert(key.clone(), to_json(value));
+        }
     }
 
     // Collect script variables if a script is attached.
@@ -398,9 +404,9 @@ func _ready():
         assert_eq!(plain["script_vars"], json!({}));
     }
 
-    /// Script vars are also synced to node properties in dump output.
+    /// Script vars appear in script_vars but custom ones are filtered from properties.
     #[test]
-    fn dump_tree_json_script_vars_also_in_properties() {
+    fn dump_tree_json_script_vars_in_script_vars_not_properties() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let child = Node::new("Player", "Node2D");
@@ -421,9 +427,10 @@ func _ready():
         let children = output["children"].as_array().unwrap();
         let player = &children[0];
 
-        // Both script_vars and properties should have speed=300
+        // script_vars should have speed=300
         assert_eq!(player["script_vars"]["speed"]["value"], json!(300));
-        assert_eq!(player["properties"]["speed"]["value"], json!(300));
+        // properties should NOT have speed (it is a custom script var, not a Godot class property)
+        assert!(player["properties"]["speed"].is_null());
     }
 
     #[test]

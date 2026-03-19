@@ -15,6 +15,7 @@ use gdobject::notification::{NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NO
 
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
+use crate::trace::TraceEventType;
 
 /// Manages lifecycle notification dispatch for the scene tree.
 ///
@@ -34,6 +35,7 @@ impl LifecycleManager {
         tree.collect_subtree_top_down(subtree_root, &mut top_down);
 
         for &id in &top_down {
+            tree.trace_record(id, TraceEventType::Notification, "ENTER_TREE");
             if let Some(node) = tree.get_node_mut(id) {
                 node.set_inside_tree(true);
                 node.receive_notification(NOTIFICATION_ENTER_TREE);
@@ -46,6 +48,7 @@ impl LifecycleManager {
         tree.collect_subtree_bottom_up(subtree_root, &mut bottom_up);
 
         for &id in &bottom_up {
+            tree.trace_record(id, TraceEventType::Notification, "READY");
             if let Some(node) = tree.get_node_mut(id) {
                 node.set_ready(true);
                 node.receive_notification(NOTIFICATION_READY);
@@ -63,6 +66,7 @@ impl LifecycleManager {
         tree.collect_subtree_bottom_up(subtree_root, &mut bottom_up);
 
         for &id in &bottom_up {
+            tree.trace_record(id, TraceEventType::Notification, "EXIT_TREE");
             if let Some(node) = tree.get_node_mut(id) {
                 node.set_ready(false);
                 node.set_inside_tree(false);

@@ -3482,4 +3482,405 @@ func _process(delta):
             "get_vector should return y=0.0 when only ui_right pressed"
         );
     }
+
+    // ── B006: Script call/return trace tests ────────────────────────────
+
+    mod trace_script_tests {
+        use super::*;
+        use crate::trace::TraceEventType;
+
+        #[test]
+        fn trace_script_call_return_on_ready() {
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+            tree.event_trace_mut().enable();
+
+            let script_src = "\
+extends Node2D
+var x = 0
+func _ready():
+    self.x = 42
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            let events = tree.event_trace().events();
+            let script_events: Vec<_> = events
+                .iter()
+                .filter(|e| {
+                    e.event_type == TraceEventType::ScriptCall
+                        || e.event_type == TraceEventType::ScriptReturn
+                })
+                .collect();
+
+            // Should have call/return pairs for _enter_tree and _ready
+            // (at least _ready since the script defines it)
+            let ready_calls: Vec<_> = script_events
+                .iter()
+                .filter(|e| e.detail == "_ready" && e.event_type == TraceEventType::ScriptCall)
+                .collect();
+            let ready_returns: Vec<_> = script_events
+                .iter()
+                .filter(|e| e.detail == "_ready" && e.event_type == TraceEventType::ScriptReturn)
+                .collect();
+            assert_eq!(ready_calls.len(), 1);
+            assert_eq!(ready_returns.len(), 1);
+        }
+
+        #[test]
+        fn trace_script_call_return_on_process() {
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+            let script_src = "\
+extends Node2D
+var counter = 0
+func _process(delta):
+    self.counter = self.counter + 1
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+
+            tree.event_trace_mut().enable();
+            tree.process_all_scripts_process(1.0 / 60.0);
+
+            let events = tree.event_trace().events();
+            let call_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::ScriptCall && e.detail == "_process")
+                .collect();
+            let return_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::ScriptReturn && e.detail == "_process")
+                .collect();
+
+            assert_eq!(call_events.len(), 1);
+            assert_eq!(return_events.len(), 1);
+        }
+
+        #[test]
+        fn trace_signal_emit_from_script() {
+            use std::sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            };
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+            let counter = Arc::new(AtomicUsize::new(0));
+            let counter_clone = counter.clone();
+            let conn = gdobject::signal::Connection::with_callback(
+                ObjectId::from_raw(parent_id.raw()),
+                "on_hit",
+                move |_args| {
+                    counter_clone.fetch_add(1, Ordering::SeqCst);
+                    Variant::Nil
+                },
+            );
+            tree.connect_signal(parent_id, "hit", conn);
+
+            tree.event_trace_mut().enable();
+
+            let script_src = "\
+extends Node2D
+func _ready():
+    emit_signal(\"hit\")
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            let events = tree.event_trace().events();
+            let signal_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_type == TraceEventType::SignalEmit)
+                .collect();
+
+            assert!(
+                !signal_events.is_empty(),
+                "Signal emission should be traced"
+            );
+            assert_eq!(signal_events[0].detail, "hit");
+        }
+    }
+
+    // ── B008: Cross-node property reads and script var sync tests ───────
+
+    mod b008_sync_tests {
+        use super::*;
+
+        #[test]
+        fn cross_node_read_position_via_get_node() {
+            // nodeA reads nodeB.position via get_node("../NodeB").position
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let parent = Node::new("Parent", "Node2D");
+            let parent_id = tree.add_child(root, parent).unwrap();
+
+            let mut node_a = Node::new("NodeA", "Node2D");
+            let node_a_id = tree.add_child(parent_id, node_a).unwrap();
+
+            let mut node_b = Node::new("NodeB", "Node2D");
+            let node_b_id = tree.add_child(parent_id, node_b).unwrap();
+
+            // Set NodeB's position as a node property
+            tree.get_node_mut(node_b_id)
+                .unwrap()
+                .set_property("position_x", Variant::Float(42.5));
+
+            // NodeA reads NodeB's position_x
+            let script_src = "\
+extends Node2D
+var read_value = 0.0
+func _ready():
+    var b = get_node(\"../NodeB\")
+    self.read_value = b.position_x
+";
+            let script = GDScriptNodeInstance::from_source(script_src, node_a_id).unwrap();
+            tree.attach_script(node_a_id, Box::new(script));
+            LifecycleManager::enter_tree(&mut tree, node_a_id);
+
+            assert_eq!(
+                tree.get_script(node_a_id)
+                    .unwrap()
+                    .get_property("read_value"),
+                Some(Variant::Float(42.5)),
+                "NodeA should read NodeB.position_x = 42.5"
+            );
+        }
+
+        #[test]
+        fn cross_node_read_script_var_via_scene_access() {
+            // nodeA reads nodeB's script variable
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let parent = Node::new("Parent", "Node2D");
+            let parent_id = tree.add_child(root, parent).unwrap();
+
+            let node_a = Node::new("NodeA", "Node2D");
+            let node_a_id = tree.add_child(parent_id, node_a).unwrap();
+
+            let node_b = Node::new("NodeB", "Node2D");
+            let node_b_id = tree.add_child(parent_id, node_b).unwrap();
+
+            // NodeB has a script var
+            let b_script = "\
+extends Node2D
+var health = 75
+";
+            let bs = GDScriptNodeInstance::from_source(b_script, node_b_id).unwrap();
+            tree.attach_script(node_b_id, Box::new(bs));
+
+            // NodeA reads it
+            let a_script = "\
+extends Node2D
+var other_health = 0
+func _ready():
+    var b = get_node(\"../NodeB\")
+    self.other_health = b.health
+";
+            let a_s = GDScriptNodeInstance::from_source(a_script, node_a_id).unwrap();
+            tree.attach_script(node_a_id, Box::new(a_s));
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            assert_eq!(
+                tree.get_script(node_a_id)
+                    .unwrap()
+                    .get_property("other_health"),
+                Some(Variant::Int(75)),
+                "NodeA should read NodeB's script var health = 75"
+            );
+        }
+
+        #[test]
+        fn script_var_sync_after_ready() {
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+            let script_src = "\
+extends Node2D
+var score = 0
+func _ready():
+    self.score = 999
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            // After _ready, script var should be synced to node property
+            let node_val = tree.get_node(parent_id).unwrap().get_property("score");
+            assert_eq!(
+                node_val,
+                Variant::Int(999),
+                "Script var should sync to node property after _ready"
+            );
+        }
+
+        #[test]
+        fn script_var_sync_after_process() {
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+            let script_src = "\
+extends Node2D
+var ticks = 0
+func _process(delta):
+    self.ticks = self.ticks + 1
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+
+            tree.process_all_scripts_process(1.0 / 60.0);
+
+            // Check sync to node property
+            let node_val = tree.get_node(parent_id).unwrap().get_property("ticks");
+            assert_eq!(
+                node_val,
+                Variant::Int(1),
+                "Script var should sync to node property after _process"
+            );
+
+            tree.process_all_scripts_process(1.0 / 60.0);
+            let node_val = tree.get_node(parent_id).unwrap().get_property("ticks");
+            assert_eq!(
+                node_val,
+                Variant::Int(2),
+                "Script var should sync after second _process"
+            );
+        }
+
+        #[test]
+        fn script_var_sync_after_physics_process() {
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+            let script_src = "\
+extends Node2D
+var physics_ticks = 0
+func _physics_process(delta):
+    self.physics_ticks = self.physics_ticks + 1
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+
+            tree.process_all_scripts_physics_process(1.0 / 60.0);
+
+            let node_val = tree
+                .get_node(parent_id)
+                .unwrap()
+                .get_property("physics_ticks");
+            assert_eq!(
+                node_val,
+                Variant::Int(1),
+                "Script var should sync to node property after _physics_process"
+            );
+        }
+
+        #[test]
+        fn script_var_sync_after_enter_tree() {
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+            let script_src = "\
+extends Node2D
+var entered = false
+func _enter_tree():
+    self.entered = true
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            let node_val = tree.get_node(parent_id).unwrap().get_property("entered");
+            assert_eq!(
+                node_val,
+                Variant::Bool(true),
+                "Script var should sync to node property after _enter_tree"
+            );
+        }
+
+        #[test]
+        fn script_var_sync_consistent_across_callbacks() {
+            // Verify sync happens after EVERY callback type within a single node.
+            let (mut tree, parent_id, _c1_id, _c2_id) = build_tree_with_children();
+
+            let script_src = "\
+extends Node2D
+var stage = 0
+func _enter_tree():
+    self.stage = 1
+func _ready():
+    self.stage = 2
+func _process(delta):
+    self.stage = self.stage + 10
+func _physics_process(delta):
+    self.stage = self.stage + 100
+";
+            let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+            tree.attach_script(parent_id, Box::new(script));
+
+            // _enter_tree sets stage=1, then _ready sets stage=2
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+            assert_eq!(
+                tree.get_node(parent_id).unwrap().get_property("stage"),
+                Variant::Int(2),
+                "stage should be 2 after _ready"
+            );
+
+            // _process adds 10 -> 12
+            tree.process_all_scripts_process(1.0 / 60.0);
+            assert_eq!(
+                tree.get_node(parent_id).unwrap().get_property("stage"),
+                Variant::Int(12),
+                "stage should be 12 after _process"
+            );
+
+            // _physics_process adds 100 -> 112
+            tree.process_all_scripts_physics_process(1.0 / 60.0);
+            assert_eq!(
+                tree.get_node(parent_id).unwrap().get_property("stage"),
+                Variant::Int(112),
+                "stage should be 112 after _physics_process"
+            );
+        }
+
+        #[test]
+        fn cross_node_read_synced_property() {
+            // After nodeB's script sets a var in _ready, nodeA can read
+            // the synced value as a node property.
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let parent = Node::new("Parent", "Node2D");
+            let parent_id = tree.add_child(root, parent).unwrap();
+
+            let node_b = Node::new("NodeB", "Node2D");
+            let node_b_id = tree.add_child(parent_id, node_b).unwrap();
+
+            let node_a = Node::new("NodeA", "Node2D");
+            let node_a_id = tree.add_child(parent_id, node_a).unwrap();
+
+            // NodeB sets speed in _ready
+            let b_script = "\
+extends Node2D
+var speed = 0
+func _ready():
+    self.speed = 200
+";
+            let bs = GDScriptNodeInstance::from_source(b_script, node_b_id).unwrap();
+            tree.attach_script(node_b_id, Box::new(bs));
+
+            // NodeA reads NodeB.speed in _ready (NodeB is ready first since bottom-up)
+            let a_script = "\
+extends Node2D
+var b_speed = 0
+func _ready():
+    var b = get_node(\"../NodeB\")
+    self.b_speed = b.speed
+";
+            let a_s = GDScriptNodeInstance::from_source(a_script, node_a_id).unwrap();
+            tree.attach_script(node_a_id, Box::new(a_s));
+
+            LifecycleManager::enter_tree(&mut tree, parent_id);
+
+            // NodeB's _ready fires before NodeA's (bottom-up, and NodeB is listed before NodeA)
+            assert_eq!(
+                tree.get_script(node_a_id).unwrap().get_property("b_speed"),
+                Some(Variant::Int(200)),
+                "NodeA should read synced value from NodeB"
+            );
+        }
+    }
 }
