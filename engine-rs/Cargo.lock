@@ -466,6 +466,7 @@ version = "0.1.0"
 dependencies = [
  "gdcore",
  "gdobject",
+ "gdrender2d",
  "gdscene",
  "gdvariant",
  "serde",
@@ -1153,6 +1154,7 @@ version = "0.1.0"
 dependencies = [
  "gdaudio",
  "gdcore",
+ "gdeditor",
  "gdphysics2d",
  "gdplatform",
  "gdrender2d",
@@ -1162,6 +1164,7 @@ dependencies = [
  "gdserver2d",
  "gdvariant",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

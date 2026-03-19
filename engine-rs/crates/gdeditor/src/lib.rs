@@ -15,6 +15,8 @@
 #![warn(clippy::all)]
 
 pub mod dock;
+pub mod editor_server;
+pub mod editor_ui;
 pub mod filesystem;
 pub mod import;
 pub mod inspector;
