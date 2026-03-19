@@ -1,0 +1,9 @@
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+position = Vector2(80, 80)
+
+[node name="Label" type="Node2D" parent="."]
+position = Vector2(40, 120)

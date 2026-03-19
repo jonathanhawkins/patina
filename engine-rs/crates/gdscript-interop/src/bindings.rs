@@ -174,4 +174,67 @@ pub trait SceneAccess {
     fn connect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str);
     /// Return the name of `node`, if it exists.
     fn get_node_name(&self, node: u64) -> Option<String>;
+
+    // -- Runtime node creation/deletion ------------------------------------
+
+    /// Create a new node of the given class (not yet in the tree).
+    /// Returns the raw ObjectId of the new node.
+    fn create_node(&mut self, _class_name: &str, _name: &str) -> Option<u64> {
+        None
+    }
+
+    /// Add `child_id` as a child of `parent_id` in the scene tree.
+    fn add_child(&mut self, _parent_id: u64, _child_id: u64) -> bool {
+        false
+    }
+
+    /// Mark a node for deferred deletion (removed at end of frame).
+    fn queue_free(&mut self, _node_id: u64) {}
+
+    /// Return the class name of a node.
+    fn get_class(&self, _node: u64) -> Option<String> {
+        None
+    }
+
+    // -- Input methods (used by the `Input` singleton in GDScript) ----------
+
+    /// Returns `true` if any key mapped to `action` is currently held.
+    fn is_input_action_pressed(&self, _action: &str) -> bool {
+        false
+    }
+
+    /// Returns `true` if any key mapped to `action` was just pressed this frame.
+    fn is_input_action_just_pressed(&self, _action: &str) -> bool {
+        false
+    }
+
+    /// Returns `true` if the raw key `key` is currently held.
+    fn is_input_key_pressed(&self, _key: &str) -> bool {
+        false
+    }
+
+    /// Returns a direction Vector2 from four input actions.
+    fn get_input_vector(&self, neg_x: &str, pos_x: &str, neg_y: &str, pos_y: &str) -> (f32, f32) {
+        let mut x: f32 = 0.0;
+        let mut y: f32 = 0.0;
+        if self.is_input_action_pressed(neg_x) {
+            x -= 1.0;
+        }
+        if self.is_input_action_pressed(pos_x) {
+            x += 1.0;
+        }
+        if self.is_input_action_pressed(neg_y) {
+            y -= 1.0;
+        }
+        if self.is_input_action_pressed(pos_y) {
+            y += 1.0;
+        }
+        // Normalize if diagonal
+        let len = (x * x + y * y).sqrt();
+        if len > 0.0 {
+            (x / len, y / len)
+        } else {
+            (0.0, 0.0)
+        }
+    }
 }

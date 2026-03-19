@@ -146,6 +146,49 @@ impl ScriptInstance for GDScriptNodeInstance {
 }
 
 // ---------------------------------------------------------------------------
+// InputSnapshot — a frozen copy of input state for one frame
+// ---------------------------------------------------------------------------
+
+use std::collections::HashSet;
+
+/// A snapshot of input state at a single frame, passed to scripts via
+/// [`SceneTreeAccessor`] so they can query `Input.is_action_pressed()` etc.
+#[derive(Debug, Clone, Default)]
+pub struct InputSnapshot {
+    /// Keys currently held down (browser key names like "ArrowLeft", "a").
+    pub pressed_keys: HashSet<String>,
+    /// Keys that were first pressed this frame.
+    pub just_pressed_keys: HashSet<String>,
+    /// Action name → list of key names.
+    pub input_map: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl InputSnapshot {
+    /// Returns `true` if any key mapped to `action` is held.
+    pub fn is_action_pressed(&self, action: &str) -> bool {
+        if let Some(keys) = self.input_map.get(action) {
+            keys.iter().any(|k| self.pressed_keys.contains(k))
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if any key mapped to `action` was just pressed.
+    pub fn is_action_just_pressed(&self, action: &str) -> bool {
+        if let Some(keys) = self.input_map.get(action) {
+            keys.iter().any(|k| self.just_pressed_keys.contains(k))
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if the raw key is held.
+    pub fn is_key_pressed(&self, key: &str) -> bool {
+        self.pressed_keys.contains(key)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SceneTreeAccessor
 // ---------------------------------------------------------------------------
 
@@ -163,12 +206,21 @@ use gdobject::signal::Connection;
 /// the accessor is created, so there is no aliasing of the script itself.
 pub(crate) struct SceneTreeAccessor {
     tree: *mut SceneTree,
+    input: Option<InputSnapshot>,
 }
 
 impl SceneTreeAccessor {
     /// Creates a new accessor. Caller must ensure the pointer is valid.
     pub(crate) unsafe fn new(tree: *mut SceneTree) -> Self {
-        Self { tree }
+        Self { tree, input: None }
+    }
+
+    /// Creates a new accessor with an input snapshot.
+    pub(crate) unsafe fn with_input(tree: *mut SceneTree, input: InputSnapshot) -> Self {
+        Self {
+            tree,
+            input: Some(input),
+        }
     }
 
     fn tree(&self) -> &SceneTree {
@@ -275,6 +327,59 @@ impl SceneAccess for SceneTreeAccessor {
     fn get_node_name(&self, node: u64) -> Option<String> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree().get_node(nid).map(|n| n.name().to_string())
+    }
+
+    fn is_input_action_pressed(&self, action: &str) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_action_pressed(action))
+            .unwrap_or(false)
+    }
+
+    fn is_input_action_just_pressed(&self, action: &str) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_action_just_pressed(action))
+            .unwrap_or(false)
+    }
+
+    fn is_input_key_pressed(&self, key: &str) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_key_pressed(key))
+            .unwrap_or(false)
+    }
+
+    fn create_node(&mut self, class_name: &str, name: &str) -> Option<u64> {
+        let id = self.tree_mut().create_node(class_name, name);
+        Some(id.raw())
+    }
+
+    fn add_child(&mut self, parent_id: u64, child_id: u64) -> bool {
+        let pid = NodeId::from_object_id(ObjectId::from_raw(parent_id));
+        let cid = NodeId::from_object_id(ObjectId::from_raw(child_id));
+
+        // The node was created by create_node and already lives in the arena.
+        // We extract it, then re-insert via SceneTree::add_child which wires
+        // up the parent-child relationship and lifecycle events.
+        let tree = self.tree_mut();
+        if let Some(node) = tree.take_node(cid) {
+            tree.add_child(pid, node).is_ok()
+        } else {
+            false
+        }
+    }
+
+    fn queue_free(&mut self, node_id: u64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
+        self.tree_mut().queue_free(nid);
+    }
+
+    fn get_class(&self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_node(nid)
+            .map(|n| n.class_name().to_string())
     }
 }
 
@@ -1793,6 +1898,46 @@ func _process(delta):
         }
     }
 
+    /// Bare node property component writes should behave like `self.position.x`
+    /// during per-frame script processing.
+    #[test]
+    fn bare_script_position_x_moves_over_frames() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut child = Node::new("Mover", "Node2D");
+        child.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+        );
+        let child_id = tree.add_child(root, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var speed = 100.0
+func _process(delta):
+    position.x += speed * delta
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        let delta = 1.0 / 60.0;
+        for _ in 0..10 {
+            tree.process_script_process(child_id, delta);
+        }
+
+        let expected_x = 100.0 * delta as f32 * 10.0;
+        match tree.get_node(child_id).unwrap().get_property("position") {
+            Variant::Vector2(v) => {
+                assert!(
+                    (v.x - expected_x).abs() < 0.01,
+                    "expected position.x ~{expected_x}, got {}",
+                    v.x
+                );
+            }
+            other => panic!("expected Vector2 position, got {other:?}"),
+        }
+    }
+
     /// Test that _ready is called when we manually invoke it, simulating
     /// what the Play button does.
     #[test]
@@ -2912,6 +3057,429 @@ func _on_message(text):
         assert_eq!(
             tree.get_script(listener_id).unwrap().get_property("msg"),
             Some(Variant::String("hello".into()))
+        );
+    }
+
+    // -- Runtime node creation / deletion tests ----------------------------
+
+    #[test]
+    fn script_creates_node_with_new_and_add_child() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let spawner = Node::new("Spawner", "Node2D");
+        let spawner_id = tree.add_child(root, spawner).unwrap();
+
+        let script_src = "\
+extends Node2D
+var spawned = false
+func _process(delta):
+    if not self.spawned:
+        var bullet = Node2D.new()
+        add_child(bullet)
+        self.spawned = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, spawner_id).unwrap();
+        tree.attach_script(spawner_id, Box::new(script));
+
+        assert_eq!(tree.get_node(spawner_id).unwrap().children().len(), 0);
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        let children = tree.get_node(spawner_id).unwrap().children();
+        assert_eq!(
+            children.len(),
+            1,
+            "spawner should have 1 child after _process"
+        );
+
+        let child_id = children[0];
+        let child = tree.get_node(child_id).unwrap();
+        assert_eq!(child.class_name(), "Node2D");
+    }
+
+    #[test]
+    fn script_queue_free_removes_node_after_process_deletions() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let enemy = Node::new("Enemy", "Node2D");
+        let enemy_id = tree.add_child(root, enemy).unwrap();
+
+        let script_src = "\
+extends Node2D
+func _process(delta):
+    queue_free()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, enemy_id).unwrap();
+        tree.attach_script(enemy_id, Box::new(script));
+
+        assert!(tree.get_node(enemy_id).is_some());
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        // Enemy still exists (queue_free is deferred).
+        assert!(tree.get_node(enemy_id).is_some());
+        assert_eq!(tree.pending_deletion_count(), 1);
+
+        tree.process_deletions();
+        assert!(tree.get_node(enemy_id).is_none());
+        assert_eq!(tree.pending_deletion_count(), 0);
+    }
+
+    #[test]
+    fn queue_free_on_object_id_removes_child() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let parent = Node::new("Parent", "Node2D");
+        let parent_id = tree.add_child(root, parent).unwrap();
+
+        let child = Node::new("Child", "Node2D");
+        let _child_id = tree.add_child(parent_id, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+func _process(delta):
+    var kids = get_children()
+    for kid in kids:
+        kid.queue_free()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, parent_id).unwrap();
+        tree.attach_script(parent_id, Box::new(script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+        tree.process_deletions();
+
+        assert_eq!(tree.get_node(parent_id).unwrap().children().len(), 0);
+    }
+
+    #[test]
+    fn spawned_nodes_get_process_called_on_next_frame() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let spawner = Node::new("Spawner", "Node2D");
+        let spawner_id = tree.add_child(root, spawner).unwrap();
+
+        let spawner_script = "\
+extends Node2D
+var did_spawn = false
+func _process(delta):
+    if not self.did_spawn:
+        var bullet = Node2D.new()
+        add_child(bullet)
+        self.did_spawn = true
+";
+        let script = GDScriptNodeInstance::from_source(spawner_script, spawner_id).unwrap();
+        tree.attach_script(spawner_id, Box::new(script));
+
+        // Frame 1: spawner creates bullet.
+        tree.process_all_scripts_process(1.0 / 60.0);
+        tree.process_deletions();
+
+        let children = tree.get_node(spawner_id).unwrap().children();
+        assert_eq!(children.len(), 1);
+        let bullet_id = children[0];
+
+        // Attach a script to the bullet that records it was processed.
+        let bullet_script_src = "\
+extends Node2D
+var processed = false
+func _process(delta):
+    self.processed = true
+";
+        let bullet_script =
+            GDScriptNodeInstance::from_source(bullet_script_src, bullet_id).unwrap();
+        tree.attach_script(bullet_id, Box::new(bullet_script));
+
+        // Frame 2: both spawner and bullet get _process.
+        tree.process_all_scripts_process(1.0 / 60.0);
+        tree.process_deletions();
+
+        let processed = tree
+            .get_script(bullet_id)
+            .unwrap()
+            .get_property("processed");
+        assert_eq!(processed, Some(Variant::Bool(true)));
+    }
+
+    #[test]
+    fn get_parent_add_child_on_parent_node() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let parent = Node::new("Parent", "Node2D");
+        let parent_id = tree.add_child(root, parent).unwrap();
+
+        let child = Node::new("Child", "Node2D");
+        let child_id = tree.add_child(parent_id, child).unwrap();
+
+        let script_src = "\
+extends Node2D
+var did_spawn = false
+func _process(delta):
+    if not self.did_spawn:
+        var bullet = Node2D.new()
+        get_parent().add_child(bullet)
+        self.did_spawn = true
+";
+        let script = GDScriptNodeInstance::from_source(script_src, child_id).unwrap();
+        tree.attach_script(child_id, Box::new(script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        let parent_children = tree.get_node(parent_id).unwrap().children();
+        assert_eq!(parent_children.len(), 2);
+    }
+
+    #[test]
+    fn create_node_sets_correct_class_name() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let spawner = Node::new("Spawner", "Node2D");
+        let spawner_id = tree.add_child(root, spawner).unwrap();
+
+        let script_src = "\
+extends Node2D
+var child_class = \"\"
+func _process(delta):
+    var area = Area2D.new()
+    add_child(area)
+    self.child_class = area.get_class()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, spawner_id).unwrap();
+        tree.attach_script(spawner_id, Box::new(script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        let cls = tree
+            .get_script(spawner_id)
+            .unwrap()
+            .get_property("child_class");
+        assert_eq!(cls, Some(Variant::String("Area2D".into())));
+    }
+
+    #[test]
+    fn queue_free_idempotent() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let node = Node::new("N", "Node2D");
+        let nid = tree.add_child(root, node).unwrap();
+
+        tree.queue_free(nid);
+        tree.queue_free(nid);
+        assert_eq!(tree.pending_deletion_count(), 1);
+
+        tree.process_deletions();
+        assert!(tree.get_node(nid).is_none());
+    }
+
+    #[test]
+    fn mainloop_processes_deletions_each_frame() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let enemy = Node::new("Enemy", "Node2D");
+        let enemy_id = tree.add_child(root, enemy).unwrap();
+
+        let script_src = "\
+extends Node2D
+func _process(delta):
+    queue_free()
+";
+        let script = GDScriptNodeInstance::from_source(script_src, enemy_id).unwrap();
+        tree.attach_script(enemy_id, Box::new(script));
+
+        let mut ml = MainLoop::new(tree);
+        ml.run_frames(1, 1.0 / 60.0);
+
+        assert!(ml.tree().get_node(enemy_id).is_none());
+    }
+
+    // -- End-to-end Input tests through scene tree ----------------------------
+
+    const INPUT_MOVEMENT_SCRIPT: &str = "\
+extends Node2D
+var speed = 200.0
+var moved_right = false
+func _process(delta):
+    if Input.is_action_pressed(\"ui_right\"):
+        self.moved_right = true
+";
+
+    #[test]
+    fn input_action_pressed_through_scene_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let player = Node::new("Player", "Node2D");
+        let player_id = player.id();
+        tree.add_child(root, player).unwrap();
+
+        let script = GDScriptNodeInstance::from_source(INPUT_MOVEMENT_SCRIPT, player_id).unwrap();
+        tree.attach_script(player_id, Box::new(script));
+
+        // Set up input: ui_right is pressed
+        let mut snapshot = InputSnapshot::default();
+        snapshot.pressed_keys.insert("ArrowRight".to_string());
+        snapshot
+            .input_map
+            .insert("ui_right".to_string(), vec!["ArrowRight".to_string()]);
+        tree.set_input_snapshot(snapshot);
+
+        // Run _ready + one _process frame
+        tree.process_script_ready(player_id);
+        tree.process_script_process(player_id, 1.0 / 60.0);
+
+        // Verify the script saw Input.is_action_pressed("ui_right") == true
+        let script = tree.get_script(player_id).unwrap();
+        assert_eq!(
+            script.get_property("moved_right"),
+            Some(Variant::Bool(true)),
+            "script should detect ui_right is pressed via Input singleton"
+        );
+    }
+
+    #[test]
+    fn input_action_not_pressed_through_scene_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let player = Node::new("Player", "Node2D");
+        let player_id = player.id();
+        tree.add_child(root, player).unwrap();
+
+        let script = GDScriptNodeInstance::from_source(INPUT_MOVEMENT_SCRIPT, player_id).unwrap();
+        tree.attach_script(player_id, Box::new(script));
+
+        // Set up input: nothing pressed
+        let snapshot = InputSnapshot::default();
+        tree.set_input_snapshot(snapshot);
+
+        tree.process_script_ready(player_id);
+        tree.process_script_process(player_id, 1.0 / 60.0);
+
+        let script = tree.get_script(player_id).unwrap();
+        assert_eq!(
+            script.get_property("moved_right"),
+            Some(Variant::Bool(false)),
+            "script should detect no input when nothing is pressed"
+        );
+    }
+
+    #[test]
+    fn input_just_pressed_only_on_first_frame() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let player = Node::new("Player", "Node2D");
+        let player_id = player.id();
+        tree.add_child(root, player).unwrap();
+
+        let script_src = "\
+extends Node2D
+var fire_count = 0
+func _process(delta):
+    if Input.is_action_just_pressed(\"shoot\"):
+        self.fire_count = self.fire_count + 1
+";
+        let script = GDScriptNodeInstance::from_source(script_src, player_id).unwrap();
+        tree.attach_script(player_id, Box::new(script));
+
+        // Frame 1: shoot just pressed
+        let mut snap1 = InputSnapshot::default();
+        snap1.pressed_keys.insert("x".to_string());
+        snap1.just_pressed_keys.insert("x".to_string());
+        snap1
+            .input_map
+            .insert("shoot".to_string(), vec!["x".to_string()]);
+        tree.set_input_snapshot(snap1);
+        tree.process_script_process(player_id, 1.0 / 60.0);
+
+        let script = tree.get_script(player_id).unwrap();
+        assert_eq!(
+            script.get_property("fire_count"),
+            Some(Variant::Int(1)),
+            "should fire on first frame (just_pressed)"
+        );
+
+        // Frame 2: shoot still held but NOT just pressed
+        let mut snap2 = InputSnapshot::default();
+        snap2.pressed_keys.insert("x".to_string());
+        // just_pressed_keys is empty — key was already held
+        snap2
+            .input_map
+            .insert("shoot".to_string(), vec!["x".to_string()]);
+        tree.set_input_snapshot(snap2);
+        tree.process_script_process(player_id, 1.0 / 60.0);
+
+        let script = tree.get_script(player_id).unwrap();
+        assert_eq!(
+            script.get_property("fire_count"),
+            Some(Variant::Int(1)),
+            "should NOT fire on second frame (not just_pressed)"
+        );
+    }
+
+    #[test]
+    fn input_get_vector_through_scene_tree() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let player = Node::new("Player", "Node2D");
+        let player_id = player.id();
+        tree.add_child(root, player).unwrap();
+
+        let script_src = "\
+extends Node2D
+var dir_x = 0.0
+var dir_y = 0.0
+func _process(delta):
+    var dir = Input.get_vector(\"ui_left\", \"ui_right\", \"ui_up\", \"ui_down\")
+    self.dir_x = dir.x
+    self.dir_y = dir.y
+";
+        let script = GDScriptNodeInstance::from_source(script_src, player_id).unwrap();
+        tree.attach_script(player_id, Box::new(script));
+
+        let mut snapshot = InputSnapshot::default();
+        snapshot.pressed_keys.insert("ArrowRight".to_string());
+        snapshot
+            .input_map
+            .insert("ui_left".to_string(), vec!["ArrowLeft".to_string()]);
+        snapshot
+            .input_map
+            .insert("ui_right".to_string(), vec!["ArrowRight".to_string()]);
+        snapshot
+            .input_map
+            .insert("ui_up".to_string(), vec!["ArrowUp".to_string()]);
+        snapshot
+            .input_map
+            .insert("ui_down".to_string(), vec!["ArrowDown".to_string()]);
+        tree.set_input_snapshot(snapshot);
+
+        tree.process_script_process(player_id, 1.0 / 60.0);
+
+        let script = tree.get_script(player_id).unwrap();
+        assert_eq!(
+            script.get_property("dir_x"),
+            Some(Variant::Float(1.0)),
+            "get_vector should return x=1.0 when ui_right pressed"
+        );
+        assert_eq!(
+            script.get_property("dir_y"),
+            Some(Variant::Float(0.0)),
+            "get_vector should return y=0.0 when only ui_right pressed"
         );
     }
 }

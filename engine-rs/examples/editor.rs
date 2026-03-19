@@ -74,6 +74,7 @@ fn main() {
 
     // Set up editor state with texture cache rooted at the scene file's directory.
     let mut state = EditorState::new(tree);
+    state.scene_file = Some(scene_path.clone());
     state.frame_buffer = Some(initial_frame);
     let project_root = std::path::Path::new(&scene_path)
         .parent()
@@ -146,7 +147,9 @@ fn main() {
                     tree.process_animations(delta);
                     tree.process_tweens(delta);
                     tree.process_all_scripts_process(delta);
+                    tree.process_collisions();
                     tree.process_frame();
+                    tree.process_deletions();
                 }
                 state.runtime_frame_count += 1;
                 state.clear_frame_input();

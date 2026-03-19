@@ -12,6 +12,7 @@ const SCENE_ARG := "--scene"
 
 var _trace_signals: Array[Dictionary] = []
 var _trace_notifications: Array[Dictionary] = []
+var _frame_trace: Array[Dictionary] = []
 var _frame_count: int = 0
 var _max_frames: int = 10
 
@@ -119,6 +120,11 @@ func _serialize_arg(value: Variant) -> Variant:
 
 func _process(delta: float) -> bool:
 	_frame_count += 1
+	_frame_trace.append({
+		"frame": _frame_count,
+		"scene_tree": _dump_scene_tree(root),
+		"properties": _dump_properties(root),
+	})
 	if _frame_count >= _max_frames:
 		_write_output()
 		quit(0)
@@ -154,6 +160,7 @@ func _write_output() -> void:
 		"frames_captured": _frame_count,
 		"scene_tree": scene_tree_data,
 		"properties": properties_data,
+		"frame_trace": _frame_trace,
 		"signal_trace": _trace_signals,
 		"notification_trace": _trace_notifications,
 	}

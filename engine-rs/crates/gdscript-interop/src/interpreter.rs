@@ -713,6 +713,15 @@ impl Interpreter {
                     .map(|inst| inst.properties.contains_key(name.as_str()))
                     .unwrap_or(false)
                     && !self.environment.is_shadowed_in_inner_scope(name);
+                let is_node_prop = !is_instance_prop
+                    && !self.environment.is_shadowed_in_inner_scope(name)
+                    && if let (Some(ref access), Some(node_id)) =
+                        (&self.scene_access, self.current_node_id)
+                    {
+                        !access.get_node_property(node_id, name).is_nil()
+                    } else {
+                        false
+                    };
 
                 let final_val = match op {
                     AssignOp::Assign => rhs,
@@ -725,6 +734,11 @@ impl Interpreter {
                                 .get(name.as_str())
                                 .cloned()
                                 .unwrap_or(Variant::Nil)
+                        } else if is_node_prop {
+                            self.scene_access
+                                .as_ref()
+                                .unwrap()
+                                .get_node_property(self.current_node_id.unwrap(), name)
                         } else {
                             self.environment.get(name)?
                         };
@@ -739,6 +753,11 @@ impl Interpreter {
                                 .get(name.as_str())
                                 .cloned()
                                 .unwrap_or(Variant::Nil)
+                        } else if is_node_prop {
+                            self.scene_access
+                                .as_ref()
+                                .unwrap()
+                                .get_node_property(self.current_node_id.unwrap(), name)
                         } else {
                             self.environment.get(name)?
                         };
@@ -754,6 +773,14 @@ impl Interpreter {
                         .properties
                         .insert(name.clone(), final_val.clone());
                     // Also update environment so subsequent reads in this call see the new value
+                    let _ = self.environment.set(name, final_val);
+                    Ok(())
+                } else if is_node_prop {
+                    if let (Some(ref mut access), Some(node_id)) =
+                        (&mut self.scene_access, self.current_node_id)
+                    {
+                        access.set_node_property(node_id, name, final_val.clone());
+                    }
                     let _ = self.environment.set(name, final_val);
                     Ok(())
                 } else {
@@ -787,6 +814,9 @@ impl Interpreter {
                 self.environment.set(&container_name, container)
             }
             Expr::MemberAccess { object, member } => {
+                if self.try_exec_value_member_assignment(object, member, op, rhs.clone())? {
+                    return Ok(());
+                }
                 // Handle compound member assignment: obj.prop.field = value
                 // e.g. self.position.x = 5.0, node.position.y += 10.0
                 if let Expr::MemberAccess {
@@ -842,6 +872,31 @@ impl Interpreter {
                     }
                     return Ok(());
                 }
+                // Handle bare node/instance property member writes:
+                // `position.x += 1`, `velocity.y = 2`, etc.
+                if let Expr::Ident(name) = object.as_ref() {
+                    let is_instance_prop = self
+                        .self_instance
+                        .as_ref()
+                        .map(|inst| inst.properties.contains_key(name.as_str()))
+                        .unwrap_or(false);
+                    let is_node_prop = if let (Some(ref access), Some(node_id)) =
+                        (&self.scene_access, self.current_node_id)
+                    {
+                        !access.get_node_property(node_id, name).is_nil()
+                    } else {
+                        false
+                    };
+                    if is_instance_prop || is_node_prop {
+                        return self.exec_compound_member_assignment(
+                            &Expr::SelfRef,
+                            name,
+                            member,
+                            op,
+                            rhs,
+                        );
+                    }
+                }
                 // Check if the object evaluates to an ObjectId
                 let obj_val = self.eval_expr(object)?;
                 if let Variant::ObjectId(oid) = &obj_val {
@@ -896,6 +951,85 @@ impl Interpreter {
                 "invalid assignment target".into(),
             ))),
         }
+    }
+
+    /// Handle read-modify-write on value-type members where the target object
+    /// expression itself resolves to a container value such as Vector2, Vector3,
+    /// or Color.
+    ///
+    /// Examples:
+    /// - `position.x += 1`
+    /// - `self.position.y = 2`
+    /// - `node.position.x = 3`
+    fn try_exec_value_member_assignment(
+        &mut self,
+        object: &Expr,
+        field: &str,
+        op: &AssignOp,
+        rhs: Variant,
+    ) -> Result<bool, RuntimeError> {
+        let intermediate = match self.eval_expr(object) {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        };
+
+        let current_field = match &intermediate {
+            Variant::Vector2(v) => match field {
+                "x" => Some(Variant::Float(v.x as f64)),
+                "y" => Some(Variant::Float(v.y as f64)),
+                _ => None,
+            },
+            Variant::Vector3(v) => match field {
+                "x" => Some(Variant::Float(v.x as f64)),
+                "y" => Some(Variant::Float(v.y as f64)),
+                "z" => Some(Variant::Float(v.z as f64)),
+                _ => None,
+            },
+            Variant::Color(c) => match field {
+                "r" => Some(Variant::Float(c.r as f64)),
+                "g" => Some(Variant::Float(c.g as f64)),
+                "b" => Some(Variant::Float(c.b as f64)),
+                "a" => Some(Variant::Float(c.a as f64)),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let Some(current_field) = current_field else {
+            return Ok(false);
+        };
+
+        let final_field = match op {
+            AssignOp::Assign => rhs,
+            AssignOp::AddAssign => self.binary_add(&current_field, &rhs)?,
+            AssignOp::SubAssign => self.binary_sub(&current_field, &rhs)?,
+        };
+        let new_float = to_float(&final_field)? as f32;
+
+        let modified = match intermediate {
+            Variant::Vector2(v) => match field {
+                "x" => Variant::Vector2(gdcore::math::Vector2::new(new_float, v.y)),
+                "y" => Variant::Vector2(gdcore::math::Vector2::new(v.x, new_float)),
+                _ => unreachable!(),
+            },
+            Variant::Vector3(v) => match field {
+                "x" => Variant::Vector3(gdcore::math::Vector3::new(new_float, v.y, v.z)),
+                "y" => Variant::Vector3(gdcore::math::Vector3::new(v.x, new_float, v.z)),
+                "z" => Variant::Vector3(gdcore::math::Vector3::new(v.x, v.y, new_float)),
+                _ => unreachable!(),
+            },
+            Variant::Color(c) => match field {
+                "r" => Variant::Color(gdcore::math::Color::new(new_float, c.g, c.b, c.a)),
+                "g" => Variant::Color(gdcore::math::Color::new(c.r, new_float, c.b, c.a)),
+                "b" => Variant::Color(gdcore::math::Color::new(c.r, c.g, new_float, c.a)),
+                "a" => Variant::Color(gdcore::math::Color::new(c.r, c.g, c.b, new_float)),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+
+        self.exec_assignment(object, &AssignOp::Assign, modified)?;
+        Ok(true)
     }
 
     /// Handle compound member assignment: `inner_obj.prop.field = rhs`
@@ -1020,7 +1154,27 @@ impl Interpreter {
                 "TAU" => Ok(Variant::Float(std::f64::consts::TAU)),
                 "INF" => Ok(Variant::Float(f64::INFINITY)),
                 "NAN" => Ok(Variant::Float(f64::NAN)),
-                _ => self.environment.get(name),
+                _ => {
+                    if let Ok(value) = self.environment.get(name) {
+                        return Ok(value);
+                    }
+                    if let Some(ref inst) = self.self_instance {
+                        if let Some(value) = inst.properties.get(name) {
+                            return Ok(value.clone());
+                        }
+                    }
+                    if let (Some(ref access), Some(node_id)) =
+                        (&self.scene_access, self.current_node_id)
+                    {
+                        let value = access.get_node_property(node_id, name);
+                        if !value.is_nil() {
+                            return Ok(value);
+                        }
+                    }
+                    Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
+                        name.clone(),
+                    )))
+                }
             },
 
             Expr::BinaryOp { left, op, right } => {
@@ -1078,8 +1232,35 @@ impl Interpreter {
                     }
                     Expr::MemberAccess { object, member } => {
                         // Handle self.method() — dispatch to class methods
+                        // First try builtins (add_child, queue_free, etc.), then user funcs
                         if matches!(object.as_ref(), Expr::SelfRef) {
+                            if let Some(result) = self.try_builtin(member, &evaluated_args)? {
+                                return Ok(result);
+                            }
                             return self.call_user_func(member, &evaluated_args);
+                        }
+                        // Handle Input singleton: Input.is_action_pressed(), etc.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
+                            return self.call_input_method(member, &evaluated_args);
+                        }
+                        // Handle ClassName.new() — runtime node creation
+                        if member == "new" {
+                            if let Expr::Ident(class_name) = object.as_ref() {
+                                if is_node_class_name(class_name) {
+                                    if let Some(ref mut access) = self.scene_access {
+                                        if let Some(raw_id) =
+                                            access.create_node(class_name, class_name)
+                                        {
+                                            return Ok(Variant::ObjectId(
+                                                gdcore::id::ObjectId::from_raw(raw_id),
+                                            ));
+                                        }
+                                    }
+                                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                        format!("{class_name}.new() requires scene access"),
+                                    )));
+                                }
+                            }
                         }
                         let obj = self.eval_expr(object)?;
                         self.call_method_on(&obj, member, &evaluated_args, object)
@@ -1918,6 +2099,43 @@ impl Interpreter {
                     )))
                 }
             }
+            "add_child" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "add_child() takes 1 argument".into(),
+                    )));
+                }
+                let child_id = match &args[0] {
+                    Variant::ObjectId(oid) => oid.raw(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "add_child() argument must be a node reference".into(),
+                        )))
+                    }
+                };
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.add_child(node_id, child_id);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "add_child() requires scene access".into(),
+                    )))
+                }
+            }
+            "queue_free" => {
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.queue_free(node_id);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "queue_free() requires scene access".into(),
+                    )))
+                }
+            }
             "deg_to_rad" => {
                 if args.len() != 1 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -1973,6 +2191,24 @@ impl Interpreter {
                     "Color() takes 3 or 4 arguments".into(),
                 ))),
             },
+            "move_toward" => {
+                if args.len() != 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "move_toward() takes 3 arguments".into(),
+                    )));
+                }
+                let from = to_float(&args[0])?;
+                let to = to_float(&args[1])?;
+                let delta = to_float(&args[2])?;
+                let result = if (to - from).abs() <= delta {
+                    to
+                } else if to > from {
+                    from + delta
+                } else {
+                    from - delta
+                };
+                Ok(Some(Variant::Float(result)))
+            }
             _ => Ok(None), // Not a built-in
         }
     }
@@ -2030,6 +2266,97 @@ impl Interpreter {
         self.current_function = prev_function;
         self.call_stack_frames.pop();
         Ok(return_val)
+    }
+
+    /// Dispatch an `Input.method()` call through the scene_access input API.
+    fn call_input_method(&self, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+        match method {
+            "is_action_pressed" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.is_action_pressed() takes 1 argument".into(),
+                    )));
+                }
+                let action = match &args[0] {
+                    Variant::String(s) => s.as_str(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.is_action_pressed() argument must be a string".into(),
+                        )))
+                    }
+                };
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Bool(access.is_input_action_pressed(action)))
+                } else {
+                    Ok(Variant::Bool(false))
+                }
+            }
+            "is_action_just_pressed" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.is_action_just_pressed() takes 1 argument".into(),
+                    )));
+                }
+                let action = match &args[0] {
+                    Variant::String(s) => s.as_str(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.is_action_just_pressed() argument must be a string".into(),
+                        )))
+                    }
+                };
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Bool(access.is_input_action_just_pressed(action)))
+                } else {
+                    Ok(Variant::Bool(false))
+                }
+            }
+            "is_key_pressed" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.is_key_pressed() takes 1 argument".into(),
+                    )));
+                }
+                let key = match &args[0] {
+                    Variant::String(s) => s.as_str(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.is_key_pressed() argument must be a string".into(),
+                        )))
+                    }
+                };
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Bool(access.is_input_key_pressed(key)))
+                } else {
+                    Ok(Variant::Bool(false))
+                }
+            }
+            "get_vector" => {
+                if args.len() != 4 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_vector() takes 4 arguments".into(),
+                    )));
+                }
+                let strs: Vec<&str> = args
+                    .iter()
+                    .map(|a| match a {
+                        Variant::String(s) => Ok(s.as_str()),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.get_vector() arguments must be strings".into(),
+                        ))),
+                    })
+                    .collect::<Result<_, _>>()?;
+                if let Some(ref access) = self.scene_access {
+                    let (x, y) = access.get_input_vector(strs[0], strs[1], strs[2], strs[3]);
+                    Ok(Variant::Vector2(gdcore::math::Vector2::new(x, y)))
+                } else {
+                    Ok(Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)))
+                }
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("Input.{other}"),
+            ))),
+        }
     }
 
     /// Call a method on a value (e.g. array.push_back, array.size, etc.)
@@ -2609,6 +2936,51 @@ impl Interpreter {
                             )))
                         }
                     }
+                    "add_child" => {
+                        if args.len() != 1 {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "add_child() takes 1 argument".into(),
+                            )));
+                        }
+                        let child_id = match &args[0] {
+                            Variant::ObjectId(oid) => oid.raw(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "add_child() argument must be a node reference".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.add_child(id, child_id);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "queue_free" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.queue_free(id);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_class" => {
+                        if let Some(ref access) = self.scene_access {
+                            match access.get_class(id) {
+                                Some(cls) => Ok(Variant::String(cls)),
+                                None => Ok(Variant::Nil),
+                            }
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                         format!("ObjectId.{method}"),
                     ))),
@@ -3071,6 +3443,40 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
         },
         _ => None,
     }
+}
+
+/// Returns `true` if the identifier is a known Godot node class name that
+/// supports `.new()` for runtime instantiation.
+fn is_node_class_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Node"
+            | "Node2D"
+            | "Node3D"
+            | "Control"
+            | "Sprite2D"
+            | "Sprite3D"
+            | "Area2D"
+            | "Area3D"
+            | "CharacterBody2D"
+            | "CharacterBody3D"
+            | "RigidBody2D"
+            | "RigidBody3D"
+            | "StaticBody2D"
+            | "StaticBody3D"
+            | "CollisionShape2D"
+            | "CollisionShape3D"
+            | "Timer"
+            | "Camera2D"
+            | "Camera3D"
+            | "Label"
+            | "Button"
+            | "TextureRect"
+            | "AudioStreamPlayer"
+            | "AnimationPlayer"
+            | "CanvasLayer"
+            | "ColorRect"
+    )
 }
 
 fn variant_eq(a: &Variant, b: &Variant) -> bool {
@@ -5443,6 +5849,23 @@ func move_x(amount):
     }
 
     #[test]
+    fn compound_member_add_assign_bare_position_x() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(100, 200)
+func move_x(amount):
+    position.x += amount
+    return position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "move_x", &[Variant::Float(50.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(150.0, 200.0)));
+    }
+
+    #[test]
     fn compound_member_assign_both_x_and_y() {
         let (mut interp, class_def) = run_class(
             "\
@@ -5513,6 +5936,23 @@ var position = Vector2(100, 200)
 func move_by(delta):
     self.position.x = self.position.x + delta
     return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "move_by", &[Variant::Float(15.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(115.0, 200.0)));
+    }
+
+    #[test]
+    fn compound_member_read_modify_write_bare_position() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(100, 200)
+func move_by(delta):
+    position.x = position.x + delta
+    return position
 ",
         );
         let mut inst = interp.instantiate_class(&class_def).unwrap();
@@ -5684,5 +6124,308 @@ func fade(alpha):
             (val - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
             "expected PI/2, got {val}"
         );
+    }
+
+    #[test]
+    fn builtin_move_toward_basic() {
+        let src = "return move_toward(0.0, 10.0, 3.0)\n";
+        assert_eq!(run_val(src), Variant::Float(3.0));
+    }
+
+    #[test]
+    fn builtin_move_toward_overshoot() {
+        let src = "return move_toward(8.0, 10.0, 5.0)\n";
+        assert_eq!(run_val(src), Variant::Float(10.0));
+    }
+
+    #[test]
+    fn builtin_move_toward_negative() {
+        let src = "return move_toward(5.0, 0.0, 2.0)\n";
+        assert_eq!(run_val(src), Variant::Float(3.0));
+    }
+
+    #[test]
+    fn builtin_move_toward_already_at_target() {
+        let src = "return move_toward(5.0, 5.0, 1.0)\n";
+        assert_eq!(run_val(src), Variant::Float(5.0));
+    }
+
+    // -- Input singleton tests -----------------------------------------------
+
+    /// Mock SceneAccess that provides input state for testing Input.* calls.
+    struct MockInputAccess {
+        pressed_actions: std::collections::HashSet<String>,
+        just_pressed_actions: std::collections::HashSet<String>,
+        pressed_keys: std::collections::HashSet<String>,
+        action_map: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    impl MockInputAccess {
+        fn new() -> Self {
+            Self {
+                pressed_actions: std::collections::HashSet::new(),
+                just_pressed_actions: std::collections::HashSet::new(),
+                pressed_keys: std::collections::HashSet::new(),
+                action_map: std::collections::HashMap::new(),
+            }
+        }
+
+        fn press_action(mut self, action: &str) -> Self {
+            self.pressed_actions.insert(action.to_string());
+            self
+        }
+
+        fn just_press_action(mut self, action: &str) -> Self {
+            self.just_pressed_actions.insert(action.to_string());
+            self.pressed_actions.insert(action.to_string());
+            self
+        }
+
+        fn press_key(mut self, key: &str) -> Self {
+            self.pressed_keys.insert(key.to_string());
+            self
+        }
+    }
+
+    impl SceneAccess for MockInputAccess {
+        fn get_node(&self, _from: u64, _path: &str) -> Option<u64> {
+            None
+        }
+        fn get_parent(&self, _node: u64) -> Option<u64> {
+            None
+        }
+        fn get_children(&self, _node: u64) -> Vec<u64> {
+            vec![]
+        }
+        fn get_node_property(&self, _node: u64, _prop: &str) -> Variant {
+            Variant::Nil
+        }
+        fn set_node_property(&mut self, _node: u64, _prop: &str, _value: Variant) {}
+        fn emit_signal(&mut self, _node: u64, _signal: &str, _args: &[Variant]) {}
+        fn connect_signal(&mut self, _source: u64, _signal: &str, _target: u64, _method: &str) {}
+        fn get_node_name(&self, _node: u64) -> Option<String> {
+            None
+        }
+
+        fn is_input_action_pressed(&self, action: &str) -> bool {
+            self.pressed_actions.contains(action)
+        }
+
+        fn is_input_action_just_pressed(&self, action: &str) -> bool {
+            self.just_pressed_actions.contains(action)
+        }
+
+        fn is_input_key_pressed(&self, key: &str) -> bool {
+            self.pressed_keys.contains(key)
+        }
+    }
+
+    fn run_class_with_input(
+        src: &str,
+        access: MockInputAccess,
+    ) -> (Interpreter, ClassDef, ClassInstance) {
+        let mut interp = Interpreter::new();
+        let class_def = interp.run_class(src).unwrap();
+        let instance = interp.instantiate_class(&class_def).unwrap();
+        interp.set_scene_access(Box::new(access), 1);
+        (interp, class_def, instance)
+    }
+
+    #[test]
+    fn input_is_action_pressed_true() {
+        let src = "\
+extends Node2D
+var moving = false
+func _process(delta):
+    if Input.is_action_pressed(\"ui_right\"):
+        self.moving = true
+";
+        let access = MockInputAccess::new().press_action("ui_right");
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("moving"), Some(&Variant::Bool(true)));
+    }
+
+    #[test]
+    fn input_is_action_pressed_false() {
+        let src = "\
+extends Node2D
+var moving = false
+func _process(delta):
+    if Input.is_action_pressed(\"ui_right\"):
+        self.moving = true
+";
+        let access = MockInputAccess::new(); // nothing pressed
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("moving"), Some(&Variant::Bool(false)));
+    }
+
+    #[test]
+    fn input_is_action_just_pressed_true() {
+        let src = "\
+extends Node2D
+var fired = false
+func _process(delta):
+    if Input.is_action_just_pressed(\"shoot\"):
+        self.fired = true
+";
+        let access = MockInputAccess::new().just_press_action("shoot");
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("fired"), Some(&Variant::Bool(true)));
+    }
+
+    #[test]
+    fn input_is_action_just_pressed_false_when_only_held() {
+        let src = "\
+extends Node2D
+var fired = false
+func _process(delta):
+    if Input.is_action_just_pressed(\"shoot\"):
+        self.fired = true
+";
+        // Action is pressed (held) but NOT just-pressed (not first frame)
+        let access = MockInputAccess::new().press_action("shoot");
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("fired"), Some(&Variant::Bool(false)));
+    }
+
+    #[test]
+    fn input_is_key_pressed() {
+        let src = "\
+extends Node2D
+var result = false
+func _process(delta):
+    if Input.is_key_pressed(\"ArrowLeft\"):
+        self.result = true
+";
+        let access = MockInputAccess::new().press_key("ArrowLeft");
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("result"), Some(&Variant::Bool(true)));
+    }
+
+    #[test]
+    fn input_get_vector_right() {
+        let src = "\
+extends Node2D
+var dir_x = 0.0
+var dir_y = 0.0
+func _process(delta):
+    var dir = Input.get_vector(\"ui_left\", \"ui_right\", \"ui_up\", \"ui_down\")
+    self.dir_x = dir.x
+    self.dir_y = dir.y
+";
+        let access = MockInputAccess::new().press_action("ui_right");
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("dir_x"), Some(&Variant::Float(1.0)));
+        assert_eq!(inst.properties.get("dir_y"), Some(&Variant::Float(0.0)));
+    }
+
+    #[test]
+    fn input_get_vector_diagonal_normalized() {
+        let src = "\
+extends Node2D
+var dir_x = 0.0
+var dir_y = 0.0
+func _process(delta):
+    var dir = Input.get_vector(\"ui_left\", \"ui_right\", \"ui_up\", \"ui_down\")
+    self.dir_x = dir.x
+    self.dir_y = dir.y
+";
+        let access = MockInputAccess::new()
+            .press_action("ui_right")
+            .press_action("ui_down");
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        let dx = match inst.properties.get("dir_x") {
+            Some(Variant::Float(f)) => *f,
+            other => panic!("expected Float, got {:?}", other),
+        };
+        let dy = match inst.properties.get("dir_y") {
+            Some(Variant::Float(f)) => *f,
+            other => panic!("expected Float, got {:?}", other),
+        };
+        let len = (dx * dx + dy * dy).sqrt();
+        assert!(
+            (len - 1.0).abs() < 1e-6,
+            "diagonal vector should be normalized, got len={len}"
+        );
+        assert!(dx > 0.0, "should move right");
+        assert!(dy > 0.0, "should move down");
+    }
+
+    #[test]
+    fn input_get_vector_no_input() {
+        let src = "\
+extends Node2D
+var dir_x = 99.0
+var dir_y = 99.0
+func _process(delta):
+    var dir = Input.get_vector(\"ui_left\", \"ui_right\", \"ui_up\", \"ui_down\")
+    self.dir_x = dir.x
+    self.dir_y = dir.y
+";
+        let access = MockInputAccess::new(); // nothing pressed
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("dir_x"), Some(&Variant::Float(0.0)));
+        assert_eq!(inst.properties.get("dir_y"), Some(&Variant::Float(0.0)));
+    }
+
+    #[test]
+    fn input_nonexistent_method_errors() {
+        let src = "\
+extends Node2D
+func _process(delta):
+    Input.nonexistent_method()
+";
+        let access = MockInputAccess::new();
+        let (mut interp, _, mut inst) = run_class_with_input(src, access);
+        let result = interp.call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind, RuntimeErrorKind::UndefinedFunction(ref name) if name == "Input.nonexistent_method"),
+            "expected UndefinedFunction for Input.nonexistent_method, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn input_without_scene_access_returns_false() {
+        // When no scene access is set, Input methods should return false/zero
+        let src = "\
+extends Node2D
+var result = true
+func _process(delta):
+    self.result = Input.is_action_pressed(\"ui_right\")
+";
+        let (mut interp, class_def) = run_class(src);
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        // No scene_access set
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("result"), Some(&Variant::Bool(false)));
     }
 }

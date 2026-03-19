@@ -208,6 +208,22 @@ fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) {
 /// Resolves a `res://` path to an absolute filesystem path.
 fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
     let relative = res_path.strip_prefix("res://").unwrap_or(res_path);
+    for ancestor in project_dir.ancestors() {
+        let candidate = ancestor.join(relative);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            let candidate = ancestor.join(relative);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
     project_dir.join(relative)
 }
 
@@ -285,10 +301,14 @@ fn main() {
     };
 
     // Resolve and attach GDScript files to nodes that have _script_path.
-    let project_dir = Path::new(&args.scene_path)
+    let resolved_scene_path = Path::new(&args.scene_path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&args.scene_path));
+    let project_dir = resolved_scene_path
         .parent()
-        .unwrap_or(Path::new("."));
-    attach_scripts(&mut tree, project_dir);
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    attach_scripts(&mut tree, &project_dir);
 
     // Run lifecycle: enter_tree + ready.
     LifecycleManager::enter_tree(&mut tree, scene_root_id);
@@ -420,5 +440,21 @@ func _ready():
         assert_eq!(trace[0]["frame"], json!(1));
         assert_eq!(trace[1]["frame"], json!(2));
         assert_eq!(trace[0]["tree"]["children"][0]["name"], json!("Child"));
+    }
+
+    #[test]
+    fn resolve_res_path_finds_fixture_script_via_ancestor_search() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let resolved = resolve_res_path(
+            &manifest_dir.join("../fixtures/scenes"),
+            "res://fixtures/scripts/test_movement.gd",
+        );
+
+        assert!(
+            resolved.ends_with("fixtures/scripts/test_movement.gd"),
+            "expected fixture script path, got {}",
+            resolved.display()
+        );
+        assert!(resolved.exists(), "resolved path must exist");
     }
 }

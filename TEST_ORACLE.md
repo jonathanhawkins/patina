@@ -220,6 +220,11 @@ Golden outputs are JSON files with a standard envelope:
 }
 ```
 
+**Full Fixture Capture**: Combined oracle captures produced by `tools/oracle/run_fixture.gd`
+include final `scene_tree`, final `properties`, ordered `signal_trace`,
+ordered `notification_trace`, and per-frame `frame_trace` snapshots for
+scenes that need frame-by-frame contract comparison.
+
 **Signals**: Ordered array of signal emission events with signal name, emitter path, and parameters.
 
 **Notifications**: Ordered array of notification events with notification ID, target path, and frame number.

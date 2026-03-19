@@ -29,7 +29,7 @@ use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
 use gdcore::math::Vector2;
-use gdscene::scripting::GDScriptNodeInstance;
+use gdscene::scripting::{GDScriptNodeInstance, InputSnapshot};
 
 /// Animation playback state for the editor.
 #[derive(Debug, Clone)]
@@ -265,6 +265,17 @@ impl EditorState {
         self.just_released_keys.clear();
         self.mouse_position = (0.0, 0.0);
         self.mouse_buttons.clear();
+    }
+
+    /// Creates an [`InputSnapshot`] from the current editor input state.
+    /// This is passed to the scene tree so scripts can call
+    /// `Input.is_action_pressed()`, etc.
+    pub fn make_input_snapshot(&self) -> InputSnapshot {
+        InputSnapshot {
+            pressed_keys: self.pressed_keys.clone(),
+            just_pressed_keys: self.just_pressed_keys.clone(),
+            input_map: self.input_map.clone(),
+        }
     }
 
     /// Adds a log entry to the ring buffer.
@@ -3288,6 +3299,7 @@ fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         return;
     }
     let delta = state.delta_time;
+    let input_snapshot = state.make_input_snapshot();
     if let Some(ref mut tree) = state.run_scene_tree {
         let ids = tree.all_nodes_in_tree_order();
         for id in &ids {
@@ -3317,11 +3329,14 @@ fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
                 }
             }
         }
+        tree.set_input_snapshot(input_snapshot);
         tree.process_animations(delta);
         tree.process_tweens(delta);
         tree.process_all_scripts_process(delta);
         tree.process_frame();
     }
+    // Clear per-frame input after scripts have run
+    state.clear_frame_input();
     state.runtime_frame_count += 1;
     let frame = state.runtime_frame_count;
     send_json(stream, &format!(r#"{{"ok":true,"frame_count":{frame}}}"#));
@@ -4138,6 +4153,111 @@ mod tests {
         // Verify the tree was replaced (Main should still be there).
         let scene_resp = http_get(port, "/api/scene");
         assert!(scene_resp.contains("Main"));
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_scene_load_sets_scene_file() {
+        let (handle, port) = make_server();
+
+        // Save scene first so we have a file to load.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let save_body = format!(r#"{{"path":"{path}"}}"#);
+        http_post(port, "/api/scene/save", &save_body);
+
+        // Load it — scene_file should be set.
+        let load_body = format!(r#"{{"path":"{path}"}}"#);
+        let resp = http_post(port, "/api/scene/load", &load_body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify scene_file appears in scene info.
+        let info = http_get(port, "/api/scene/info");
+        assert!(
+            info.contains(&path),
+            "scene_file should be set after load; info = {info}"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_scene_file_initially_none() {
+        let (handle, port) = make_server();
+
+        // Default state has no scene_file — info should say null.
+        let info = http_get(port, "/api/scene/info");
+        assert!(
+            info.contains("\"scene_file\":null"),
+            "scene_file should be null initially; info = {info}"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_scene_save_sets_scene_file() {
+        let (handle, port) = make_server();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let save_body = format!(r#"{{"path":"{path}"}}"#);
+        let resp = http_post(port, "/api/scene/save", &save_body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify scene_file appears in scene info after save.
+        let info = http_get(port, "/api/scene/info");
+        assert!(
+            info.contains(&path),
+            "scene_file should be set after save; info = {info}"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_logs_appear_after_operations() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Initially should have no logs (or only startup logs).
+        let logs_before = http_get(port, "/api/logs");
+
+        // Perform an operation that logs.
+        let body = format!(r#"{{"parent_id":{main_id},"name":"TestChild","class_name":"Node2D"}}"#);
+        http_post(port, "/api/node/add", &body);
+
+        // Logs should now have an entry about adding a node.
+        let logs_after = http_get(port, "/api/logs");
+        assert!(
+            logs_after.contains("Added"),
+            "logs should contain 'Added' after adding a node; logs = {logs_after}"
+        );
+        // Should have more content than before.
+        assert!(
+            logs_after.len() > logs_before.len(),
+            "logs should grow after operations"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_scene_file_set_at_startup() {
+        // Simulate what the editor example does: set scene_file before starting server.
+        let port = free_port();
+        let tree = SceneTree::new();
+        let mut state = EditorState::new(tree);
+        state.scene_file = Some("test_scene.tscn".to_string());
+        let handle = EditorServerHandle::start(port, state);
+        thread::sleep(Duration::from_millis(100));
+
+        let info = http_get(port, "/api/scene/info");
+        assert!(
+            info.contains("test_scene.tscn"),
+            "scene_file should be set from startup state; info = {info}"
+        );
 
         handle.stop();
     }

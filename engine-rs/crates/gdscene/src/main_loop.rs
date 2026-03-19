@@ -169,6 +169,14 @@ impl MainLoop {
         self.tree.process_frame();
         self.tree.process_all_scripts_process(delta_secs);
 
+        // -- collision detection phase --
+        // Run after scripts so collision properties are set before next frame's _process.
+        self.tree.process_collisions();
+
+        // -- deferred deletion phase --
+        // Remove nodes that called queue_free() during this frame.
+        self.tree.process_deletions();
+
         // -- bookkeeping --
         self.process_time += delta_secs;
         self.frame_counter += 1;

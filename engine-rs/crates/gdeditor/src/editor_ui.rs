@@ -142,6 +142,12 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 #viewport-placeholder {
   color: var(--text-dim); font-size: 14px; text-align: center;
 }
+#viewport-placeholder .loading-spinner {
+  display: inline-block; width: 24px; height: 24px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%; animation: vp-spin 0.8s linear infinite;
+  margin-bottom: 8px;
+}
+@keyframes vp-spin { to { transform: rotate(360deg); } }
 
 /* Inspector panel */
 #inspector-panel {
@@ -413,6 +419,32 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #444; }
 
+/* Help dialog */
+#help-dialog {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.6); z-index: 300; align-items: center; justify-content: center;
+}
+#help-dialog.open { display: flex; }
+#help-dialog-inner {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  width: 520px; max-height: 80vh; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+#help-dialog-header {
+  padding: 10px 14px; font-weight: bold; font-size: 13px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+#help-dialog-header button {
+  background: transparent; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; padding: 0 4px;
+}
+#help-dialog-header button:hover { color: var(--text); background: transparent; border: none; }
+#help-dialog-body { overflow: auto; padding: 10px 14px; }
+.help-category { margin-bottom: 12px; }
+.help-category-title { font-weight: bold; font-size: 11px; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; letter-spacing: 0.5px; }
+.help-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 12px; }
+.help-key { color: var(--text); font-family: monospace; background: var(--bg); padding: 1px 6px; border-radius: 2px; border: 1px solid var(--border); font-size: 11px; }
+.help-desc { color: var(--text-dim); }
+
 /* Inspector/Node tabs */
 .right-panel-tabs {
   display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
@@ -604,6 +636,58 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   </div>
 </div>
 
+<!-- Help Dialog -->
+<div id="help-dialog">
+  <div id="help-dialog-inner">
+    <div id="help-dialog-header">
+      <span>Keyboard Shortcuts</span>
+      <button id="help-close" title="Close">&times;</button>
+    </div>
+    <div id="help-dialog-body">
+      <div class="help-category">
+        <div class="help-category-title">File</div>
+        <div class="help-row"><span class="help-desc">Save scene</span><span class="help-key">Ctrl+S</span></div>
+        <div class="help-row"><span class="help-desc">Search nodes</span><span class="help-key">Ctrl+F</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Edit</div>
+        <div class="help-row"><span class="help-desc">Undo</span><span class="help-key">Ctrl+Z</span></div>
+        <div class="help-row"><span class="help-desc">Redo</span><span class="help-key">Ctrl+Y / Ctrl+Shift+Z</span></div>
+        <div class="help-row"><span class="help-desc">Duplicate node</span><span class="help-key">Ctrl+D</span></div>
+        <div class="help-row"><span class="help-desc">Copy</span><span class="help-key">Ctrl+C</span></div>
+        <div class="help-row"><span class="help-desc">Paste</span><span class="help-key">Ctrl+V</span></div>
+        <div class="help-row"><span class="help-desc">Cut</span><span class="help-key">Ctrl+X</span></div>
+        <div class="help-row"><span class="help-desc">Delete node</span><span class="help-key">Delete</span></div>
+        <div class="help-row"><span class="help-desc">Rename node</span><span class="help-key">F2</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">View</div>
+        <div class="help-row"><span class="help-desc">Zoom in</span><span class="help-key">Ctrl+ +</span></div>
+        <div class="help-row"><span class="help-desc">Zoom out</span><span class="help-key">Ctrl+ -</span></div>
+        <div class="help-row"><span class="help-desc">Reset zoom &amp; pan</span><span class="help-key">Ctrl+0</span></div>
+        <div class="help-row"><span class="help-desc">Pan viewport</span><span class="help-key">Middle-click drag / Shift+drag</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Tools</div>
+        <div class="help-row"><span class="help-desc">Select tool</span><span class="help-key">Q</span></div>
+        <div class="help-row"><span class="help-desc">Move tool</span><span class="help-key">W</span></div>
+        <div class="help-row"><span class="help-desc">Rotate tool</span><span class="help-key">E</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Runtime</div>
+        <div class="help-row"><span class="help-desc">Play</span><span class="help-key">F5</span></div>
+        <div class="help-row"><span class="help-desc">Play current scene</span><span class="help-key">F6</span></div>
+        <div class="help-row"><span class="help-desc">Pause</span><span class="help-key">F7</span></div>
+        <div class="help-row"><span class="help-desc">Stop</span><span class="help-key">F8</span></div>
+      </div>
+      <div class="help-category">
+        <div class="help-category-title">Help</div>
+        <div class="help-row"><span class="help-desc">Show this dialog</span><span class="help-key">F1 / ?</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Main area -->
 <div id="main">
   <!-- Left panel: Scene tree + FileSystem -->
@@ -630,7 +714,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     <div id="viewport-panel">
       <div class="panel-header">Viewport</div>
       <div id="viewport-container">
-        <div id="viewport-placeholder">No frame available</div>
+        <div id="viewport-placeholder"><div class="loading-spinner"></div><div>Loading viewport...</div></div>
       </div>
     </div>
 
@@ -742,6 +826,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <span>Tool: <span id="status-tool">Select</span></span>
   <span>Snap: <span id="status-snap">Off</span></span>
   <span>Zoom: <span id="status-zoom">100%</span></span>
+  <span id="status-cursor" style="display:none">Cursor: <span id="status-cursor-pos">(0, 0)</span></span>
 </div>
 
 <script>
@@ -758,7 +843,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var contextNodeId = null;
   var currentToolMode = 'select';
   var collapsedSections = {};
-  var lastLogCount = 0;
+  var lastLogCount = -1;
 
   // Editor settings
   var editorSettings = { grid_snap_enabled: false, grid_snap_size: 8, grid_visible: true, rulers_visible: true, background_color: [0.08,0.08,0.1,1], font_size: 'medium' };
@@ -1229,13 +1314,25 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       // Refresh node dock if visible.
       if (currentRightTab === 'node') fetchNodeDock();
       // Check for script property and load it.
+      // Prefer _script_path (real file path) over script (may be ExtResource ref).
       var scriptPath = null;
       if (data.properties) {
         for (var pi = 0; pi < data.properties.length; pi++) {
-          if (data.properties[pi].name === 'script') {
-            var sv = data.properties[pi].value;
-            if (sv && sv.value && typeof sv.value === 'string') scriptPath = sv.value;
-            break;
+          if (data.properties[pi].name === '_script_path') {
+            var sp = data.properties[pi].value;
+            if (sp && sp.value && typeof sp.value === 'string') { scriptPath = sp.value; break; }
+          }
+        }
+        if (!scriptPath) {
+          for (var pi = 0; pi < data.properties.length; pi++) {
+            if (data.properties[pi].name === 'script') {
+              var sv = data.properties[pi].value;
+              if (sv && sv.value && typeof sv.value === 'string') {
+                // Ignore ExtResource references like 'ExtResource("1_player")'
+                if (sv.value.indexOf('ExtResource') === -1) scriptPath = sv.value;
+              }
+              break;
+            }
           }
         }
       }
@@ -1795,6 +1892,29 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         viewportPanY = data.pan_y || 0;
         updateZoomIndicator();
       }
+    });
+
+    // Cursor position in status bar
+    var cursorEl = document.getElementById('status-cursor');
+    var cursorPosEl = document.getElementById('status-cursor-pos');
+    container.addEventListener('mousemove', function(e) {
+      if (!viewportImg || viewportImg.style.display === 'none') return;
+      var rect = viewportImg.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
+        cursorEl.style.display = 'none'; return;
+      }
+      var scaleX = viewportImg.naturalWidth / rect.width;
+      var scaleY = viewportImg.naturalHeight / rect.height;
+      var px = Math.round((e.clientX - rect.left) * scaleX);
+      var py = Math.round((e.clientY - rect.top) * scaleY);
+      // Convert pixel coords to world coords using zoom/pan
+      var wx = Math.round((px - viewportPanX) / viewportZoom);
+      var wy = Math.round((py - viewportPanY) / viewportZoom);
+      cursorPosEl.textContent = '(' + wx + ', ' + wy + ')';
+      cursorEl.style.display = '';
+    });
+    container.addEventListener('mouseleave', function() {
+      cursorEl.style.display = 'none';
     });
   }
 
@@ -2479,6 +2599,23 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (e.key === 'F6') { e.preventDefault(); document.getElementById('btn-play-current').click(); return; }
       if (e.key === 'F7') { e.preventDefault(); document.getElementById('btn-pause').click(); return; }
       if (e.key === 'F8') { e.preventDefault(); document.getElementById('btn-stop').click(); return; }
+
+      // Help shortcut
+      if (e.key === 'F1' || e.key === '?') { e.preventDefault(); toggleHelpDialog(); return; }
+    });
+  }
+
+  // ---- Help dialog ----
+  function toggleHelpDialog() {
+    var dlg = document.getElementById('help-dialog');
+    dlg.classList.toggle('open');
+  }
+  function setupHelpDialog() {
+    document.getElementById('help-close').addEventListener('click', function() {
+      document.getElementById('help-dialog').classList.remove('open');
+    });
+    document.getElementById('help-dialog').addEventListener('click', function(e) {
+      if (e.target === this) this.classList.remove('open');
     });
   }
 
@@ -2986,7 +3123,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   setupAnimationPanel();
   refreshAnimationList();
   setupSettingsDialog();
+  setupHelpDialog();
   setupLeftDivider();
+  logMessage('info', 'Editor ready');
   fetchScene();
   fetchSelected();
   refreshViewport();

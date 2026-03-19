@@ -1,0 +1,9 @@
+[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Player" type="Node2D" parent="."]
+position = Vector2(50, 50)
+
+[node name="Enemy" type="Node2D" parent="."]
+position = Vector2(150, 100)

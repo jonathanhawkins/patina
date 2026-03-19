@@ -17,6 +17,15 @@ has a concrete entrypoint:
 The scripts currently wrap machine-readable probe payloads into the standard
 oracle envelope using the pinned upstream Godot version and commit.
 
+`run_fixture.gd` is the upstream-facing combined capture entrypoint. Its
+envelope now includes:
+
+- final `scene_tree`
+- final `properties`
+- per-frame `frame_trace`
+- `signal_trace`
+- `notification_trace`
+
 Bootstrap generation command:
 
 ```sh
