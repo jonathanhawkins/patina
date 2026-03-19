@@ -599,7 +599,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       const placeholder = document.getElementById('viewport-placeholder');
       if (placeholder) placeholder.style.display = 'block';
     };
-    img.src = '/api/viewport?t=' + Date.now();
+    img.src = '/api/viewport/png?t=' + Date.now();
   }
 
   // ---- Toolbar actions ----

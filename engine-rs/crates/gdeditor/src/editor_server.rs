@@ -284,12 +284,15 @@ fn send_error(stream: &mut TcpStream, status: u16, message: &str) {
 }
 
 fn send_binary(stream: &mut TcpStream, content_type: &str, data: &[u8]) {
+    use std::io::BufWriter;
     let header = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
         data.len()
     );
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(data);
+    let mut writer = BufWriter::new(stream);
+    let _ = writer.write_all(header.as_bytes());
+    let _ = writer.write_all(data);
+    let _ = writer.flush();
 }
 
 fn serve_cors_preflight(stream: &mut TcpStream) {
