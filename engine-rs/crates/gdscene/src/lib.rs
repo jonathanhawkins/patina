@@ -34,11 +34,12 @@ pub mod scene_tree;
 pub mod scripting;
 pub mod tilemap;
 pub mod trace;
+mod trace_oracle_tests;
 pub mod tween;
 
 // Re-export the most-used types at the crate root.
 pub use lifecycle::LifecycleManager;
-pub use main_loop::MainLoop;
+pub use main_loop::{FrameOutput, MainLoop};
 pub use node::{Node, NodeId};
 pub use packed_scene::{add_packed_scene_to_tree, wire_connections, PackedScene, SceneConnection};
 pub use scene_saver::TscnSaver;

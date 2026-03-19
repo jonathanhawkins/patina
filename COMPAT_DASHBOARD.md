@@ -1,7 +1,7 @@
 # Compatibility Dashboard
 
-**Last updated**: 2026-03-19
-**Test suite**: 43 oracle golden tests + render/runtime tests passing
+**Last updated**: 2026-03-19 (B013 vertical-slice update)
+**Test suite**: 43 oracle golden tests + render/runtime tests + 11 vertical-slice integration tests passing
 
 ---
 
@@ -54,12 +54,12 @@ Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner a
 | Typed arrays | Variant | Not started |
 | Enums in scripts | Scripting | Parsed but not fully evaluated |
 | @export annotations | Scripting | Parsed, not enforced |
-| Physics bodies (CharacterBody2D, etc.) | Physics | Node class recognized, no physics simulation |
+| Physics bodies (CharacterBody2D, etc.) | Physics | PhysicsServer integrated into MainLoop; body sync and fixed-step advance working |
 | Audio playback | Audio | Stub only |
-| Input handling | Platform | Stub only |
+| Input handling | Platform | Engine-owned via `MainLoop::set_input()`; InputSnapshot flows to scripts; auto-cleared per frame |
 | Rendering / viewport | Render | Scene-driven golden rendering is passing via `render_golden_test` against `.tscn` fixtures |
-| Animation system | Scene | Not started |
-| Tween system | Scene | Not started |
+| Animation system | Scene | Driven by MainLoop (process_animations per frame) |
+| Tween system | Scene | Driven by MainLoop (process_tweens per frame) |
 
 ---
 
@@ -88,3 +88,27 @@ Scene-driven 2D render fixtures currently pass for:
 
 Those tests compare rendered output against checked-in golden PNGs under
 `fixtures/golden/render/` and also verify determinism and zoom/pan behavior.
+
+---
+
+## 2D Vertical-Slice Coverage (B013)
+
+The `vertical_slice_test.rs` integration test exercises the full engine-owned pipeline end-to-end:
+
+**Scene**: `space_shooter.tscn` with real GDScript scripts (`player.gd`, `enemy_spawner.gd`)
+
+| Test | What it proves |
+|------|---------------|
+| Scene loads with correct structure | PackedScene → SceneTree instancing (6 nodes) |
+| Player starts at expected position | Property sync from .tscn (320, 400) |
+| 60 frames no input | MainLoop::step() runs full pipeline without crash; player stays put |
+| Player moves right with input | InputSnapshot → MainLoop → script _process → position update |
+| Player moves left with input | Bidirectional input routing works |
+| Player clamped to viewport | Script `clamp()` built-in works correctly |
+| Diagonal movement | Multiple simultaneous actions in InputSnapshot |
+| FrameOutput matches | step() returns correct frame_count and delta each frame |
+| Enemy spawner timer advances | Script variable accumulation across 60 frames (~1.0s) |
+| Deterministic | Two identical runs produce identical final positions |
+| Input does not persist | Auto-clear after step() prevents stale input leak |
+
+**Pipeline exercised**: scene load → script attach → lifecycle (enter_tree/ready) → input routing → fixed-timestep physics → process callbacks → script execution → frame bookkeeping → input cleanup

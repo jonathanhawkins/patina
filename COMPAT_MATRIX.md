@@ -2,7 +2,7 @@
 
 This document tracks the implementation and compatibility status of each Patina Engine subsystem relative to upstream Godot behavior.
 
-**Last updated**: 2026-03-19 (oracle/render/runtime verification)
+**Last updated**: 2026-03-19 (B013 vertical-slice update)
 
 ---
 
@@ -30,25 +30,26 @@ This document tracks the implementation and compatibility status of each Patina 
 | Scene System | `gdscene` | **Partial** | 4 oracle scenes + runtime unit coverage | ~90% | Node hierarchy, SceneTree, lifecycle, PackedScene working; tree-order script dispatch, pause handling, live-subtree lifecycle mutation tests, and traced scripted frame evolution now covered |
 | GDScript Interop | `gdscript-interop` | **Partial** | 4 scenes | ~85% | 30+ built-ins, get_child_count added; class system, cross-node access |
 | 2D Rendering | `gdrender2d` | **Partial** | 6 `.tscn` render fixtures | Golden-based | Scene-driven rendering is covered by `render_golden_test`; fixture scenes render to golden PNGs for demo_2d, hierarchy, space_shooter, render_test_simple, render_test_camera, and render_test_sprite |
-| 2D Physics | `gdphysics2d` | Not Started | -- | -- | Shapes, collision detection stub only |
+| 2D Physics | `gdphysics2d` | **Partial** | physics_playground.tscn | Measured | PhysicsServer integrated into MainLoop; body sync, fixed-step advance, trace recording working (B011) |
 | Audio | `gdaudio` | Not Started | -- | -- | Stub only |
-| Input | `gdplatform` | Not Started | -- | -- | Stub only |
+| Input | `gdplatform` | **Partial** | vertical_slice_test | Measured | Engine-owned InputSnapshot routes through MainLoop::set_input(); scripts read Input.is_action_pressed(); auto-cleared per frame (B012) |
 | Platform | `gdplatform` | Not Started | -- | -- | Windowing, timing stub only |
 | 3D Runtime | -- | Not Started | -- | -- | Deferred to Phase 6 |
-| Editor | `gdeditor` | In Progress | -- | -- | HTTP server + basic viewport working |
+| Editor | `gdeditor` | In Progress | -- | -- | HTTP server + basic viewport; runtime uses MainLoop (B012) |
+| **2D Vertical Slice** | `gdscene` + all | **Partial** | vertical_slice_test (11 tests) | Measured | End-to-end: scene→scripts→input→physics→process→render via MainLoop::step() (B013) |
 
 ---
 
 ## Oracle Parity Summary
 
-Measured against 4 Godot oracle outputs (main, simple_hierarchy, signal_test, multi_script):
+Measured against 9 Godot oracle outputs (147 comparisons, 55 matched = 37.4%):
 
-- **Overall**: 32.2% (28/87 property comparisons match)
+- **Overall**: 37.4% (55/147 property comparisons match)
 - **Node structure**: 100% (all nodes present with correct names/classes)
 - **Explicit properties**: ~70% (positions, script vars match)
 - **Default properties**: Fixed but fixtures need regeneration
 
-> Headless oracle parity still needs broader fixture regeneration, but the runtime frame/lifecycle contract and scene-driven 2D render golden path are now both covered by passing tests.
+> Headless oracle parity is at 37.4% across 9 scenes. The full engine-owned runtime pipeline (scene→input→physics→process→render) is now exercised end-to-end by `vertical_slice_test.rs` (11 integration tests) via `MainLoop::step()`.
 
 ---
 

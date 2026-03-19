@@ -466,6 +466,7 @@ version = "0.1.0"
 dependencies = [
  "gdcore",
  "gdobject",
+ "gdplatform",
  "gdrender2d",
  "gdscene",
  "gdvariant",
@@ -537,6 +538,8 @@ version = "0.1.0"
 dependencies = [
  "gdcore",
  "gdobject",
+ "gdphysics2d",
+ "gdplatform",
  "gdresource",
  "gdscript-interop",
  "gdvariant",

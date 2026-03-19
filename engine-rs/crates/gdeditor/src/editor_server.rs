@@ -18,6 +18,7 @@ use gdrender2d::renderer::FrameBuffer;
 use std::collections::HashMap;
 
 use gdscene::animation::{Animation, AnimationTrack, KeyFrame, LoopMode};
+use gdscene::main_loop::MainLoop;
 use gdscene::node::{Node, NodeId};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_saver::TscnSaver;
@@ -143,8 +144,9 @@ pub struct EditorState {
     pub is_running: bool,
     /// Whether the game is paused.
     pub is_paused: bool,
-    /// A separate copy of the scene tree for running.
-    pub run_scene_tree: Option<SceneTree>,
+    /// Engine-owned runtime loop for play mode.
+    /// Contains the scene tree and drives the full frame pipeline.
+    pub run_main_loop: Option<MainLoop>,
     /// Counts frames during runtime.
     pub runtime_frame_count: u64,
     /// Time between frames (fixed at 1/60).
@@ -199,7 +201,7 @@ impl EditorState {
             display_settings: EditorDisplaySettings::default(),
             is_running: false,
             is_paused: false,
-            run_scene_tree: None,
+            run_main_loop: None,
             runtime_frame_count: 0,
             delta_time: 1.0 / 60.0,
             animations: HashMap::new(),
@@ -252,6 +254,24 @@ impl EditorState {
         } else {
             false
         }
+    }
+
+    /// Converts the string-based input map into a typed [`gdplatform::InputMap`]
+    /// for the engine-owned [`MainLoop`].
+    pub fn build_engine_input_map(&self) -> gdplatform::InputMap {
+        let mut map = gdplatform::InputMap::new();
+        for (action, keys) in &self.input_map {
+            map.add_action(action, 0.0);
+            for key_name in keys {
+                if let Some(typed_key) = gdplatform::input::Key::from_name(key_name) {
+                    map.action_add_event(
+                        action,
+                        gdplatform::ActionBinding::KeyBinding(typed_key),
+                    );
+                }
+            }
+        }
+        map
     }
 
     /// Clears per-frame input state (just_pressed and just_released).
@@ -3224,7 +3244,9 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         cloned.process_script_ready(*id);
     }
 
-    state.run_scene_tree = Some(cloned);
+    let mut main_loop = MainLoop::new(cloned);
+    main_loop.set_input_map(state.build_engine_input_map());
+    state.run_main_loop = Some(main_loop);
     state.is_running = true;
     state.is_paused = false;
     state.runtime_frame_count = 0;
@@ -3276,7 +3298,7 @@ fn api_runtime_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut state = state.lock().unwrap();
     state.is_running = false;
     state.is_paused = false;
-    state.run_scene_tree = None;
+    state.run_main_loop = None;
     state.runtime_frame_count = 0;
     state.clear_all_input();
     state.add_log("info", "Runtime: stopped");
@@ -3309,45 +3331,18 @@ fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         return;
     }
     let delta = state.delta_time;
+    // The engine-owned InputState is populated by api_input_key_down/up via
+    // push_event(). The bridge in MainLoop::step() converts it to the
+    // script-facing InputSnapshot automatically. We still set a manual
+    // snapshot as a fallback for any keys that didn't map to a typed Key.
     let input_snapshot = state.make_input_snapshot();
-    if let Some(ref mut tree) = state.run_scene_tree {
-        let ids = tree.all_nodes_in_tree_order();
-        for id in &ids {
-            let velocity = {
-                let node = match tree.get_node(*id) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                match node.get_property("velocity") {
-                    Variant::Vector2(v) => Some(v),
-                    _ => None,
-                }
-            };
-            if let Some(vel) = velocity {
-                let new_pos = {
-                    let node = tree.get_node(*id).unwrap();
-                    match node.get_property("position") {
-                        Variant::Vector2(pos) => Variant::Vector2(gdcore::math::Vector2::new(
-                            pos.x + vel.x * delta as f32,
-                            pos.y + vel.y * delta as f32,
-                        )),
-                        _ => continue,
-                    }
-                };
-                if let Some(node) = tree.get_node_mut(*id) {
-                    node.set_property("position", new_pos);
-                }
-            }
-        }
-        tree.set_input_snapshot(input_snapshot);
-        tree.process_animations(delta);
-        tree.process_tweens(delta);
-        tree.process_all_scripts_process(delta);
-        tree.process_frame();
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        main_loop.set_input(input_snapshot);
+        let output = main_loop.step(delta);
+        state.runtime_frame_count = output.frame_count;
     }
-    // Clear per-frame input after scripts have run
+    // Clear per-frame input after scripts have run.
     state.clear_frame_input();
-    state.runtime_frame_count += 1;
     let frame = state.runtime_frame_count;
     send_json(stream, &format!(r#"{{"ok":true,"frame_count":{frame}}}"#));
 }
@@ -3586,7 +3581,19 @@ fn api_input_key_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     if !state.pressed_keys.contains(&key) {
         state.just_pressed_keys.insert(key.clone());
     }
-    state.pressed_keys.insert(key);
+    state.pressed_keys.insert(key.clone());
+    // Route through engine-owned InputState when MainLoop is active.
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        if let Some(typed_key) = gdplatform::input::Key::from_name(&key) {
+            main_loop.push_event(gdplatform::InputEvent::Key {
+                key: typed_key,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+                alt: false,
+            });
+        }
+    }
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -3611,7 +3618,19 @@ fn api_input_key_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     };
     state.pressed_keys.remove(&key);
-    state.just_released_keys.insert(key);
+    state.just_released_keys.insert(key.clone());
+    // Route through engine-owned InputState when MainLoop is active.
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        if let Some(typed_key) = gdplatform::input::Key::from_name(&key) {
+            main_loop.push_event(gdplatform::InputEvent::Key {
+                key: typed_key,
+                pressed: false,
+                shift: false,
+                ctrl: false,
+                alt: false,
+            });
+        }
+    }
     send_json(stream, r#"{"ok":true}"#);
 }
 
