@@ -13,6 +13,5 @@ gdresource = { path = "../gdresource" }
 gdscript-interop = { path = "../gdscript-interop" }
 thiserror.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+

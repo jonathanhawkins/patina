@@ -28,6 +28,7 @@ pub mod node2d;
 pub mod node3d;
 pub mod packed_scene;
 pub mod particle;
+pub mod physics_server;
 pub mod scene_saver;
 pub mod scene_tree;
 pub mod scripting;
@@ -43,4 +44,5 @@ pub use packed_scene::{add_packed_scene_to_tree, wire_connections, PackedScene, 
 pub use scene_saver::TscnSaver;
 pub use scene_tree::SceneTree;
 pub use scripting::{GDScriptNodeInstance, InputSnapshot};
+pub use tilemap::{default_color_tileset, ColorTile, ColorTileSet, TileGrid, TileGridStore};
 pub use trace::{EventTrace, TraceEvent, TraceEventType};

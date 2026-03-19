@@ -289,6 +289,203 @@ pub fn get_surrounding_cells(cell: Vector2i) -> Vec<Vector2i> {
     ]
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorTile {
+    pub id: i32,
+    pub name: String,
+    pub color: gdcore::math::Color,
+    pub collision: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorTileSet {
+    pub cell_size: Vector2,
+    pub tiles: HashMap<i32, ColorTile>,
+}
+
+impl ColorTileSet {
+    pub fn new(cs: Vector2) -> Self {
+        Self {
+            cell_size: cs,
+            tiles: HashMap::new(),
+        }
+    }
+    pub fn add_tile(&mut self, t: ColorTile) {
+        self.tiles.insert(t.id, t);
+    }
+    pub fn get_tile(&self, id: i32) -> Option<&ColorTile> {
+        self.tiles.get(&id)
+    }
+    pub fn tile_ids_sorted(&self) -> Vec<i32> {
+        let mut v: Vec<i32> = self.tiles.keys().copied().collect();
+        v.sort();
+        v
+    }
+}
+
+pub fn default_color_tileset() -> ColorTileSet {
+    let mut ts = ColorTileSet::new(Vector2::new(16.0, 16.0));
+    ts.add_tile(ColorTile {
+        id: 1,
+        name: "Ground".into(),
+        color: gdcore::math::Color::new(0.545, 0.271, 0.075, 1.0),
+        collision: true,
+    });
+    ts.add_tile(ColorTile {
+        id: 2,
+        name: "Wall".into(),
+        color: gdcore::math::Color::new(0.412, 0.412, 0.412, 1.0),
+        collision: true,
+    });
+    ts.add_tile(ColorTile {
+        id: 3,
+        name: "Water".into(),
+        color: gdcore::math::Color::new(0.255, 0.412, 0.882, 1.0),
+        collision: false,
+    });
+    ts.add_tile(ColorTile {
+        id: 4,
+        name: "Grass".into(),
+        color: gdcore::math::Color::new(0.133, 0.545, 0.133, 1.0),
+        collision: false,
+    });
+    ts.add_tile(ColorTile {
+        id: 5,
+        name: "Lava".into(),
+        color: gdcore::math::Color::new(1.0, 0.271, 0.0, 1.0),
+        collision: false,
+    });
+    ts.add_tile(ColorTile {
+        id: 6,
+        name: "Ice".into(),
+        color: gdcore::math::Color::new(0.529, 0.808, 0.922, 1.0),
+        collision: false,
+    });
+    ts.add_tile(ColorTile {
+        id: 7,
+        name: "Sand".into(),
+        color: gdcore::math::Color::new(0.824, 0.706, 0.549, 1.0),
+        collision: false,
+    });
+    ts.add_tile(ColorTile {
+        id: 8,
+        name: "Stone".into(),
+        color: gdcore::math::Color::new(0.184, 0.310, 0.310, 1.0),
+        collision: true,
+    });
+    ts
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileGrid {
+    pub width: usize,
+    pub height: usize,
+    pub cells: Vec<i32>,
+}
+impl TileGrid {
+    pub fn new(w: usize, h: usize) -> Self {
+        Self {
+            width: w,
+            height: h,
+            cells: vec![0; w * h],
+        }
+    }
+    pub fn get(&self, x: i32, y: i32) -> Option<i32> {
+        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
+            return None;
+        }
+        Some(self.cells[y as usize * self.width + x as usize])
+    }
+    pub fn set(&mut self, x: i32, y: i32, t: i32) -> bool {
+        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
+            return false;
+        }
+        self.cells[y as usize * self.width + x as usize] = t;
+        true
+    }
+    pub fn fill_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, t: i32) -> usize {
+        let (ax, bx) = (
+            x1.min(x2).max(0) as usize,
+            (x1.max(x2) as usize).min(self.width.saturating_sub(1)),
+        );
+        let (ay, by) = (
+            y1.min(y2).max(0) as usize,
+            (y1.max(y2) as usize).min(self.height.saturating_sub(1)),
+        );
+        let mut n = 0;
+        for r in ay..=by {
+            for c in ax..=bx {
+                self.cells[r * self.width + c] = t;
+                n += 1;
+            }
+        }
+        n
+    }
+    pub fn resize(&mut self, nw: usize, nh: usize) {
+        let mut nc = vec![0i32; nw * nh];
+        for r in 0..self.height.min(nh) {
+            for c in 0..self.width.min(nw) {
+                nc[r * nw + c] = self.cells[r * self.width + c];
+            }
+        }
+        self.width = nw;
+        self.height = nh;
+        self.cells = nc;
+    }
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "width": self.width, "height": self.height, "cells": self.cells })
+    }
+    pub fn from_json(v: &serde_json::Value) -> Option<Self> {
+        let w = v.get("width")?.as_u64()? as usize;
+        let h = v.get("height")?.as_u64()? as usize;
+        let a = v.get("cells")?.as_array()?;
+        if a.len() != w * h {
+            return None;
+        }
+        let c: Vec<i32> = a
+            .iter()
+            .filter_map(|x: &serde_json::Value| x.as_i64().map(|n| n as i32))
+            .collect();
+        if c.len() != w * h {
+            return None;
+        }
+        Some(Self {
+            width: w,
+            height: h,
+            cells: c,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TileGridStore {
+    grids: HashMap<NodeId, TileGrid>,
+    pub tileset: Option<ColorTileSet>,
+}
+impl TileGridStore {
+    pub fn new_with_defaults() -> Self {
+        Self {
+            grids: HashMap::new(),
+            tileset: Some(default_color_tileset()),
+        }
+    }
+    pub fn insert(&mut self, id: NodeId, g: TileGrid) {
+        self.grids.insert(id, g);
+    }
+    pub fn get(&self, id: NodeId) -> Option<&TileGrid> {
+        self.grids.get(&id)
+    }
+    pub fn get_mut(&mut self, id: NodeId) -> Option<&mut TileGrid> {
+        self.grids.get_mut(&id)
+    }
+    pub fn remove(&mut self, id: NodeId) -> Option<TileGrid> {
+        self.grids.remove(&id)
+    }
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.grids.keys().copied().collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -596,5 +793,41 @@ mod tests {
         set_cell(&mut store, nid, 0, coords, TileData::new(1));
         set_cell(&mut store, nid, 0, coords, TileData::new(2));
         assert_eq!(get_cell(&store, nid, 0, coords).unwrap().source_id, 2);
+    }
+
+    #[test]
+    fn default_tileset_8() {
+        assert_eq!(default_color_tileset().tiles.len(), 8);
+    }
+    #[test]
+    fn grid_get_set() {
+        let mut g = TileGrid::new(5, 5);
+        g.set(2, 3, 1);
+        assert_eq!(g.get(2, 3), Some(1));
+    }
+    #[test]
+    fn grid_fill() {
+        let mut g = TileGrid::new(10, 10);
+        assert_eq!(g.fill_rect(2, 2, 4, 4, 3), 9);
+    }
+    #[test]
+    fn grid_resize() {
+        let mut g = TileGrid::new(5, 5);
+        g.set(1, 1, 7);
+        g.resize(10, 10);
+        assert_eq!(g.get(1, 1), Some(7));
+    }
+    #[test]
+    fn grid_json_rt() {
+        let mut g = TileGrid::new(4, 3);
+        g.set(0, 0, 1);
+        assert_eq!(TileGrid::from_json(&g.to_json()).unwrap(), g);
+    }
+    #[test]
+    fn grid_store() {
+        let mut s = TileGridStore::new_with_defaults();
+        let n = NodeId::next();
+        s.insert(n, TileGrid::new(8, 8));
+        assert!(s.get(n).is_some());
     }
 }

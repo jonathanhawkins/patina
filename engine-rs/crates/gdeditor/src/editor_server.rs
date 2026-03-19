@@ -165,6 +165,7 @@ pub struct EditorState {
     pub mouse_buttons: HashSet<u8>,
     /// Input action map: action name -> list of key names.
     pub input_map: HashMap<String, Vec<String>>,
+    pub tile_grid_store: gdscene::tilemap::TileGridStore,
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -214,6 +215,7 @@ impl EditorState {
             mouse_position: (0.0, 0.0),
             mouse_buttons: HashSet::new(),
             input_map: Self::default_input_map(),
+            tile_grid_store: gdscene::tilemap::TileGridStore::new_with_defaults(),
         }
     }
 
@@ -669,6 +671,12 @@ fn handle_connection(
         // Scene instancing + collision shape editing
         ("POST", "/api/scene/instance") => api_instance_scene(state, &req.body, &mut stream),
         ("POST", "/api/viewport/shape_resize") => api_shape_resize(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/paint") => api_tilemap_paint(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/erase") => api_tilemap_erase(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/fill") => api_tilemap_fill(state, &req.body, &mut stream),
+        ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
+        ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
+        ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
         _ => serve_404(&mut stream),
     }
 }
@@ -1379,6 +1387,7 @@ fn api_undo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         return;
     }
 
+    let _ = cmd.undo_tilemap(&mut state.tile_grid_store);
     state.redo_stack.push(cmd);
     state.add_log("info", "Undo");
     send_json(stream, r#"{"ok":true}"#);
@@ -1401,6 +1410,7 @@ fn api_redo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         return;
     }
 
+    let _ = cmd.execute_tilemap(&mut state.tile_grid_store);
     state.undo_stack.push(cmd);
     state.add_log("info", "Redo");
     send_json(stream, r#"{"ok":true}"#);
@@ -3736,6 +3746,229 @@ fn api_input_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         actions,
     );
     send_json(stream, &json);
+}
+
+fn api_tilemap_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "bad json");
+            return;
+        }
+    };
+    let nr = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let x = p.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let y = p.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let tid = p.get("tile_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let mut s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "not found");
+            return;
+        }
+    };
+    let mut cmd = EditorCommand::TileMapPaint {
+        node_id: nid,
+        x,
+        y,
+        tile_id: tid,
+        old_tile_id: 0,
+    };
+    let _ = cmd.execute_tilemap(&mut s.tile_grid_store);
+    s.undo_stack.push(cmd);
+    s.redo_stack.clear();
+    s.scene_modified = true;
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_tilemap_erase(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "bad json");
+            return;
+        }
+    };
+    let nr = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let x = p.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let y = p.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let mut s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "not found");
+            return;
+        }
+    };
+    let mut cmd = EditorCommand::TileMapPaint {
+        node_id: nid,
+        x,
+        y,
+        tile_id: 0,
+        old_tile_id: 0,
+    };
+    let _ = cmd.execute_tilemap(&mut s.tile_grid_store);
+    s.undo_stack.push(cmd);
+    s.redo_stack.clear();
+    s.scene_modified = true;
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_tilemap_fill(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "bad json");
+            return;
+        }
+    };
+    let nr = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let x1 = p.get("x1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let y1 = p.get("y1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let x2 = p.get("x2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let y2 = p.get("y2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let tid = p.get("tile_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let mut s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "not found");
+            return;
+        }
+    };
+    let mut cmd = EditorCommand::TileMapFill {
+        node_id: nid,
+        x1,
+        y1,
+        x2,
+        y2,
+        tile_id: tid,
+        old_tiles: Vec::new(),
+    };
+    let _ = cmd.execute_tilemap(&mut s.tile_grid_store);
+    s.undo_stack.push(cmd);
+    s.redo_stack.clear();
+    s.scene_modified = true;
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_tilemap_data(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let nr: u64 = query
+        .split('&')
+        .find_map(|p| {
+            let mut kv = p.splitn(2, '=');
+            let k = kv.next()?;
+            let v = kv.next()?;
+            if k == "node_id" {
+                v.parse().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    if nr == 0 {
+        send_error(stream, 400, "missing node_id");
+        return;
+    }
+    let s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "not found");
+            return;
+        }
+    };
+    match s.tile_grid_store.get(nid) {
+        Some(g) => send_json(stream, &g.to_json().to_string()),
+        None => send_error(stream, 404, "no tilemap data"),
+    }
+}
+
+fn api_tilemap_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "bad json");
+            return;
+        }
+    };
+    let nr = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let w = match p.get("width").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing width");
+            return;
+        }
+    };
+    let h = match p.get("height").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing height");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "not found");
+            return;
+        }
+    };
+    let mut cmd = EditorCommand::TileMapResize {
+        node_id: nid,
+        new_width: w,
+        new_height: h,
+        old_width: 0,
+        old_height: 0,
+        old_cells: Vec::new(),
+    };
+    let _ = cmd.execute_tilemap(&mut s.tile_grid_store);
+    s.undo_stack.push(cmd);
+    s.redo_stack.clear();
+    s.scene_modified = true;
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let ts = match &s.tile_grid_store.tileset {
+        Some(ts) => ts,
+        None => {
+            send_json(stream, r#"{"tiles":[]}"#);
+            return;
+        }
+    };
+    let tiles: Vec<serde_json::Value> = ts.tile_ids_sorted().iter().filter_map(|&id| { let t = ts.get_tile(id)?; Some(serde_json::json!({"id":t.id,"name":t.name,"color":format!("#{:02X}{:02X}{:02X}",(t.color.r*255.0) as u8,(t.color.g*255.0) as u8,(t.color.b*255.0) as u8),"collision":t.collision})) }).collect();
+    send_json(
+        stream,
+        &serde_json::json!({"cell_size":[ts.cell_size.x,ts.cell_size.y],"tiles":tiles}).to_string(),
+    );
 }
 
 #[cfg(test)]

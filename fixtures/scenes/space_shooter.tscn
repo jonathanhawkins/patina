@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://space_shooter"]
 
-[ext_resource type="Script" path="res://fixtures/scripts/player.gd" id="1_player"]
-[ext_resource type="Script" path="res://fixtures/scripts/enemy_spawner.gd" id="2_spawner"]
+[ext_resource type="Script" path="res://scripts/player.gd" id="1_player"]
+[ext_resource type="Script" path="res://scripts/enemy_spawner.gd" id="2_spawner"]
 
 [node name="SpaceShooter" type="Node2D"]
 

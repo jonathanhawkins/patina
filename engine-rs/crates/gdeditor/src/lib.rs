@@ -136,6 +136,30 @@ pub enum EditorCommand {
         /// The root node of the instanced scene (populated on execute).
         root_id: Option<NodeId>,
     },
+    TileMapPaint {
+        node_id: NodeId,
+        x: i32,
+        y: i32,
+        tile_id: i32,
+        old_tile_id: i32,
+    },
+    TileMapFill {
+        node_id: NodeId,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        tile_id: i32,
+        old_tiles: Vec<(i32, i32, i32)>,
+    },
+    TileMapResize {
+        node_id: NodeId,
+        new_width: usize,
+        new_height: usize,
+        old_width: usize,
+        old_height: usize,
+        old_cells: Vec<i32>,
+    },
 }
 
 impl EditorCommand {
@@ -302,6 +326,117 @@ impl EditorCommand {
                 );
                 Ok(())
             }
+            EditorCommand::TileMapPaint { .. }
+            | EditorCommand::TileMapFill { .. }
+            | EditorCommand::TileMapResize { .. } => Ok(()),
+        }
+    }
+
+    pub fn execute_tilemap(
+        &mut self,
+        store: &mut gdscene::tilemap::TileGridStore,
+    ) -> EditorResult<()> {
+        match self {
+            EditorCommand::TileMapPaint {
+                node_id,
+                x,
+                y,
+                tile_id,
+                old_tile_id,
+            } => {
+                if let Some(g) = store.get_mut(*node_id) {
+                    *old_tile_id = g.get(*x, *y).unwrap_or(0);
+                    g.set(*x, *y, *tile_id);
+                }
+                Ok(())
+            }
+            EditorCommand::TileMapFill {
+                node_id,
+                x1,
+                y1,
+                x2,
+                y2,
+                tile_id,
+                old_tiles,
+            } => {
+                if let Some(g) = store.get_mut(*node_id) {
+                    old_tiles.clear();
+                    let (ax, bx) = (
+                        (*x1).min(*x2).max(0),
+                        (*x1).max(*x2).min(g.width as i32 - 1),
+                    );
+                    let (ay, by) = (
+                        (*y1).min(*y2).max(0),
+                        (*y1).max(*y2).min(g.height as i32 - 1),
+                    );
+                    for r in ay..=by {
+                        for c in ax..=bx {
+                            old_tiles.push((c, r, g.get(c, r).unwrap_or(0)));
+                        }
+                    }
+                    g.fill_rect(*x1, *y1, *x2, *y2, *tile_id);
+                }
+                Ok(())
+            }
+            EditorCommand::TileMapResize {
+                node_id,
+                new_width,
+                new_height,
+                old_width,
+                old_height,
+                old_cells,
+            } => {
+                if let Some(g) = store.get_mut(*node_id) {
+                    *old_width = g.width;
+                    *old_height = g.height;
+                    *old_cells = g.cells.clone();
+                    g.resize(*new_width, *new_height);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn undo_tilemap(&self, store: &mut gdscene::tilemap::TileGridStore) -> EditorResult<()> {
+        match self {
+            EditorCommand::TileMapPaint {
+                node_id,
+                x,
+                y,
+                old_tile_id,
+                ..
+            } => {
+                if let Some(g) = store.get_mut(*node_id) {
+                    g.set(*x, *y, *old_tile_id);
+                }
+                Ok(())
+            }
+            EditorCommand::TileMapFill {
+                node_id, old_tiles, ..
+            } => {
+                if let Some(g) = store.get_mut(*node_id) {
+                    for &(cx, cy, oid) in old_tiles {
+                        g.set(cx, cy, oid);
+                    }
+                }
+                Ok(())
+            }
+            EditorCommand::TileMapResize {
+                node_id,
+                old_width,
+                old_height,
+                old_cells,
+                ..
+            } => {
+                if let Some(g) = store.get_mut(*node_id) {
+                    g.width = *old_width;
+                    g.height = *old_height;
+                    g.cells = old_cells.clone();
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 
@@ -367,6 +502,9 @@ impl EditorCommand {
                 }
                 Ok(())
             }
+            EditorCommand::TileMapPaint { .. }
+            | EditorCommand::TileMapFill { .. }
+            | EditorCommand::TileMapResize { .. } => Ok(()),
         }
     }
 }
@@ -927,5 +1065,68 @@ position = Vector2(10, 20)
         let sprite = editor.tree().get_node(sprite_id).unwrap();
         assert_eq!(sprite.name(), "Sprite");
         assert_eq!(sprite.parent(), Some(enemy_id));
+    }
+
+    #[test]
+    fn tm_paint_undo() {
+        use gdscene::tilemap::{TileGrid, TileGridStore};
+        let n = gdscene::node::NodeId::next();
+        let mut s = TileGridStore::new_with_defaults();
+        s.insert(n, TileGrid::new(10, 10));
+        let mut c = EditorCommand::TileMapPaint {
+            node_id: n,
+            x: 3,
+            y: 4,
+            tile_id: 1,
+            old_tile_id: 0,
+        };
+        c.execute_tilemap(&mut s).unwrap();
+        assert_eq!(s.get(n).unwrap().get(3, 4), Some(1));
+        c.undo_tilemap(&mut s).unwrap();
+        assert_eq!(s.get(n).unwrap().get(3, 4), Some(0));
+    }
+    #[test]
+    fn tm_fill_undo() {
+        use gdscene::tilemap::{TileGrid, TileGridStore};
+        let n = gdscene::node::NodeId::next();
+        let mut s = TileGridStore::new_with_defaults();
+        let mut g = TileGrid::new(10, 10);
+        g.set(1, 1, 5);
+        s.insert(n, g);
+        let mut c = EditorCommand::TileMapFill {
+            node_id: n,
+            x1: 0,
+            y1: 0,
+            x2: 2,
+            y2: 2,
+            tile_id: 2,
+            old_tiles: Vec::new(),
+        };
+        c.execute_tilemap(&mut s).unwrap();
+        assert_eq!(s.get(n).unwrap().get(1, 1), Some(2));
+        c.undo_tilemap(&mut s).unwrap();
+        assert_eq!(s.get(n).unwrap().get(1, 1), Some(5));
+    }
+    #[test]
+    fn tm_resize_undo() {
+        use gdscene::tilemap::{TileGrid, TileGridStore};
+        let n = gdscene::node::NodeId::next();
+        let mut s = TileGridStore::new_with_defaults();
+        let mut g = TileGrid::new(5, 5);
+        g.set(4, 4, 7);
+        s.insert(n, g);
+        let mut c = EditorCommand::TileMapResize {
+            node_id: n,
+            new_width: 10,
+            new_height: 10,
+            old_width: 0,
+            old_height: 0,
+            old_cells: Vec::new(),
+        };
+        c.execute_tilemap(&mut s).unwrap();
+        assert_eq!(s.get(n).unwrap().width, 10);
+        c.undo_tilemap(&mut s).unwrap();
+        assert_eq!(s.get(n).unwrap().width, 5);
+        assert_eq!(s.get(n).unwrap().get(4, 4), Some(7));
     }
 }
