@@ -15,4 +15,4 @@ pub mod texture;
 
 pub use export::{encode_bmp, encode_png, encode_ppm, save_bmp, save_png, save_ppm};
 pub use renderer::{FrameBuffer, SoftwareRenderer};
-pub use texture::Texture2D;
+pub use texture::{decode_png, load_png, resolve_res_path, Texture2D};

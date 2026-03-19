@@ -72,9 +72,15 @@ fn main() {
     let viewport = Viewport::new(WIDTH, HEIGHT, Color::rgb(0.05, 0.05, 0.1));
     let initial_frame = capture_frame(&mut renderer, &viewport);
 
-    // Set up editor state.
+    // Set up editor state with texture cache rooted at the scene file's directory.
     let mut state = EditorState::new(tree);
     state.frame_buffer = Some(initial_frame);
+    let project_root = std::path::Path::new(&scene_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_string_lossy()
+        .to_string();
+    state.texture_cache = gdeditor::texture_cache::TextureCache::new(&project_root);
 
     // Start the editor server.
     let handle = EditorServerHandle::start(port, state);
@@ -88,39 +94,119 @@ fn main() {
     let r = Arc::clone(&running);
     setup_ctrlc(&r);
 
-    // Main loop: re-render only when scene changes (dirty flag).
+    // Main loop: re-render, and run game loop when playing.
     let mut frame_count: u64 = 0;
+    let mut last_runtime_tick = std::time::Instant::now();
     while running.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(50));
-
-        // Re-render every ~100ms (every other 50ms tick). Lock briefly, release before encoding.
-        if frame_count % 2 == 0 {
+        let is_runtime_running = {
+            let state = handle.state().lock().unwrap();
+            state.is_running && !state.is_paused
+        };
+        if is_runtime_running {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(last_runtime_tick);
+            if elapsed < Duration::from_millis(16) {
+                std::thread::sleep(Duration::from_millis(16) - elapsed);
+            }
+            last_runtime_tick = std::time::Instant::now();
+            {
+                let mut state = handle.state().lock().unwrap();
+                let delta = state.delta_time;
+                if let Some(ref mut tree) = state.run_scene_tree {
+                    let ids = tree.all_nodes_in_tree_order();
+                    for id in &ids {
+                        let velocity = {
+                            let node = match tree.get_node(*id) {
+                                Some(n) => n,
+                                None => continue,
+                            };
+                            match node.get_property("velocity") {
+                                gdvariant::Variant::Vector2(v) => Some(v),
+                                _ => None,
+                            }
+                        };
+                        if let Some(vel) = velocity {
+                            let new_pos = {
+                                let node = tree.get_node(*id).unwrap();
+                                match node.get_property("position") {
+                                    gdvariant::Variant::Vector2(pos) => {
+                                        gdvariant::Variant::Vector2(gdcore::math::Vector2::new(
+                                            pos.x + vel.x * delta as f32,
+                                            pos.y + vel.y * delta as f32,
+                                        ))
+                                    }
+                                    _ => continue,
+                                }
+                            };
+                            if let Some(node) = tree.get_node_mut(*id) {
+                                node.set_property("position", new_pos);
+                            }
+                        }
+                    }
+                    tree.process_animations(delta);
+                    tree.process_tweens(delta);
+                    tree.process_all_scripts_process(delta);
+                    tree.process_frame();
+                }
+                state.runtime_frame_count += 1;
+            }
             let fb = {
                 let state = handle.state().lock().unwrap();
-                let selected = state.selected_node;
                 let zoom = state.viewport_zoom;
                 let pan = state.viewport_pan;
-                gdeditor::scene_renderer::render_scene_with_zoom_pan(
-                    &state.scene_tree,
-                    selected,
-                    WIDTH,
-                    HEIGHT,
-                    zoom,
-                    pan,
-                )
-                // Lock released at end of block
+                if let Some(ref tree) = state.run_scene_tree {
+                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                        tree, None, WIDTH, HEIGHT, zoom, pan,
+                    )
+                } else {
+                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                        &state.scene_tree,
+                        state.selected_node,
+                        WIDTH,
+                        HEIGHT,
+                        zoom,
+                        pan,
+                    )
+                }
             };
             handle.update_frame(fb);
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+            if frame_count % 2 == 0 {
+                let fb = {
+                    let state = handle.state().lock().unwrap();
+                    let selected = state.selected_node;
+                    let zoom = state.viewport_zoom;
+                    let pan = state.viewport_pan;
+                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                        &state.scene_tree,
+                        selected,
+                        WIDTH,
+                        HEIGHT,
+                        zoom,
+                        pan,
+                    )
+                };
+                handle.update_frame(fb);
+            }
         }
         frame_count += 1;
-
         if frame_count % 200 == 0 {
             let state = handle.state().lock().unwrap();
+            let ri = if state.is_running {
+                format!(
+                    " | PLAYING frame {} {}",
+                    state.runtime_frame_count,
+                    if state.is_paused { "(PAUSED)" } else { "" }
+                )
+            } else {
+                String::new()
+            };
             println!(
-                "[Frame {frame_count}] Nodes: {} | Undo stack: {} | Selected: {:?}",
+                "[Frame {frame_count}] Nodes: {} | Undo stack: {} | Selected: {:?}{ri}",
                 state.scene_tree.node_count(),
                 state.undo_stack.len(),
-                state.selected_node,
+                state.selected_node
             );
         }
     }

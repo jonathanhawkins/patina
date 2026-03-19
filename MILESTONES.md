@@ -33,7 +33,7 @@ This document defines the phased delivery plan for the Patina Engine, with objec
 ### Deliverables
 
 - [ ] All foundation documents created (AGENTS.md, PORT_SCOPE.md, ARCHITECTURE_MAP.md, COMPAT_MATRIX.md, RISK_REGISTER.md, TEST_ORACLE.md, BENCHMARKS.md, THIRDPARTY_STRATEGY.md, CRATE_BOUNDARIES.md, MILESTONES.md)
-- [ ] Upstream Godot added as pinned submodule
+- [x] Upstream Godot added as pinned submodule
 - [ ] Rust workspace bootstrapped with empty core crates
 - [ ] First master plan drafted
 - [ ] Bead graph created with first 50-100 beads prioritized

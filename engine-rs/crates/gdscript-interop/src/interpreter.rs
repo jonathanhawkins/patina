@@ -203,6 +203,23 @@ impl Environment {
         )))
     }
 
+    /// Returns true if the name exists in a scope strictly inner to the outermost
+    /// scope that also contains it. Used to detect when a local `var` shadows an
+    /// instance property that was defined in an outer scope.
+    fn is_shadowed_in_inner_scope(&self, name: &str) -> bool {
+        let mut found_outer = false;
+        // Walk from outer to inner; if we find it twice, the inner one shadows.
+        for scope in &self.scopes {
+            if scope.contains_key(name) {
+                if found_outer {
+                    return true;
+                }
+                found_outer = true;
+            }
+        }
+        false
+    }
+
     #[allow(dead_code)]
     fn exists_in_outer_scope(&self, name: &str) -> bool {
         if self.scopes.len() < 2 {
@@ -688,18 +705,60 @@ impl Interpreter {
     ) -> Result<(), RuntimeError> {
         match target {
             Expr::Ident(name) => {
+                // Check if this is an instance property (bare `count = x` in a class method),
+                // but NOT if a local `var` shadows the instance variable.
+                let is_instance_prop = self
+                    .self_instance
+                    .as_ref()
+                    .map(|inst| inst.properties.contains_key(name.as_str()))
+                    .unwrap_or(false)
+                    && !self.environment.is_shadowed_in_inner_scope(name);
+
                 let final_val = match op {
                     AssignOp::Assign => rhs,
                     AssignOp::AddAssign => {
-                        let cur = self.environment.get(name)?;
+                        let cur = if is_instance_prop {
+                            self.self_instance
+                                .as_ref()
+                                .unwrap()
+                                .properties
+                                .get(name.as_str())
+                                .cloned()
+                                .unwrap_or(Variant::Nil)
+                        } else {
+                            self.environment.get(name)?
+                        };
                         self.binary_add(&cur, &rhs)?
                     }
                     AssignOp::SubAssign => {
-                        let cur = self.environment.get(name)?;
+                        let cur = if is_instance_prop {
+                            self.self_instance
+                                .as_ref()
+                                .unwrap()
+                                .properties
+                                .get(name.as_str())
+                                .cloned()
+                                .unwrap_or(Variant::Nil)
+                        } else {
+                            self.environment.get(name)?
+                        };
                         self.binary_sub(&cur, &rhs)?
                     }
                 };
-                self.environment.set(name, final_val)
+
+                if is_instance_prop {
+                    // Write to instance properties (synced back on method return)
+                    self.self_instance
+                        .as_mut()
+                        .unwrap()
+                        .properties
+                        .insert(name.clone(), final_val.clone());
+                    // Also update environment so subsequent reads in this call see the new value
+                    let _ = self.environment.set(name, final_val);
+                    Ok(())
+                } else {
+                    self.environment.set(name, final_val)
+                }
             }
             Expr::Index { object, index } => {
                 let idx = self.eval_expr(index)?;
@@ -728,6 +787,15 @@ impl Interpreter {
                 self.environment.set(&container_name, container)
             }
             Expr::MemberAccess { object, member } => {
+                // Handle compound member assignment: obj.prop.field = value
+                // e.g. self.position.x = 5.0, node.position.y += 10.0
+                if let Expr::MemberAccess {
+                    object: inner_obj,
+                    member: prop,
+                } = object.as_ref()
+                {
+                    return self.exec_compound_member_assignment(inner_obj, prop, member, op, rhs);
+                }
                 // Handle self.member = value
                 if matches!(object.as_ref(), Expr::SelfRef) {
                     if self.self_instance.is_none() {
@@ -735,36 +803,43 @@ impl Interpreter {
                             "'self' used outside of a class instance".into(),
                         )));
                     }
+                    // Read current value: try instance properties first, then scene_access
+                    let get_current = |s: &Self, member: &str| -> Variant {
+                        if let Some(inst) = s.self_instance.as_ref() {
+                            if let Some(v) = inst.properties.get(member) {
+                                return v.clone();
+                            }
+                        }
+                        if let Some(ref access) = s.scene_access {
+                            if let Some(node_id) = s.current_node_id {
+                                return access.get_node_property(node_id, member);
+                            }
+                        }
+                        Variant::Nil
+                    };
                     let final_val = match op {
                         AssignOp::Assign => rhs,
                         AssignOp::AddAssign => {
-                            let cur = self
-                                .self_instance
-                                .as_ref()
-                                .unwrap()
-                                .properties
-                                .get(member)
-                                .cloned()
-                                .unwrap_or(Variant::Nil);
+                            let cur = get_current(self, member);
                             self.binary_add(&cur, &rhs)?
                         }
                         AssignOp::SubAssign => {
-                            let cur = self
-                                .self_instance
-                                .as_ref()
-                                .unwrap()
-                                .properties
-                                .get(member)
-                                .cloned()
-                                .unwrap_or(Variant::Nil);
+                            let cur = get_current(self, member);
                             self.binary_sub(&cur, &rhs)?
                         }
                     };
+                    // Write to instance properties
                     self.self_instance
                         .as_mut()
                         .unwrap()
                         .properties
-                        .insert(member.clone(), final_val);
+                        .insert(member.clone(), final_val.clone());
+                    // Also write through scene_access for Node properties (position, rotation, etc.)
+                    if let Some(ref mut access) = self.scene_access {
+                        if let Some(node_id) = self.current_node_id {
+                            access.set_node_property(node_id, member, final_val);
+                        }
+                    }
                     return Ok(());
                 }
                 // Check if the object evaluates to an ObjectId
@@ -821,6 +896,115 @@ impl Interpreter {
                 "invalid assignment target".into(),
             ))),
         }
+    }
+
+    /// Handle compound member assignment: `inner_obj.prop.field = rhs`
+    ///
+    /// Implements the read-modify-write pattern for value-type members:
+    /// 1. Read `inner_obj.prop` → get intermediate (e.g. Vector2)
+    /// 2. Modify the `field` component (e.g. x) with `rhs`
+    /// 3. Write back `inner_obj.prop = modified`
+    fn exec_compound_member_assignment(
+        &mut self,
+        inner_obj: &Expr,
+        prop: &str,
+        field: &str,
+        op: &AssignOp,
+        rhs: Variant,
+    ) -> Result<(), RuntimeError> {
+        // Step 1: Read the intermediate value (e.g. self.position → Vector2)
+        let intermediate = self.eval_expr(&Expr::MemberAccess {
+            object: Box::new(inner_obj.clone()),
+            member: prop.to_string(),
+        })?;
+
+        // Step 2: Get the current field value for compound ops
+        let current_field = match &intermediate {
+            Variant::Vector2(v) => match field {
+                "x" => Ok(Variant::Float(v.x as f64)),
+                "y" => Ok(Variant::Float(v.y as f64)),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Vector2 has no member '{field}'"
+                )))),
+            },
+            Variant::Vector3(v) => match field {
+                "x" => Ok(Variant::Float(v.x as f64)),
+                "y" => Ok(Variant::Float(v.y as f64)),
+                "z" => Ok(Variant::Float(v.z as f64)),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Vector3 has no member '{field}'"
+                )))),
+            },
+            Variant::Color(c) => match field {
+                "r" => Ok(Variant::Float(c.r as f64)),
+                "g" => Ok(Variant::Float(c.g as f64)),
+                "b" => Ok(Variant::Float(c.b as f64)),
+                "a" => Ok(Variant::Float(c.a as f64)),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Color has no member '{field}'"
+                )))),
+            },
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "cannot assign member '{field}' on {}",
+                other.variant_type()
+            )))),
+        }?;
+
+        // Step 3: Compute final value based on assignment operator
+        let final_val = match op {
+            AssignOp::Assign => rhs,
+            AssignOp::AddAssign => self.binary_add(&current_field, &rhs)?,
+            AssignOp::SubAssign => self.binary_sub(&current_field, &rhs)?,
+        };
+
+        let new_float = to_float(&final_val)? as f32;
+
+        // Step 4: Create modified intermediate with the new field value
+        let modified = match intermediate {
+            Variant::Vector2(v) => match field {
+                "x" => Ok(Variant::Vector2(gdcore::math::Vector2::new(new_float, v.y))),
+                "y" => Ok(Variant::Vector2(gdcore::math::Vector2::new(v.x, new_float))),
+                _ => unreachable!(),
+            },
+            Variant::Vector3(v) => match field {
+                "x" => Ok(Variant::Vector3(gdcore::math::Vector3::new(
+                    new_float, v.y, v.z,
+                ))),
+                "y" => Ok(Variant::Vector3(gdcore::math::Vector3::new(
+                    v.x, new_float, v.z,
+                ))),
+                "z" => Ok(Variant::Vector3(gdcore::math::Vector3::new(
+                    v.x, v.y, new_float,
+                ))),
+                _ => unreachable!(),
+            },
+            Variant::Color(c) => match field {
+                "r" => Ok(Variant::Color(gdcore::math::Color::new(
+                    new_float, c.g, c.b, c.a,
+                ))),
+                "g" => Ok(Variant::Color(gdcore::math::Color::new(
+                    c.r, new_float, c.b, c.a,
+                ))),
+                "b" => Ok(Variant::Color(gdcore::math::Color::new(
+                    c.r, c.g, new_float, c.a,
+                ))),
+                "a" => Ok(Variant::Color(gdcore::math::Color::new(
+                    c.r, c.g, c.b, new_float,
+                ))),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }?;
+
+        // Step 5: Write back the modified intermediate to the original target
+        self.exec_assignment(
+            &Expr::MemberAccess {
+                object: Box::new(inner_obj.clone()),
+                member: prop.to_string(),
+            },
+            &AssignOp::Assign,
+            modified,
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -999,6 +1183,14 @@ impl Interpreter {
             }
 
             Expr::SelfRef => {
+                // If we have scene_access + current_node_id, return ObjectId
+                // so member access goes through scene_access (reads Node properties).
+                if let Some(node_id) = self.current_node_id {
+                    if self.scene_access.is_some() {
+                        return Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(node_id)));
+                    }
+                }
+                // Fallback: return ClassInstance properties as Dictionary
                 if let Some(ref inst) = self.self_instance {
                     Ok(Variant::Dictionary(inst.properties.clone()))
                 } else {
@@ -2539,6 +2731,9 @@ impl Interpreter {
             self.environment.define(name.clone(), val.clone());
         }
 
+        // Push an inner scope for the method body so that local `var`
+        // declarations correctly shadow instance properties / parameters.
+        self.environment.push_scope();
         let mut return_val = Variant::Nil;
         for stmt in &func.body {
             if let Some(ControlFlow::Return(v)) = self.exec_stmt(stmt)? {
@@ -2546,6 +2741,7 @@ impl Interpreter {
                 break;
             }
         }
+        self.environment.pop_scope();
 
         if let Some(ref updated) = self.self_instance {
             instance.properties = updated.properties.clone();
@@ -2925,6 +3121,7 @@ impl ScriptInstance for GDScriptInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gdcore::math::{Color, Vector2, Vector3};
 
     fn run(src: &str) -> InterpreterResult {
         let mut interp = Interpreter::new();
@@ -4899,5 +5096,490 @@ var speed = 10
             .call_instance_method(&mut inst, "add", &[Variant::Int(5), Variant::Int(20)])
             .unwrap();
         assert_eq!(result, Variant::Int(25));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bare variable assignment in instance methods (#80)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bare_assign_instance_var_in_ready() {
+        let (mut interp, class_def) = run_class(
+            "\
+var count: int = 0
+func _ready():
+    count = 10
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "_ready", &[])
+            .unwrap();
+        assert_eq!(inst.properties.get("count"), Some(&Variant::Int(10)));
+    }
+
+    #[test]
+    fn bare_assign_instance_var_accumulates_across_calls() {
+        let (mut interp, class_def) = run_class(
+            "\
+var count: int = 0
+func _ready():
+    count = 10
+func _process(delta):
+    count = count + 1
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "_ready", &[])
+            .unwrap();
+        assert_eq!(inst.properties.get("count"), Some(&Variant::Int(10)));
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("count"), Some(&Variant::Int(11)));
+        interp
+            .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
+            .unwrap();
+        assert_eq!(inst.properties.get("count"), Some(&Variant::Int(12)));
+    }
+
+    #[test]
+    fn bare_add_assign_instance_var() {
+        let (mut interp, class_def) = run_class(
+            "\
+var score: int = 0
+func add_score(amount):
+    score += amount
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "add_score", &[Variant::Int(10)])
+            .unwrap();
+        assert_eq!(inst.properties.get("score"), Some(&Variant::Int(10)));
+        interp
+            .call_instance_method(&mut inst, "add_score", &[Variant::Int(5)])
+            .unwrap();
+        assert_eq!(inst.properties.get("score"), Some(&Variant::Int(15)));
+    }
+
+    #[test]
+    fn bare_sub_assign_instance_var() {
+        let (mut interp, class_def) = run_class(
+            "\
+var health: int = 100
+func take_damage(amount):
+    health -= amount
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "take_damage", &[Variant::Int(30)])
+            .unwrap();
+        assert_eq!(inst.properties.get("health"), Some(&Variant::Int(70)));
+        interp
+            .call_instance_method(&mut inst, "take_damage", &[Variant::Int(20)])
+            .unwrap();
+        assert_eq!(inst.properties.get("health"), Some(&Variant::Int(50)));
+    }
+
+    #[test]
+    fn bare_assign_new_local_var_not_instance() {
+        let (mut interp, class_def) = run_class(
+            "\
+var count: int = 0
+func compute():
+    var temp = 99
+    temp = temp + 1
+    return temp
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "compute", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(100));
+        // count should be unchanged
+        assert_eq!(inst.properties.get("count"), Some(&Variant::Int(0)));
+        // temp should NOT appear in instance properties
+        assert!(inst.properties.get("temp").is_none());
+    }
+
+    #[test]
+    fn bare_assign_local_shadows_instance_var() {
+        let (mut interp, class_def) = run_class(
+            "\
+var count: int = 42
+func shadow_test():
+    var count = 0
+    count = count + 1
+    return count
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "shadow_test", &[])
+            .unwrap();
+        // local var shadows instance var — local should be 1
+        assert_eq!(result, Variant::Int(1));
+        // instance var should be unchanged
+        assert_eq!(inst.properties.get("count"), Some(&Variant::Int(42)));
+    }
+
+    #[test]
+    fn bare_assign_multiple_instance_vars() {
+        let (mut interp, class_def) = run_class(
+            "\
+var x: int = 0
+var y: int = 0
+func set_pos(nx, ny):
+    x = nx
+    y = ny
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "set_pos", &[Variant::Int(10), Variant::Int(20)])
+            .unwrap();
+        assert_eq!(inst.properties.get("x"), Some(&Variant::Int(10)));
+        assert_eq!(inst.properties.get("y"), Some(&Variant::Int(20)));
+    }
+
+    #[test]
+    fn bare_read_then_modify_instance_var() {
+        let (mut interp, class_def) = run_class(
+            "\
+var value: int = 5
+func double_it():
+    var old = value
+    value = old * 2
+    return old
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "double_it", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(5));
+        assert_eq!(inst.properties.get("value"), Some(&Variant::Int(10)));
+    }
+
+    #[test]
+    fn bare_instance_var_read_returns_instance_value() {
+        let (mut interp, class_def) = run_class(
+            "\
+var name = \"hello\"
+func get_name():
+    return name
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        // Modify the property directly, then read via method
+        inst.properties
+            .insert("name".to_string(), Variant::String("world".to_string()));
+        let result = interp
+            .call_instance_method(&mut inst, "get_name", &[])
+            .unwrap();
+        assert_eq!(result, Variant::String("world".to_string()));
+    }
+
+    #[test]
+    fn bare_assign_different_types() {
+        let (mut interp, class_def) = run_class(
+            "\
+var i: int = 0
+var f: float = 0.0
+var s = \"\"
+var b: bool = false
+func set_all():
+    i = 42
+    f = 3.14
+    s = \"hello\"
+    b = true
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "set_all", &[])
+            .unwrap();
+        assert_eq!(inst.properties.get("i"), Some(&Variant::Int(42)));
+        assert_eq!(inst.properties.get("f"), Some(&Variant::Float(3.14)));
+        assert_eq!(
+            inst.properties.get("s"),
+            Some(&Variant::String("hello".to_string()))
+        );
+        assert_eq!(inst.properties.get("b"), Some(&Variant::Bool(true)));
+    }
+
+    #[test]
+    fn bare_assign_persists_after_method_call() {
+        let (mut interp, class_def) = run_class(
+            "\
+var count: int = 0
+func increment():
+    count = count + 1
+func get_count():
+    return count
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "increment", &[])
+            .unwrap();
+        interp
+            .call_instance_method(&mut inst, "increment", &[])
+            .unwrap();
+        interp
+            .call_instance_method(&mut inst, "increment", &[])
+            .unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "get_count", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(3));
+        assert_eq!(inst.properties.get("count"), Some(&Variant::Int(3)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Compound member assignment (self.position.x = value)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compound_member_assign_self_position_x() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(100, 200)
+func set_x(val):
+    self.position.x = val
+    return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "set_x", &[Variant::Float(5.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(5.0, 200.0)));
+    }
+
+    #[test]
+    fn compound_member_assign_self_position_y() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(100, 200)
+func set_y(val):
+    self.position.y = val
+    return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "set_y", &[Variant::Float(42.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(100.0, 42.0)));
+    }
+
+    #[test]
+    fn compound_member_add_assign_self_position_x() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(100, 200)
+func move_x(amount):
+    self.position.x += amount
+    return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "move_x", &[Variant::Float(50.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(150.0, 200.0)));
+    }
+
+    #[test]
+    fn compound_member_assign_both_x_and_y() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(10, 20)
+func set_both(x, y):
+    self.position.x = x
+    self.position.y = y
+    return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(
+                &mut inst,
+                "set_both",
+                &[Variant::Float(99.0), Variant::Float(77.0)],
+            )
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(99.0, 77.0)));
+    }
+
+    #[test]
+    fn compound_member_assign_vector3_components() {
+        let (mut interp, class_def) = run_class(
+            "\
+var velocity = Vector3(1, 2, 3)
+func set_z(val):
+    self.velocity.z = val
+    return self.velocity
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "set_z", &[Variant::Float(99.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector3(Vector3::new(1.0, 2.0, 99.0)));
+    }
+
+    #[test]
+    fn compound_member_assign_color_components() {
+        let (mut interp, class_def) = run_class(
+            "\
+var tint = Color(0.1, 0.2, 0.3, 1.0)
+func set_red(val):
+    self.tint.r = val
+    return self.tint
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "set_red", &[Variant::Float(0.9)])
+            .unwrap();
+        if let Variant::Color(c) = result {
+            assert!((c.r - 0.9).abs() < 0.001);
+            assert!((c.g - 0.2).abs() < 0.001);
+            assert!((c.b - 0.3).abs() < 0.001);
+            assert!((c.a - 1.0).abs() < 0.001);
+        } else {
+            panic!("expected Color, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn compound_member_read_modify_write() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(100, 200)
+func move_by(delta):
+    self.position.x = self.position.x + delta
+    return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "move_by", &[Variant::Float(15.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(115.0, 200.0)));
+    }
+
+    #[test]
+    fn compound_member_preserves_other_components() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(10, 20)
+func modify():
+    self.position.x = 999.0
+    return self.position.y
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "modify", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Float(20.0));
+    }
+
+    #[test]
+    fn compound_member_multiple_frames_accumulation() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(0, 0)
+func tick(speed):
+    self.position.x += speed
+    return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let r1 = interp
+            .call_instance_method(&mut inst, "tick", &[Variant::Float(10.0)])
+            .unwrap();
+        assert_eq!(r1, Variant::Vector2(Vector2::new(10.0, 0.0)));
+        let r2 = interp
+            .call_instance_method(&mut inst, "tick", &[Variant::Float(10.0)])
+            .unwrap();
+        assert_eq!(r2, Variant::Vector2(Vector2::new(20.0, 0.0)));
+        let r3 = interp
+            .call_instance_method(&mut inst, "tick", &[Variant::Float(10.0)])
+            .unwrap();
+        assert_eq!(r3, Variant::Vector2(Vector2::new(30.0, 0.0)));
+    }
+
+    #[test]
+    fn compound_member_sub_assign() {
+        let (mut interp, class_def) = run_class(
+            "\
+var position = Vector2(100, 200)
+func move_left(amount):
+    self.position.x -= amount
+    return self.position
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "move_left", &[Variant::Float(30.0)])
+            .unwrap();
+        assert_eq!(result, Variant::Vector2(Vector2::new(70.0, 200.0)));
+    }
+
+    #[test]
+    fn compound_member_assign_vector3_all_components() {
+        let (mut interp, class_def) = run_class(
+            "\
+var vel = Vector3(1, 2, 3)
+func set_all(x, y, z):
+    self.vel.x = x
+    self.vel.y = y
+    self.vel.z = z
+    return self.vel
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(
+                &mut inst,
+                "set_all",
+                &[
+                    Variant::Float(10.0),
+                    Variant::Float(20.0),
+                    Variant::Float(30.0),
+                ],
+            )
+            .unwrap();
+        assert_eq!(result, Variant::Vector3(Vector3::new(10.0, 20.0, 30.0)));
+    }
+
+    #[test]
+    fn compound_member_assign_color_alpha() {
+        let (mut interp, class_def) = run_class(
+            "\
+var color = Color(1.0, 1.0, 1.0, 1.0)
+func fade(alpha):
+    self.color.a = alpha
+    return self.color
+",
+        );
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "fade", &[Variant::Float(0.5)])
+            .unwrap();
+        if let Variant::Color(c) = result {
+            assert!((c.a - 0.5).abs() < 0.001);
+            assert!((c.r - 1.0).abs() < 0.001);
+        } else {
+            panic!("expected Color, got {:?}", result);
+        }
     }
 }

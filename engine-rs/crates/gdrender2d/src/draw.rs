@@ -244,6 +244,50 @@ pub fn fill_circle_blended(fb: &mut FrameBuffer, center: Vector2, radius: f32, c
     }
 }
 
+/// Draws a texture into `rect` with alpha blending, modulating each texel by `modulate`.
+///
+/// Unlike [`draw_texture_rect`], this version uses source-over alpha compositing
+/// so that transparent texels do not overwrite the background.
+pub fn draw_texture_rect_blended(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    rect: Rect2,
+    modulate: Color,
+) {
+    if texture.width == 0 || texture.height == 0 {
+        return;
+    }
+
+    let x_min = (rect.position.x as i32).max(0) as u32;
+    let y_min = (rect.position.y as i32).max(0) as u32;
+    let x_max = ((rect.position.x + rect.size.x) as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((rect.position.y + rect.size.y) as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
+
+    for py in y_min..y_max {
+        for px in x_min..x_max {
+            let u = (px as f32 - rect.position.x) / rect.size.x;
+            let v = (py as f32 - rect.position.y) / rect.size.y;
+            let tx = ((u * texture.width as f32) as u32).min(texture.width - 1);
+            let ty = ((v * texture.height as f32) as u32).min(texture.height - 1);
+
+            let texel = texture.get_pixel(tx, ty);
+            let final_color = Color::new(
+                texel.r * modulate.r,
+                texel.g * modulate.g,
+                texel.b * modulate.b,
+                texel.a * modulate.a,
+            );
+            if final_color.a > 0.001 {
+                fb.blend_pixel(px, py, final_color);
+            }
+        }
+    }
+}
+
 /// Draws a rectangle outline with alpha blending.
 pub fn draw_rect_outline_blended(fb: &mut FrameBuffer, rect: Rect2, color: Color, _width: f32) {
     let tl = rect.position;

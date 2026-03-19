@@ -255,9 +255,33 @@ When upgrading the pinned upstream version:
 
 ### Current Pin
 
-- **Upstream version**: (to be set during Phase 0)
-- **Upstream commit**: (to be set during Phase 0)
-- **Pin date**: (to be set during Phase 0)
+- **Upstream version**: `4.5.1-stable`
+- **Upstream commit**: `f62fdbde15035c5576dad93e586201f4d41ef0cb`
+- **Pin date**: `2026-03-19`
+- **Submodule path**: `upstream/godot`
+- **Source remote**: `https://github.com/godotengine/godot.git`
+
+### Sync and Update Commands
+
+Use the pinned upstream checkout for all oracle generation work:
+
+```sh
+git submodule update --init --recursive
+```
+
+When intentionally updating the oracle pin:
+
+```sh
+git -C upstream/godot fetch --tags
+git -C upstream/godot checkout <tag-or-commit>
+git add upstream/godot .gitmodules
+```
+
+After changing the pin:
+
+1. Regenerate all golden outputs.
+2. Run the compatibility suites that consume those goldens.
+3. Record the new version, commit, and date in this section.
 
 ---
 

@@ -23,6 +23,7 @@ pub mod inspector;
 pub mod scene_editor;
 pub mod scene_renderer;
 pub mod settings;
+pub mod texture_cache;
 
 use gdscene::node::{Node, NodeId};
 use gdscene::SceneTree;
