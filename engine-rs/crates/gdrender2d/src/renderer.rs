@@ -52,6 +52,36 @@ impl FrameBuffer {
     pub fn get_pixel(&self, x: u32, y: u32) -> Color {
         self.pixels[(y * self.width + x) as usize]
     }
+
+    /// Encodes the framebuffer as an uncompressed 32-bit BMP image.
+    pub fn to_bmp(&self) -> Vec<u8> {
+        crate::export::encode_bmp(self)
+    }
+
+    /// Encodes the framebuffer as a PNG image.
+    pub fn to_png(&self) -> Vec<u8> {
+        crate::export::encode_png(self)
+    }
+
+    /// Encodes the framebuffer as a binary PPM (P6) image.
+    pub fn to_ppm(&self) -> Vec<u8> {
+        crate::export::encode_ppm(self)
+    }
+
+    /// Saves the framebuffer as a BMP file.
+    pub fn save_bmp(&self, path: &str) -> std::io::Result<()> {
+        crate::export::save_bmp(self, path)
+    }
+
+    /// Saves the framebuffer as a PNG file.
+    pub fn save_png(&self, path: &str) -> std::io::Result<()> {
+        crate::export::save_png(self, path)
+    }
+
+    /// Saves the framebuffer as a binary PPM file.
+    pub fn save_ppm(&self, path: &str) -> std::io::Result<()> {
+        crate::export::save_ppm(self, path)
+    }
 }
 
 /// A CPU-based 2D software renderer.

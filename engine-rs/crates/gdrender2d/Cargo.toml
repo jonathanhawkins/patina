@@ -10,3 +10,4 @@ gdcore = { path = "../gdcore" }
 gdserver2d = { path = "../gdserver2d" }
 thiserror.workspace = true
 tracing.workspace = true
+miniz_oxide = "0.8"
