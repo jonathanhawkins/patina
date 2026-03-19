@@ -62,6 +62,7 @@ Patina is a monorepo containing:
 
 After every context compaction or session restart:
 1. Re-read this file (`AGENTS.md`)
+2. Read [prd/BEAD_EXECUTION_MAP.md](/Users/bone/dev/games/patina/prd/BEAD_EXECUTION_MAP.md) for current claim order and lane rules
 2. Check `git status` and `git log --oneline -10` to understand current state
 3. Check task list or bead status for current assignments
 4. Resume work on the current bead or claim a new one
@@ -74,6 +75,8 @@ After every context compaction or session restart:
 4. Self-review ("fresh eyes") after completion
 5. Mark bead as complete
 6. Move to next priority bead
+
+Execution order and parallel-lane guidance live in [prd/BEAD_EXECUTION_MAP.md](/Users/bone/dev/games/patina/prd/BEAD_EXECUTION_MAP.md). Agents should follow that file for `Now`, `Next`, `Later`, and `Do Not Touch Yet` claim order instead of inferring priority from `br list` alone.
 
 ## Project-Specific Rules
 
