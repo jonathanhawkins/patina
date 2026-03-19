@@ -49,6 +49,10 @@ pub struct EditorState {
     pub redo_stack: Vec<EditorCommand>,
     /// The latest rendered frame, if any.
     pub frame_buffer: Option<FrameBuffer>,
+    /// Cached PNG encoding of the frame buffer (avoids re-encoding on every poll).
+    pub cached_png: Option<Vec<u8>>,
+    /// Cached BMP encoding of the frame buffer.
+    pub cached_bmp: Option<Vec<u8>>,
     /// Current drag operation, if any.
     pub drag_state: Option<DragState>,
     /// Viewport width for hit testing.
@@ -72,6 +76,8 @@ impl EditorState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             frame_buffer: None,
+            cached_png: None,
+            cached_bmp: None,
             drag_state: None,
             viewport_width: 800,
             viewport_height: 600,
@@ -106,11 +112,16 @@ impl EditorServerHandle {
     }
 
     /// Updates the latest frame buffer for viewport endpoints.
+    /// Pre-encodes PNG and BMP so serving is instant.
     pub fn update_frame(&self, fb: FrameBuffer) {
+        let png = encode_png(&fb);
+        let bmp = encode_bmp(&fb);
         let mut state = self.state.lock().unwrap();
         state.viewport_width = fb.width;
         state.viewport_height = fb.height;
         state.frame_buffer = Some(fb);
+        state.cached_png = Some(png);
+        state.cached_bmp = Some(bmp);
     }
 
     /// Returns a reference to the shared state for external access.
@@ -135,17 +146,29 @@ fn run_server(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>, port: u1
             return;
         }
     };
+    // Use a short blocking timeout so we can check the running flag periodically.
     listener
-        .set_nonblocking(true)
-        .expect("failed to set non-blocking");
+        .set_nonblocking(false)
+        .expect("failed to set blocking");
 
     while running.load(Ordering::SeqCst) {
+        // Set a short accept timeout so we can check the `running` flag.
+        listener
+            .set_nonblocking(true)
+            .expect("failed to set non-blocking");
         match listener.accept() {
             Ok((stream, _)) => {
-                handle_connection(&state, stream);
+                let state_clone = Arc::clone(&state);
+                // Handle each connection in its own thread so concurrent
+                // requests (viewport poll + scene poll + inspector) don't block each other.
+                thread::spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handle_connection(&state_clone, stream);
+                    }));
+                });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(5));
             }
             Err(e) => {
                 tracing::warn!("Accept error: {e}");
@@ -166,16 +189,35 @@ struct HttpRequest {
 }
 
 fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
-    let mut buf = [0u8; 8192];
-    let n = stream.read(&mut buf).ok()?;
-    if n == 0 {
-        return None;
+    // Read until we have the full headers (look for \r\n\r\n).
+    let mut raw = Vec::with_capacity(16384);
+    let mut buf = [0u8; 4096];
+    let mut header_end = None;
+
+    // Read headers
+    loop {
+        let n = stream.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        // Check if we have the full headers
+        if let Some(pos) = find_header_end(&raw) {
+            header_end = Some(pos);
+            break;
+        }
+        if raw.len() > 65536 {
+            return None; // Too large
+        }
     }
-    let raw = String::from_utf8_lossy(&buf[..n]).to_string();
 
-    let first_line = raw.lines().next()?;
+    let header_end = header_end?;
+    let header_bytes = &raw[..header_end];
+    let header_str = String::from_utf8_lossy(header_bytes).to_string();
+
+    let first_line = header_str.lines().next()?;
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
         return None;
@@ -183,29 +225,33 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     let method = parts[0].to_string();
     let path = parts[1].split('?').next().unwrap_or(parts[1]).to_string();
 
-    // Extract body for POST requests.
-    let body = if let Some(body_start) = raw.find("\r\n\r\n") {
-        let header_part = &raw[..body_start];
-        let body_part = &raw[body_start + 4..];
+    // Parse Content-Length from headers.
+    let content_length: usize = header_str
+        .lines()
+        .find_map(|line| {
+            let lower = line.to_lowercase();
+            if lower.starts_with("content-length:") {
+                lower.split(':').nth(1)?.trim().parse().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
 
-        // Check Content-Length header.
-        let content_length: usize = header_part
-            .lines()
-            .find_map(|line| {
-                let lower = line.to_lowercase();
-                if lower.starts_with("content-length:") {
-                    lower.split(':').nth(1)?.trim().parse().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
+    // Read remaining body bytes if needed.
+    let body_start = header_end + 4; // skip \r\n\r\n
+    while raw.len() < body_start + content_length {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        raw.extend_from_slice(&buf[..n]);
+    }
 
-        if body_part.len() >= content_length {
-            body_part[..content_length].to_string()
-        } else {
-            body_part.to_string()
-        }
+    let body = if raw.len() > body_start {
+        let end = (body_start + content_length).min(raw.len());
+        String::from_utf8_lossy(&raw[body_start..end]).to_string()
     } else {
         String::new()
     };
@@ -216,6 +262,11 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
 // ---------------------------------------------------------------------------
 // Connection handler + routing
 // ---------------------------------------------------------------------------
+
+/// Find the end of HTTP headers (\r\n\r\n) in raw bytes.
+fn find_header_end(data: &[u8]) -> Option<usize> {
+    data.windows(4).position(|w| w == b"\r\n\r\n")
+}
 
 fn handle_connection(state: &Arc<Mutex<EditorState>>, mut stream: TcpStream) {
     let req = match parse_request(&mut stream) {
@@ -759,13 +810,12 @@ fn api_redo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(stream, r#"{"ok":true}"#);
 }
 
-/// `GET /api/viewport` — returns the latest frame as BMP.
+/// `GET /api/viewport` — returns the latest frame as BMP (from cache).
 fn api_get_viewport_bmp(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let state = state.lock().unwrap();
-    match &state.frame_buffer {
-        Some(fb) => {
-            let bmp = encode_bmp(fb);
-            send_binary(stream, "image/bmp", &bmp);
+    match &state.cached_bmp {
+        Some(bmp) => {
+            send_binary(stream, "image/bmp", bmp);
         }
         None => {
             send_error(stream, 404, "no frame available");
@@ -773,13 +823,12 @@ fn api_get_viewport_bmp(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream)
     }
 }
 
-/// `GET /api/viewport/png` — returns the latest frame as PNG.
+/// `GET /api/viewport/png` — returns the latest frame as PNG (from cache).
 fn api_get_viewport_png(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let state = state.lock().unwrap();
-    match &state.frame_buffer {
-        Some(fb) => {
-            let png = encode_png(fb);
-            send_binary(stream, "image/png", &png);
+    match &state.cached_png {
+        Some(png) => {
+            send_binary(stream, "image/png", png);
         }
         None => {
             send_error(stream, 404, "no frame available");
