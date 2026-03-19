@@ -37,3 +37,13 @@ release/
 # Test/coverage
 coverage/
 *.lcov
+
+# Flywheel / Agent Mail local setup
+.agent-mail-store/
+mcp_agent_mail/
+.mcp.json
+codex.mcp.json
+cline.mcp.json
+windsurf.mcp.json
+.claude/settings.local.json
+.codex/hooks/

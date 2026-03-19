@@ -597,9 +597,15 @@ impl SceneTree {
 
             // Sync script variables to node properties so they are visible
             // as first-class node properties (matching Godot behavior).
+            // Collect current values first to avoid borrow conflicts.
+            let prop_values: Vec<(String, Variant)> = script
+                .list_properties()
+                .into_iter()
+                .filter_map(|info| script.get_property(&info.name).map(|v| (info.name, v)))
+                .collect();
             if let Some(node) = self.nodes.get_mut(&node_id) {
-                for prop in script.list_properties() {
-                    node.set_property(&prop.name, prop.default_value.clone());
+                for (name, val) in prop_values {
+                    node.set_property(&name, val);
                 }
             }
 

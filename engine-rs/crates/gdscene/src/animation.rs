@@ -60,6 +60,8 @@ impl KeyFrame {
 /// A track that animates a single property over time via keyframes.
 #[derive(Debug, Clone)]
 pub struct AnimationTrack {
+    /// The node path this track targets (e.g. `"Player"`).
+    pub node_path: String,
     /// The property path this track targets (e.g. `"position:x"`).
     pub property_path: String,
     /// Keyframes sorted by time.
@@ -70,6 +72,16 @@ impl AnimationTrack {
     /// Creates a new empty track for the given property path.
     pub fn new(property_path: impl Into<String>) -> Self {
         Self {
+            node_path: String::new(),
+            property_path: property_path.into(),
+            keyframes: Vec::new(),
+        }
+    }
+
+    /// Creates a new empty track with both node path and property path.
+    pub fn with_node(node_path: impl Into<String>, property_path: impl Into<String>) -> Self {
+        Self {
+            node_path: node_path.into(),
             property_path: property_path.into(),
             keyframes: Vec::new(),
         }
@@ -91,6 +103,21 @@ impl AnimationTrack {
     /// Returns the keyframes (sorted by time).
     pub fn keyframes(&self) -> &[KeyFrame] {
         &self.keyframes
+    }
+
+    /// Removes the keyframe at the given index. Returns `true` if removed.
+    pub fn remove_keyframe(&mut self, index: usize) -> bool {
+        if index < self.keyframes.len() {
+            self.keyframes.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the number of keyframes.
+    pub fn keyframe_count(&self) -> usize {
+        self.keyframes.len()
     }
 
     /// Samples this track at the given time, interpolating between keyframes.
@@ -766,5 +793,52 @@ mod tests {
         } else {
             panic!("expected Vector2");
         }
+    }
+
+    // -- AnimationTrack::with_node -----------------------------------------
+
+    #[test]
+    fn track_with_node() {
+        let track = AnimationTrack::with_node("Player", "position");
+        assert_eq!(track.node_path, "Player");
+        assert_eq!(track.property_path, "position");
+        assert_eq!(track.keyframe_count(), 0);
+    }
+
+    #[test]
+    fn track_new_has_empty_node_path() {
+        let track = AnimationTrack::new("position:x");
+        assert_eq!(track.node_path, "");
+        assert_eq!(track.property_path, "position:x");
+    }
+
+    // -- remove_keyframe / keyframe_count ----------------------------------
+
+    #[test]
+    fn track_remove_keyframe() {
+        let mut track = AnimationTrack::new("x");
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+        track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(10.0)));
+        assert_eq!(track.keyframe_count(), 2);
+        assert!(track.remove_keyframe(0));
+        assert_eq!(track.keyframe_count(), 1);
+        assert_eq!(track.keyframes()[0].time, 1.0);
+    }
+
+    #[test]
+    fn track_remove_keyframe_out_of_bounds() {
+        let mut track = AnimationTrack::new("x");
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+        assert!(!track.remove_keyframe(5));
+        assert_eq!(track.keyframe_count(), 1);
+    }
+
+    #[test]
+    fn track_remove_all_keyframes() {
+        let mut track = AnimationTrack::new("x");
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+        assert!(track.remove_keyframe(0));
+        assert_eq!(track.keyframe_count(), 0);
+        assert!(track.sample(0.0).is_none());
     }
 }

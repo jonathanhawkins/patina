@@ -1,7 +1,7 @@
 {
-  "frame_count": 2,
-  "physics_time": 0.03333333333333333,
-  "process_time": 0.03333333333333333,
+  "frame_count": 1,
+  "physics_time": 0.016666666666666666,
+  "process_time": 0.016666666666666666,
   "scene_file": "/Users/bone/dev/games/godot/test-00/multi_script.tscn",
   "tree": {
     "children": [
@@ -15,8 +15,6 @@
               "NOTIFICATION_ENTER_TREE",
               "NOTIFICATION_READY",
               "NOTIFICATION_PHYSICS_PROCESS",
-              "NOTIFICATION_PROCESS",
-              "NOTIFICATION_PHYSICS_PROCESS",
               "NOTIFICATION_PROCESS"
             ],
             "path": "/root/World/Counter",
@@ -27,7 +25,7 @@
               },
               "count": {
                 "type": "Int",
-                "value": 0
+                "value": 11
               },
               "position": {
                 "type": "Vector2",
@@ -59,7 +57,7 @@
             "script_vars": {
               "count": {
                 "type": "Int",
-                "value": 0
+                "value": 11
               }
             }
           },
@@ -71,8 +69,6 @@
               "NOTIFICATION_ENTER_TREE",
               "NOTIFICATION_READY",
               "NOTIFICATION_PHYSICS_PROCESS",
-              "NOTIFICATION_PROCESS",
-              "NOTIFICATION_PHYSICS_PROCESS",
               "NOTIFICATION_PROCESS"
             ],
             "path": "/root/World/Reader",
@@ -83,7 +79,7 @@
               },
               "last_read": {
                 "type": "Int",
-                "value": 0
+                "value": 1
               },
               "position": {
                 "type": "Vector2",
@@ -115,7 +111,7 @@
             "script_vars": {
               "last_read": {
                 "type": "Int",
-                "value": 0
+                "value": 1
               }
             }
           },
@@ -126,8 +122,6 @@
             "notifications": [
               "NOTIFICATION_ENTER_TREE",
               "NOTIFICATION_READY",
-              "NOTIFICATION_PHYSICS_PROCESS",
-              "NOTIFICATION_PROCESS",
               "NOTIFICATION_PHYSICS_PROCESS",
               "NOTIFICATION_PROCESS"
             ],
@@ -165,7 +159,7 @@
               },
               "total_moved": {
                 "type": "Float",
-                "value": 0.0
+                "value": 0.8333333333333334
               },
               "visible": {
                 "type": "Bool",
@@ -179,7 +173,7 @@
               },
               "total_moved": {
                 "type": "Float",
-                "value": 0.0
+                "value": 0.8333333333333334
               }
             }
           }
@@ -189,8 +183,6 @@
         "notifications": [
           "NOTIFICATION_ENTER_TREE",
           "NOTIFICATION_READY",
-          "NOTIFICATION_PHYSICS_PROCESS",
-          "NOTIFICATION_PROCESS",
           "NOTIFICATION_PHYSICS_PROCESS",
           "NOTIFICATION_PROCESS"
         ],
@@ -225,8 +217,6 @@
     "class": "Node",
     "name": "root",
     "notifications": [
-      "NOTIFICATION_PHYSICS_PROCESS",
-      "NOTIFICATION_PROCESS",
       "NOTIFICATION_PHYSICS_PROCESS",
       "NOTIFICATION_PROCESS"
     ],

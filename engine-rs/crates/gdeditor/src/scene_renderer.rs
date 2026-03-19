@@ -13,6 +13,8 @@ use gdscene::node::NodeId;
 use gdscene::SceneTree;
 use gdvariant::Variant;
 
+use crate::texture_cache::TextureCache;
+
 // ---------------------------------------------------------------------------
 // Colors
 // ---------------------------------------------------------------------------
@@ -87,6 +89,39 @@ pub fn render_scene_with_zoom_pan(
     zoom: f64,
     pan: (f64, f64),
 ) -> FrameBuffer {
+    render_scene_inner(tree, selected, width, height, zoom, pan, None)
+}
+
+/// Renders with texture support for Sprite2D nodes.
+pub fn render_scene_with_textures(
+    tree: &SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    texture_cache: &mut TextureCache,
+) -> FrameBuffer {
+    render_scene_inner(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        Some(texture_cache),
+    )
+}
+
+fn render_scene_inner(
+    tree: &SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    mut texture_cache: Option<&mut TextureCache>,
+) -> FrameBuffer {
     let mut fb = FrameBuffer::new(width, height, BG_COLOR);
     let z = zoom as f32;
 
@@ -119,7 +154,9 @@ pub fn render_scene_with_zoom_pan(
         // Draw node representation based on class.
         match class {
             "Node2D" => draw_node2d_diamond(&mut fb, pos, COLOR_NODE2D),
-            "Sprite2D" => draw_sprite2d_icon(&mut fb, pos, COLOR_SPRITE2D, z),
+            "Sprite2D" => {
+                draw_sprite2d_with_texture(&mut fb, node, pos, z, &mut texture_cache);
+            }
             "Camera2D" => draw_camera2d_icon(&mut fb, pos, COLOR_CAMERA2D, z),
             "CollisionShape2D" => draw_collision_shape(&mut fb, pos, z),
             "Area2D" => draw_area2d(&mut fb, pos, z),
@@ -207,7 +244,7 @@ pub fn compute_scene_bounds(tree: &SceneTree) -> Rect2 {
 }
 
 /// Extracts the position from a node's properties, defaulting to (0, 0).
-fn extract_position(node: &gdscene::node::Node) -> Vector2 {
+pub fn extract_position(node: &gdscene::node::Node) -> Vector2 {
     match node.get_property("position") {
         Variant::Vector2(v) => v,
         _ => Vector2::ZERO,
@@ -409,6 +446,60 @@ fn draw_sprite2d_icon(fb: &mut FrameBuffer, pos: Vector2, color: Color, zoom: f3
         icon_color,
         1.0,
     );
+}
+
+/// Draws Sprite2D with texture from cache or blue placeholder.
+fn draw_sprite2d_with_texture(
+    fb: &mut FrameBuffer,
+    node: &gdscene::node::Node,
+    pos: Vector2,
+    zoom: f32,
+    texture_cache: &mut Option<&mut TextureCache>,
+) {
+    let texture_path = match node.get_property("texture") {
+        Variant::String(s) => Some(s.clone()),
+        _ => None,
+    };
+    let loaded = if let (Some(ref path), Some(ref mut cache)) = (&texture_path, texture_cache) {
+        if !path.is_empty() {
+            cache.get(path).cloned()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(tex) = loaded {
+        let offset = match node.get_property("offset") {
+            Variant::Vector2(v) => v,
+            _ => Vector2::ZERO,
+        };
+        let flip_h = matches!(node.get_property("flip_h"), Variant::Bool(true));
+        let flip_v = matches!(node.get_property("flip_v"), Variant::Bool(true));
+        let modulate = match node.get_property("modulate") {
+            Variant::Color(c) => c,
+            _ => Color::WHITE,
+        };
+        let mut draw_tex = tex;
+        if flip_h {
+            draw_tex = draw_tex.flip_horizontal();
+        }
+        if flip_v {
+            draw_tex = draw_tex.flip_vertical();
+        }
+        let sw = draw_tex.width as f32 * zoom;
+        let sh = draw_tex.height as f32 * zoom;
+        let dx = pos.x + offset.x * zoom - sw / 2.0;
+        let dy = pos.y + offset.y * zoom - sh / 2.0;
+        draw::draw_texture_rect_blended(
+            fb,
+            &draw_tex,
+            Rect2::new(Vector2::new(dx, dy), Vector2::new(sw, sh)),
+            modulate,
+        );
+    } else {
+        draw_sprite2d_icon(fb, pos, COLOR_SPRITE2D, zoom);
+    }
 }
 
 /// Draws a Camera2D icon: viewport outline with a small camera icon.

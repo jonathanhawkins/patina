@@ -14,16 +14,33 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gdrender2d::export::{encode_bmp, encode_png};
 use gdrender2d::renderer::FrameBuffer;
-use gdscene::node::NodeId;
+use std::collections::HashMap;
+
+use gdscene::animation::{Animation, AnimationTrack, KeyFrame, LoopMode};
+use gdscene::node::{Node, NodeId};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_saver::TscnSaver;
 use gdscene::SceneTree;
 use gdvariant::serialize::{from_json, to_json};
 use gdvariant::Variant;
 
+use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
 use gdcore::math::Vector2;
+
+/// Animation playback state for the editor.
+#[derive(Debug, Clone)]
+pub struct AnimationPlaybackState {
+    /// Whether an animation is currently playing.
+    pub playing: bool,
+    /// The name of the animation being played.
+    pub animation_name: Option<String>,
+    /// The current playback time in seconds.
+    pub current_time: f64,
+    /// Whether keyframe recording mode is active.
+    pub recording: bool,
+}
 
 /// State for an in-progress drag operation.
 #[derive(Debug, Clone)]
@@ -51,6 +68,37 @@ pub struct LogEntry {
 
 /// Maximum number of log entries to keep.
 const MAX_LOG_ENTRIES: usize = 100;
+
+/// Editor display settings that can be persisted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EditorDisplaySettings {
+    pub grid_snap_enabled: bool,
+    pub grid_snap_size: u32,
+    pub grid_visible: bool,
+    pub rulers_visible: bool,
+    pub background_color: [f64; 4],
+    pub font_size: String,
+}
+impl Default for EditorDisplaySettings {
+    fn default() -> Self {
+        Self {
+            grid_snap_enabled: false,
+            grid_snap_size: 8,
+            grid_visible: true,
+            rulers_visible: true,
+            background_color: [0.08, 0.08, 0.1, 1.0],
+            font_size: "medium".to_string(),
+        }
+    }
+}
+/// Serialized node data for the copy/paste clipboard.
+#[derive(Debug, Clone)]
+pub struct ClipboardEntry {
+    pub name: String,
+    pub class_name: String,
+    pub properties: Vec<(String, Variant)>,
+    pub children: Vec<ClipboardEntry>,
+}
 
 /// Shared editor state protected by a mutex.
 pub struct EditorState {
@@ -84,6 +132,25 @@ pub struct EditorState {
     pub scene_file: Option<String>,
     /// Whether the scene has unsaved modifications.
     pub scene_modified: bool,
+    pub selected_nodes: Vec<NodeId>,
+    pub clipboard: Vec<ClipboardEntry>,
+    pub display_settings: EditorDisplaySettings,
+    /// Cache of loaded textures for viewport rendering.
+    pub texture_cache: TextureCache,
+    /// Whether the game is currently playing.
+    pub is_running: bool,
+    /// Whether the game is paused.
+    pub is_paused: bool,
+    /// A separate copy of the scene tree for running.
+    pub run_scene_tree: Option<SceneTree>,
+    /// Counts frames during runtime.
+    pub runtime_frame_count: u64,
+    /// Time between frames (fixed at 1/60).
+    pub delta_time: f64,
+    /// Named animations stored in the editor.
+    pub animations: std::collections::HashMap<String, Animation>,
+    /// Current animation playback state.
+    pub animation_playback: AnimationPlaybackState,
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -111,6 +178,22 @@ impl EditorState {
             log_entries: VecDeque::new(),
             scene_file: None,
             scene_modified: false,
+            texture_cache: TextureCache::default(),
+            selected_nodes: Vec::new(),
+            clipboard: Vec::new(),
+            display_settings: EditorDisplaySettings::default(),
+            is_running: false,
+            is_paused: false,
+            run_scene_tree: None,
+            runtime_frame_count: 0,
+            delta_time: 1.0 / 60.0,
+            animations: HashMap::new(),
+            animation_playback: AnimationPlaybackState {
+                playing: false,
+                animation_name: None,
+                current_time: 0.0,
+                recording: false,
+            },
         }
     }
 
@@ -129,6 +212,43 @@ impl EditorState {
             self.log_entries.pop_front();
         }
     }
+}
+
+/// Deep-copies a scene tree (without scripts) for runtime use.
+pub fn clone_scene_tree(source: &SceneTree) -> SceneTree {
+    let mut dest = SceneTree::new();
+    let dest_root = dest.root_id();
+    let source_root = source.root_id();
+    let source_root_node = match source.get_node(source_root) {
+        Some(n) => n,
+        None => return dest,
+    };
+    let children: Vec<NodeId> = source_root_node.children().to_vec();
+    fn copy_subtree(source: &SceneTree, dest: &mut SceneTree, src_id: NodeId, dest_parent: NodeId) {
+        let src_node = match source.get_node(src_id) {
+            Some(n) => n,
+            None => return,
+        };
+        let mut new_node = Node::new(src_node.name(), src_node.class_name());
+        for (k, v) in src_node.properties() {
+            new_node.set_property(k, v.clone());
+        }
+        for group in src_node.groups() {
+            new_node.add_to_group(group.clone());
+        }
+        let new_id = match dest.add_child(dest_parent, new_node) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let children: Vec<NodeId> = src_node.children().to_vec();
+        for child_id in children {
+            copy_subtree(source, dest, child_id, new_id);
+        }
+    }
+    for child_id in children {
+        copy_subtree(source, &mut dest, child_id, dest_root);
+    }
+    dest
 }
 
 /// Separate cache for viewport images — avoids Mutex contention with scene tree.
@@ -415,9 +535,40 @@ fn handle_connection(
         ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
         ("GET", "/api/filesystem") => api_get_filesystem(&mut stream),
         ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
+        ("POST", "/api/script/save") => api_save_script(&req.body, &mut stream),
         ("POST", "/api/node/signals/connect") => api_connect_signal(state, &req.body, &mut stream),
         ("POST", "/api/node/groups/add") => api_add_group(state, &req.body, &mut stream),
         ("POST", "/api/node/groups/remove") => api_remove_group(state, &req.body, &mut stream),
+        ("POST", "/api/node/select_multi") => api_select_multi(state, &req.body, &mut stream),
+        ("GET", "/api/selected_nodes") => api_get_selected_nodes(state, &mut stream),
+        ("POST", "/api/node/copy") => api_copy_nodes(state, &req.body, &mut stream),
+        ("POST", "/api/node/paste") => api_paste_nodes(state, &req.body, &mut stream),
+        ("POST", "/api/node/cut") => api_cut_nodes(state, &req.body, &mut stream),
+        ("GET", "/api/settings") => api_get_settings(state, &mut stream),
+        ("POST", "/api/settings") => api_set_settings(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/box_select") => api_box_select(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/drag_multi") => {
+            api_viewport_drag_multi(state, &req.body, &mut stream)
+        }
+        // Animation endpoints
+        ("GET", "/api/animations") => api_get_animations(state, &mut stream),
+        ("GET", "/api/animation") => api_get_animation(state, &req.query, &mut stream),
+        ("POST", "/api/animation/create") => api_create_animation(state, &req.body, &mut stream),
+        ("POST", "/api/animation/delete") => api_delete_animation(state, &req.body, &mut stream),
+        ("POST", "/api/animation/keyframe/add") => api_add_keyframe(state, &req.body, &mut stream),
+        ("POST", "/api/animation/keyframe/remove") => {
+            api_remove_keyframe(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/play") => api_play_animation(state, &req.body, &mut stream),
+        ("POST", "/api/animation/stop") => api_stop_animation(state, &mut stream),
+        ("GET", "/api/animation/status") => api_animation_status(state, &mut stream),
+        ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
+        ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
+        ("POST", "/api/runtime/play") => api_runtime_play(state, &mut stream),
+        ("POST", "/api/runtime/stop") => api_runtime_stop(state, &mut stream),
+        ("POST", "/api/runtime/pause") => api_runtime_pause(state, &mut stream),
+        ("POST", "/api/runtime/step") => api_runtime_step(state, &mut stream),
+        ("GET", "/api/runtime/status") => api_runtime_status(state, &mut stream),
         _ => serve_404(&mut stream),
     }
 }
@@ -763,6 +914,7 @@ fn api_select_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     };
 
     state.selected_node = Some(node_id);
+    state.selected_nodes = vec![node_id];
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -1261,6 +1413,7 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         Ok(_) => {
             state.scene_tree = new_tree;
             state.selected_node = None;
+            state.selected_nodes.clear();
             state.undo_stack.clear();
             state.redo_stack.clear();
             state.scene_file = Some(path.clone());
@@ -1300,6 +1453,7 @@ fn api_viewport_click(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         crate::scene_renderer::hit_test_with_zoom_pan(&state.scene_tree, vw, vh, zoom, pan, x, y);
 
     state.selected_node = hit;
+    state.selected_nodes = hit.into_iter().collect();
 
     match hit {
         Some(id) => send_json(stream, &format!(r#"{{"selected":{}}}"#, id.raw())),
@@ -1764,6 +1918,56 @@ fn api_get_script(query: &str, stream: &mut TcpStream) {
     }
 }
 
+/// `POST /api/script/save` -- writes content to a .gd file.
+fn api_save_script(body: &str, stream: &mut TcpStream) {
+    let json = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let raw_path = match json.get("path").and_then(|p| p.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path field");
+            return;
+        }
+    };
+    let content_str = match json.get("content").and_then(|c| c.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            send_error(stream, 400, "missing content field");
+            return;
+        }
+    };
+    let file_path = if let Some(stripped) = raw_path.strip_prefix("res://") {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&raw_path)
+    };
+    match file_path.extension().and_then(|e| e.to_str()) {
+        Some("gd") => {}
+        _ => {
+            send_error(stream, 400, "only .gd files are supported");
+            return;
+        }
+    }
+    if let Some(parent) = file_path.parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                send_error(stream, 500, &format!("failed to create directory: {e}"));
+                return;
+            }
+        }
+    }
+    match std::fs::write(&file_path, &content_str) {
+        Ok(()) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("failed to write script: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Signals endpoint
 // ---------------------------------------------------------------------------
@@ -2053,6 +2257,942 @@ fn api_remove_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.add_log("info", format!("Removed group '{}'", group));
 
     send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-select, copy/paste, settings, box select, multi-drag
+// ---------------------------------------------------------------------------
+
+fn api_select_multi(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    if let Some(ids_arr) = parsed.get("node_ids").and_then(|v| v.as_array()) {
+        let mut nids = Vec::new();
+        for iv in ids_arr {
+            if let Some(r) = iv.as_u64() {
+                if let Some(n) = find_node_by_raw_id(&state.scene_tree, r) {
+                    nids.push(n);
+                }
+            }
+        }
+        state.selected_nodes = nids.clone();
+        state.selected_node = nids.first().copied();
+        let j: Vec<String> = nids.iter().map(|i| i.raw().to_string()).collect();
+        send_json(
+            stream,
+            &format!(r#"{{"selected_nodes":[{}]}}"#, j.join(",")),
+        );
+        return;
+    }
+    let raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id or node_ids");
+            return;
+        }
+    };
+    let mode = parsed.get("mode").and_then(|v| v.as_str()).unwrap_or("set");
+    let nid = match find_node_by_raw_id(&state.scene_tree, raw) {
+        Some(i) => i,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match mode {
+        "add" => {
+            if !state.selected_nodes.contains(&nid) {
+                state.selected_nodes.push(nid);
+            }
+        }
+        "remove" => {
+            state.selected_nodes.retain(|&i| i != nid);
+        }
+        "toggle" => {
+            if state.selected_nodes.contains(&nid) {
+                state.selected_nodes.retain(|&i| i != nid);
+            } else {
+                state.selected_nodes.push(nid);
+            }
+        }
+        _ => {
+            state.selected_nodes = vec![nid];
+        }
+    }
+    state.selected_node = state.selected_nodes.first().copied();
+    let j: Vec<String> = state
+        .selected_nodes
+        .iter()
+        .map(|i| i.raw().to_string())
+        .collect();
+    send_json(
+        stream,
+        &format!(r#"{{"selected_nodes":[{}]}}"#, j.join(",")),
+    );
+}
+
+fn api_get_selected_nodes(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let j = {
+        let s = state.lock().unwrap();
+        let ids: Vec<String> = s
+            .selected_nodes
+            .iter()
+            .map(|i| i.raw().to_string())
+            .collect();
+        format!(
+            r#"{{"selected_nodes":[{}],"count":{}}}"#,
+            ids.join(","),
+            s.selected_nodes.len()
+        )
+    };
+    send_json(stream, &j);
+}
+
+fn node_to_clipboard(tree: &SceneTree, nid: NodeId) -> Option<ClipboardEntry> {
+    let n = tree.get_node(nid)?;
+    let props: Vec<(String, Variant)> = n
+        .properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let ch: Vec<ClipboardEntry> = n
+        .children()
+        .iter()
+        .filter_map(|&c| node_to_clipboard(tree, c))
+        .collect();
+    Some(ClipboardEntry {
+        name: n.name().to_string(),
+        class_name: n.class_name().to_string(),
+        properties: props,
+        children: ch,
+    })
+}
+
+fn paste_clipboard_entry(
+    tree: &mut SceneTree,
+    pid: NodeId,
+    e: &ClipboardEntry,
+) -> Result<NodeId, gdcore::error::EngineError> {
+    let mut node = Node::new(&e.name, &e.class_name);
+    for (k, v) in &e.properties {
+        node.set_property(k, v.clone());
+    }
+    let new_id = tree.add_child(pid, node)?;
+    for c in &e.children {
+        paste_clipboard_entry(tree, new_id, c)?;
+    }
+    Ok(new_id)
+}
+
+fn api_copy_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = parse_json_body(body);
+    let mut state = state.lock().unwrap();
+    let raws: Vec<u64> = if let Some(a) = parsed
+        .as_ref()
+        .and_then(|p| p.get("node_ids"))
+        .and_then(|v| v.as_array())
+    {
+        a.iter().filter_map(|v| v.as_u64()).collect()
+    } else if let Some(i) = parsed
+        .as_ref()
+        .and_then(|p| p.get("node_id"))
+        .and_then(|v| v.as_u64())
+    {
+        vec![i]
+    } else {
+        state.selected_nodes.iter().map(|i| i.raw()).collect()
+    };
+    let mut cb = Vec::new();
+    for r in &raws {
+        if let Some(n) = find_node_by_raw_id(&state.scene_tree, *r) {
+            if let Some(e) = node_to_clipboard(&state.scene_tree, n) {
+                cb.push(e);
+            }
+        }
+    }
+    let c = cb.len();
+    state.clipboard = cb;
+    state.add_log("info", format!("Copied {} node(s)", c));
+    send_json(stream, &format!(r#"{{"ok":true,"copied":{c}}}"#));
+}
+
+fn api_paste_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = parse_json_body(body);
+    let mut state = state.lock().unwrap();
+    if state.clipboard.is_empty() {
+        send_error(stream, 400, "clipboard is empty");
+        return;
+    }
+    let pr = parsed
+        .as_ref()
+        .and_then(|p| p.get("parent_id"))
+        .and_then(|v| v.as_u64());
+    let pid = if let Some(r) = pr {
+        match find_node_by_raw_id(&state.scene_tree, r) {
+            Some(i) => i,
+            None => {
+                send_error(stream, 404, "parent not found");
+                return;
+            }
+        }
+    } else if let Some(s) = state.selected_node {
+        s
+    } else {
+        state.scene_tree.root_id()
+    };
+    let cb = state.clipboard.clone();
+    let mut ids = Vec::new();
+    for e in &cb {
+        match paste_clipboard_entry(&mut state.scene_tree, pid, e) {
+            Ok(i) => ids.push(i),
+            Err(e) => {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+        }
+    }
+    state.scene_modified = true;
+    let c = ids.len();
+    state.selected_nodes = ids.clone();
+    state.selected_node = ids.first().copied();
+    state.add_log("info", format!("Pasted {} node(s)", c));
+    let j: Vec<String> = ids.iter().map(|i| i.raw().to_string()).collect();
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"pasted":{c},"ids":[{}]}}"#, j.join(",")),
+    );
+}
+
+fn api_cut_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = parse_json_body(body);
+    let mut state = state.lock().unwrap();
+    let raws: Vec<u64> = if let Some(a) = parsed
+        .as_ref()
+        .and_then(|p| p.get("node_ids"))
+        .and_then(|v| v.as_array())
+    {
+        a.iter().filter_map(|v| v.as_u64()).collect()
+    } else if let Some(i) = parsed
+        .as_ref()
+        .and_then(|p| p.get("node_id"))
+        .and_then(|v| v.as_u64())
+    {
+        vec![i]
+    } else {
+        state.selected_nodes.iter().map(|i| i.raw()).collect()
+    };
+    let mut cb = Vec::new();
+    let mut del = Vec::new();
+    for r in &raws {
+        if let Some(n) = find_node_by_raw_id(&state.scene_tree, *r) {
+            if let Some(e) = node_to_clipboard(&state.scene_tree, n) {
+                cb.push(e);
+                del.push(n);
+            }
+        }
+    }
+    let c = cb.len();
+    state.clipboard = cb;
+    for d in del {
+        let _ = state.scene_tree.remove_node(d);
+    }
+    state.selected_nodes.clear();
+    state.selected_node = None;
+    state.scene_modified = true;
+    state.add_log("info", format!("Cut {} node(s)", c));
+    send_json(stream, &format!(r#"{{"ok":true,"cut":{c}}}"#));
+}
+
+fn api_get_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let j = {
+        let s = state.lock().unwrap();
+        serde_json::to_string(&s.display_settings).unwrap_or_else(|_| "{}".to_string())
+    };
+    send_json(stream, &j);
+}
+
+fn api_set_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(v) = p.get("grid_snap_enabled").and_then(|v| v.as_bool()) {
+        s.display_settings.grid_snap_enabled = v;
+    }
+    if let Some(v) = p.get("grid_snap_size").and_then(|v| v.as_u64()) {
+        s.display_settings.grid_snap_size = v as u32;
+    }
+    if let Some(v) = p.get("grid_visible").and_then(|v| v.as_bool()) {
+        s.display_settings.grid_visible = v;
+    }
+    if let Some(v) = p.get("rulers_visible").and_then(|v| v.as_bool()) {
+        s.display_settings.rulers_visible = v;
+    }
+    if let Some(a) = p.get("background_color").and_then(|v| v.as_array()) {
+        if a.len() == 4 {
+            s.display_settings.background_color = [
+                a[0].as_f64().unwrap_or(0.08),
+                a[1].as_f64().unwrap_or(0.08),
+                a[2].as_f64().unwrap_or(0.1),
+                a[3].as_f64().unwrap_or(1.0),
+            ];
+        }
+    }
+    if let Some(v) = p.get("font_size").and_then(|v| v.as_str()) {
+        s.display_settings.font_size = v.to_string();
+    }
+    let j = serde_json::to_string(&s.display_settings).unwrap_or_else(|_| "{}".to_string());
+    send_json(stream, &j);
+}
+
+fn api_box_select(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let x1 = p.get("x1").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y1 = p.get("y1").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let x2 = p.get("x2").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y2 = p.get("y2").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let add = p.get("add").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut s = state.lock().unwrap();
+    let (vw, vh, zm, pn) = (
+        s.viewport_width,
+        s.viewport_height,
+        s.viewport_zoom,
+        s.viewport_pan,
+    );
+    let p1 =
+        crate::scene_renderer::pixel_to_scene_with_zoom_pan(&s.scene_tree, vw, vh, zm, pn, x1, y1);
+    let p2 =
+        crate::scene_renderer::pixel_to_scene_with_zoom_pan(&s.scene_tree, vw, vh, zm, pn, x2, y2);
+    let (mnx, mny, mxx, mxy) = (
+        p1.x.min(p2.x),
+        p1.y.min(p2.y),
+        p1.x.max(p2.x),
+        p1.y.max(p2.y),
+    );
+    let mut sel: Vec<NodeId> = if add {
+        s.selected_nodes.clone()
+    } else {
+        Vec::new()
+    };
+    for &nid in &s.scene_tree.all_nodes_in_tree_order() {
+        if let Some(n) = s.scene_tree.get_node(nid) {
+            if n.parent().is_none() {
+                continue;
+            }
+            let pos = crate::scene_renderer::extract_position(n);
+            if pos.x >= mnx && pos.x <= mxx && pos.y >= mny && pos.y <= mxy && !sel.contains(&nid) {
+                sel.push(nid);
+            }
+        }
+    }
+    s.selected_nodes = sel.clone();
+    s.selected_node = sel.first().copied();
+    let j: Vec<String> = sel.iter().map(|i| i.raw().to_string()).collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"selected_nodes":[{}],"count":{}}}"#,
+            j.join(","),
+            sel.len()
+        ),
+    );
+}
+
+fn api_viewport_drag_multi(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let dx = p.get("dx").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let dy = p.get("dy").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let snap = p.get("snap").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut s = state.lock().unwrap();
+    let z = s.viewport_zoom as f32;
+    let (mut wdx, mut wdy) = (dx / z, dy / z);
+    if snap && s.display_settings.grid_snap_enabled {
+        let g = s.display_settings.grid_snap_size as f32;
+        wdx = (wdx / g).round() * g;
+        wdy = (wdy / g).round() * g;
+    }
+    let sel = s.selected_nodes.clone();
+    for &nid in &sel {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let pos = match n.get_property("position") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::ZERO,
+            };
+            n.set_property(
+                "position",
+                Variant::Vector2(Vector2::new(pos.x + wdx, pos.y + wdy)),
+            );
+        }
+    }
+    send_json(stream, &format!(r#"{{"ok":true,"moved":{}}}"#, sel.len()));
+}
+
+// ---------------------------------------------------------------------------
+// Animation endpoints
+// ---------------------------------------------------------------------------
+
+fn loop_mode_to_str(mode: LoopMode) -> &'static str {
+    match mode {
+        LoopMode::None => "none",
+        LoopMode::Linear => "loop",
+        LoopMode::PingPong => "pingpong",
+    }
+}
+
+fn loop_mode_from_str(s: &str) -> LoopMode {
+    match s {
+        "loop" => LoopMode::Linear,
+        "pingpong" => LoopMode::PingPong,
+        _ => LoopMode::None,
+    }
+}
+
+fn variant_to_simple_json(v: &Variant) -> String {
+    to_json(v).to_string()
+}
+
+/// `GET /api/animations` -- list all animations (names + lengths).
+fn api_get_animations(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        let entries: Vec<String> = state
+            .animations
+            .values()
+            .map(|a| {
+                format!(
+                    r#"{{"name":"{}","length":{},"loop_mode":"{}","track_count":{}}}"#,
+                    a.name.replace('"', "\\\""),
+                    a.length,
+                    loop_mode_to_str(a.loop_mode),
+                    a.tracks.len()
+                )
+            })
+            .collect();
+        format!("[{}]", entries.join(","))
+    };
+    send_json(stream, &json);
+}
+
+/// `GET /api/animation?name=<name>` -- get full animation data.
+fn api_get_animation(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let name = match query_param(query, "name") {
+        Some(n) => url_decode(n),
+        None => {
+            send_error(stream, 400, "missing name parameter");
+            return;
+        }
+    };
+    let json = {
+        let state = state.lock().unwrap();
+        let anim = match state.animations.get(&name) {
+            Some(a) => a,
+            None => {
+                send_error(stream, 404, "animation not found");
+                return;
+            }
+        };
+        let tracks_json: Vec<String> = anim
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(idx, track)| {
+                let kf_json: Vec<String> = track
+                    .keyframes()
+                    .iter()
+                    .map(|kf| {
+                        format!(
+                            r#"{{"time":{},"value":{}}}"#,
+                            kf.time,
+                            variant_to_simple_json(&kf.value)
+                        )
+                    })
+                    .collect();
+                format!(
+                    r#"{{"index":{},"node_path":"{}","property":"{}","keyframes":[{}]}}"#,
+                    idx,
+                    track.node_path.replace('"', "\\\""),
+                    track.property_path.replace('"', "\\\""),
+                    kf_json.join(",")
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"name":"{}","length":{},"loop_mode":"{}","tracks":[{}]}}"#,
+            anim.name.replace('"', "\\\""),
+            anim.length,
+            loop_mode_to_str(anim.loop_mode),
+            tracks_json.join(",")
+        )
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/animation/create` -- create a new animation.
+fn api_create_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match parsed.get("name").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    let length = parsed.get("length").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let loop_mode = parsed
+        .get("loop_mode")
+        .and_then(|v| v.as_str())
+        .map(loop_mode_from_str)
+        .unwrap_or(LoopMode::None);
+    if name.is_empty() {
+        send_error(stream, 400, "animation name cannot be empty");
+        return;
+    }
+    let mut state = state.lock().unwrap();
+    if state.animations.contains_key(&name) {
+        send_error(stream, 400, "animation already exists");
+        return;
+    }
+    let mut anim = Animation::new(name.clone(), length.max(0.1));
+    anim.loop_mode = loop_mode;
+    state.animations.insert(name.clone(), anim);
+    state.add_log("info", format!("Created animation '{}'", name));
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/delete` -- delete an animation.
+fn api_delete_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match parsed.get("name").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    if state.animations.remove(&name).is_none() {
+        send_error(stream, 404, "animation not found");
+        return;
+    }
+    if state.animation_playback.animation_name.as_deref() == Some(&name) {
+        state.animation_playback.playing = false;
+        state.animation_playback.animation_name = None;
+        state.animation_playback.current_time = 0.0;
+    }
+    state.add_log("info", format!("Deleted animation '{}'", name));
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/keyframe/add` -- add a keyframe to a track.
+fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let node_path = match parsed.get("track_node").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing track_node");
+            return;
+        }
+    };
+    let property = match parsed.get("track_property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing track_property");
+            return;
+        }
+    };
+    let time = match parsed.get("time").and_then(|v| v.as_f64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing time");
+            return;
+        }
+    };
+    let value_json = match parsed.get("value") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing value");
+            return;
+        }
+    };
+    let value = match from_json(value_json) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid variant value");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let anim = match state.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    let track_idx = anim
+        .tracks
+        .iter()
+        .position(|t| t.node_path == node_path && t.property_path == property);
+    let track_idx = match track_idx {
+        Some(idx) => idx,
+        None => {
+            let track = AnimationTrack::with_node(&node_path, &property);
+            anim.tracks.push(track);
+            anim.tracks.len() - 1
+        }
+    };
+    anim.tracks[track_idx].add_keyframe(KeyFrame::linear(time, value));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"track_index":{}}}"#, track_idx),
+    );
+}
+
+/// `POST /api/animation/keyframe/remove` -- remove a keyframe from a track.
+fn api_remove_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_index = match parsed.get("keyframe_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing keyframe_index");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let anim = match state.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    if !anim.tracks[track_index].remove_keyframe(keyframe_index) {
+        send_error(stream, 400, "keyframe_index out of range");
+        return;
+    }
+    if anim.tracks[track_index].keyframe_count() == 0 {
+        anim.tracks.remove(track_index);
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/play` -- start playing an animation.
+fn api_play_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match parsed.get("name").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    if !state.animations.contains_key(&name) {
+        send_error(stream, 404, "animation not found");
+        return;
+    }
+    state.animation_playback.playing = true;
+    state.animation_playback.animation_name = Some(name.clone());
+    state.animation_playback.current_time = 0.0;
+    state.add_log("info", format!("Playing animation '{}'", name));
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/stop` -- stop animation playback.
+fn api_stop_animation(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    state.animation_playback.playing = false;
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/animation/status` -- returns current playback state.
+fn api_animation_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        let pb = &state.animation_playback;
+        let name_json = match &pb.animation_name {
+            Some(n) => format!(r#""{}""#, n.replace('"', "\\\"")),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{"playing":{},"current_time":{},"animation_name":{},"recording":{}}}"#,
+            pb.playing, pb.current_time, name_json, pb.recording
+        )
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/animation/seek` -- set the current playback time (for scrubbing).
+fn api_seek_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let time = match parsed.get("time").and_then(|v| v.as_f64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing time");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    state.animation_playback.current_time = time.max(0.0);
+    // Apply interpolated values to scene tree nodes when scrubbing.
+    if let Some(anim_name) = state.animation_playback.animation_name.clone() {
+        if let Some(anim) = state.animations.get(&anim_name) {
+            let values: Vec<(String, String, Variant)> = anim
+                .tracks
+                .iter()
+                .filter_map(|track| {
+                    track
+                        .sample(time)
+                        .map(|v| (track.node_path.clone(), track.property_path.clone(), v))
+                })
+                .collect();
+            for (node_path, property, value) in values {
+                let node_id = find_node_by_name(&state.scene_tree, &node_path);
+                if let Some(nid) = node_id {
+                    if let Some(node) = state.scene_tree.get_node_mut(nid) {
+                        node.set_property(&property, value);
+                    }
+                }
+            }
+        }
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/record` -- toggle keyframe recording mode.
+fn api_toggle_recording(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let enabled = parsed
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut state = state.lock().unwrap();
+    state.animation_playback.recording = enabled;
+    state.add_log(
+        "info",
+        if enabled {
+            "Recording mode ON"
+        } else {
+            "Recording mode OFF"
+        },
+    );
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Find a node by name anywhere in the scene tree (simple linear search).
+fn find_node_by_name(tree: &SceneTree, name: &str) -> Option<NodeId> {
+    let mut stack = vec![tree.root_id()];
+    while let Some(nid) = stack.pop() {
+        if let Some(node) = tree.get_node(nid) {
+            if node.name() == name {
+                return Some(nid);
+            }
+            for &child in node.children() {
+                stack.push(child);
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Runtime API endpoints
+// ---------------------------------------------------------------------------
+
+fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if state.is_running {
+        send_json(stream, r#"{"ok":true,"already_running":true}"#);
+        return;
+    }
+    let cloned = clone_scene_tree(&state.scene_tree);
+    state.run_scene_tree = Some(cloned);
+    state.is_running = true;
+    state.is_paused = false;
+    state.runtime_frame_count = 0;
+    state.add_log("info", "Runtime: play started");
+    send_json(stream, r#"{"ok":true,"running":true}"#);
+}
+
+fn api_runtime_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    state.is_running = false;
+    state.is_paused = false;
+    state.run_scene_tree = None;
+    state.runtime_frame_count = 0;
+    state.add_log("info", "Runtime: stopped");
+    send_json(stream, r#"{"ok":true,"running":false}"#);
+}
+
+fn api_runtime_pause(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    state.is_paused = !state.is_paused;
+    let paused = state.is_paused;
+    state.add_log(
+        "info",
+        format!("Runtime: {}", if paused { "paused" } else { "resumed" }),
+    );
+    send_json(stream, &format!(r#"{{"ok":true,"paused":{paused}}}"#));
+}
+
+fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    if !state.is_paused {
+        send_error(stream, 400, "not paused");
+        return;
+    }
+    let delta = state.delta_time;
+    if let Some(ref mut tree) = state.run_scene_tree {
+        let ids = tree.all_nodes_in_tree_order();
+        for id in &ids {
+            let velocity = {
+                let node = match tree.get_node(*id) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                match node.get_property("velocity") {
+                    Variant::Vector2(v) => Some(v),
+                    _ => None,
+                }
+            };
+            if let Some(vel) = velocity {
+                let new_pos = {
+                    let node = tree.get_node(*id).unwrap();
+                    match node.get_property("position") {
+                        Variant::Vector2(pos) => Variant::Vector2(gdcore::math::Vector2::new(
+                            pos.x + vel.x * delta as f32,
+                            pos.y + vel.y * delta as f32,
+                        )),
+                        _ => continue,
+                    }
+                };
+                if let Some(node) = tree.get_node_mut(*id) {
+                    node.set_property("position", new_pos);
+                }
+            }
+        }
+        tree.process_animations(delta);
+        tree.process_tweens(delta);
+        tree.process_all_scripts_process(delta);
+        tree.process_frame();
+    }
+    state.runtime_frame_count += 1;
+    let frame = state.runtime_frame_count;
+    send_json(stream, &format!(r#"{{"ok":true,"frame_count":{frame}}}"#));
+}
+
+fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let state = state.lock().unwrap();
+    let running = state.is_running;
+    let paused = state.is_paused;
+    let frame_count = state.runtime_frame_count;
+    let fps = if state.delta_time > 0.0 {
+        1.0 / state.delta_time
+    } else {
+        0.0
+    };
+    send_json(
+        stream,
+        &format!(
+            r#"{{"running":{running},"paused":{paused},"frame_count":{frame_count},"fps":{fps:.1}}}"#
+        ),
+    );
 }
 
 #[cfg(test)]
@@ -3221,4 +4361,414 @@ mod tests {
         assert_eq!(v["is_dir"], true);
         assert_eq!(v["children"][0]["name"], "main.tscn");
     }
+
+    #[test]
+    fn test_multi_select_state() {
+        let tree = SceneTree::new();
+        let st = EditorState::new(tree);
+        assert!(st.selected_nodes.is_empty());
+        assert!(st.clipboard.is_empty());
+        assert_eq!(st.display_settings.grid_snap_size, 8);
+    }
+    #[test]
+    fn test_clipboard_roundtrip() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut p = gdscene::node::Node::new("Player", "Node2D");
+        p.set_property("position", Variant::Vector2(Vector2::new(10.0, 20.0)));
+        let pid = tree.add_child(root, p).unwrap();
+        tree.add_child(pid, gdscene::node::Node::new("Ch", "Sprite2D"))
+            .unwrap();
+        let entry = super::node_to_clipboard(&tree, pid).unwrap();
+        assert_eq!(entry.name, "Player");
+        assert_eq!(entry.children.len(), 1);
+        let cnt = tree.node_count();
+        let nid = super::paste_clipboard_entry(&mut tree, root, &entry).unwrap();
+        assert_eq!(tree.node_count(), cnt + 2);
+        assert_eq!(tree.get_node(nid).unwrap().name(), "Player");
+    }
+    #[test]
+    fn test_settings_serde() {
+        let s = EditorDisplaySettings::default();
+        let j = serde_json::to_string(&s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["grid_snap_size"], 8);
+        assert_eq!(v["grid_visible"], true);
+    }
+    #[test]
+    fn test_multi_select_ops() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = tree
+            .add_child(root, gdscene::node::Node::new("A", "Node2D"))
+            .unwrap();
+        let b = tree
+            .add_child(root, gdscene::node::Node::new("B", "Node2D"))
+            .unwrap();
+        let mut st = EditorState::new(tree);
+        st.selected_nodes = vec![a];
+        st.selected_nodes.push(b);
+        assert_eq!(st.selected_nodes.len(), 2);
+        st.selected_nodes.retain(|&i| i != a);
+        assert_eq!(st.selected_nodes, vec![b]);
+    }
+
+    #[test]
+    fn test_runtime_play_and_status() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/runtime/status");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["running"], false);
+        let resp = http_post(port, "/api/runtime/play", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["running"], true);
+        handle.stop();
+    }
+    #[test]
+    fn test_runtime_stop() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/runtime/play", "");
+        let resp = http_post(port, "/api/runtime/stop", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["running"], false);
+        handle.stop();
+    }
+    #[test]
+    fn test_runtime_pause_toggle() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/runtime/play", "");
+        let resp = http_post(port, "/api/runtime/pause", "");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["paused"], true);
+        let resp = http_post(port, "/api/runtime/pause", "");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["paused"], false);
+        handle.stop();
+    }
+    #[test]
+    fn test_runtime_pause_when_not_running() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/runtime/pause", "");
+        assert!(resp.contains("400"));
+        handle.stop();
+    }
+    #[test]
+    fn test_runtime_step_when_paused() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/runtime/play", "");
+        http_post(port, "/api/runtime/pause", "");
+        let resp = http_post(port, "/api/runtime/step", "");
+        assert!(resp.contains("200 OK"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["frame_count"], 1);
+        handle.stop();
+    }
+    #[test]
+    fn test_runtime_step_errors() {
+        let (handle, port) = make_server();
+        assert!(http_post(port, "/api/runtime/step", "").contains("400"));
+        http_post(port, "/api/runtime/play", "");
+        assert!(http_post(port, "/api/runtime/step", "").contains("400"));
+        handle.stop();
+    }
+    #[test]
+    fn test_clone_scene_tree_preserves_structure() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut main = Node::new("Main", "Node2D");
+        main.set_property("position", Variant::Vector2(Vector2::new(10.0, 20.0)));
+        tree.add_child(root, main).unwrap();
+        let cloned = clone_scene_tree(&tree);
+        assert_eq!(cloned.node_count(), tree.node_count());
+        let cr = cloned.root_id();
+        let cm = cloned.get_node(cr).unwrap().children()[0];
+        let cmn = cloned.get_node(cm).unwrap();
+        assert_eq!(cmn.name(), "Main");
+        assert_eq!(
+            cmn.get_property("position"),
+            Variant::Vector2(Vector2::new(10.0, 20.0))
+        );
+    }
+    #[test]
+    fn test_runtime_full_cycle() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/runtime/play", "");
+        assert!(extract_body(&http_get(port, "/api/runtime/status")).contains("\"running\":true"));
+        http_post(port, "/api/runtime/pause", "");
+        http_post(port, "/api/runtime/step", "");
+        assert!(extract_body(&http_get(port, "/api/runtime/status")).contains("\"frame_count\":1"));
+        http_post(port, "/api/runtime/stop", "");
+        assert!(extract_body(&http_get(port, "/api/runtime/status")).contains("\"running\":false"));
+        handle.stop();
+    }
+    #[test]
+    fn test_script_save_and_read() {
+        let (handle, port) = make_server();
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_script.gd");
+        let path_str = script_path.to_str().unwrap();
+        let json_body = serde_json::json!({
+            "path": path_str,
+            "content": "extends Node2D\nfunc _ready():\n    pass\n"
+        });
+        let resp = http_post(port, "/api/script/save", &json_body.to_string());
+        assert!(resp.contains("200 OK"), "save should succeed: {resp}");
+        let resp_body = extract_body(&resp);
+        assert!(resp_body.contains(r#""ok":true"#));
+        let written = std::fs::read_to_string(&script_path).unwrap();
+        assert!(written.contains("extends Node2D"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_script_save_rejects_non_gd() {
+        let (handle, port) = make_server();
+        let dir = tempfile::tempdir().unwrap();
+        let path_str = dir.path().join("bad.txt").to_str().unwrap().to_string();
+        let json_body = serde_json::json!({ "path": path_str, "content": "hello" });
+        let resp = http_post(port, "/api/script/save", &json_body.to_string());
+        assert!(resp.contains("400"), "should reject non-.gd: {resp}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_script_save_missing_path() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/script/save", r#"{"content":"hello"}"#);
+        assert!(resp.contains("400"), "should require path: {resp}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_script_save_missing_content() {
+        let (handle, port) = make_server();
+        let dir = tempfile::tempdir().unwrap();
+        let path_str = dir.path().join("test.gd").to_str().unwrap().to_string();
+        let json_body = serde_json::json!({ "path": path_str });
+        let resp = http_post(port, "/api/script/save", &json_body.to_string());
+        assert!(resp.contains("400"), "should require content: {resp}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_script_save_creates_parent_dirs() {
+        let (handle, port) = make_server();
+        let dir = tempfile::tempdir().unwrap();
+        let nested_path = dir.path().join("subdir").join("nested").join("script.gd");
+        let path_str = nested_path.to_str().unwrap();
+        let json_body = serde_json::json!({ "path": path_str, "content": "extends Node\n" });
+        let resp = http_post(port, "/api/script/save", &json_body.to_string());
+        assert!(resp.contains("200 OK"), "should create dirs: {resp}");
+        assert!(nested_path.exists());
+        handle.stop();
+    }
+
+    // ---- Animation endpoint tests ----
+
+    #[test]
+    fn test_animation_create_and_list() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/animations");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 0);
+        let resp = http_post(port, "/api/animation/create", r#"{"name":"walk","length":2.0}"#);
+        assert!(resp.contains("200 OK"));
+        let resp = http_get(port, "/api/animations");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["name"], "walk");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_create_duplicate_fails() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"idle","length":1.0}"#);
+        let resp = http_post(port, "/api/animation/create", r#"{"name":"idle","length":1.0}"#);
+        assert!(resp.contains("400"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_delete() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"run","length":1.5}"#);
+        let resp = http_post(port, "/api/animation/delete", r#"{"name":"run"}"#);
+        assert!(resp.contains("200 OK"));
+        let resp = http_get(port, "/api/animations");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_delete_not_found() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/animation/delete", r#"{"name":"nope"}"#);
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_get_details() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"jump","length":0.5,"loop_mode":"loop"}"#);
+        let resp = http_get(port, "/api/animation?name=jump");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["name"], "jump");
+        assert_eq!(v["loop_mode"], "loop");
+        assert_eq!(v["tracks"].as_array().unwrap().len(), 0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_keyframe_add_and_get() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"move","length":2.0}"#);
+        let resp = http_post(port, "/api/animation/keyframe/add",
+            r#"{"animation":"move","track_node":"Player","track_property":"position","time":0.0,"value":{"type":"Float","value":0.0}}"#);
+        assert!(resp.contains("200 OK"));
+        http_post(port, "/api/animation/keyframe/add",
+            r#"{"animation":"move","track_node":"Player","track_property":"position","time":1.0,"value":{"type":"Float","value":100.0}}"#);
+        let resp = http_get(port, "/api/animation?name=move");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(v["tracks"][0]["node_path"], "Player");
+        assert_eq!(v["tracks"][0]["property"], "position");
+        assert_eq!(v["tracks"][0]["keyframes"].as_array().unwrap().len(), 2);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_keyframe_remove() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"rm","length":1.0}"#);
+        http_post(port, "/api/animation/keyframe/add",
+            r#"{"animation":"rm","track_node":"N","track_property":"p","time":0.0,"value":{"type":"Float","value":0.0}}"#);
+        http_post(port, "/api/animation/keyframe/add",
+            r#"{"animation":"rm","track_node":"N","track_property":"p","time":1.0,"value":{"type":"Float","value":1.0}}"#);
+        let resp = http_post(port, "/api/animation/keyframe/remove",
+            r#"{"animation":"rm","track_index":0,"keyframe_index":0}"#);
+        assert!(resp.contains("200 OK"));
+        let resp = http_get(port, "/api/animation?name=rm");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["tracks"][0]["keyframes"].as_array().unwrap().len(), 1);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_keyframe_remove_cleans_empty_track() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"clean","length":1.0}"#);
+        http_post(port, "/api/animation/keyframe/add",
+            r#"{"animation":"clean","track_node":"N","track_property":"p","time":0.0,"value":{"type":"Float","value":0.0}}"#);
+        http_post(port, "/api/animation/keyframe/remove",
+            r#"{"animation":"clean","track_index":0,"keyframe_index":0}"#);
+        let resp = http_get(port, "/api/animation?name=clean");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["tracks"].as_array().unwrap().len(), 0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_play_and_status() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"anim","length":1.0}"#);
+        http_post(port, "/api/animation/play", r#"{"name":"anim"}"#);
+        let resp = http_get(port, "/api/animation/status");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["playing"], true);
+        assert_eq!(v["animation_name"], "anim");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_stop() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"s","length":1.0}"#);
+        http_post(port, "/api/animation/play", r#"{"name":"s"}"#);
+        http_post(port, "/api/animation/stop", "{}");
+        let resp = http_get(port, "/api/animation/status");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["playing"], false);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_play_nonexistent_fails() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/animation/play", r#"{"name":"nope"}"#);
+        assert!(resp.contains("404"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_seek() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"seek_test","length":2.0}"#);
+        http_post(port, "/api/animation/play", r#"{"name":"seek_test"}"#);
+        http_post(port, "/api/animation/seek", r#"{"time":0.75}"#);
+        let resp = http_get(port, "/api/animation/status");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["current_time"], 0.75);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_record_toggle() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/record", r#"{"enabled":true}"#);
+        let resp = http_get(port, "/api/animation/status");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["recording"], true);
+        http_post(port, "/api/animation/record", r#"{"enabled":false}"#);
+        let resp = http_get(port, "/api/animation/status");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["recording"], false);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_delete_stops_playback() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"del_play","length":1.0}"#);
+        http_post(port, "/api/animation/play", r#"{"name":"del_play"}"#);
+        http_post(port, "/api/animation/delete", r#"{"name":"del_play"}"#);
+        let resp = http_get(port, "/api/animation/status");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["playing"], false);
+        assert!(v["animation_name"].is_null());
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_loop_mode_variants() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/animation/create", r#"{"name":"pp","length":1.0,"loop_mode":"pingpong"}"#);
+        let resp = http_get(port, "/api/animation?name=pp");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["loop_mode"], "pingpong");
+        handle.stop();
+    }
+
 }

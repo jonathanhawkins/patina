@@ -1,7 +1,7 @@
 {
-  "frame_count": 2,
-  "physics_time": 0.03333333333333333,
-  "process_time": 0.03333333333333333,
+  "frame_count": 1,
+  "physics_time": 0.016666666666666666,
+  "process_time": 0.016666666666666666,
   "scene_file": "/Users/bone/dev/games/godot/test-00/simple_hierarchy.tscn",
   "tree": {
     "children": [
@@ -16,8 +16,6 @@
                 "notifications": [
                   "NOTIFICATION_ENTER_TREE",
                   "NOTIFICATION_READY",
-                  "NOTIFICATION_PHYSICS_PROCESS",
-                  "NOTIFICATION_PROCESS",
                   "NOTIFICATION_PHYSICS_PROCESS",
                   "NOTIFICATION_PROCESS"
                 ],
@@ -54,8 +52,6 @@
             "notifications": [
               "NOTIFICATION_ENTER_TREE",
               "NOTIFICATION_READY",
-              "NOTIFICATION_PHYSICS_PROCESS",
-              "NOTIFICATION_PROCESS",
               "NOTIFICATION_PHYSICS_PROCESS",
               "NOTIFICATION_PROCESS"
             ],
@@ -94,8 +90,6 @@
               "NOTIFICATION_ENTER_TREE",
               "NOTIFICATION_READY",
               "NOTIFICATION_PHYSICS_PROCESS",
-              "NOTIFICATION_PROCESS",
-              "NOTIFICATION_PHYSICS_PROCESS",
               "NOTIFICATION_PROCESS"
             ],
             "path": "/root/Root/Child2",
@@ -132,8 +126,6 @@
           "NOTIFICATION_ENTER_TREE",
           "NOTIFICATION_READY",
           "NOTIFICATION_PHYSICS_PROCESS",
-          "NOTIFICATION_PROCESS",
-          "NOTIFICATION_PHYSICS_PROCESS",
           "NOTIFICATION_PROCESS"
         ],
         "path": "/root/Root",
@@ -144,7 +136,7 @@
           },
           "child_count": {
             "type": "Int",
-            "value": 0
+            "value": 2
           },
           "position": {
             "type": "Vector2",
@@ -170,7 +162,7 @@
           },
           "tree_ready": {
             "type": "Bool",
-            "value": false
+            "value": true
           },
           "visible": {
             "type": "Bool",
@@ -180,11 +172,11 @@
         "script_vars": {
           "child_count": {
             "type": "Int",
-            "value": 0
+            "value": 2
           },
           "tree_ready": {
             "type": "Bool",
-            "value": false
+            "value": true
           }
         }
       }
@@ -192,8 +184,6 @@
     "class": "Node",
     "name": "root",
     "notifications": [
-      "NOTIFICATION_PHYSICS_PROCESS",
-      "NOTIFICATION_PROCESS",
       "NOTIFICATION_PHYSICS_PROCESS",
       "NOTIFICATION_PROCESS"
     ],

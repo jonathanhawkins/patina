@@ -1,7 +1,7 @@
 {
-  "frame_count": 2,
-  "physics_time": 0.03333333333333333,
-  "process_time": 0.03333333333333333,
+  "frame_count": 1,
+  "physics_time": 0.016666666666666666,
+  "process_time": 0.016666666666666666,
   "scene_file": "/Users/bone/dev/games/godot/test-00/signal_test.tscn",
   "tree": {
     "children": [
@@ -15,8 +15,6 @@
               "NOTIFICATION_ENTER_TREE",
               "NOTIFICATION_READY",
               "NOTIFICATION_PHYSICS_PROCESS",
-              "NOTIFICATION_PROCESS",
-              "NOTIFICATION_PHYSICS_PROCESS",
               "NOTIFICATION_PROCESS"
             ],
             "path": "/root/Root/Emitter",
@@ -27,7 +25,7 @@
               },
               "emit_count": {
                 "type": "Int",
-                "value": 0
+                "value": 1
               },
               "position": {
                 "type": "Vector2",
@@ -59,7 +57,7 @@
             "script_vars": {
               "emit_count": {
                 "type": "Int",
-                "value": 0
+                "value": 1
               }
             }
           },
@@ -70,8 +68,6 @@
             "notifications": [
               "NOTIFICATION_ENTER_TREE",
               "NOTIFICATION_READY",
-              "NOTIFICATION_PHYSICS_PROCESS",
-              "NOTIFICATION_PROCESS",
               "NOTIFICATION_PHYSICS_PROCESS",
               "NOTIFICATION_PROCESS"
             ],
@@ -134,8 +130,6 @@
           "NOTIFICATION_ENTER_TREE",
           "NOTIFICATION_READY",
           "NOTIFICATION_PHYSICS_PROCESS",
-          "NOTIFICATION_PROCESS",
-          "NOTIFICATION_PHYSICS_PROCESS",
           "NOTIFICATION_PROCESS"
         ],
         "path": "/root/Root",
@@ -169,8 +163,6 @@
     "class": "Node",
     "name": "root",
     "notifications": [
-      "NOTIFICATION_PHYSICS_PROCESS",
-      "NOTIFICATION_PROCESS",
       "NOTIFICATION_PHYSICS_PROCESS",
       "NOTIFICATION_PROCESS"
     ],

@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd '/Users/bone/dev/games/patina/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations active '/Users/bone/dev/games/patina'"
+          },
+          {
+            "type": "command",
+            "command": "cd '/Users/bone/dev/games/patina/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli acks pending '/Users/bone/dev/games/patina' 'YOUR_AGENT_NAME' --limit 20"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd '/Users/bone/dev/games/patina/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations soon '/Users/bone/dev/games/patina' --minutes 10"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_MAIL_PROJECT='/Users/bone/dev/games/patina' AGENT_MAIL_AGENT='YOUR_AGENT_NAME' AGENT_MAIL_URL='http://127.0.0.1:8765/api/' AGENT_MAIL_TOKEN='2682e5cd154ab3ea2d8fcce03861f1fc49ac12583721c00efa54a8dd1b7c3c3c' AGENT_MAIL_INTERVAL='120' '/Users/bone/dev/games/patina/.claude/hooks/check_inbox.sh'"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__mcp-agent-mail__send_message",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd '/Users/bone/dev/games/patina/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli list-acks --project '/Users/bone/dev/games/patina' --agent 'YOUR_AGENT_NAME' --limit 10"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__mcp-agent-mail__file_reservation_paths",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd '/Users/bone/dev/games/patina/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations list '/Users/bone/dev/games/patina'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -254,6 +254,41 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 }
 #bottom-resize-handle:hover { background: var(--accent); opacity: 0.3; }
 
+
+/* Animation timeline panel */
+#animation-panel { display: flex; flex-direction: column; height: 100%; }
+.anim-toolbar {
+  display: flex; align-items: center; gap: 4px; padding: 4px 0;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.anim-toolbar select { min-width: 120px; }
+.anim-toolbar .anim-sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+.anim-record { color: #888; }
+.anim-record.active { color: #e05050; }
+#anim-time-display { color: var(--text-dim); font-size: 11px; margin-left: auto; font-family: monospace; }
+.anim-timeline-area { display: flex; flex: 1; overflow: hidden; min-height: 50px; }
+.anim-tracks {
+  width: 160px; min-width: 100px; border-right: 1px solid var(--border);
+  overflow-y: auto; flex-shrink: 0;
+}
+.anim-empty { color: var(--text-dim); font-style: italic; padding: 8px; font-size: 11px; }
+.anim-track-row {
+  display: flex; align-items: center; padding: 3px 6px; font-size: 11px;
+  border-bottom: 1px solid var(--border); height: 24px; gap: 4px;
+}
+.anim-track-node { color: var(--accent); }
+.anim-track-prop { color: var(--text-dim); }
+.anim-timeline { flex: 1; position: relative; overflow-x: auto; overflow-y: hidden; }
+#anim-timeline-canvas { display: block; cursor: crosshair; }
+.anim-playhead {
+  position: absolute; top: 0; width: 2px; height: 100%;
+  background: var(--accent); pointer-events: none; left: 0;
+}
+.anim-add-track-bar { padding: 4px 0; border-top: 1px solid var(--border); flex-shrink: 0; }
+.anim-add-track-bar button { font-size: 11px; }
+/* Recording mode indicator */
+body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
+
 /* Status bar */
 #statusbar {
   display: flex; align-items: center; gap: 16px; padding: 4px 10px;
@@ -461,6 +496,21 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 .gd-number { color: #d19a66; }
 .gd-builtin { color: #dcdcaa; }
 .gd-nodepath { color: #c586c0; }
+
+/* Settings dialog */
+#settings-dialog {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5); z-index: 300; align-items: center; justify-content: center;
+}
+#settings-dialog.open { display: flex; }
+#settings-dialog-inner {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  width: 380px; padding: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+#settings-dialog-inner h3 { font-size: 14px; color: var(--accent); margin-bottom: 12px; }
+.settings-row { display: flex; align-items: center; margin-bottom: 8px; gap: 8px; }
+.settings-label { width: 120px; font-size: 12px; color: var(--text-dim); }
+.settings-value { flex: 1; }
 </style>
 </head>
 <body>
@@ -482,6 +532,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   <div class="sep"></div>
   <button id="btn-save" title="Save Scene (Ctrl+S)">&#128190; Save</button>
   <button id="btn-load" title="Load Scene">&#128194; Load</button>
+  <div class="sep"></div>
+  <button id="btn-settings" title="Editor Settings">&#9881; Settings</button>
   <span id="scene-file-indicator"></span>
   <div class="play-buttons">
     <button class="play-btn play-main" id="btn-play" title="Play (F5)">&#9654;</button>
@@ -494,6 +546,10 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 <!-- Context menu -->
 <div id="context-menu">
   <div class="ctx-item" data-action="rename">Rename<span class="ctx-shortcut">F2</span></div>
+  <div class="ctx-item" data-action="copy">Copy<span class="ctx-shortcut">Ctrl+C</span></div>
+  <div class="ctx-item" data-action="paste">Paste<span class="ctx-shortcut">Ctrl+V</span></div>
+  <div class="ctx-item" data-action="cut">Cut<span class="ctx-shortcut">Ctrl+X</span></div>
+  <div class="ctx-separator"></div>
   <div class="ctx-item" data-action="duplicate">Duplicate<span class="ctx-shortcut">Ctrl+D</span></div>
   <div class="ctx-item" data-action="delete">Delete<span class="ctx-shortcut">Del</span></div>
   <div class="ctx-separator"></div>
@@ -557,6 +613,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
         <button class="bottom-tab active" data-tab="output">Output</button>
         <button class="bottom-tab" data-tab="scene-info">Scene Info</button>
         <button class="bottom-tab" data-tab="script">Script</button>
+        <button class="bottom-tab" data-tab="animation">Animation</button>
         <button id="bottom-toggle" title="Toggle panel">&#9650;</button>
       </div>
       <div id="bottom-panel-content">
@@ -569,6 +626,32 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
         <div class="bottom-content-tab" data-tab="script">
           <div id="script-panel">
             <div class="script-empty">Select a node with a script to view its content</div>
+          </div>
+        </div>
+        <div class="bottom-content-tab" data-tab="animation">
+          <div id="animation-panel">
+            <div class="anim-toolbar">
+              <select id="anim-select"><option value="">-- No Animation --</option></select>
+              <button id="anim-new-btn" title="New Animation">+</button>
+              <button id="anim-delete-btn" title="Delete Animation">&#x2715;</button>
+              <span class="anim-sep"></span>
+              <button id="anim-record-btn" class="anim-record" title="Toggle Recording">&#9679;</button>
+              <button id="anim-play-btn" title="Play">&#9654;</button>
+              <button id="anim-stop-btn" title="Stop">&#9632;</button>
+              <span id="anim-time-display">0.00 / 0.00</span>
+            </div>
+            <div class="anim-timeline-area">
+              <div class="anim-tracks" id="anim-tracks">
+                <div class="anim-empty">No animation selected</div>
+              </div>
+              <div class="anim-timeline" id="anim-timeline">
+                <canvas id="anim-timeline-canvas" width="600" height="120"></canvas>
+                <div id="anim-playhead" class="anim-playhead"></div>
+              </div>
+            </div>
+            <div class="anim-add-track-bar">
+              <button id="anim-add-track-btn">+ Add Track</button>
+            </div>
           </div>
         </div>
       </div>
@@ -609,11 +692,28 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   </div>
 </div>
 
+
+<!-- Settings dialog -->
+<div id="settings-dialog">
+  <div id="settings-dialog-inner">
+    <h3>Editor Settings</h3>
+    <div class="settings-row"><span class="settings-label">Grid Snap</span><div class="settings-value"><input type="checkbox" id="set-grid-snap"> <label for="set-grid-snap">Enabled</label></div></div>
+    <div class="settings-row"><span class="settings-label">Snap Size</span><div class="settings-value"><select id="set-snap-size"><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64">64</option></select></div></div>
+    <div class="settings-row"><span class="settings-label">Grid Visible</span><div class="settings-value"><input type="checkbox" id="set-grid-visible" checked></div></div>
+    <div class="settings-row"><span class="settings-label">Rulers Visible</span><div class="settings-value"><input type="checkbox" id="set-rulers-visible" checked></div></div>
+    <div class="settings-row"><span class="settings-label">Font Size</span><div class="settings-value"><select id="set-font-size"><option value="small">Small</option><option value="medium" selected>Medium</option><option value="large">Large</option></select></div></div>
+    <div style="text-align:right;margin-top:12px"><button id="settings-close">Close</button></div>
+  </div>
+</div>
+
 <!-- Status bar -->
 <div id="statusbar">
   <span>Selected: <span class="accent" id="status-selected">None</span></span>
   <span>Path: <span id="status-path">&mdash;</span></span>
   <span>Nodes: <span id="status-nodes">0</span></span>
+  <span>Tool: <span id="status-tool">Select</span></span>
+  <span>Snap: <span id="status-snap">Off</span></span>
+  <span>Zoom: <span id="status-zoom">100%</span></span>
 </div>
 
 <script>
@@ -623,6 +723,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   // State
   var selectedNodeId = null;
   var selectedNodeData = null;
+  var selectedNodeIds = new Set();  // Multi-select set
   var sceneData = null;
   var expandedNodes = new Set();
   var searchFilter = '';
@@ -630,6 +731,14 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   var currentToolMode = 'select';
   var collapsedSections = {};
   var lastLogCount = 0;
+
+  // Editor settings
+  var editorSettings = { grid_snap_enabled: false, grid_snap_size: 8, grid_visible: true, rulers_visible: true, background_color: [0.08,0.08,0.1,1], font_size: 'medium' };
+
+  // Box select state
+  var isBoxSelecting = false;
+  var boxSelectStart = null;
+  var boxSelectOverlay = null;
 
   // Drag-drop state for tree reordering
   var treeDragNodeId = null;
@@ -758,7 +867,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     if (searchFilter && hasChildren) isExpanded = true;
 
     var row = document.createElement('div');
-    row.className = 'tree-row' + (node.id === selectedNodeId ? ' selected' : '');
+    row.className = 'tree-row' + (selectedNodeIds.has(node.id) || node.id === selectedNodeId ? ' selected' : '');
     if (node.visible === false) row.className += ' hidden-node';
     row.setAttribute('data-node-id', node.id);
 
@@ -804,7 +913,30 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     row.appendChild(name);
     row.appendChild(visBtn);
 
-    row.addEventListener('click', (function(nid) { return function() { selectNode(nid); }; })(node.id));
+    row.addEventListener('click', (function(nid) { return function(e) {
+      if (e.ctrlKey || e.metaKey) {
+        // Toggle selection
+        if (selectedNodeIds.has(nid)) { selectedNodeIds.delete(nid); } else { selectedNodeIds.add(nid); }
+        selectedNodeId = selectedNodeIds.size > 0 ? Array.from(selectedNodeIds)[0] : null;
+        api('POST', '/api/node/select_multi', { node_ids: Array.from(selectedNodeIds) });
+        refreshTree(); fetchSelected();
+      } else if (e.shiftKey && selectedNodeId) {
+        // Range select among siblings
+        var parent = findNodeParent(sceneData ? sceneData.nodes : null, nid);
+        if (parent && parent.children) {
+          var ids = parent.children.map(function(c) { return c.id; });
+          var a = ids.indexOf(selectedNodeId), b = ids.indexOf(nid);
+          if (a >= 0 && b >= 0) {
+            var lo = Math.min(a, b), hi = Math.max(a, b);
+            for (var si = lo; si <= hi; si++) selectedNodeIds.add(ids[si]);
+          }
+        }
+        api('POST', '/api/node/select_multi', { node_ids: Array.from(selectedNodeIds) });
+        refreshTree(); fetchSelected();
+      } else {
+        selectedNodeIds.clear(); selectedNodeIds.add(nid); selectNode(nid);
+      }
+    }; })(node.id));
 
     row.addEventListener('contextmenu', (function(nid) { return function(e) {
       e.preventDefault(); e.stopPropagation();
@@ -946,6 +1078,9 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   async function handleContextAction(action, nodeId) {
     switch (action) {
       case 'rename': doRename(nodeId); break;
+      case 'copy': doCopy(); break;
+      case 'paste': doPaste(); break;
+      case 'cut': doCut(); break;
       case 'duplicate': doDuplicate(nodeId); break;
       case 'delete': doDelete(nodeId); break;
       case 'add-child': doAddChild(nodeId); break;
@@ -1010,6 +1145,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   }
 
   async function fetchSelected() {
+    if (selectedNodeIds.size > 1) { renderInspectorMulti(selectedNodeIds.size); return; }
     if (selectedNodeId === null) {
       renderInspectorEmpty();
       renderNodeDockEmpty();
@@ -1048,6 +1184,12 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   }
 
   // ---- Inspector ----
+  function renderInspectorMulti(count) {
+    document.getElementById('inspector').innerHTML = '<div class="insp-empty">' + count + ' nodes selected</div>';
+    document.getElementById('status-selected').textContent = count + ' nodes';
+    document.getElementById('status-path').textContent = '\u2014';
+  }
+
   function renderInspectorEmpty() {
     document.getElementById('inspector').innerHTML = '<div class="insp-empty">Select a node to inspect</div>';
     document.getElementById('status-selected').textContent = 'None';
@@ -1454,9 +1596,30 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       var c = viewportCoords(e);
       dragStartX = e.clientX; dragStartY = e.clientY;
       isDragging = false;
-      api('POST', '/api/viewport/drag_start', c);
+      // If holding Alt or in select mode clicking empty space, start box select
+      api('POST', '/api/viewport/drag_start', c).then(function(result) {
+        if (result && !result.dragging && currentToolMode === 'select') {
+          isBoxSelecting = true;
+          boxSelectStart = { x: e.clientX, y: e.clientY };
+          if (!boxSelectOverlay) {
+            boxSelectOverlay = document.createElement('div');
+            boxSelectOverlay.style.cssText = 'position:fixed;border:1px dashed rgba(100,150,255,0.8);background:rgba(100,150,255,0.15);pointer-events:none;z-index:50;display:none;';
+            document.body.appendChild(boxSelectOverlay);
+          }
+          boxSelectOverlay.style.display = 'block';
+        }
+      });
     });
     document.addEventListener('mousemove', function(e) {
+      if (isBoxSelecting && boxSelectStart) {
+        var x = Math.min(boxSelectStart.x, e.clientX);
+        var y = Math.min(boxSelectStart.y, e.clientY);
+        var w = Math.abs(e.clientX - boxSelectStart.x);
+        var h = Math.abs(e.clientY - boxSelectStart.y);
+        boxSelectOverlay.style.left = x + 'px'; boxSelectOverlay.style.top = y + 'px';
+        boxSelectOverlay.style.width = w + 'px'; boxSelectOverlay.style.height = h + 'px';
+        return;
+      }
       if (dragStartX === 0 && dragStartY === 0) return;
       if (!viewportImg) return;
       var dx = e.clientX - dragStartX;
@@ -1465,6 +1628,26 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
       if (isDragging) api('POST', '/api/viewport/drag', viewportCoords(e));
     });
     document.addEventListener('mouseup', function(e) {
+      if (isBoxSelecting && boxSelectStart) {
+        isBoxSelecting = false;
+        if (boxSelectOverlay) boxSelectOverlay.style.display = 'none';
+        var rect = viewportImg.getBoundingClientRect();
+        var scaleX = viewportImg.naturalWidth / rect.width;
+        var scaleY = viewportImg.naturalHeight / rect.height;
+        var x1 = (Math.min(boxSelectStart.x, e.clientX) - rect.left) * scaleX;
+        var y1 = (Math.min(boxSelectStart.y, e.clientY) - rect.top) * scaleY;
+        var x2 = (Math.max(boxSelectStart.x, e.clientX) - rect.left) * scaleX;
+        var y2 = (Math.max(boxSelectStart.y, e.clientY) - rect.top) * scaleY;
+        api('POST', '/api/viewport/box_select', { x1: x1, y1: y1, x2: x2, y2: y2, add: e.shiftKey }).then(function(result) {
+          if (result && result.selected_nodes) {
+            selectedNodeIds = new Set(result.selected_nodes);
+            selectedNodeId = result.selected_nodes.length > 0 ? result.selected_nodes[0] : null;
+          }
+          refreshTree(); fetchSelected();
+        });
+        boxSelectStart = null; dragStartX = 0; dragStartY = 0;
+        return;
+      }
       if (dragStartX === 0 && dragStartY === 0) return;
       if (!viewportImg) return;
       var c = viewportCoords(e);
@@ -1474,8 +1657,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
         });
       } else {
         api('POST', '/api/viewport/click', c).then(function(result) {
-          if (result && result.selected) selectedNodeId = result.selected;
-          else selectedNodeId = null;
+          if (result && result.selected) { selectedNodeId = result.selected; selectedNodeIds.clear(); selectedNodeIds.add(result.selected); }
+          else { selectedNodeId = null; selectedNodeIds.clear(); }
           refreshTree(); fetchSelected(); fetchScene();
         });
       }
@@ -1550,6 +1733,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   function updateZoomIndicator() {
     var label = document.getElementById('zoom-label');
     if (label) label.textContent = Math.round(viewportZoom * 100) + '%';
+    var szl = document.getElementById('status-zoom');
+    if (szl) szl.textContent = Math.round(viewportZoom * 100) + '%';
   }
 
   function refreshViewport() {
@@ -1584,6 +1769,8 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
 
   function setToolMode(mode) {
     currentToolMode = mode;
+    var toolEl = document.getElementById('status-tool');
+    if (toolEl) toolEl.textContent = mode.charAt(0).toUpperCase() + mode.slice(1);
     var btns = document.querySelectorAll('.tool-btn');
     for (var i = 0; i < btns.length; i++) {
       btns[i].classList.toggle('active', btns[i].getAttribute('data-tool') === mode);
@@ -1951,19 +2138,64 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     tab.innerHTML = escapeHtml(name) + (modified ? '<span class="modified-indicator"> *</span>' : '');
   }
 
+  // ---- Runtime state ----
+  var runtimeRunning = false, runtimePaused = false, runtimeFrameCount = 0, runtimeFps = 0, runtimeStatusInterval = null;
+
+  function updatePlayButtonStates() {
+    var bp = document.getElementById('btn-play'), bpa = document.getElementById('btn-pause'), bs = document.getElementById('btn-stop');
+    if (runtimeRunning) {
+      bp.style.borderColor = 'var(--accent)'; bp.style.background = 'rgba(80,200,120,0.15)';
+      bs.style.borderColor = '#e05050';
+      bpa.style.borderColor = runtimePaused ? 'var(--accent)' : ''; bpa.style.background = runtimePaused ? 'rgba(224,192,80,0.15)' : '';
+    } else { bp.style.borderColor = ''; bp.style.background = ''; bpa.style.borderColor = ''; bpa.style.background = ''; bs.style.borderColor = ''; }
+  }
+  function showPlayingOverlay(show) {
+    var o = document.getElementById('runtime-overlay');
+    if (show) {
+      if (!o) { o = document.createElement('div'); o.id = 'runtime-overlay'; o.style.cssText = 'position:absolute;top:8px;left:50%;transform:translateX(-50%);background:rgba(80,200,120,0.85);color:#000;padding:3px 14px;border-radius:3px;font-size:12px;font-weight:bold;z-index:20;letter-spacing:1px;'; var c = document.getElementById('viewport-container'); if (c) { c.style.position = 'relative'; c.appendChild(o); } }
+      o.textContent = runtimePaused ? 'PAUSED' : 'PLAYING'; o.style.background = runtimePaused ? 'rgba(224,192,80,0.85)' : 'rgba(80,200,120,0.85)';
+    } else { if (o) o.remove(); }
+  }
+  function updateRuntimeStatusBar() {
+    var sb = document.getElementById('statusbar'), rs = document.getElementById('status-runtime');
+    if (runtimeRunning) {
+      if (!rs) { rs = document.createElement('span'); rs.id = 'status-runtime'; sb.appendChild(rs); }
+      rs.innerHTML = 'Frame: <span class="accent">' + runtimeFrameCount + '</span> | FPS: <span class="accent">' + runtimeFps.toFixed(0) + '</span>';
+    } else { if (rs) rs.remove(); }
+  }
+  function setRuntimeEditingDisabled(d) {
+    var sp = document.getElementById('scene-panel'), ip = document.getElementById('inspector-panel');
+    if (d) { [sp, ip].forEach(function(p) { if (!p) return; if (!p.querySelector('.runtime-edit-msg')) { var m = document.createElement('div'); m.className = 'runtime-edit-msg'; m.style.cssText = 'padding:12px;color:var(--text-dim);font-size:12px;text-align:center;background:rgba(0,0,0,0.3);'; m.textContent = 'Stop the scene to edit'; p.appendChild(m); } }); }
+    else { document.querySelectorAll('.runtime-edit-msg').forEach(function(e) { e.remove(); }); }
+  }
+  async function pollRuntimeStatus() {
+    if (!runtimeRunning) return;
+    var r = await api('GET', '/api/runtime/status');
+    if (r) { runtimeRunning = r.running; runtimePaused = r.paused; runtimeFrameCount = r.frame_count; runtimeFps = r.fps; updatePlayButtonStates(); showPlayingOverlay(runtimeRunning); updateRuntimeStatusBar(); if (!runtimeRunning) { setRuntimeEditingDisabled(false); stopRuntimePolling(); } }
+  }
+  function startRuntimePolling() { if (runtimeStatusInterval) return; runtimeStatusInterval = setInterval(pollRuntimeStatus, 200); }
+  function stopRuntimePolling() { if (runtimeStatusInterval) { clearInterval(runtimeStatusInterval); runtimeStatusInterval = null; } }
+
   // ---- Play buttons ----
   function setupPlayButtons() {
-    document.getElementById('btn-play').addEventListener('click', function() {
-      logMessage('info', 'Play pressed (F5)');
+    document.getElementById('btn-play').addEventListener('click', async function() {
+      if (runtimeRunning) return;
+      var r = await api('POST', '/api/runtime/play');
+      if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play started (F5)'); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); }
     });
-    document.getElementById('btn-pause').addEventListener('click', function() {
-      logMessage('info', 'Pause pressed (F7)');
+    document.getElementById('btn-pause').addEventListener('click', async function() {
+      if (!runtimeRunning) return;
+      var r = await api('POST', '/api/runtime/pause');
+      if (r && r.ok) { runtimePaused = r.paused; logMessage('info', runtimePaused ? 'Paused (F7)' : 'Resumed (F7)'); updatePlayButtonStates(); showPlayingOverlay(true); }
     });
-    document.getElementById('btn-stop').addEventListener('click', function() {
-      logMessage('info', 'Stop pressed (F8)');
+    document.getElementById('btn-stop').addEventListener('click', async function() {
+      var r = await api('POST', '/api/runtime/stop');
+      if (r && r.ok) { runtimeRunning = false; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Stopped (F8)'); updatePlayButtonStates(); showPlayingOverlay(false); updateRuntimeStatusBar(); setRuntimeEditingDisabled(false); stopRuntimePolling(); }
     });
-    document.getElementById('btn-play-current').addEventListener('click', function() {
-      logMessage('info', 'Play Current Scene pressed (F6)');
+    document.getElementById('btn-play-current').addEventListener('click', async function() {
+      if (runtimeRunning) return;
+      var r = await api('POST', '/api/runtime/play');
+      if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play Current Scene (F6)'); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); }
     });
   }
 
@@ -2036,9 +2268,12 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     document.addEventListener('keydown', function(e) {
       if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'SELECT')) return;
 
-      if (e.key === 'Delete' && selectedNodeId !== null) { e.preventDefault(); doDelete(selectedNodeId); return; }
+      if (e.key === 'Delete') { e.preventDefault(); if (selectedNodeIds.size > 1) { doDeleteMulti(); } else if (selectedNodeId !== null) { doDelete(selectedNodeId); } return; }
       if (e.key === 'F2' && selectedNodeId !== null) { e.preventDefault(); doRename(selectedNodeId); return; }
       if (e.ctrlKey && e.key === 'd' && selectedNodeId !== null) { e.preventDefault(); doDuplicate(selectedNodeId); return; }
+      if (e.ctrlKey && e.key === 'c') { e.preventDefault(); doCopy(); return; }
+      if (e.ctrlKey && e.key === 'v') { e.preventDefault(); doPaste(); return; }
+      if (e.ctrlKey && e.key === 'x') { e.preventDefault(); doCut(); return; }
       if (e.ctrlKey && e.key === 'z' && !e.shiftKey) {
         e.preventDefault(); api('POST', '/api/undo').then(function() { fetchScene(); if (selectedNodeId) fetchSelected(); }); return;
       }
@@ -2074,6 +2309,53 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     });
   }
 
+  // ---- Multi-delete ----
+  async function doDeleteMulti() {
+    if (selectedNodeIds.size === 0) return;
+    if (!confirm('Delete ' + selectedNodeIds.size + ' selected nodes?')) return;
+    for (var id of selectedNodeIds) { await api('POST', '/api/node/delete', { node_id: id }); }
+    selectedNodeId = null; selectedNodeData = null; selectedNodeIds.clear();
+    renderInspectorEmpty(); await fetchScene();
+  }
+
+  // ---- Copy/Paste ----
+  async function doCopy() {
+    var ids = selectedNodeIds.size > 0 ? Array.from(selectedNodeIds) : (selectedNodeId ? [selectedNodeId] : []);
+    if (ids.length === 0) return;
+    await api('POST', '/api/node/copy', { node_ids: ids });
+    logMessage('info', 'Copied ' + ids.length + ' node(s)');
+  }
+  async function doPaste() {
+    var parentId = selectedNodeId || (sceneData && sceneData.nodes ? sceneData.nodes.id : null);
+    var result = await api('POST', '/api/node/paste', { parent_id: parentId });
+    if (result && result.ok) {
+      if (parentId) expandedNodes.add(parentId);
+      await fetchScene(); await fetchSelected();
+      logMessage('info', 'Pasted ' + (result.pasted || 0) + ' node(s)');
+    }
+  }
+  async function doCut() {
+    var ids = selectedNodeIds.size > 0 ? Array.from(selectedNodeIds) : (selectedNodeId ? [selectedNodeId] : []);
+    if (ids.length === 0) return;
+    await api('POST', '/api/node/cut', { node_ids: ids });
+    selectedNodeId = null; selectedNodeData = null; selectedNodeIds.clear();
+    renderInspectorEmpty(); await fetchScene();
+    logMessage('info', 'Cut ' + ids.length + ' node(s)');
+  }
+
+  // ---- Settings ----
+  var settingsDialogOpen = false;
+  async function fetchSettings() {
+    var data = await api('GET', '/api/settings');
+    if (data) editorSettings = data;
+  }
+  async function updateSetting(key, value) {
+    var body = {}; body[key] = value;
+    var data = await api('POST', '/api/settings', body);
+    if (data) editorSettings = data;
+  }
+
+
   // ---- Polling ----
   function startPolling() {
     setInterval(fetchScene, 500);
@@ -2081,6 +2363,7 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     setInterval(fetchLogs, 1000);
     setInterval(function() { fetchSceneInfo(); updateSceneTab(); }, 2000);
     setInterval(fetchFileSystem, 5000);
+    fetchSettings();
   }
 
   // ---- Right panel tabs (Inspector / Node) ----
@@ -2358,6 +2641,323 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
     document.getElementById('script-panel').innerHTML = '<div class="script-empty">Select a node with a script to view its content</div>';
   }
 
+
+  // ---- Settings Dialog ----
+  function setupSettingsDialog() {
+    document.getElementById('btn-settings').addEventListener('click', function() {
+      var d = document.getElementById('settings-dialog');
+      d.classList.add('open');
+      document.getElementById('set-grid-snap').checked = editorSettings.grid_snap_enabled;
+      document.getElementById('set-snap-size').value = String(editorSettings.grid_snap_size);
+      document.getElementById('set-grid-visible').checked = editorSettings.grid_visible;
+      document.getElementById('set-rulers-visible').checked = editorSettings.rulers_visible;
+      document.getElementById('set-font-size').value = editorSettings.font_size;
+    });
+    document.getElementById('settings-close').addEventListener('click', function() {
+      document.getElementById('settings-dialog').classList.remove('open');
+    });
+    document.getElementById('settings-dialog').addEventListener('click', function(e) {
+      if (e.target === this) this.classList.remove('open');
+    });
+    document.getElementById('set-grid-snap').addEventListener('change', function() {
+      updateSetting('grid_snap_enabled', this.checked);
+      document.getElementById('status-snap').textContent = this.checked ? editorSettings.grid_snap_size + 'px' : 'Off';
+    });
+    document.getElementById('set-snap-size').addEventListener('change', function() {
+      updateSetting('grid_snap_size', parseInt(this.value));
+      if (editorSettings.grid_snap_enabled) document.getElementById('status-snap').textContent = this.value + 'px';
+    });
+    document.getElementById('set-grid-visible').addEventListener('change', function() { updateSetting('grid_visible', this.checked); });
+    document.getElementById('set-rulers-visible').addEventListener('change', function() { updateSetting('rulers_visible', this.checked); });
+    document.getElementById('set-font-size').addEventListener('change', function() {
+      updateSetting('font_size', this.value);
+      var sizes = { small: '11px', medium: '13px', large: '15px' };
+      document.body.style.fontSize = sizes[this.value] || '13px';
+    });
+  }
+
+
+  // ---- Animation Panel ----
+  var currentAnimName = null;
+  var animPlaying = false;
+  var animPlayInterval = null;
+
+  function setupAnimationPanel() {
+    var select = document.getElementById('anim-select');
+    var newBtn = document.getElementById('anim-new-btn');
+    var delBtn = document.getElementById('anim-delete-btn');
+    var recordBtn = document.getElementById('anim-record-btn');
+    var playBtn = document.getElementById('anim-play-btn');
+    var stopBtn = document.getElementById('anim-stop-btn');
+    var addTrackBtn = document.getElementById('anim-add-track-btn');
+
+    select.addEventListener('change', function() {
+      currentAnimName = this.value || null;
+      refreshAnimationPanel();
+    });
+
+    newBtn.addEventListener('click', function() {
+      var name = prompt('Animation name:', 'NewAnimation');
+      if (!name) return;
+      var length = parseFloat(prompt('Length (seconds):', '1.0')) || 1.0;
+      api('POST', '/api/animation/create', { name: name, length: length }).then(function() {
+        refreshAnimationList().then(function() {
+          document.getElementById('anim-select').value = name;
+          currentAnimName = name;
+          refreshAnimationPanel();
+        });
+      });
+    });
+
+    delBtn.addEventListener('click', function() {
+      if (!currentAnimName) return;
+      if (!confirm('Delete animation "' + currentAnimName + '"?')) return;
+      api('POST', '/api/animation/delete', { name: currentAnimName }).then(function() {
+        currentAnimName = null;
+        refreshAnimationList();
+        refreshAnimationPanel();
+      });
+    });
+
+    recordBtn.addEventListener('click', function() {
+      var isActive = recordBtn.classList.toggle('active');
+      document.body.classList.toggle('anim-recording', isActive);
+      api('POST', '/api/animation/record', { enabled: isActive });
+    });
+
+    playBtn.addEventListener('click', function() {
+      if (!currentAnimName) return;
+      api('POST', '/api/animation/play', { name: currentAnimName }).then(function() {
+        startAnimPlayback();
+      });
+    });
+
+    stopBtn.addEventListener('click', function() {
+      api('POST', '/api/animation/stop', {}).then(function() {
+        stopAnimPlayback();
+      });
+    });
+
+    addTrackBtn.addEventListener('click', function() {
+      if (!currentAnimName) { alert('Select an animation first'); return; }
+      var nodeName = prompt('Node name (e.g. Player):');
+      if (!nodeName) return;
+      var prop = prompt('Property (e.g. position):');
+      if (!prop) return;
+      api('POST', '/api/animation/keyframe/add', {
+        animation: currentAnimName, track_node: nodeName, track_property: prop,
+        time: 0.0, value: { type: 'Float', value: 0 }
+      }).then(function() { refreshAnimationPanel(); });
+    });
+
+    // Timeline canvas click for scrubbing
+    var canvas = document.getElementById('anim-timeline-canvas');
+    canvas.addEventListener('mousedown', function(e) { scrubTimeline(e, canvas); });
+    canvas.addEventListener('mousemove', function(e) {
+      if (e.buttons === 1) scrubTimeline(e, canvas);
+    });
+    canvas.addEventListener('dblclick', function(e) { addKeyframeAtClick(e, canvas); });
+  }
+
+  function scrubTimeline(e, canvas) {
+    if (!currentAnimName) return;
+    var rect = canvas.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName)).then(function(anim) {
+      if (!anim) return;
+      var time = (x / canvas.width) * anim.length;
+      time = Math.max(0, Math.min(anim.length, time));
+      api('POST', '/api/animation/seek', { time: time }).then(function() {
+        refreshAnimationPanel();
+        refreshViewport();
+      });
+    });
+  }
+
+  function addKeyframeAtClick(e, canvas) {
+    if (!currentAnimName) return;
+    var rect = canvas.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    var y = e.clientY - rect.top;
+    api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName)).then(function(anim) {
+      if (!anim || !anim.tracks.length) return;
+      var time = (x / canvas.width) * anim.length;
+      var trackHeight = 24;
+      var trackIdx = Math.floor(y / trackHeight);
+      if (trackIdx >= anim.tracks.length) return;
+      var track = anim.tracks[trackIdx];
+      var val = prompt('Value for ' + track.node_path + '.' + track.property + ' at t=' + time.toFixed(2) + ':');
+      if (val === null) return;
+      var numVal = parseFloat(val);
+      api('POST', '/api/animation/keyframe/add', {
+        animation: currentAnimName, track_node: track.node_path, track_property: track.property,
+        time: time, value: { type: 'Float', value: isNaN(numVal) ? 0 : numVal }
+      }).then(function() { refreshAnimationPanel(); });
+    });
+  }
+
+  function startAnimPlayback() {
+    animPlaying = true;
+    if (animPlayInterval) clearInterval(animPlayInterval);
+    animPlayInterval = setInterval(function() {
+      api('GET', '/api/animation/status').then(function(status) {
+        if (!status || !status.playing) { stopAnimPlayback(); return; }
+        var newTime = status.current_time + (1.0 / 30.0);
+        api('POST', '/api/animation/seek', { time: newTime }).then(function() {
+          refreshAnimTimeline();
+          refreshViewport();
+        });
+      });
+    }, 1000 / 30);
+  }
+
+  function stopAnimPlayback() {
+    animPlaying = false;
+    if (animPlayInterval) { clearInterval(animPlayInterval); animPlayInterval = null; }
+    refreshAnimTimeline();
+  }
+
+  async function refreshAnimationList() {
+    var data = await api('GET', '/api/animations');
+    if (!data) return;
+    var select = document.getElementById('anim-select');
+    var cur = select.value;
+    select.innerHTML = '<option value="">-- No Animation --</option>';
+    for (var i = 0; i < data.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = data[i].name;
+      opt.textContent = data[i].name + ' (' + data[i].length.toFixed(1) + 's)';
+      select.appendChild(opt);
+    }
+    if (cur && data.some(function(a) { return a.name === cur; })) {
+      select.value = cur;
+    }
+  }
+
+  async function refreshAnimationPanel() {
+    if (!currentAnimName) {
+      document.getElementById('anim-tracks').innerHTML = '<div class="anim-empty">No animation selected</div>';
+      drawTimeline(null, 0);
+      document.getElementById('anim-time-display').textContent = '0.00 / 0.00';
+      return;
+    }
+    var anim = await api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName));
+    if (!anim) return;
+    var status = await api('GET', '/api/animation/status');
+    var curTime = (status && status.current_time) || 0;
+
+    // Track list
+    var tracksEl = document.getElementById('anim-tracks');
+    if (anim.tracks.length === 0) {
+      tracksEl.innerHTML = '<div class="anim-empty">No tracks. Click + Add Track.</div>';
+    } else {
+      var html = '';
+      for (var i = 0; i < anim.tracks.length; i++) {
+        html += '<div class="anim-track-row">' +
+          '<span class="anim-track-node">' + escapeHtml(anim.tracks[i].node_path) + '</span>' +
+          '<span class="anim-track-prop">.' + escapeHtml(anim.tracks[i].property) + '</span>' +
+          '</div>';
+      }
+      tracksEl.innerHTML = html;
+    }
+
+    // Time display
+    document.getElementById('anim-time-display').textContent =
+      curTime.toFixed(2) + ' / ' + anim.length.toFixed(2);
+
+    drawTimeline(anim, curTime);
+  }
+
+  function refreshAnimTimeline() {
+    if (!currentAnimName) return;
+    Promise.all([
+      api('GET', '/api/animation?name=' + encodeURIComponent(currentAnimName)),
+      api('GET', '/api/animation/status')
+    ]).then(function(results) {
+      var anim = results[0];
+      var status = results[1];
+      if (!anim) return;
+      var curTime = (status && status.current_time) || 0;
+      document.getElementById('anim-time-display').textContent =
+        curTime.toFixed(2) + ' / ' + anim.length.toFixed(2);
+      drawTimeline(anim, curTime);
+    });
+  }
+
+  function drawTimeline(anim, currentTime) {
+    var canvas = document.getElementById('anim-timeline-canvas');
+    var ctx = canvas.getContext('2d');
+    var w = canvas.width;
+    var h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    if (!anim) return;
+
+    var length = anim.length || 1;
+    var trackHeight = 24;
+
+    // Background
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, w, h);
+
+    // Time ruler
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, w, 16);
+    ctx.strokeStyle = '#333';
+    ctx.fillStyle = '#666';
+    ctx.font = '9px monospace';
+    var step = 0.5;
+    if (length > 5) step = 1.0;
+    if (length > 20) step = 5.0;
+    for (var t = 0; t <= length; t += step) {
+      var x = (t / length) * w;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, 16);
+      ctx.stroke();
+      ctx.fillText(t.toFixed(1), x + 2, 12);
+    }
+
+    // Track rows
+    for (var i = 0; i < anim.tracks.length; i++) {
+      var y = 16 + i * trackHeight;
+      ctx.strokeStyle = '#2a2a2a';
+      ctx.beginPath();
+      ctx.moveTo(0, y + trackHeight);
+      ctx.lineTo(w, y + trackHeight);
+      ctx.stroke();
+
+      // Keyframe diamonds
+      var kfs = anim.tracks[i].keyframes;
+      for (var j = 0; j < kfs.length; j++) {
+        var kx = (kfs[j].time / length) * w;
+        var ky = y + trackHeight / 2;
+        ctx.fillStyle = '#d4a574';
+        ctx.beginPath();
+        ctx.moveTo(kx, ky - 5);
+        ctx.lineTo(kx + 5, ky);
+        ctx.lineTo(kx, ky + 5);
+        ctx.lineTo(kx - 5, ky);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    // Playhead
+    var phX = (currentTime / length) * w;
+    ctx.strokeStyle = '#d4a574';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(phX, 0);
+    ctx.lineTo(phX, h);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+
+    // Update playhead div
+    var playhead = document.getElementById('anim-playhead');
+    playhead.style.left = phX + 'px';
+  }
+
   // ---- Init ----
   setupViewport();
   setupToolbar();
@@ -2370,6 +2970,9 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   setupConnectDialog();
   setupAddNodeDialog();
   setupPlayButtons();
+  setupAnimationPanel();
+  refreshAnimationList();
+  setupSettingsDialog();
   setupLeftDivider();
   fetchScene();
   fetchSelected();
