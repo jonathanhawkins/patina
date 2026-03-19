@@ -85,9 +85,18 @@ impl EditorState {
     }
 }
 
+/// Separate cache for viewport images — avoids Mutex contention with scene tree.
+pub struct ViewportCache {
+    /// Cached PNG bytes.
+    pub png: Mutex<Option<Vec<u8>>>,
+    /// Cached BMP bytes.
+    pub bmp: Mutex<Option<Vec<u8>>>,
+}
+
 /// Handle returned by [`start`], used to interact with the running server.
 pub struct EditorServerHandle {
     state: Arc<Mutex<EditorState>>,
+    viewport_cache: Arc<ViewportCache>,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -96,32 +105,40 @@ impl EditorServerHandle {
     /// Starts the editor HTTP server on the given port.
     pub fn start(port: u16, state: EditorState) -> Self {
         let state = Arc::new(Mutex::new(state));
+        let viewport_cache = Arc::new(ViewportCache {
+            png: Mutex::new(None),
+            bmp: Mutex::new(None),
+        });
         let running = Arc::new(AtomicBool::new(true));
 
         let state_clone = Arc::clone(&state);
+        let cache_clone = Arc::clone(&viewport_cache);
         let running_clone = Arc::clone(&running);
         let thread = thread::spawn(move || {
-            run_server(state_clone, running_clone, port);
+            run_server(state_clone, cache_clone, running_clone, port);
         });
 
         Self {
             state,
+            viewport_cache,
             running,
             thread: Some(thread),
         }
     }
 
     /// Updates the latest frame buffer for viewport endpoints.
-    /// Pre-encodes PNG and BMP so serving is instant.
+    /// Pre-encodes PNG and BMP into separate cache (no main Mutex contention).
     pub fn update_frame(&self, fb: FrameBuffer) {
         let png = encode_png(&fb);
         let bmp = encode_bmp(&fb);
+        // Update viewport cache (separate lock from scene tree)
+        *self.viewport_cache.png.lock().unwrap() = Some(png);
+        *self.viewport_cache.bmp.lock().unwrap() = Some(bmp);
+        // Update scene state
         let mut state = self.state.lock().unwrap();
         state.viewport_width = fb.width;
         state.viewport_height = fb.height;
         state.frame_buffer = Some(fb);
-        state.cached_png = Some(png);
-        state.cached_bmp = Some(bmp);
     }
 
     /// Returns a reference to the shared state for external access.
@@ -138,7 +155,12 @@ impl EditorServerHandle {
     }
 }
 
-fn run_server(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>, port: u16) {
+fn run_server(
+    state: Arc<Mutex<EditorState>>,
+    viewport_cache: Arc<ViewportCache>,
+    running: Arc<AtomicBool>,
+    port: u16,
+) {
     let listener = match TcpListener::bind(format!("127.0.0.1:{port}")) {
         Ok(l) => l,
         Err(e) => {
@@ -159,11 +181,12 @@ fn run_server(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>, port: u1
         match listener.accept() {
             Ok((stream, _)) => {
                 let state_clone = Arc::clone(&state);
+                let cache_clone = Arc::clone(&viewport_cache);
                 // Handle each connection in its own thread so concurrent
                 // requests (viewport poll + scene poll + inspector) don't block each other.
                 thread::spawn(move || {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        handle_connection(&state_clone, stream);
+                        handle_connection(&state_clone, &cache_clone, stream);
                     }));
                 });
             }
@@ -268,7 +291,11 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn handle_connection(state: &Arc<Mutex<EditorState>>, mut stream: TcpStream) {
+fn handle_connection(
+    state: &Arc<Mutex<EditorState>>,
+    viewport_cache: &Arc<ViewportCache>,
+    mut stream: TcpStream,
+) {
     let req = match parse_request(&mut stream) {
         Some(r) => r,
         None => return,
@@ -284,8 +311,8 @@ fn handle_connection(state: &Arc<Mutex<EditorState>>, mut stream: TcpStream) {
             api_get_node(state, id_str, &mut stream);
         }
         ("GET", "/api/selected") => api_get_selected(state, &mut stream),
-        ("GET", "/api/viewport") => api_get_viewport_bmp(state, &mut stream),
-        ("GET", "/api/viewport/png") => api_get_viewport_png(state, &mut stream),
+        ("GET", "/api/viewport") => api_get_viewport_bmp(viewport_cache, &mut stream),
+        ("GET", "/api/viewport/png") => api_get_viewport_png(viewport_cache, &mut stream),
         ("POST", "/api/node/add") => api_add_node(state, &req.body, &mut stream),
         ("POST", "/api/node/delete") => api_delete_node(state, &req.body, &mut stream),
         ("POST", "/api/node/select") => api_select_node(state, &req.body, &mut stream),
@@ -810,12 +837,12 @@ fn api_redo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(stream, r#"{"ok":true}"#);
 }
 
-/// `GET /api/viewport` — returns the latest frame as BMP (from cache).
-fn api_get_viewport_bmp(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let state = state.lock().unwrap();
-    match &state.cached_bmp {
-        Some(bmp) => {
-            send_binary(stream, "image/bmp", bmp);
+/// `GET /api/viewport` — returns the latest frame as BMP (from separate cache).
+fn api_get_viewport_bmp(cache: &Arc<ViewportCache>, stream: &mut TcpStream) {
+    let bmp = cache.bmp.lock().unwrap();
+    match &*bmp {
+        Some(data) => {
+            send_binary(stream, "image/bmp", data);
         }
         None => {
             send_error(stream, 404, "no frame available");
@@ -823,12 +850,12 @@ fn api_get_viewport_bmp(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream)
     }
 }
 
-/// `GET /api/viewport/png` — returns the latest frame as PNG (from cache).
-fn api_get_viewport_png(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let state = state.lock().unwrap();
-    match &state.cached_png {
-        Some(png) => {
-            send_binary(stream, "image/png", png);
+/// `GET /api/viewport/png` — returns the latest frame as PNG (from separate cache).
+fn api_get_viewport_png(cache: &Arc<ViewportCache>, stream: &mut TcpStream) {
+    let png = cache.png.lock().unwrap();
+    match &*png {
+        Some(data) => {
+            send_binary(stream, "image/png", data);
         }
         None => {
             send_error(stream, 404, "no frame available");
