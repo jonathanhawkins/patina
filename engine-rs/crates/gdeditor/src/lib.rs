@@ -632,6 +632,28 @@ impl Editor {
         self.plugins.iter().map(|p| p.name()).collect()
     }
 
+    /// Enables a plugin by name, calling its `on_enable` hook.
+    pub fn enable_plugin(&mut self, name: &str) -> bool {
+        for p in &mut self.plugins {
+            if p.name() == name {
+                p.on_enable();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Disables a plugin by name, calling its `on_disable` hook.
+    pub fn disable_plugin(&mut self, name: &str) -> bool {
+        for p in &mut self.plugins {
+            if p.name() == name {
+                p.on_disable();
+                return true;
+            }
+        }
+        false
+    }
+
     /// Notifies all plugins that a node was selected.
     pub fn notify_selection_changed(&mut self) {
         // We need to call plugin methods but can't borrow self mutably
@@ -650,6 +672,12 @@ impl Editor {
 pub trait EditorPlugin {
     /// Returns the plugin's display name.
     fn name(&self) -> &str;
+
+    /// Called when the plugin is enabled.
+    fn on_enable(&mut self) {}
+
+    /// Called when the plugin is disabled.
+    fn on_disable(&mut self) {}
 
     /// Called when the selected node changes.
     fn on_selection_changed(&mut self, _selected: Option<NodeId>) {}
@@ -1133,5 +1161,47 @@ position = Vector2(10, 20)
         c.undo_tilemap(&mut s).unwrap();
         assert_eq!(s.get(n).unwrap().width, 5);
         assert_eq!(s.get(n).unwrap().get(4, 4), Some(7));
+    }
+
+    // ===== Batch 3: pat-0fa Plugin on_enable/on_disable =====
+
+    struct LifecyclePlugin {
+        enabled_count: Rc<Cell<u32>>,
+        disabled_count: Rc<Cell<u32>>,
+    }
+
+    impl EditorPlugin for LifecyclePlugin {
+        fn name(&self) -> &str {
+            "LifecyclePlugin"
+        }
+        fn on_enable(&mut self) {
+            self.enabled_count.set(self.enabled_count.get() + 1);
+        }
+        fn on_disable(&mut self) {
+            self.disabled_count.set(self.disabled_count.get() + 1);
+        }
+    }
+
+    #[test]
+    fn plugin_enable_disable_hooks() {
+        let mut editor = make_editor();
+        let en = Rc::new(Cell::new(0u32));
+        let dis = Rc::new(Cell::new(0u32));
+        let plugin = LifecyclePlugin {
+            enabled_count: en.clone(),
+            disabled_count: dis.clone(),
+        };
+        editor.add_plugin(Box::new(plugin));
+
+        assert!(editor.enable_plugin("LifecyclePlugin"));
+        assert_eq!(en.get(), 1);
+        assert_eq!(dis.get(), 0);
+
+        assert!(editor.disable_plugin("LifecyclePlugin"));
+        assert_eq!(dis.get(), 1);
+
+        // Non-existent plugin returns false
+        assert!(!editor.enable_plugin("NoSuchPlugin"));
+        assert!(!editor.disable_plugin("NoSuchPlugin"));
     }
 }
