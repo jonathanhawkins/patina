@@ -196,3 +196,45 @@ must confirm no orphaned or stale golden files.
 
 **v1 ship blockers**: 1 item remaining
 - `pat-ijc`: CI execution path for render golden tests
+
+---
+
+## Audio Milestone — Stub Contract (pat-dd3)
+
+The audio milestone defines the minimum viable audio contract for the 2D
+milestone. The goal is not playback — it is crash-free existence.
+
+**Exit criteria**:
+- `AudioStreamPlayer` node can be created via `Node::new("MyAudio", "AudioStreamPlayer")`
+- The node has expected stub properties: `volume_db`, `bus`, `playing`, `stream_length`
+- Creating, configuring, and dropping the node does not panic
+- `AudioStreamPlayback` state machine (play/pause/stop/seek/advance) works correctly
+- `AudioMixer` bus management (add/remove/move/mute/solo) works correctly
+
+| Requirement | Status | Test files |
+|-------------|--------|------------|
+| Stub node creation | **Pass** | `audio_smoke_test` (6) |
+| Playback state machine | **Pass** | `gdaudio` units (17) |
+| Mixer bus management | **Pass** | `gdaudio` units (17) |
+
+**Not in scope**: actual audio decoding, PCM output, platform audio backends,
+spatial audio, `AudioServer` singleton integration with scene tree.
+
+---
+
+## Runtime Parity Gate — Editor Feature Unlock
+
+The editor feature gate (defined in `AGENTS.md`) requires all runtime parity
+exits (Gates 1–8) to be green before new `gdeditor` features can be added.
+
+**Status**: **Met** as of 2026-03-19.
+
+All gates except the CI render path (pat-ijc) are passing. The editor feature
+gate considers runtime _parity_ exits, not CI infrastructure — the gate is met.
+
+- Gates 1–5, 7–8: **All pass** (lifecycle, physics, input, signals, resources, GDScript, CI)
+- Gate 6 (Render): **Pass** for pixel parity; CI path is infrastructure, not parity
+
+Editor work is now allowed in maintenance-only mode: bug fixes, stability
+improvements, and smoke tests. New feature work requires explicit project lead
+approval.

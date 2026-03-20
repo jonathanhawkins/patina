@@ -75,14 +75,15 @@ This document tracks the implementation and compatibility status of each Patina 
 | Platform / Windowing | 24 lifecycle tests | No Godot windowing behavior comparison |
 | Editor | 291 tests (units + integration) | Maintenance-only; no parity target |
 
-### Deferred (not started for 2D milestone)
+### Deferred (not in 2D milestone)
 
-| Subsystem | Milestone |
-|-----------|-----------|
-| 3D Math (`Vector3`, `Basis`, `Transform3D`, `Quaternion`) | Phase 6+ |
-| 3D Nodes (`Node3D`, `MeshInstance3D`, `Camera3D`) | Phase 6+ |
-| 3D Physics (`PhysicsServer3D`, `RigidBody3D`) | Phase 6+ |
-| 3D Servers (`RenderingServer` 3D paths, `XRServer`) | Phase 6+ |
+| Subsystem | Milestone | Notes |
+|-----------|-----------|-------|
+| 3D Math (`Vector3`, `Basis`, `Transform3D`, `Quaternion`) | Phase 6+ | — |
+| 3D Nodes (`Node3D`, `MeshInstance3D`, `Camera3D`, `Light3D`) | Phase 6+ | Explicitly out of scope for 2D milestone (pat-bwg) |
+| 3D Physics (`PhysicsServer3D`, `RigidBody3D`) | Phase 6+ | — |
+| 3D Servers (`RenderingServer` 3D paths, `XRServer`) | Phase 6+ | — |
+| Audio (full playback) | Audio milestone | Stub exists; see EXIT_CRITERIA.md audio gate (pat-dd3) |
 
 ---
 

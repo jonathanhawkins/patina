@@ -123,6 +123,19 @@ The `golden_staleness_test` (Tier 2) verifies that:
 If a golden is stale, regenerate it by running the corresponding test with
 `--ignored` or re-running the generator (see `tools/oracle/`).
 
+## Editor tests (maintenance-only)
+
+The following test files cover `gdeditor` functionality and are classified as
+**maintenance-only**. They exist to catch regressions in existing editor
+behavior — not to validate new features. Do not add new feature coverage to
+these files until the editor feature gate is lifted (see `AGENTS.md`).
+
+| Test file | Tests | Scope |
+|---|---|---|
+| `editor_test.rs` | 24 | Integration: server, API, undo/redo, save/load |
+| `editor_smoke_test.rs` | 6 | Smoke: server starts, endpoints respond, round-trips work |
+| `gdeditor` unit tests | 267 | Crate internals |
+
 ## Naming conventions
 
 - Tests containing `golden` or `staleness` in their name are Tier 2.

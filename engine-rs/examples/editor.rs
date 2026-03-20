@@ -3,6 +3,17 @@
 //! Loads a `.tscn` scene file and serves a web-based editor interface
 //! for inspecting and modifying the scene tree in real time.
 //!
+//! ## Current limitations
+//!
+//! - **Play/stop mode (pat-zdc)**: The editor has `is_running`/`is_paused`
+//!   state wired into the main loop, but there is no formal play/stop/edit-lock
+//!   API exposed via HTTP endpoints. Formalizing a play-mode workflow with
+//!   proper edit-lock semantics is deferred to post-runtime-parity work.
+//!
+//! - **Multi-tab / session switching (pat-vww)**: The editor is single-scene.
+//!   Opening, switching, and closing multiple scene tabs is not supported.
+//!   Multi-tab session management is deferred to post-runtime-parity work.
+//!
 //! Usage:
 //!   cargo run --example editor
 //!   cargo run --example editor -- fixtures/scenes/demo_2d.tscn

@@ -1,6 +1,8 @@
 use godot::prelude::*;
 
+mod classdb_probe;
 mod property_probe;
+mod resource_probe;
 mod scene_probe;
 mod signal_probe;
 
@@ -39,6 +41,18 @@ impl PatinaSmokeProbe {
         scene_probe::emit(&base);
         property_probe::emit(&base, &self.probe_label, self.probe_count);
         signal_probe::emit(self, &mut base);
+    }
+
+    /// Run resource metadata probe for a given path.
+    #[func]
+    fn run_resource_probe(&self, path: GString) {
+        resource_probe::emit_for_path(&path.to_string());
+    }
+
+    /// Run ClassDB probe for the 17 core classes.
+    #[func]
+    fn run_classdb_probe(&self) {
+        classdb_probe::emit();
     }
 
     #[func]

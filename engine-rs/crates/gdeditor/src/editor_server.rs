@@ -4082,6 +4082,20 @@ mod tests {
     }
 
     #[test]
+    fn test_editor_html_contains_statusbar() {
+        // pat-rjd: output panel / status bar element must be present in editor HTML
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("id=\"statusbar\""),
+            "editor HTML must contain statusbar element"
+        );
+        handle.stop();
+    }
+
+    #[test]
     fn test_get_scene() {
         let (handle, port) = make_server();
         let resp = http_get(port, "/api/scene");
@@ -6331,6 +6345,509 @@ position = Vector2(10, 20)
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+        handle.stop();
+    }
+
+    // ===== pat-0lo: add-node and delete-node toolbar coverage =====
+
+    #[test]
+    fn test_add_node_returns_id_and_appears_in_scene() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(r#"{{"parent_id":{main_id},"name":"Cannon","class_name":"Area2D"}}"#);
+        let resp = http_post(port, "/api/node/add", &body);
+        assert!(resp.contains("200 OK"));
+        let new_id: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        let new_id = new_id["id"].as_u64().unwrap();
+
+        // Verify via GET /api/node/<id>
+        let node_resp = http_get(port, &format!("/api/node/{new_id}"));
+        assert!(node_resp.contains("200 OK"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        assert_eq!(v["name"], "Cannon");
+        assert_eq!(v["class"], "Area2D");
+
+        // Verify appears in GET /api/scene
+        let scene_resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&scene_resp);
+        let scene: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let children = scene["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap();
+        assert!(
+            children.iter().any(|c| c["name"] == "Cannon"),
+            "Cannon should appear as child of Main in scene tree"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_delete_node_removes_from_scene_and_404_on_get() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add then delete
+        let add_body =
+            format!(r#"{{"parent_id":{main_id},"name":"Ephemeral","class_name":"Node2D"}}"#);
+        let add_resp = http_post(port, "/api/node/add", &add_body);
+        let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let eph_id = add_json["id"].as_u64().unwrap();
+
+        let del_resp = http_post(
+            port,
+            "/api/node/delete",
+            &format!(r#"{{"node_id":{eph_id}}}"#),
+        );
+        assert!(del_resp.contains("200 OK"));
+
+        // GET /api/node/<id> should 404
+        let node_resp = http_get(port, &format!("/api/node/{eph_id}"));
+        assert!(
+            node_resp.contains("404"),
+            "deleted node should return 404 on GET"
+        );
+
+        // Scene tree should not contain Ephemeral
+        let scene_resp = http_get(port, "/api/scene");
+        assert!(
+            !extract_body(&scene_resp).contains("Ephemeral"),
+            "deleted node should not appear in scene"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_add_multiple_nodes_all_appear() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        for name in &["Alpha", "Beta", "Gamma"] {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Sprite2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            assert!(resp.contains("200 OK"), "adding {name} should succeed");
+        }
+
+        let scene_resp = http_get(port, "/api/scene");
+        let body = extract_body(&scene_resp);
+        for name in &["Alpha", "Beta", "Gamma"] {
+            assert!(body.contains(name), "{name} should appear in scene tree");
+        }
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_delete_nonexistent_node_returns_404() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/node/delete", r#"{"node_id":9999999}"#);
+        assert!(
+            resp.contains("404"),
+            "deleting nonexistent node should return 404"
+        );
+        handle.stop();
+    }
+
+    // ===== pat-waz: undo/redo coverage for node and property actions =====
+
+    #[test]
+    fn test_undo_add_then_redo_restores_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a node
+        let body = format!(r#"{{"parent_id":{main_id},"name":"UndoMe","class_name":"Node2D"}}"#);
+        http_post(port, "/api/node/add", &body);
+        assert!(extract_body(&http_get(port, "/api/scene")).contains("UndoMe"));
+
+        // Undo — node should disappear
+        let undo_resp = http_post(port, "/api/undo", "");
+        assert!(undo_resp.contains("200 OK"));
+        assert!(
+            !extract_body(&http_get(port, "/api/scene")).contains("UndoMe"),
+            "node should be gone after undo"
+        );
+
+        // Redo — node should reappear
+        let redo_resp = http_post(port, "/api/redo", "");
+        assert!(redo_resp.contains("200 OK"));
+        assert!(
+            extract_body(&http_get(port, "/api/scene")).contains("UndoMe"),
+            "node should reappear after redo"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_undo_redo_property_change_round_trip() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Set rotation to 1.5
+        let body = format!(
+            r#"{{"node_id":{main_id},"property":"rotation","value":{{"type":"Float","value":1.5}}}}"#
+        );
+        http_post(port, "/api/property/set", &body);
+
+        // Verify rotation set
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        let rot = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "rotation");
+        assert!(rot.is_some(), "rotation property should exist after set");
+
+        // Undo
+        http_post(port, "/api/undo", "");
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        let rot = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "rotation");
+        match rot {
+            None => {} // reverted entirely
+            Some(p) => assert_eq!(p["type"], "Nil", "rotation should be Nil after undo"),
+        }
+
+        // Redo
+        http_post(port, "/api/redo", "");
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        let rot = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "rotation")
+            .expect("rotation should be restored after redo");
+        assert_eq!(rot["type"], "Float");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_undo_delete_restores_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a node then delete it
+        let body = format!(r#"{{"parent_id":{main_id},"name":"Revivable","class_name":"Node"}}"#);
+        let add_resp = http_post(port, "/api/node/add", &body);
+        let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let node_id = add_json["id"].as_u64().unwrap();
+
+        http_post(
+            port,
+            "/api/node/delete",
+            &format!(r#"{{"node_id":{node_id}}}"#),
+        );
+        assert!(
+            !extract_body(&http_get(port, "/api/scene")).contains("Revivable"),
+            "node should be gone after delete"
+        );
+
+        // Undo the delete — node should reappear
+        let undo_resp = http_post(port, "/api/undo", "");
+        assert!(undo_resp.contains("200 OK"));
+        assert!(
+            extract_body(&http_get(port, "/api/scene")).contains("Revivable"),
+            "node should reappear after undoing delete"
+        );
+
+        handle.stop();
+    }
+
+    // ===== pat-htg: inspector property editing for core Node2D fields =====
+
+    #[test]
+    fn test_set_position_vector2_and_verify() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(
+            r#"{{"node_id":{main_id},"property":"position","value":{{"type":"Vector2","value":[42.5,99.0]}}}}"#
+        );
+        let resp = http_post(port, "/api/property/set", &body);
+        assert!(resp.contains("200 OK"));
+
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        let pos = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "position")
+            .expect("position property should exist");
+        assert_eq!(pos["type"], "Vector2");
+        let val = pos["value"]["value"].as_array().unwrap();
+        assert!(
+            (val[0].as_f64().unwrap() - 42.5).abs() < 0.01,
+            "x should be ~42.5"
+        );
+        assert!(
+            (val[1].as_f64().unwrap() - 99.0).abs() < 0.01,
+            "y should be ~99.0"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_set_rotation_float_and_verify() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(
+            r#"{{"node_id":{main_id},"property":"rotation","value":{{"type":"Float","value":3.14}}}}"#
+        );
+        let resp = http_post(port, "/api/property/set", &body);
+        assert!(resp.contains("200 OK"));
+
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        let rot = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "rotation")
+            .expect("rotation property should exist");
+        assert_eq!(rot["type"], "Float");
+        assert!(
+            (rot["value"]["value"].as_f64().unwrap() - 3.14).abs() < 0.01,
+            "rotation should be ~3.14"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_set_visible_bool_and_verify() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let body = format!(
+            r#"{{"node_id":{main_id},"property":"visible","value":{{"type":"Bool","value":false}}}}"#
+        );
+        let resp = http_post(port, "/api/property/set", &body);
+        assert!(resp.contains("200 OK"));
+
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        let vis = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "visible")
+            .expect("visible property should exist");
+        assert_eq!(vis["type"], "Bool");
+        assert_eq!(vis["value"]["value"], false);
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_set_multiple_node2d_fields_persist() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Set position, rotation, visible in sequence
+        http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{main_id},"property":"position","value":{{"type":"Vector2","value":[5,10]}}}}"#
+            ),
+        );
+        http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{main_id},"property":"rotation","value":{{"type":"Float","value":0.5}}}}"#
+            ),
+        );
+        http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{main_id},"property":"visible","value":{{"type":"Bool","value":true}}}}"#
+            ),
+        );
+
+        // Verify all three are present
+        let node_resp = http_get(port, &format!("/api/node/{main_id}"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&node_resp)).unwrap();
+        let props = v["properties"].as_array().unwrap();
+
+        let pos = props.iter().find(|p| p["name"] == "position").unwrap();
+        assert_eq!(pos["type"], "Vector2");
+
+        let rot = props.iter().find(|p| p["name"] == "rotation").unwrap();
+        assert_eq!(rot["type"], "Float");
+
+        let vis = props.iter().find(|p| p["name"] == "visible").unwrap();
+        assert_eq!(vis["type"], "Bool");
+        assert_eq!(vis["value"]["value"], true);
+
+        handle.stop();
+    }
+
+    // ===== pat-bzp: scene tree selection and hierarchy sync =====
+
+    #[test]
+    fn test_select_changes_get_selected() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a child node
+        let body =
+            format!(r#"{{"parent_id":{main_id},"name":"Selectee","class_name":"Sprite2D"}}"#);
+        let add_resp = http_post(port, "/api/node/add", &body);
+        let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let child_id = add_json["id"].as_u64().unwrap();
+
+        // Select the child
+        http_post(
+            port,
+            "/api/node/select",
+            &format!(r#"{{"node_id":{child_id}}}"#),
+        );
+
+        // GET /api/selected should reflect the child
+        let sel_resp = http_get(port, "/api/selected");
+        let sel: serde_json::Value = serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        assert_eq!(sel["name"], "Selectee");
+        assert_eq!(sel["class"], "Sprite2D");
+
+        // Switch selection to Main
+        http_post(
+            port,
+            "/api/node/select",
+            &format!(r#"{{"node_id":{main_id}}}"#),
+        );
+        let sel_resp = http_get(port, "/api/selected");
+        let sel: serde_json::Value = serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        assert_eq!(sel["name"], "Main");
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_hierarchy_after_add_delete() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add parent and child
+        let p_body = format!(r#"{{"parent_id":{main_id},"name":"Parent","class_name":"Node2D"}}"#);
+        let p_resp = http_post(port, "/api/node/add", &p_body);
+        let p_json: serde_json::Value = serde_json::from_str(extract_body(&p_resp)).unwrap();
+        let parent_id = p_json["id"].as_u64().unwrap();
+
+        let c_body =
+            format!(r#"{{"parent_id":{parent_id},"name":"Child","class_name":"Sprite2D"}}"#);
+        http_post(port, "/api/node/add", &c_body);
+
+        // Verify hierarchy: Main > Parent > Child
+        let scene_resp = http_get(port, "/api/scene");
+        let scene: serde_json::Value = serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let main_children = scene["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap();
+        let parent_node = main_children
+            .iter()
+            .find(|c| c["name"] == "Parent")
+            .expect("Parent should be child of Main");
+        let parent_children = parent_node["children"].as_array().unwrap();
+        assert!(
+            parent_children.iter().any(|c| c["name"] == "Child"),
+            "Child should be nested under Parent"
+        );
+
+        // Delete Parent — Child should also be gone
+        http_post(
+            port,
+            "/api/node/delete",
+            &format!(r#"{{"node_id":{parent_id}}}"#),
+        );
+        let scene_resp = http_get(port, "/api/scene");
+        let body = extract_body(&scene_resp);
+        assert!(
+            !body.contains("Parent"),
+            "Parent should be gone after delete"
+        );
+        assert!(
+            !body.contains("\"Child\""),
+            "Child should be gone when parent is deleted"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_hierarchy_after_reparent() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Get root id
+        let scene_resp = http_get(port, "/api/scene");
+        let scene: serde_json::Value = serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let _root_id = scene["nodes"]["id"].as_u64().unwrap();
+
+        // Add two sibling nodes under Main
+        let a_body = format!(r#"{{"parent_id":{main_id},"name":"NodeA","class_name":"Node"}}"#);
+        let a_resp = http_post(port, "/api/node/add", &a_body);
+        let a_json: serde_json::Value = serde_json::from_str(extract_body(&a_resp)).unwrap();
+        let a_id = a_json["id"].as_u64().unwrap();
+
+        let b_body = format!(r#"{{"parent_id":{main_id},"name":"NodeB","class_name":"Node"}}"#);
+        let b_resp = http_post(port, "/api/node/add", &b_body);
+        let b_json: serde_json::Value = serde_json::from_str(extract_body(&b_resp)).unwrap();
+        let b_id = b_json["id"].as_u64().unwrap();
+
+        // Reparent NodeB under NodeA
+        let reparent_body = format!(r#"{{"node_id":{b_id},"new_parent_id":{a_id}}}"#);
+        let resp = http_post(port, "/api/node/reparent", &reparent_body);
+        assert!(resp.contains("200 OK"));
+
+        // Verify hierarchy: Main > NodeA > NodeB
+        let scene_resp = http_get(port, "/api/scene");
+        let scene: serde_json::Value = serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let main_children = scene["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap();
+        let node_a = main_children
+            .iter()
+            .find(|c| c["name"] == "NodeA")
+            .expect("NodeA should be child of Main");
+        let a_children = node_a["children"].as_array().unwrap();
+        assert!(
+            a_children.iter().any(|c| c["name"] == "NodeB"),
+            "NodeB should be child of NodeA after reparent"
+        );
+
+        // NodeB should NOT be a direct child of Main anymore
+        assert!(
+            !main_children.iter().any(|c| c["name"] == "NodeB"),
+            "NodeB should not be direct child of Main after reparent"
+        );
+
+        handle.stop();
+    }
+
+    #[test]
+    fn test_select_nonexistent_node_returns_404() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/node/select", r#"{"node_id":8888888}"#);
+        assert!(
+            resp.contains("404"),
+            "selecting nonexistent node should return 404"
+        );
         handle.stop();
     }
 }
