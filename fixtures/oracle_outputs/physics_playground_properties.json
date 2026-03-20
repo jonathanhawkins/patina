@@ -3,8 +3,26 @@
 		{
 			"children": [
 				{
-					"children": [],
-					"class": "Node2D",
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"name": "CollisionShape",
+							"path": "/root/World/Ball/CollisionShape",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 0.0,
+										"y": 0.0
+									}
+								}
+							}
+						}
+					],
+					"class": "RigidBody2D",
 					"name": "Ball",
 					"path": "/root/World/Ball",
 					"properties": {
@@ -20,8 +38,26 @@
 					}
 				},
 				{
-					"children": [],
-					"class": "Node2D",
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"name": "CollisionShape",
+							"path": "/root/World/Wall/CollisionShape",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 0.0,
+										"y": 0.0
+									}
+								}
+							}
+						}
+					],
+					"class": "StaticBody2D",
 					"name": "Wall",
 					"path": "/root/World/Wall",
 					"properties": {
@@ -37,8 +73,26 @@
 					}
 				},
 				{
-					"children": [],
-					"class": "Node2D",
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"name": "CollisionShape",
+							"path": "/root/World/Floor/CollisionShape",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 0.0,
+										"y": 0.0
+									}
+								}
+							}
+						}
+					],
+					"class": "StaticBody2D",
 					"name": "Floor",
 					"path": "/root/World/Floor",
 					"properties": {

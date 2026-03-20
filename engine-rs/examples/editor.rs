@@ -3,6 +3,17 @@
 //! Loads a `.tscn` scene file and serves a web-based editor interface
 //! for inspecting and modifying the scene tree in real time.
 //!
+//! ## Current limitations
+//!
+//! - **Play/stop mode (pat-zdc)**: The editor has `is_running`/`is_paused`
+//!   state wired into the main loop, but there is no formal play/stop/edit-lock
+//!   API exposed via HTTP endpoints. Formalizing a play-mode workflow with
+//!   proper edit-lock semantics is deferred to post-runtime-parity work.
+//!
+//! - **Multi-tab / session switching (pat-vww)**: The editor is single-scene.
+//!   Opening, switching, and closing multiple scene tabs is not supported.
+//!   Multi-tab session management is deferred to post-runtime-parity work.
+//!
 //! Usage:
 //!   cargo run --example editor
 //!   cargo run --example editor -- fixtures/scenes/demo_2d.tscn
@@ -14,7 +25,6 @@ use std::time::Duration;
 
 use gdcore::math::Color;
 use gdeditor::editor_server::{EditorServerHandle, EditorState};
-use gdrender2d::renderer::FrameBuffer;
 use gdrender2d::test_adapter::capture_frame;
 use gdrender2d::SoftwareRenderer;
 use gdscene::lifecycle::LifecycleManager;
@@ -113,54 +123,26 @@ fn main() {
             {
                 let mut state = handle.state().lock().unwrap();
                 let delta = state.delta_time;
-                if let Some(ref mut tree) = state.run_scene_tree {
-                    let ids = tree.all_nodes_in_tree_order();
-                    for id in &ids {
-                        let velocity = {
-                            let node = match tree.get_node(*id) {
-                                Some(n) => n,
-                                None => continue,
-                            };
-                            match node.get_property("velocity") {
-                                gdvariant::Variant::Vector2(v) => Some(v),
-                                _ => None,
-                            }
-                        };
-                        if let Some(vel) = velocity {
-                            let new_pos = {
-                                let node = tree.get_node(*id).unwrap();
-                                match node.get_property("position") {
-                                    gdvariant::Variant::Vector2(pos) => {
-                                        gdvariant::Variant::Vector2(gdcore::math::Vector2::new(
-                                            pos.x + vel.x * delta as f32,
-                                            pos.y + vel.y * delta as f32,
-                                        ))
-                                    }
-                                    _ => continue,
-                                }
-                            };
-                            if let Some(node) = tree.get_node_mut(*id) {
-                                node.set_property("position", new_pos);
-                            }
-                        }
-                    }
-                    tree.process_animations(delta);
-                    tree.process_tweens(delta);
-                    tree.process_all_scripts_process(delta);
-                    tree.process_collisions();
-                    tree.process_frame();
-                    tree.process_deletions();
+                let input_snapshot = state.make_input_snapshot();
+                if let Some(ref mut main_loop) = state.run_main_loop {
+                    main_loop.set_input(input_snapshot);
+                    let output = main_loop.step(delta);
+                    state.runtime_frame_count = output.frame_count;
                 }
-                state.runtime_frame_count += 1;
                 state.clear_frame_input();
             }
             let fb = {
                 let state = handle.state().lock().unwrap();
                 let zoom = state.viewport_zoom;
                 let pan = state.viewport_pan;
-                if let Some(ref tree) = state.run_scene_tree {
+                if let Some(ref main_loop) = state.run_main_loop {
                     gdeditor::scene_renderer::render_scene_with_zoom_pan(
-                        tree, None, WIDTH, HEIGHT, zoom, pan,
+                        main_loop.tree(),
+                        None,
+                        WIDTH,
+                        HEIGHT,
+                        zoom,
+                        pan,
                     )
                 } else {
                     gdeditor::scene_renderer::render_scene_with_zoom_pan(

@@ -31,6 +31,10 @@ Patina is a monorepo for a Rust-native Godot-compatible game engine, its marketi
 - Never assume a fix works — verify in the browser with error tracking active for at least 15 seconds
 - For network errors (ERR_CONNECTION_RESET, ERR_EMPTY_RESPONSE), the root cause is almost always server-side — check Rust panic/error output
 
+## Editor Feature Gate
+- No new `gdeditor` features until runtime parity exits are green — see `AGENTS.md` "Editor Feature Gate" section and `EXIT_CRITERIA.md` Gates 1–8
+- Editor test files (`editor_test.rs`, `gdeditor` unit tests) are maintenance-only — no new feature coverage, only stability/regression checks
+
 ## Important
 - Always read AGENTS.md first for safety rules and conventions
 - This project uses the Agent Flywheel methodology — see docs/

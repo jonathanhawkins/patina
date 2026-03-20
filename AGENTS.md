@@ -84,4 +84,23 @@ Execution order and parallel-lane guidance live in [prd/BEAD_EXECUTION_MAP.md](/
 - Upstream Godot is the behavioral oracle — never guess at behavior, verify against upstream
 - Every compatibility test must state what observable behavior it checks
 - Do not start reimplementing third-party code until classification is recorded in `THIRDPARTY_STRATEGY.md`
-- No editor work until runtime milestones are stable
+- No new editor feature work until runtime parity exits are met (98%+ oracle parity across all supported scenes). Editor maintenance (bug fixes, server stability, smoke tests) is allowed and encouraged.
+
+## Editor Feature Gate (Explicit)
+
+**Gate**: No new `gdeditor` features may be added until all runtime parity exit
+criteria in `EXIT_CRITERIA.md` Gates 1–8 are green.
+
+**What is allowed** (maintenance-only):
+- Bug fixes for existing editor functionality
+- Server stability improvements (crash fixes, connection handling)
+- Smoke tests that verify existing behavior does not regress
+
+**What is blocked**:
+- New editor UI panels, tools, or workflows
+- New API endpoints that expose new editing capabilities
+- Expanding editor node support beyond what the runtime already covers
+
+**Current status**: Gate is **met** as of 2026-03-19 — all runtime parity exits
+(Gates 1–8) are passing. Editor maintenance work may proceed; new feature work
+requires explicit approval from the project lead.

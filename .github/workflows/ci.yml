@@ -87,6 +87,55 @@ jobs:
         working-directory: engine-rs
         run: cargo clippy --workspace -- -D warnings
 
+  # ── Rust: render golden tests (dedicated CI gate) ────────────────────────
+  # Runs all CPU-based render pixel and golden-image tests as a separate
+  # check so render regressions surface immediately.  No GPU or display
+  # server required — uses SoftwareRenderer.
+  rust-render-goldens:
+    name: Render goldens (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: rust-fmt
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Run render golden tests
+        working-directory: engine-rs
+        run: make test-render
+
   # ── Rust: release build check ─────────────────────────────────────────────
   rust-release:
     name: Rust release build

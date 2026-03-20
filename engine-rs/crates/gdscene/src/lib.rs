@@ -32,17 +32,27 @@ pub mod physics_server;
 pub mod scene_saver;
 pub mod scene_tree;
 pub mod scripting;
+pub mod theme;
 pub mod tilemap;
 pub mod trace;
+mod trace_oracle_tests;
 pub mod tween;
 
 // Re-export the most-used types at the crate root.
 pub use lifecycle::LifecycleManager;
-pub use main_loop::MainLoop;
-pub use node::{Node, NodeId};
-pub use packed_scene::{add_packed_scene_to_tree, wire_connections, PackedScene, SceneConnection};
+pub use main_loop::{FrameOutput, FrameRecord, FrameTrace, MainLoop, NodeSnapshot};
+pub use node::{Node, NodeId, ProcessMode};
+pub use packed_scene::{
+    add_packed_scene_to_tree, add_packed_scene_to_tree_with_subscenes, wire_connections,
+    ExtResourceEntry, PackedScene, SceneConnection,
+};
 pub use scene_saver::TscnSaver;
 pub use scene_tree::SceneTree;
 pub use scripting::{GDScriptNodeInstance, InputSnapshot};
 pub use tilemap::{default_color_tileset, ColorTile, ColorTileSet, TileGrid, TileGridStore};
 pub use trace::{EventTrace, TraceEvent, TraceEventType};
+
+pub use theme::{Theme, ThemeDB, ThemePropertyType};
+
+// Re-export signal types for integration tests.
+pub use gdobject::signal::Connection as SignalConnection;

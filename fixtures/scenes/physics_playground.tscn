@@ -2,13 +2,27 @@
 
 [node name="World" type="Node"]
 
-[node name="Ball" type="Node2D" parent="."]
+[node name="Ball" type="RigidBody2D" parent="."]
 position = Vector2(400, 100)
-velocity = Vector2(50, 0)
-radius = 16
+mass = 1.0
+collision_layer = 1
+collision_mask = 1
 
-[node name="Wall" type="Node2D" parent="."]
+[node name="CollisionShape" type="CollisionShape2D" parent="Ball"]
+radius = 16.0
+
+[node name="Wall" type="StaticBody2D" parent="."]
 position = Vector2(800, 300)
+collision_layer = 1
+collision_mask = 0
 
-[node name="Floor" type="Node2D" parent="."]
+[node name="CollisionShape" type="CollisionShape2D" parent="Wall"]
+size = Vector2(20, 400)
+
+[node name="Floor" type="StaticBody2D" parent="."]
 position = Vector2(400, 600)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Floor"]
+size = Vector2(800, 20)

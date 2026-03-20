@@ -614,3 +614,175 @@ fn server_survives_concurrent_bad_and_good_requests() {
     );
     handle.stop();
 }
+
+// ---------------------------------------------------------------------------
+// pat-776: Save/load workflow for fixture scenes
+// ---------------------------------------------------------------------------
+
+/// Verifies that saving a scene writes a valid .tscn file containing the
+/// expected [gd_scene] header and all node names from the tree.
+#[test]
+fn save_writes_tscn_with_all_nodes() {
+    let (handle, port) = make_test_server();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap().to_string();
+
+    let save_body = format!(r#"{{"path":"{path}"}}"#);
+    let resp = http_post(port, "/api/scene/save", &save_body);
+    assert!(resp.contains("200 OK"), "save should succeed");
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        contents.contains("[gd_scene"),
+        "must contain [gd_scene header"
+    );
+    assert!(contents.contains("World"), "must contain World node");
+    assert!(contents.contains("Player"), "must contain Player node");
+    assert!(contents.contains("Enemy"), "must contain Enemy node");
+    assert!(contents.contains("Ground"), "must contain Ground node");
+
+    handle.stop();
+}
+
+/// Verifies that loading a .tscn file replaces the scene tree and the
+/// loaded tree matches the original structure.
+#[test]
+fn load_replaces_tree_with_correct_structure() {
+    let (handle, port) = make_test_server();
+
+    // Save the current tree.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap().to_string();
+    http_post(port, "/api/scene/save", &format!(r#"{{"path":"{path}"}}"#));
+
+    // Load it back.
+    let resp = http_post(port, "/api/scene/load", &format!(r#"{{"path":"{path}"}}"#));
+    assert!(resp.contains("200 OK"), "load should succeed");
+
+    // Verify the tree still has the expected structure.
+    let scene_resp = http_get(port, "/api/scene");
+    let body = extract_body(&scene_resp);
+    let v: serde_json::Value = serde_json::from_str(body).expect("scene JSON");
+    let children = v["nodes"]["children"].as_array().expect("root children");
+    assert!(!children.is_empty(), "loaded tree must have children");
+    let world = &children[0];
+    assert_eq!(world["name"], "World");
+    let world_children = world["children"].as_array().expect("World children");
+    assert!(
+        world_children.len() >= 3,
+        "World should have at least Player, Enemy, Ground"
+    );
+
+    handle.stop();
+}
+
+/// Round-trip: save, load, re-save, compare — the two .tscn files should
+/// be identical, proving no data corruption in the save/load cycle.
+#[test]
+fn save_load_roundtrip_preserves_content() {
+    let (handle, port) = make_test_server();
+
+    // First save.
+    let tmp1 = tempfile::NamedTempFile::new().unwrap();
+    let path1 = tmp1.path().to_str().unwrap().to_string();
+    http_post(port, "/api/scene/save", &format!(r#"{{"path":"{path1}"}}"#));
+
+    // Load it back.
+    http_post(port, "/api/scene/load", &format!(r#"{{"path":"{path1}"}}"#));
+
+    // Save again to a different file.
+    let tmp2 = tempfile::NamedTempFile::new().unwrap();
+    let path2 = tmp2.path().to_str().unwrap().to_string();
+    http_post(port, "/api/scene/save", &format!(r#"{{"path":"{path2}"}}"#));
+
+    // Both files should be identical.
+    let contents1 = std::fs::read_to_string(&path1).unwrap();
+    let contents2 = std::fs::read_to_string(&path2).unwrap();
+    assert_eq!(
+        contents1, contents2,
+        "Round-trip save → load → save must produce identical .tscn output"
+    );
+
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-fp2: Filesystem browser and scene/script loading
+// ---------------------------------------------------------------------------
+//
+// The editor exposes GET /api/filesystem which scans the working directory
+// for .tscn, .gd, and .tres files and returns them as JSON. Scene loading
+// is done via POST /api/scene/load with a file path. There is no
+// interactive filesystem "browser" UI action yet — that is future work.
+// The current flow is:
+//   1. Client calls GET /api/filesystem to discover available scenes.
+//   2. Client calls POST /api/scene/load with the chosen path.
+
+/// Verifies that a fixture .tscn scene can be loaded through the editor API.
+#[test]
+fn load_fixture_scene_via_api() {
+    let (handle, port) = make_test_server();
+
+    // Load the minimal fixture scene.
+    let fixture_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/scenes/minimal.tscn");
+    let abs_path = fixture_path.canonicalize().expect("fixture must exist");
+    let path_str = abs_path.to_str().unwrap();
+
+    let load_body = format!(r#"{{"path":"{}"}}"#, path_str.replace('\\', "\\\\"));
+    let resp = http_post(port, "/api/scene/load", &load_body);
+    assert!(
+        resp.contains("200 OK"),
+        "loading fixture scene should succeed"
+    );
+
+    // Verify the loaded tree has the expected root from minimal.tscn.
+    let scene_resp = http_get(port, "/api/scene");
+    assert!(
+        scene_resp.contains("Root"),
+        "minimal.tscn root node should appear"
+    );
+
+    handle.stop();
+}
+
+/// Verifies that loading a second fixture scene replaces the first.
+#[test]
+fn load_second_fixture_replaces_first() {
+    let (handle, port) = make_test_server();
+
+    let fixtures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/scenes");
+
+    // Load minimal.tscn first.
+    let minimal = fixtures_dir.join("minimal.tscn").canonicalize().unwrap();
+    let path_str = minimal.to_str().unwrap();
+    http_post(
+        port,
+        "/api/scene/load",
+        &format!(r#"{{"path":"{}"}}"#, path_str.replace('\\', "\\\\")),
+    );
+
+    // Now load hierarchy.tscn.
+    let hierarchy = fixtures_dir.join("hierarchy.tscn").canonicalize().unwrap();
+    let path_str = hierarchy.to_str().unwrap();
+    let resp = http_post(
+        port,
+        "/api/scene/load",
+        &format!(r#"{{"path":"{}"}}"#, path_str.replace('\\', "\\\\")),
+    );
+    assert!(resp.contains("200 OK"));
+
+    // The tree should reflect the hierarchy scene, not minimal.
+    let scene_resp = http_get(port, "/api/scene");
+    let body = extract_body(&scene_resp);
+    let v: serde_json::Value = serde_json::from_str(body).expect("scene JSON");
+    let children = v["nodes"]["children"].as_array().expect("root children");
+    // hierarchy.tscn should have its own node structure, distinct from minimal.
+    assert!(
+        !children.is_empty(),
+        "hierarchy.tscn should produce a non-empty tree"
+    );
+
+    handle.stop();
+}

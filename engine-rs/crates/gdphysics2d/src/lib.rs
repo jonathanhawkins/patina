@@ -32,8 +32,10 @@ pub mod area2d;
 pub mod body;
 pub mod character;
 pub mod collision;
+pub mod joint;
 pub mod shape;
 pub mod test_harness;
+pub mod tilemap_collision;
 pub mod world;
 
 // 3D physics modules.
@@ -47,7 +49,13 @@ pub use area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};
 pub use body::{BodyId, BodyType, PhysicsBody2D};
 pub use character::CharacterBody2D;
 pub use collision::CollisionResult;
+pub use joint::{
+    apply_joint_constraints, DampedSpringJoint2D, Joint2D, Joint2DBase, JointId, PinJoint2D,
+};
 pub use shape::Shape2D;
+pub use tilemap_collision::{
+    collect_collision_tiles, tilemap_to_physics, TileCollisionInfo, TileMapCollisionResult,
+};
 pub use world::{CollisionEvent, ContactState, PhysicsWorld2D, RaycastHit};
 
 // 3D re-exports.

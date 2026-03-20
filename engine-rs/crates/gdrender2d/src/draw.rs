@@ -183,6 +183,175 @@ pub fn fill_rect_blended(fb: &mut FrameBuffer, rect: Rect2, color: Color) {
     }
 }
 
+/// Draws a nine-patch (9-slice) texture into `rect`.
+///
+/// The source texture is divided into 9 regions by the four margin values.
+/// Corners are drawn at their natural size, edges are stretched along one
+/// axis, and the center region is stretched in both axes (if `draw_center`
+/// is true). Each texel is tinted by `modulate`.
+pub fn draw_nine_patch(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    rect: Rect2,
+    margin_left: f32,
+    margin_top: f32,
+    margin_right: f32,
+    margin_bottom: f32,
+    draw_center: bool,
+    modulate: Color,
+) {
+    if texture.width == 0 || texture.height == 0 {
+        return;
+    }
+
+    let tw = texture.width as f32;
+    let th = texture.height as f32;
+
+    // Clamp margins to texture size.
+    let ml = margin_left.min(tw).max(0.0);
+    let mt = margin_top.min(th).max(0.0);
+    let mr = margin_right.min(tw - ml).max(0.0);
+    let mb = margin_bottom.min(th - mt).max(0.0);
+
+    // Source regions (in texture pixel coords).
+    let src_left = ml;
+    let src_top = mt;
+    let src_right = tw - mr;
+    let src_bottom = th - mb;
+
+    // Destination regions.
+    let dst_x0 = rect.position.x;
+    let dst_y0 = rect.position.y;
+    let dst_x3 = rect.position.x + rect.size.x;
+    let dst_y3 = rect.position.y + rect.size.y;
+    let dst_x1 = dst_x0 + ml;
+    let dst_y1 = dst_y0 + mt;
+    // Ensure middle region doesn't collapse to negative.
+    let dst_x2 = (dst_x3 - mr).max(dst_x1);
+    let dst_y2 = (dst_y3 - mb).max(dst_y1);
+
+    // Helper closure: draw a texture sub-region into a destination rect.
+    let mut draw_patch = |fb: &mut FrameBuffer,
+                          dx: f32,
+                          dy: f32,
+                          dw: f32,
+                          dh: f32,
+                          sx: f32,
+                          sy: f32,
+                          sw: f32,
+                          sh: f32| {
+        if dw <= 0.0 || dh <= 0.0 || sw <= 0.0 || sh <= 0.0 {
+            return;
+        }
+        let dst = Rect2::new(Vector2::new(dx, dy), Vector2::new(dw, dh));
+        let src = Rect2::new(Vector2::new(sx, sy), Vector2::new(sw, sh));
+        draw_texture_region(fb, texture, dst, src, modulate);
+    };
+
+    // Top-left corner
+    draw_patch(fb, dst_x0, dst_y0, ml, mt, 0.0, 0.0, src_left, src_top);
+    // Top edge
+    draw_patch(
+        fb,
+        dst_x1,
+        dst_y0,
+        dst_x2 - dst_x1,
+        mt,
+        src_left,
+        0.0,
+        src_right - src_left,
+        src_top,
+    );
+    // Top-right corner
+    draw_patch(
+        fb,
+        dst_x2,
+        dst_y0,
+        mr,
+        mt,
+        src_right,
+        0.0,
+        tw - src_right,
+        src_top,
+    );
+
+    // Left edge
+    draw_patch(
+        fb,
+        dst_x0,
+        dst_y1,
+        ml,
+        dst_y2 - dst_y1,
+        0.0,
+        src_top,
+        src_left,
+        src_bottom - src_top,
+    );
+    // Center
+    if draw_center {
+        draw_patch(
+            fb,
+            dst_x1,
+            dst_y1,
+            dst_x2 - dst_x1,
+            dst_y2 - dst_y1,
+            src_left,
+            src_top,
+            src_right - src_left,
+            src_bottom - src_top,
+        );
+    }
+    // Right edge
+    draw_patch(
+        fb,
+        dst_x2,
+        dst_y1,
+        mr,
+        dst_y2 - dst_y1,
+        src_right,
+        src_top,
+        tw - src_right,
+        src_bottom - src_top,
+    );
+
+    // Bottom-left corner
+    draw_patch(
+        fb,
+        dst_x0,
+        dst_y2,
+        ml,
+        mb,
+        0.0,
+        src_bottom,
+        src_left,
+        th - src_bottom,
+    );
+    // Bottom edge
+    draw_patch(
+        fb,
+        dst_x1,
+        dst_y2,
+        dst_x2 - dst_x1,
+        mb,
+        src_left,
+        src_bottom,
+        src_right - src_left,
+        th - src_bottom,
+    );
+    // Bottom-right corner
+    draw_patch(
+        fb,
+        dst_x2,
+        dst_y2,
+        mr,
+        mb,
+        src_right,
+        src_bottom,
+        tw - src_right,
+        th - src_bottom,
+    );
+}
+
 /// Draws a line with alpha blending (source-over).
 pub fn draw_line_blended(
     fb: &mut FrameBuffer,
@@ -477,6 +646,86 @@ mod tests {
         let pixel = fb.get_pixel(1, 1);
         assert!((pixel.g - 1.0).abs() < 0.01);
         assert!(pixel.r.abs() < 0.01);
+    }
+
+    #[test]
+    fn nine_patch_draws_corners_and_center() {
+        // 6x6 texture: top-left 2x2 = red, rest = blue
+        let mut pixels = vec![Color::rgb(0.0, 0.0, 1.0); 36];
+        for y in 0..2 {
+            for x in 0..2 {
+                pixels[y * 6 + x] = Color::rgb(1.0, 0.0, 0.0);
+            }
+        }
+        let tex = Texture2D {
+            width: 6,
+            height: 6,
+            pixels,
+        };
+
+        let mut fb = FrameBuffer::new(12, 12, Color::BLACK);
+        let rect = Rect2::new(Vector2::ZERO, Vector2::new(12.0, 12.0));
+        draw_nine_patch(&mut fb, &tex, rect, 2.0, 2.0, 2.0, 2.0, true, Color::WHITE);
+
+        // Top-left corner pixel should be red (from the 2x2 red corner of texture)
+        assert_eq!(fb.get_pixel(0, 0), Color::rgb(1.0, 0.0, 0.0));
+        // Center should be blue (center region stretched)
+        assert_eq!(fb.get_pixel(6, 6), Color::rgb(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn nine_patch_no_center() {
+        let tex = Texture2D::solid(6, 6, Color::WHITE);
+        let mut fb = FrameBuffer::new(12, 12, Color::BLACK);
+        let rect = Rect2::new(Vector2::ZERO, Vector2::new(12.0, 12.0));
+        draw_nine_patch(&mut fb, &tex, rect, 2.0, 2.0, 2.0, 2.0, false, Color::WHITE);
+
+        // Corners should be drawn (white)
+        assert_eq!(fb.get_pixel(0, 0), Color::WHITE);
+        assert_eq!(fb.get_pixel(11, 11), Color::WHITE);
+        // Center should remain black (draw_center=false)
+        assert_eq!(fb.get_pixel(6, 6), Color::BLACK);
+    }
+
+    #[test]
+    fn nine_patch_with_modulate() {
+        let tex = Texture2D::solid(6, 6, Color::WHITE);
+        let mut fb = FrameBuffer::new(12, 12, Color::BLACK);
+        let rect = Rect2::new(Vector2::ZERO, Vector2::new(12.0, 12.0));
+        let half_green = Color::rgb(0.0, 0.5, 0.0);
+        draw_nine_patch(&mut fb, &tex, rect, 2.0, 2.0, 2.0, 2.0, true, half_green);
+
+        let pixel = fb.get_pixel(0, 0);
+        assert!((pixel.g - 0.5).abs() < 0.01);
+        assert!(pixel.r.abs() < 0.01);
+    }
+
+    #[test]
+    fn nine_patch_empty_texture() {
+        let tex = Texture2D {
+            width: 0,
+            height: 0,
+            pixels: vec![],
+        };
+        let mut fb = FrameBuffer::new(10, 10, Color::BLACK);
+        let rect = Rect2::new(Vector2::ZERO, Vector2::new(10.0, 10.0));
+        // Should not panic
+        draw_nine_patch(&mut fb, &tex, rect, 2.0, 2.0, 2.0, 2.0, true, Color::WHITE);
+        assert_eq!(fb.get_pixel(0, 0), Color::BLACK);
+    }
+
+    #[test]
+    fn nine_patch_edges_stretch() {
+        // 6x6 solid green texture
+        let tex = Texture2D::solid(6, 6, Color::rgb(0.0, 1.0, 0.0));
+        let mut fb = FrameBuffer::new(20, 20, Color::BLACK);
+        let rect = Rect2::new(Vector2::ZERO, Vector2::new(20.0, 20.0));
+        draw_nine_patch(&mut fb, &tex, rect, 2.0, 2.0, 2.0, 2.0, true, Color::WHITE);
+
+        // Top edge (stretched horizontally) should be green
+        assert_eq!(fb.get_pixel(10, 0), Color::rgb(0.0, 1.0, 0.0));
+        // Left edge (stretched vertically) should be green
+        assert_eq!(fb.get_pixel(0, 10), Color::rgb(0.0, 1.0, 0.0));
     }
 
     #[test]

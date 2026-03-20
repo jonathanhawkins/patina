@@ -58,6 +58,8 @@ pub enum Token {
     Onready,
     /// `@export`
     Export,
+    /// `await`
+    Await,
 
     // Literals
     /// Integer literal.
@@ -177,6 +179,7 @@ impl fmt::Display for Token {
             Token::ClassName => write!(f, "class_name"),
             Token::Onready => write!(f, "onready"),
             Token::Export => write!(f, "export"),
+            Token::Await => write!(f, "await"),
             Token::IntLit(v) => write!(f, "{v}"),
             Token::FloatLit(v) => write!(f, "{v}"),
             Token::StringLit(v) => write!(f, "\"{v}\""),
@@ -525,6 +528,7 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 "and" => Token::And,
                 "or" => Token::Or,
                 "not" => Token::Not,
+                "await" => Token::Await,
                 _ => Token::Ident(ident),
             };
             tokens.push(TokenSpan {

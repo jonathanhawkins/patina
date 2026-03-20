@@ -175,6 +175,20 @@ impl ClassDB {
         let chain = self.inheritance_chain(child);
         chain.iter().any(|c| c == parent)
     }
+
+    /// Checks whether `method_name` is registered on `class_name` or any
+    /// of its ancestors in the inheritance chain.
+    fn has_method(&self, class_name: &str, method_name: &str) -> bool {
+        let chain = self.inheritance_chain(class_name);
+        for ancestor in &chain {
+            if let Some(info) = self.classes.get(ancestor) {
+                if info.methods.iter().any(|m| m.name == method_name) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Returns a reference to the global ClassDB instance.
@@ -239,6 +253,15 @@ pub fn inheritance_chain(class_name: &str) -> Vec<String> {
         .lock()
         .expect("ClassDB lock poisoned")
         .inheritance_chain(class_name)
+}
+
+/// Returns `true` if `method_name` is registered on `class_name` or any
+/// of its ancestors in the ClassDB inheritance chain.
+pub fn class_has_method(class_name: &str, method_name: &str) -> bool {
+    global_db()
+        .lock()
+        .expect("ClassDB lock poisoned")
+        .has_method(class_name, method_name)
 }
 
 /// Returns `true` if `child` inherits from `parent` (or is `parent` itself).

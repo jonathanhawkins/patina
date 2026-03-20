@@ -24,9 +24,11 @@ pub mod cache;
 pub mod importers;
 pub mod loader;
 pub mod project;
+pub mod res_loader;
 pub mod resource;
 pub mod saver;
 pub mod uid;
+pub mod unified;
 
 // Re-export the most-used types at the crate root.
 pub use cache::ResourceCache;
@@ -34,11 +36,15 @@ pub use importers::{
     import_font, import_image, import_wav, load_import_file, parse_import_file, resolve_res_path,
     ImportFile, ResourceFormatLoader,
 };
-pub use loader::{parse_variant_value, ResourceLoader, TresLoader};
+pub use loader::{parse_uid_string, parse_variant_value, ResourceLoader, TresLoader};
 pub use project::{AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader};
+pub use res_loader::{
+    is_res_binary, load_res_binary, parse_res_header, ResBinaryHeader, RES_MAGIC,
+};
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::UidRegistry;
+pub use unified::UnifiedLoader;
 
 #[cfg(test)]
 mod integration_tests {

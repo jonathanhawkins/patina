@@ -196,13 +196,53 @@ The goal for v1 is not to beat upstream Godot on performance but to be "competit
 
 ---
 
+## Headless Runtime Baselines
+
+In addition to the example harness, `engine-rs/tests/bench_runtime_baselines.rs`
+provides test-based benchmarks that print timing data to stderr. These run as
+part of the Tier 3 test suite (`cargo test --workspace`).
+
+### Implemented Runtime Baselines
+
+| Benchmark | Workload | Metric |
+|-----------|----------|--------|
+| `bench_step_1000_frames_*` | Step 1000 frames at 60 Hz | ms/frame |
+| `bench_load_instance_*` | Parse .tscn + instance into SceneTree (100x) | ms/iter |
+| `bench_physics_100_frames_*` | 100 physics frames at 60 Hz | ms/frame |
+| `bench_variant_roundtrip` | 9-variant JSON roundtrip (100x) | ms/iter |
+| `bench_parse_script_*` | Tokenize + parse .gd script (100x) | ms/iter |
+
+Scenes covered: `space_shooter`, `platformer`, `physics_playground`, `hierarchy`, `minimal`.
+
+### Running Baselines
+
+```bash
+cd engine-rs
+# Run all benchmarks (output on stderr)
+cargo test bench_ -- --nocapture 2>&1 | grep '\[bench\]'
+
+# Run the example harness (JSON on stdout)
+cargo run --example benchmarks
+```
+
+Baseline numbers are machine-dependent. To establish baselines for your
+hardware, run the benchmarks and save the output. Compare future runs against
+your saved baselines using the regression thresholds defined above.
+
 ## CI Integration
 
-- Benchmark workloads run on dedicated CI hardware (not shared runners) to ensure consistent results.
-- Results are stored in `tools/benchmarks/results/` and committed to the repository.
-- A summary dashboard is generated from the result files.
-- Regressions above the failure threshold block merges to main.
-- Historical trends are tracked to detect gradual degradation.
+Benchmark tests run as part of the standard Tier 3 test suite (`cargo test --workspace`) in the
+`rust` CI job (`.github/workflows/ci.yml`). They are implemented as `#[test]` functions that always
+pass and print timing output to stderr.
+
+- **Hardware**: Shared GitHub Actions runners (ubuntu-latest, macos-latest) — not dedicated hardware.
+- **Timing data**: Printed to stderr only; not committed or stored automatically.
+- **Regressions**: Not automatically enforced in CI — benchmark tests always pass. Thresholds
+  above are guidelines for manual review.
+- **Result storage**: No automated result archiving or dashboard. To establish baselines, run
+  locally and save output manually (see "Running Baselines" section).
+- **Historical tracking**: Not automated; track manually by saving JSON output from
+  `cargo run --example benchmarks`.
 
 ---
 

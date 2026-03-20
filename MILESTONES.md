@@ -32,15 +32,15 @@ This document defines the phased delivery plan for the Patina Engine, with objec
 
 ### Deliverables
 
-- [ ] All foundation documents created (AGENTS.md, PORT_SCOPE.md, ARCHITECTURE_MAP.md, COMPAT_MATRIX.md, RISK_REGISTER.md, TEST_ORACLE.md, BENCHMARKS.md, THIRDPARTY_STRATEGY.md, CRATE_BOUNDARIES.md, MILESTONES.md)
+- [x] All foundation documents created (AGENTS.md, PORT_SCOPE.md, ARCHITECTURE_MAP.md, COMPAT_MATRIX.md, RISK_REGISTER.md, TEST_ORACLE.md, BENCHMARKS.md, THIRDPARTY_STRATEGY.md, CRATE_BOUNDARIES.md, MILESTONES.md)
 - [x] Upstream Godot added as pinned submodule
-- [ ] Rust workspace bootstrapped with empty core crates
-- [ ] First master plan drafted
-- [ ] Bead graph created with first 50-100 beads prioritized
-- [ ] Agent roles and swarm composition defined
-- [ ] DCG enabled
-- [ ] File reservation policy live
-- [ ] Reporting format defined
+- [x] Rust workspace bootstrapped with empty core crates
+- [x] First master plan drafted
+- [x] Bead graph created with first 50-100 beads prioritized
+- [x] Agent roles and swarm composition defined
+- [x] DCG enabled
+- [x] File reservation policy live
+- [x] Reporting format defined
 
 ### Exit Criteria
 
@@ -61,14 +61,14 @@ This document defines the phased delivery plan for the Patina Engine, with objec
 
 ### Deliverables
 
-- [ ] Fixture corpus for scenes, resources, rendering, and physics
-- [ ] Scene tree dumper (runs inside upstream Godot)
-- [ ] Property dumper
-- [ ] Signal/notification tracer
-- [ ] Resource roundtrip tool
-- [ ] API extraction pipeline
-- [ ] Golden output format defined and implemented
-- [ ] Compatibility dashboard (basic version)
+- [x] Fixture corpus for scenes, resources, rendering, and physics
+- [x] Scene tree dumper (runs inside upstream Godot)
+- [x] Property dumper
+- [x] Signal/notification tracer
+- [x] Resource roundtrip tool
+- [x] API extraction pipeline
+- [x] Golden output format defined and implemented
+- [x] Compatibility dashboard (basic version)
 
 ### Exit Criteria
 
@@ -88,11 +88,11 @@ This document defines the phased delivery plan for the Patina Engine, with objec
 
 ### Deliverables
 
-- [ ] GDExtension harness (apps/godot/)
-- [ ] godot-rust smoke-test modules
-- [ ] Scene and resource inspectors (Rust running inside Godot)
-- [ ] Signal/notification tracing helpers
-- [ ] API coverage tooling (what percentage of API is exercised by fixtures)
+- [x] GDExtension harness (apps/godot/)
+- [x] godot-rust smoke-test modules
+- [x] Scene and resource inspectors (Rust running inside Godot)
+- [x] Signal/notification tracing helpers
+- [x] API coverage tooling (what percentage of API is exercised by fixtures)
 
 ### Exit Criteria
 
@@ -112,16 +112,16 @@ This document defines the phased delivery plan for the Patina Engine, with objec
 
 ### Deliverables
 
-- [ ] `gdcore` first working version (math types, IDs, strings, errors)
-- [ ] `gdvariant` first working version (Variant enum, conversions, serialization)
-- [ ] `gdobject` first working version (object model, signals, notifications, refcounting)
-- [ ] `gdresource` first working version (resource loading, .tres parsing, cache)
-- [ ] `gdscene` first working version (Node, SceneTree subset, lifecycle)
-- [ ] Headless runner (execute scenes without rendering)
-- [ ] Compatibility tests for simple scene execution
-- [ ] Resource roundtrip tests
-- [ ] Signal ordering tests
-- [ ] Notification dispatch tests
+- [x] `gdcore` first working version (math types, IDs, strings, errors)
+- [x] `gdvariant` first working version (Variant enum, conversions, serialization)
+- [x] `gdobject` first working version (object model, signals, notifications, refcounting)
+- [x] `gdresource` first working version (resource loading, .tres parsing, cache)
+- [x] `gdscene` first working version (Node, SceneTree subset, lifecycle)
+- [x] Headless runner (execute scenes without rendering)
+- [x] Compatibility tests for simple scene execution
+- [x] Resource roundtrip tests
+- [x] Signal ordering tests
+- [x] Notification dispatch tests
 
 ### Exit Criteria
 
@@ -141,16 +141,16 @@ This document defines the phased delivery plan for the Patina Engine, with objec
 
 ### Deliverables
 
-- [ ] `gdserver2d` initial implementation (2D rendering server API)
-- [ ] `gdrender2d` initial implementation (2D rendering backend)
-- [ ] `gdphysics2d` initial implementation (basic 2D physics)
-- [ ] 2D node subset (Node2D, Sprite2D, Camera2D, CanvasItem)
-- [ ] Transform2D hierarchy working
-- [ ] Input subset working (keyboard, mouse basics)
-- [ ] Frame loop (timing, process, physics process)
-- [ ] Render snapshot tests against upstream golden outputs
-- [ ] Simple 2D demo project compatibility
-- [ ] Baseline performance measurements (BENCHMARKS.md populated)
+- [x] `gdserver2d` initial implementation (2D rendering server API)
+- [x] `gdrender2d` initial implementation (2D rendering backend)
+- [x] `gdphysics2d` initial implementation (basic 2D physics)
+- [x] 2D node subset (Node2D, Sprite2D, Camera2D, CanvasItem)
+- [x] Transform2D hierarchy working
+- [x] Input subset working (keyboard, mouse basics)
+- [x] Frame loop (timing, process, physics process)
+- [x] Render snapshot tests against upstream golden outputs
+- [x] Simple 2D demo project compatibility
+- [x] Baseline performance measurements (BENCHMARKS.md populated)
 
 ### Exit Criteria
 

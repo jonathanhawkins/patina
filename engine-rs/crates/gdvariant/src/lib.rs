@@ -11,4 +11,4 @@ pub mod variant;
 
 // Re-export the most-used types at the crate root.
 pub use conversion::ConversionError;
-pub use variant::{Variant, VariantType};
+pub use variant::{CallableRef, ResourceRef, Variant, VariantType};
