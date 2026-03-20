@@ -923,6 +923,23 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   </div>
 </div>
 
+<!-- Project Settings dialog (pat-kj4) -->
+<div id="project-settings-dialog" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:300;align-items:center;justify-content:center;">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;width:420px;padding:16px;box-shadow:0 8px 32px rgba(0,0,0,0.6);">
+    <h3 style="font-size:14px;color:var(--accent);margin-bottom:12px;">Project Settings</h3>
+    <div class="settings-row"><span class="settings-label">Project Name</span><div class="settings-value"><input type="text" id="pset-name" style="width:100%"></div></div>
+    <div class="settings-row"><span class="settings-label">Resolution W</span><div class="settings-value"><input type="number" id="pset-res-w" min="1" max="7680" style="width:80px"></div></div>
+    <div class="settings-row"><span class="settings-label">Resolution H</span><div class="settings-value"><input type="number" id="pset-res-h" min="1" max="4320" style="width:80px"></div></div>
+    <div class="settings-row"><span class="settings-label">Physics FPS</span><div class="settings-value"><select id="pset-physics-fps"><option value="30">30</option><option value="60">60</option><option value="120">120</option></select></div></div>
+    <div class="settings-row"><span class="settings-label">Gravity</span><div class="settings-value"><input type="number" id="pset-gravity" step="0.1" style="width:80px"></div></div>
+    <div class="settings-row"><span class="settings-label">Main Scene</span><div class="settings-value"><input type="text" id="pset-main-scene" placeholder="res://..." style="width:100%"></div></div>
+    <div style="text-align:right;margin-top:12px;display:flex;gap:6px;justify-content:flex-end;">
+      <button id="pset-cancel">Cancel</button>
+      <button id="pset-save" style="border-color:var(--accent);color:var(--accent);">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Status bar -->
 <div id="statusbar">
   <span>Selected: <span class="accent" id="status-selected">None</span></span>
@@ -1121,12 +1138,29 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       name.style.fontWeight = 'bold';
     }
 
-    // Script indicator badge
+    // pat-t0c: Tree indicator badges (script, signal, group)
     var scriptBadge = document.createElement('span');
-    scriptBadge.className = 'script-badge';
+    scriptBadge.className = 'tree-badge';
     if (node.has_script) {
       scriptBadge.textContent = '\u{1F4DC}';
       scriptBadge.title = 'Has script attached';
+    }
+    var signalBadge = document.createElement('span');
+    signalBadge.className = 'tree-badge';
+    if (node.has_signals) {
+      signalBadge.innerHTML = '&#9889;&#8594;';
+      signalBadge.title = 'Has connected signals';
+      signalBadge.style.color = '#50c878';
+      signalBadge.style.fontSize = '10px';
+    }
+    var groupBadge = document.createElement('span');
+    groupBadge.className = 'tree-badge';
+    if (node.groups && node.groups.length > 0) {
+      groupBadge.textContent = '[G]';
+      groupBadge.title = 'Groups: ' + node.groups.join(', ');
+      groupBadge.style.color = 'var(--text-dim)';
+      groupBadge.style.fontSize = '9px';
+      groupBadge.style.fontWeight = 'bold';
     }
 
     var visBtn = document.createElement('span');
@@ -1145,6 +1179,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     row.appendChild(icon);
     row.appendChild(name);
     row.appendChild(scriptBadge);
+    row.appendChild(signalBadge);
+    row.appendChild(groupBadge);
     row.appendChild(visBtn);
 
     row.addEventListener('click', (function(nid) { return function(e) {
@@ -1233,14 +1269,29 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         }
       } catch(ex) { /* not JSON, fall through to tree drag */ }
       if (treeDragNodeId === null || treeDragNodeId === nid) return;
+      // pat-lac: Multi-node drag — reparent all selected nodes
+      var dragIds = selectedNodeIds.size > 1 && selectedNodeIds.has(treeDragNodeId) ?
+        Array.from(selectedNodeIds) : [treeDragNodeId];
       if (treeDragZone === 'inside') {
-        api('POST', '/api/node/reparent', { node_id: treeDragNodeId, new_parent_id: nid })
-          .then(function() { expandedNodes.add(nid); fetchScene(); });
+        (async function() {
+          for (var di = 0; di < dragIds.length; di++) {
+            if (dragIds[di] !== nid) {
+              await api('POST', '/api/node/reparent', { node_id: dragIds[di], new_parent_id: nid });
+            }
+          }
+          expandedNodes.add(nid); fetchScene();
+        })();
       } else {
         var targetParent = findNodeParent(sceneData.nodes, nid);
         if (targetParent) {
-          api('POST', '/api/node/reparent', { node_id: treeDragNodeId, new_parent_id: targetParent.id })
-            .then(function() { fetchScene(); });
+          (async function() {
+            for (var di = 0; di < dragIds.length; di++) {
+              if (dragIds[di] !== targetParent.id) {
+                await api('POST', '/api/node/reparent', { node_id: dragIds[di], new_parent_id: targetParent.id });
+              }
+            }
+            fetchScene();
+          })();
         }
       }
       treeDragNodeId = null; treeDragZone = null;
@@ -1504,10 +1555,25 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   // ---- Inspector ----
+  // pat-mn3: Multi-object inspector showing shared properties
   function renderInspectorMulti(count) {
-    document.getElementById('inspector').innerHTML = '<div class="insp-empty">' + count + ' nodes selected</div>';
+    var el = document.getElementById('inspector');
+    el.innerHTML = '<div class="insp-empty">' + count + ' nodes selected — loading shared properties...</div>';
     document.getElementById('status-selected').textContent = count + ' nodes';
     document.getElementById('status-path').textContent = '\u2014';
+    // Fetch shared properties
+    api('POST', '/api/node/shared_properties', { node_ids: Array.from(selectedNodeIds) }).then(function(data) {
+      if (!data || !data.properties) { el.innerHTML = '<div class="insp-empty">' + count + ' nodes selected (no shared properties)</div>'; return; }
+      el.innerHTML = '<div style="padding:6px 8px;font-size:11px;color:var(--text-dim)">' + count + ' nodes — shared properties:</div>';
+      if (data.properties.length === 0) { el.innerHTML += '<div class="insp-empty">No common properties</div>'; return; }
+      for (var i = 0; i < data.properties.length; i++) {
+        var prop = data.properties[i];
+        var row = document.createElement('div');
+        row.className = 'insp-row';
+        row.innerHTML = '<div class="insp-label">' + escapeHtml(prop.name) + '</div><div class="insp-value"><span class="insp-readonly">' + escapeHtml(prop.type) + '</span></div>';
+        el.appendChild(row);
+      }
+    });
   }
 
   function renderInspectorEmpty() {
@@ -1533,6 +1599,24 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       '<button id="inspector-history-forward" title="Forward" disabled>&rarr;</button>' +
       '<span id="resource-info" class="resource-info"></span>';
     el.appendChild(toolbar);
+
+    // pat-mn3: Property search/filter
+    var propFilterInput = document.createElement('input');
+    propFilterInput.type = 'text';
+    propFilterInput.id = 'insp-filter-input';
+    propFilterInput.placeholder = 'Filter properties...';
+    propFilterInput.style.cssText = 'margin:4px 0;padding:3px 6px;font-size:11px;width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:2px;';
+    propFilterInput.addEventListener('input', function() {
+      var filter = propFilterInput.value.toLowerCase();
+      var rows = el.querySelectorAll('.insp-row');
+      for (var ri = 0; ri < rows.length; ri++) {
+        var lbl = rows[ri].querySelector('.insp-label');
+        if (lbl) {
+          rows[ri].style.display = (!filter || lbl.textContent.toLowerCase().indexOf(filter) >= 0) ? '' : 'none';
+        }
+      }
+    });
+    el.appendChild(propFilterInput);
 
     // Wire up history buttons
     var hBack = document.getElementById('inspector-history-back');
@@ -1631,6 +1715,47 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       }
       el.appendChild(section);
     }
+
+    // pat-48k: @export variable display from script
+    // If the node has a script, parse @export annotations and show them
+    var scriptPath = null;
+    if (data.properties) {
+      for (var sp = 0; sp < data.properties.length; sp++) {
+        if (data.properties[sp].name === '_script_path') {
+          var spv = data.properties[sp].value;
+          if (spv && spv.value && typeof spv.value === 'string') { scriptPath = spv.value; break; }
+        }
+      }
+    }
+    if (scriptPath) {
+      api('GET', '/api/script?path=' + encodeURIComponent(scriptPath)).then(function(scriptData) {
+        if (!scriptData || !scriptData.content) return;
+        var exportVars = parseExportVars(scriptData.content);
+        if (exportVars.length === 0) return;
+        var expSection = createSection('Exports (@export)', 'cat-exports');
+        var expBody = expSection.querySelector('.insp-section-body');
+        for (var ei = 0; ei < exportVars.length; ei++) {
+          var ev = exportVars[ei];
+          var evProp = propMap[ev.name] || { name: ev.name, type: ev.type || 'String', value: { type: ev.type || 'String', value: ev.default || '' } };
+          expBody.appendChild(createPropertyRow(data.id, evProp));
+        }
+        el.appendChild(expSection);
+      });
+    }
+  }
+
+  // pat-48k: Parse @export annotations from GDScript source
+  function parseExportVars(source) {
+    var result = [];
+    var lines = source.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      var m = line.match(/^@export\s+var\s+(\w+)\s*(?::\s*(\w+))?\s*(?:=\s*(.+))?$/);
+      if (m) {
+        result.push({ name: m[1], type: m[2] || 'Variant', default: m[3] ? m[3].trim() : '' });
+      }
+    }
+    return result;
   }
 
   function createSection(title, key) {
@@ -2380,6 +2505,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 
   var CATEGORY_DISPLAY_ORDER = ['Node', '2D', 'Physics 2D', 'UI', 'Audio', 'Other'];
   var addNodeSelectedType = null;
+  // pat-4mc: Recent and favorite node types
+  var recentNodeTypes = [];
+  var favoriteNodeTypes = ['Node2D', 'Sprite2D', 'CharacterBody2D', 'Control', 'Label'];
 
   function openAddNodeDialog() {
     addNodeSelectedType = null;
@@ -2394,10 +2522,61 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     addNodeSelectedType = null;
   }
 
+  // pat-4mc: Helper to append a node type item to the list
+  function appendNodeTypeItem(list, typeName) {
+    var item = document.createElement('div');
+    item.className = 'add-node-item' + (typeName === addNodeSelectedType ? ' selected' : '');
+    var icon = document.createElement('span');
+    icon.className = 'node-type-icon';
+    icon.innerHTML = classIconHtml(typeName).replace('tree-icon', 'node-type-icon');
+    var nameSpan = document.createElement('span');
+    nameSpan.textContent = typeName;
+    item.appendChild(icon);
+    item.appendChild(nameSpan);
+    item.addEventListener('click', function() {
+      addNodeSelectedType = typeName;
+      list.querySelectorAll('.add-node-item').forEach(function(el) { el.classList.remove('selected'); });
+      item.classList.add('selected');
+      document.getElementById('add-node-description').textContent = NODE_TYPES[typeName].desc;
+    });
+    item.addEventListener('dblclick', function() {
+      addNodeSelectedType = typeName;
+      createSelectedNode();
+    });
+    list.appendChild(item);
+  }
+
   function renderAddNodeList(filter) {
     var list = document.getElementById('add-node-list');
     list.innerHTML = '';
     var lower = filter.toLowerCase();
+
+    // pat-4mc: Show Favorites and Recent sections when no filter
+    if (!lower) {
+      if (favoriteNodeTypes.length > 0) {
+        var favCat = document.createElement('div');
+        favCat.className = 'add-node-category';
+        favCat.textContent = '\u2605 Favorites';
+        list.appendChild(favCat);
+        for (var fi = 0; fi < favoriteNodeTypes.length; fi++) {
+          if (NODE_TYPES[favoriteNodeTypes[fi]]) {
+            appendNodeTypeItem(list, favoriteNodeTypes[fi]);
+          }
+        }
+      }
+      if (recentNodeTypes.length > 0) {
+        var recCat = document.createElement('div');
+        recCat.className = 'add-node-category';
+        recCat.textContent = '\u23F0 Recent';
+        list.appendChild(recCat);
+        for (var ri = 0; ri < recentNodeTypes.length; ri++) {
+          if (NODE_TYPES[recentNodeTypes[ri]]) {
+            appendNodeTypeItem(list, recentNodeTypes[ri]);
+          }
+        }
+      }
+    }
+
     var byCategory = {};
     var types = Object.keys(NODE_TYPES);
     for (var i = 0; i < types.length; i++) {
@@ -2416,28 +2595,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       catEl.textContent = catName;
       list.appendChild(catEl);
       for (var j = 0; j < items.length; j++) {
-        (function(typeName) {
-          var item = document.createElement('div');
-          item.className = 'add-node-item' + (typeName === addNodeSelectedType ? ' selected' : '');
-          var icon = document.createElement('span');
-          icon.className = 'node-type-icon';
-          icon.innerHTML = classIconHtml(typeName).replace('tree-icon', 'node-type-icon');
-          var nameSpan = document.createElement('span');
-          nameSpan.textContent = typeName;
-          item.appendChild(icon);
-          item.appendChild(nameSpan);
-          item.addEventListener('click', function() {
-            addNodeSelectedType = typeName;
-            list.querySelectorAll('.add-node-item').forEach(function(el) { el.classList.remove('selected'); });
-            item.classList.add('selected');
-            document.getElementById('add-node-description').textContent = NODE_TYPES[typeName].desc;
-          });
-          item.addEventListener('dblclick', function() {
-            addNodeSelectedType = typeName;
-            createSelectedNode();
-          });
-          list.appendChild(item);
-        })(items[j]);
+        appendNodeTypeItem(list, items[j]);
       }
     }
     // Auto-select first if filter narrows
@@ -2454,6 +2612,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var parentId = selectedNodeId || (sceneData && sceneData.nodes ? sceneData.nodes.id : null);
     if (parentId === null) return;
     await api('POST', '/api/node/add', { parent_id: parentId, name: name, class_name: addNodeSelectedType });
+    // pat-4mc: Track recent node types (max 5, most recent first)
+    var idx = recentNodeTypes.indexOf(addNodeSelectedType);
+    if (idx >= 0) recentNodeTypes.splice(idx, 1);
+    recentNodeTypes.unshift(addNodeSelectedType);
+    if (recentNodeTypes.length > 5) recentNodeTypes.length = 5;
     if (selectedNodeId) expandedNodes.add(selectedNodeId);
     closeAddNodeDialog();
     await fetchScene();
@@ -2562,6 +2725,63 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           }
         })(entry);
       }
+
+      // pat-flr: Show file size/type for files
+      if (!entry.is_dir && entry.size !== undefined) {
+        var meta = document.createElement('span');
+        meta.style.cssText = 'margin-left:auto;font-size:10px;color:var(--text-dim);';
+        var sizeStr = entry.size < 1024 ? entry.size + ' B' : (entry.size / 1024).toFixed(1) + ' KB';
+        meta.textContent = (entry.file_type || '') + ' ' + sizeStr;
+        row.appendChild(meta);
+      }
+
+      // pat-flr: Context menu for rename/delete/mkdir
+      (function(e, r) {
+        r.addEventListener('contextmenu', function(ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          var oldMenu = document.getElementById('fs-context-menu');
+          if (oldMenu) oldMenu.remove();
+          var menu = document.createElement('div');
+          menu.id = 'fs-context-menu';
+          menu.style.cssText = 'position:fixed;top:' + ev.clientY + 'px;left:' + ev.clientX + 'px;background:var(--panel);border:1px solid var(--border);border-radius:3px;padding:4px 0;z-index:500;box-shadow:0 4px 12px rgba(0,0,0,0.5);min-width:140px;';
+          var actions = [];
+          actions.push({ label: 'Rename', action: 'rename' });
+          actions.push({ label: 'Delete', action: 'delete' });
+          if (e.is_dir) actions.push({ label: 'New Folder', action: 'mkdir' });
+          for (var ai = 0; ai < actions.length; ai++) {
+            (function(act) {
+              var item = document.createElement('div');
+              item.textContent = act.label;
+              item.style.cssText = 'padding:4px 12px;cursor:pointer;font-size:12px;white-space:nowrap;';
+              item.addEventListener('mouseenter', function() { item.style.background = 'var(--hover)'; });
+              item.addEventListener('mouseleave', function() { item.style.background = ''; });
+              item.addEventListener('click', function() {
+                menu.remove();
+                if (act.action === 'rename') {
+                  var newName = prompt('Rename to:', e.name);
+                  if (newName && newName !== e.name) {
+                    api('POST', '/api/filesystem/rename', { old_path: e.path, new_name: newName }).then(function() { fetchFileSystem(); });
+                  }
+                } else if (act.action === 'delete') {
+                  if (confirm('Delete ' + e.name + '?')) {
+                    api('POST', '/api/filesystem/delete', { path: e.path }).then(function() { fetchFileSystem(); });
+                  }
+                } else if (act.action === 'mkdir') {
+                  var folderName = prompt('New folder name:');
+                  if (folderName) {
+                    api('POST', '/api/filesystem/mkdir', { path: e.path + '/' + folderName }).then(function() { fetchFileSystem(); });
+                  }
+                }
+              });
+              menu.appendChild(item);
+            })(actions[ai]);
+          }
+          document.body.appendChild(menu);
+          var dismiss = function() { menu.remove(); document.removeEventListener('click', dismiss); };
+          setTimeout(function() { document.addEventListener('click', dismiss); }, 0);
+        });
+      })(entry, row);
 
       node.appendChild(row);
       container.appendChild(node);
@@ -2786,6 +3006,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var timeStr = time.toLocaleTimeString();
     div.innerHTML = '<span class="log-time">[' + escapeHtml(timeStr) + ']</span><span class="log-msg">' + escapeHtml(message) + '</span>';
     logEl.insertBefore(div, logEl.firstChild);
+    // pat-rjd: Cap log entries to prevent unbounded DOM growth
+    while (logEl.children.length > 200) { logEl.removeChild(logEl.lastChild); }
   }
 
   // ---- Toolbar actions ----
@@ -3402,6 +3624,35 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
   }
 
+  // pat-kj4: Project settings dialog
+  function setupProjectSettingsDialog() {
+    var dialog = document.getElementById('project-settings-dialog');
+    if (!dialog) return;
+    document.getElementById('pset-cancel').addEventListener('click', function() { dialog.style.display = 'none'; });
+    document.getElementById('pset-save').addEventListener('click', function() {
+      var settings = {
+        project_name: document.getElementById('pset-name').value,
+        resolution_w: parseInt(document.getElementById('pset-res-w').value) || 1152,
+        resolution_h: parseInt(document.getElementById('pset-res-h').value) || 648,
+        physics_fps: parseInt(document.getElementById('pset-physics-fps').value) || 60,
+        gravity: parseFloat(document.getElementById('pset-gravity').value) || 980.0,
+        main_scene: document.getElementById('pset-main-scene').value
+      };
+      api('POST', '/api/project_settings', settings).then(function() { dialog.style.display = 'none'; });
+    });
+    // Load current values
+    api('GET', '/api/project_settings').then(function(data) {
+      if (!data) return;
+      document.getElementById('pset-name').value = data.project_name || '';
+      document.getElementById('pset-res-w').value = data.resolution_w || 1152;
+      document.getElementById('pset-res-h').value = data.resolution_h || 648;
+      document.getElementById('pset-physics-fps').value = data.physics_fps || 60;
+      document.getElementById('pset-gravity').value = data.gravity || 980.0;
+      document.getElementById('pset-main-scene').value = data.main_scene || '';
+    });
+    dialog.addEventListener('click', function(e) { if (e.target === dialog) dialog.style.display = 'none'; });
+  }
+
   // ---- Theme ----
   function applyTheme(theme) {
     if (theme === 'light') { document.body.classList.add('light'); } else { document.body.classList.remove('light'); }
@@ -3599,6 +3850,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   setupAnimationPanel();
   refreshAnimationList();
   setupSettingsDialog();
+  setupProjectSettingsDialog();
   setupHelpDialog();
   setupLeftDivider();
   setupMenuBar();

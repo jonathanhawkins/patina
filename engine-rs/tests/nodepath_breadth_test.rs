@@ -1,7 +1,8 @@
 //! pat-99r: Broadened packed-scene and NodePath parity coverage.
 //!
 //! Tests ../Sibling resolution, %UniqueNode paths, deeply nested paths (5+ levels),
-//! and relative path resolution after reparenting.
+//! relative path resolution after reparenting, ../../Sibling, ./Child/GrandChild,
+//! paths with :property subnames, empty paths, and paths to non-existent nodes.
 
 use gdscene::node::Node;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
@@ -317,4 +318,197 @@ fn node_path_correct_after_reparent() {
     tree.reparent(child, b).unwrap();
 
     assert_eq!(tree.node_path(child).unwrap(), "/root/B/Child");
+}
+
+// ===========================================================================
+// 7. ../../Sibling resolution (pat-99r broadening)
+// ===========================================================================
+
+#[test]
+fn dotdot_dotdot_sibling_resolution() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let grandparent = tree.add_child(root, Node::new("GP", "Node2D")).unwrap();
+    let parent = tree
+        .add_child(grandparent, Node::new("Parent", "Node2D"))
+        .unwrap();
+    let child = tree
+        .add_child(parent, Node::new("Child", "Node2D"))
+        .unwrap();
+    let sibling_of_parent = tree
+        .add_child(grandparent, Node::new("Uncle", "Node2D"))
+        .unwrap();
+
+    // From Child, ../../Uncle reaches the sibling of Parent
+    assert_eq!(
+        tree.get_node_relative(child, "../../Uncle").unwrap(),
+        sibling_of_parent
+    );
+}
+
+// ===========================================================================
+// 8. ./Child/GrandChild resolution
+// ===========================================================================
+
+#[test]
+fn dot_slash_child_grandchild() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
+    let child = tree
+        .add_child(parent, Node::new("Child", "Node2D"))
+        .unwrap();
+    let grandchild = tree
+        .add_child(child, Node::new("GrandChild", "Sprite2D"))
+        .unwrap();
+
+    // ./Child/GrandChild from Parent
+    assert_eq!(
+        tree.get_node_relative(parent, "./Child/GrandChild")
+            .unwrap(),
+        grandchild
+    );
+    // ./GrandChild from Child
+    assert_eq!(
+        tree.get_node_relative(child, "./GrandChild").unwrap(),
+        grandchild
+    );
+}
+
+// ===========================================================================
+// 9. NodePath with :property subnames (parsing only — resolution strips subnames)
+// ===========================================================================
+
+#[test]
+fn nodepath_property_subname_parsing() {
+    use gdcore::NodePath;
+
+    let p = NodePath::new("Player:position");
+    assert_eq!(p.get_name_count(), 1);
+    assert_eq!(p.get_name(0), Some("Player"));
+    assert_eq!(p.get_subname_count(), 1);
+    assert_eq!(p.get_subname(0), Some("position"));
+
+    let p2 = NodePath::new("../Sibling:scale:x");
+    assert_eq!(p2.get_name_count(), 2);
+    assert_eq!(p2.get_name(0), Some(".."));
+    assert_eq!(p2.get_name(1), Some("Sibling"));
+    assert_eq!(p2.get_subname_count(), 2);
+    assert_eq!(p2.get_subname(0), Some("scale"));
+    assert_eq!(p2.get_subname(1), Some("x"));
+    assert_eq!(p2.get_concatenated_subnames(), "scale:x");
+}
+
+#[test]
+fn nodepath_absolute_with_subnames() {
+    use gdcore::NodePath;
+
+    let p = NodePath::new("/root/Player/Sprite:modulate:a");
+    assert!(p.is_absolute());
+    assert_eq!(p.get_name_count(), 3);
+    assert_eq!(p.get_name(0), Some("root"));
+    assert_eq!(p.get_name(1), Some("Player"));
+    assert_eq!(p.get_name(2), Some("Sprite"));
+    assert_eq!(p.get_subname_count(), 2);
+    assert_eq!(p.get_subname(0), Some("modulate"));
+    assert_eq!(p.get_subname(1), Some("a"));
+}
+
+// ===========================================================================
+// 10. Empty path and edge cases
+// ===========================================================================
+
+#[test]
+fn empty_path_returns_self() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let node = tree.add_child(root, Node::new("A", "Node2D")).unwrap();
+
+    // Empty relative path returns self
+    assert_eq!(tree.get_node_relative(node, "").unwrap(), node);
+    // Empty via get_node_or_null
+    assert_eq!(tree.get_node_or_null(node, "").unwrap(), node);
+}
+
+#[test]
+fn dot_only_returns_self() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let node = tree.add_child(root, Node::new("A", "Node2D")).unwrap();
+    assert_eq!(tree.get_node_relative(node, ".").unwrap(), node);
+}
+
+// ===========================================================================
+// 11. Paths to non-existent nodes
+// ===========================================================================
+
+#[test]
+fn nonexistent_child_returns_none() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let parent = tree.add_child(root, Node::new("P", "Node2D")).unwrap();
+    tree.add_child(parent, Node::new("A", "Node2D")).unwrap();
+
+    assert!(tree.get_node_relative(parent, "B").is_none());
+    assert!(tree.get_node_relative(parent, "A/NonExistent").is_none());
+    assert!(tree.get_node_relative(parent, "A/B/C/D").is_none());
+}
+
+#[test]
+fn nonexistent_absolute_path_returns_none() {
+    let tree = SceneTree::new();
+
+    assert!(tree.get_node_by_path("/root/DoesNotExist").is_none());
+    assert!(tree.get_node_by_path("/root/A/B/C").is_none());
+    assert!(tree.get_node_by_path("/wrong").is_none());
+}
+
+#[test]
+fn dotdot_past_root_returns_none() {
+    let tree = SceneTree::new();
+    let root = tree.root_id();
+
+    assert!(tree.get_node_relative(root, "..").is_none());
+    assert!(tree.get_node_relative(root, "../..").is_none());
+}
+
+// ===========================================================================
+// 12. %UniqueName within packed scene breadth (pat-99r)
+// ===========================================================================
+
+#[test]
+fn unique_name_in_packed_scene_breadth() {
+    let tscn = r#"[gd_scene format=3]
+
+[node name="Level" type="Node2D"]
+
+[node name="Enemies" type="Node2D" parent="."]
+
+[node name="%BossEnemy" type="CharacterBody2D" parent="Enemies"]
+
+[node name="UI" type="Control" parent="."]
+
+[node name="%HUD" type="CanvasLayer" parent="UI"]
+"#;
+    let scene = PackedScene::from_tscn(tscn).unwrap();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let level = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+    // %BossEnemy resolves from level root
+    let boss = tree.get_node_relative(level, "%BossEnemy").unwrap();
+    assert_eq!(tree.get_node(boss).unwrap().name(), "BossEnemy");
+
+    // %HUD resolves from level root
+    let hud = tree.get_node_relative(level, "%HUD").unwrap();
+    assert_eq!(tree.get_node(hud).unwrap().name(), "HUD");
+
+    // Cross-resolve: from boss's parent, find HUD
+    let enemies = tree.get_node_relative(level, "Enemies").unwrap();
+    assert_eq!(tree.get_node_relative(enemies, "%HUD").unwrap(), hud);
 }

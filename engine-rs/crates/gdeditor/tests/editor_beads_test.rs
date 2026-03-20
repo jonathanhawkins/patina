@@ -514,3 +514,172 @@ fn test_qg1_scene_tabs_and_info() {
     assert!(b.contains("scene-search"), "Missing scene-search");
     handle.stop();
 }
+
+// pat-kj4: Project settings API
+#[test]
+fn test_kj4_project_settings_get() {
+    let (handle, port) = make_server();
+    let resp = http_get(port, "/api/project_settings");
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["project_name"], "New Project");
+    assert_eq!(v["resolution_w"], 1152);
+    assert_eq!(v["resolution_h"], 648);
+    assert_eq!(v["physics_fps"], 60);
+    assert_eq!(v["gravity"], 980.0);
+    handle.stop();
+}
+
+#[test]
+fn test_kj4_project_settings_set() {
+    let (handle, port) = make_server();
+    let body = r#"{"project_name":"MyGame","resolution_w":1920,"resolution_h":1080,"physics_fps":120,"gravity":490.0,"main_scene":"res://main.tscn"}"#;
+    let resp = http_post(port, "/api/project_settings", body);
+    assert!(resp.contains("200 OK"));
+
+    // Verify it stuck
+    let resp2 = http_get(port, "/api/project_settings");
+    let v: serde_json::Value = serde_json::from_str(extract_body(&resp2)).unwrap();
+    assert_eq!(v["project_name"], "MyGame");
+    assert_eq!(v["resolution_w"], 1920);
+    assert_eq!(v["physics_fps"], 120);
+    assert_eq!(v["main_scene"], "res://main.tscn");
+    handle.stop();
+}
+
+// pat-mn3: Shared properties API
+#[test]
+fn test_mn3_shared_properties() {
+    let (handle, port) = make_server();
+    let main_id = get_main_node_id(port);
+    // Add two child nodes
+    let body_a = format!(
+        r#"{{"parent_id":{},"name":"A","class_name":"Sprite2D"}}"#,
+        main_id
+    );
+    http_post(port, "/api/node/add", &body_a);
+    let body_b = format!(
+        r#"{{"parent_id":{},"name":"B","class_name":"Sprite2D"}}"#,
+        main_id
+    );
+    http_post(port, "/api/node/add", &body_b);
+
+    // Get children IDs
+    let resp = http_get(port, "/api/scene");
+    let scene: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+    let children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let id_a = children[0]["id"].as_u64().unwrap();
+    let id_b = children[1]["id"].as_u64().unwrap();
+
+    // Get shared properties
+    let body = format!(r#"{{"node_ids":[{},{}]}}"#, id_a, id_b);
+    let resp = http_post(port, "/api/node/shared_properties", &body);
+    let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+    // Both are Sprite2D, so they should share the same property set
+    assert!(
+        v.as_object().is_some(),
+        "Shared properties should be an object"
+    );
+    handle.stop();
+}
+
+// pat-flr: Filesystem operations
+#[test]
+fn test_flr_filesystem_mkdir_and_delete() {
+    let (handle, port) = make_server();
+    let tmp = std::env::temp_dir().join("patina_fs_test_flr");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // Create a subfolder
+    let body = format!(r#"{{"path":"{}"}}"#, tmp.join("newdir").display());
+    let resp = http_post(port, "/api/filesystem/mkdir", &body);
+    assert!(resp.contains("200 OK"), "mkdir should succeed");
+    assert!(tmp.join("newdir").is_dir(), "Directory should exist");
+
+    // Delete the subfolder
+    let body = format!(r#"{{"path":"{}"}}"#, tmp.join("newdir").display());
+    let resp = http_post(port, "/api/filesystem/delete", &body);
+    assert!(resp.contains("200 OK"), "delete should succeed");
+    assert!(!tmp.join("newdir").exists(), "Directory should be deleted");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    handle.stop();
+}
+
+#[test]
+fn test_flr_filesystem_rename() {
+    let (handle, port) = make_server();
+    let tmp = std::env::temp_dir().join("patina_fs_test_rename");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("old.txt"), "hello").unwrap();
+
+    let body = format!(
+        r#"{{"old_path":"{}","new_name":"new.txt"}}"#,
+        tmp.join("old.txt").display()
+    );
+    let resp = http_post(port, "/api/filesystem/rename", &body);
+    assert!(resp.contains("200 OK"), "rename should succeed");
+    assert!(tmp.join("new.txt").exists(), "New file should exist");
+    assert!(!tmp.join("old.txt").exists(), "Old file should be gone");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    handle.stop();
+}
+
+// pat-4mc: Project settings dialog HTML present
+#[test]
+fn test_kj4_project_settings_dialog_html() {
+    let (handle, port) = make_server();
+    let html = http_get(port, "/editor");
+    let b = extract_body(&html);
+    assert!(
+        b.contains("project-settings-dialog"),
+        "Missing project-settings-dialog element"
+    );
+    assert!(b.contains("pset-name"), "Missing pset-name input");
+    assert!(b.contains("pset-res-w"), "Missing pset-res-w input");
+    assert!(b.contains("pset-gravity"), "Missing pset-gravity input");
+    handle.stop();
+}
+
+// pat-rjd: Log cap in frontend
+#[test]
+fn test_rjd_log_cap_in_html() {
+    let (handle, port) = make_server();
+    let html = http_get(port, "/editor");
+    let b = extract_body(&html);
+    assert!(
+        b.contains("logEl.children.length > 200"),
+        "Missing frontend log cap (200 entries)"
+    );
+    handle.stop();
+}
+
+// pat-flr: Filesystem context menu in HTML
+#[test]
+fn test_flr_fs_context_menu_html() {
+    let (handle, port) = make_server();
+    let html = http_get(port, "/editor");
+    let b = extract_body(&html);
+    assert!(
+        b.contains("fs-context-menu"),
+        "Missing filesystem context menu"
+    );
+    assert!(
+        b.contains("/api/filesystem/rename"),
+        "Missing filesystem rename API call"
+    );
+    assert!(
+        b.contains("/api/filesystem/delete"),
+        "Missing filesystem delete API call"
+    );
+    assert!(
+        b.contains("/api/filesystem/mkdir"),
+        "Missing filesystem mkdir API call"
+    );
+    handle.stop();
+}

@@ -463,10 +463,28 @@ impl SceneTree {
     }
 
     /// Resolves a relative path from a given node (e.g. `"Player/Sprite"`).
+    ///
+    /// Supports `%UniqueName` syntax: if the **first** segment starts with
+    /// `%`, it is resolved via [`get_node_by_unique_name`](Self::get_node_by_unique_name)
+    /// within the scene-owner scope. Remaining segments (if any) are resolved
+    /// relative to the unique-name result.
     pub fn get_node_relative(&self, from: NodeId, rel_path: &str) -> Option<NodeId> {
         if rel_path.is_empty() {
             return Some(from);
         }
+
+        // Handle %UniqueName paths — first segment starts with '%'.
+        if let Some(stripped) = rel_path.strip_prefix('%') {
+            let parts: Vec<&str> = stripped.split('/').collect();
+            let unique_node = self.get_node_by_unique_name(from, parts[0])?;
+            if parts.len() == 1 {
+                return Some(unique_node);
+            }
+            // Resolve remaining segments relative to the unique node.
+            let rest = parts[1..].join("/");
+            return self.get_node_relative(unique_node, &rest);
+        }
+
         let parts: Vec<&str> = rel_path.split('/').collect();
         let mut current = from;
         for &part in &parts {
@@ -490,6 +508,42 @@ impl SceneTree {
             if let Some(child) = self.nodes.get(&child_id) {
                 if child.name() == name {
                     return Some(child_id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolves a `%UniqueName` within the scene owner scope.
+    ///
+    /// In Godot, `get_node("%Foo")` searches the subtree owned by the same
+    /// scene root for a node with `unique_name == true` whose name matches
+    /// `"Foo"`. The search starts from the owner of `from` (or `from`
+    /// itself if it has no owner, i.e. it is a scene root).
+    pub fn get_node_by_unique_name(&self, from: NodeId, name: &str) -> Option<NodeId> {
+        // Determine the owner scope root.
+        let owner_id = self
+            .nodes
+            .get(&from)
+            .and_then(|n| n.owner())
+            .unwrap_or(from);
+
+        // Breadth-first search through the owner's subtree.
+        self.find_unique_in_subtree(owner_id, name)
+    }
+
+    /// Searches a subtree (depth-first) for a node with `unique_name == true`
+    /// and the given name.
+    fn find_unique_in_subtree(&self, root: NodeId, name: &str) -> Option<NodeId> {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                if node.is_unique_name() && node.name() == name {
+                    return Some(id);
+                }
+                // Push children in reverse order so left-most is visited first.
+                for &child_id in node.children().iter().rev() {
+                    stack.push(child_id);
                 }
             }
         }

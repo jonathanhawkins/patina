@@ -18,6 +18,7 @@ For every fixture class, the oracle system must produce machine-readable outputs
 - Full node hierarchy (parent-child relationships)
 - Node types and class names
 - Node names and paths
+- `%UniqueName` resolution within scene-owner scope (implemented — `get_node("%Foo")` searches the owner's subtree for `unique_name_in_owner` nodes)
 - Group memberships
 - Scene instancing relationships
 

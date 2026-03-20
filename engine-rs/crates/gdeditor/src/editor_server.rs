@@ -200,6 +200,18 @@ pub struct EditorState {
     pub viewport_mode: ViewportMode,
     /// Output log from script print() calls.
     pub output_entries: VecDeque<String>,
+    /// Project settings (pat-kj4).
+    pub project_name: String,
+    /// Project display resolution width.
+    pub project_resolution_w: u32,
+    /// Project display resolution height.
+    pub project_resolution_h: u32,
+    /// Project physics FPS.
+    pub project_physics_fps: u32,
+    /// Project default gravity.
+    pub project_gravity: f64,
+    /// Project main scene path.
+    pub project_main_scene: String,
 }
 
 /// Viewport tool modes for the editor.
@@ -305,6 +317,12 @@ impl EditorState {
             plugins: Vec::new(),
             viewport_mode: ViewportMode::Select,
             output_entries: VecDeque::new(),
+            project_name: "New Project".to_string(),
+            project_resolution_w: 1152,
+            project_resolution_h: 648,
+            project_physics_fps: 60,
+            project_gravity: 980.0,
+            project_main_scene: String::new(),
         }
     }
 
@@ -829,6 +847,19 @@ fn handle_connection(
         ("POST", "/api/signal/disconnect") => api_disconnect_signal(state, &req.body, &mut stream),
         ("POST", "/api/output/clear") => api_clear_output(state, &mut stream),
         ("GET", "/api/output") => api_get_output(state, &mut stream),
+        // pat-kj4: Project settings
+        ("GET", "/api/project_settings") => api_get_project_settings(state, &mut stream),
+        ("POST", "/api/project_settings") => {
+            api_set_project_settings(state, &req.body, &mut stream)
+        }
+        // pat-flr: Filesystem operations
+        ("POST", "/api/filesystem/rename") => api_filesystem_rename(&req.body, &mut stream),
+        ("POST", "/api/filesystem/delete") => api_filesystem_delete(&req.body, &mut stream),
+        ("POST", "/api/filesystem/mkdir") => api_filesystem_mkdir(&req.body, &mut stream),
+        // pat-mn3: Multi-object shared properties
+        ("POST", "/api/node/shared_properties") => {
+            api_get_shared_properties(state, &req.body, &mut stream)
+        }
         _ => serve_404(&mut stream),
     }
 }
@@ -2066,6 +2097,10 @@ struct FsEntry {
     path: String,
     is_dir: bool,
     children: Vec<FsEntry>,
+    /// File size in bytes (0 for directories).
+    size: u64,
+    /// File type string (e.g. "GDScript", "Scene", "Resource").
+    file_type: String,
 }
 
 impl FsEntry {
@@ -2080,11 +2115,25 @@ impl FsEntry {
             )
         } else {
             format!(
-                r#"{{"name":"{}","path":"{}","is_dir":false}}"#,
+                r#"{{"name":"{}","path":"{}","is_dir":false,"size":{},"file_type":"{}"}}"#,
                 self.name.replace('\\', "\\\\").replace('"', "\\\""),
                 self.path.replace('\\', "\\\\").replace('"', "\\\""),
+                self.size,
+                self.file_type,
             )
         }
+    }
+}
+
+fn file_type_for_ext(ext: &str) -> &str {
+    match ext {
+        "gd" => "GDScript",
+        "tscn" => "Scene",
+        "tres" => "Resource",
+        "png" | "jpg" | "jpeg" | "webp" | "svg" => "Image",
+        "wav" | "ogg" | "mp3" => "Audio",
+        "ttf" | "otf" => "Font",
+        _ => "File",
     }
 }
 
@@ -2129,6 +2178,8 @@ fn scan_directory(
                     path: format!("res://{}", child_prefix),
                     is_dir: true,
                     children,
+                    size: 0,
+                    file_type: "Directory".to_string(),
                 });
             }
         } else if path.is_file() {
@@ -2139,11 +2190,14 @@ fn scan_directory(
                 } else {
                     format!("res://{}/{}", prefix, name)
                 };
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 files.push(FsEntry {
                     name,
                     path: file_path,
                     is_dir: false,
                     children: Vec::new(),
+                    size,
+                    file_type: file_type_for_ext(ext).to_string(),
                 });
             }
         }
@@ -4995,6 +5049,243 @@ fn api_get_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(stream, &serde_json::json!({"entries": entries}).to_string());
 }
 
+// ---------------------------------------------------------------------------
+// pat-kj4: Project settings
+// ---------------------------------------------------------------------------
+
+/// `GET /api/project_settings` — returns project settings as JSON.
+fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let s = state.lock().unwrap();
+        serde_json::json!({
+            "project_name": s.project_name,
+            "resolution_w": s.project_resolution_w,
+            "resolution_h": s.project_resolution_h,
+            "physics_fps": s.project_physics_fps,
+            "gravity": s.project_gravity,
+            "main_scene": s.project_main_scene,
+        })
+        .to_string()
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/project_settings` — updates project settings.
+fn api_set_project_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let json = {
+        let mut s = state.lock().unwrap();
+        if let Some(v) = p.get("project_name").and_then(|v| v.as_str()) {
+            s.project_name = v.to_string();
+        }
+        if let Some(v) = p.get("resolution_w").and_then(|v| v.as_u64()) {
+            s.project_resolution_w = v as u32;
+        }
+        if let Some(v) = p.get("resolution_h").and_then(|v| v.as_u64()) {
+            s.project_resolution_h = v as u32;
+        }
+        if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {
+            s.project_physics_fps = v as u32;
+        }
+        if let Some(v) = p.get("gravity").and_then(|v| v.as_f64()) {
+            s.project_gravity = v;
+        }
+        if let Some(v) = p.get("main_scene").and_then(|v| v.as_str()) {
+            s.project_main_scene = v.to_string();
+        }
+        serde_json::json!({
+            "ok": true,
+            "project_name": s.project_name,
+            "resolution_w": s.project_resolution_w,
+            "resolution_h": s.project_resolution_h,
+            "physics_fps": s.project_physics_fps,
+            "gravity": s.project_gravity,
+            "main_scene": s.project_main_scene,
+        })
+        .to_string()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-flr: Filesystem operations
+// ---------------------------------------------------------------------------
+
+/// `POST /api/filesystem/rename` — renames a file or directory.
+fn api_filesystem_rename(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let old_path = match p.get("old_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing old_path");
+            return;
+        }
+    };
+    let new_name = match p.get("new_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing new_name");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = old_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&old_path)
+    };
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let new_path = resolved.parent().unwrap_or(&cwd).join(&new_name);
+    match std::fs::rename(&resolved, &new_path) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("rename failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/delete` — deletes a file or empty directory.
+fn api_filesystem_delete(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let result = if resolved.is_dir() {
+        std::fs::remove_dir(&resolved)
+    } else {
+        std::fs::remove_file(&resolved)
+    };
+    match result {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("delete failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/mkdir` — creates a new directory.
+fn api_filesystem_mkdir(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    match std::fs::create_dir_all(&resolved) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("mkdir failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-mn3: Multi-object shared properties
+// ---------------------------------------------------------------------------
+
+/// `POST /api/node/shared_properties` — returns properties shared by all given nodes.
+fn api_get_shared_properties(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_ids: Vec<u64> = match p.get("node_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_u64()).collect(),
+        None => {
+            send_error(stream, 400, "missing node_ids array");
+            return;
+        }
+    };
+    let json = {
+        let s = state.lock().unwrap();
+        let mut shared: Option<HashMap<String, serde_json::Value>> = None;
+        for raw_id in &node_ids {
+            let nid = match find_node_by_raw_id(&s.scene_tree, *raw_id) {
+                Some(id) => id,
+                None => continue,
+            };
+            let node = match s.scene_tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            let mut props = HashMap::new();
+            for (name, value) in node.properties() {
+                let vj = gdvariant::serialize::to_json(value);
+                let type_name = vj
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                props.insert(
+                    name.to_string(),
+                    serde_json::json!({"name": name, "type": type_name, "value": vj}),
+                );
+            }
+            shared = match shared {
+                None => Some(props),
+                Some(existing) => {
+                    let mut intersection = HashMap::new();
+                    for (k, v) in existing {
+                        if props.contains_key(&k) {
+                            intersection.insert(k, v);
+                        }
+                    }
+                    Some(intersection)
+                }
+            };
+        }
+        let props_arr: Vec<serde_json::Value> = shared.unwrap_or_default().into_values().collect();
+        serde_json::json!({"properties": props_arr, "count": node_ids.len()}).to_string()
+    };
+    send_json(stream, &json);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6262,6 +6553,8 @@ mod tests {
             path: "res://test.tscn".to_string(),
             is_dir: false,
             children: Vec::new(),
+            size: 1024,
+            file_type: "Scene".to_string(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -6281,7 +6574,11 @@ mod tests {
                 path: "res://scenes/main.tscn".to_string(),
                 is_dir: false,
                 children: Vec::new(),
+                size: 512,
+                file_type: "Scene".to_string(),
             }],
+            size: 0,
+            file_type: String::new(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
