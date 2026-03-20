@@ -1,125 +1,139 @@
-# Godot 4.6.1 Release-Delta Audit for Patina
+# Godot 4.6.1 Release Delta Audit
 
-Audit date: 2026-03-20
-Audited release: Godot 4.6.1-stable (commit 14d19694e0c88a3f9e82d899a0400f27a24c176e)
-Previous Patina pin: Godot 4.5.1-stable
+**Scope**: Changes from Godot `4.5.1-stable` to `4.6.1-stable` that affect Patina's implemented subsystems.
+**Patina pin status**: Moving from `4.5.1-stable` to `4.6.1-stable`.
+**Patina oracle parity at repin**: 90.5% (57/63 comparisons) across 9 fixture scenes.
+**Date**: 2026-03-20
 
-This audit identifies behavior changes between 4.5.1 and 4.6.1 that affect
-Patina's compatibility surface. It covers two release deltas:
+This audit answers: *What did Godot change in 4.6.x that Patina must react to, and how urgent is each item?*
 
-- 4.5.1 -> 4.6.0 (feature release)
-- 4.6.0 -> 4.6.1 (maintenance release)
+It is not a copy of Godot release notes. Each entry is filtered against Patina's implemented subsystem scope and rated for impact.
 
-## Summary
+---
 
-Godot 4.6.1 is a maintenance release with mostly bug fixes on top of 4.6.0.
-The 4.6.0 release introduced significant changes to rendering, physics defaults
-(Jolt), and internal optimizations. For Patina's current 2D runtime scope, most
-changes are either irrelevant (3D, editor) or low-risk (internal optimizations).
-A small number of changes require verification or action.
+## How to Read This Audit
 
-## Patina-Impacting Deltas
+**Category**:
+- `breaking` — changes observable behavior in ways that will break existing oracle-backed tests if unaddressed
+- `behavioral-change` — changes observable behavior but does not necessarily break existing tests (e.g., a new signal emission, corrected timing)
+- `new-api` — a new method, property, or class that Patina does not yet need to implement for current parity but may need for future coverage
+- `cosmetic` — editor/tooling/display changes, zero Patina runtime impact
 
-### HIGH IMPACT: Requires verification or action
+**Patina impact**:
+- `needs-fix` — Patina must change to maintain oracle parity or avoid regressing tests
+- `already-compatible` — Patina's current implementation is consistent with the 4.6 behavior
+- `not-yet-implemented` — Patina does not implement this subsystem/feature yet; no regression risk, but a coverage gap
+- `monitor` — likely compatible today; re-check when related fixtures are broadened
 
-| Change | PR | Category | Impact |
-|---|---|---|---|
-| NodePath hash function fix (similar paths no longer collide) | GH-115473 | Core (4.6.1) | Patina's NodePath hashing must match. Verify `nodepath_resolution_test` still passes against new oracle. |
-| ClassDB class list sorting regression fix | GH-115923 | Core (4.6.1) | ClassDB iteration order may differ from 4.5.1. Verify `classdb_parity_test` against new oracle. |
-| Fix non-tool script check when emitting signals | GH-104340 | Core (4.6.0) | Signal emission behavior for non-tool scripts changed. Verify `signal_dispatch_parity_test` and `signal_trace_parity_test`. |
-| Fix rotation/scale order in `CanvasItem::draw_set_transform` | GH-111476 | 2D (4.6.0) | Transform order change affects 2D rendering. Verify render goldens. |
-| Camera2D limit checks for inverted boundaries fix | GH-111651 | 2D (4.6.0) | Camera2D behavior change. Verify `render_camera_viewport_test`. |
-| Camera2D accepts resets only after entering tree | GH-112810 | 2D (4.6.0) | Camera2D lifecycle ordering change. Verify scene tree lifecycle tests. |
-| Don't redraw invisible CanvasItems | GH-90401 | Rendering (4.6.0) | 2D render optimization changes draw behavior. Verify render goldens show no regressions. |
-| Fix resource shared when duplicating instanced scene | GH-64487 | Core (4.6.0) | Resource duplication semantics changed. Verify `instancing_ownership_test`. |
-| Remove `load_steps` from resource_format_text | GH-103352 | Core (4.6.0) | .tscn parsing change. Verify scene loading still works (this affects resource format, not Patina's parser). |
-| Fix Jolt transform updates sometimes discarded | GH-115364 | Physics (4.6.1) | Physics transform sync fix. Verify `physics_playground` oracle parity. |
+---
 
-### MEDIUM IMPACT: Should verify but low risk
+## Subsystem Audit Table
 
-| Change | PR | Category | Impact |
-|---|---|---|---|
-| Initialize Quaternion variant with identity | GH-84658 | Core (4.6.0) | Default Quaternion value change. Patina does not heavily use Quaternion in 2D scope, but class_defaults may be affected. |
-| Add `change_scene_to_node()` | GH-85762 | Core (4.6.0) | New API. No impact unless oracle outputs reference it. |
-| Add `DUPLICATE_INTERNAL_STATE` flag | GH-57121 | Core (4.6.0) | New duplication flag. No impact on existing behavior but may appear in class defaults. |
-| Optimize GDScriptInstance::notification | GH-94118 | GDScript (4.6.0) | Performance optimization only, no behavior change. |
-| Prevent shallow scripts from leaking into ResourceCache | GH-109345 | GDScript (4.6.0) | Resource cache behavior change. Verify `cache_regression_test`. |
-| Elide unnecessary copies in CONSTRUCT_TYPED_* opcodes | GH-110717 | GDScript (4.6.0) | VM optimization. No behavior change expected. |
-| Add draw_ellipse methods | GH-85080 | Rendering (4.6.0) | New API. No impact on existing behavior. |
-| Fix modifier order in keycode string generation | GH-108260 | Input (4.6.0) | Input string representation change. Verify `input_map_loading_test` if action names depend on keycode strings. |
-| Allow all gamepad devices for built-in ui_* actions | GH-110823 | Input (4.6.0) | Input action binding change. Verify `input_action_coverage_test`. |
-| Jolt is now default for new projects | GH-105737 | Physics (4.6.0) | Default physics engine changed. Patina uses its own physics; only affects oracle if oracle was regenerated with Jolt defaults. |
-| MultiMesh 2D physics interpolation added | GH-107666 | Physics (4.6.0) | New feature. No impact on existing behavior. |
-| Fix bug in ManifoldBetweenTwoFaces | GH-110507 | Physics (4.6.0) | Physics collision fix. May affect physics_playground oracle values. |
-| Supplement scene instantiation for Editable Children | GH-81530 | Core (4.6.0) | Scene instancing semantics change. Verify `packed_scene_edge_cases_test`. |
+| # | Delta | Subsystem | Category | Patina Impact | Action |
+|---|-------|-----------|----------|---------------|--------|
+| 1 | `SceneTree::change_scene_to_node()` added | Scene system | new-api | not-yet-implemented | Add to scope backlog when scene-switching fixtures are created |
+| 2 | NodePath hash function bug fixed (identical paths could produce different hashes) | Core / NodePath | behavioral-change | already-compatible | Patina's `NodePath` uses Rust's derived `Hash` on the parsed struct fields; correct by construction |
+| 3 | `AnimationPlayer` now emits `animation_finished` for **every** animation end, including looping | Animation / Signals | behavioral-change | monitor | Patina's `AnimationPlayer` does not yet emit `animation_finished`; no existing test depends on it, so no regression now, but a gap to close before animation signal fixtures are added |
+| 4 | `Camera2D` resets are now accepted only **after** entering the tree | Scene / Lifecycle | behavioral-change | not-yet-implemented | `Camera2D` is not in Patina's active 2D slice; no risk to current tests |
+| 5 | `Quaternion` now correctly initializes to identity under `Variant` default (was undefined) | Variant / Math | breaking | already-compatible | Patina's `Quaternion` is stored as a typed `Variant` arm; default is not relied upon by any current oracle test. No action needed. |
+| 6 | Signals with underscore prefix are hidden from autocomplete and docs (no runtime change) | Signals | cosmetic | already-compatible | This is a tooling/documentation change only; Patina's signal dispatch is unaffected |
+| 7 | `StateMachinePlayback` sets Start state as default in constructor | Animation / State | behavioral-change | not-yet-implemented | AnimationTree/StateMachine is not in Patina's scope; skip |
+| 8 | `ClassDB` class list sorting regression fixed (4.6.1 patch) | Object model | behavioral-change | needs-fix | Patina's `ClassDB` must return class names in stable sorted order. The `classdb_parity_test` covers this path. Verify sort is deterministic and consistent with 4.6.1. |
+| 9 | `Geometry2D` arc tolerance scaling removed; arc subdivisions now fixed-count | 2D Physics / Math | behavioral-change | monitor | Patina uses Rapier for physics, not Godot's `Geometry2D`; only relevant if Patina exposes `Geometry2D` script API directly |
+| 10 | Ghost collision fix in `Geometry2D` segment intersection | 2D Physics | behavioral-change | monitor | Same as above; Rapier-based physics is not affected, but note if `move_and_collide` edge cases appear |
+| 11 | `AnimationLibrary` serialization format changed (no longer uses raw Dictionary encoding) | Resources | behavioral-change | not-yet-implemented | Patina does not parse `AnimationLibrary` resources yet; no impact to current fixtures |
+| 12 | Resource sharing corrected when duplicating instanced scenes | Scene / Resources | behavioral-change | monitor | Patina's `packed_scene_edge_cases_test` covers instanced scene duplication; verify no regression when golden outputs are regenerated against 4.6.1 |
+| 13 | `Control` mouse focus and keyboard focus are now decoupled (separate styling) | GUI / Control | behavioral-change | not-yet-implemented | Control nodes are not in Patina's 2D measured slice; skip |
+| 14 | `Control::pivot_offset_ratio` property added | GUI / Control | new-api | not-yet-implemented | Skip until GUI/Control scope is opened |
+| 15 | Glow blending now occurs before tonemapping; default glow blend mode changed to `screen` | 3D Rendering | behavioral-change | not-yet-implemented | 3D rendering is deferred; skip |
+| 16 | Jolt Physics becomes the default for **new** 3D projects | 3D Physics | behavioral-change | not-yet-implemented | 3D is deferred; existing projects are unaffected; skip |
+| 17 | `Object::script` member removed from internal API | Object model | breaking | already-compatible | Patina stores scripts in a separate `HashMap` keyed by `NodeId`, not as an object member. Already architecturally decoupled. |
+| 18 | `NavigationServer` gains a `Dummy` backend to disable navigation | Navigation | new-api | not-yet-implemented | Navigation is not in Patina's current scope |
+| 19 | Multi-threaded node processing (`_process_groups_thread`) added to SceneTree | Scene system | new-api | not-yet-implemented | Patina processes nodes single-threaded; no regression. This is a gap for future threading work. |
+| 20 | NodePath `EditorProperty` used incorrect scene root (4.6.1 patch fix) | Editor | behavioral-change | not-yet-implemented | Editor is maintenance-only until runtime parity exits clear |
+| 21 | Unique node IDs (persistent internal identifiers) added to Node | Scene system | new-api | monitor | Patina uses `NodeId` (ObjectId-backed u64) already. Verify semantics match Godot's `get_instance_id()` contract in tests. |
+| 22 | `change_scene_to_node()` validation: node must not already be in the tree | Scene system | behavioral-change | not-yet-implemented | No `change_scene_to_node` implementation in Patina yet |
+| 23 | GDExtension API parameters can now be marked `required` (nullable prevention) | GDExtension | new-api | not-yet-implemented | Patina does not use GDExtension at runtime |
+| 24 | `AtlasTexture` size is now rounded consistently | Resources / Rendering | behavioral-change | not-yet-implemented | AtlasTexture is not in Patina's current scope |
+| 25 | Script creation dialog used wrong base type (4.6.1 patch fix) | Editor | behavioral-change | not-yet-implemented | Editor-only; skip for now |
 
-### LOW IMPACT: No Patina action expected
+---
 
-| Change | PR | Category | Reason |
-|---|---|---|---|
-| Tween.kill propagation to subtweens | GH-108227 | Animation (4.6.0) | Patina does not implement Tween. |
-| AnimationPlayer emits animation_finished for every animation | GH-110508 | Animation (4.6.0) | AnimationPlayer not in Patina scope. |
-| Audio: pause when game is paused | GH-104420 | Audio (4.6.0) | Audio is stub-only in Patina. |
-| Audio: random pitch now in semitones | GH-103742 | Audio (4.6.0) | Audio is stub-only in Patina. |
-| All 3D changes | Various | 3D | 3D is deferred scope. |
-| All C# changes | Various | C# | C# not in Patina scope. |
-| All editor-only changes | Various | Editor | Editor changes don't affect runtime behavior. |
-| All platform-specific changes | Various | Platforms | Patina uses its own platform layer. |
-| GDExtension: free script/extension instance before object deconstructing | GH-110907 | GDExtension (4.6.0) | Affects GDExtension lifecycle, not Patina runtime. |
-| LSP changes | Various | GDScript | LSP is editor tooling, not runtime. |
-| Rendering: all 3D-specific rendering changes | Various | Rendering | 3D renderer not in Patina scope. |
+## Priority-Ordered Action List
 
-### CHANGES BETWEEN 4.6.0 AND 4.6.1 (Maintenance)
+### Immediate (before first 4.6.1 oracle run)
 
-The 4.6.1 release is small (approximately 30 entries). Patina-relevant items:
+**1. ClassDB sort order (row 8)**
 
-1. **Core: NodePath hash fix** (GH-115473) - HIGH. Similar paths no longer hash identically.
-2. **Core: ClassDB sorting fix** (GH-115923) - HIGH. Class iteration order restored.
-3. **Physics: Jolt transform update fix** (GH-115364) - MEDIUM. Physics transform sync.
-4. **Rendering: sky/volumetric fog fixes** (GH-115874, GH-116107) - NONE. 3D only.
-5. **Rendering: MSAA sample selection** (GH-115124) - NONE. GPU pipeline only.
-6. **GDScript: LSP fixes** (GH-115671, GH-115672) - NONE. Editor tooling only.
-7. **Particles: revert curve range change** (GH-116140) - NONE. Particles not in scope.
+Patina's `ClassDB::class_list()` must return classes in consistent sorted order. Godot 4.6.1 fixed a regression in class list sorting. If Patina's oracle goldens are regenerated against 4.6.1, the class list comparison in `classdb_parity_test` will use the corrected order. Patina already sorts class names alphabetically in the test fixture, but verify the runtime path (`ClassDB::class_list`) also returns a deterministic sorted vec before running the oracle update.
 
-## Action Items
+**Action**: Confirm `ClassDB::class_list()` is sorted. Add or harden a unit test that asserts the returned vec is in lexicographic order. This is low-risk and a single-function check.
 
-1. **NodePath hashing**: Compare Patina's NodePath hash implementation against
-   upstream 4.6.1. If Patina uses its own hash, ensure it does not produce
-   collisions for similar paths. Run `nodepath_resolution_test` against
-   regenerated oracle.
+### Deferred (before animation signal fixtures are added)
 
-2. **ClassDB ordering**: Verify `classdb_parity_test` passes with regenerated
-   oracle outputs. The sorting fix may change property enumeration order.
+**2. `AnimationPlayer::animation_finished` signal (row 3)**
 
-3. **2D transform order**: Verify render goldens are still correct. The
-   `draw_set_transform` rotation/scale order fix (GH-111476) may change
-   rendered output for scenes that use both rotation and scale.
+Godot 4.6 ensures `animation_finished` fires for every animation completion including looping modes. Patina's `AnimationPlayer` does not currently emit this signal. No existing test depends on it, so there is no regression today. However, any future oracle fixture that exercises animation playback will see a gap here.
 
-4. **Camera2D lifecycle**: Verify Camera2D reset behavior in lifecycle tests.
-   The "accepts resets only after entering tree" change (GH-112810) may affect
-   camera initialization ordering.
+**Action**: When animation signal fixtures are created (not now), implement `animation_finished` emission in `AnimationPlayer::advance()` and verify against 4.6.1 oracle output.
 
-5. **Signal emission for non-tool scripts**: Verify signal parity tests pass.
-   The fix (GH-104340) changes when signals are emitted from non-tool scripts.
+### Monitor (no action now, review when fixtures expand)
 
-6. **Physics oracle values**: The Jolt default (GH-105737) and collision fix
-   (GH-110507) may change physics_playground oracle outputs. Verify after
-   oracle regeneration.
+**3. Instanced scene resource sharing (row 12)**
 
-7. **Resource duplication**: Verify instancing/ownership tests against new oracle.
-   Resource sharing behavior changed (GH-64487).
+The fix to resource sharing when duplicating instanced scenes is subtle. Patina's `packed_scene_edge_cases_test` covers some of this ground. When oracle goldens are regenerated against 4.6.1, run this test suite first to confirm no regression.
 
-## Conclusion
+**4. Unique node ID semantics (row 21)**
 
-The 4.5.1-to-4.6.1 delta is dominated by 3D, editor, and platform changes
-that do not affect Patina's 2D runtime scope. The changes that do matter are:
+Patina's `NodeId` is already an internal unique identifier (u64). Verify that when the 4.6.1 oracle exposes `get_instance_id()` in any fixture, Patina's returned values are structurally compatible (type, not value — instance IDs are not expected to match, only the shape/type).
 
-- A small number of Core fixes (NodePath hash, ClassDB sort, resource duplication)
-- 2D rendering fixes (transform order, Camera2D lifecycle, invisible CanvasItem optimization)
-- Signal emission behavior for non-tool scripts
-- Physics collision and transform fixes
+---
 
-All of these should be caught by oracle parity tests once P0 oracle regeneration
-is complete. No code changes are required in Patina preemptively -- the correct
-approach is to regenerate oracle outputs, run parity tests, and fix any
-regressions that surface.
+## Out-of-Scope Changes (Confirmed Skip)
+
+The following 4.6.x changes are explicitly outside Patina's current milestone scope. They are listed here to document the decision, not as open items.
+
+| Change | Why skipped |
+|--------|-------------|
+| Jolt Physics as 3D default | 3D deferred |
+| Screen Space Reflection overhaul | 3D rendering deferred |
+| IK framework (8 new SkeletonModifier3D classes) | 3D animation deferred |
+| AgX tonemapper parameters | 3D rendering deferred |
+| Octahedral probe maps | 3D rendering deferred |
+| Android/XR platform changes | Platform not in scope |
+| Delta-encoded patch PCKs | Export tooling not in scope |
+| Tracy/Perfetto profiler integration | Profiler tooling not in scope |
+| C# translation parser | C# not in scope |
+| LSP BBCode-to-Markdown improvements | Tooling only |
+| Editor theme (Modern default) | Editor maintenance-only |
+| Movable editor docks | Editor maintenance-only |
+| GridMap Bresenham painting | TileMap/GridMap not in scope |
+| Advanced joypad LED/haptic API | Platform not in scope |
+| Faster GPU texture import | Import pipeline not in scope |
+
+---
+
+## Oracle Regeneration Notes
+
+When the upstream submodule is repinned to `4.6.1-stable` and golden outputs are regenerated:
+
+1. **Run `classdb_parity_test` first** — the ClassDB sort fix (row 8) means the expected class list may be in a different order against 4.6.1 than against 4.5.1. This test should pass without changes if Patina's sort is already correct, or reveal a gap if not.
+
+2. **Run `packed_scene_edge_cases_test` and `instancing_ownership_test`** — the instanced scene resource sharing fix (row 12) may produce marginally different property values in edge cases. Compare carefully.
+
+3. **Run `oracle_parity_test` and `oracle_regression_test`** against the new 4.6.1 golden set. Expect the 9-scene fixture corpus to continue passing at or above 90.5%. Any new failures should be isolated to the behavioral changes documented above.
+
+4. **No new golden fixtures need to be created as part of this repin** — the existing 9-scene corpus exercises the implemented subsystems. New fixtures (animation signals, Camera2D, Control) can be deferred until those subsystems move from `not-yet-implemented` to `Measured`.
+
+---
+
+## Summary Assessment
+
+| Category | Count | Notes |
+|----------|-------|-------|
+| Needs-fix items | 1 | ClassDB sort order (low risk, single function) |
+| Already-compatible | 5 | Object::script removal, Quaternion default, NodePath hash, underscore signals, signal decoupling |
+| Monitor (re-check after golden regen) | 4 | Geometry2D ghost collision, instanced scene resources, AnimationPlayer signal, unique node IDs |
+| Not-yet-implemented (skip now) | 15 | All 3D, GUI/Control, AnimationLibrary, Camera2D, navigation, threads |
+
+**Headline conclusion**: Godot 4.6.1 introduces no breaking changes to Patina's currently-measured subsystem slice. The one `needs-fix` item (ClassDB sort order) is a low-risk single-function verification. The repin is safe to proceed once that check passes and oracle goldens are regenerated.
