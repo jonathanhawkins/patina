@@ -1,9 +1,9 @@
-//! pat-b2h: NodePath resolution fixtures for absolute, relative, and unique paths.
+//! pat-b2h + pat-u33: NodePath resolution fixtures for absolute, relative, and unique paths.
 //!
 //! Validates that SceneTree path resolution works for:
 //! 1. Absolute paths (/root/Player)
 //! 2. Relative paths (../Sibling, Player/Sprite)
-//! 3. Unique name paths (%Player) — documented gap
+//! 3. Unique name paths (%Player) — resolved via scene-owner scope search
 //! 4. Missing/invalid paths return None
 
 use gdscene::node::Node;
@@ -325,18 +325,116 @@ fn b2h_unique_name_accessible_via_normal_path() {
 }
 
 #[test]
-fn b2h_unique_name_percent_prefix_not_yet_resolved() {
+fn b2h_unique_name_percent_prefix_resolves() {
     let t = build_test_tree();
-    // In Godot, %HealthBar resolves to the unique-name node from any point
-    // within the scene owner. This is NOT yet implemented in Patina.
-    // Verify the gap: %HealthBar should return None since find_child_by_name
-    // looks for literal "%HealthBar" child name, which doesn't exist.
-    let result = t.tree.get_node_relative(t.ui, "%HealthBar");
-    assert!(
-        result.is_none(),
-        "KNOWN GAP: %%Name unique-name resolution is not yet implemented. \
-         Godot resolves %%Name by searching for unique-named nodes within the scene owner."
+    // pat-u33: %HealthBar resolves to the unique-name node within the owner scope.
+    // Since these nodes have no explicit owner set, the `from` node acts as its
+    // own owner root. We need to set owners to test properly.
+    // Build a tree with owners set (simulating PackedScene instancing).
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let scene_root = tree.add_child(root, Node::new("Scene", "Node2D")).unwrap();
+
+    let mut hb = Node::new("HealthBar", "ProgressBar");
+    hb.set_unique_name(true);
+    hb.set_owner(Some(scene_root));
+    let hb_id = tree.add_child(scene_root, hb).unwrap();
+
+    let container = {
+        let mut n = Node::new("Container", "VBoxContainer");
+        n.set_owner(Some(scene_root));
+        tree.add_child(scene_root, n).unwrap()
+    };
+
+    let mut sl = Node::new("ScoreLabel", "Label");
+    sl.set_unique_name(true);
+    sl.set_owner(Some(scene_root));
+    let sl_id = tree.add_child(container, sl).unwrap();
+
+    // %HealthBar from any node in the scene resolves to the unique node
+    assert_eq!(
+        tree.get_node_relative(scene_root, "%HealthBar").unwrap(),
+        hb_id
     );
+    assert_eq!(
+        tree.get_node_relative(container, "%HealthBar").unwrap(),
+        hb_id
+    );
+    assert_eq!(tree.get_node_relative(sl_id, "%HealthBar").unwrap(), hb_id);
+
+    // %ScoreLabel from anywhere in the scene
+    assert_eq!(
+        tree.get_node_relative(scene_root, "%ScoreLabel").unwrap(),
+        sl_id
+    );
+    assert_eq!(tree.get_node_relative(hb_id, "%ScoreLabel").unwrap(), sl_id);
+}
+
+#[test]
+fn b2h_unique_name_percent_nonexistent_returns_none() {
+    let t = build_test_tree();
+    assert!(t.tree.get_node_relative(t.ui, "%NonExistent").is_none());
+}
+
+#[test]
+fn b2h_unique_name_via_get_node_or_null() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let scene_root = tree.add_child(root, Node::new("Scene", "Node2D")).unwrap();
+    let mut hb = Node::new("HealthBar", "ProgressBar");
+    hb.set_unique_name(true);
+    hb.set_owner(Some(scene_root));
+    let hb_id = tree.add_child(scene_root, hb).unwrap();
+
+    // get_node_or_null routes %Name through get_node_relative
+    assert_eq!(
+        tree.get_node_or_null(scene_root, "%HealthBar").unwrap(),
+        hb_id
+    );
+}
+
+#[test]
+fn b2h_unique_name_with_subpath() {
+    // %UniqueName/Child resolves the unique node then walks to Child
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let scene_root = tree.add_child(root, Node::new("Scene", "Node2D")).unwrap();
+    let mut panel = Node::new("Panel", "Control");
+    panel.set_unique_name(true);
+    panel.set_owner(Some(scene_root));
+    let panel_id = tree.add_child(scene_root, panel).unwrap();
+
+    let mut label = Node::new("Label", "Label");
+    label.set_owner(Some(scene_root));
+    let label_id = tree.add_child(panel_id, label).unwrap();
+
+    assert_eq!(
+        tree.get_node_relative(scene_root, "%Panel/Label").unwrap(),
+        label_id
+    );
+}
+
+#[test]
+fn b2h_get_node_by_unique_name_direct() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let scene_root = tree.add_child(root, Node::new("Scene", "Node2D")).unwrap();
+    let mut node = Node::new("Target", "Sprite2D");
+    node.set_unique_name(true);
+    node.set_owner(Some(scene_root));
+    let target_id = tree.add_child(scene_root, node).unwrap();
+
+    // Direct API call
+    assert_eq!(
+        tree.get_node_by_unique_name(scene_root, "Target").unwrap(),
+        target_id
+    );
+    // Non-unique node should not be found
+    assert!(tree.get_node_by_unique_name(scene_root, "Scene").is_none());
 }
 
 // ===========================================================================
