@@ -11,6 +11,71 @@ use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
+
+/// A callable reference — either a named method or a closure/lambda.
+///
+/// In Godot, `Callable` wraps either an object+method pair or a lambda.
+/// We model both, plus a "native" closure variant for Rust callbacks.
+#[derive(Clone)]
+pub enum CallableRef {
+    /// A reference to a method on an object: `Callable(obj, "method")`.
+    Method {
+        /// Target object id (0 for self).
+        target_id: u64,
+        /// Method name.
+        method: String,
+    },
+    /// A lambda / anonymous function with captured body.
+    Lambda {
+        /// Parameter names.
+        params: Vec<String>,
+        /// Serialised body (stored as opaque bytes; the interpreter casts back).
+        body: Arc<dyn std::any::Any + Send + Sync>,
+    },
+}
+
+impl fmt::Debug for CallableRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CallableRef::Method { target_id, method } => {
+                write!(f, "Callable(Object#{target_id}, \"{method}\")")
+            }
+            CallableRef::Lambda { params, .. } => {
+                write!(f, "Callable(<lambda({})>)", params.join(", "))
+            }
+        }
+    }
+}
+
+impl PartialEq for CallableRef {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                CallableRef::Method {
+                    target_id: a,
+                    method: am,
+                },
+                CallableRef::Method {
+                    target_id: b,
+                    method: bm,
+                },
+            ) => a == b && am == bm,
+            _ => false, // lambdas are never equal
+        }
+    }
+}
+
+/// Metadata about a loaded resource stored in a Variant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceRef {
+    /// The `res://` path of the resource.
+    pub path: String,
+    /// The Godot class name (e.g. `"Texture2D"`, `"PackedScene"`).
+    pub class_name: String,
+    /// Properties loaded from the resource file.
+    pub properties: HashMap<String, Variant>,
+}
 
 /// The set of type tags a Variant can carry.
 ///
@@ -38,6 +103,8 @@ pub enum VariantType {
     ObjectId,
     Array,
     Dictionary,
+    Callable,
+    Resource,
 }
 
 /// A dynamically-typed engine value, analogous to Godot's `Variant`.
@@ -84,6 +151,10 @@ pub enum Variant {
     Array(Vec<Variant>),
     /// A string-keyed map of variants.
     Dictionary(HashMap<String, Variant>),
+    /// A callable reference (method or lambda).
+    Callable(Box<CallableRef>),
+    /// A loaded resource.
+    Resource(Box<ResourceRef>),
 }
 
 impl Variant {
@@ -110,6 +181,8 @@ impl Variant {
             Self::ObjectId(_) => VariantType::ObjectId,
             Self::Array(_) => VariantType::Array,
             Self::Dictionary(_) => VariantType::Dictionary,
+            Self::Callable(_) => VariantType::Callable,
+            Self::Resource(_) => VariantType::Resource,
         }
     }
 
@@ -132,6 +205,8 @@ impl Variant {
             Self::NodePath(np) => !np.is_empty(),
             Self::Array(a) => !a.is_empty(),
             Self::Dictionary(d) => !d.is_empty(),
+            Self::Callable(_) => true,
+            Self::Resource(_) => true,
             _ => true,
         }
     }
@@ -172,6 +247,8 @@ impl fmt::Display for Variant {
             Self::ObjectId(id) => write!(f, "<Object#{id}>"),
             Self::Array(a) => write!(f, "[Array; len={}]", a.len()),
             Self::Dictionary(d) => write!(f, "{{Dict; len={}}}", d.len()),
+            Self::Callable(c) => write!(f, "{c:?}"),
+            Self::Resource(r) => write!(f, "<Resource:{} @ {}>", r.class_name, r.path),
         }
     }
 }
@@ -199,6 +276,8 @@ impl fmt::Display for VariantType {
             Self::ObjectId => "ObjectId",
             Self::Array => "Array",
             Self::Dictionary => "Dictionary",
+            Self::Callable => "Callable",
+            Self::Resource => "Resource",
         };
         write!(f, "{name}")
     }

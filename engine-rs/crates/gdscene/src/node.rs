@@ -6,7 +6,7 @@
 //! [`SceneTree`](crate::scene_tree::SceneTree)) and referenced by
 //! lightweight [`NodeId`] handles.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use gdcore::ObjectId;
@@ -59,6 +59,30 @@ impl fmt::Display for NodeId {
 }
 
 // ---------------------------------------------------------------------------
+// ProcessMode
+// ---------------------------------------------------------------------------
+
+/// Controls whether a node processes when the scene tree is paused.
+///
+/// Mirrors Godot's `Node.ProcessMode` enum. The default is [`Inherit`](ProcessMode::Inherit),
+/// which resolves by walking up the parent chain. If the root node has `Inherit`,
+/// it is treated as [`Pausable`](ProcessMode::Pausable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessMode {
+    /// Use the parent's effective process mode. Root defaults to `Pausable`.
+    #[default]
+    Inherit,
+    /// Processes only when the tree is **not** paused (default behavior).
+    Pausable,
+    /// Processes **only** when the tree **is** paused.
+    WhenPaused,
+    /// Always processes, regardless of pause state.
+    Always,
+    /// Never processes.
+    Disabled,
+}
+
+// ---------------------------------------------------------------------------
 // Node
 // ---------------------------------------------------------------------------
 
@@ -85,6 +109,8 @@ pub struct Node {
     groups: HashSet<String>,
     /// Log of notifications received (for testing / debugging).
     notification_log: Vec<Notification>,
+    /// Meta property storage (separate namespace from regular properties).
+    meta: BTreeMap<String, Variant>,
     /// The node that "owns" this node in the scene hierarchy.
     /// Usually the scene root that this node was instanced from.
     owner: Option<NodeId>,
@@ -94,6 +120,10 @@ pub struct Node {
     inside_tree: bool,
     /// Whether this node has completed its ready phase.
     ready: bool,
+    /// Process priority — lower values process first. Default 0.
+    process_priority: i32,
+    /// Controls whether this node processes when the tree is paused.
+    process_mode: ProcessMode,
 }
 
 impl Node {
@@ -108,10 +138,13 @@ impl Node {
             properties: HashMap::new(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
+            meta: BTreeMap::new(),
             owner: None,
             unique_name: false,
             inside_tree: false,
             ready: false,
+            process_priority: 0,
+            process_mode: ProcessMode::default(),
         }
     }
 
@@ -126,10 +159,13 @@ impl Node {
             properties: HashMap::new(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
+            meta: BTreeMap::new(),
             owner: None,
             unique_name: false,
             inside_tree: false,
             ready: false,
+            process_priority: 0,
+            process_mode: ProcessMode::default(),
         }
     }
 
@@ -216,6 +252,70 @@ impl Node {
         self.properties.iter()
     }
 
+    /// Removes a property by name. Returns the old value, or `Nil` if absent.
+    pub fn remove_property(&mut self, key: &str) -> Variant {
+        self.properties.remove(key).unwrap_or(Variant::Nil)
+    }
+
+    /// Returns a sorted list of property names (matches Godot's
+    /// `get_property_list()` returning entries in deterministic order).
+    pub fn get_property_list(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.properties.keys().map(String::as_str).collect();
+        names.sort();
+        names
+    }
+
+    // -- type checking ------------------------------------------------------
+
+    /// Returns `true` if this node's class matches `name`, or if `name` is
+    /// an ancestor in the ClassDB inheritance chain.
+    ///
+    /// Mirrors Godot's `Object.is_class()`.
+    pub fn is_class(&self, name: &str) -> bool {
+        if self.class_name == name {
+            return true;
+        }
+        gdobject::is_parent_class(&self.class_name, name)
+    }
+
+    /// Checks whether the given method is registered for this node's class
+    /// (or any ancestor) in the ClassDB.
+    pub fn has_method(&self, method_name: &str) -> bool {
+        gdobject::class_has_method(&self.class_name, method_name)
+    }
+
+    // -- meta properties ----------------------------------------------------
+
+    /// Sets a meta property. Returns the previous value (or `Nil`).
+    ///
+    /// Meta properties are a separate namespace from regular properties,
+    /// used by the editor, plugins, and runtime tagging.
+    pub fn set_meta(&mut self, key: &str, value: Variant) -> Variant {
+        self.meta
+            .insert(key.to_owned(), value)
+            .unwrap_or(Variant::Nil)
+    }
+
+    /// Gets a meta property by name. Returns `Nil` if absent.
+    pub fn get_meta(&self, key: &str) -> Variant {
+        self.meta.get(key).cloned().unwrap_or(Variant::Nil)
+    }
+
+    /// Returns `true` if the meta property exists.
+    pub fn has_meta(&self, key: &str) -> bool {
+        self.meta.contains_key(key)
+    }
+
+    /// Removes a meta property by name. Returns the old value (or `Nil`).
+    pub fn remove_meta(&mut self, key: &str) -> Variant {
+        self.meta.remove(key).unwrap_or(Variant::Nil)
+    }
+
+    /// Returns the names of all meta properties (sorted, matching Godot).
+    pub fn get_meta_list(&self) -> Vec<&str> {
+        self.meta.keys().map(String::as_str).collect()
+    }
+
     // -- groups -------------------------------------------------------------
 
     /// Adds this node to a group.
@@ -280,6 +380,28 @@ impl Node {
     /// Marks whether this node has completed its ready phase.
     pub(crate) fn set_ready(&mut self, ready: bool) {
         self.ready = ready;
+    }
+
+    // -- process priority / mode --------------------------------------------
+
+    /// Returns this node's process priority. Lower values process first.
+    pub fn process_priority(&self) -> i32 {
+        self.process_priority
+    }
+
+    /// Sets this node's process priority. Lower values process first.
+    pub fn set_process_priority(&mut self, priority: i32) {
+        self.process_priority = priority;
+    }
+
+    /// Returns this node's process mode.
+    pub fn process_mode(&self) -> ProcessMode {
+        self.process_mode
+    }
+
+    /// Sets this node's process mode.
+    pub fn set_process_mode(&mut self, mode: ProcessMode) {
+        self.process_mode = mode;
     }
 
     // -- notifications ------------------------------------------------------

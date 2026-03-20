@@ -1,3 +1,7 @@
+// Input and frame lifecycle now delegated to engine-owned MainLoop (pat-4y7).
+// Game-specific physics, particles, and audio remain example-local until
+// the engine owns those subsystems. See FIXTURE_MAP.md for fixture targets.
+
 //! Playable platformer demo exercising all Patina Engine subsystems.
 //!
 //! Demonstrates: scene tree, physics, input, rendering, tweens, particles, audio,
@@ -10,7 +14,7 @@ use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D};
 use gdphysics2d::shape::Shape2D;
 use gdphysics2d::world::PhysicsWorld2D;
-use gdplatform::input::{ActionBinding, InputEvent, InputMap, InputState, Key};
+use gdplatform::input::{ActionBinding, InputEvent, InputMap, Key};
 use gdrender2d::test_adapter::{capture_frame, save_ppm};
 use gdrender2d::SoftwareRenderer;
 use gdscene::node::Node;
@@ -237,19 +241,8 @@ pub fn run_platformer() -> PlatformerResult {
     physics.add_body(ground_body);
 
     // -----------------------------------------------------------------------
-    // 3. Input setup
+    // 3. Input setup (engine-owned via MainLoop)
     // -----------------------------------------------------------------------
-    let mut input_map = InputMap::new();
-    input_map.add_action("move_right", 0.0);
-    input_map.add_action("move_left", 0.0);
-    input_map.add_action("jump", 0.0);
-    input_map.action_add_event("move_right", ActionBinding::KeyBinding(Key::Right));
-    input_map.action_add_event("move_left", ActionBinding::KeyBinding(Key::Left));
-    input_map.action_add_event("jump", ActionBinding::KeyBinding(Key::Space));
-
-    let mut input_state = InputState::new();
-    input_state.set_input_map(input_map);
-
     let input_sequence = build_input_sequence();
 
     // -----------------------------------------------------------------------
@@ -298,6 +291,17 @@ pub fn run_platformer() -> PlatformerResult {
     // 7. Main loop (120 frames)
     // -----------------------------------------------------------------------
     let mut main_loop = gdscene::MainLoop::new(tree);
+
+    // Configure engine-owned input map on MainLoop.
+    let mut input_map = InputMap::new();
+    input_map.add_action("move_right", 0.0);
+    input_map.add_action("move_left", 0.0);
+    input_map.add_action("jump", 0.0);
+    input_map.action_add_event("move_right", ActionBinding::KeyBinding(Key::Right));
+    input_map.action_add_event("move_left", ActionBinding::KeyBinding(Key::Left));
+    input_map.action_add_event("jump", ActionBinding::KeyBinding(Key::Space));
+    main_loop.set_input_map(input_map);
+
     let mut score: u32 = 0;
     let mut collected = false;
     let mut player_y_history = Vec::new();
@@ -305,28 +309,27 @@ pub fn run_platformer() -> PlatformerResult {
     let mut collectible_scale = 1.0_f32;
 
     for frame in 0..FRAME_COUNT {
-        // --- Process input ---
-        // Feed scripted events for this frame
+        // --- Process input via engine-owned InputState ---
         for (evt_frame, evt) in &input_sequence {
             if *evt_frame == frame {
-                input_state.process_event(evt.clone());
+                main_loop.push_event(evt.clone());
             }
         }
 
         // Apply input to player body
+        let h_input = if main_loop.input_state().is_action_pressed("move_right") {
+            1.0
+        } else if main_loop.input_state().is_action_pressed("move_left") {
+            -1.0
+        } else {
+            0.0
+        };
+        let jumped = main_loop.input_state().is_action_just_pressed("jump");
+
         if let Some(player) = physics.get_body_mut(player_body_id) {
-            // Horizontal movement
-            let h_input = if input_state.is_action_pressed("move_right") {
-                1.0
-            } else if input_state.is_action_pressed("move_left") {
-                -1.0
-            } else {
-                0.0
-            };
             player.linear_velocity.x = h_input * PLAYER_SPEED;
 
-            // Jump (only when on/near ground)
-            if input_state.is_action_just_pressed("jump") && player.position.y > 350.0 {
+            if jumped && player.position.y > 350.0 {
                 player.apply_impulse(Vector2::new(0.0, JUMP_IMPULSE));
 
                 // Trigger jump particles
@@ -395,9 +398,6 @@ pub fn run_platformer() -> PlatformerResult {
         // Record player Y for history
         let player_pos = get_position(main_loop.tree(), player_id);
         player_y_history.push(player_pos.y);
-
-        // --- Flush input frame ---
-        input_state.flush_frame();
     }
 
     // -----------------------------------------------------------------------

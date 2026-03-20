@@ -1,0 +1,61 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_test_scripts",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "Mover",
+          "path": "/root/TestScene/Mover",
+          "properties": {
+            "_script_path": {
+              "type": "String",
+              "value": "res://scripts/test_movement.gd"
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                100.0,
+                200.0
+              ]
+            },
+            "script": {
+              "type": "String",
+              "value": "ExtResource(\"1_movement\")"
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "VarTest",
+          "path": "/root/TestScene/VarTest",
+          "properties": {
+            "_script_path": {
+              "type": "String",
+              "value": "res://scripts/test_variables.gd"
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                300.0,
+                200.0
+              ]
+            },
+            "script": {
+              "type": "String",
+              "value": "ExtResource(\"2_variables\")"
+            }
+          }
+        }
+      ],
+      "class": "Node2D",
+      "name": "TestScene",
+      "path": "/root/TestScene",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "pending"
+}

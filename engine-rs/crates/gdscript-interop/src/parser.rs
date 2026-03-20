@@ -66,6 +66,13 @@ pub enum Expr {
     },
     /// `$NodeName` / `$"Path/To/Node"` sugar for get_node.
     GetNode(String),
+    /// A lambda / anonymous function: `func(x): return x + 1`
+    Lambda {
+        /// Parameter names.
+        params: Vec<FuncParam>,
+        /// Function body.
+        body: Vec<Stmt>,
+    },
 }
 
 /// Binary operators.
@@ -152,6 +159,10 @@ pub enum Stmt {
         value: Option<Expr>,
         /// Annotations (e.g. `@export`).
         annotations: Vec<Annotation>,
+        /// Optional setter function name (Godot 4: `set = _set_name`).
+        setter: Option<String>,
+        /// Optional getter function name (Godot 4: `get = _get_name`).
+        getter: Option<String>,
     },
     /// Assignment: `target op value`
     Assignment {
@@ -240,6 +251,8 @@ pub enum Stmt {
     Break,
     /// `continue`
     Continue,
+    /// `await expr` — yields execution until the awaited expression resolves.
+    Await(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -408,6 +421,7 @@ impl Parser {
                 Ok(Stmt::Continue)
             }
             Token::Match => self.parse_match(),
+            Token::Await => self.parse_await(),
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -466,7 +480,11 @@ impl Parser {
         let name = self.eat_ident()?;
         let type_hint = if self.check(&Token::Colon) {
             self.advance();
-            Some(self.eat_ident()?)
+            // Peek: if next is `set` or `get` immediately, there's no type hint
+            match self.peek() {
+                Token::Ident(n) if n == "set" || n == "get" => None,
+                _ => Some(self.eat_ident()?),
+            }
         } else {
             None
         };
@@ -476,12 +494,48 @@ impl Parser {
         } else {
             None
         };
+        // Parse setter/getter: `var x: int = 0: set = _set_x, get = _get_x`
+        // Or after value: `var x = 0: set = _set_x, get = _get_x`
+        let (setter, getter) = if self.check(&Token::Colon) {
+            self.advance();
+            self.parse_setter_getter()?
+        } else {
+            (None, None)
+        };
         Ok(Stmt::VarDecl {
             name,
             type_hint,
             value,
             annotations,
+            setter,
+            getter,
         })
+    }
+
+    /// Parses `set = _setter, get = _getter` in any order.
+    fn parse_setter_getter(&mut self) -> Result<(Option<String>, Option<String>), ParseError> {
+        let mut setter = None;
+        let mut getter = None;
+        loop {
+            match self.peek().clone() {
+                Token::Ident(ref kw) if kw == "set" => {
+                    self.advance();
+                    self.expect(&Token::Assign)?;
+                    setter = Some(self.eat_ident()?);
+                }
+                Token::Ident(ref kw) if kw == "get" => {
+                    self.advance();
+                    self.expect(&Token::Assign)?;
+                    getter = Some(self.eat_ident()?);
+                }
+                _ => break,
+            }
+            if !self.check(&Token::Comma) {
+                break;
+            }
+            self.advance(); // consume comma
+        }
+        Ok((setter, getter))
     }
 
     fn parse_extends(&mut self) -> Result<Stmt, ParseError> {
@@ -818,6 +872,12 @@ impl Parser {
         }
     }
 
+    fn parse_await(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `await`
+        let expr = self.parse_expr()?;
+        Ok(Stmt::Await(expr))
+    }
+
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, ParseError> {
         let expr = self.parse_expr()?;
 
@@ -1067,6 +1127,35 @@ impl Parser {
             Token::Ident(name) => {
                 self.advance();
                 Ok(Expr::Ident(name))
+            }
+            Token::Func => {
+                // Lambda / anonymous function: `func(x, y): return x + y`
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let mut params = Vec::new();
+                if !self.check(&Token::RParen) {
+                    params.push(self.parse_func_param()?);
+                    while self.check(&Token::Comma) {
+                        self.advance();
+                        params.push(self.parse_func_param()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                self.expect(&Token::Colon)?;
+                // Lambda body: either a single-line statement or a block
+                let body = if self.check(&Token::Newline) || self.check(&Token::Indent) {
+                    self.parse_block()?
+                } else if self.check(&Token::Return) {
+                    // Single-line: `func(x): return x + 1`
+                    self.advance(); // consume `return`
+                    let expr = self.parse_expr()?;
+                    vec![Stmt::Return(Some(expr))]
+                } else {
+                    // Single expression body (implicit return)
+                    let expr = self.parse_expr()?;
+                    vec![Stmt::Return(Some(expr))]
+                };
+                Ok(Expr::Lambda { params, body })
             }
             Token::Self_ => {
                 self.advance();

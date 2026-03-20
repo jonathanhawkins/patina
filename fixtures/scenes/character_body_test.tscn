@@ -1,0 +1,27 @@
+[gd_scene format=3 uid="uid://character_body_test"]
+
+[node name="World" type="Node"]
+
+[node name="Player" type="CharacterBody2D" parent="."]
+position = Vector2(100, 100)
+collision_layer = 1
+collision_mask = 1
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Player"]
+radius = 12.0
+
+[node name="Platform" type="StaticBody2D" parent="."]
+position = Vector2(100, 200)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Platform"]
+size = Vector2(200, 20)
+
+[node name="Wall" type="StaticBody2D" parent="."]
+position = Vector2(300, 150)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Wall"]
+size = Vector2(20, 100)

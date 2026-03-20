@@ -1,0 +1,649 @@
+{
+  "event_trace": [
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/QuitButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/Title"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/PlayButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/SettingsButton"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/MenuRoot/QuitButton"
+    }
+  ],
+  "frame_count": 3,
+  "physics_time": 0.05,
+  "process_time": 0.05,
+  "scene_file": "/Users/bone/dev/games/patina/fixtures/scenes/ui_menu.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [],
+            "class": "Node",
+            "name": "Title",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/MenuRoot/Title",
+            "properties": {},
+            "script_vars": {}
+          },
+          {
+            "children": [],
+            "class": "Node",
+            "name": "PlayButton",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/MenuRoot/PlayButton",
+            "properties": {},
+            "script_vars": {}
+          },
+          {
+            "children": [],
+            "class": "Node",
+            "name": "SettingsButton",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/MenuRoot/SettingsButton",
+            "properties": {},
+            "script_vars": {}
+          },
+          {
+            "children": [],
+            "class": "Node",
+            "name": "QuitButton",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/MenuRoot/QuitButton",
+            "properties": {},
+            "script_vars": {}
+          }
+        ],
+        "class": "Node",
+        "name": "MenuRoot",
+        "notifications": [
+          "NOTIFICATION_PARENTED",
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/MenuRoot",
+        "properties": {},
+        "script_vars": {}
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}

@@ -85,6 +85,11 @@ pub fn to_json(v: &Variant) -> Value {
                 dict.iter().map(|(k, v)| (k.clone(), to_json(v))).collect();
             json!({ "type": "Dictionary", "value": entries })
         }
+        Variant::Callable(c) => json!({ "type": "Callable", "value": format!("{c:?}") }),
+        Variant::Resource(r) => json!({
+            "type": "Resource",
+            "value": { "class_name": r.class_name, "path": r.path }
+        }),
     }
 }
 
