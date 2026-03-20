@@ -389,6 +389,10 @@ pub struct ClassDef {
     pub setters: HashMap<String, String>,
     /// Property getter function names: property_name → getter_func_name.
     pub getters: HashMap<String, String>,
+    /// Whether this script has `@tool` annotation.
+    pub is_tool: bool,
+    /// Inner class definitions: name → ClassDef.
+    pub inner_classes: HashMap<String, ClassDef>,
 }
 
 /// A live instance of a class.
@@ -655,7 +659,9 @@ impl Interpreter {
             Stmt::Extends { .. }
             | Stmt::ClassNameDecl { .. }
             | Stmt::SignalDecl { .. }
-            | Stmt::EnumDecl { .. } => Ok(None),
+            | Stmt::EnumDecl { .. }
+            | Stmt::InnerClass { .. }
+            | Stmt::AnnotationStmt { .. } => Ok(None),
         }
     }
 
@@ -3287,6 +3293,8 @@ impl Interpreter {
             exports: Vec::new(),
             setters: HashMap::new(),
             getters: HashMap::new(),
+            is_tool: false,
+            inner_classes: HashMap::new(),
         };
 
         for stmt in &stmts {
@@ -3347,6 +3355,64 @@ impl Interpreter {
                         });
                     }
                     class_def.instance_vars.push(var_decl);
+                }
+                Stmt::AnnotationStmt { annotations } => {
+                    if annotations.iter().any(|a| a.name == "tool") {
+                        class_def.is_tool = true;
+                    }
+                }
+                Stmt::InnerClass { name, body } => {
+                    let mut inner = ClassDef {
+                        name: Some(name.clone()),
+                        parent_class: None,
+                        signals: Vec::new(),
+                        enums: HashMap::new(),
+                        methods: HashMap::new(),
+                        instance_vars: Vec::new(),
+                        exports: Vec::new(),
+                        setters: HashMap::new(),
+                        getters: HashMap::new(),
+                        is_tool: false,
+                        inner_classes: HashMap::new(),
+                    };
+                    for inner_stmt in body {
+                        match inner_stmt {
+                            Stmt::VarDecl {
+                                name,
+                                type_hint,
+                                value,
+                                annotations,
+                                setter,
+                                getter,
+                            } => {
+                                inner.instance_vars.push(VarDecl {
+                                    name: name.clone(),
+                                    type_hint: type_hint.clone(),
+                                    default: value.clone(),
+                                    annotations: annotations.clone(),
+                                    setter: setter.clone(),
+                                    getter: getter.clone(),
+                                });
+                            }
+                            Stmt::FuncDef {
+                                name,
+                                params,
+                                body,
+                                is_static,
+                                ..
+                            } => {
+                                inner.methods.insert(
+                                    name.clone(),
+                                    FuncDef::from_params(params, body, *is_static),
+                                );
+                            }
+                            Stmt::SignalDecl { name, .. } => {
+                                inner.signals.push(name.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    class_def.inner_classes.insert(name.clone(), inner);
                 }
                 _ => {}
             }
@@ -6715,5 +6781,196 @@ func _process(delta):
             .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
             .unwrap();
         assert_eq!(inst.properties.get("result"), Some(&Variant::Bool(false)));
+    }
+
+    // -- pat-13d: Typed arrays in classes ------------------------------------
+
+    #[test]
+    fn class_typed_array_var() {
+        let (_, class_def) = run_class("var items: Array[int] = [1, 2, 3]\n");
+        assert_eq!(class_def.instance_vars[0].name, "items");
+        assert_eq!(
+            class_def.instance_vars[0].type_hint.as_deref(),
+            Some("Array[int]")
+        );
+    }
+
+    #[test]
+    fn class_typed_array_var_node() {
+        let (_, class_def) = run_class("var children: Array[Node]\n");
+        assert_eq!(
+            class_def.instance_vars[0].type_hint.as_deref(),
+            Some("Array[Node]")
+        );
+    }
+
+    #[test]
+    fn class_typed_array_export() {
+        let (_, class_def) = run_class("@export\nvar speeds: Array[float] = []\n");
+        assert_eq!(class_def.exports[0].name, "speeds");
+        assert_eq!(
+            class_def.exports[0].type_hint.as_deref(),
+            Some("Array[float]")
+        );
+    }
+
+    #[test]
+    fn class_typed_array_method_param_accepted() {
+        // Typed array params should parse without error in class methods
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class("class_name Sorter\nfunc sort(items: Array[int]):\n    return items\n")
+            .unwrap();
+        assert!(class_def.methods.contains_key("sort"));
+        assert_eq!(class_def.methods["sort"].params, vec!["items"]);
+    }
+
+    #[test]
+    fn typed_array_var_runs() {
+        let mut interp = Interpreter::new();
+        let result = interp
+            .run("var items: Array[int] = [1, 2, 3]\nreturn items[0]\n")
+            .unwrap();
+        assert_eq!(result.return_value, Some(Variant::Int(1)));
+    }
+
+    // -- pat-c13: Inner classes in interpreter --------------------------------
+
+    #[test]
+    fn class_inner_class_parsed() {
+        let (_, class_def) = run_class("class State:\n    var name = \"idle\"\n");
+        assert!(class_def.inner_classes.contains_key("State"));
+        let inner = &class_def.inner_classes["State"];
+        assert_eq!(inner.name.as_deref(), Some("State"));
+        assert_eq!(inner.instance_vars.len(), 1);
+        assert_eq!(inner.instance_vars[0].name, "name");
+    }
+
+    #[test]
+    fn class_inner_class_with_method() {
+        let (_, class_def) =
+            run_class("class Enemy:\n    var hp = 10\n    func get_hp():\n        return hp\n");
+        let inner = &class_def.inner_classes["Enemy"];
+        assert_eq!(inner.instance_vars.len(), 1);
+        assert!(inner.methods.contains_key("get_hp"));
+    }
+
+    #[test]
+    fn class_inner_class_with_signal() {
+        let (_, class_def) = run_class("class EventBus:\n    signal fired\n    var count = 0\n");
+        let inner = &class_def.inner_classes["EventBus"];
+        assert_eq!(inner.signals, vec!["fired"]);
+        assert_eq!(inner.instance_vars.len(), 1);
+    }
+
+    #[test]
+    fn class_multiple_inner_classes() {
+        let src = "\
+class StateA:
+    var x = 1
+class StateB:
+    var y = 2
+";
+        let (_, class_def) = run_class(src);
+        assert_eq!(class_def.inner_classes.len(), 2);
+        assert!(class_def.inner_classes.contains_key("StateA"));
+        assert!(class_def.inner_classes.contains_key("StateB"));
+    }
+
+    #[test]
+    fn class_inner_class_alongside_vars() {
+        let src = "\
+extends Node
+var health = 100
+class State:
+    var name = \"idle\"
+func _ready():
+    pass
+";
+        let (_, class_def) = run_class(src);
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert_eq!(class_def.instance_vars[0].name, "health");
+        assert!(class_def.inner_classes.contains_key("State"));
+        assert!(class_def.methods.contains_key("_ready"));
+    }
+
+    #[test]
+    fn class_inner_class_not_in_instance_vars() {
+        let (_, class_def) = run_class("class Foo:\n    var x = 1\nvar y = 2\n");
+        // Inner class vars should not leak into outer class instance_vars
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert_eq!(class_def.instance_vars[0].name, "y");
+    }
+
+    #[test]
+    fn class_inner_class_is_tool_false() {
+        let (_, class_def) = run_class("class Inner:\n    var x = 1\n");
+        let inner = &class_def.inner_classes["Inner"];
+        assert!(!inner.is_tool);
+    }
+
+    #[test]
+    fn class_inner_class_empty_methods() {
+        let (_, class_def) = run_class("class Empty:\n    pass\n");
+        let inner = &class_def.inner_classes["Empty"];
+        assert!(inner.methods.is_empty());
+        assert!(inner.instance_vars.is_empty());
+    }
+
+    // -- pat-916: @tool scripts in interpreter --------------------------------
+
+    #[test]
+    fn class_tool_script_is_tool_true() {
+        let (_, class_def) = run_class("@tool\nextends Node\n");
+        assert!(class_def.is_tool);
+    }
+
+    #[test]
+    fn class_non_tool_script_is_tool_false() {
+        let (_, class_def) = run_class("extends Node\n");
+        assert!(!class_def.is_tool);
+    }
+
+    #[test]
+    fn class_tool_with_class_name() {
+        let (_, class_def) = run_class("@tool\nextends Node\nclass_name MyTool\n");
+        assert!(class_def.is_tool);
+        assert_eq!(class_def.name.as_deref(), Some("MyTool"));
+        assert_eq!(class_def.parent_class.as_deref(), Some("Node"));
+    }
+
+    #[test]
+    fn class_tool_with_vars_and_methods() {
+        let src = "\
+@tool
+extends Node
+var speed = 10.0
+func _process(delta):
+    pass
+";
+        let (_, class_def) = run_class(src);
+        assert!(class_def.is_tool);
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert!(class_def.methods.contains_key("_process"));
+    }
+
+    #[test]
+    fn class_tool_does_not_change_runtime() {
+        // @tool scripts should still execute normally
+        let src = "\
+@tool
+extends Node
+var x = 42
+func get_x():
+    return self.x
+";
+        let mut interp = Interpreter::new();
+        let class_def = interp.run_class(src).unwrap();
+        assert!(class_def.is_tool);
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "get_x", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(42));
     }
 }

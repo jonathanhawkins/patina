@@ -4030,9 +4030,19 @@ mod tests {
         http_request_str(port, &req)
     }
 
+    fn connect_with_retry(port: u16) -> TcpStream {
+        for attempt in 0..20 {
+            match TcpStream::connect(format!("127.0.0.1:{port}")) {
+                Ok(stream) => return stream,
+                Err(_) if attempt < 19 => thread::sleep(Duration::from_millis(50)),
+                Err(e) => panic!("failed to connect after retries: {e}"),
+            }
+        }
+        unreachable!()
+    }
+
     fn http_request_str(port: u16, request: &str) -> String {
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+        let mut stream = connect_with_retry(port);
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = Vec::new();
@@ -4041,8 +4051,7 @@ mod tests {
     }
 
     fn http_request_raw(port: u16, request: &str) -> Vec<u8> {
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+        let mut stream = connect_with_retry(port);
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = Vec::new();

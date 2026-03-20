@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+gpu = []
+
 [dependencies]
 gdcore = { path = "../gdcore" }
 gdserver2d = { path = "../gdserver2d" }

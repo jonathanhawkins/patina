@@ -217,6 +217,55 @@ pub fn set_flip_v(tree: &mut SceneTree, node_id: NodeId, flip: bool) {
 }
 
 // ===========================================================================
+// NinePatchRect properties
+// ===========================================================================
+
+/// Sets the `"texture"` property on a NinePatchRect node.
+pub fn set_nine_patch_texture(tree: &mut SceneTree, node_id: NodeId, path: &str) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("texture", Variant::String(path.to_owned()));
+    }
+}
+
+/// Sets the nine-patch margins on a NinePatchRect node.
+///
+/// Stores `margin_left`, `margin_top`, `margin_right`, `margin_bottom` as
+/// individual `Int` properties matching Godot's convention.
+pub fn set_nine_patch_margins(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("patch_margin_left", Variant::Int(left));
+        node.set_property("patch_margin_top", Variant::Int(top));
+        node.set_property("patch_margin_right", Variant::Int(right));
+        node.set_property("patch_margin_bottom", Variant::Int(bottom));
+    }
+}
+
+/// Reads the nine-patch margins, defaulting each to `0`.
+pub fn get_nine_patch_margins(tree: &SceneTree, node_id: NodeId) -> (i64, i64, i64, i64) {
+    let get = |prop: &str| -> i64 {
+        tree.get_node(node_id)
+            .map(|n| match n.get_property(prop) {
+                Variant::Int(i) => i,
+                _ => 0,
+            })
+            .unwrap_or(0)
+    };
+    (
+        get("patch_margin_left"),
+        get("patch_margin_top"),
+        get("patch_margin_right"),
+        get("patch_margin_bottom"),
+    )
+}
+
+// ===========================================================================
 // Camera2D properties
 // ===========================================================================
 
@@ -516,6 +565,39 @@ mod tests {
         set_camera_current(&mut tree, id, true);
         let n = tree.get_node(id).unwrap();
         assert_eq!(n.get_property("current"), Variant::Bool(true));
+    }
+
+    // -- NinePatchRect properties --------------------------------------------
+
+    #[test]
+    fn nine_patch_texture_roundtrip() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let node = Node::new("Patch", "NinePatchRect");
+        let id = tree.add_child(root, node).unwrap();
+
+        set_nine_patch_texture(&mut tree, id, "res://panel.png");
+        assert_eq!(get_texture_path(&tree, id), Some("res://panel.png".into()));
+    }
+
+    #[test]
+    fn nine_patch_margins_default_zero() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let node = Node::new("Patch", "NinePatchRect");
+        let id = tree.add_child(root, node).unwrap();
+        assert_eq!(get_nine_patch_margins(&tree, id), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn nine_patch_margins_roundtrip() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let node = Node::new("Patch", "NinePatchRect");
+        let id = tree.add_child(root, node).unwrap();
+
+        set_nine_patch_margins(&mut tree, id, 4, 8, 4, 8);
+        assert_eq!(get_nine_patch_margins(&tree, id), (4, 8, 4, 8));
     }
 
     // -- set_global_position (inverse transform) ----------------------------

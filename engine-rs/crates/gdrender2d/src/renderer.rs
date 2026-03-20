@@ -223,6 +223,31 @@ impl SoftwareRenderer {
                     let bitmap_font = font::BitmapFont::builtin();
                     font::draw_string(fb, &bitmap_font, pos, text, *color, *font_size);
                 }
+                DrawCommand::DrawNinePatch {
+                    texture_path,
+                    rect,
+                    margin_left,
+                    margin_top,
+                    margin_right,
+                    margin_bottom,
+                    draw_center,
+                    modulate,
+                } => {
+                    if let Some(tex) = self.find_texture(texture_path) {
+                        let transformed = Self::transform_rect(global_transform, *rect);
+                        draw::draw_nine_patch(
+                            fb,
+                            tex,
+                            transformed,
+                            *margin_left,
+                            *margin_top,
+                            *margin_right,
+                            *margin_bottom,
+                            *draw_center,
+                            *modulate,
+                        );
+                    }
+                }
             }
         }
     }
@@ -732,6 +757,35 @@ mod tests {
         // Everything should be black since layer is invisible.
         assert_eq!(frame.pixels[0], Color::BLACK);
         assert_eq!(frame.pixels[55], Color::BLACK);
+    }
+
+    #[test]
+    fn nine_patch_rendering_through_pipeline() {
+        let mut renderer = SoftwareRenderer::new();
+        renderer.register_texture("panel.png", Texture2D::solid(6, 6, Color::WHITE));
+
+        let mut vp = Viewport::new(20, 20, Color::BLACK);
+        let mut item = CanvasItem::new(CanvasItemId(1));
+        item.commands.push(DrawCommand::DrawNinePatch {
+            texture_path: "panel.png".to_string(),
+            rect: Rect2::new(Vector2::ZERO, Vector2::new(20.0, 20.0)),
+            margin_left: 2.0,
+            margin_top: 2.0,
+            margin_right: 2.0,
+            margin_bottom: 2.0,
+            draw_center: true,
+            modulate: Color::rgb(0.0, 1.0, 0.0),
+        });
+        vp.add_canvas_item(item);
+
+        let frame = renderer.render_frame(&vp);
+        // Corner pixel should be green-tinted white
+        let pixel = frame.pixels[0];
+        assert!((pixel.g - 1.0).abs() < 0.01);
+        assert!(pixel.r.abs() < 0.01);
+        // Center pixel too
+        let center = frame.pixels[10 * 20 + 10];
+        assert!((center.g - 1.0).abs() < 0.01);
     }
 
     #[test]

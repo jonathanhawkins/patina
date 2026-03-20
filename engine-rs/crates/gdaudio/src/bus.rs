@@ -42,7 +42,12 @@ impl AudioBus {
     /// The formula is `10^(dB / 20)`, so 0 dB maps to 1.0,
     /// -20 dB maps to 0.1, +20 dB maps to 10.0, etc.
     pub fn volume_linear(&self) -> f32 {
-        f32::powf(10.0, self.volume_db / 20.0)
+        Self::db_to_linear(self.volume_db)
+    }
+
+    /// Convert a dB value to a linear multiplier (static utility).
+    pub fn db_to_linear(db: f32) -> f32 {
+        f32::powf(10.0, db / 20.0)
     }
 
     /// Set the volume in decibels.
