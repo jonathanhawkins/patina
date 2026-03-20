@@ -317,6 +317,24 @@ golden_regression_test!(
     "signals_complex_patina.json",
     "signals_complex"
 );
+golden_regression_test!(
+    golden_character_body_test,
+    "character_body_test.tscn",
+    "character_body_test_patina.json",
+    "character_body_test"
+);
+golden_regression_test!(
+    golden_unique_name_resolution,
+    "unique_name_resolution.tscn",
+    "unique_name_resolution_patina.json",
+    "unique_name_resolution"
+);
+golden_regression_test!(
+    golden_with_properties,
+    "with_properties.tscn",
+    "with_properties_patina.json",
+    "with_properties"
+);
 
 // ===========================================================================
 // Cross-scene parity: Patina traces match upstream mocks

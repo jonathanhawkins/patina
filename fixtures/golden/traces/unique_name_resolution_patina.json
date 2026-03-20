@@ -1,0 +1,766 @@
+{
+  "event_trace": [
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "ENTER_TREE",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "READY",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 0,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 1,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "INTERNAL_PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "PHYSICS_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "INTERNAL_PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container/StatusIcon"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/HealthBar"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Panel/ScoreLabel"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container"
+    },
+    {
+      "detail": "PROCESS",
+      "event_type": "notification",
+      "frame": 2,
+      "node_path": "/root/Root/Container/StatusIcon"
+    }
+  ],
+  "frame_count": 3,
+  "physics_time": 0.05,
+  "process_time": 0.05,
+  "scene_file": "/Users/bone/dev/games/patina/fixtures/scenes/unique_name_resolution.tscn",
+  "tree": {
+    "children": [
+      {
+        "children": [
+          {
+            "children": [],
+            "class": "ProgressBar",
+            "name": "HealthBar",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/Root/HealthBar",
+            "properties": {},
+            "script_vars": {}
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "class": "Label",
+                "name": "ScoreLabel",
+                "notifications": [
+                  "NOTIFICATION_PARENTED",
+                  "NOTIFICATION_ENTER_TREE",
+                  "NOTIFICATION_READY",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS"
+                ],
+                "path": "/root/Root/Panel/ScoreLabel",
+                "properties": {},
+                "script_vars": {}
+              }
+            ],
+            "class": "Panel",
+            "name": "Panel",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_CHILD_ORDER_CHANGED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/Root/Panel",
+            "properties": {},
+            "script_vars": {}
+          },
+          {
+            "children": [
+              {
+                "children": [],
+                "class": "TextureRect",
+                "name": "StatusIcon",
+                "notifications": [
+                  "NOTIFICATION_PARENTED",
+                  "NOTIFICATION_ENTER_TREE",
+                  "NOTIFICATION_READY",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS",
+                  "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+                  "NOTIFICATION_PHYSICS_PROCESS",
+                  "NOTIFICATION_INTERNAL_PROCESS",
+                  "NOTIFICATION_PROCESS"
+                ],
+                "path": "/root/Root/Container/StatusIcon",
+                "properties": {},
+                "script_vars": {}
+              }
+            ],
+            "class": "VBoxContainer",
+            "name": "Container",
+            "notifications": [
+              "NOTIFICATION_PARENTED",
+              "NOTIFICATION_CHILD_ORDER_CHANGED",
+              "NOTIFICATION_ENTER_TREE",
+              "NOTIFICATION_READY",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS",
+              "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+              "NOTIFICATION_PHYSICS_PROCESS",
+              "NOTIFICATION_INTERNAL_PROCESS",
+              "NOTIFICATION_PROCESS"
+            ],
+            "path": "/root/Root/Container",
+            "properties": {},
+            "script_vars": {}
+          }
+        ],
+        "class": "Node2D",
+        "name": "Root",
+        "notifications": [
+          "NOTIFICATION_PARENTED",
+          "NOTIFICATION_CHILD_ORDER_CHANGED",
+          "NOTIFICATION_CHILD_ORDER_CHANGED",
+          "NOTIFICATION_CHILD_ORDER_CHANGED",
+          "NOTIFICATION_ENTER_TREE",
+          "NOTIFICATION_READY",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS",
+          "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+          "NOTIFICATION_PHYSICS_PROCESS",
+          "NOTIFICATION_INTERNAL_PROCESS",
+          "NOTIFICATION_PROCESS"
+        ],
+        "path": "/root/Root",
+        "properties": {},
+        "script_vars": {}
+      }
+    ],
+    "class": "Node",
+    "name": "root",
+    "notifications": [
+      "NOTIFICATION_CHILD_ORDER_CHANGED",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS",
+      "NOTIFICATION_INTERNAL_PHYSICS_PROCESS",
+      "NOTIFICATION_PHYSICS_PROCESS",
+      "NOTIFICATION_INTERNAL_PROCESS",
+      "NOTIFICATION_PROCESS"
+    ],
+    "path": "/root",
+    "properties": {},
+    "script_vars": {}
+  }
+}

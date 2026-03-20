@@ -1,0 +1,52 @@
+{
+  "fixture_id": "scene_unique_name_resolution",
+  "capture_type": "scene_tree",
+  "upstream_version": "pending",
+  "nodes": [
+    {
+      "name": "Root",
+      "class": "Node2D",
+      "path": "/root/Root",
+      "children": [
+        {
+          "name": "HealthBar",
+          "class": "ProgressBar",
+          "path": "/root/Root/HealthBar",
+          "children": [],
+          "properties": {}
+        },
+        {
+          "name": "Panel",
+          "class": "Panel",
+          "path": "/root/Root/Panel",
+          "children": [
+            {
+              "name": "ScoreLabel",
+              "class": "Label",
+              "path": "/root/Root/Panel/ScoreLabel",
+              "children": [],
+              "properties": {}
+            }
+          ],
+          "properties": {}
+        },
+        {
+          "name": "Container",
+          "class": "VBoxContainer",
+          "path": "/root/Root/Container",
+          "children": [
+            {
+              "name": "StatusIcon",
+              "class": "TextureRect",
+              "path": "/root/Root/Container/StatusIcon",
+              "children": [],
+              "properties": {}
+            }
+          ],
+          "properties": {}
+        }
+      ],
+      "properties": {}
+    }
+  ]
+}

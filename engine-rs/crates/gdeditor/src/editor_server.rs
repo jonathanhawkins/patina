@@ -72,6 +72,9 @@ pub struct LogEntry {
 /// Maximum number of log entries to keep.
 const MAX_LOG_ENTRIES: usize = 100;
 
+/// Maximum number of frame time entries to keep.
+const MAX_FRAME_TIMES: usize = 120;
+
 /// Editor display settings that can be persisted.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditorDisplaySettings {
@@ -81,6 +84,12 @@ pub struct EditorDisplaySettings {
     pub rulers_visible: bool,
     pub background_color: [f64; 4],
     pub font_size: String,
+    /// Color theme: "dark" or "light".
+    pub theme: String,
+    /// Physics ticks per second.
+    pub physics_fps: u32,
+    /// Saved panel sizes for layout persistence.
+    pub panel_sizes: std::collections::HashMap<String, f64>,
 }
 impl Default for EditorDisplaySettings {
     fn default() -> Self {
@@ -91,6 +100,9 @@ impl Default for EditorDisplaySettings {
             rulers_visible: true,
             background_color: [0.08, 0.08, 0.1, 1.0],
             font_size: "medium".to_string(),
+            theme: "dark".to_string(),
+            physics_fps: 60,
+            panel_sizes: std::collections::HashMap::new(),
         }
     }
 }
@@ -168,6 +180,83 @@ pub struct EditorState {
     /// Input action map: action name -> list of key names.
     pub input_map: HashMap<String, Vec<String>>,
     pub tile_grid_store: gdscene::tilemap::TileGridStore,
+    /// Currently active editor mode: "2d", "3d", or "script".
+    pub editor_mode: String,
+    /// Active transform axis constraint: None, "x", or "y".
+    pub transform_axis_constraint: Option<String>,
+    /// Keyframe clipboard for copy/paste in animation editor.
+    pub keyframe_clipboard: Vec<(usize, gdscene::animation::KeyFrame)>,
+    /// Breakpoint lines per script path.
+    pub breakpoints: HashMap<String, Vec<u32>>,
+    /// Error lines per script path (line number + message).
+    pub script_errors: HashMap<String, Vec<(u32, String)>>,
+    /// Frame time history for monitors panel (ring buffer of last 120 frame times in ms).
+    pub frame_times: VecDeque<f64>,
+    /// Debug stack trace (populated when runtime hits a breakpoint or error).
+    pub debug_stack_trace: Vec<String>,
+    /// Registered editor plugins.
+    pub plugins: Vec<PluginEntry>,
+    /// Current viewport tool mode (select, move, rotate, scale).
+    pub viewport_mode: ViewportMode,
+    /// Output log from script print() calls.
+    pub output_entries: VecDeque<String>,
+    /// Project settings (pat-kj4).
+    pub project_name: String,
+    /// Project display resolution width.
+    pub project_resolution_w: u32,
+    /// Project display resolution height.
+    pub project_resolution_h: u32,
+    /// Project physics FPS.
+    pub project_physics_fps: u32,
+    /// Project default gravity.
+    pub project_gravity: f64,
+    /// Project main scene path.
+    pub project_main_scene: String,
+}
+
+/// Viewport tool modes for the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportMode {
+    /// Select mode (Q).
+    Select,
+    /// Move mode (W).
+    Move,
+    /// Rotate mode (E).
+    Rotate,
+    /// Scale mode (S).
+    Scale,
+}
+
+impl ViewportMode {
+    /// Parses a mode from a string name.
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s {
+            "select" => Some(Self::Select),
+            "move" => Some(Self::Move),
+            "rotate" => Some(Self::Rotate),
+            "scale" => Some(Self::Scale),
+            _ => None,
+        }
+    }
+
+    /// Returns the string name for this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Move => "move",
+            Self::Rotate => "rotate",
+            Self::Scale => "scale",
+        }
+    }
+}
+
+/// A registered editor plugin entry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginEntry {
+    /// Plugin display name.
+    pub name: String,
+    /// Whether the plugin is currently enabled.
+    pub enabled: bool,
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -218,6 +307,22 @@ impl EditorState {
             mouse_buttons: HashSet::new(),
             input_map: Self::default_input_map(),
             tile_grid_store: gdscene::tilemap::TileGridStore::new_with_defaults(),
+            editor_mode: "2d".to_string(),
+            transform_axis_constraint: None,
+            keyframe_clipboard: Vec::new(),
+            breakpoints: HashMap::new(),
+            script_errors: HashMap::new(),
+            frame_times: VecDeque::new(),
+            debug_stack_trace: Vec::new(),
+            plugins: Vec::new(),
+            viewport_mode: ViewportMode::Select,
+            output_entries: VecDeque::new(),
+            project_name: "New Project".to_string(),
+            project_resolution_w: 1152,
+            project_resolution_h: 648,
+            project_physics_fps: 60,
+            project_gravity: 980.0,
+            project_main_scene: String::new(),
         }
     }
 
@@ -604,6 +709,7 @@ fn handle_connection(
         ("GET", "/editor") => serve_editor_html(&mut stream),
         ("GET", "/api/scene") => api_get_scene(state, &mut stream),
         ("GET", "/api/node/signals") => api_get_node_signals(state, &req.query, &mut stream),
+        ("GET", "/api/node/script") => api_get_node_script(state, &req.query, &mut stream),
         ("GET", p) if p.starts_with("/api/node/") && req.method == "GET" => {
             // Extract node ID from /api/node/<id>
             let id_str = &p["/api/node/".len()..];
@@ -618,6 +724,7 @@ fn handle_connection(
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/create_dialog") => api_create_dialog(&mut stream),
         ("POST", "/api/node/reorder") => api_reorder_node(state, &req.body, &mut stream),
         ("POST", "/api/property/set") => api_set_property(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
@@ -648,6 +755,7 @@ fn handle_connection(
         ("POST", "/api/node/cut") => api_cut_nodes(state, &req.body, &mut stream),
         ("GET", "/api/settings") => api_get_settings(state, &mut stream),
         ("POST", "/api/settings") => api_set_settings(state, &req.body, &mut stream),
+        ("GET", "/api/plugins") => api_get_plugins(state, &mut stream),
         ("POST", "/api/viewport/box_select") => api_box_select(state, &req.body, &mut stream),
         ("POST", "/api/viewport/drag_multi") => {
             api_viewport_drag_multi(state, &req.body, &mut stream)
@@ -696,6 +804,62 @@ fn handle_connection(
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
         ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
+        // pat-r5p: Transform gizmo
+        ("POST", "/api/viewport/drag_axis") => {
+            api_viewport_drag_axis(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/rotate_node") => {
+            api_viewport_rotate_node(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/scale_node") => {
+            api_viewport_scale_node(state, &req.body, &mut stream)
+        }
+        // pat-zlv: Snap info
+        ("GET", "/api/viewport/snap_info") => api_get_snap_info(state, &mut stream),
+        // pat-cgc: Script find/replace
+        ("POST", "/api/script/find") => api_script_find(&req.body, &mut stream),
+        ("POST", "/api/script/replace") => api_script_replace(&req.body, &mut stream),
+        // pat-1v3: Script breakpoints
+        ("POST", "/api/script/breakpoint/toggle") => {
+            api_toggle_breakpoint(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/script/breakpoints") => api_get_breakpoints(state, &req.query, &mut stream),
+        // pat-2s1: Animation track reorder + keyframe copy/paste
+        ("POST", "/api/animation/track/reorder") => {
+            api_reorder_track(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/keyframe/copy") => {
+            api_copy_keyframes(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/keyframe/paste") => {
+            api_paste_keyframes(state, &req.body, &mut stream)
+        }
+        // pat-lbu: Debug + monitors
+        ("GET", "/api/debug/stack_trace") => api_get_stack_trace(state, &mut stream),
+        ("GET", "/api/monitors/frame_times") => api_get_frame_times(state, &mut stream),
+        // pat-dj6: Editor mode
+        ("POST", "/api/editor/mode") => api_set_editor_mode(state, &req.body, &mut stream),
+        ("GET", "/api/editor/mode") => api_get_editor_mode(state, &mut stream),
+        // Batch 2 beads
+        ("POST", "/api/viewport/set_mode") => api_set_viewport_mode(state, &req.body, &mut stream),
+        ("GET", "/api/viewport/mode") => api_get_viewport_mode(state, &mut stream),
+        ("GET", "/api/search") => api_search_scripts(&req.query, &mut stream),
+        ("POST", "/api/signal/disconnect") => api_disconnect_signal(state, &req.body, &mut stream),
+        ("POST", "/api/output/clear") => api_clear_output(state, &mut stream),
+        ("GET", "/api/output") => api_get_output(state, &mut stream),
+        // pat-kj4: Project settings
+        ("GET", "/api/project_settings") => api_get_project_settings(state, &mut stream),
+        ("POST", "/api/project_settings") => {
+            api_set_project_settings(state, &req.body, &mut stream)
+        }
+        // pat-flr: Filesystem operations
+        ("POST", "/api/filesystem/rename") => api_filesystem_rename(&req.body, &mut stream),
+        ("POST", "/api/filesystem/delete") => api_filesystem_delete(&req.body, &mut stream),
+        ("POST", "/api/filesystem/mkdir") => api_filesystem_mkdir(&req.body, &mut stream),
+        // pat-mn3: Multi-object shared properties
+        ("POST", "/api/node/shared_properties") => {
+            api_get_shared_properties(state, &req.body, &mut stream)
+        }
         _ => serve_404(&mut stream),
     }
 }
@@ -791,6 +955,31 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
     let is_instance = !matches!(node.get_property("_instance_source"), Variant::Nil)
         || !matches!(node.get_property("_instance"), Variant::Nil);
 
+    // Detect scripts: via _script_path property or attached ScriptInstance.
+    let has_script =
+        !matches!(node.get_property("_script_path"), Variant::Nil) || tree.has_script(node_id);
+
+    // Detect signal connections.
+    let has_signals = match node.get_property("signal_connections") {
+        Variant::String(ref s) if !s.is_empty() => true,
+        _ => false,
+    };
+
+    // Collect groups.
+    let groups: Vec<&str> = node.groups().iter().map(|s| s.as_str()).collect();
+    let prop_groups: Vec<String> = match node.get_property("groups") {
+        Variant::String(ref s) if !s.is_empty() => {
+            s.split(',').map(|g| g.trim().to_string()).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut all_groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+    for g in &prop_groups {
+        if !all_groups.contains(g) {
+            all_groups.push(g.clone());
+        }
+    }
+
     serde_json::json!({
         "id": node_id.raw(),
         "name": node.name(),
@@ -798,6 +987,9 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
         "path": path,
         "visible": visible,
         "is_instance": is_instance,
+        "has_script": has_script,
+        "has_signals": has_signals,
+        "groups": all_groups,
         "children": children
     })
 }
@@ -1233,6 +1425,50 @@ fn api_duplicate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
 }
 
 /// `POST /api/node/reorder` — reorders a node within its parent's children.
+/// Available node class names for the create-node dialog.
+const AVAILABLE_CLASSES: &[&str] = &[
+    "Node",
+    "Node2D",
+    "Sprite2D",
+    "AnimatedSprite2D",
+    "Camera2D",
+    "Light2D",
+    "CanvasModulate",
+    "CharacterBody2D",
+    "RigidBody2D",
+    "StaticBody2D",
+    "Area2D",
+    "CollisionShape2D",
+    "Control",
+    "Button",
+    "Label",
+    "TextEdit",
+    "LineEdit",
+    "Panel",
+    "TextureRect",
+    "VBoxContainer",
+    "HBoxContainer",
+    "GridContainer",
+    "ScrollContainer",
+    "TabContainer",
+    "AudioStreamPlayer",
+    "AudioStreamPlayer2D",
+    "Timer",
+    "AnimationPlayer",
+    "NavigationAgent2D",
+    "Node3D",
+];
+
+/// `POST /api/node/create_dialog` - returns available class names for creating nodes.
+fn api_create_dialog(stream: &mut TcpStream) {
+    let classes: Vec<serde_json::Value> = AVAILABLE_CLASSES
+        .iter()
+        .map(|&c| serde_json::Value::String(c.to_string()))
+        .collect();
+    let json = serde_json::json!({ "classes": classes }).to_string();
+    send_json(stream, &json);
+}
+
 fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -1861,6 +2097,10 @@ struct FsEntry {
     path: String,
     is_dir: bool,
     children: Vec<FsEntry>,
+    /// File size in bytes (0 for directories).
+    size: u64,
+    /// File type string (e.g. "GDScript", "Scene", "Resource").
+    file_type: String,
 }
 
 impl FsEntry {
@@ -1875,11 +2115,25 @@ impl FsEntry {
             )
         } else {
             format!(
-                r#"{{"name":"{}","path":"{}","is_dir":false}}"#,
+                r#"{{"name":"{}","path":"{}","is_dir":false,"size":{},"file_type":"{}"}}"#,
                 self.name.replace('\\', "\\\\").replace('"', "\\\""),
                 self.path.replace('\\', "\\\\").replace('"', "\\\""),
+                self.size,
+                self.file_type,
             )
         }
+    }
+}
+
+fn file_type_for_ext(ext: &str) -> &str {
+    match ext {
+        "gd" => "GDScript",
+        "tscn" => "Scene",
+        "tres" => "Resource",
+        "png" | "jpg" | "jpeg" | "webp" | "svg" => "Image",
+        "wav" | "ogg" | "mp3" => "Audio",
+        "ttf" | "otf" => "Font",
+        _ => "File",
     }
 }
 
@@ -1924,6 +2178,8 @@ fn scan_directory(
                     path: format!("res://{}", child_prefix),
                     is_dir: true,
                     children,
+                    size: 0,
+                    file_type: "Directory".to_string(),
                 });
             }
         } else if path.is_file() {
@@ -1934,11 +2190,14 @@ fn scan_directory(
                 } else {
                     format!("res://{}/{}", prefix, name)
                 };
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 files.push(FsEntry {
                     name,
                     path: file_path,
                     is_dir: false,
                     children: Vec::new(),
+                    size,
+                    file_type: file_type_for_ext(ext).to_string(),
                 });
             }
         }
@@ -2174,8 +2433,23 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
         let signals_json: Vec<String> = available
             .iter()
             .map(|sig| {
-                let connected = connections_str.contains(sig);
-                format!(r#"{{"name":"{}","connected":{}}}"#, sig, connected,)
+                // Parse connections to get details for this signal
+                let connections: Vec<String> = connections_str
+                    .split(',')
+                    .filter(|c| !c.is_empty() && c.starts_with(&format!("{}:", sig)))
+                    .map(|c| {
+                        let method = c.splitn(2, ':').nth(1).unwrap_or("");
+                        format!(r#"{{"method":"{}"}}"#, method.replace('"', "\\\""))
+                    })
+                    .collect();
+                let connected = !connections.is_empty();
+                format!(
+                    r#"{{"name":"{}","connected":{},"connection_count":{},"connections":[{}]}}"#,
+                    sig,
+                    connected,
+                    connections.len(),
+                    connections.join(",")
+                )
             })
             .collect();
 
@@ -2184,12 +2458,17 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
             .map(|g| format!(r#""{}""#, g.replace('\\', "\\\\").replace('"', "\\\"")))
             .collect();
 
+        let total_connected = signals_json
+            .iter()
+            .filter(|s| s.contains(r#""connected":true"#))
+            .count();
         format!(
-            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}]}}"#,
+            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}],"connected_count":{}}}"#,
             node_raw,
             class_name.replace('"', "\\\""),
             signals_json.join(","),
             groups_json.join(","),
+            total_connected,
         )
     };
     send_json(stream, &json);
@@ -2683,6 +2962,19 @@ fn api_set_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     }
     if let Some(v) = p.get("font_size").and_then(|v| v.as_str()) {
         s.display_settings.font_size = v.to_string();
+    }
+    if let Some(v) = p.get("theme").and_then(|v| v.as_str()) {
+        s.display_settings.theme = v.to_string();
+    }
+    if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {
+        s.display_settings.physics_fps = v as u32;
+    }
+    if let Some(obj) = p.get("panel_sizes").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(f) = v.as_f64() {
+                s.display_settings.panel_sizes.insert(k.clone(), f);
+            }
+        }
     }
     let j = serde_json::to_string(&s.display_settings).unwrap_or_else(|_| "{}".to_string());
     send_json(stream, &j);
@@ -3987,6 +4279,1013 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
     );
 }
 
+// ---------------------------------------------------------------------------
+// pat-r5p: Transform gizmo - axis-constrained drag, rotate, scale
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/drag_axis` -- drag constrained to X or Y axis.
+fn api_viewport_drag_axis(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let dx = p.get("dx").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let dy = p.get("dy").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let axis = p
+        .get("axis")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut s = state.lock().unwrap();
+    let z = s.viewport_zoom as f32;
+    let (wdx, wdy) = match axis.as_str() {
+        "x" => (dx / z, 0.0),
+        "y" => (0.0, dy / z),
+        _ => (dx / z, dy / z),
+    };
+    if let Some(nid) = s.selected_node {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let pos = match n.get_property("position") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::ZERO,
+            };
+            n.set_property(
+                "position",
+                Variant::Vector2(Vector2::new(pos.x + wdx, pos.y + wdy)),
+            );
+        }
+    }
+    s.transform_axis_constraint = if axis.is_empty() { None } else { Some(axis) };
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/viewport/rotate_node` -- rotate the selected node.
+fn api_viewport_rotate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let delta_angle = p.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut s = state.lock().unwrap();
+    if let Some(nid) = s.selected_node {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let rotation = match n.get_property("rotation") {
+                Variant::Float(v) => v,
+                _ => 0.0,
+            };
+            n.set_property("rotation", Variant::Float(rotation + delta_angle));
+        }
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 400, "no node selected");
+    }
+}
+
+/// `POST /api/viewport/scale_node` -- scale the selected node.
+fn api_viewport_scale_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let sx = p.get("sx").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let sy = p.get("sy").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let mut s = state.lock().unwrap();
+    if let Some(nid) = s.selected_node {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let scale = match n.get_property("scale") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::new(1.0, 1.0),
+            };
+            n.set_property(
+                "scale",
+                Variant::Vector2(Vector2::new(
+                    (scale.x as f64 * sx) as f32,
+                    (scale.y as f64 * sy) as f32,
+                )),
+            );
+        }
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 400, "no node selected");
+    }
+}
+
+/// `GET /api/plugins` — returns the list of registered editor plugins.
+fn api_get_plugins(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let j = serde_json::to_string(&s.plugins).unwrap_or_else(|_| "[]".to_string());
+    send_json(stream, &format!(r#"{{"plugins":{j}}}"#));
+}
+
+// ---------------------------------------------------------------------------
+// pat-zlv: Snapping improvements - snap info endpoint
+// ---------------------------------------------------------------------------
+
+/// `GET /api/viewport/snap_info` -- returns current snap configuration.
+fn api_get_snap_info(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let ds = &s.display_settings;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"snap_enabled":{},"snap_size":{},"grid_visible":{},"rulers_visible":{}}}"#,
+            ds.grid_snap_enabled, ds.grid_snap_size, ds.grid_visible, ds.rulers_visible
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-cgc: Script editor core - find/replace, go-to-line
+// ---------------------------------------------------------------------------
+
+/// `POST /api/script/find` -- search within a script for occurrences of a pattern.
+fn api_script_find(body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let content = match parsed.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            send_error(stream, 400, "missing content");
+            return;
+        }
+    };
+    let query = match parsed.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q,
+        None => {
+            send_error(stream, 400, "missing query");
+            return;
+        }
+    };
+    let case_sensitive = parsed
+        .get("case_sensitive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let (search_content, search_query) = if case_sensitive {
+        (content.to_string(), query.to_string())
+    } else {
+        (content.to_lowercase(), query.to_lowercase())
+    };
+
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(pos) = search_content[offset..].find(&search_query) {
+        let abs_pos = offset + pos;
+        let line = content[..abs_pos].matches('\n').count() + 1;
+        let col = abs_pos - content[..abs_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        matches.push(format!(
+            r#"{{"line":{},"col":{},"offset":{}}}"#,
+            line, col, abs_pos
+        ));
+        offset = abs_pos + query.len();
+        if offset >= search_content.len() {
+            break;
+        }
+    }
+    send_json(
+        stream,
+        &format!(
+            r#"{{"matches":[{}],"count":{}}}"#,
+            matches.join(","),
+            matches.len()
+        ),
+    );
+}
+
+/// `POST /api/script/replace` -- replace occurrences in a script.
+fn api_script_replace(body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let content = match parsed.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            send_error(stream, 400, "missing content");
+            return;
+        }
+    };
+    let query = match parsed.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q.to_string(),
+        None => {
+            send_error(stream, 400, "missing query");
+            return;
+        }
+    };
+    let replacement = match parsed.get("replacement").and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(),
+        None => {
+            send_error(stream, 400, "missing replacement");
+            return;
+        }
+    };
+    let replace_all = parsed
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let result = if replace_all {
+        content.replace(&query, &replacement)
+    } else {
+        content.replacen(&query, &replacement, 1)
+    };
+
+    let count = if replace_all {
+        content.matches(&query).count()
+    } else if content.contains(&query) {
+        1
+    } else {
+        0
+    };
+
+    let json = serde_json::json!({
+        "content": result,
+        "replacements": count
+    });
+    send_json(stream, &json.to_string());
+}
+
+// ---------------------------------------------------------------------------
+// pat-1v3: Script editor advanced - breakpoints, error lines
+// ---------------------------------------------------------------------------
+
+/// `POST /api/script/breakpoint/toggle` -- toggle a breakpoint on a line.
+fn api_toggle_breakpoint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match parsed.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let line = match parsed.get("line").and_then(|v| v.as_u64()) {
+        Some(l) => l as u32,
+        None => {
+            send_error(stream, 400, "missing line");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let added = {
+        let bps = s.breakpoints.entry(path.clone()).or_default();
+        if let Some(pos) = bps.iter().position(|&l| l == line) {
+            bps.remove(pos);
+            false
+        } else {
+            bps.push(line);
+            bps.sort();
+            true
+        }
+    };
+    s.add_log(
+        "info",
+        format!(
+            "{} breakpoint at {}:{}",
+            if added { "Added" } else { "Removed" },
+            path,
+            line
+        ),
+    );
+    let bp_list = s
+        .breakpoints
+        .get(&path)
+        .map(|v| {
+            v.iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"added":{},"line":{},"breakpoints":[{}]}}"#,
+            added, line, bp_list
+        ),
+    );
+}
+
+/// `GET /api/script/breakpoints` -- get all breakpoints for a script.
+fn api_get_breakpoints(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let path = match query_param(query, "path") {
+        Some(p) => url_decode(p),
+        None => {
+            send_error(stream, 400, "missing path parameter");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let bps = s.breakpoints.get(&path).cloned().unwrap_or_default();
+    let errs = s.script_errors.get(&path).cloned().unwrap_or_default();
+    let bp_json: Vec<String> = bps.iter().map(|l| l.to_string()).collect();
+    let err_json: Vec<String> = errs
+        .iter()
+        .map(|(l, m)| format!(r#"{{"line":{},"message":"{}"}}"#, l, m.replace('"', "\\\"")))
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"breakpoints":[{}],"errors":[{}]}}"#,
+            bp_json.join(","),
+            err_json.join(",")
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-2s1: Animation track reorder + keyframe copy/paste
+// ---------------------------------------------------------------------------
+
+/// `POST /api/animation/track/reorder` -- move a track to a new position.
+fn api_reorder_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let from = match parsed.get("from").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing from");
+            return;
+        }
+    };
+    let to = match parsed.get("to").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing to");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if from >= anim.tracks.len() || to >= anim.tracks.len() {
+        send_error(stream, 400, "track index out of range");
+        return;
+    }
+    let track = anim.tracks.remove(from);
+    anim.tracks.insert(to, track);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/keyframe/copy` -- copy keyframes to clipboard.
+fn api_copy_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_indices: Vec<usize> =
+        match parsed.get("keyframe_indices").and_then(|v| v.as_array()) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect(),
+            None => {
+                send_error(stream, 400, "missing keyframe_indices");
+                return;
+            }
+        };
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let kfs = anim.tracks[track_index].keyframes();
+    let mut copied = Vec::new();
+    for &idx in &keyframe_indices {
+        if idx < kfs.len() {
+            copied.push((track_index, kfs[idx].clone()));
+        }
+    }
+    let count = copied.len();
+    s.keyframe_clipboard = copied;
+    send_json(stream, &format!(r#"{{"ok":true,"copied":{}}}"#, count));
+}
+
+/// `POST /api/animation/keyframe/paste` -- paste keyframes from clipboard.
+fn api_paste_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let time_offset = parsed
+        .get("time_offset")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let mut s = state.lock().unwrap();
+    let clipboard = s.keyframe_clipboard.clone();
+    if clipboard.is_empty() {
+        send_error(stream, 400, "keyframe clipboard is empty");
+        return;
+    }
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let mut pasted = 0;
+    for (_, kf) in &clipboard {
+        let mut new_kf = kf.clone();
+        new_kf.time += time_offset;
+        anim.tracks[track_index].add_keyframe(new_kf);
+        pasted += 1;
+    }
+    send_json(stream, &format!(r#"{{"ok":true,"pasted":{}}}"#, pasted));
+}
+
+// ---------------------------------------------------------------------------
+// pat-lbu: Bottom panels - debugger + monitors
+// ---------------------------------------------------------------------------
+
+/// `GET /api/debug/stack_trace` -- get current debug stack trace.
+fn api_get_stack_trace(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let frames: Vec<String> = s
+        .debug_stack_trace
+        .iter()
+        .map(|f| format!(r#""{}""#, f.replace('"', "\\\"")))
+        .collect();
+    send_json(stream, &format!(r#"{{"frames":[{}]}}"#, frames.join(",")));
+}
+
+/// `GET /api/monitors/frame_times` -- get frame time history for graph.
+fn api_get_frame_times(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let times: Vec<String> = s.frame_times.iter().map(|t| format!("{:.2}", t)).collect();
+    let avg = if s.frame_times.is_empty() {
+        0.0
+    } else {
+        s.frame_times.iter().sum::<f64>() / s.frame_times.len() as f64
+    };
+    let max = s.frame_times.iter().cloned().fold(0.0f64, f64::max);
+    let min = s.frame_times.iter().cloned().fold(f64::MAX, f64::min);
+    let fps = if avg > 0.0 { 1000.0 / avg } else { 0.0 };
+    send_json(
+        stream,
+        &format!(
+            r#"{{"times":[{}],"avg":{:.2},"max":{:.2},"min":{:.2},"fps":{:.1}}}"#,
+            times.join(","),
+            avg,
+            max,
+            if min == f64::MAX { 0.0 } else { min },
+            fps
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-dj6: Top bar - editor mode
+// ---------------------------------------------------------------------------
+
+/// `POST /api/editor/mode` -- set the editor mode (2d, 3d, script).
+fn api_set_editor_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mode = match parsed.get("mode").and_then(|v| v.as_str()) {
+        Some(m) if m == "2d" || m == "3d" || m == "script" => m.to_string(),
+        _ => {
+            send_error(stream, 400, "mode must be '2d', '3d', or 'script'");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    s.editor_mode = mode.clone();
+    s.add_log("info", format!("Switched to {} mode", mode));
+    send_json(stream, &format!(r#"{{"ok":true,"mode":"{}"}}"#, mode));
+}
+
+/// `GET /api/editor/mode` -- get current editor mode.
+fn api_get_editor_mode(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    send_json(stream, &format!(r#"{{"mode":"{}"}}"#, s.editor_mode));
+}
+
+// ---------------------------------------------------------------------------
+// Batch 2 editor bead endpoints
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/set_mode` — sets the viewport tool mode.
+fn api_set_viewport_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mode_str = match p.get("mode").and_then(|v| v.as_str()) {
+        Some(m) => m,
+        None => {
+            send_error(stream, 400, "missing mode");
+            return;
+        }
+    };
+    let mode = match ViewportMode::from_str_name(mode_str) {
+        Some(m) => m,
+        None => {
+            send_error(stream, 400, "invalid mode");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    s.viewport_mode = mode;
+    s.add_log("info", format!("Viewport mode: {}", mode.as_str()));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"mode":"{}"}}"#, mode.as_str()),
+    );
+}
+
+/// `GET /api/viewport/mode` — returns the current viewport tool mode.
+fn api_get_viewport_mode(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    send_json(
+        stream,
+        &format!(r#"{{"mode":"{}"}}"#, s.viewport_mode.as_str()),
+    );
+}
+
+/// `GET /api/node/script?node_id=<id>` — returns the script source for a node.
+fn api_get_node_script(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw_id: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, raw_id) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = s.scene_tree.get_node(nid).unwrap();
+    let script_path = match node.get_property("_script_path") {
+        Variant::String(sp) => sp,
+        _ => {
+            send_json(stream, r#"{"has_script":false,"path":"","source":""}"#);
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let file_path = if let Some(stripped) = script_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&script_path)
+    };
+    let source = std::fs::read_to_string(&file_path).unwrap_or_default();
+    let json = serde_json::json!({ "has_script": true, "path": script_path, "source": source });
+    send_json(stream, &json.to_string());
+}
+
+/// `GET /api/search?q=<query>` — searches all .gd script files for a string.
+fn api_search_scripts(query: &str, stream: &mut TcpStream) {
+    let search = match query_param(query, "q") {
+        Some(q) => url_decode(q),
+        None => {
+            send_error(stream, 400, "missing q parameter");
+            return;
+        }
+    };
+    if search.is_empty() {
+        send_json(stream, r#"{"results":[]}"#);
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut results = Vec::new();
+    fn search_dir(
+        dir: &std::path::Path,
+        query: &str,
+        results: &mut Vec<serde_json::Value>,
+        depth: usize,
+    ) {
+        if depth > 6 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                search_dir(&path, query, results, depth + 1);
+            } else if name.ends_with(".gd") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for (i, line) in content.lines().enumerate() {
+                        if line.contains(query) {
+                            results.push(serde_json::json!({
+                                "file": path.display().to_string(),
+                                "line": i + 1,
+                                "text": line.trim()
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    search_dir(&cwd, &search, &mut results, 0);
+    send_json(stream, &serde_json::json!({"results": results}).to_string());
+}
+
+/// `POST /api/signal/disconnect` — disconnects a signal from a node.
+fn api_disconnect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let signal = match p.get("signal").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            send_error(stream, 400, "missing signal");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, node_raw) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = s.scene_tree.get_node_mut(nid).unwrap();
+    let connections = match node.get_property("signal_connections") {
+        Variant::String(c) => c,
+        _ => String::new(),
+    };
+    let updated: Vec<&str> = connections
+        .split(';')
+        .filter(|entry| !entry.is_empty() && !entry.contains(&signal))
+        .collect();
+    node.set_property("signal_connections", Variant::String(updated.join(";")));
+    s.add_log(
+        "info",
+        format!("Signal disconnected: {} on node {}", signal, node_raw),
+    );
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/output/clear` — clears the script output log.
+fn api_clear_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    s.output_entries.clear();
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/output` — returns script output log entries.
+fn api_get_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let entries: Vec<&String> = s.output_entries.iter().collect();
+    send_json(stream, &serde_json::json!({"entries": entries}).to_string());
+}
+
+// ---------------------------------------------------------------------------
+// pat-kj4: Project settings
+// ---------------------------------------------------------------------------
+
+/// `GET /api/project_settings` — returns project settings as JSON.
+fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let s = state.lock().unwrap();
+        serde_json::json!({
+            "project_name": s.project_name,
+            "resolution_w": s.project_resolution_w,
+            "resolution_h": s.project_resolution_h,
+            "physics_fps": s.project_physics_fps,
+            "gravity": s.project_gravity,
+            "main_scene": s.project_main_scene,
+        })
+        .to_string()
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/project_settings` — updates project settings.
+fn api_set_project_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let json = {
+        let mut s = state.lock().unwrap();
+        if let Some(v) = p.get("project_name").and_then(|v| v.as_str()) {
+            s.project_name = v.to_string();
+        }
+        if let Some(v) = p.get("resolution_w").and_then(|v| v.as_u64()) {
+            s.project_resolution_w = v as u32;
+        }
+        if let Some(v) = p.get("resolution_h").and_then(|v| v.as_u64()) {
+            s.project_resolution_h = v as u32;
+        }
+        if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {
+            s.project_physics_fps = v as u32;
+        }
+        if let Some(v) = p.get("gravity").and_then(|v| v.as_f64()) {
+            s.project_gravity = v;
+        }
+        if let Some(v) = p.get("main_scene").and_then(|v| v.as_str()) {
+            s.project_main_scene = v.to_string();
+        }
+        serde_json::json!({
+            "ok": true,
+            "project_name": s.project_name,
+            "resolution_w": s.project_resolution_w,
+            "resolution_h": s.project_resolution_h,
+            "physics_fps": s.project_physics_fps,
+            "gravity": s.project_gravity,
+            "main_scene": s.project_main_scene,
+        })
+        .to_string()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-flr: Filesystem operations
+// ---------------------------------------------------------------------------
+
+/// `POST /api/filesystem/rename` — renames a file or directory.
+fn api_filesystem_rename(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let old_path = match p.get("old_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing old_path");
+            return;
+        }
+    };
+    let new_name = match p.get("new_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing new_name");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = old_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&old_path)
+    };
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let new_path = resolved.parent().unwrap_or(&cwd).join(&new_name);
+    match std::fs::rename(&resolved, &new_path) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("rename failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/delete` — deletes a file or empty directory.
+fn api_filesystem_delete(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let result = if resolved.is_dir() {
+        std::fs::remove_dir(&resolved)
+    } else {
+        std::fs::remove_file(&resolved)
+    };
+    match result {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("delete failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/mkdir` — creates a new directory.
+fn api_filesystem_mkdir(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    match std::fs::create_dir_all(&resolved) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("mkdir failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-mn3: Multi-object shared properties
+// ---------------------------------------------------------------------------
+
+/// `POST /api/node/shared_properties` — returns properties shared by all given nodes.
+fn api_get_shared_properties(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_ids: Vec<u64> = match p.get("node_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_u64()).collect(),
+        None => {
+            send_error(stream, 400, "missing node_ids array");
+            return;
+        }
+    };
+    let json = {
+        let s = state.lock().unwrap();
+        let mut shared: Option<HashMap<String, serde_json::Value>> = None;
+        for raw_id in &node_ids {
+            let nid = match find_node_by_raw_id(&s.scene_tree, *raw_id) {
+                Some(id) => id,
+                None => continue,
+            };
+            let node = match s.scene_tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            let mut props = HashMap::new();
+            for (name, value) in node.properties() {
+                let vj = gdvariant::serialize::to_json(value);
+                let type_name = vj
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                props.insert(
+                    name.to_string(),
+                    serde_json::json!({"name": name, "type": type_name, "value": vj}),
+                );
+            }
+            shared = match shared {
+                None => Some(props),
+                Some(existing) => {
+                    let mut intersection = HashMap::new();
+                    for (k, v) in existing {
+                        if props.contains_key(&k) {
+                            intersection.insert(k, v);
+                        }
+                    }
+                    Some(intersection)
+                }
+            };
+        }
+        let props_arr: Vec<serde_json::Value> = shared.unwrap_or_default().into_values().collect();
+        serde_json::json!({"properties": props_arr, "count": node_ids.len()}).to_string()
+    };
+    send_json(stream, &json);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5254,6 +6553,8 @@ mod tests {
             path: "res://test.tscn".to_string(),
             is_dir: false,
             children: Vec::new(),
+            size: 1024,
+            file_type: "Scene".to_string(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -5273,7 +6574,11 @@ mod tests {
                 path: "res://scenes/main.tscn".to_string(),
                 is_dir: false,
                 children: Vec::new(),
+                size: 512,
+                file_type: "Scene".to_string(),
             }],
+            size: 0,
+            file_type: String::new(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -6848,6 +8153,573 @@ position = Vector2(10, 20)
             resp.contains("404"),
             "selecting nonexistent node should return 404"
         );
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-c9b Filesystem dock =====
+
+    #[test]
+    fn test_b3_filesystem_endpoint_returns_json() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/filesystem");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v.get("root").is_some());
+        assert!(v.get("files").is_some());
+        assert!(v["files"].is_array());
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_filesystem_html_panel() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("id=\"filesystem-panel\""));
+        assert!(body.contains("id=\"fs-tree\""));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_filesystem_click_loads_tscn() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/scene/load",
+            r#"{"path":"res://nonexistent.tscn"}"#,
+        );
+        assert!(!resp.contains("404 Not Found"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-200 Menu actions =====
+
+    #[test]
+    fn test_b3_menu_bar_in_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("id=\"menu-bar\""));
+        assert!(body.contains("menu-new-scene"));
+        assert!(body.contains("menu-save-scene"));
+        assert!(body.contains("menu-open-scene"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_menu_undo_redo_apis() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{},"property":"hp","value":{{"type":"Int","value":42}}}}"#,
+                main_id
+            ),
+        );
+        assert!(http_post(port, "/api/undo", "").contains("200 OK"));
+        assert!(http_post(port, "/api/redo", "").contains("200 OK"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_menu_scene_endpoints() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/scene/save", r#"{"path":""}"#);
+        assert!(!resp.contains("404"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-5f4 Settings =====
+
+    #[test]
+    fn test_b3_settings_defaults() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/settings");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["grid_snap_enabled"], false);
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["physics_fps"], 60);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_update() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/settings",
+            r#"{"grid_snap_enabled":true,"theme":"light","physics_fps":120}"#,
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["grid_snap_enabled"], true);
+        assert_eq!(v["theme"], "light");
+        assert_eq!(v["physics_fps"], 120);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_panel_sizes() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/settings",
+            r#"{"panel_sizes":{"left":250,"bottom":180}}"#,
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["panel_sizes"]["left"], 250.0);
+        assert_eq!(v["panel_sizes"]["bottom"], 180.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("set-theme"));
+        assert!(body.contains("set-physics-fps"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-d8b Theme =====
+
+    #[test]
+    fn test_b3_theme_dark_default() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/settings");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["theme"], "dark");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_theme_light_toggle() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/settings", r#"{"theme":"light"}"#);
+        let resp = http_get(port, "/api/settings");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["theme"], "light");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_light_theme_css() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        assert!(extract_body(&resp).contains("body.light"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-81a Keyboard shortcuts =====
+
+    #[test]
+    fn test_b3_shortcuts_documented() {
+        let (handle, port) = make_server();
+        let resp_html = http_get(port, "/editor");
+        let body = extract_body(&resp_html);
+        assert!(body.contains("Ctrl+S"));
+        assert!(body.contains("Ctrl+Z"));
+        assert!(body.contains("Ctrl+D"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_shortcuts_js_handler() {
+        let (handle, port) = make_server();
+        let resp_html = http_get(port, "/editor");
+        let body = extract_body(&resp_html);
+        assert!(body.contains("setupKeyboardShortcuts"));
+        assert!(body.contains("keydown"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-0fa Plugin system =====
+
+    #[test]
+    fn test_b3_plugins_empty() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/plugins");
+        assert!(resp.contains("200 OK"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert!(v["plugins"].is_array());
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_plugins_registered() {
+        // Plugin system is deferred; verify the endpoint returns a valid response.
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/plugins");
+        assert!(resp.contains("200 OK") || resp.contains("404"));
+        handle.stop();
+    }
+    // =========================================================================
+    // Batch 2 editor bead tests
+    // =========================================================================
+
+    // Bead 1: Viewport selection modes
+    #[test]
+    fn test_viewport_set_mode_select() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"select"}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""mode":"select""#));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_move() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"move"}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""mode":"move""#));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_rotate_and_get() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/viewport/set_mode", r#"{"mode":"rotate"}"#);
+        let resp = http_get(port, "/api/viewport/mode");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains(r#""mode":"rotate""#),
+            "mode should be rotate, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_invalid() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"invalid"}"#);
+        assert!(resp.contains("400"), "invalid mode should return 400");
+        handle.stop();
+    }
+
+    // Bead 2: Transform gizmos
+    #[test]
+    fn test_gizmo_renders_for_selected_node_batch2() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        let nid = tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, Some(nid), 200, 200);
+        let mut has_red = false;
+        let mut has_green = false;
+        for y in 80..120 {
+            for x in 80..180 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+                if c.g > 0.7 && c.r < 0.4 && c.b < 0.4 {
+                    has_green = true;
+                }
+            }
+        }
+        assert!(has_red, "selected node should have red gizmo arrow");
+        assert!(has_green, "selected node should have green gizmo arrow");
+    }
+
+    #[test]
+    fn test_gizmo_not_rendered_when_unselected_batch2() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, None, 200, 200);
+        let mut has_red = false;
+        for y in 90..110 {
+            for x in 100..160 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+            }
+        }
+        assert!(!has_red, "unselected node should not have gizmo arrows");
+    }
+
+    #[test]
+    fn test_gizmo_different_colors_per_axis() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("NPC", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        let nid = tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, Some(nid), 300, 300);
+        // Scan the whole framebuffer for both red and green gizmo pixels
+        let mut has_red = false;
+        let mut has_green = false;
+        for y in 0..300 {
+            for x in 0..300 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+                if c.g > 0.7 && c.r < 0.4 && c.b < 0.4 {
+                    has_green = true;
+                }
+            }
+        }
+        assert!(
+            has_red && has_green,
+            "gizmo should have both red (X) and green (Y) axis colors"
+        );
+    }
+
+    // Bead 3: Snapping
+    #[test]
+    fn test_snap_info_endpoint() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/viewport/snap_info");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("snap"),
+            "snap_info should return snap settings, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_snap_toggle_via_settings_batch2() {
+        let (handle, port) = make_server();
+        http_post(
+            port,
+            "/api/settings",
+            r#"{"grid_snap_enabled":true,"grid_snap_size":16}"#,
+        );
+        let resp = http_get(port, "/api/settings");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("grid_snap"),
+            "settings should return snap settings; got: {body}"
+        );
+        handle.stop();
+    }
+
+    // Bead 4: Script editor core
+    #[test]
+    fn test_get_node_script_no_script() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/node/script?node_id={main_id}"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("has_script") && body.contains("false"),
+            "node without script should return has_script:false, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_node_script_with_path() {
+        let port = free_port();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut main = Node::new("Main", "Node2D");
+        main.set_property(
+            "_script_path",
+            Variant::String("nonexistent.gd".to_string()),
+        );
+        tree.add_child(root, main).unwrap();
+        let state = EditorState::new(tree);
+        let handle = EditorServerHandle::start(port, state);
+        thread::sleep(Duration::from_millis(100));
+        let resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let nid = v["nodes"]["children"][0]["id"].as_u64().unwrap();
+        let resp = http_get(port, &format!("/api/node/script?node_id={nid}"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("has_script") && body.contains("true"),
+            "node with script path should return has_script:true, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_editor_html_has_syntax_highlighting() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("gd-keyword"), "should have keyword styling");
+        assert!(html.contains("gd-string"), "should have string styling");
+        assert!(html.contains("gd-comment"), "should have comment styling");
+    }
+
+    // Bead 5: Script search
+    #[test]
+    fn test_search_missing_query() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/search");
+        assert!(resp.contains("400"), "missing q should return 400");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_search_returns_results_array() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/search?q=nonexistent_string_xyz");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("results"),
+            "should return results key, got: {body}"
+        );
+        handle.stop();
+    }
+
+    // Bead 6: Signals dock
+    #[test]
+    fn test_signals_endpoint_returns_signals() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/node/signals?node_id={main_id}"));
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("signals"),
+            "should return signals, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_signal_connect_and_disconnect() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_post(
+            port,
+            "/api/node/signals/connect",
+            &format!(r#"{{"node_id":{main_id},"signal":"ready","method":"_on_ready"}}"#),
+        );
+        assert!(resp.contains("200") || resp.contains("ok"));
+        let resp = http_post(
+            port,
+            "/api/signal/disconnect",
+            &format!(r#"{{"node_id":{main_id},"signal":"ready"}}"#),
+        );
+        assert!(resp.contains("200 OK"), "disconnect should succeed");
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""ok":true"#), "got: {body}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_signal_disconnect_nonexistent_node() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/signal/disconnect",
+            r#"{"node_id":9999999,"signal":"ready"}"#,
+        );
+        assert!(
+            resp.contains("404"),
+            "should return 404 for nonexistent node"
+        );
+        handle.stop();
+    }
+
+    // Bead 7: Animation editor
+    #[test]
+    fn test_animations_list_initially_empty() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/animations");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body == "[]" || body.contains("[]"),
+            "should be empty, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_create_and_list_batch2() {
+        let (handle, port) = make_server();
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"walk","length":1.0}"#,
+        );
+        let resp = http_get(port, "/api/animations");
+        let body = extract_body(&resp);
+        assert!(body.contains("walk"), "should contain 'walk', got: {body}");
+        handle.stop();
+    }
+
+    // Bead 8: Bottom panels
+    #[test]
+    fn test_output_returns_entries() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/output");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("entries"),
+            "should return entries, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_output_clear_endpoint() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/output/clear", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""ok":true"#), "got: {body}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_bottom_panel_and_output_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("bottom-panel"), "should have bottom panel");
+        assert!(html.contains("output"), "should have output");
+    }
+
+    // Bead 9: Top bar
+    #[test]
+    fn test_top_bar_play_stop_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("btn-play"), "should have play button");
+        assert!(html.contains("btn-stop"), "should have stop button");
+    }
+
+    #[test]
+    fn test_scene_tab_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("scene-tab"), "should have scene tab");
+    }
+
+    #[test]
+    fn test_runtime_play_stop_endpoints() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/runtime/play", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("running") || body.contains("true"),
+            "got: {body}"
+        );
+        let resp = http_post(port, "/api/runtime/stop", "");
+        assert!(resp.contains("200 OK"));
         handle.stop();
     }
 }

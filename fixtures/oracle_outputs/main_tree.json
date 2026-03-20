@@ -17,7 +17,8 @@
 					"groups": [],
 					"name": "Enemy",
 					"owner": "/root/World",
-					"path": "/root/World/Enemy"
+					"path": "/root/World/Enemy",
+					"script": "res://scripts/enemy.gd"
 				},
 				{
 					"children": [],

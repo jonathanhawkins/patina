@@ -1,6 +1,6 @@
 # Compatibility Dashboard
 
-**Last updated**: 2026-03-19 (pat-0l5: oracle parity updated from 37.4% to 90.5%)
+**Last updated**: 2026-03-20 (pat-1vg/pat-s9b: oracle regenerated against Godot 4.6.1 — parity 83.1%)
 **Test suite**: 3,200+ tests passing across workspace (integration + crate units)
 **Golden files**: 49 (8 physics, 16 traces, 11 scenes, 5 resources, 9 render)
 
@@ -31,25 +31,27 @@
 
 ## Oracle Parity Results
 
-Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner across 9 fixture scenes. The runner uses `class_defaults.rs` filtering to compare only explicitly-set and semantically-meaningful properties (excluding Godot-internal defaults that Patina does not emit). Tests: `oracle_parity_test.rs` (32) + `oracle_regression_test.rs` (43).
+All oracle golden outputs regenerated against **Godot 4.6.1** (v4.6.1.stable.official.14d19694e). Comparison uses `class_defaults.rs` filtering to compare only explicitly-set and semantically-meaningful properties. Tests: `oracle_parity_test.rs` (32) + `oracle_regression_test.rs` (43).
 
 | Scene | Comparisons | Matched | Parity | Notes |
 |-------|-------------|---------|--------|-------|
 | `minimal.tscn` | 1 | 1 | **100.0%** | Single Node, perfect match |
 | `hierarchy.tscn` | 3 | 3 | **100.0%** | Full node/class/property match |
 | `with_properties.tscn` | 5 | 5 | **100.0%** | Player position/modulate match |
-| `space_shooter.tscn` | 8 | 8 | **100.0%** | Player/EnemySpawner positions match |
+| `space_shooter.tscn` | 13 | 8 | **61.5%** | Positions match; 5 script vars (speed, can_shoot, etc.) missing from Patina |
 | `platformer.tscn` | 12 | 12 | **100.0%** | Node structure and properties match |
-| `physics_playground.tscn` | 15 | 10 | **66.7%** | Physics node classes match; simulation gaps remain |
+| `physics_playground.tscn` | 12 | 12 | **100.0%** | All physics node classes, positions, and collision_mask match |
 | `signals_complex.tscn` | 9 | 9 | **100.0%** | Signal node structure matches |
-| `test_scripts.tscn` | 5 | 4 | **80.0%** | Script vars mostly match; one frame-accumulated value diverges |
+| `test_scripts.tscn` | 11 | 4 | **36.4%** | Script vars (health, is_alive, etc.) missing; Mover position diverges from frame accumulation |
 | `ui_menu.tscn` | 5 | 5 | **100.0%** | Complete match |
-| **Overall** | **63** | **57** | **90.5%** | Up from 37.4% baseline |
+| **Overall** | **71** | **59** | **83.1%** | Measured against Godot 4.6.1 |
 
-**Improvement drivers** (from 37.4% → 90.5%):
-- `class_defaults.rs` filtering: removes false-negative comparisons on Godot-internal default properties that Patina does not serialize
-- Bare var sync: script variable initial values now correctly propagate
-- `self.position.x` fix: member-access expressions in GDScript correctly resolve
+**Parity change notes** (4.6.1 repin):
+- `physics_playground`: improved from 66.7% → 100% (Godot 4.6.1 oracle outputs now align with Patina's collision_mask handling)
+- `space_shooter`: dropped from 100% → 61.5% (Godot 4.6.1 oracle now captures 5 additional script variables that Patina does not yet export)
+- `test_scripts`: dropped from 80% → 36.4% (Godot 4.6.1 oracle now captures 7 script variables Patina does not yet export)
+- Overall property count increased from 63 → 71 due to richer oracle capture in 4.6.1
+- See `fixtures/oracle_outputs/PARITY_REPORT.md` for per-property detail
 
 ---
 
@@ -70,8 +72,8 @@ Comparison of Godot 4.5.1 oracle golden outputs vs live Patina headless runner a
 
 | Gap | Category | Impact |
 |-----|----------|--------|
-| Physics playground properties (5 mismatches) | Partial | Medium — physics simulation parity for playground scene not yet complete |
-| Script frame-accumulated values (1 mismatch) | Partial | Low — initial values match, one frame-accumulated divergence in test_scripts |
+| Script variable export in space_shooter (5 missing) | Partial | Medium — speed, can_shoot, shoot_cooldown, spawn_interval, spawn_timer not emitted by Patina |
+| Script variable export in test_scripts (7 missing) | Partial | Medium — direction, speed, health, is_alive, name_str, velocity not emitted; Mover position diverges |
 | Audio playback | Deferred | Low — stub only, no Godot behavior to compare |
 
 ---

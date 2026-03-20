@@ -400,7 +400,7 @@ fn draw_node2d_diamond(fb: &mut FrameBuffer, pos: Vector2, color: Color) {
             continue;
         }
         let x_start = ((pos.x - half_w) as i32).max(0) as u32;
-        let x_end = ((pos.x + half_w) as i32).min(fb.width as i32) as u32;
+        let x_end = ((pos.x + half_w) as i32).max(0).min(fb.width as i32) as u32;
         for x in x_start..x_end {
             fb.set_pixel(x, y as u32, color);
         }
