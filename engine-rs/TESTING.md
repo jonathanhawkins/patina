@@ -41,12 +41,44 @@ Use for: release validation, nightly CI, full regression sweeps.
 Adds to Tier 2: render golden image comparison, stress/concurrency tests,
 runtime benchmarks.
 
-**CI coverage**: The `rust` job in `.github/workflows/ci.yml` runs
-`cargo test --workspace` on every push/PR to `main`, which includes all
-render golden tests (`tests/render_golden_test.rs`). These tests verify
-texture drawing, camera/viewport parity, draw ordering, visibility, layer
-semantics, determinism, and golden image comparison. No additional CI
-configuration is needed — render goldens are covered by the existing workflow.
+**CI coverage**: Render golden tests run in two CI paths on every push/PR
+to `main` (`.github/workflows/ci.yml`):
+
+1. **`rust` job** — runs `cargo test --workspace` (all tests including render
+   goldens) on ubuntu-latest and macos-latest.
+2. **`rust-render-goldens` job** — dedicated gate that runs *only* the render
+   pixel and golden-image tests via `make test-render` on ubuntu-latest and
+   macos-latest. This provides an isolated check so render regressions surface
+   as a distinct CI failure rather than hiding inside the full test suite.
+
+Prerequisites: None beyond Rust stable. All render tests use the CPU-based
+`SoftwareRenderer` — no GPU, display server, or windowing system required.
+
+Locally, run the same target with:
+```bash
+cd engine-rs && make test-render
+```
+
+## Render pixel tests (CI-safe, headless)
+
+All render tests use the CPU-based `SoftwareRenderer` — no GPU, display server,
+or windowing system required. They run identically on headless CI (ubuntu-latest,
+macos-latest) and local machines.
+
+| Test file | Tests | CI-safe | Notes |
+|---|---|---|---|
+| `render_draw_ordering_test.rs` | 40 | Yes | z-index, tree-order, visibility, canvas layers |
+| `render_camera_viewport_test.rs` | 26 | Yes | Camera2D zoom/offset/rotation, viewport sizing |
+| `render_sprite_property_test.rs` | 29 | Yes | flip_h/v, offset, modulate, centered, texture region |
+| `render_golden_test.rs` | 29 | Yes* | Golden image comparison; 2 tests `#[ignore]`d (editor-path hang) |
+| `render_vertical_slice_test.rs` | 11 | Yes* | Vertical slice; 1 test `#[ignore]`d (editor-path hang) |
+
+Run all render tests:
+```bash
+make test-render        # via Makefile
+# or directly:
+cargo test --workspace -p gdrender2d --test render_draw_ordering_test --test render_camera_viewport_test --test render_sprite_property_test --test render_golden_test --test render_vertical_slice_test
+```
 
 ## Runtime benchmarks
 
@@ -59,6 +91,25 @@ The `bench_runtime_baselines` test (Tier 3) measures wall-clock time for:
 Benchmarks always pass — run with `--nocapture` to see timing output:
 ```bash
 cargo test --test bench_runtime_baselines -- --nocapture
+```
+
+## Render benchmarks
+
+The `bench_render_baselines` test (Tier 3) measures `SoftwareRenderer::render_frame`
+wall-clock time for fixture scenes and synthetic stress tests at three resolutions:
+
+| Resolution | Pixels |
+|---|---|
+| 640×480 | 0.31 MP |
+| 1280×720 | 0.92 MP |
+| 1920×1080 | 2.07 MP |
+
+Scenes benchmarked: `space_shooter`, `demo_2d`, `hierarchy`, plus synthetic
+stress tests with 100 and 500 canvas items.
+
+Benchmarks always pass — run with `--nocapture` to see timing output:
+```bash
+cargo test --test bench_render_baselines -- --nocapture
 ```
 
 ## Golden staleness checks

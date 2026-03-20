@@ -73,12 +73,11 @@ struct NodeTemplate {
 
 /// An external resource reference parsed from `[ext_resource]` sections.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct ExtResourceEntry {
+pub struct ExtResourceEntry {
     /// The resource type (e.g. `"Script"`, `"PackedScene"`, `"Texture2D"`).
-    res_type: String,
+    pub res_type: String,
     /// The resource path (e.g. `"res://scripts/player.gd"`).
-    path: String,
+    pub path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +369,183 @@ impl PackedScene {
     pub fn connection_count(&self) -> usize {
         self.connections.len()
     }
+
+    /// Returns the external resources map (id -> entry).
+    pub fn ext_resources(&self) -> &HashMap<String, ExtResourceEntry> {
+        &self.ext_resources
+    }
+
+    /// Resolves an `ExtResource("id")` string to the resource path, if found.
+    pub fn resolve_ext_resource_path(&self, ext_ref: &str) -> Option<&str> {
+        // ext_ref is like `ExtResource("1_abc")`
+        let id = parse_ext_resource_ref(ext_ref)?;
+        self.ext_resources.get(&id).map(|e| e.path.as_str())
+    }
+
+    /// Instantiates this packed scene with recursive sub-scene resolution.
+    ///
+    /// When a node has `instance=ExtResource("id")`, the `resolve_scene`
+    /// callback is invoked with the resolved `res://` path. If it returns
+    /// `Some(PackedScene)`, that scene is instanced and inserted as a
+    /// subtree, with property overrides from the parent scene applied on top.
+    ///
+    /// This enables full nested sub-scene instancing.
+    pub fn instance_with_subscenes<F>(&self, resolve_scene: &F) -> EngineResult<Vec<Node>>
+    where
+        F: Fn(&str) -> Option<PackedScene>,
+    {
+        if self.templates.is_empty() {
+            return Err(EngineError::InvalidOperation(
+                "packed scene has no nodes".into(),
+            ));
+        }
+
+        let root_tmpl = &self.templates[0];
+        if root_tmpl.parent_path.is_some() {
+            return Err(EngineError::Parse(
+                "first [node] section must be the scene root (no parent attribute)".into(),
+            ));
+        }
+
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut path_to_index: HashMap<String, usize> = HashMap::new();
+
+        // Create root node (may itself be a sub-scene instance, but that's
+        // handled by the caller).
+        let mut root_node = Node::new(&root_tmpl.name, &root_tmpl.class_name);
+        for (key, value) in &root_tmpl.properties {
+            root_node.set_property(key, value.clone());
+        }
+        for group in &root_tmpl.groups {
+            root_node.add_to_group(group.clone());
+        }
+        root_node.set_unique_name(root_tmpl.unique_name);
+        if let Some(ref script_path) = root_tmpl.script_path {
+            root_node.set_property("_script_path", Variant::String(script_path.clone()));
+        }
+        path_to_index.insert(".".into(), 0);
+        path_to_index.insert(root_tmpl.name.clone(), 0);
+        let root_id = root_node.id();
+        nodes.push(root_node);
+
+        for tmpl in &self.templates[1..] {
+            let parent_path = tmpl.parent_path.as_deref().unwrap_or(".");
+            let parent_idx = path_to_index.get(parent_path).copied().ok_or_else(|| {
+                EngineError::Parse(format!(
+                    "parent path '{parent_path}' not found for node '{}'",
+                    tmpl.name
+                ))
+            })?;
+
+            // Check if this node instances a sub-scene.
+            if let Some(ref inst_ref) = tmpl.instance {
+                if let Some(scene_path) = self.resolve_ext_resource_path(inst_ref) {
+                    if let Some(sub_scene) = resolve_scene(scene_path) {
+                        // Recursively instance the sub-scene.
+                        let sub_nodes = sub_scene.instance_with_subscenes(resolve_scene)?;
+                        if sub_nodes.is_empty() {
+                            continue;
+                        }
+
+                        // The sub-scene root replaces this template's node.
+                        // Apply overrides: rename to template name, apply
+                        // template properties on top.
+                        let sub_root_idx = nodes.len();
+                        let node_path = if parent_path == "." {
+                            tmpl.name.clone()
+                        } else {
+                            format!("{}/{}", parent_path, tmpl.name)
+                        };
+
+                        for (i, mut sub_node) in sub_nodes.into_iter().enumerate() {
+                            if i == 0 {
+                                // Override name from parent scene's template.
+                                sub_node.set_name(&tmpl.name);
+                                // Apply property overrides from parent scene.
+                                for (key, value) in &tmpl.properties {
+                                    sub_node.set_property(key, value.clone());
+                                }
+                                for group in &tmpl.groups {
+                                    sub_node.add_to_group(group.clone());
+                                }
+                                sub_node.set_unique_name(tmpl.unique_name);
+                                // Wire to parent.
+                                sub_node.set_parent(Some(nodes[parent_idx].id()));
+                                sub_node.set_owner(Some(root_id));
+                                let child_id = sub_node.id();
+                                nodes[parent_idx].add_child_id(child_id);
+                                path_to_index.insert(node_path.clone(), sub_root_idx);
+                            } else {
+                                // Remap sub-node owners to the main scene root.
+                                sub_node.set_owner(Some(root_id));
+                            }
+                            nodes.push(sub_node);
+                        }
+
+                        // Map sub-scene child paths for future parent lookups.
+                        // Recursively map children of the sub-root.
+                        Self::map_child_paths(&nodes, sub_root_idx, &node_path, &mut path_to_index);
+
+                        continue;
+                    }
+                }
+            }
+
+            // Regular (non-instanced) node.
+            let mut node = Node::new(&tmpl.name, &tmpl.class_name);
+            for (key, value) in &tmpl.properties {
+                node.set_property(key, value.clone());
+            }
+            for group in &tmpl.groups {
+                node.add_to_group(group.clone());
+            }
+            node.set_unique_name(tmpl.unique_name);
+            if let Some(ref inst) = tmpl.instance {
+                node.set_property("_instance", Variant::String(inst.clone()));
+            }
+            if let Some(ref script_path) = tmpl.script_path {
+                node.set_property("_script_path", Variant::String(script_path.clone()));
+            }
+            node.set_owner(Some(root_id));
+
+            let child_id = node.id();
+            let child_idx = nodes.len();
+
+            let node_path = if parent_path == "." {
+                tmpl.name.clone()
+            } else {
+                format!("{}/{}", parent_path, tmpl.name)
+            };
+            path_to_index.insert(node_path, child_idx);
+
+            node.set_parent(Some(nodes[parent_idx].id()));
+            nodes[parent_idx].add_child_id(child_id);
+
+            nodes.push(node);
+        }
+
+        Ok(nodes)
+    }
+
+    /// Recursively maps child node paths for a subtree starting at `root_idx`.
+    fn map_child_paths(
+        nodes: &[Node],
+        root_idx: usize,
+        root_path: &str,
+        path_to_index: &mut HashMap<String, usize>,
+    ) {
+        let root_id = nodes[root_idx].id();
+        for (idx, node) in nodes.iter().enumerate() {
+            if idx == root_idx {
+                continue;
+            }
+            if node.parent() == Some(root_id) {
+                let child_path = format!("{}/{}", root_path, node.name());
+                path_to_index.insert(child_path.clone(), idx);
+                Self::map_child_paths(nodes, idx, &child_path, path_to_index);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,6 +737,73 @@ pub fn add_packed_scene_to_tree(
     }
 
     // Wire any signal connections from the packed scene.
+    wire_connections(tree, new_root_id, &scene.connections);
+
+    Ok(new_root_id)
+}
+
+/// Adds all nodes from a [`PackedScene::instance_with_subscenes()`] call
+/// into a [`crate::SceneTree`] under the given parent, with recursive
+/// sub-scene instancing.
+///
+/// The `resolve_scene` callback is invoked for each `instance=ExtResource`
+/// reference, receiving the `res://` path and returning the parsed sub-scene.
+pub fn add_packed_scene_to_tree_with_subscenes<F>(
+    tree: &mut crate::scene_tree::SceneTree,
+    parent_id: crate::node::NodeId,
+    scene: &PackedScene,
+    resolve_scene: &F,
+) -> EngineResult<crate::node::NodeId>
+where
+    F: Fn(&str) -> Option<PackedScene>,
+{
+    let nodes = scene.instance_with_subscenes(resolve_scene)?;
+    if nodes.is_empty() {
+        return Err(EngineError::InvalidOperation(
+            "instanced scene produced no nodes".into(),
+        ));
+    }
+
+    let mut old_to_new: HashMap<crate::node::NodeId, crate::node::NodeId> = HashMap::new();
+
+    let scene_root = &nodes[0];
+    let mut new_root = Node::new(scene_root.name(), scene_root.class_name());
+    for (key, value) in scene_root.properties() {
+        new_root.set_property(key, value.clone());
+    }
+    for group in scene_root.groups() {
+        new_root.add_to_group(group.clone());
+    }
+    new_root.set_unique_name(scene_root.is_unique_name());
+    let new_root_id = new_root.id();
+    old_to_new.insert(scene_root.id(), new_root_id);
+    tree.add_child(parent_id, new_root)?;
+
+    for node in &nodes[1..] {
+        let old_parent_id = node.parent().ok_or_else(|| {
+            EngineError::InvalidOperation(format!("instanced node '{}' has no parent", node.name()))
+        })?;
+        let &new_parent_id = old_to_new.get(&old_parent_id).ok_or_else(|| {
+            EngineError::InvalidOperation(format!(
+                "parent for '{}' not yet added to tree",
+                node.name()
+            ))
+        })?;
+
+        let mut new_node = Node::new(node.name(), node.class_name());
+        for (key, value) in node.properties() {
+            new_node.set_property(key, value.clone());
+        }
+        for group in node.groups() {
+            new_node.add_to_group(group.clone());
+        }
+        new_node.set_unique_name(node.is_unique_name());
+        new_node.set_owner(Some(new_root_id));
+        let new_node_id = new_node.id();
+        old_to_new.insert(node.id(), new_node_id);
+        tree.add_child(new_parent_id, new_node)?;
+    }
+
     wire_connections(tree, new_root_id, &scene.connections);
 
     Ok(new_root_id)
@@ -1838,5 +2081,300 @@ position = Vector2(400, 200)
         assert_eq!(root.class_name(), "Node");
         assert_eq!(root.get_property("position"), Variant::Nil);
         assert_eq!(root.get_property("rotation"), Variant::Nil);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sub-scene instancing (pat-05f)
+    // -----------------------------------------------------------------------
+
+    const PLAYER_TSCN: &str = r#"
+[gd_scene format=3]
+
+[node name="PlayerBody" type="Node2D"]
+speed = 100
+
+[node name="Sprite" type="Sprite2D" parent="."]
+frame = 0
+
+[node name="Hitbox" type="Area2D" parent="."]
+"#;
+
+    const MAIN_WITH_INSTANCE: &str = r#"
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://player.tscn" id="1_player"]
+
+[node name="World" type="Node"]
+
+[node name="Player" parent="." instance=ExtResource("1_player")]
+position = Vector2(100, 200)
+"#;
+
+    fn test_scene_resolver(path: &str) -> Option<PackedScene> {
+        match path {
+            "res://player.tscn" => Some(PackedScene::from_tscn(PLAYER_TSCN).unwrap()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn subscene_basic_instancing() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        // World + Player(PlayerBody renamed) + Sprite + Hitbox = 4 nodes
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(nodes[0].name(), "World");
+        assert_eq!(nodes[1].name(), "Player"); // renamed from PlayerBody
+        assert_eq!(nodes[2].name(), "Sprite");
+        assert_eq!(nodes[3].name(), "Hitbox");
+    }
+
+    #[test]
+    fn subscene_class_names_from_subscene() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        assert_eq!(nodes[1].class_name(), "Node2D"); // from player.tscn
+        assert_eq!(nodes[2].class_name(), "Sprite2D");
+        assert_eq!(nodes[3].class_name(), "Area2D");
+    }
+
+    #[test]
+    fn subscene_property_overrides_applied() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        // position override from main scene
+        assert_eq!(
+            nodes[1].get_property("position"),
+            Variant::Vector2(Vector2::new(100.0, 200.0))
+        );
+        // speed from the sub-scene's own template
+        assert_eq!(nodes[1].get_property("speed"), Variant::Int(100));
+    }
+
+    #[test]
+    fn subscene_original_properties_preserved() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        // Sprite's frame property from sub-scene
+        assert_eq!(nodes[2].get_property("frame"), Variant::Int(0));
+    }
+
+    #[test]
+    fn subscene_hierarchy_correct() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        // Player is child of World
+        assert_eq!(nodes[1].parent(), Some(nodes[0].id()));
+        // Sprite is child of Player
+        assert_eq!(nodes[2].parent(), Some(nodes[1].id()));
+        // Hitbox is child of Player
+        assert_eq!(nodes[3].parent(), Some(nodes[1].id()));
+        // World's children should include Player
+        assert!(nodes[0].children().contains(&nodes[1].id()));
+    }
+
+    #[test]
+    fn subscene_add_to_tree() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let scene_root_id =
+            add_packed_scene_to_tree_with_subscenes(&mut tree, root, &scene, &test_scene_resolver)
+                .unwrap();
+
+        // root + World + Player + Sprite + Hitbox = 5
+        assert_eq!(tree.node_count(), 5);
+        assert_eq!(tree.node_path(scene_root_id).unwrap(), "/root/World");
+
+        let player = tree.get_node_by_path("/root/World/Player").unwrap();
+        let player_node = tree.get_node(player).unwrap();
+        assert_eq!(player_node.class_name(), "Node2D");
+        assert_eq!(
+            player_node.get_property("position"),
+            Variant::Vector2(Vector2::new(100.0, 200.0))
+        );
+
+        let sprite = tree.get_node_by_path("/root/World/Player/Sprite").unwrap();
+        assert!(tree.get_node(sprite).is_some());
+
+        let hitbox = tree.get_node_by_path("/root/World/Player/Hitbox").unwrap();
+        assert!(tree.get_node(hitbox).is_some());
+    }
+
+    #[test]
+    fn subscene_unresolvable_falls_through() {
+        // When the resolver returns None, the node should be a regular
+        // node with the _instance property set (fallback behavior).
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let nodes = scene.instance_with_subscenes(&|_| None).unwrap();
+
+        // World + Player (as regular node) = 2 nodes
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[1].name(), "Player");
+        // Should have _instance property since it couldn't be resolved
+        assert_eq!(
+            nodes[1].get_property("_instance"),
+            Variant::String("ExtResource(\"1_player\")".into())
+        );
+    }
+
+    #[test]
+    fn subscene_nested_two_levels() {
+        let weapon_tscn = r#"
+[gd_scene format=3]
+
+[node name="Weapon" type="Node2D"]
+damage = 10
+
+[node name="Particle" type="Node2D" parent="."]
+"#;
+
+        let player_with_weapon = r#"
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://weapon.tscn" id="1_weapon"]
+
+[node name="PlayerBody" type="Node2D"]
+
+[node name="Sword" parent="." instance=ExtResource("1_weapon")]
+damage = 25
+"#;
+
+        let main = r#"
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://player_armed.tscn" id="1_p"]
+
+[node name="World" type="Node"]
+
+[node name="Player" parent="." instance=ExtResource("1_p")]
+"#;
+
+        let resolver = |path: &str| -> Option<PackedScene> {
+            match path {
+                "res://weapon.tscn" => Some(PackedScene::from_tscn(weapon_tscn).unwrap()),
+                "res://player_armed.tscn" => {
+                    Some(PackedScene::from_tscn(player_with_weapon).unwrap())
+                }
+                _ => None,
+            }
+        };
+
+        let scene = PackedScene::from_tscn(main).unwrap();
+        let nodes = scene.instance_with_subscenes(&resolver).unwrap();
+
+        // World + Player(PlayerBody) + Sword(Weapon) + Particle = 4 nodes
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(nodes[0].name(), "World");
+        assert_eq!(nodes[1].name(), "Player");
+        assert_eq!(nodes[2].name(), "Sword");
+        assert_eq!(nodes[3].name(), "Particle");
+
+        // Nested override: damage overridden to 25
+        assert_eq!(nodes[2].get_property("damage"), Variant::Int(25));
+    }
+
+    #[test]
+    fn subscene_multiple_instances_same_scene() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://player.tscn" id="1_player"]
+
+[node name="World" type="Node"]
+
+[node name="Player1" parent="." instance=ExtResource("1_player")]
+position = Vector2(100, 0)
+
+[node name="Player2" parent="." instance=ExtResource("1_player")]
+position = Vector2(200, 0)
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        // World + Player1(+Sprite+Hitbox) + Player2(+Sprite+Hitbox) = 7
+        assert_eq!(nodes.len(), 7);
+        assert_eq!(nodes[1].name(), "Player1");
+        assert_eq!(nodes[4].name(), "Player2");
+        assert_eq!(
+            nodes[1].get_property("position"),
+            Variant::Vector2(Vector2::new(100.0, 0.0))
+        );
+        assert_eq!(
+            nodes[4].get_property("position"),
+            Variant::Vector2(Vector2::new(200.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn subscene_owner_is_main_scene_root() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        let root_id = nodes[0].id();
+        assert!(nodes[0].owner().is_none()); // root has no owner
+        for node in &nodes[1..] {
+            assert_eq!(node.owner(), Some(root_id));
+        }
+    }
+
+    #[test]
+    fn subscene_mixed_regular_and_instanced_nodes() {
+        let tscn = r#"
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://player.tscn" id="1_player"]
+
+[node name="World" type="Node"]
+
+[node name="Camera" type="Camera2D" parent="."]
+
+[node name="Player" parent="." instance=ExtResource("1_player")]
+
+[node name="HUD" type="Control" parent="."]
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
+
+        // World + Camera + Player(+Sprite+Hitbox) + HUD = 6
+        assert_eq!(nodes.len(), 6);
+        assert_eq!(nodes[0].name(), "World");
+        assert_eq!(nodes[1].name(), "Camera");
+        assert_eq!(nodes[1].class_name(), "Camera2D");
+        assert_eq!(nodes[2].name(), "Player");
+        assert_eq!(nodes[3].name(), "Sprite");
+        assert_eq!(nodes[4].name(), "Hitbox");
+        assert_eq!(nodes[5].name(), "HUD");
+        assert_eq!(nodes[5].class_name(), "Control");
+    }
+
+    #[test]
+    fn resolve_ext_resource_path_works() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        assert_eq!(
+            scene.resolve_ext_resource_path("ExtResource(\"1_player\")"),
+            Some("res://player.tscn")
+        );
+        assert_eq!(
+            scene.resolve_ext_resource_path("ExtResource(\"missing\")"),
+            None
+        );
+        assert_eq!(scene.resolve_ext_resource_path("not_a_ref"), None);
+    }
+
+    #[test]
+    fn ext_resources_accessor() {
+        let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
+        let ext = scene.ext_resources();
+        assert_eq!(ext.len(), 1);
+        let entry = ext.get("1_player").unwrap();
+        assert_eq!(entry.res_type, "PackedScene");
+        assert_eq!(entry.path, "res://player.tscn");
     }
 }

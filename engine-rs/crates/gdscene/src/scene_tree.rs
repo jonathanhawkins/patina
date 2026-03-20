@@ -51,6 +51,8 @@ pub struct SceneTree {
     event_trace: EventTrace,
     /// Current frame number for trace recording.
     trace_frame: u64,
+    /// Whether the scene tree is currently paused.
+    paused: bool,
 }
 
 impl std::fmt::Debug for SceneTree {
@@ -83,6 +85,7 @@ impl SceneTree {
             pending_deletions: Vec::new(),
             event_trace: EventTrace::new(),
             trace_frame: 0,
+            paused: false,
         }
     }
 
@@ -557,6 +560,65 @@ impl SceneTree {
         out
     }
 
+    // -- pause state --------------------------------------------------------
+
+    /// Returns whether the scene tree is currently paused.
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Sets the paused state of the scene tree.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    // -- process ordering and filtering -------------------------------------
+
+    /// Returns IDs of all nodes sorted by process priority (stable sort,
+    /// lower priority first), preserving tree order for equal priorities.
+    pub fn all_nodes_in_process_order(&self) -> Vec<NodeId> {
+        let mut ids = self.all_nodes_in_tree_order();
+        ids.sort_by_key(|id| self.nodes.get(id).map_or(0, |n| n.process_priority()));
+        ids
+    }
+
+    /// Resolves the effective [`ProcessMode`] for a node by walking up the
+    /// parent chain until a non-`Inherit` mode is found. If the root node
+    /// has `Inherit`, it is treated as `Pausable`.
+    pub fn effective_process_mode(&self, node_id: NodeId) -> crate::node::ProcessMode {
+        use crate::node::ProcessMode;
+        let mut current = Some(node_id);
+        while let Some(id) = current {
+            if let Some(node) = self.nodes.get(&id) {
+                if node.process_mode() != ProcessMode::Inherit {
+                    return node.process_mode();
+                }
+                current = node.parent();
+            } else {
+                break;
+            }
+        }
+        // Walked to root (or beyond) and everything was Inherit → Pausable.
+        ProcessMode::Pausable
+    }
+
+    /// Returns `true` if the node should be processed in the current frame,
+    /// taking the tree's pause state and the node's effective process mode
+    /// into account.
+    pub fn should_process_node(&self, node_id: NodeId) -> bool {
+        use crate::node::ProcessMode;
+        match self.effective_process_mode(node_id) {
+            ProcessMode::Disabled => false,
+            ProcessMode::Always => true,
+            ProcessMode::Pausable => !self.paused,
+            ProcessMode::WhenPaused => self.paused,
+            ProcessMode::Inherit => {
+                // Should never reach here — effective_process_mode resolves it.
+                !self.paused
+            }
+        }
+    }
+
     // -- signal management --------------------------------------------------
 
     /// Returns a reference to a node's signal store, if it exists.
@@ -942,8 +1004,9 @@ impl SceneTree {
     /// Calls `_process(delta)` on all nodes that have attached scripts.
     pub fn process_all_scripts_process(&mut self, delta: f64) {
         let ids: Vec<NodeId> = self
-            .all_nodes_in_tree_order()
+            .all_nodes_in_process_order()
             .into_iter()
+            .filter(|id| self.should_process_node(*id))
             .filter(|id| self.scripts.contains_key(id))
             .collect();
         for id in ids {
@@ -954,8 +1017,9 @@ impl SceneTree {
     /// Calls `_physics_process(delta)` on all nodes that have attached scripts.
     pub fn process_all_scripts_physics_process(&mut self, delta: f64) {
         let ids: Vec<NodeId> = self
-            .all_nodes_in_tree_order()
+            .all_nodes_in_process_order()
             .into_iter()
+            .filter(|id| self.should_process_node(*id))
             .filter(|id| self.scripts.contains_key(id))
             .collect();
         for id in ids {
@@ -972,7 +1036,11 @@ impl SceneTree {
     /// `NOTIFICATION_PHYSICS_PROCESS`. This matches Godot's per-frame
     /// ordering: internal physics -> user physics -> internal process -> user process.
     pub fn process_internal_physics_frame(&mut self) {
-        let ids = self.all_nodes_in_tree_order();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_process_order()
+            .into_iter()
+            .filter(|id| self.should_process_node(*id))
+            .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "INTERNAL_PHYSICS_PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
@@ -986,7 +1054,11 @@ impl SceneTree {
     ///
     /// Called once per fixed-timestep physics tick, after internal physics processing.
     pub fn process_physics_frame(&mut self) {
-        let ids = self.all_nodes_in_tree_order();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_process_order()
+            .into_iter()
+            .filter(|id| self.should_process_node(*id))
+            .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "PHYSICS_PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
@@ -1000,7 +1072,11 @@ impl SceneTree {
     ///
     /// Called once per visual frame, **before** user `NOTIFICATION_PROCESS`.
     pub fn process_internal_frame(&mut self) {
-        let ids = self.all_nodes_in_tree_order();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_process_order()
+            .into_iter()
+            .filter(|id| self.should_process_node(*id))
+            .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "INTERNAL_PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
@@ -1014,7 +1090,11 @@ impl SceneTree {
     ///
     /// Called once per visual frame, after internal process.
     pub fn process_frame(&mut self) {
-        let ids = self.all_nodes_in_tree_order();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_process_order()
+            .into_iter()
+            .filter(|id| self.should_process_node(*id))
+            .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
@@ -1031,7 +1111,11 @@ impl SceneTree {
     /// notification and has its `_process()` called before the next node is
     /// processed.
     pub fn process_frame_with_scripts(&mut self, delta: f64) {
-        let ids = self.all_nodes_in_tree_order();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_process_order()
+            .into_iter()
+            .filter(|id| self.should_process_node(*id))
+            .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {
@@ -1049,7 +1133,11 @@ impl SceneTree {
     ///
     /// This matches Godot's per-node dispatch for physics processing.
     pub fn process_physics_frame_with_scripts(&mut self, delta: f64) {
-        let ids = self.all_nodes_in_tree_order();
+        let ids: Vec<NodeId> = self
+            .all_nodes_in_process_order()
+            .into_iter()
+            .filter(|id| self.should_process_node(*id))
+            .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "PHYSICS_PROCESS");
             if let Some(node) = self.nodes.get_mut(&id) {

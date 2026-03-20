@@ -549,3 +549,298 @@ fn cde_many_properties_stress() {
         assert_eq!(node.get_property(&key), Variant::Int(i));
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Meta property storage and retrieval
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cde_node_meta_set_get_roundtrip() {
+    let mut node = Node::new("TestNode", "Node2D");
+
+    node.set_meta("editor_hint", Variant::Bool(true));
+    node.set_meta("custom_tag", Variant::String("important".into()));
+    node.set_meta("priority", Variant::Int(5));
+
+    assert!(node.has_meta("editor_hint"));
+    assert!(node.has_meta("custom_tag"));
+    assert!(node.has_meta("priority"));
+    assert!(!node.has_meta("nonexistent"));
+
+    assert_eq!(node.get_meta("editor_hint"), Variant::Bool(true));
+    assert_eq!(
+        node.get_meta("custom_tag"),
+        Variant::String("important".into())
+    );
+    assert_eq!(node.get_meta("priority"), Variant::Int(5));
+    assert_eq!(node.get_meta("nonexistent"), Variant::Nil);
+}
+
+#[test]
+fn cde_node_meta_remove() {
+    let mut node = Node::new("TestNode", "Node2D");
+    node.set_meta("temp", Variant::Int(42));
+    assert!(node.has_meta("temp"));
+
+    let removed = node.remove_meta("temp");
+    assert_eq!(removed, Variant::Int(42));
+    assert!(!node.has_meta("temp"));
+    assert_eq!(node.get_meta("temp"), Variant::Nil);
+
+    // Removing nonexistent returns Nil
+    assert_eq!(node.remove_meta("never_set"), Variant::Nil);
+}
+
+#[test]
+fn cde_node_meta_list() {
+    let mut node = Node::new("TestNode", "Node2D");
+    node.set_meta("z_tag", Variant::Bool(true));
+    node.set_meta("a_tag", Variant::Int(1));
+    node.set_meta("m_tag", Variant::Float(3.14));
+
+    // get_meta_list returns sorted names (BTreeMap gives us deterministic order)
+    let list = node.get_meta_list();
+    assert_eq!(list, vec!["a_tag", "m_tag", "z_tag"]);
+}
+
+#[test]
+fn cde_node_meta_overwrite_returns_previous() {
+    let mut node = Node::new("TestNode", "Node");
+    let prev = node.set_meta("key", Variant::Int(1));
+    assert_eq!(prev, Variant::Nil);
+
+    let prev = node.set_meta("key", Variant::Int(2));
+    assert_eq!(prev, Variant::Int(1));
+    assert_eq!(node.get_meta("key"), Variant::Int(2));
+}
+
+#[test]
+fn cde_node_meta_does_not_interfere_with_properties() {
+    let mut node = Node::new("TestNode", "Node2D");
+    // Set a property and a meta with the same key
+    node.set_property("shared_key", Variant::Int(10));
+    node.set_meta("shared_key", Variant::String("meta_value".into()));
+
+    // They are independent namespaces
+    assert_eq!(node.get_property("shared_key"), Variant::Int(10));
+    assert_eq!(
+        node.get_meta("shared_key"),
+        Variant::String("meta_value".into())
+    );
+    assert!(node.has_property("shared_key"));
+    assert!(node.has_meta("shared_key"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ObjectBase meta properties
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cde_object_base_meta_roundtrip() {
+    let mut obj = gdobject::object::ObjectBase::new("TestClass");
+
+    assert!(!obj.has_meta("tag"));
+    assert_eq!(obj.get_meta("tag"), Variant::Nil);
+
+    obj.set_meta("tag", Variant::String("hello".into()));
+    assert!(obj.has_meta("tag"));
+    assert_eq!(obj.get_meta("tag"), Variant::String("hello".into()));
+
+    let removed = obj.remove_meta("tag");
+    assert_eq!(removed, Variant::String("hello".into()));
+    assert!(!obj.has_meta("tag"));
+}
+
+#[test]
+fn cde_object_base_meta_list() {
+    let mut obj = gdobject::object::ObjectBase::new("TestClass");
+    obj.set_meta("b", Variant::Int(2));
+    obj.set_meta("a", Variant::Int(1));
+
+    let mut list = obj.get_meta_list();
+    list.sort();
+    assert_eq!(list, vec!["a", "b"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Type checking: get_class, is_class
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cde_node_get_class_returns_class_name() {
+    let node = Node::new("Player", "CharacterBody2D");
+    assert_eq!(node.class_name(), "CharacterBody2D");
+}
+
+#[test]
+fn cde_node_is_class_exact_match() {
+    let node = Node::new("Sprite", "Sprite2D");
+    assert!(node.is_class("Sprite2D"));
+    assert!(!node.is_class("Node2D")); // Not registered in ClassDB, so no chain
+}
+
+#[test]
+fn cde_node_is_class_with_classdb_inheritance() {
+    use gdobject::class_db::{ClassRegistration, PropertyInfo};
+
+    // Register a small hierarchy with unique names
+    let pid = std::process::id();
+    let base = format!("CdeBase2_{pid}");
+    let mid = format!("CdeMid2_{pid}");
+    let leaf = format!("CdeLeaf2_{pid}");
+
+    gdobject::class_db::register_class(ClassRegistration::new(&base));
+    gdobject::class_db::register_class(ClassRegistration::new(&mid).parent(&base));
+    gdobject::class_db::register_class(
+        ClassRegistration::new(&leaf)
+            .parent(&mid)
+            .property(PropertyInfo::new("hp", Variant::Int(100))),
+    );
+
+    let node = Node::new("Monster", &leaf);
+    assert!(node.is_class(&leaf));
+    assert!(node.is_class(&mid));
+    assert!(node.is_class(&base));
+    assert!(!node.is_class("CompletelyUnrelated"));
+}
+
+#[test]
+fn cde_object_base_is_class() {
+    let obj = gdobject::object::ObjectBase::new("Sprite2D");
+    assert!(obj.is_class("Sprite2D"));
+    assert!(!obj.is_class("Node2D")); // No ClassDB chain for unregistered
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Property list enumeration
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cde_node_get_property_list_sorted() {
+    let mut node = Node::new("TestNode", "Node2D");
+    node.set_property("z_index", Variant::Int(5));
+    node.set_property("position", Variant::Vector2(Vector2::ZERO));
+    node.set_property("alpha", Variant::Float(1.0));
+
+    let list = node.get_property_list();
+    assert_eq!(list, vec!["alpha", "position", "z_index"]);
+}
+
+#[test]
+fn cde_node_get_property_list_empty() {
+    let node = Node::new("TestNode", "Node");
+    assert!(node.get_property_list().is_empty());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Property removal
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cde_node_remove_property() {
+    let mut node = Node::new("TestNode", "Node2D");
+    node.set_property("temp", Variant::Int(42));
+    assert!(node.has_property("temp"));
+
+    let removed = node.remove_property("temp");
+    assert_eq!(removed, Variant::Int(42));
+    assert!(!node.has_property("temp"));
+    assert_eq!(node.get_property("temp"), Variant::Nil);
+}
+
+#[test]
+fn cde_node_remove_nonexistent_property_returns_nil() {
+    let mut node = Node::new("TestNode", "Node");
+    assert_eq!(node.remove_property("nope"), Variant::Nil);
+}
+
+#[test]
+fn cde_object_base_remove_property() {
+    let mut obj = gdobject::object::ObjectBase::new("TestClass");
+    obj.set_property("x", Variant::Int(10));
+    let removed = obj.remove_property("x");
+    assert_eq!(removed, Variant::Int(10));
+    assert!(!obj.has_property("x"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// has_method via ClassDB
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cde_node_has_method_registered() {
+    use gdobject::class_db::{ClassRegistration, MethodInfo};
+
+    let pid = std::process::id();
+    let class = format!("CdeMethodTest_{pid}");
+
+    gdobject::class_db::register_class(
+        ClassRegistration::new(&class)
+            .method(MethodInfo::new("_ready", 0))
+            .method(MethodInfo::new("_process", 1)),
+    );
+
+    let node = Node::new("Test", &class);
+    assert!(node.has_method("_ready"));
+    assert!(node.has_method("_process"));
+    assert!(!node.has_method("_nonexistent"));
+}
+
+#[test]
+fn cde_node_has_method_inherited() {
+    use gdobject::class_db::{ClassRegistration, MethodInfo};
+
+    let pid = std::process::id();
+    let parent = format!("CdeMethodParent_{pid}");
+    let child = format!("CdeMethodChild_{pid}");
+
+    gdobject::class_db::register_class(
+        ClassRegistration::new(&parent).method(MethodInfo::new("base_method", 0)),
+    );
+    gdobject::class_db::register_class(
+        ClassRegistration::new(&child)
+            .parent(&parent)
+            .method(MethodInfo::new("child_method", 0)),
+    );
+
+    let node = Node::new("Test", &child);
+    assert!(node.has_method("child_method"));
+    assert!(node.has_method("base_method")); // inherited
+    assert!(!node.has_method("unrelated"));
+}
+
+#[test]
+fn cde_object_base_has_method() {
+    use gdobject::class_db::{ClassRegistration, MethodInfo};
+
+    let pid = std::process::id();
+    let class = format!("CdeObjMethod_{pid}");
+
+    gdobject::class_db::register_class(
+        ClassRegistration::new(&class).method(MethodInfo::new("do_thing", 2)),
+    );
+
+    let obj = gdobject::object::ObjectBase::new(&class);
+    assert!(obj.has_method("do_thing"));
+    assert!(!obj.has_method("missing"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ObjectBase: properties() iterator
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cde_object_base_properties_iterator() {
+    let mut obj = gdobject::object::ObjectBase::new("TestClass");
+    obj.set_property("a", Variant::Int(1));
+    obj.set_property("b", Variant::Bool(true));
+
+    let props: std::collections::HashMap<String, Variant> = obj
+        .properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    assert_eq!(props.len(), 2);
+    assert_eq!(props["a"], Variant::Int(1));
+    assert_eq!(props["b"], Variant::Bool(true));
+}

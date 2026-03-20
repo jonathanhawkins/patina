@@ -53,6 +53,10 @@ pub struct ObjectBase {
     signals: SignalStore,
     /// Log of received notifications (useful for tests and debugging).
     notification_log: Vec<Notification>,
+    /// Meta property storage. In Godot, `set_meta`/`get_meta` provide a
+    /// separate key-value namespace from regular properties, used for
+    /// editor annotations, plugins, and runtime tagging.
+    meta: HashMap<String, Variant>,
 }
 
 impl ObjectBase {
@@ -64,6 +68,7 @@ impl ObjectBase {
             properties: HashMap::new(),
             signals: SignalStore::new(),
             notification_log: Vec::new(),
+            meta: HashMap::new(),
         }
     }
 
@@ -75,6 +80,7 @@ impl ObjectBase {
             properties: HashMap::new(),
             signals: SignalStore::new(),
             notification_log: Vec::new(),
+            meta: HashMap::new(),
         }
     }
 
@@ -108,6 +114,71 @@ impl ObjectBase {
     /// Returns the names of all stored properties.
     pub fn property_names(&self) -> Vec<&str> {
         self.properties.keys().map(String::as_str).collect()
+    }
+
+    /// Returns an iterator over all `(name, value)` property pairs.
+    pub fn properties(&self) -> impl Iterator<Item = (&String, &Variant)> {
+        self.properties.iter()
+    }
+
+    /// Removes a property by name. Returns the old value, or `Nil` if absent.
+    pub fn remove_property(&mut self, name: &str) -> Variant {
+        self.properties.remove(name).unwrap_or(Variant::Nil)
+    }
+
+    /// Returns `true` if this object's class matches `class_name`, or if
+    /// `class_name` is an ancestor in the ClassDB inheritance chain.
+    ///
+    /// This mirrors Godot's `Object.is_class()`.
+    pub fn is_class(&self, class_name: &str) -> bool {
+        if self.class_name == class_name {
+            return true;
+        }
+        crate::class_db::is_parent_class(&self.class_name, class_name)
+    }
+
+    /// Checks whether the given method is registered for this object's class
+    /// (or any ancestor) in the ClassDB.
+    pub fn has_method(&self, method_name: &str) -> bool {
+        crate::class_db::class_has_method(&self.class_name, method_name)
+    }
+
+    /// Returns `true` if a signal with the given name has been declared on
+    /// this object instance.
+    pub fn has_signal(&self, name: &str) -> bool {
+        self.signals.has_signal(name)
+    }
+
+    // -- meta properties ----------------------------------------------------
+
+    /// Sets a meta property. Returns the previous value (or `Nil`).
+    ///
+    /// Meta properties are a separate namespace from regular properties,
+    /// used by the editor, plugins, and runtime tagging.
+    pub fn set_meta(&mut self, key: &str, value: Variant) -> Variant {
+        self.meta
+            .insert(key.to_owned(), value)
+            .unwrap_or(Variant::Nil)
+    }
+
+    /// Gets a meta property by name. Returns `Nil` if absent.
+    pub fn get_meta(&self, key: &str) -> Variant {
+        self.meta.get(key).cloned().unwrap_or(Variant::Nil)
+    }
+
+    /// Returns `true` if the meta property exists.
+    pub fn has_meta(&self, key: &str) -> bool {
+        self.meta.contains_key(key)
+    }
+
+    /// Removes a meta property by name. Returns the old value (or `Nil`).
+    pub fn remove_meta(&mut self, key: &str) -> Variant {
+        self.meta.remove(key).unwrap_or(Variant::Nil)
+    }
+
+    /// Returns the names of all meta properties.
+    pub fn get_meta_list(&self) -> Vec<&str> {
+        self.meta.keys().map(String::as_str).collect()
     }
 
     /// Records a notification and returns a reference to the log.

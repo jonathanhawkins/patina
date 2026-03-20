@@ -20,13 +20,14 @@
 pub mod class_db;
 pub mod notification;
 pub mod object;
+pub mod ref_counted;
 pub mod signal;
 
 // Re-export the most-used types at the crate root.
 pub use class_db::{
-    class_count, class_exists, clear_for_testing, get_class_info, get_class_info_by_id,
-    inheritance_chain, instantiate, is_parent_class, register_class, ClassInfo, ClassRegistration,
-    MethodInfo, PropertyInfo,
+    class_count, class_exists, class_has_method, clear_for_testing, get_class_info,
+    get_class_info_by_id, inheritance_chain, instantiate, is_parent_class, register_class,
+    ClassInfo, ClassRegistration, MethodInfo, PropertyInfo,
 };
 pub use notification::{
     dispatch_notification_chain, Notification, NotificationHandler, NotificationRecord,
@@ -38,4 +39,5 @@ pub use notification::{
     NOTIFICATION_UNPAUSED,
 };
 pub use object::{GenericObject, GodotObject, ObjectBase};
+pub use ref_counted::{RefCounted, RefCountedBase};
 pub use signal::{Connection, Signal, SignalEmitter, SignalStore};

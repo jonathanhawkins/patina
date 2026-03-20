@@ -213,6 +213,7 @@ impl MainLoop {
             return;
         }
         self.paused = paused;
+        self.tree.set_paused(paused);
         let (notification, detail) = if paused {
             (NOTIFICATION_PAUSED, "PAUSED")
         } else {
@@ -349,18 +350,6 @@ impl MainLoop {
 
         // Sync trace frame counter so trace events have the correct frame.
         self.tree.set_trace_frame(self.frame_counter);
-
-        if self.paused {
-            self.process_time += delta_secs;
-            self.frame_counter += 1;
-            self.tree.clear_input_snapshot();
-            self.input_state.flush_frame();
-            return FrameOutput {
-                frame_count: self.frame_counter,
-                delta: delta_secs,
-                physics_steps: 0,
-            };
-        }
 
         let physics_dt = 1.0 / self.physics_ticks_per_second as f64;
 
@@ -798,7 +787,9 @@ mod tests {
         assert!(!log.contains(&NOTIFICATION_PROCESS));
         assert!(!log.contains(&NOTIFICATION_PHYSICS_PROCESS));
         assert_eq!(ml.frame_count(), 1);
-        assert_eq!(ml.physics_time(), 0.0);
+        // Physics still runs when paused (Always-mode nodes may need it);
+        // default Inherit (= Pausable) nodes are filtered at the per-node level.
+        assert!(ml.physics_time() > 0.0);
     }
 
     #[test]
@@ -1402,13 +1393,14 @@ mod tests {
     }
 
     #[test]
-    fn frame_output_zero_physics_when_paused() {
+    fn frame_output_physics_runs_when_paused() {
         let (mut ml, _) = make_loop_with_child();
         ml.set_paused(true);
 
         let output = ml.step(1.0 / 60.0);
         assert_eq!(output.frame_count, 1);
-        assert_eq!(output.physics_steps, 0);
+        // Physics still runs when paused; per-node filtering handles pause mode.
+        assert!(output.physics_steps >= 1);
     }
 
     #[test]

@@ -107,7 +107,21 @@ impl HeadlessPlatform {
 
 impl PlatformBackend for HeadlessPlatform {
     fn poll_events(&mut self) -> Vec<WindowEvent> {
-        std::mem::take(&mut self.events)
+        let events = std::mem::take(&mut self.events);
+        // Mirror real platform behavior: resize updates stored size,
+        // close request triggers quit.
+        for event in &events {
+            match event {
+                WindowEvent::Resized { width, height } => {
+                    self.size = (*width, *height);
+                }
+                WindowEvent::CloseRequested => {
+                    self.quit = true;
+                }
+                _ => {}
+            }
+        }
+        events
     }
 
     fn should_quit(&self) -> bool {

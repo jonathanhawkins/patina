@@ -9,6 +9,7 @@ use gdserver2d::server::{FrameData, RenderingServer2D};
 use gdserver2d::viewport::Viewport;
 
 use crate::draw;
+use crate::font;
 use crate::texture::Texture2D;
 
 /// A pixel framebuffer for the software renderer.
@@ -161,8 +162,7 @@ impl SoftwareRenderer {
                     filled,
                 } => {
                     if *filled {
-                        let pos = global_transform.xform(rect.position);
-                        let transformed = Rect2::new(pos, rect.size);
+                        let transformed = Self::transform_rect(global_transform, *rect);
                         draw::fill_rect(fb, transformed, *color);
                     }
                 }
@@ -172,7 +172,15 @@ impl SoftwareRenderer {
                     color,
                 } => {
                     let pos = global_transform.xform(*center);
-                    draw::fill_circle(fb, pos, *radius, *color);
+                    // Scale radius by the average of the basis scale factors.
+                    let sx = global_transform
+                        .basis_xform(Vector2::new(1.0, 0.0))
+                        .length();
+                    let sy = global_transform
+                        .basis_xform(Vector2::new(0.0, 1.0))
+                        .length();
+                    let scaled_radius = *radius * (sx + sy) * 0.5;
+                    draw::fill_circle(fb, pos, scaled_radius, *color);
                 }
                 DrawCommand::DrawLine {
                     from,
@@ -190,8 +198,7 @@ impl SoftwareRenderer {
                     modulate,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
-                        let pos = global_transform.xform(rect.position);
-                        let transformed = Rect2::new(pos, rect.size);
+                        let transformed = Self::transform_rect(global_transform, *rect);
                         draw::draw_texture_rect(fb, tex, transformed, *modulate);
                     }
                 }
@@ -202,20 +209,56 @@ impl SoftwareRenderer {
                     modulate,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
-                        let pos = global_transform.xform(rect.position);
-                        let transformed = Rect2::new(pos, rect.size);
+                        let transformed = Self::transform_rect(global_transform, *rect);
                         draw::draw_texture_region(fb, tex, transformed, *source_rect, *modulate);
                     }
+                }
+                DrawCommand::DrawString {
+                    text,
+                    position,
+                    color,
+                    font_size,
+                } => {
+                    let pos = global_transform.xform(*position);
+                    let bitmap_font = font::BitmapFont::builtin();
+                    font::draw_string(fb, &bitmap_font, pos, text, *color, *font_size);
                 }
             }
         }
     }
 
+    /// Transforms an axis-aligned rect through a 2D transform, returning the AABB.
+    ///
+    /// All four corners are transformed, then the axis-aligned bounding box is
+    /// computed. This correctly handles rotation (the AABB grows) and zoom
+    /// (the rect size scales).
+    fn transform_rect(xform: Transform2D, rect: Rect2) -> Rect2 {
+        let p0 = xform.xform(rect.position);
+        let p1 = xform.xform(Vector2::new(rect.position.x + rect.size.x, rect.position.y));
+        let p2 = xform.xform(Vector2::new(rect.position.x, rect.position.y + rect.size.y));
+        let p3 = xform.xform(Vector2::new(
+            rect.position.x + rect.size.x,
+            rect.position.y + rect.size.y,
+        ));
+        let min_x = p0.x.min(p1.x).min(p2.x).min(p3.x);
+        let min_y = p0.y.min(p1.y).min(p2.y).min(p3.y);
+        let max_x = p0.x.max(p1.x).max(p2.x).max(p3.x);
+        let max_y = p0.y.max(p1.y).max(p2.y).max(p3.y);
+        Rect2::new(
+            Vector2::new(min_x, min_y),
+            Vector2::new(max_x - min_x, max_y - min_y),
+        )
+    }
+
     /// Computes the camera transform to apply to draw commands.
     ///
-    /// When camera is enabled (non-zero position, non-identity zoom, or non-zero rotation),
-    /// offsets all draw commands by `-camera_position + viewport_size/2`, applies zoom
-    /// and rotation. When camera is at defaults, returns identity.
+    /// Follows the Godot convention:
+    ///   screen = viewport_center + zoom * rotation * (world - camera_position)
+    ///
+    /// Decomposed as a right-to-left transform chain:
+    ///   translate(viewport_center) * scale(zoom) * rotate(angle) * translate(-camera_pos)
+    ///
+    /// When all camera properties are at defaults, returns identity.
     fn compute_camera_transform(viewport: &Viewport) -> Transform2D {
         let has_camera = viewport.camera_position.x != 0.0
             || viewport.camera_position.y != 0.0
@@ -230,18 +273,20 @@ impl SoftwareRenderer {
         let half_w = viewport.width as f32 / 2.0;
         let half_h = viewport.height as f32 / 2.0;
 
-        // Translation: move world so camera_position maps to viewport center.
-        let translation = Transform2D::translated(Vector2::new(
-            -viewport.camera_position.x + half_w,
-            -viewport.camera_position.y + half_h,
+        // Step 1: translate world so camera_position is at the origin.
+        let to_camera = Transform2D::translated(Vector2::new(
+            -viewport.camera_position.x,
+            -viewport.camera_position.y,
         ));
-        // Rotation around viewport center.
+        // Step 2: rotate around the origin.
         let rotation = Transform2D::rotated(viewport.camera_rotation);
-        // Zoom (scale).
+        // Step 3: apply zoom (scale around the origin).
         let zoom = Transform2D::scaled(viewport.camera_zoom);
+        // Step 4: translate so the origin maps to viewport center.
+        let to_screen = Transform2D::translated(Vector2::new(half_w, half_h));
 
-        // Apply: first translate world, then rotate, then scale.
-        zoom * rotation * translation
+        // Right-to-left: first to_camera, then rotation, then zoom, then to_screen.
+        to_screen * zoom * rotation * to_camera
     }
 
     /// Resolves the global transform for a canvas item by walking up the parent chain.

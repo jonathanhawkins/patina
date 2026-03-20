@@ -44,6 +44,17 @@ pub enum DrawCommand {
         source_rect: Rect2,
         modulate: Color,
     },
+    /// Draw a text string at `position` with the given `color` and `font_size`.
+    DrawString {
+        /// The text to render.
+        text: String,
+        /// Top-left position for the text.
+        position: Vector2,
+        /// Text color.
+        color: Color,
+        /// Font size (used as scale multiplier over the built-in 5×7 font).
+        font_size: u32,
+    },
 }
 
 /// A canvas item that holds a transform, draw commands, and child references.

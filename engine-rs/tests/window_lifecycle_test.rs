@@ -414,7 +414,148 @@ fn v1w_full_window_lifecycle() {
 }
 
 // ===========================================================================
-// 9. Operations on closed window are safe no-ops
+// 9. Resize updates viewport size via HeadlessPlatform
+// ===========================================================================
+
+#[test]
+fn v1w_resize_event_updates_backend_viewport_size() {
+    use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
+
+    let mut backend = HeadlessPlatform::new(640, 480);
+    assert_eq!(backend.window_size(), (640, 480));
+
+    backend.push_event(WindowEvent::Resized {
+        width: 1920,
+        height: 1080,
+    });
+
+    // Before polling, size is still the original.
+    assert_eq!(backend.window_size(), (640, 480));
+
+    // Polling the event updates the stored viewport size.
+    let events = backend.poll_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(backend.window_size(), (1920, 1080));
+}
+
+#[test]
+fn v1w_multiple_resizes_applies_last() {
+    use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
+
+    let mut backend = HeadlessPlatform::new(640, 480);
+
+    backend.push_event(WindowEvent::Resized {
+        width: 800,
+        height: 600,
+    });
+    backend.push_event(WindowEvent::Resized {
+        width: 1024,
+        height: 768,
+    });
+    backend.push_event(WindowEvent::Resized {
+        width: 1920,
+        height: 1080,
+    });
+
+    let _events = backend.poll_events();
+    assert_eq!(
+        backend.window_size(),
+        (1920, 1080),
+        "viewport should reflect the last resize"
+    );
+}
+
+// ===========================================================================
+// 10. Close triggers quit via HeadlessPlatform
+// ===========================================================================
+
+#[test]
+fn v1w_close_requested_triggers_quit() {
+    use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
+
+    let mut backend = HeadlessPlatform::new(640, 480);
+    assert!(!backend.should_quit());
+
+    backend.push_event(WindowEvent::CloseRequested);
+
+    // Before polling, quit is not set.
+    assert!(!backend.should_quit());
+
+    // Polling the close event sets the quit flag.
+    let events = backend.poll_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0], WindowEvent::CloseRequested);
+    assert!(backend.should_quit(), "close request should trigger quit");
+}
+
+#[test]
+fn v1w_close_event_stops_main_loop_run() {
+    use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
+    use gdscene::main_loop::MainLoop;
+    use gdscene::node::Node;
+    use gdscene::scene_tree::SceneTree;
+
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    tree.add_child(root, Node::new("Child", "Node2D")).unwrap();
+    let mut ml = MainLoop::new(tree);
+
+    let mut backend = HeadlessPlatform::new(640, 480);
+
+    // Run one frame, then inject a close event.
+    ml.run_frame(&mut backend, 1.0 / 60.0);
+    assert_eq!(ml.frame_count(), 1);
+    assert!(!backend.should_quit());
+
+    // Push close event — next poll_events in run_frame will set quit.
+    backend.push_event(WindowEvent::CloseRequested);
+    ml.run_frame(&mut backend, 1.0 / 60.0);
+    assert_eq!(ml.frame_count(), 2);
+    assert!(
+        backend.should_quit(),
+        "should_quit must be true after CloseRequested"
+    );
+
+    // A subsequent run() should exit immediately since quit is set.
+    ml.run(&mut backend, 1.0 / 60.0);
+    assert_eq!(ml.frame_count(), 2, "no more frames after quit");
+}
+
+// ===========================================================================
+// 11. Resize through MainLoop run_frame updates backend size
+// ===========================================================================
+
+#[test]
+fn v1w_resize_through_run_frame_updates_viewport() {
+    use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
+    use gdscene::main_loop::MainLoop;
+    use gdscene::node::Node;
+    use gdscene::scene_tree::SceneTree;
+
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    tree.add_child(root, Node::new("Child", "Node2D")).unwrap();
+    let mut ml = MainLoop::new(tree);
+
+    let mut backend = HeadlessPlatform::new(640, 480);
+
+    // Push a resize event, run one frame.
+    backend.push_event(WindowEvent::Resized {
+        width: 1920,
+        height: 1080,
+    });
+    ml.run_frame(&mut backend, 1.0 / 60.0);
+
+    // After the frame, viewport size should reflect the resize.
+    assert_eq!(
+        backend.window_size(),
+        (1920, 1080),
+        "run_frame should cause resize event to update viewport"
+    );
+}
+
+// ===========================================================================
+// 12. Operations on closed window are safe no-ops
 // ===========================================================================
 
 #[test]

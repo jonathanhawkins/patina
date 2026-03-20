@@ -349,15 +349,17 @@ fn fractional_physics_ratio_produces_correct_ticks() {
 // ===========================================================================
 
 #[test]
-fn paused_frames_have_zero_physics_ticks() {
+fn paused_frames_still_run_physics_ticks() {
     let (mut ml, _) = make_loop_with_child();
     ml.set_paused(true);
     let trace = ml.run_frames_traced(3, 1.0 / 60.0);
 
     for (i, frame) in trace.frames.iter().enumerate() {
-        assert_eq!(
-            frame.physics_ticks, 0,
-            "frame {i}: paused frames should have 0 physics ticks"
+        // Physics ticks still run when paused (Always-mode nodes may need them);
+        // per-node filtering handles pause mode at the notification level.
+        assert!(
+            frame.physics_ticks >= 1,
+            "frame {i}: physics ticks should still run when paused"
         );
         assert!(frame.paused, "frame {i}: should be marked paused");
     }
@@ -398,17 +400,18 @@ fn unpausing_restores_normal_processing() {
 }
 
 #[test]
-fn paused_physics_time_does_not_advance() {
+fn paused_physics_time_still_advances() {
+    // With per-node pause mode, physics runs even when paused (to support
+    // Always-mode nodes). The physics time accumulator advances normally.
     let (mut ml, _) = make_loop_with_child();
     ml.set_paused(true);
     let trace = ml.run_frames_traced(5, 1.0 / 60.0);
 
-    for frame in &trace.frames {
-        assert!(
-            frame.cumulative_physics_time.abs() < 1e-12,
-            "physics time should not advance while paused"
-        );
-    }
+    let last = trace.frames.last().unwrap();
+    assert!(
+        last.cumulative_physics_time > 0.0,
+        "physics time should advance while paused (per-node filtering handles pause mode)"
+    );
 }
 
 #[test]
