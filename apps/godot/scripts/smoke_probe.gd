@@ -11,9 +11,12 @@ func _ready() -> void:
 	# Run ClassDB probe for 17 core classes
 	probe.run_classdb_probe()
 
-	# Probe resources (add fixture .tres files to res://fixtures/ for more coverage)
+	# Probe resources — scenes and fixtures
 	var fixtures := [
 		"res://scenes/smoke_probe.tscn",
+		"res://fixtures/test_theme.tres",
+		"res://fixtures/test_environment.tres",
+		"res://fixtures/test_rect_shape.tres",
 	]
 	for path in fixtures:
 		if ResourceLoader.exists(path):

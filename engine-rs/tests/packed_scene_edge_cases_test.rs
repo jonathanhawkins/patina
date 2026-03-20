@@ -372,6 +372,107 @@ macro_rules! fixture_parse_test {
 fixture_parse_test!(fixture_hierarchy, "hierarchy.tscn");
 fixture_parse_test!(fixture_test_scripts, "test_scripts.tscn");
 fixture_parse_test!(fixture_space_shooter, "space_shooter.tscn");
+fixture_parse_test!(fixture_platformer, "platformer.tscn");
+fixture_parse_test!(fixture_ui_menu, "ui_menu.tscn");
+fixture_parse_test!(fixture_signals_complex, "signals_complex.tscn");
+fixture_parse_test!(fixture_demo_2d, "demo_2d.tscn");
+fixture_parse_test!(fixture_tilemap_demo, "tilemap_demo.tscn");
+
+// ===========================================================================
+// 8b. Scene fixtures: structure verification (pat-09t)
+// ===========================================================================
+
+/// Platformer fixture has expected node hierarchy and class types.
+#[test]
+fn fixture_platformer_structure() {
+    use gdscene::packed_scene::add_packed_scene_to_tree;
+    use gdscene::scene_tree::SceneTree;
+
+    let content =
+        std::fs::read_to_string(fixtures_dir().join("platformer.tscn")).expect("read platformer");
+    let scene = PackedScene::from_tscn(&content).unwrap();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+    // Verify key nodes exist with correct types
+    let player = tree.get_node_by_path("/root/Platformer/Player").unwrap();
+    assert_eq!(
+        tree.get_node(player).unwrap().class_name(),
+        "CharacterBody2D"
+    );
+
+    let camera = tree
+        .get_node_by_path("/root/Platformer/Player/Camera")
+        .unwrap();
+    assert_eq!(tree.get_node(camera).unwrap().class_name(), "Camera2D");
+
+    let ground = tree.get_node_by_path("/root/Platformer/Ground").unwrap();
+    assert_eq!(tree.get_node(ground).unwrap().class_name(), "StaticBody2D");
+
+    // Coins container with Area2D children
+    let coins = tree.get_node_by_path("/root/Platformer/Coins").unwrap();
+    assert_eq!(tree.get_node(coins).unwrap().class_name(), "Node2D");
+    assert!(tree
+        .get_node_by_path("/root/Platformer/Coins/Coin1")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/Platformer/Coins/Coin2")
+        .is_some());
+}
+
+/// UI menu fixture has expected hierarchy with nested containers.
+#[test]
+fn fixture_ui_menu_structure() {
+    use gdscene::packed_scene::add_packed_scene_to_tree;
+    use gdscene::scene_tree::SceneTree;
+
+    let content =
+        std::fs::read_to_string(fixtures_dir().join("ui_menu.tscn")).expect("read ui_menu");
+    let scene = PackedScene::from_tscn(&content).unwrap();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+    // Root is Control
+    let menu = tree.get_node_by_path("/root/MenuRoot").unwrap();
+    assert_eq!(tree.get_node(menu).unwrap().class_name(), "Control");
+
+    // VBox with button children
+    assert!(tree.get_node_by_path("/root/MenuRoot/VBox/Title").is_some());
+    assert!(tree
+        .get_node_by_path("/root/MenuRoot/VBox/StartButton")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/MenuRoot/VBox/QuitButton")
+        .is_some());
+
+    // Nested options panel
+    let options = tree
+        .get_node_by_path("/root/MenuRoot/OptionsPanel")
+        .unwrap();
+    assert_eq!(tree.get_node(options).unwrap().class_name(), "Control");
+    assert!(tree
+        .get_node_by_path("/root/MenuRoot/OptionsPanel/VolumeSlider")
+        .is_some());
+}
+
+/// Signals complex fixture has connection definitions.
+#[test]
+fn fixture_signals_complex_has_connections() {
+    let content = std::fs::read_to_string(fixtures_dir().join("signals_complex.tscn"))
+        .expect("read signals_complex");
+    let scene = PackedScene::from_tscn(&content).unwrap();
+    assert_eq!(
+        scene.connection_count(),
+        3,
+        "signals_complex should have 3 connections"
+    );
+    assert!(
+        scene.node_count() >= 5,
+        "signals_complex should have at least 5 nodes"
+    );
+}
 
 // ===========================================================================
 // 9. Malformed inputs — no panics
@@ -434,4 +535,121 @@ fn connection_missing_required_attrs_skipped() {
     // Missing "to" and "method" — connection should be skipped, not error.
     let scene = PackedScene::from_tscn(tscn).unwrap();
     assert_eq!(scene.connection_count(), 0);
+}
+
+// ===========================================================================
+// 10. Nested scene instancing and NodePath resolution (pat-99r)
+// ===========================================================================
+
+/// Nested scene instancing: inner scene is instanced inside outer scene.
+#[test]
+fn nested_scene_instance_paths_correct() {
+    use gdscene::packed_scene::add_packed_scene_to_tree;
+    use gdscene::scene_tree::SceneTree;
+
+    let inner_tscn = r#"[gd_scene format=3]
+
+[node name="InnerRoot" type="Node2D"]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+"#;
+    let outer_tscn = r#"[gd_scene format=3]
+
+[node name="OuterRoot" type="Node2D"]
+
+[node name="Background" type="Node2D" parent="."]
+"#;
+
+    let inner_scene = PackedScene::from_tscn(inner_tscn).unwrap();
+    let outer_scene = PackedScene::from_tscn(outer_tscn).unwrap();
+
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    // Instance outer scene under root
+    let outer_id = add_packed_scene_to_tree(&mut tree, root, &outer_scene).unwrap();
+    // Instance inner scene under outer's Background
+    let bg = tree.get_node_relative(outer_id, "Background").unwrap();
+    let inner_id = add_packed_scene_to_tree(&mut tree, bg, &inner_scene).unwrap();
+
+    // Verify nested path resolution
+    assert!(tree
+        .get_node_by_path("/root/OuterRoot/Background/InnerRoot/Sprite")
+        .is_some());
+    // Relative path from inner root to sprite
+    assert!(tree.get_node_relative(inner_id, "Sprite").is_some());
+    // "../" from inner root should reach Background
+    assert_eq!(tree.get_node_relative(inner_id, "..").unwrap(), bg);
+}
+
+/// NodePath with "../" resolution across instanced scenes.
+#[test]
+fn nodepath_dotdot_across_instances() {
+    use gdscene::packed_scene::add_packed_scene_to_tree;
+    use gdscene::scene_tree::SceneTree;
+
+    let scene_tscn = r#"[gd_scene format=3]
+
+[node name="Container" type="Node2D"]
+
+[node name="Left" type="Node2D" parent="."]
+
+[node name="Right" type="Node2D" parent="."]
+
+[node name="DeepChild" type="Node2D" parent="Right"]
+"#;
+    let scene = PackedScene::from_tscn(scene_tscn).unwrap();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let container = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+    let deep_child = tree
+        .get_node_by_path("/root/Container/Right/DeepChild")
+        .unwrap();
+    let left = tree.get_node_by_path("/root/Container/Left").unwrap();
+
+    // Navigate from DeepChild to Left via ../../Left
+    assert_eq!(
+        tree.get_node_relative(deep_child, "../../Left").unwrap(),
+        left
+    );
+    // Navigate from DeepChild up three levels to root
+    assert_eq!(
+        tree.get_node_relative(deep_child, "../../..").unwrap(),
+        root
+    );
+}
+
+/// Multiple instancing of the same PackedScene produces independent subtrees.
+#[test]
+fn multiple_instances_independent_subtrees() {
+    use gdscene::packed_scene::add_packed_scene_to_tree;
+    use gdscene::scene_tree::SceneTree;
+
+    let tscn = r#"[gd_scene format=3]
+
+[node name="Enemy" type="Node2D"]
+
+[node name="AI" type="Node" parent="."]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+"#;
+    let scene = PackedScene::from_tscn(tscn).unwrap();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let inst1 = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+    let inst2 = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+    // Both instances exist but are separate nodes
+    assert_ne!(inst1, inst2);
+
+    // Each has its own AI and Sprite children
+    let ai1 = tree.get_node_relative(inst1, "AI").unwrap();
+    let ai2 = tree.get_node_relative(inst2, "AI").unwrap();
+    assert_ne!(ai1, ai2);
+
+    let sprite1 = tree.get_node_relative(inst1, "Sprite").unwrap();
+    let sprite2 = tree.get_node_relative(inst2, "Sprite").unwrap();
+    assert_ne!(sprite1, sprite2);
 }

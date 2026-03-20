@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://ui_menu_test"]
+
+[node name="MenuRoot" type="Control"]
+
+[node name="Background" type="Node2D" parent="."]
+
+[node name="VBox" type="VBoxContainer" parent="."]
+
+[node name="Title" type="Label" parent="VBox"]
+
+[node name="StartButton" type="Node" parent="VBox"]
+
+[node name="OptionsButton" type="Node" parent="VBox"]
+
+[node name="QuitButton" type="Node" parent="VBox"]
+
+[node name="OptionsPanel" type="Control" parent="."]
+visible = false
+
+[node name="VolumeSlider" type="Node" parent="OptionsPanel"]
+
+[node name="FullscreenToggle" type="Node" parent="OptionsPanel"]

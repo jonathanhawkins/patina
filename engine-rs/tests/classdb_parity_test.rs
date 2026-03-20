@@ -6,7 +6,8 @@
 
 use std::sync::Mutex;
 
-use gdcore::math::{Vector2, Vector3};
+use gdcore::math::{Color, Rect2, Vector2, Vector3};
+use gdcore::NodePath;
 use gdobject::class_db::{
     class_count, class_exists, clear_for_testing, get_class_info, inheritance_chain, instantiate,
     is_parent_class, register_class, ClassRegistration, PropertyInfo,
@@ -42,6 +43,11 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("name", Variant::String(String::new())),
                 ("process_mode", Variant::Int(0)), // PROCESS_MODE_INHERIT
                 ("process_priority", Variant::Int(0)),
+                ("process_physics_priority", Variant::Int(0)),
+                ("process_thread_group", Variant::Int(0)), // PROCESS_THREAD_GROUP_INHERIT
+                ("scene_file_path", Variant::String(String::new())),
+                ("unique_name_in_owner", Variant::Bool(false)),
+                ("editor_description", Variant::String(String::new())),
             ],
             godot_property_count: 8,
         },
@@ -55,6 +61,10 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("skew", Variant::Float(0.0)),
                 ("visible", Variant::Bool(true)),
                 ("z_index", Variant::Int(0)),
+                ("z_as_relative", Variant::Bool(true)),
+                ("y_sort_enabled", Variant::Bool(false)),
+                ("top_level", Variant::Bool(false)),
+                ("modulate", Variant::Color(Color::WHITE)),
             ],
             godot_property_count: 12,
         },
@@ -66,6 +76,10 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("rotation", Variant::Vector3(Vector3::ZERO)),
                 ("scale", Variant::Vector3(Vector3::new(1.0, 1.0, 1.0))),
                 ("visible", Variant::Bool(true)),
+                ("top_level", Variant::Bool(false)),
+                ("rotation_degrees", Variant::Vector3(Vector3::ZERO)),
+                ("global_position", Variant::Vector3(Vector3::ZERO)),
+                ("global_rotation", Variant::Vector3(Vector3::ZERO)),
             ],
             godot_property_count: 10,
         },
@@ -79,6 +93,15 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("flip_h", Variant::Bool(false)),
                 ("flip_v", Variant::Bool(false)),
                 ("centered", Variant::Bool(true)),
+                ("region_enabled", Variant::Bool(false)),
+                (
+                    "region_rect",
+                    Variant::Rect2(Rect2::new(Vector2::ZERO, Vector2::ZERO)),
+                ),
+                ("hframes", Variant::Int(1)),
+                ("vframes", Variant::Int(1)),
+                ("frame", Variant::Int(0)),
+                ("self_modulate", Variant::Color(Color::WHITE)),
             ],
             godot_property_count: 11,
         },
@@ -90,6 +113,14 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("zoom", Variant::Vector2(Vector2::new(1.0, 1.0))),
                 ("enabled", Variant::Bool(true)),
                 ("anchor_mode", Variant::Int(1)), // ANCHOR_MODE_DRAG_CENTER
+                ("position_smoothing_enabled", Variant::Bool(false)),
+                ("position_smoothing_speed", Variant::Float(5.0)),
+                ("rotation_smoothing_enabled", Variant::Bool(false)),
+                ("rotation_smoothing_speed", Variant::Float(5.0)),
+                ("drag_horizontal_enabled", Variant::Bool(false)),
+                ("drag_vertical_enabled", Variant::Bool(false)),
+                ("limit_left", Variant::Int(-10_000_000)),
+                ("limit_right", Variant::Int(10_000_000)),
             ],
             godot_property_count: 15,
         },
@@ -101,6 +132,9 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("speed_scale", Variant::Float(1.0)),
                 ("autoplay", Variant::String(String::new())),
                 ("playback_active", Variant::Bool(false)),
+                ("root_node", Variant::NodePath(NodePath::from(".."))),
+                ("playback_default_blend_time", Variant::Float(0.0)),
+                ("movie_quit_on_finish", Variant::Bool(false)),
             ],
             godot_property_count: 8,
         },
@@ -117,6 +151,18 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("anchor_right", Variant::Float(0.0)),
                 ("anchor_bottom", Variant::Float(0.0)),
                 ("mouse_filter", Variant::Int(0)), // MOUSE_FILTER_STOP
+                ("offset_left", Variant::Float(0.0)),
+                ("offset_top", Variant::Float(0.0)),
+                ("offset_right", Variant::Float(0.0)),
+                ("offset_bottom", Variant::Float(0.0)),
+                ("minimum_size", Variant::Vector2(Vector2::ZERO)),
+                ("size_flags_horizontal", Variant::Int(1)), // SIZE_FILL
+                ("size_flags_vertical", Variant::Int(1)),   // SIZE_FILL
+                ("focus_mode", Variant::Int(0)),            // FOCUS_NONE
+                ("mouse_default_cursor_shape", Variant::Int(0)), // CURSOR_ARROW
+                ("layout_direction", Variant::Int(0)),      // LAYOUT_DIRECTION_INHERITED
+                ("clip_contents", Variant::Bool(false)),
+                ("pivot_offset", Variant::Vector2(Vector2::ZERO)),
             ],
             godot_property_count: 25,
         },
@@ -129,6 +175,11 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("vertical_alignment", Variant::Int(0)),   // VALIGN_TOP
                 ("autowrap_mode", Variant::Int(0)),
                 ("font_size", Variant::Int(16)),
+                ("clip_text", Variant::Bool(false)),
+                ("text_overrun_behavior", Variant::Int(0)), // OVERRUN_NO_TRIMMING
+                ("uppercase", Variant::Bool(false)),
+                ("visible_characters", Variant::Int(-1)), // show all
+                ("max_lines_visible", Variant::Int(-1)),  // show all
             ],
             godot_property_count: 12,
         },
@@ -140,6 +191,10 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("disabled", Variant::Bool(false)),
                 ("flat", Variant::Bool(false)),
                 ("toggle_mode", Variant::Bool(false)),
+                ("icon", Variant::Nil),
+                ("alignment", Variant::Int(1)), // HORIZONTAL_ALIGNMENT_CENTER
+                ("text_overrun_behavior", Variant::Int(0)),
+                ("clip_text", Variant::Bool(false)),
             ],
             godot_property_count: 10,
         },
@@ -154,6 +209,15 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("angular_velocity", Variant::Float(0.0)),
                 ("freeze", Variant::Bool(false)),
                 ("contact_monitor", Variant::Bool(false)),
+                ("inertia", Variant::Float(0.0)),
+                ("linear_damp", Variant::Float(0.0)),
+                ("angular_damp", Variant::Float(0.0)),
+                ("lock_rotation", Variant::Bool(false)),
+                ("continuous_cd", Variant::Int(0)), // CCD_MODE_DISABLED
+                ("sleeping", Variant::Bool(false)),
+                ("freeze_mode", Variant::Int(0)), // FREEZE_MODE_STATIC
+                ("linear_damp_mode", Variant::Int(0)),
+                ("angular_damp_mode", Variant::Int(0)),
             ],
             godot_property_count: 18,
         },
@@ -164,6 +228,8 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("physics_material_override", Variant::Nil),
                 ("constant_linear_velocity", Variant::Vector2(Vector2::ZERO)),
                 ("constant_angular_velocity", Variant::Float(0.0)),
+                ("collision_layer", Variant::Int(1)),
+                ("collision_mask", Variant::Int(1)),
             ],
             godot_property_count: 5,
         },
@@ -176,6 +242,13 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("floor_max_angle", Variant::Float(0.7853982)), // ~45 degrees
                 ("max_slides", Variant::Int(6)),
                 ("up_direction", Variant::Vector2(Vector2::new(0.0, -1.0))),
+                ("wall_min_slide_angle", Variant::Float(0.2617994)), // ~15 degrees
+                ("floor_stop_on_slope", Variant::Bool(true)),
+                ("floor_constant_speed", Variant::Bool(false)),
+                ("floor_block_on_wall", Variant::Bool(true)),
+                ("floor_snap_length", Variant::Float(1.0)),
+                ("slide_on_ceiling", Variant::Bool(true)),
+                ("platform_on_leave", Variant::Int(0)), // PLATFORM_ON_LEAVE_ADD_VELOCITY
             ],
             godot_property_count: 14,
         },
@@ -191,6 +264,9 @@ fn core_class_specs() -> Vec<ClassSpec> {
                     Variant::Vector2(Vector2::new(0.0, 1.0)),
                 ),
                 ("priority", Variant::Int(0)),
+                ("gravity_space_override", Variant::Int(0)), // SPACE_OVERRIDE_DISABLED
+                ("gravity_point", Variant::Bool(false)),
+                ("linear_damp_space_override", Variant::Int(0)),
             ],
             godot_property_count: 10,
         },
@@ -201,6 +277,11 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("shape", Variant::Nil),
                 ("disabled", Variant::Bool(false)),
                 ("one_way_collision", Variant::Bool(false)),
+                ("one_way_collision_margin", Variant::Float(1.0)),
+                (
+                    "debug_color",
+                    Variant::Color(Color::new(0.0, 0.56, 0.65, 0.42)),
+                ),
             ],
             godot_property_count: 5,
         },
@@ -213,6 +294,7 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("one_shot", Variant::Bool(false)),
                 ("autostart", Variant::Bool(false)),
                 ("paused", Variant::Bool(false)),
+                ("process_callback", Variant::Int(1)), // TIMER_PROCESS_IDLE
             ],
             godot_property_count: 5,
         },
@@ -222,6 +304,9 @@ fn core_class_specs() -> Vec<ClassSpec> {
             properties: vec![
                 ("cell_quadrant_size", Variant::Int(16)),
                 ("collision_enabled", Variant::Bool(true)),
+                ("tile_set", Variant::Nil),
+                ("collision_visibility_mode", Variant::Int(0)),
+                ("navigation_visibility_mode", Variant::Int(0)),
             ],
             godot_property_count: 6,
         },
@@ -235,6 +320,32 @@ fn core_class_specs() -> Vec<ClassSpec> {
                 ("one_shot", Variant::Bool(false)),
                 ("explosiveness", Variant::Float(0.0)),
                 ("speed_scale", Variant::Float(1.0)),
+                ("preprocess", Variant::Float(0.0)),
+                ("randomness", Variant::Float(0.0)),
+                ("fixed_fps", Variant::Int(0)),
+                ("fract_delta", Variant::Bool(true)),
+                ("local_coords", Variant::Bool(false)),
+                ("draw_order", Variant::Int(0)), // DRAW_ORDER_INDEX
+                ("direction", Variant::Vector2(Vector2::new(1.0, 0.0))),
+                ("spread", Variant::Float(45.0)),
+                ("initial_velocity_min", Variant::Float(0.0)),
+                ("initial_velocity_max", Variant::Float(0.0)),
+                ("angular_velocity_min", Variant::Float(0.0)),
+                ("angular_velocity_max", Variant::Float(0.0)),
+                ("orbit_velocity_min", Variant::Float(0.0)),
+                ("orbit_velocity_max", Variant::Float(0.0)),
+                ("linear_accel_min", Variant::Float(0.0)),
+                ("linear_accel_max", Variant::Float(0.0)),
+                ("radial_accel_min", Variant::Float(0.0)),
+                ("radial_accel_max", Variant::Float(0.0)),
+                ("tangential_accel_min", Variant::Float(0.0)),
+                ("tangential_accel_max", Variant::Float(0.0)),
+                ("damping_min", Variant::Float(0.0)),
+                ("damping_max", Variant::Float(0.0)),
+                ("scale_amount_min", Variant::Float(1.0)),
+                ("scale_amount_max", Variant::Float(1.0)),
+                ("color", Variant::Color(Color::WHITE)),
+                ("emission_shape", Variant::Int(0)), // EMISSION_SHAPE_POINT
             ],
             godot_property_count: 40,
         },
@@ -596,11 +707,10 @@ fn parity_summary() {
         recognized_classes, total_classes,
         "all {total_classes} core classes must be recognized"
     );
-    // Property coverage should be at least 30% (we cover the most important
-    // defaults; full coverage is tracked via the percentage).
+    // Property coverage should be at least 80% (target: 170+/214).
     assert!(
-        parity_pct >= 30,
-        "property parity {parity_pct}% is below minimum 30% threshold"
+        parity_pct >= 80,
+        "property parity {parity_pct}% is below minimum 80% threshold"
     );
 }
 

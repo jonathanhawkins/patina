@@ -8,19 +8,17 @@ This directory is the **GDExtension compatibility lab** for Patina. It contains 
 
 The lab serves three goals:
 
-1. **API probing** — emit ClassDB-level signatures (class list, parent class, property list, method list) so Patina's object model can be validated against upstream Godot.
-2. **Resource probing** — capture resource metadata and roundtrip behavior for representative `.tres`/`.res` fixtures so Patina's resource loader can be validated.
-3. **Smoke testing** — run basic scene tree, signal, and property operations and verify the output format that Patina tests consume.
+1. **API probing** — emit ClassDB-level signatures (class list, parent class, property list, method list, signals) so Patina's object model can be validated against upstream Godot.
+2. **Resource probing** — capture resource metadata, property enumeration, and subresource references for representative `.tres`/`.res` fixtures so Patina's resource loader can be validated.
+3. **Smoke testing** — run scene tree, signal, and property operations and verify the output format that Patina tests consume.
 
 All probe output is printed to stdout as `PATINA_PROBE:<json>` lines, which the oracle harness in `tools/` can capture and diff.
 
 ---
 
-## Existing Probes
+## Probes
 
 ### `scene_probe.rs`
-
-**Status: Implemented**
 
 Walks the scene tree rooted at a given `Node` and emits a JSON envelope:
 
@@ -28,62 +26,103 @@ Walks the scene tree rooted at a given `Node` and emits a JSON envelope:
 {
   "fixture_id": "smoke_probe",
   "capture_type": "scene_tree",
-  "data": { "root": { "name": "...", "class": "...", "path": "...", "children": [...] } }
+  "data": {
+    "root": {
+      "name": "...",
+      "class": "...",
+      "path": "...",
+      "owner": "...",
+      "script_path": "...",
+      "process_mode": 0,
+      "unique_name_in_owner": false,
+      "children": [...]
+    }
+  }
 }
 ```
 
-**What it covers:** node names, class names, scene paths, tree structure.
-**What it does not cover:** node properties, script variables, sub-resources.
+**Covers:** node names, class names, scene paths, owner path, script path, process mode, unique name flag, tree structure.
 
 ---
 
 ### `property_probe.rs`
 
-**Status: Implemented**
-
-Emits property metadata for the `PatinaSmokeProbe` node:
+Enumerates all properties via `get_property_list()` for a node:
 
 ```json
 {
   "fixture_id": "smoke_probe",
   "capture_type": "properties",
-  "data": { "properties": { "probe_label": { "type": "String", "value": "..." }, ... } }
+  "data": {
+    "node_name": "...",
+    "node_class": "...",
+    "property_count": 42,
+    "properties": [
+      { "name": "position", "type": 5, "hint": 0, "hint_string": "", "usage": 4102, "class_name": "" }
+    ]
+  }
 }
 ```
 
-**What it covers:** `@var`-exported properties and their runtime values.
-**What it does not cover:** full `ClassDB.get_property_list()` enumeration (deferred — see below).
+**Covers:** full ClassDB property enumeration — name, Variant type, hint, hint_string, usage flags, class_name.
 
 ---
 
 ### `signal_probe.rs`
 
-**Status: Implemented**
-
-Connects, emits, and records events for `probe_signal`:
+Tests signal connect/emit/callback ordering AND enumerates all signals via `get_signal_list()`:
 
 ```json
 {
   "fixture_id": "smoke_probe",
   "capture_type": "signals",
-  "data": { "events": ["before_connect", "after_connect", "after_emit"] }
+  "data": {
+    "node_name": "...",
+    "node_class": "...",
+    "ordering_events": ["before_connect", "after_connect", "after_emit"],
+    "signal_count": 5,
+    "signals": [
+      { "name": "ready", "args": [] },
+      { "name": "tree_entered", "args": [] }
+    ]
+  }
 }
 ```
 
-**What it covers:** signal connect, emit, and callback ordering.
-**What it does not cover:** disconnecting signals, multi-argument signals, cross-node signal wiring.
+**Covers:** signal connect/emit ordering, full signal list with argument metadata.
 
 ---
 
-## Deferred Probes
+### `resource_probe.rs`
 
-The following probes are specified but not yet implemented. They require compiling `patina_lab` against the pinned Godot 4 binary (which requires a local Godot install with the matching GDExtension API).
+Loads a resource by path and emits metadata including full property enumeration and subresource references:
 
-### ClassDB API Probe (pat-9eb)
+```json
+{
+  "fixture_id": "resource_probe",
+  "capture_type": "resource_metadata",
+  "data": {
+    "resource_class": "PackedScene",
+    "resource_path": "res://scenes/smoke_probe.tscn",
+    "resource_name": "",
+    "property_count": 5,
+    "properties": [...],
+    "subresource_count": 1,
+    "subresources": [
+      { "property": "script", "class": "GDScript", "path": "res://scripts/smoke_probe.gd" }
+    ]
+  }
+}
+```
 
-**Goal:** Emit machine-readable ClassDB metadata for a representative set of runtime classes.
+**Covers:** resource class, path, name, full property list, subresource graph.
 
-**Planned output per class:**
+---
+
+### `classdb_probe.rs`
+
+Dumps ClassDB metadata for 17 core Godot classes that match Patina's `classdb_parity_test.rs`:
+
 ```json
 {
   "fixture_id": "classdb_probe",
@@ -91,40 +130,19 @@ The following probes are specified but not yet implemented. They require compili
   "data": {
     "class": "Node",
     "parent": "Object",
-    "methods": [{ "name": "add_child", "args": [...], "return_type": "..." }],
-    "properties": [{ "name": "name", "type": "String", ... }],
+    "method_count": 85,
+    "methods": [{ "name": "add_child", "args": [...], "return_type": 0 }],
+    "property_count": 8,
+    "properties": [{ "name": "name", "type": 4, "hint": 0, "hint_string": "", "usage": 4102 }],
+    "signal_count": 3,
     "signals": [{ "name": "ready", "args": [] }]
   }
 }
 ```
 
-**Acceptance:** Output is reproducible across runs and consumed by at least one regression test in `engine-rs/`.
+**Core classes probed:** Node, Node2D, Node3D, Sprite2D, Camera2D, AnimationPlayer, Control, Label, Button, RigidBody2D, StaticBody2D, CharacterBody2D, Area2D, CollisionShape2D, Timer, TileMap, CPUParticles2D.
 
-**Blocked by:** Local Godot binary + godot-rust compilation against pinned API (`pat-1wt` prerequisite).
-
----
-
-### Resource Metadata Probe (pat-a41)
-
-**Goal:** Load a representative `.tres` fixture and emit metadata + roundtrip hash.
-
-**Planned output:**
-```json
-{
-  "fixture_id": "resource_probe",
-  "capture_type": "resource_metadata",
-  "data": {
-    "resource_class": "SpriteFrames",
-    "resource_path": "res://fixtures/sprite_frames.tres",
-    "properties": { ... },
-    "roundtrip_sha256": "..."
-  }
-}
-```
-
-**Acceptance:** Probe output feeds the oracle path in `engine-rs/crates/gdresource/`.
-
-**Blocked by:** Same Godot binary dependency as ClassDB probe.
+**Covers:** parent class, all methods with argument types, all properties with type/hint/usage, all signals with argument metadata.
 
 ---
 
@@ -147,14 +165,14 @@ Probe lines can be parsed with `jq` or the oracle tooling in `tools/`.
 
 ---
 
-## Current State Summary
+## Probe Status
 
 | Probe | Status | Feeds |
 |---|---|---|
 | `scene_probe` | Implemented | `gdscene` oracle tests |
 | `property_probe` | Implemented | `gdobject` property tests |
 | `signal_probe` | Implemented | `gdobject` signal tests |
-| ClassDB API probe | **Deferred** (pat-9eb) | `gdobject` ClassDB parity |
-| Resource metadata probe | **Deferred** (pat-a41) | `gdresource` oracle tests |
+| `resource_probe` | Implemented | `gdresource` oracle tests |
+| `classdb_probe` | Implemented | `gdobject` ClassDB parity |
 
-Full GDExtension lab execution is deferred pending a CI-available Godot binary. When unblocked, implement deferred probes and wire output into the golden comparison pipeline.
+All probes compile against godot-rust 0.2 and emit machine-readable JSON. Running them requires a local Godot 4 binary with matching GDExtension API.

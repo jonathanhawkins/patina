@@ -364,6 +364,14 @@ impl MainLoop {
             self.physics_server.sync_to_physics(&self.tree);
             self.physics_server.step_physics(physics_dt as f32);
             self.physics_server.sync_from_physics(&mut self.tree);
+
+            // Emit body_entered / body_exited signals on Area2D nodes.
+            self.physics_server.process_overlap_signals(&mut self.tree);
+
+            // Run move_and_slide for CharacterBody2D nodes with velocity.
+            self.physics_server
+                .process_character_movement(physics_dt as f32, &mut self.tree);
+
             self.physics_server.record_trace(&self.tree);
 
             self.tree.process_internal_physics_frame();
@@ -1645,5 +1653,157 @@ mod tests {
         assert!(!ml
             .input_state()
             .is_key_pressed(gdplatform::input::Key::Space));
+    }
+
+    // -------------------------------------------------------------------
+    // #159 — Area2D signal dispatch through MainLoop
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn mainloop_emits_body_entered_signal_on_area2d() {
+        use gdobject::signal::Connection;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // RigidBody2D overlapping an Area2D
+        let mut body = Node::new("Body", "RigidBody2D");
+        body.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(5.0, 0.0)),
+        );
+        let body_nid = tree.add_child(root, body).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(2.0));
+        tree.add_child(body_nid, s).unwrap();
+
+        let mut area = Node::new("Zone", "Area2D");
+        area.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(5.0, 0.0)),
+        );
+        let area_nid = tree.add_child(root, area).unwrap();
+        let mut sa = Node::new("Shape", "CollisionShape2D");
+        sa.set_property("radius", Variant::Float(10.0));
+        tree.add_child(area_nid, sa).unwrap();
+
+        let entered_count = Arc::new(AtomicUsize::new(0));
+        let cnt = entered_count.clone();
+        tree.connect_signal(
+            area_nid,
+            "body_entered",
+            Connection::with_callback(area_nid.object_id(), "on_body_entered", move |_args| {
+                cnt.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            }),
+        );
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+        ml.step(1.0 / 60.0);
+
+        assert_eq!(
+            entered_count.load(Ordering::SeqCst),
+            1,
+            "body_entered should fire once through MainLoop"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // #162 — CharacterBody2D move_and_slide through MainLoop
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn mainloop_moves_character_body_with_velocity() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut char_node = Node::new("Player", "CharacterBody2D");
+        char_node.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+        );
+        char_node.set_property(
+            "velocity",
+            Variant::Vector2(gdcore::math::Vector2::new(100.0, 0.0)),
+        );
+        let char_id = tree.add_child(root, char_node).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(8.0));
+        tree.add_child(char_id, s).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+        ml.step(1.0 / 60.0);
+
+        let pos = ml
+            .tree()
+            .get_node(char_id)
+            .map(|n| n.get_property("position"))
+            .unwrap_or(Variant::Nil);
+        match pos {
+            Variant::Vector2(v) => assert!(
+                v.x > 0.0,
+                "CharacterBody2D should move right via MainLoop, got x={:.1}",
+                v.x
+            ),
+            _ => panic!("expected Vector2 position"),
+        }
+    }
+
+    #[test]
+    fn mainloop_character_body_stops_at_wall() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // velocity=600 px/s, dt=1/60 → displacement=10px per tick.
+        // Wall at x=12 with half_extent=5 → left edge at x=7.
+        // Character radius=4, so collision when center+4 >= 7, i.e., center >= 3.
+        let mut char_node = Node::new("Player", "CharacterBody2D");
+        char_node.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+        );
+        char_node.set_property(
+            "velocity",
+            Variant::Vector2(gdcore::math::Vector2::new(600.0, 0.0)),
+        );
+        let char_id = tree.add_child(root, char_node).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(4.0));
+        tree.add_child(char_id, s).unwrap();
+
+        let mut wall_node = Node::new("Wall", "StaticBody2D");
+        wall_node.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(12.0, 0.0)),
+        );
+        let wall_id = tree.add_child(root, wall_node).unwrap();
+        let mut ws = Node::new("Shape", "CollisionShape2D");
+        ws.set_property(
+            "size",
+            Variant::Vector2(gdcore::math::Vector2::new(10.0, 200.0)),
+        );
+        tree.add_child(wall_id, ws).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+        ml.step(1.0 / 60.0);
+
+        let pos = ml
+            .tree()
+            .get_node(char_id)
+            .map(|n| n.get_property("position"))
+            .unwrap_or(Variant::Nil);
+        match pos {
+            Variant::Vector2(v) => assert!(
+                v.x < 12.0,
+                "CharacterBody2D should stop before wall, got x={:.1}",
+                v.x
+            ),
+            _ => panic!("expected Vector2 position"),
+        }
     }
 }

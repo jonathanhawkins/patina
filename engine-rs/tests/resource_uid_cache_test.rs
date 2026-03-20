@@ -367,6 +367,89 @@ fn uid_parsing_is_deterministic() {
     );
 }
 
+// ===========================================================================
+// 6. Resource loading edge cases (pat-j76)
+// ===========================================================================
+
+/// Loading a missing/invalid path returns an error, not a panic.
+#[test]
+fn cache_load_missing_path_returns_error() {
+    struct FailLoader;
+    impl ResourceLoader for FailLoader {
+        fn load(&self, path: &str) -> EngineResult<Arc<Resource>> {
+            Err(gdcore::error::EngineError::NotFound(path.to_string()))
+        }
+    }
+
+    let mut cache = ResourceCache::new(FailLoader);
+    let result = cache.load("res://nonexistent.tres");
+    assert!(result.is_err(), "loading a missing resource should error");
+}
+
+/// TresLoader with corrupt .tres content returns a default resource without UID.
+#[test]
+fn tres_loader_corrupt_content_returns_default_resource() {
+    let loader = TresLoader::new();
+    let res = loader
+        .parse_str(
+            "this is not valid tres content at all",
+            "res://corrupt.tres",
+        )
+        .unwrap();
+    assert!(
+        !res.uid.is_valid(),
+        "corrupt content should produce invalid UID"
+    );
+    assert_eq!(res.path, "res://corrupt.tres");
+}
+
+/// TresLoader with empty string returns a default resource.
+#[test]
+fn tres_loader_empty_string_returns_default_resource() {
+    let loader = TresLoader::new();
+    let res = loader.parse_str("", "res://empty.tres").unwrap();
+    assert!(
+        !res.uid.is_valid(),
+        "empty content should produce invalid UID"
+    );
+    assert_eq!(res.path, "res://empty.tres");
+}
+
+/// UID collision: re-registering same UID with different path replaces mapping.
+#[test]
+fn uid_collision_replaces_mapping() {
+    let mut reg = UidRegistry::new();
+    let uid = ResourceUid::new(42);
+
+    reg.register(uid, "res://original.tres");
+    assert_eq!(reg.lookup_uid(uid), Some("res://original.tres"));
+
+    // Same UID, different path — should replace
+    reg.register(uid, "res://replacement.tres");
+    assert_eq!(reg.lookup_uid(uid), Some("res://replacement.tres"));
+    assert_eq!(reg.lookup_path("res://original.tres"), None);
+    assert_eq!(reg.lookup_path("res://replacement.tres"), Some(uid));
+    assert_eq!(
+        reg.len(),
+        1,
+        "collision should not create duplicate entries"
+    );
+}
+
+/// Cache invalidation of non-existent path is a no-op.
+#[test]
+fn cache_invalidate_nonexistent_is_noop() {
+    let mut cache = ResourceCache::new(FakeLoader);
+    cache.load("res://exists.tres").unwrap();
+    assert_eq!(cache.len(), 1);
+    cache.invalidate("res://does_not_exist.tres");
+    assert_eq!(
+        cache.len(),
+        1,
+        "invalidating non-existent path should be a no-op"
+    );
+}
+
 /// Different uid:// strings produce different ResourceUids.
 #[test]
 fn different_uid_strings_produce_different_uids() {

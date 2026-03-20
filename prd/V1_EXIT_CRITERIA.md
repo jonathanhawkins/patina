@@ -128,7 +128,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 All subsystems above must reach their individual exit gates **and**:
 
-- Oracle parity ≥ 98% across all supported scene fixtures
+- Oracle parity ≥ 98% across all supported scene fixtures (currently 90.5% — 7/9 scenes at 100%, remaining gaps in physics_playground and test_scripts)
 - Zero known panics in headless mode on the `demo_2d` example
 - CI green on `cargo test --workspace` including golden comparisons
 - `THIRDPARTY_STRATEGY.md` reviewed and up to date before new subsystem imports

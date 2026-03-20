@@ -22,12 +22,18 @@ This document defines the smallest acceptable audio contract for the current Pat
 - Volume (dB) and bus routing by name
 - Position tracking with clamp and wrap semantics
 
+### WAV Decode (`wav.rs`)
+- Parses RIFF/WAV files (fmt + data chunks) into `AudioSampleBuffer` (f32 PCM)
+- Supports 8-bit unsigned, 16-bit signed, 24-bit signed, 32-bit float
+- Mono and stereo layouts; normalizes all formats to `f32`
+- **Note**: Decode-to-buffer only — no real audio output or streaming playback
+
 ## Deferred (Not in Current Scope)
 
 The following are explicitly out of scope until runtime parity exits are met:
 
 - **Actual audio output**: No platform audio backend (WASAPI, CoreAudio, ALSA/PulseAudio)
-- **Audio decoding**: No WAV/OGG/MP3 decoding — streams are time-based stubs
+- **OGG/MP3 decoding**: Only WAV is decoded; OGG and MP3 remain stubs
 - **Effects processing**: No reverb, EQ, compression, or bus effects chain
 - **Spatial audio**: No 2D/3D positional audio or distance attenuation
 - **Audio streaming**: No background file streaming or buffer management

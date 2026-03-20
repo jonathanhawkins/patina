@@ -1,0 +1,17 @@
+[gd_scene format=3 uid="uid://signals_complex_test"]
+
+[node name="SignalRoot" type="Node2D"]
+
+[node name="Emitter" type="Node2D" parent="."]
+
+[node name="RelayA" type="Node2D" parent="."]
+
+[node name="RelayB" type="Node2D" parent="."]
+
+[node name="FinalReceiver" type="Node2D" parent="."]
+
+[node name="Timer" type="Timer" parent="."]
+
+[connection signal="custom_signal" from="Emitter" to="RelayA" method="_on_relay"]
+[connection signal="relayed" from="RelayA" to="RelayB" method="_on_relay"]
+[connection signal="relayed" from="RelayB" to="FinalReceiver" method="_on_final"]

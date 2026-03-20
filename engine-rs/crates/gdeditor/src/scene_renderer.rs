@@ -2732,4 +2732,34 @@ mod tests {
             "RigidBody2D with velocity should render arrow, got {yellow_count} yellow pixels"
         );
     }
+
+    #[test]
+    fn debug_hierarchy_hang_repro() {
+        // Reproduce hierarchy.tscn: Node2D parent with Sprite2D child, wide spread positions
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut player = Node::new("Player", "Node2D");
+        player.set_property("position", Variant::Vector2(Vector2::new(100.0, 200.0)));
+        let player_id = tree.add_child(root, player).unwrap();
+
+        // Try without Sprite first
+        let mut enemy = Node::new("Enemy", "Node2D");
+        enemy.set_property("position", Variant::Vector2(Vector2::new(400.0, 300.0)));
+        tree.add_child(root, enemy).unwrap();
+
+        // This should work fine
+        let fb = render_scene(&tree, None, 256, 256);
+        assert_eq!(fb.width, 256);
+        eprintln!("Part 1 OK - no sprite");
+
+        // Now add Sprite child
+        let sprite = Node::new("Sprite", "Sprite2D");
+        tree.add_child(player_id, sprite).unwrap();
+
+        eprintln!("Part 2 - with sprite, starting render...");
+        let fb = render_scene(&tree, None, 256, 256);
+        assert_eq!(fb.width, 256);
+        eprintln!("Part 2 OK");
+    }
 }

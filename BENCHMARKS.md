@@ -231,11 +231,18 @@ your saved baselines using the regression thresholds defined above.
 
 ## CI Integration
 
-- Benchmark workloads run on dedicated CI hardware (not shared runners) to ensure consistent results.
-- Results are stored in `tools/benchmarks/results/` and committed to the repository.
-- A summary dashboard is generated from the result files.
-- Regressions above the failure threshold block merges to main.
-- Historical trends are tracked to detect gradual degradation.
+Benchmark tests run as part of the standard Tier 3 test suite (`cargo test --workspace`) in the
+`rust` CI job (`.github/workflows/ci.yml`). They are implemented as `#[test]` functions that always
+pass and print timing output to stderr.
+
+- **Hardware**: Shared GitHub Actions runners (ubuntu-latest, macos-latest) — not dedicated hardware.
+- **Timing data**: Printed to stderr only; not committed or stored automatically.
+- **Regressions**: Not automatically enforced in CI — benchmark tests always pass. Thresholds
+  above are guidelines for manual review.
+- **Result storage**: No automated result archiving or dashboard. To establish baselines, run
+  locally and save output manually (see "Running Baselines" section).
+- **Historical tracking**: Not automated; track manually by saving JSON output from
+  `cargo run --example benchmarks`.
 
 ---
 

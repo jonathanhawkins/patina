@@ -483,6 +483,102 @@ return false
     assert_eq!(val, Variant::Bool(true));
 }
 
+// ===========================================================================
+// pat-t1x: GDScript interop parity — match, ternary, string formatting
+// ===========================================================================
+
+/// match statement with literal patterns.
+#[test]
+fn match_with_literal_patterns() {
+    let val = run_val(
+        "\
+var x = 2
+match x:
+    1:
+        return \"one\"
+    2:
+        return \"two\"
+    3:
+        return \"three\"
+return \"unknown\"
+",
+    );
+    assert_eq!(val, Variant::String("two".into()));
+}
+
+/// match with default/wildcard pattern.
+#[test]
+fn match_with_wildcard_pattern() {
+    let val = run_val(
+        "\
+var x = 99
+match x:
+    1:
+        return \"one\"
+    _:
+        return \"default\"
+",
+    );
+    assert_eq!(val, Variant::String("default".into()));
+}
+
+/// match with string patterns.
+#[test]
+fn match_with_string_patterns() {
+    let val = run_val(
+        "\
+var cmd = \"attack\"
+match cmd:
+    \"move\":
+        return 1
+    \"attack\":
+        return 2
+    \"defend\":
+        return 3
+return 0
+",
+    );
+    assert_eq!(val, Variant::Int(2));
+}
+
+/// Ternary (conditional) expression.
+#[test]
+fn ternary_expression_true_branch() {
+    let val = run_val("return 10 if true else 20\n");
+    assert_eq!(val, Variant::Int(10));
+}
+
+#[test]
+fn ternary_expression_false_branch() {
+    let val = run_val("return 10 if false else 20\n");
+    assert_eq!(val, Variant::Int(20));
+}
+
+#[test]
+fn ternary_in_variable_assignment() {
+    let val = run_val(
+        "\
+var x = 5
+var result = \"big\" if x > 3 else \"small\"
+return result
+",
+    );
+    assert_eq!(val, Variant::String("big".into()));
+}
+
+/// String formatting with % operator.
+#[test]
+fn string_format_percent_single() {
+    let val = run_val("return \"Hello %s\" % \"world\"\n");
+    assert_eq!(val, Variant::String("Hello world".into()));
+}
+
+#[test]
+fn string_format_percent_array() {
+    let val = run_val("return \"%s has %s items\" % [\"bag\", \"3\"]\n");
+    assert_eq!(val, Variant::String("bag has 3 items".into()));
+}
+
 #[test]
 fn preload_font_returns_resource() {
     let val = run_val("return preload(\"res://font.ttf\")\n");

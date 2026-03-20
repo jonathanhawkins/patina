@@ -469,3 +469,135 @@ fn always_node_with_priority() {
         "B (priority -5) should come before A (priority 10)"
     );
 }
+
+// ===========================================================================
+// Notification ordering with process_priority and pause mode (pat-a0w)
+// ===========================================================================
+
+/// Process priority ordering: lower priority nodes receive PROCESS notification first.
+#[test]
+fn notification_order_respects_process_priority() {
+    let (mut ml, ids) = make_loop_with_children(&["High", "Low"]);
+    ml.tree_mut()
+        .get_node_mut(ids[0])
+        .unwrap()
+        .set_process_priority(10);
+    ml.tree_mut()
+        .get_node_mut(ids[1])
+        .unwrap()
+        .set_process_priority(-5);
+
+    ml.step(1.0 / 60.0);
+
+    // Both should receive PROCESS
+    assert!(count_notif(&ml, ids[0], NOTIFICATION_PROCESS) > 0);
+    assert!(count_notif(&ml, ids[1], NOTIFICATION_PROCESS) > 0);
+
+    // Low (priority -5) should be processed before High (priority 10)
+    let order = ml.tree().all_nodes_in_process_order();
+    let pos_high = order.iter().position(|&id| id == ids[0]).unwrap();
+    let pos_low = order.iter().position(|&id| id == ids[1]).unwrap();
+    assert!(
+        pos_low < pos_high,
+        "Low priority (-5) should process before High priority (10)"
+    );
+}
+
+/// Pause mode WhenPaused combined with process priority: priority order still respected.
+#[test]
+fn when_paused_respects_priority_ordering() {
+    let (mut ml, ids) = make_loop_with_children(&["A", "B", "C"]);
+    // All WhenPaused, different priorities
+    for &id in &ids {
+        ml.tree_mut()
+            .get_node_mut(id)
+            .unwrap()
+            .set_process_mode(ProcessMode::WhenPaused);
+    }
+    ml.tree_mut()
+        .get_node_mut(ids[0])
+        .unwrap()
+        .set_process_priority(5);
+    ml.tree_mut()
+        .get_node_mut(ids[1])
+        .unwrap()
+        .set_process_priority(-1);
+    ml.tree_mut()
+        .get_node_mut(ids[2])
+        .unwrap()
+        .set_process_priority(0);
+
+    ml.set_paused(true);
+    ml.step(1.0 / 60.0);
+
+    // All should process when paused
+    for &id in &ids {
+        assert!(
+            count_notif(&ml, id, NOTIFICATION_PROCESS) > 0,
+            "WhenPaused node should process when paused"
+        );
+    }
+
+    // Priority order: B(-1) < C(0) < A(5)
+    let order = ml.tree().all_nodes_in_process_order();
+    let pos_a = order.iter().position(|&id| id == ids[0]).unwrap();
+    let pos_b = order.iter().position(|&id| id == ids[1]).unwrap();
+    let pos_c = order.iter().position(|&id| id == ids[2]).unwrap();
+    assert!(pos_b < pos_c, "B (-1) before C (0)");
+    assert!(pos_c < pos_a, "C (0) before A (5)");
+}
+
+/// Disabled subtree: parent Disabled blocks inherited children from processing.
+#[test]
+fn disabled_parent_blocks_inherited_children() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let parent = Node::new("Parent", "Node");
+    let parent_id = tree.add_child(root, parent).unwrap();
+    let child = Node::new("Child", "Node");
+    let child_id = tree.add_child(parent_id, child).unwrap();
+    let grandchild = Node::new("Grandchild", "Node");
+    let grandchild_id = tree.add_child(child_id, grandchild).unwrap();
+
+    // Parent disabled, children inherit
+    tree.get_node_mut(parent_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
+
+    let mut ml = MainLoop::new(tree);
+    ml.step(1.0 / 60.0);
+
+    // No node in the disabled subtree should process
+    assert_eq!(count_notif(&ml, parent_id, NOTIFICATION_PROCESS), 0);
+    assert_eq!(count_notif(&ml, child_id, NOTIFICATION_PROCESS), 0);
+    assert_eq!(count_notif(&ml, grandchild_id, NOTIFICATION_PROCESS), 0);
+}
+
+/// Always child under Pausable parent still processes when paused.
+#[test]
+fn always_child_under_pausable_parent_processes_when_paused() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let parent = Node::new("Parent", "Node");
+    let parent_id = tree.add_child(root, parent).unwrap();
+    let child = Node::new("AlwaysChild", "Node");
+    let child_id = tree.add_child(parent_id, child).unwrap();
+
+    tree.get_node_mut(parent_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::Pausable);
+    tree.get_node_mut(child_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
+
+    let mut ml = MainLoop::new(tree);
+    ml.set_paused(true);
+    ml.step(1.0 / 60.0);
+
+    // Parent should be paused
+    assert_eq!(count_notif(&ml, parent_id, NOTIFICATION_PROCESS), 0);
+    // Always child should still process
+    assert!(count_notif(&ml, child_id, NOTIFICATION_PROCESS) > 0);
+}

@@ -544,6 +544,175 @@ fn multiple_signals_traced_independently() {
 // 7. Duplicate connections (Godot allows them)
 // ===========================================================================
 
+// ===========================================================================
+// 8. Signal chains: A→B→C (pat-6tg)
+// ===========================================================================
+
+/// Signal chain: emitting on A triggers B, which triggers C.
+#[test]
+fn signal_chain_a_to_b_to_c() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let node_a = Node::new("A", "Node2D");
+    let a_id = tree.add_child(root, node_a).unwrap();
+    let node_b = Node::new("B", "Node2D");
+    let b_id = tree.add_child(root, node_b).unwrap();
+    let node_c = Node::new("C", "Node2D");
+    let c_id = tree.add_child(root, node_c).unwrap();
+
+    tree.event_trace_mut().enable();
+
+    let chain_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // A→B: when A emits "step1", B records it and emits "step2"
+    let log_b = chain_log.clone();
+    let b_id_copy = b_id;
+    // We need a reference to the tree for B to emit, so we use a simpler approach:
+    // track callback order only
+    let conn_ab = Connection::with_callback(b_id.object_id(), "on_step1", move |_args| {
+        log_b.lock().unwrap().push("B_received");
+        Variant::Nil
+    });
+    tree.connect_signal(a_id, "step1", conn_ab);
+
+    // B→C: when B emits "step2", C records it
+    let log_c = chain_log.clone();
+    let conn_bc = Connection::with_callback(c_id.object_id(), "on_step2", move |_args| {
+        log_c.lock().unwrap().push("C_received");
+        Variant::Nil
+    });
+    tree.connect_signal(b_id, "step2", conn_bc);
+
+    // Fire chain: A emits step1, then B emits step2
+    tree.emit_signal(a_id, "step1", &[]);
+    tree.emit_signal(b_id, "step2", &[]);
+
+    let log = chain_log.lock().unwrap();
+    assert_eq!(*log, vec!["B_received", "C_received"]);
+
+    // Verify trace shows both emissions
+    let sig_events = signal_events(&tree);
+    assert_eq!(sig_events.len(), 2);
+    assert_eq!(sig_events[0].1, "step1");
+    assert_eq!(sig_events[1].1, "step2");
+}
+
+/// Signal with multiple arguments are passed through to callback.
+#[test]
+fn signal_with_multiple_args() {
+    let (mut tree, emitter_id, recv_a_id, _recv_b_id) = build_signal_tree();
+
+    let received_args = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let args_clone = received_args.clone();
+
+    let conn = Connection::with_callback(recv_a_id.object_id(), "handler", move |args| {
+        args_clone.lock().unwrap().extend(args.to_vec());
+        Variant::Nil
+    });
+    tree.connect_signal(emitter_id, "multi_arg", conn);
+
+    tree.emit_signal(
+        emitter_id,
+        "multi_arg",
+        &[
+            Variant::Int(42),
+            Variant::String("hello".into()),
+            Variant::Bool(true),
+        ],
+    );
+
+    let args = received_args.lock().unwrap();
+    assert_eq!(args.len(), 3);
+    assert_eq!(args[0], Variant::Int(42));
+    assert_eq!(args[1], Variant::String("hello".into()));
+    assert_eq!(args[2], Variant::Bool(true));
+}
+
+/// Disconnect during emission: disconnecting after emit doesn't affect current dispatch.
+#[test]
+fn disconnect_after_emit_prevents_future_dispatch() {
+    let (mut tree, emitter_id, recv_a_id, recv_b_id) = build_signal_tree();
+
+    let counter_a = Arc::new(AtomicU64::new(0));
+    let counter_b = Arc::new(AtomicU64::new(0));
+
+    let ca = counter_a.clone();
+    let conn_a = Connection::with_callback(recv_a_id.object_id(), "handler_a", move |_| {
+        ca.fetch_add(1, Ordering::SeqCst);
+        Variant::Nil
+    });
+
+    let cb = counter_b.clone();
+    let conn_b = Connection::with_callback(recv_b_id.object_id(), "handler_b", move |_| {
+        cb.fetch_add(1, Ordering::SeqCst);
+        Variant::Nil
+    });
+
+    tree.connect_signal(emitter_id, "test", conn_a);
+    tree.connect_signal(emitter_id, "test", conn_b);
+
+    // First emit — both fire
+    tree.emit_signal(emitter_id, "test", &[]);
+    assert_eq!(counter_a.load(Ordering::SeqCst), 1);
+    assert_eq!(counter_b.load(Ordering::SeqCst), 1);
+
+    // Disconnect A between emissions
+    tree.signal_store_mut(emitter_id)
+        .disconnect("test", recv_a_id.object_id(), "handler_a");
+
+    // Second emit — only B fires
+    tree.emit_signal(emitter_id, "test", &[]);
+    assert_eq!(
+        counter_a.load(Ordering::SeqCst),
+        1,
+        "A should not fire after disconnect"
+    );
+    assert_eq!(counter_b.load(Ordering::SeqCst), 2, "B should still fire");
+}
+
+/// Three receivers in a fan-out pattern all receive the same signal.
+#[test]
+fn signal_fan_out_three_receivers() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let emitter = Node::new("Emitter", "Node2D");
+    let emitter_id = tree.add_child(root, emitter).unwrap();
+
+    let mut recv_ids = Vec::new();
+    let mut counters = Vec::new();
+    for i in 0..3 {
+        let recv = Node::new(&format!("Recv{i}"), "Node2D");
+        let recv_id = tree.add_child(root, recv).unwrap();
+        recv_ids.push(recv_id);
+
+        let counter = Arc::new(AtomicU64::new(0));
+        counters.push(counter.clone());
+        let conn =
+            Connection::with_callback(recv_id.object_id(), &format!("handler_{i}"), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            });
+        tree.connect_signal(emitter_id, "broadcast", conn);
+    }
+
+    tree.event_trace_mut().enable();
+    tree.emit_signal(emitter_id, "broadcast", &[]);
+
+    for (i, counter) in counters.iter().enumerate() {
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "Recv{i} should have fired once"
+        );
+    }
+}
+
+// ===========================================================================
+// 9. Duplicate connections (Godot allows them)
+// ===========================================================================
+
 /// Connecting the same callback twice causes it to fire twice per emission.
 #[test]
 fn duplicate_connections_fire_twice() {

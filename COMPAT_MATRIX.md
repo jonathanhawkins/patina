@@ -2,7 +2,7 @@
 
 This document tracks the implementation and compatibility status of each Patina Engine subsystem relative to upstream Godot behavior.
 
-**Last updated**: 2026-03-19 (pat-qv4: measured vs claimed vs deferred split)
+**Last updated**: 2026-03-19 (pat-4ap: audit reconciliation — oracle parity 90.5%, test count 3,200+)
 
 ---
 
@@ -31,17 +31,17 @@ This document tracks the implementation and compatibility status of each Patina 
 | Scene System | `gdscene` | **Measured** | 666 + 11 + 15 + 22 + 32 | 11 | ~90% | `gdscene` units (666), `golden_tests` (11), `instancing_ownership_test` (15), `packed_scene_edge_cases_test` (22), `frame_processing_semantics_test` (32) |
 | GDScript Interop | `gdscript-interop` | **Measured** | 368 + 13 | — | ~85% | `gdscript_interop` units (368), `demo_scenes_test` (13) |
 | Trace Parity | `gdscene` | **Measured** | 10 + 7 + 8 | 16 | — | `trace_parity_test` (10), `multi_scene_trace_parity_test` (7), `frame_trace_test` (8) |
-| Oracle Parity | `gdscene` | **Measured** | 32 + 43 | 11 scenes | 37.4% | `oracle_parity_test` (32), `oracle_regression_test` (43) |
+| Oracle Parity | `gdscene` | **Measured** | 32 + 43 | 9 scenes | 90.5% | `oracle_parity_test` (32), `oracle_regression_test` (43) |
 | 2D Rendering | `gdrender2d` | **Measured** | 84 + 37 + 29 | 9 | Golden-based | `gdrender2d` units (84), `render_pipeline` (37), `render_golden_test` (29) |
 | 2D Physics | `gdphysics2d` | **Measured** | 86 + 54 | 8 | Deterministic | `gdphysics2d` units (86), `physics_integration_test` (54) |
 | Input | `gdplatform` | **Measured** | 120 + 16 + 10 | — | Measured | `gdplatform` units (120), `input_map_loading_test` (16), `input_action_coverage_test` (10) |
 | 2D Vertical Slice | all | **Measured** | 16 | — | End-to-end | `vertical_slice_test` (16): scene→scripts→input→physics→process→render |
-| Audio | `gdaudio` | **Claimed** | 17 | — | N/A | `gdaudio` units (17) — stub behavior only, no Godot parity |
-| Platform / Windowing | `gdplatform` | **Claimed** | 24 | — | N/A | `window_lifecycle_test` (24) — windowing stubs, no Godot parity test |
+| Audio | `gdaudio` | **Claimed** | 17 | — | N/A | Stub — bus routing, playback state, WAV decode implemented. No real audio output. See `engine-rs/crates/gdaudio/AUDIO_MILESTONE.md`. |
+| Platform / Windowing | `gdplatform` | **Claimed** | 24 | — | N/A | Windowing (winit feature-gated), input (complete), timers (complete), OS info (complete), export (stubs). `window_lifecycle_test` (24) — no Godot parity test. Measurement source: `gdplatform` test suite. |
 | Editor | `gdeditor` | **Claimed** | 267 + 24 | — | N/A | `gdeditor` units (267), `editor_test` (24) — maintenance-only, no parity target |
 | 3D Runtime | — | **Deferred** | — | — | N/A | Out of scope for 2D milestone (Phase 6+) |
 
-**Total test count**: ~2,300+ across workspace (665 integration tests + crate unit tests)
+**Total test count**: ~3,200+ across workspace (integration + crate unit tests)
 **Total golden files**: 49 (8 physics, 16 traces, 11 scenes, 5 resources, 9 render)
 
 ---
@@ -61,7 +61,7 @@ This document tracks the implementation and compatibility status of each Patina 
 | Scene System | 746 tests: hierarchy, lifecycle, instancing, packed scenes, frame processing; 11 scene goldens |
 | GDScript Interop | 381 tests: tokenizer, parser, interpreter, built-ins, bindings |
 | Trace Parity | 25 tests against 16 trace goldens (patina vs upstream mock) |
-| Oracle Parity | 75 tests against 11 scene goldens; 37.4% property parity |
+| Oracle Parity | 75 tests against 9 scene goldens; 90.5% property parity |
 | 2D Rendering | 150 tests + 9 render goldens (pixel-level comparison) |
 | 2D Physics | 140 tests + 8 physics goldens (deterministic trace comparison) |
 | Input | 146 tests: input map loading, action coverage, snapshot routing |
@@ -71,8 +71,8 @@ This document tracks the implementation and compatibility status of each Patina 
 
 | Subsystem | What exists | What's missing |
 |-----------|-------------|----------------|
-| Audio | 17 stub tests | No audio playback; no Godot comparison |
-| Platform / Windowing | 24 lifecycle tests | No Godot windowing behavior comparison |
+| Audio | 17 stub tests covering bus routing, playback state machine, and WAV decode | No real audio output; no Godot parity comparison. See `AUDIO_MILESTONE.md`. |
+| Platform / Windowing | 24 lifecycle tests; windowing (winit feature-gated), input (complete), timers (complete), OS info (complete), export (stubs) | No Godot windowing parity test. Measurement source: `gdplatform` test suite (`window_lifecycle_test`). |
 | Editor | 291 tests (units + integration) | Maintenance-only; no parity target |
 
 ### Deferred (not in 2D milestone)
@@ -89,12 +89,13 @@ This document tracks the implementation and compatibility status of each Patina 
 
 ## Oracle Parity Summary
 
-Measured against 9 Godot oracle outputs (147 comparisons, 55 matched = 37.4%):
+Measured against 9 Godot oracle outputs (63 comparisons, 57 matched = 90.5%):
 
-- **Overall**: 37.4% (55/147 property comparisons match)
+- **Overall**: 90.5% (57/63 property comparisons match)
 - **Node structure**: 100% (all nodes present with correct names/classes)
-- **Explicit properties**: ~70% (positions, script vars match)
-- **Default properties**: Fixed but fixtures need regeneration
+- **Explicit properties**: 100% for 7 of 9 scenes (positions, script vars, modulate all match)
+- **Remaining gaps**: `physics_playground` (66.7%) and `test_scripts` (80.0%)
+- **Improvement**: `class_defaults.rs` filtering removes spurious default-property mismatches; bare var sync and `self.position.x` fix closed additional gaps
 
 Test files: `oracle_parity_test.rs` (32 tests), `oracle_regression_test.rs` (43 tests)
 
