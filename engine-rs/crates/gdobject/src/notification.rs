@@ -33,6 +33,7 @@ impl fmt::Display for Notification {
             13 => "READY",
             14 => "PAUSED",
             15 => "UNPAUSED",
+            16 => "CHILD_ORDER_CHANGED",
             17 => "PROCESS",
             18 => "PHYSICS_PROCESS",
             20 => "PARENTED",
@@ -74,6 +75,9 @@ pub const NOTIFICATION_PAUSED: Notification = Notification::new(14);
 
 /// Node has been unpaused.
 pub const NOTIFICATION_UNPAUSED: Notification = Notification::new(15);
+
+/// The order of children within the parent has changed.
+pub const NOTIFICATION_CHILD_ORDER_CHANGED: Notification = Notification::new(16);
 
 /// Called every frame during `_process`.
 pub const NOTIFICATION_PROCESS: Notification = Notification::new(17);
@@ -282,6 +286,10 @@ mod tests {
             "NOTIFICATION_INSTANCED"
         );
         assert_eq!(format!("{}", NOTIFICATION_DRAW), "NOTIFICATION_DRAW");
+        assert_eq!(
+            format!("{}", NOTIFICATION_CHILD_ORDER_CHANGED),
+            "NOTIFICATION_CHILD_ORDER_CHANGED"
+        );
     }
 
     #[test]

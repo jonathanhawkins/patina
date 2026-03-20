@@ -20,21 +20,24 @@
 pub mod class_db;
 pub mod notification;
 pub mod object;
+pub mod ref_counted;
 pub mod signal;
 
 // Re-export the most-used types at the crate root.
 pub use class_db::{
-    class_count, class_exists, clear_for_testing, get_class_info, get_class_info_by_id,
-    inheritance_chain, instantiate, is_parent_class, register_class, ClassInfo, ClassRegistration,
-    MethodInfo, PropertyInfo,
+    class_count, class_exists, class_has_method, clear_for_testing, get_class_info,
+    get_class_info_by_id, inheritance_chain, instantiate, is_parent_class, register_class,
+    ClassInfo, ClassRegistration, MethodInfo, PropertyInfo,
 };
 pub use notification::{
     dispatch_notification_chain, Notification, NotificationHandler, NotificationRecord,
-    NOTIFICATION_DRAW, NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_INSTANCED,
-    NOTIFICATION_INTERNAL_PHYSICS_PROCESS, NOTIFICATION_INTERNAL_PROCESS,
-    NOTIFICATION_MOVED_IN_PARENT, NOTIFICATION_PARENTED, NOTIFICATION_PAUSED,
-    NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_POSTINITIALIZE, NOTIFICATION_PREDELETE,
-    NOTIFICATION_PROCESS, NOTIFICATION_READY, NOTIFICATION_UNPARENTED, NOTIFICATION_UNPAUSED,
+    NOTIFICATION_CHILD_ORDER_CHANGED, NOTIFICATION_DRAW, NOTIFICATION_ENTER_TREE,
+    NOTIFICATION_EXIT_TREE, NOTIFICATION_INSTANCED, NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
+    NOTIFICATION_INTERNAL_PROCESS, NOTIFICATION_MOVED_IN_PARENT, NOTIFICATION_PARENTED,
+    NOTIFICATION_PAUSED, NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_POSTINITIALIZE,
+    NOTIFICATION_PREDELETE, NOTIFICATION_PROCESS, NOTIFICATION_READY, NOTIFICATION_UNPARENTED,
+    NOTIFICATION_UNPAUSED,
 };
 pub use object::{GenericObject, GodotObject, ObjectBase};
+pub use ref_counted::{RefCounted, RefCountedBase};
 pub use signal::{Connection, Signal, SignalEmitter, SignalStore};

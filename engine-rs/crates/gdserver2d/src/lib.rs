@@ -32,7 +32,9 @@ pub use server3d::{
     Viewport3D,
 };
 pub use shader::{
-    parse_uniforms, tokenize_shader, Shader, ShaderKeyword, ShaderMaterial, ShaderToken,
-    ShaderType, ShaderUniform, UniformType,
+    eval_color_expr, eval_float_expr, execute_fragment, parse_fragment_body, parse_uniforms,
+    tokenize_shader, ColorExpr, CompiledShader, FloatExpr, FragmentContext, FragmentInstruction,
+    Shader, ShaderCompiler, ShaderKeyword, ShaderMaterial, ShaderProcessor, ShaderToken,
+    ShaderType, ShaderUniform, UniformType, UvAxis,
 };
 pub use viewport::Viewport;

@@ -67,7 +67,7 @@ impl Neg for Vector2i {
 // ---------------------------------------------------------------------------
 
 /// A 2D vector with `f32` components, matching Godot's `Vector2`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Vector2 {
     /// The X component.
     pub x: f32,
@@ -102,6 +102,11 @@ impl Vector2 {
     /// Returns the length of the vector.
     pub fn length(self) -> f32 {
         self.length_squared().sqrt()
+    }
+
+    /// Returns a vector with each component replaced by its absolute value.
+    pub fn abs(self) -> Self {
+        Self::new(self.x.abs(), self.y.abs())
     }
 
     /// Returns a normalized copy, or `ZERO` if the length is ~0.
@@ -404,6 +409,17 @@ impl Transform2D {
         Vector2::new(
             self.x.x * p.x + self.y.x * p.y + self.origin.x,
             self.x.y * p.x + self.y.y * p.y + self.origin.y,
+        )
+    }
+
+    /// Applies only the basis (rotation + scale) part of this transform to a vector.
+    ///
+    /// Unlike [`xform`](Self::xform), this does **not** add the translation origin.
+    /// Use this for transforming directions, sizes, and offsets rather than positions.
+    pub fn basis_xform(self, v: Vector2) -> Vector2 {
+        Vector2::new(
+            self.x.x * v.x + self.y.x * v.y,
+            self.x.y * v.x + self.y.y * v.y,
         )
     }
 

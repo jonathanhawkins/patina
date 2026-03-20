@@ -6,8 +6,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
-use gdvariant::Variant;
+use gdvariant::{CallableRef, ResourceRef, Variant};
 
 use crate::bindings::{
     MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
@@ -361,6 +362,10 @@ pub struct VarDecl {
     pub default: Option<Expr>,
     /// Annotations on this variable.
     pub annotations: Vec<Annotation>,
+    /// Optional setter function name.
+    pub setter: Option<String>,
+    /// Optional getter function name.
+    pub getter: Option<String>,
 }
 
 /// A GDScript class definition parsed from source.
@@ -380,6 +385,14 @@ pub struct ClassDef {
     pub instance_vars: Vec<VarDecl>,
     /// Exported variables.
     pub exports: Vec<ExportInfo>,
+    /// Property setter function names: property_name → setter_func_name.
+    pub setters: HashMap<String, String>,
+    /// Property getter function names: property_name → getter_func_name.
+    pub getters: HashMap<String, String>,
+    /// Whether this script has `@tool` annotation.
+    pub is_tool: bool,
+    /// Inner class definitions: name → ClassDef.
+    pub inner_classes: HashMap<String, ClassDef>,
 }
 
 /// A live instance of a class.
@@ -633,12 +646,22 @@ impl Interpreter {
                 Ok(None)
             }
 
+            Stmt::Await(expr) => {
+                // Simplified v1: evaluate the expression, warn, return Nil.
+                let _ = self.eval_expr(expr)?;
+                self.output
+                    .push("[warning] await: coroutines not fully supported; yielded expression evaluated synchronously".to_string());
+                Ok(None)
+            }
+
             // Class-level statements are no-ops during normal execution;
             // they are processed by `run_class()`.
             Stmt::Extends { .. }
             | Stmt::ClassNameDecl { .. }
             | Stmt::SignalDecl { .. }
-            | Stmt::EnumDecl { .. } => Ok(None),
+            | Stmt::EnumDecl { .. }
+            | Stmt::InnerClass { .. }
+            | Stmt::AnnotationStmt { .. } => Ok(None),
         }
     }
 
@@ -766,6 +789,16 @@ impl Interpreter {
                 };
 
                 if is_instance_prop {
+                    // Check for setter function (avoid recursion if we're inside the setter)
+                    if let Some(setter_name) = self
+                        .self_instance
+                        .as_ref()
+                        .and_then(|inst| inst.class_def.setters.get(name).cloned())
+                    {
+                        if self.current_function.as_deref() != Some(&setter_name) {
+                            return self.call_user_func(&setter_name, &[final_val]).map(|_| ());
+                        }
+                    }
                     // Write to instance properties (synced back on method return)
                     self.self_instance
                         .as_mut()
@@ -858,6 +891,16 @@ impl Interpreter {
                             self.binary_sub(&cur, &rhs)?
                         }
                     };
+                    // Check for setter function (avoid recursion if inside setter)
+                    if let Some(setter_name) = self
+                        .self_instance
+                        .as_ref()
+                        .and_then(|inst| inst.class_def.setters.get(member).cloned())
+                    {
+                        if self.current_function.as_deref() != Some(&setter_name) {
+                            return self.call_user_func(&setter_name, &[final_val]).map(|_| ());
+                        }
+                    }
                     // Write to instance properties
                     self.self_instance
                         .as_mut()
@@ -1160,6 +1203,13 @@ impl Interpreter {
                     }
                     if let Some(ref inst) = self.self_instance {
                         if let Some(value) = inst.properties.get(name) {
+                            // Check for getter — only call if not already
+                            // inside the getter (avoids infinite recursion).
+                            if let Some(getter_name) = inst.class_def.getters.get(name).cloned() {
+                                if self.current_function.as_deref() != Some(&getter_name) {
+                                    return self.call_user_func(&getter_name, &[]);
+                                }
+                            }
                             return Ok(value.clone());
                         }
                     }
@@ -1228,6 +1278,11 @@ impl Interpreter {
                         if let Some(result) = self.try_builtin(name, &evaluated_args)? {
                             return Ok(result);
                         }
+                        // Check if the name resolves to a Callable variable
+                        if let Ok(Variant::Callable(ref callable)) = self.environment.get(name) {
+                            let callable = callable.clone();
+                            return self.invoke_callable(&callable, &evaluated_args);
+                        }
                         self.call_user_func(name, &evaluated_args)
                     }
                     Expr::MemberAccess { object, member } => {
@@ -1277,6 +1332,12 @@ impl Interpreter {
                 // Handle self.member: try instance properties, then scene_access for Node props
                 if matches!(object.as_ref(), Expr::SelfRef) {
                     if let Some(ref inst) = self.self_instance {
+                        // Check for getter
+                        if let Some(getter_name) = inst.class_def.getters.get(member).cloned() {
+                            if self.current_function.as_deref() != Some(&getter_name) {
+                                return self.call_user_func(&getter_name, &[]);
+                            }
+                        }
                         if let Some(val) = inst.properties.get(member) {
                             return Ok(val.clone());
                         }
@@ -1446,6 +1507,14 @@ impl Interpreter {
                         "get_node() requires scene access".into(),
                     )))
                 }
+            }
+            Expr::Lambda { params, body } => {
+                // Store the body as Arc<Vec<Stmt>> so it can be recovered later.
+                let body_arc: Arc<dyn std::any::Any + Send + Sync> = Arc::new(body.clone());
+                Ok(Variant::Callable(Box::new(CallableRef::Lambda {
+                    params: params.iter().map(|p| p.name.clone()).collect(),
+                    body: body_arc,
+                })))
             }
         }
     }
@@ -1841,7 +1910,37 @@ impl Interpreter {
                         "preload/load takes 1 argument".into(),
                     )));
                 }
-                Ok(Some(args[0].clone()))
+                match &args[0] {
+                    Variant::String(path) => {
+                        // Return a Resource variant with the path and inferred class name
+                        let class_name = if path.ends_with(".tres") || path.ends_with(".res") {
+                            "Resource"
+                        } else if path.ends_with(".tscn") || path.ends_with(".scn") {
+                            "PackedScene"
+                        } else if path.ends_with(".png")
+                            || path.ends_with(".jpg")
+                            || path.ends_with(".svg")
+                        {
+                            "Texture2D"
+                        } else if path.ends_with(".wav") || path.ends_with(".ogg") {
+                            "AudioStream"
+                        } else if path.ends_with(".ttf") || path.ends_with(".otf") {
+                            "Font"
+                        } else if path.ends_with(".gd") {
+                            "GDScript"
+                        } else {
+                            "Resource"
+                        };
+                        Ok(Some(Variant::Resource(Box::new(ResourceRef {
+                            path: path.clone(),
+                            class_name: class_name.to_string(),
+                            properties: HashMap::new(),
+                        }))))
+                    }
+                    // If already a Resource, pass through
+                    Variant::Resource(_) => Ok(Some(args[0].clone())),
+                    _ => Ok(Some(args[0].clone())),
+                }
             }
             "min" => {
                 if args.len() != 2 {
@@ -2209,6 +2308,49 @@ impl Interpreter {
                 };
                 Ok(Some(Variant::Float(result)))
             }
+            "Callable" => {
+                if args.len() == 2 {
+                    // Callable(object, "method_name")
+                    let target_id = match &args[0] {
+                        Variant::ObjectId(oid) => oid.raw(),
+                        Variant::Nil => 0, // self
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "Callable() first argument must be an object or null".into(),
+                            )));
+                        }
+                    };
+                    let method = match &args[1] {
+                        Variant::String(s) => s.clone(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "Callable() second argument must be a string method name".into(),
+                            )));
+                        }
+                    };
+                    Ok(Some(Variant::Callable(Box::new(CallableRef::Method {
+                        target_id,
+                        method,
+                    }))))
+                } else if args.is_empty() {
+                    Ok(Some(Variant::Callable(Box::new(CallableRef::Method {
+                        target_id: 0,
+                        method: String::new(),
+                    }))))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Callable() takes 0 or 2 arguments".into(),
+                    )))
+                }
+            }
+            "is_instance_valid" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "is_instance_valid() takes 1 argument".into(),
+                    )));
+                }
+                Ok(Some(Variant::Bool(!args[0].is_nil())))
+            }
             _ => Ok(None), // Not a built-in
         }
     }
@@ -2327,6 +2469,39 @@ impl Interpreter {
                 };
                 if let Some(ref access) = self.scene_access {
                     Ok(Variant::Bool(access.is_input_key_pressed(key)))
+                } else {
+                    Ok(Variant::Bool(false))
+                }
+            }
+            "get_global_mouse_position" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_global_mouse_position() takes 0 arguments".into(),
+                    )));
+                }
+                if let Some(ref access) = self.scene_access {
+                    let (x, y) = access.get_global_mouse_position();
+                    Ok(Variant::Vector2(gdcore::math::Vector2::new(x, y)))
+                } else {
+                    Ok(Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)))
+                }
+            }
+            "is_mouse_button_pressed" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.is_mouse_button_pressed() takes 1 argument".into(),
+                    )));
+                }
+                let button_index = match &args[0] {
+                    Variant::Int(i) => *i,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.is_mouse_button_pressed() argument must be an integer".into(),
+                        )))
+                    }
+                };
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Bool(access.is_mouse_button_pressed(button_index)))
                 } else {
                     Ok(Variant::Bool(false))
                 }
@@ -2986,10 +3161,112 @@ impl Interpreter {
                     ))),
                 }
             }
+            Variant::Callable(callable_ref) => match method {
+                "call" => self.invoke_callable(callable_ref, args),
+                "callv" => {
+                    // callv takes a single Array argument
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "callv() takes 1 Array argument".into(),
+                        )));
+                    }
+                    let call_args = match &args[0] {
+                        Variant::Array(a) => a.clone(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "callv() argument must be an Array".into(),
+                            )));
+                        }
+                    };
+                    self.invoke_callable(callable_ref, &call_args)
+                }
+                "is_valid" => {
+                    let valid = match &**callable_ref {
+                        CallableRef::Method { method, .. } => !method.is_empty(),
+                        CallableRef::Lambda { .. } => true,
+                    };
+                    Ok(Variant::Bool(valid))
+                }
+                "get_method" => match &**callable_ref {
+                    CallableRef::Method { method, .. } => Ok(Variant::String(method.clone())),
+                    CallableRef::Lambda { .. } => Ok(Variant::String("<lambda>".into())),
+                },
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("Callable.{method}"),
+                ))),
+            },
+            Variant::Resource(res_ref) => match method {
+                "get_path" => Ok(Variant::String(res_ref.path.clone())),
+                "get_class" => Ok(Variant::String(res_ref.class_name.clone())),
+                "get" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Resource.get() takes 1 argument".into(),
+                        )));
+                    }
+                    let key = match &args[0] {
+                        Variant::String(s) => s.clone(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "Resource.get() key must be a string".into(),
+                            )));
+                        }
+                    };
+                    Ok(res_ref
+                        .properties
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or(Variant::Nil))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("Resource.{method}"),
+                ))),
+            },
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot call method on {}",
                 obj.variant_type()
             )))),
+        }
+    }
+
+    /// Invokes a Callable (lambda or method reference).
+    fn invoke_callable(
+        &mut self,
+        callable: &CallableRef,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        match callable {
+            CallableRef::Method { method, .. } => {
+                // Try to call as a user-defined function
+                self.call_user_func(method, args)
+            }
+            CallableRef::Lambda { params, body } => {
+                // Downcast the body back to Vec<Stmt>
+                let body_stmts: &Vec<Stmt> = body.downcast_ref::<Vec<Stmt>>().ok_or_else(|| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError("invalid lambda body".into()))
+                })?;
+                if self.call_depth >= MAX_RECURSION_DEPTH {
+                    return Err(RuntimeError::new(RuntimeErrorKind::MaxRecursionDepth(
+                        MAX_RECURSION_DEPTH,
+                    )));
+                }
+                self.call_depth += 1;
+                self.environment.push_scope();
+                for (i, param) in params.iter().enumerate() {
+                    let val = args.get(i).cloned().unwrap_or(Variant::Nil);
+                    self.environment.define(param.clone(), val);
+                }
+                let mut return_val = Variant::Nil;
+                for stmt in body_stmts {
+                    if let Some(ControlFlow::Return(v)) = self.exec_stmt(stmt)? {
+                        return_val = v.unwrap_or(Variant::Nil);
+                        break;
+                    }
+                }
+                self.environment.pop_scope();
+                self.call_depth -= 1;
+                Ok(return_val)
+            }
         }
     }
 
@@ -3014,6 +3291,10 @@ impl Interpreter {
             methods: HashMap::new(),
             instance_vars: Vec::new(),
             exports: Vec::new(),
+            setters: HashMap::new(),
+            getters: HashMap::new(),
+            is_tool: false,
+            inner_classes: HashMap::new(),
         };
 
         for stmt in &stmts {
@@ -3050,13 +3331,23 @@ impl Interpreter {
                     type_hint,
                     value,
                     annotations,
+                    setter,
+                    getter,
                 } => {
                     let var_decl = VarDecl {
                         name: name.clone(),
                         type_hint: type_hint.clone(),
                         default: value.clone(),
                         annotations: annotations.clone(),
+                        setter: setter.clone(),
+                        getter: getter.clone(),
                     };
+                    if let Some(s) = setter {
+                        class_def.setters.insert(name.clone(), s.clone());
+                    }
+                    if let Some(g) = getter {
+                        class_def.getters.insert(name.clone(), g.clone());
+                    }
                     if annotations.iter().any(|a| a.name == "export") {
                         class_def.exports.push(ExportInfo {
                             name: name.clone(),
@@ -3064,6 +3355,64 @@ impl Interpreter {
                         });
                     }
                     class_def.instance_vars.push(var_decl);
+                }
+                Stmt::AnnotationStmt { annotations } => {
+                    if annotations.iter().any(|a| a.name == "tool") {
+                        class_def.is_tool = true;
+                    }
+                }
+                Stmt::InnerClass { name, body } => {
+                    let mut inner = ClassDef {
+                        name: Some(name.clone()),
+                        parent_class: None,
+                        signals: Vec::new(),
+                        enums: HashMap::new(),
+                        methods: HashMap::new(),
+                        instance_vars: Vec::new(),
+                        exports: Vec::new(),
+                        setters: HashMap::new(),
+                        getters: HashMap::new(),
+                        is_tool: false,
+                        inner_classes: HashMap::new(),
+                    };
+                    for inner_stmt in body {
+                        match inner_stmt {
+                            Stmt::VarDecl {
+                                name,
+                                type_hint,
+                                value,
+                                annotations,
+                                setter,
+                                getter,
+                            } => {
+                                inner.instance_vars.push(VarDecl {
+                                    name: name.clone(),
+                                    type_hint: type_hint.clone(),
+                                    default: value.clone(),
+                                    annotations: annotations.clone(),
+                                    setter: setter.clone(),
+                                    getter: getter.clone(),
+                                });
+                            }
+                            Stmt::FuncDef {
+                                name,
+                                params,
+                                body,
+                                is_static,
+                                ..
+                            } => {
+                                inner.methods.insert(
+                                    name.clone(),
+                                    FuncDef::from_params(params, body, *is_static),
+                                );
+                            }
+                            Stmt::SignalDecl { name, .. } => {
+                                inner.signals.push(name.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    class_def.inner_classes.insert(name.clone(), inner);
                 }
                 _ => {}
             }
@@ -4648,10 +4997,15 @@ var speed = 10
     }
     #[test]
     fn preload_placeholder() {
-        assert_eq!(
-            run_val("return preload(\"res://scene.tscn\")\n"),
-            Variant::String("res://scene.tscn".into())
-        );
+        // preload() now returns a Resource variant with path and inferred class
+        let result = run_val("return preload(\"res://scene.tscn\")\n");
+        match result {
+            Variant::Resource(r) => {
+                assert_eq!(r.path, "res://scene.tscn");
+                assert_eq!(r.class_name, "PackedScene");
+            }
+            other => panic!("expected Resource, got {other:?}"),
+        }
     }
     #[test]
     fn builtin_min_max() {
@@ -6427,5 +6781,196 @@ func _process(delta):
             .call_instance_method(&mut inst, "_process", &[Variant::Float(0.016)])
             .unwrap();
         assert_eq!(inst.properties.get("result"), Some(&Variant::Bool(false)));
+    }
+
+    // -- pat-13d: Typed arrays in classes ------------------------------------
+
+    #[test]
+    fn class_typed_array_var() {
+        let (_, class_def) = run_class("var items: Array[int] = [1, 2, 3]\n");
+        assert_eq!(class_def.instance_vars[0].name, "items");
+        assert_eq!(
+            class_def.instance_vars[0].type_hint.as_deref(),
+            Some("Array[int]")
+        );
+    }
+
+    #[test]
+    fn class_typed_array_var_node() {
+        let (_, class_def) = run_class("var children: Array[Node]\n");
+        assert_eq!(
+            class_def.instance_vars[0].type_hint.as_deref(),
+            Some("Array[Node]")
+        );
+    }
+
+    #[test]
+    fn class_typed_array_export() {
+        let (_, class_def) = run_class("@export\nvar speeds: Array[float] = []\n");
+        assert_eq!(class_def.exports[0].name, "speeds");
+        assert_eq!(
+            class_def.exports[0].type_hint.as_deref(),
+            Some("Array[float]")
+        );
+    }
+
+    #[test]
+    fn class_typed_array_method_param_accepted() {
+        // Typed array params should parse without error in class methods
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class("class_name Sorter\nfunc sort(items: Array[int]):\n    return items\n")
+            .unwrap();
+        assert!(class_def.methods.contains_key("sort"));
+        assert_eq!(class_def.methods["sort"].params, vec!["items"]);
+    }
+
+    #[test]
+    fn typed_array_var_runs() {
+        let mut interp = Interpreter::new();
+        let result = interp
+            .run("var items: Array[int] = [1, 2, 3]\nreturn items[0]\n")
+            .unwrap();
+        assert_eq!(result.return_value, Some(Variant::Int(1)));
+    }
+
+    // -- pat-c13: Inner classes in interpreter --------------------------------
+
+    #[test]
+    fn class_inner_class_parsed() {
+        let (_, class_def) = run_class("class State:\n    var name = \"idle\"\n");
+        assert!(class_def.inner_classes.contains_key("State"));
+        let inner = &class_def.inner_classes["State"];
+        assert_eq!(inner.name.as_deref(), Some("State"));
+        assert_eq!(inner.instance_vars.len(), 1);
+        assert_eq!(inner.instance_vars[0].name, "name");
+    }
+
+    #[test]
+    fn class_inner_class_with_method() {
+        let (_, class_def) =
+            run_class("class Enemy:\n    var hp = 10\n    func get_hp():\n        return hp\n");
+        let inner = &class_def.inner_classes["Enemy"];
+        assert_eq!(inner.instance_vars.len(), 1);
+        assert!(inner.methods.contains_key("get_hp"));
+    }
+
+    #[test]
+    fn class_inner_class_with_signal() {
+        let (_, class_def) = run_class("class EventBus:\n    signal fired\n    var count = 0\n");
+        let inner = &class_def.inner_classes["EventBus"];
+        assert_eq!(inner.signals, vec!["fired"]);
+        assert_eq!(inner.instance_vars.len(), 1);
+    }
+
+    #[test]
+    fn class_multiple_inner_classes() {
+        let src = "\
+class StateA:
+    var x = 1
+class StateB:
+    var y = 2
+";
+        let (_, class_def) = run_class(src);
+        assert_eq!(class_def.inner_classes.len(), 2);
+        assert!(class_def.inner_classes.contains_key("StateA"));
+        assert!(class_def.inner_classes.contains_key("StateB"));
+    }
+
+    #[test]
+    fn class_inner_class_alongside_vars() {
+        let src = "\
+extends Node
+var health = 100
+class State:
+    var name = \"idle\"
+func _ready():
+    pass
+";
+        let (_, class_def) = run_class(src);
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert_eq!(class_def.instance_vars[0].name, "health");
+        assert!(class_def.inner_classes.contains_key("State"));
+        assert!(class_def.methods.contains_key("_ready"));
+    }
+
+    #[test]
+    fn class_inner_class_not_in_instance_vars() {
+        let (_, class_def) = run_class("class Foo:\n    var x = 1\nvar y = 2\n");
+        // Inner class vars should not leak into outer class instance_vars
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert_eq!(class_def.instance_vars[0].name, "y");
+    }
+
+    #[test]
+    fn class_inner_class_is_tool_false() {
+        let (_, class_def) = run_class("class Inner:\n    var x = 1\n");
+        let inner = &class_def.inner_classes["Inner"];
+        assert!(!inner.is_tool);
+    }
+
+    #[test]
+    fn class_inner_class_empty_methods() {
+        let (_, class_def) = run_class("class Empty:\n    pass\n");
+        let inner = &class_def.inner_classes["Empty"];
+        assert!(inner.methods.is_empty());
+        assert!(inner.instance_vars.is_empty());
+    }
+
+    // -- pat-916: @tool scripts in interpreter --------------------------------
+
+    #[test]
+    fn class_tool_script_is_tool_true() {
+        let (_, class_def) = run_class("@tool\nextends Node\n");
+        assert!(class_def.is_tool);
+    }
+
+    #[test]
+    fn class_non_tool_script_is_tool_false() {
+        let (_, class_def) = run_class("extends Node\n");
+        assert!(!class_def.is_tool);
+    }
+
+    #[test]
+    fn class_tool_with_class_name() {
+        let (_, class_def) = run_class("@tool\nextends Node\nclass_name MyTool\n");
+        assert!(class_def.is_tool);
+        assert_eq!(class_def.name.as_deref(), Some("MyTool"));
+        assert_eq!(class_def.parent_class.as_deref(), Some("Node"));
+    }
+
+    #[test]
+    fn class_tool_with_vars_and_methods() {
+        let src = "\
+@tool
+extends Node
+var speed = 10.0
+func _process(delta):
+    pass
+";
+        let (_, class_def) = run_class(src);
+        assert!(class_def.is_tool);
+        assert_eq!(class_def.instance_vars.len(), 1);
+        assert!(class_def.methods.contains_key("_process"));
+    }
+
+    #[test]
+    fn class_tool_does_not_change_runtime() {
+        // @tool scripts should still execute normally
+        let src = "\
+@tool
+extends Node
+var x = 42
+func get_x():
+    return self.x
+";
+        let mut interp = Interpreter::new();
+        let class_def = interp.run_class(src).unwrap();
+        assert!(class_def.is_tool);
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let result = interp
+            .call_instance_method(&mut inst, "get_x", &[])
+            .unwrap();
+        assert_eq!(result, Variant::Int(42));
     }
 }

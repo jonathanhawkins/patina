@@ -66,6 +66,13 @@ pub enum Expr {
     },
     /// `$NodeName` / `$"Path/To/Node"` sugar for get_node.
     GetNode(String),
+    /// A lambda / anonymous function: `func(x): return x + 1`
+    Lambda {
+        /// Parameter names.
+        params: Vec<FuncParam>,
+        /// Function body.
+        body: Vec<Stmt>,
+    },
 }
 
 /// Binary operators.
@@ -152,6 +159,10 @@ pub enum Stmt {
         value: Option<Expr>,
         /// Annotations (e.g. `@export`).
         annotations: Vec<Annotation>,
+        /// Optional setter function name (Godot 4: `set = _set_name`).
+        setter: Option<String>,
+        /// Optional getter function name (Godot 4: `get = _get_name`).
+        getter: Option<String>,
     },
     /// Assignment: `target op value`
     Assignment {
@@ -240,6 +251,20 @@ pub enum Stmt {
     Break,
     /// `continue`
     Continue,
+    /// `await expr` — yields execution until the awaited expression resolves.
+    Await(Expr),
+    /// Inner class definition: `class InnerName:`
+    InnerClass {
+        /// The inner class name.
+        name: String,
+        /// The body statements of the inner class.
+        body: Vec<Stmt>,
+    },
+    /// A standalone annotation statement (e.g. `@tool`).
+    AnnotationStmt {
+        /// The annotations.
+        annotations: Vec<Annotation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -408,6 +433,8 @@ impl Parser {
                 Ok(Stmt::Continue)
             }
             Token::Match => self.parse_match(),
+            Token::Await => self.parse_await(),
+            Token::Class => self.parse_inner_class(),
             _ => self.parse_expr_or_assign(),
         }
     }
@@ -433,7 +460,7 @@ impl Parser {
             annotations.push(Annotation { name });
             self.skip_newlines();
         }
-        // After annotations, expect a var decl or func def
+        // After annotations, expect a var decl, func def, or script-level annotation like @tool
         match self.peek().clone() {
             Token::Var => self.parse_var_decl_with_annotations(annotations),
             Token::Func => {
@@ -442,6 +469,10 @@ impl Parser {
             }
             Token::Static => self.parse_static_func(),
             _ => {
+                // Script-level annotations like @tool: emit as standalone annotation statement
+                if annotations.iter().any(|a| a.name == "tool") {
+                    return Ok(Stmt::AnnotationStmt { annotations });
+                }
                 let ts = self.tokens.get(self.pos);
                 let (token, line, col) = match ts {
                     Some(ts) => (ts.token.to_string(), ts.line, ts.col),
@@ -458,6 +489,19 @@ impl Parser {
         }
     }
 
+    /// Parses a type hint, handling `Array[ElementType]` syntax.
+    fn parse_type_hint(&mut self) -> Result<String, ParseError> {
+        let base = self.eat_ident()?;
+        if base == "Array" && self.check(&Token::LBracket) {
+            self.advance(); // consume `[`
+            let element_type = self.eat_ident()?;
+            self.expect(&Token::RBracket)?;
+            Ok(format!("Array[{element_type}]"))
+        } else {
+            Ok(base)
+        }
+    }
+
     fn parse_var_decl_with_annotations(
         &mut self,
         annotations: Vec<Annotation>,
@@ -466,7 +510,11 @@ impl Parser {
         let name = self.eat_ident()?;
         let type_hint = if self.check(&Token::Colon) {
             self.advance();
-            Some(self.eat_ident()?)
+            // Peek: if next is `set` or `get` immediately, there's no type hint
+            match self.peek() {
+                Token::Ident(n) if n == "set" || n == "get" => None,
+                _ => Some(self.parse_type_hint()?),
+            }
         } else {
             None
         };
@@ -476,12 +524,48 @@ impl Parser {
         } else {
             None
         };
+        // Parse setter/getter: `var x: int = 0: set = _set_x, get = _get_x`
+        // Or after value: `var x = 0: set = _set_x, get = _get_x`
+        let (setter, getter) = if self.check(&Token::Colon) {
+            self.advance();
+            self.parse_setter_getter()?
+        } else {
+            (None, None)
+        };
         Ok(Stmt::VarDecl {
             name,
             type_hint,
             value,
             annotations,
+            setter,
+            getter,
         })
+    }
+
+    /// Parses `set = _setter, get = _getter` in any order.
+    fn parse_setter_getter(&mut self) -> Result<(Option<String>, Option<String>), ParseError> {
+        let mut setter = None;
+        let mut getter = None;
+        loop {
+            match self.peek().clone() {
+                Token::Ident(ref kw) if kw == "set" => {
+                    self.advance();
+                    self.expect(&Token::Assign)?;
+                    setter = Some(self.eat_ident()?);
+                }
+                Token::Ident(ref kw) if kw == "get" => {
+                    self.advance();
+                    self.expect(&Token::Assign)?;
+                    getter = Some(self.eat_ident()?);
+                }
+                _ => break,
+            }
+            if !self.check(&Token::Comma) {
+                break;
+            }
+            self.advance(); // consume comma
+        }
+        Ok((setter, getter))
     }
 
     fn parse_extends(&mut self) -> Result<Stmt, ParseError> {
@@ -563,6 +647,14 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         Ok(Stmt::EnumDecl { name, variants })
+    }
+
+    fn parse_inner_class(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `class`
+        let name = self.eat_ident()?;
+        self.expect(&Token::Colon)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::InnerClass { name, body })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
@@ -657,7 +749,7 @@ impl Parser {
         let name = self.eat_ident()?;
         let type_hint = if self.check(&Token::Colon) {
             self.advance();
-            Some(self.eat_ident()?)
+            Some(self.parse_type_hint()?)
         } else {
             None
         };
@@ -691,7 +783,7 @@ impl Parser {
 
         let return_type = if self.check(&Token::Arrow) {
             self.advance();
-            Some(self.eat_ident()?)
+            Some(self.parse_type_hint()?)
         } else {
             None
         };
@@ -816,6 +908,12 @@ impl Parser {
                 })
             }
         }
+    }
+
+    fn parse_await(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `await`
+        let expr = self.parse_expr()?;
+        Ok(Stmt::Await(expr))
     }
 
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, ParseError> {
@@ -1067,6 +1165,35 @@ impl Parser {
             Token::Ident(name) => {
                 self.advance();
                 Ok(Expr::Ident(name))
+            }
+            Token::Func => {
+                // Lambda / anonymous function: `func(x, y): return x + y`
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let mut params = Vec::new();
+                if !self.check(&Token::RParen) {
+                    params.push(self.parse_func_param()?);
+                    while self.check(&Token::Comma) {
+                        self.advance();
+                        params.push(self.parse_func_param()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                self.expect(&Token::Colon)?;
+                // Lambda body: either a single-line statement or a block
+                let body = if self.check(&Token::Newline) || self.check(&Token::Indent) {
+                    self.parse_block()?
+                } else if self.check(&Token::Return) {
+                    // Single-line: `func(x): return x + 1`
+                    self.advance(); // consume `return`
+                    let expr = self.parse_expr()?;
+                    vec![Stmt::Return(Some(expr))]
+                } else {
+                    // Single expression body (implicit return)
+                    let expr = self.parse_expr()?;
+                    vec![Stmt::Return(Some(expr))]
+                };
+                Ok(Expr::Lambda { params, body })
             }
             Token::Self_ => {
                 self.advance();
@@ -2133,6 +2260,269 @@ mod tests {
             assert_eq!(params[2].type_hint.as_deref(), Some("String"));
         } else {
             panic!("expected FuncDef");
+        }
+    }
+
+    // -- pat-13d: Typed arrays -----------------------------------------------
+
+    #[test]
+    fn parse_typed_array_var_int() {
+        let stmts = parse("var items: Array[int] = [1, 2, 3]\n");
+        if let Stmt::VarDecl {
+            name,
+            type_hint,
+            value,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "items");
+            assert_eq!(type_hint.as_deref(), Some("Array[int]"));
+            assert!(value.is_some());
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_typed_array_var_vector2() {
+        let stmts = parse("var points: Array[Vector2]\n");
+        if let Stmt::VarDecl {
+            name, type_hint, ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "points");
+            assert_eq!(type_hint.as_deref(), Some("Array[Vector2]"));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_typed_array_var_node() {
+        let stmts = parse("var nodes: Array[Node] = []\n");
+        if let Stmt::VarDecl {
+            name, type_hint, ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "nodes");
+            assert_eq!(type_hint.as_deref(), Some("Array[Node]"));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_typed_array_var_string() {
+        let stmts = parse("var names: Array[String] = [\"a\", \"b\"]\n");
+        if let Stmt::VarDecl {
+            name, type_hint, ..
+        } = &stmts[0]
+        {
+            assert_eq!(name, "names");
+            assert_eq!(type_hint.as_deref(), Some("Array[String]"));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    #[test]
+    fn parse_typed_array_func_param() {
+        let stmts = parse("func foo(items: Array[int]):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].name, "items");
+            assert_eq!(params[0].type_hint.as_deref(), Some("Array[int]"));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_typed_array_func_param_with_default() {
+        let stmts = parse("func foo(items: Array[float] = []):\n    pass\n");
+        if let Stmt::FuncDef { params, .. } = &stmts[0] {
+            assert_eq!(params[0].type_hint.as_deref(), Some("Array[float]"));
+            assert!(params[0].default.is_some());
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_typed_array_return_type() {
+        let stmts = parse("func get_items() -> Array[int]:\n    pass\n");
+        if let Stmt::FuncDef { return_type, .. } = &stmts[0] {
+            assert_eq!(return_type.as_deref(), Some("Array[int]"));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_typed_array_multiple_params() {
+        let stmts = parse("func merge(a: Array[int], b: Array[int]) -> Array[int]:\n    pass\n");
+        if let Stmt::FuncDef {
+            params,
+            return_type,
+            ..
+        } = &stmts[0]
+        {
+            assert_eq!(params[0].type_hint.as_deref(), Some("Array[int]"));
+            assert_eq!(params[1].type_hint.as_deref(), Some("Array[int]"));
+            assert_eq!(return_type.as_deref(), Some("Array[int]"));
+        } else {
+            panic!("expected FuncDef");
+        }
+    }
+
+    #[test]
+    fn parse_plain_array_type_still_works() {
+        // Plain `Array` without element type should still parse
+        let stmts = parse("var items: Array\n");
+        if let Stmt::VarDecl { type_hint, .. } = &stmts[0] {
+            assert_eq!(type_hint.as_deref(), Some("Array"));
+        } else {
+            panic!("expected VarDecl");
+        }
+    }
+
+    // -- pat-c13: Inner classes -----------------------------------------------
+
+    #[test]
+    fn parse_inner_class_simple() {
+        let stmts = parse("class State:\n    var name = \"idle\"\n");
+        if let Stmt::InnerClass { name, body } = &stmts[0] {
+            assert_eq!(name, "State");
+            assert_eq!(body.len(), 1);
+            assert!(matches!(&body[0], Stmt::VarDecl { name, .. } if name == "name"));
+        } else {
+            panic!("expected InnerClass, got {:?}", stmts[0]);
+        }
+    }
+
+    #[test]
+    fn parse_inner_class_with_method() {
+        let stmts =
+            parse("class Enemy:\n    var hp = 10\n    func take_damage(d):\n        hp = hp - d\n");
+        if let Stmt::InnerClass { name, body } = &stmts[0] {
+            assert_eq!(name, "Enemy");
+            assert_eq!(body.len(), 2);
+            assert!(matches!(&body[0], Stmt::VarDecl { .. }));
+            assert!(matches!(&body[1], Stmt::FuncDef { .. }));
+        } else {
+            panic!("expected InnerClass");
+        }
+    }
+
+    #[test]
+    fn parse_inner_class_empty_pass() {
+        let stmts = parse("class Empty:\n    pass\n");
+        if let Stmt::InnerClass { name, body } = &stmts[0] {
+            assert_eq!(name, "Empty");
+            assert_eq!(body.len(), 1);
+            assert!(matches!(&body[0], Stmt::Pass));
+        } else {
+            panic!("expected InnerClass");
+        }
+    }
+
+    #[test]
+    fn parse_inner_class_multiple_vars() {
+        let stmts = parse("class Data:\n    var x = 0\n    var y = 0\n    var z = 0\n");
+        if let Stmt::InnerClass { name, body } = &stmts[0] {
+            assert_eq!(name, "Data");
+            assert_eq!(body.len(), 3);
+        } else {
+            panic!("expected InnerClass");
+        }
+    }
+
+    #[test]
+    fn parse_inner_class_in_script() {
+        let stmts =
+            parse("extends Node\nclass State:\n    var name = \"idle\"\nvar current = null\n");
+        assert!(matches!(&stmts[0], Stmt::Extends { .. }));
+        assert!(matches!(&stmts[1], Stmt::InnerClass { name, .. } if name == "State"));
+        assert!(matches!(&stmts[2], Stmt::VarDecl { .. }));
+    }
+
+    #[test]
+    fn parse_two_inner_classes() {
+        let stmts = parse("class A:\n    var x = 1\nclass B:\n    var y = 2\n");
+        assert!(matches!(&stmts[0], Stmt::InnerClass { name, .. } if name == "A"));
+        assert!(matches!(&stmts[1], Stmt::InnerClass { name, .. } if name == "B"));
+    }
+
+    #[test]
+    fn parse_inner_class_with_typed_var() {
+        let stmts = parse("class Config:\n    var speed: float = 100.0\n");
+        if let Stmt::InnerClass { body, .. } = &stmts[0] {
+            if let Stmt::VarDecl { type_hint, .. } = &body[0] {
+                assert_eq!(type_hint.as_deref(), Some("float"));
+            } else {
+                panic!("expected VarDecl");
+            }
+        } else {
+            panic!("expected InnerClass");
+        }
+    }
+
+    #[test]
+    fn parse_inner_class_with_signal() {
+        let stmts = parse("class EventBus:\n    signal fired\n    var count = 0\n");
+        if let Stmt::InnerClass { name, body } = &stmts[0] {
+            assert_eq!(name, "EventBus");
+            assert!(matches!(&body[0], Stmt::SignalDecl { name, .. } if name == "fired"));
+            assert!(matches!(&body[1], Stmt::VarDecl { .. }));
+        } else {
+            panic!("expected InnerClass");
+        }
+    }
+
+    // -- pat-916: @tool annotation --------------------------------------------
+
+    #[test]
+    fn parse_tool_annotation() {
+        let stmts = parse("@tool\nextends Node\n");
+        assert!(
+            matches!(&stmts[0], Stmt::AnnotationStmt { annotations } if annotations.iter().any(|a| a.name == "tool"))
+        );
+        assert!(matches!(&stmts[1], Stmt::Extends { .. }));
+    }
+
+    #[test]
+    fn parse_tool_annotation_with_class_name() {
+        let stmts = parse("@tool\nextends Node\nclass_name MyTool\n");
+        assert!(
+            matches!(&stmts[0], Stmt::AnnotationStmt { annotations } if annotations[0].name == "tool")
+        );
+        assert!(matches!(&stmts[1], Stmt::Extends { .. }));
+        assert!(matches!(&stmts[2], Stmt::ClassNameDecl { .. }));
+    }
+
+    #[test]
+    fn parse_no_tool_annotation() {
+        let stmts = parse("extends Node\n");
+        assert!(matches!(&stmts[0], Stmt::Extends { .. }));
+        // No @tool annotation stmt present
+        assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
+    fn parse_tool_with_var_and_func() {
+        let stmts = parse("@tool\nextends Node\nvar x = 1\nfunc _ready():\n    pass\n");
+        assert!(matches!(&stmts[0], Stmt::AnnotationStmt { .. }));
+        assert_eq!(stmts.len(), 4);
+    }
+
+    #[test]
+    fn parse_tool_annotation_name_is_tool() {
+        let stmts = parse("@tool\nextends Node\n");
+        if let Stmt::AnnotationStmt { annotations } = &stmts[0] {
+            assert_eq!(annotations.len(), 1);
+            assert_eq!(annotations[0].name, "tool");
+        } else {
+            panic!("expected AnnotationStmt");
         }
     }
 }

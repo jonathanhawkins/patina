@@ -347,8 +347,10 @@ fn rotation_90_moves_rect_position() {
     vp.add_canvas_item(item);
 
     let fb = capture_frame(&mut renderer, &vp);
-    // After rotation+translation, the rect position (5,0) maps to (10,5).
-    assert_eq!(fb.get_pixel(10, 5), Color::rgb(0.0, 1.0, 0.0));
+    // After 90° rotation + translate(10,0), the rect corners map to:
+    //   (5,0) -> (10,5), (8,0) -> (10,8), (5,3) -> (7,5), (8,3) -> (7,8)
+    // AABB: (7,5) to (10,8). Pixel (8,6) should be inside.
+    assert_eq!(fb.get_pixel(8, 6), Color::rgb(0.0, 1.0, 0.0));
 }
 
 #[test]

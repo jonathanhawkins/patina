@@ -1,0 +1,95 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_space_shooter",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "Background",
+          "path": "/root/SpaceShooter/Background",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [
+                0.0,
+                0.0
+              ]
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "Player",
+          "path": "/root/SpaceShooter/Player",
+          "properties": {
+            "_script_path": {
+              "type": "String",
+              "value": "res://scripts/player.gd"
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                320.0,
+                400.0
+              ]
+            },
+            "script": {
+              "type": "String",
+              "value": "ExtResource(\"1_player\")"
+            },
+            "speed": {
+              "type": "Int",
+              "value": 200
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "EnemySpawner",
+          "path": "/root/SpaceShooter/EnemySpawner",
+          "properties": {
+            "_script_path": {
+              "type": "String",
+              "value": "res://scripts/enemy_spawner.gd"
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                320.0,
+                0.0
+              ]
+            },
+            "script": {
+              "type": "String",
+              "value": "ExtResource(\"2_spawner\")"
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "ScoreLabel",
+          "path": "/root/SpaceShooter/ScoreLabel",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [
+                10.0,
+                10.0
+              ]
+            }
+          }
+        }
+      ],
+      "class": "Node2D",
+      "name": "SpaceShooter",
+      "path": "/root/SpaceShooter",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "pending"
+}

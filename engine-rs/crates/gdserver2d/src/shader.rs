@@ -208,6 +208,482 @@ impl ShaderMaterial {
 }
 
 // ---------------------------------------------------------------------------
+// Shader compiler and processor
+// ---------------------------------------------------------------------------
+
+/// A compiled shader program ready for execution.
+///
+/// Stores the parsed uniforms and the shader "program" (currently the source
+/// string — a future implementation would hold bytecode or an IR).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledShader {
+    /// The shader pipeline stage.
+    pub shader_type: ShaderType,
+    /// Parsed uniform declarations.
+    pub uniforms: Vec<ShaderUniform>,
+    /// The compiled program representation (currently just the source).
+    pub program: String,
+}
+
+impl CompiledShader {
+    /// Returns the number of uniforms in this shader.
+    pub fn uniform_count(&self) -> usize {
+        self.uniforms.len()
+    }
+
+    /// Looks up a uniform by name.
+    pub fn get_uniform(&self, name: &str) -> Option<&ShaderUniform> {
+        self.uniforms.iter().find(|u| u.name == name)
+    }
+}
+
+/// Compiles shader source into a [`CompiledShader`].
+///
+/// Currently this parses uniforms and stores the source as the "program".
+/// A future implementation would produce bytecode or an intermediate representation.
+#[derive(Debug, Default)]
+pub struct ShaderCompiler;
+
+impl ShaderCompiler {
+    /// Creates a new shader compiler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Compiles shader source into a [`CompiledShader`].
+    pub fn compile(&self, shader_type: ShaderType, source: &str) -> CompiledShader {
+        let uniforms = parse_uniforms(source);
+        CompiledShader {
+            shader_type,
+            uniforms,
+            program: source.to_string(),
+        }
+    }
+}
+
+/// Evaluates compiled shaders against pixel data.
+///
+/// Currently supports a minimal evaluation model: if the shader has an
+/// `albedo_color` uniform and a matching value is provided, that color is
+/// returned. Otherwise the input pixel color is passed through unchanged.
+#[derive(Debug, Default)]
+pub struct ShaderProcessor;
+
+impl ShaderProcessor {
+    /// Creates a new shader processor.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Applies a compiled shader to a single pixel.
+    ///
+    /// `uniforms` maps uniform names to runtime values.
+    /// `pixel` is the current fragment color.
+    ///
+    /// Returns the output color after "executing" the shader.
+    pub fn apply_shader(
+        &self,
+        shader: &CompiledShader,
+        uniforms: &HashMap<String, Variant>,
+        pixel: gdcore::math::Color,
+    ) -> gdcore::math::Color {
+        // Check for albedo_color uniform override.
+        if let Some(Variant::Color(c)) = uniforms.get("albedo_color") {
+            return *c;
+        }
+        // Check for color_override uniform.
+        if let Some(Variant::Color(c)) = uniforms.get("color_override") {
+            return *c;
+        }
+        // Check shader's own default albedo_color.
+        if let Some(u) = shader.get_uniform("albedo_color") {
+            if let Variant::Color(c) = &u.default_value {
+                return *c;
+            }
+        }
+        // Passthrough: return the input pixel unchanged.
+        pixel
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fragment function parsing and execution
+// ---------------------------------------------------------------------------
+
+/// Built-in variables available to a fragment shader during execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FragmentContext {
+    /// The current fragment color (Godot's `COLOR` built-in).
+    pub color: gdcore::math::Color,
+    /// Normalised UV coordinate of the current fragment (0..1).
+    pub uv: (f32, f32),
+    /// Normalised screen-space UV (0..1).
+    pub screen_uv: (f32, f32),
+    /// Time elapsed in seconds (for animated shaders).
+    pub time: f32,
+}
+
+impl Default for FragmentContext {
+    fn default() -> Self {
+        Self {
+            color: gdcore::math::Color::WHITE,
+            uv: (0.0, 0.0),
+            screen_uv: (0.0, 0.0),
+            time: 0.0,
+        }
+    }
+}
+
+/// A simple instruction extracted from a Godot shader fragment body.
+///
+/// This is not a full AST — it captures the most common Godot shader
+/// patterns so the software fallback can evaluate them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FragmentInstruction {
+    /// `COLOR = <expr>` — sets the output color.
+    SetColor(ColorExpr),
+    /// `COLOR.rgb = <expr>` — sets only the RGB channels.
+    SetColorRgb(ColorExpr),
+    /// `COLOR.a = <expr>` — sets only the alpha channel.
+    SetColorAlpha(FloatExpr),
+    /// `COLOR.rgb *= <float>` — multiplies RGB by a scalar.
+    MultiplyColorRgb(FloatExpr),
+    /// `COLOR *= <float>` — multiplies all channels by a scalar.
+    MultiplyColor(FloatExpr),
+}
+
+/// An expression that evaluates to a color value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColorExpr {
+    /// A `vec4(r, g, b, a)` literal.
+    Literal(f32, f32, f32, f32),
+    /// A `vec4(v)` shorthand (all components the same).
+    Splat(f32),
+    /// Reference to a uniform by name.
+    Uniform(String),
+    /// The built-in `COLOR` variable (passthrough).
+    BuiltinColor,
+    /// `mix(a, b, t)` — linear interpolation of two colors.
+    Mix(Box<ColorExpr>, Box<ColorExpr>, FloatExpr),
+}
+
+/// An expression that evaluates to a float value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FloatExpr {
+    /// A literal float.
+    Literal(f32),
+    /// A reference to a uniform.
+    Uniform(String),
+    /// The built-in `TIME` variable.
+    BuiltinTime,
+    /// `UV.x` or `UV.y`.
+    UvComponent(UvAxis),
+    /// `sin(expr)`.
+    Sin(Box<FloatExpr>),
+}
+
+/// Which component of UV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UvAxis {
+    X,
+    Y,
+}
+
+/// Parses a Godot shader's `fragment()` function body into instructions.
+///
+/// Returns an empty vec if no `fragment()` body is found or if the body
+/// contains constructs beyond what this parser supports.
+pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
+    let mut instructions = Vec::new();
+
+    // Find fragment() body.
+    let body = match extract_function_body(source, "fragment") {
+        Some(b) => b,
+        None => return instructions,
+    };
+
+    // Parse statements line-by-line (simplified).
+    for line in body.lines() {
+        let trimmed = line.trim().trim_end_matches(';').trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+
+        if let Some(inst) = parse_fragment_statement(trimmed) {
+            instructions.push(inst);
+        }
+    }
+
+    instructions
+}
+
+/// Extracts the body of a named function from shader source.
+fn extract_function_body<'a>(source: &'a str, func_name: &str) -> Option<&'a str> {
+    let pattern = format!("{func_name}(");
+    let func_pos = source.find(&pattern)?;
+
+    // Find the opening brace.
+    let after_sig = &source[func_pos..];
+    let brace_pos = after_sig.find('{')?;
+    let body_start = func_pos + brace_pos + 1;
+
+    // Find matching closing brace.
+    let mut depth = 1;
+    let mut end = body_start;
+    for ch in source[body_start..].chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&source[body_start..end]);
+                }
+            }
+            _ => {}
+        }
+        end += ch.len_utf8();
+    }
+    None
+}
+
+/// Parses a single fragment statement.
+fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
+    // COLOR.a = <expr>
+    if let Some(rest) = s.strip_prefix("COLOR.a") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix('=') {
+            let val = val.trim();
+            return Some(FragmentInstruction::SetColorAlpha(parse_float_expr(val)));
+        }
+    }
+
+    // COLOR.rgb *= <expr>
+    if let Some(rest) = s.strip_prefix("COLOR.rgb") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix("*=") {
+            let val = val.trim();
+            return Some(FragmentInstruction::MultiplyColorRgb(parse_float_expr(val)));
+        }
+        if let Some(val) = rest.strip_prefix('=') {
+            let val = val.trim();
+            return Some(FragmentInstruction::SetColorRgb(parse_color_expr(val)));
+        }
+    }
+
+    // COLOR *= <expr>
+    if let Some(rest) = s.strip_prefix("COLOR") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix("*=") {
+            let val = val.trim();
+            return Some(FragmentInstruction::MultiplyColor(parse_float_expr(val)));
+        }
+        if let Some(val) = rest.strip_prefix('=') {
+            let val = val.trim();
+            return Some(FragmentInstruction::SetColor(parse_color_expr(val)));
+        }
+    }
+
+    None
+}
+
+/// Parses a color expression from source text.
+fn parse_color_expr(s: &str) -> ColorExpr {
+    let s = s.trim();
+
+    // vec4(r, g, b, a) or vec4(v)
+    if let Some(inner) = strip_func_call(s, "vec4") {
+        let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+        if parts.len() == 4 {
+            if let (Ok(r), Ok(g), Ok(b), Ok(a)) = (
+                parts[0].parse::<f32>(),
+                parts[1].parse::<f32>(),
+                parts[2].parse::<f32>(),
+                parts[3].parse::<f32>(),
+            ) {
+                return ColorExpr::Literal(r, g, b, a);
+            }
+        } else if parts.len() == 1 {
+            if let Ok(v) = parts[0].parse::<f32>() {
+                return ColorExpr::Splat(v);
+            }
+        }
+    }
+
+    // mix(a, b, t)
+    if let Some(inner) = strip_func_call(s, "mix") {
+        let parts = split_top_level_commas(inner);
+        if parts.len() == 3 {
+            let a = parse_color_expr(parts[0]);
+            let b = parse_color_expr(parts[1]);
+            let t = parse_float_expr(parts[2]);
+            return ColorExpr::Mix(Box::new(a), Box::new(b), t);
+        }
+    }
+
+    if s == "COLOR" {
+        return ColorExpr::BuiltinColor;
+    }
+
+    // Uniform reference.
+    if s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return ColorExpr::Uniform(s.to_string());
+    }
+
+    ColorExpr::BuiltinColor
+}
+
+/// Parses a float expression.
+fn parse_float_expr(s: &str) -> FloatExpr {
+    let s = s.trim();
+
+    if let Ok(v) = s.parse::<f32>() {
+        return FloatExpr::Literal(v);
+    }
+
+    if s == "TIME" {
+        return FloatExpr::BuiltinTime;
+    }
+
+    if s == "UV.x" {
+        return FloatExpr::UvComponent(UvAxis::X);
+    }
+    if s == "UV.y" {
+        return FloatExpr::UvComponent(UvAxis::Y);
+    }
+
+    if let Some(inner) = strip_func_call(s, "sin") {
+        return FloatExpr::Sin(Box::new(parse_float_expr(inner)));
+    }
+
+    if s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return FloatExpr::Uniform(s.to_string());
+    }
+
+    FloatExpr::Literal(0.0)
+}
+
+/// Strips a function call wrapper like `func(inner)` and returns `inner`.
+fn strip_func_call<'a>(s: &'a str, func: &str) -> Option<&'a str> {
+    let prefix = format!("{func}(");
+    if s.starts_with(&prefix) && s.ends_with(')') {
+        Some(&s[prefix.len()..s.len() - 1])
+    } else {
+        None
+    }
+}
+
+/// Splits a string by commas, but only at the top level (respecting parentheses).
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Evaluates a float expression against a fragment context and uniforms.
+pub fn eval_float_expr(
+    expr: &FloatExpr,
+    ctx: &FragmentContext,
+    uniforms: &HashMap<String, Variant>,
+) -> f32 {
+    match expr {
+        FloatExpr::Literal(v) => *v,
+        FloatExpr::BuiltinTime => ctx.time,
+        FloatExpr::UvComponent(UvAxis::X) => ctx.uv.0,
+        FloatExpr::UvComponent(UvAxis::Y) => ctx.uv.1,
+        FloatExpr::Uniform(name) => match uniforms.get(name) {
+            Some(Variant::Float(f)) => *f as f32,
+            Some(Variant::Int(i)) => *i as f32,
+            _ => 0.0,
+        },
+        FloatExpr::Sin(inner) => eval_float_expr(inner, ctx, uniforms).sin(),
+    }
+}
+
+/// Evaluates a color expression against a fragment context and uniforms.
+pub fn eval_color_expr(
+    expr: &ColorExpr,
+    ctx: &FragmentContext,
+    uniforms: &HashMap<String, Variant>,
+) -> gdcore::math::Color {
+    match expr {
+        ColorExpr::Literal(r, g, b, a) => gdcore::math::Color::new(*r, *g, *b, *a),
+        ColorExpr::Splat(v) => gdcore::math::Color::new(*v, *v, *v, *v),
+        ColorExpr::BuiltinColor => ctx.color,
+        ColorExpr::Uniform(name) => match uniforms.get(name) {
+            Some(Variant::Color(c)) => *c,
+            _ => ctx.color,
+        },
+        ColorExpr::Mix(a, b, t) => {
+            let ca = eval_color_expr(a, ctx, uniforms);
+            let cb = eval_color_expr(b, ctx, uniforms);
+            let t = eval_float_expr(t, ctx, uniforms).clamp(0.0, 1.0);
+            gdcore::math::Color::new(
+                ca.r * (1.0 - t) + cb.r * t,
+                ca.g * (1.0 - t) + cb.g * t,
+                ca.b * (1.0 - t) + cb.b * t,
+                ca.a * (1.0 - t) + cb.a * t,
+            )
+        }
+    }
+}
+
+/// Executes parsed fragment instructions against a context.
+///
+/// Returns the resulting output color.
+pub fn execute_fragment(
+    instructions: &[FragmentInstruction],
+    ctx: &FragmentContext,
+    uniforms: &HashMap<String, Variant>,
+) -> gdcore::math::Color {
+    let mut color = ctx.color;
+
+    for inst in instructions {
+        match inst {
+            FragmentInstruction::SetColor(expr) => {
+                color = eval_color_expr(expr, ctx, uniforms);
+            }
+            FragmentInstruction::SetColorRgb(expr) => {
+                let c = eval_color_expr(expr, ctx, uniforms);
+                color.r = c.r;
+                color.g = c.g;
+                color.b = c.b;
+            }
+            FragmentInstruction::SetColorAlpha(expr) => {
+                color.a = eval_float_expr(expr, ctx, uniforms);
+            }
+            FragmentInstruction::MultiplyColorRgb(expr) => {
+                let f = eval_float_expr(expr, ctx, uniforms);
+                color.r *= f;
+                color.g *= f;
+                color.b *= f;
+            }
+            FragmentInstruction::MultiplyColor(expr) => {
+                let f = eval_float_expr(expr, ctx, uniforms);
+                color.r *= f;
+                color.g *= f;
+                color.b *= f;
+                color.a *= f;
+            }
+        }
+    }
+
+    color
+}
+
+// ---------------------------------------------------------------------------
 // Basic shader-language tokenizer
 // ---------------------------------------------------------------------------
 
@@ -524,6 +1000,98 @@ uniform bool enabled = true;
         assert_eq!(tokens[1], ShaderToken::Identifier("fragment".to_string()));
     }
 
+    // -- ShaderCompiler tests -----------------------------------------------
+
+    #[test]
+    fn compiler_compiles_source() {
+        let compiler = ShaderCompiler::new();
+        let src = "uniform float speed = 2.0;\nvoid fragment() {}";
+        let compiled = compiler.compile(ShaderType::CanvasItem, src);
+        assert_eq!(compiled.shader_type, ShaderType::CanvasItem);
+        assert_eq!(compiled.program, src);
+        assert_eq!(compiled.uniform_count(), 1);
+        assert!(compiled.get_uniform("speed").is_some());
+    }
+
+    #[test]
+    fn compiler_no_uniforms() {
+        let compiler = ShaderCompiler::new();
+        let compiled = compiler.compile(ShaderType::Spatial, "void fragment() {}");
+        assert_eq!(compiled.uniform_count(), 0);
+        assert!(compiled.get_uniform("anything").is_none());
+    }
+
+    #[test]
+    fn compiler_multiple_uniforms() {
+        let compiler = ShaderCompiler::new();
+        let src = "uniform float a;\nuniform int b;\nuniform vec4 c;";
+        let compiled = compiler.compile(ShaderType::CanvasItem, src);
+        assert_eq!(compiled.uniform_count(), 3);
+        assert!(compiled.get_uniform("a").is_some());
+        assert!(compiled.get_uniform("b").is_some());
+        assert!(compiled.get_uniform("c").is_some());
+    }
+
+    // -- ShaderProcessor tests ----------------------------------------------
+
+    #[test]
+    fn processor_passthrough_no_uniforms() {
+        let compiler = ShaderCompiler::new();
+        let processor = ShaderProcessor::new();
+        let compiled = compiler.compile(ShaderType::CanvasItem, "void fragment() {}");
+        let pixel = gdcore::math::Color::rgb(0.5, 0.3, 0.1);
+        let result = processor.apply_shader(&compiled, &HashMap::new(), pixel);
+        assert_eq!(result, pixel);
+    }
+
+    #[test]
+    fn processor_albedo_color_override() {
+        let compiler = ShaderCompiler::new();
+        let processor = ShaderProcessor::new();
+        let compiled = compiler.compile(ShaderType::CanvasItem, "uniform vec4 albedo_color;");
+        let red = gdcore::math::Color::rgb(1.0, 0.0, 0.0);
+        let mut uniforms = HashMap::new();
+        uniforms.insert("albedo_color".to_string(), Variant::Color(red));
+        let result = processor.apply_shader(&compiled, &uniforms, gdcore::math::Color::BLACK);
+        assert_eq!(result, red);
+    }
+
+    #[test]
+    fn processor_color_override_uniform() {
+        let compiler = ShaderCompiler::new();
+        let processor = ShaderProcessor::new();
+        let compiled = compiler.compile(ShaderType::CanvasItem, "void fragment() {}");
+        let green = gdcore::math::Color::rgb(0.0, 1.0, 0.0);
+        let mut uniforms = HashMap::new();
+        uniforms.insert("color_override".to_string(), Variant::Color(green));
+        let result = processor.apply_shader(&compiled, &uniforms, gdcore::math::Color::BLACK);
+        assert_eq!(result, green);
+    }
+
+    #[test]
+    fn processor_non_color_uniform_passthrough() {
+        let compiler = ShaderCompiler::new();
+        let processor = ShaderProcessor::new();
+        let compiled = compiler.compile(ShaderType::CanvasItem, "uniform float speed = 1.0;");
+        let mut uniforms = HashMap::new();
+        uniforms.insert("speed".to_string(), Variant::Float(5.0));
+        let pixel = gdcore::math::Color::rgb(0.2, 0.4, 0.6);
+        let result = processor.apply_shader(&compiled, &uniforms, pixel);
+        assert_eq!(result, pixel);
+    }
+
+    #[test]
+    fn compiled_shader_equality() {
+        let compiler = ShaderCompiler::new();
+        let a = compiler.compile(ShaderType::CanvasItem, "void fragment() {}");
+        let b = compiler.compile(ShaderType::CanvasItem, "void fragment() {}");
+        assert_eq!(a, b);
+        let c = compiler.compile(ShaderType::Spatial, "void fragment() {}");
+        assert_ne!(a, c);
+    }
+
+    // -- existing tests below -----------------------------------------------
+
     #[test]
     fn uniform_type_variants() {
         // Ensure all UniformType variants can be created and compared
@@ -547,5 +1115,344 @@ uniform bool enabled = true;
                 }
             }
         }
+    }
+
+    // -- Fragment parsing and execution tests --------------------------------
+
+    #[test]
+    fn parse_fragment_set_color_literal() {
+        let src =
+            "shader_type canvas_item;\nvoid fragment() {\n    COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::SetColor(ColorExpr::Literal(1.0, 0.0, 0.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn parse_fragment_set_color_splat() {
+        let src = "void fragment() {\n    COLOR = vec4(0.5);\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::SetColor(ColorExpr::Splat(0.5))
+        );
+    }
+
+    #[test]
+    fn parse_fragment_set_alpha() {
+        let src = "void fragment() {\n    COLOR.a = 0.5;\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::SetColorAlpha(FloatExpr::Literal(0.5))
+        );
+    }
+
+    #[test]
+    fn parse_fragment_multiply_rgb() {
+        let src = "void fragment() {\n    COLOR.rgb *= 0.8;\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::MultiplyColorRgb(FloatExpr::Literal(0.8))
+        );
+    }
+
+    #[test]
+    fn parse_fragment_multiply_color() {
+        let src = "void fragment() {\n    COLOR *= brightness;\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::MultiplyColor(FloatExpr::Uniform("brightness".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_fragment_color_uniform_reference() {
+        let src = "void fragment() {\n    COLOR = my_color;\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::SetColor(ColorExpr::Uniform("my_color".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_fragment_color_passthrough() {
+        let src = "void fragment() {\n    COLOR = COLOR;\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::SetColor(ColorExpr::BuiltinColor)
+        );
+    }
+
+    #[test]
+    fn parse_fragment_no_fragment_func() {
+        let src = "shader_type canvas_item;\nuniform float speed;";
+        let instructions = parse_fragment_body(src);
+        assert!(instructions.is_empty());
+    }
+
+    #[test]
+    fn parse_fragment_empty_body() {
+        let src = "void fragment() {}";
+        let instructions = parse_fragment_body(src);
+        assert!(instructions.is_empty());
+    }
+
+    #[test]
+    fn parse_fragment_multiple_statements() {
+        let src = "void fragment() {\n    COLOR.rgb *= 0.5;\n    COLOR.a = 0.8;\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 2);
+    }
+
+    #[test]
+    fn parse_fragment_mix_expression() {
+        let src = "void fragment() {\n    COLOR = mix(COLOR, vec4(1.0, 0.0, 0.0, 1.0), 0.5);\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        match &instructions[0] {
+            FragmentInstruction::SetColor(ColorExpr::Mix(a, b, t)) => {
+                assert_eq!(**a, ColorExpr::BuiltinColor);
+                assert_eq!(**b, ColorExpr::Literal(1.0, 0.0, 0.0, 1.0));
+                assert_eq!(*t, FloatExpr::Literal(0.5));
+            }
+            other => panic!("expected SetColor(Mix), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_float_expr_sin_time() {
+        let src = "void fragment() {\n    COLOR.a = sin(TIME);\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::SetColorAlpha(FloatExpr::Sin(Box::new(FloatExpr::BuiltinTime)))
+        );
+    }
+
+    #[test]
+    fn parse_float_expr_uv() {
+        let src = "void fragment() {\n    COLOR.a = UV.x;\n}";
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0],
+            FragmentInstruction::SetColorAlpha(FloatExpr::UvComponent(UvAxis::X))
+        );
+    }
+
+    #[test]
+    fn execute_fragment_set_color() {
+        let instructions = vec![FragmentInstruction::SetColor(ColorExpr::Literal(
+            1.0, 0.0, 0.0, 1.0,
+        ))];
+        let ctx = FragmentContext::default();
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert_eq!(result, gdcore::math::Color::rgb(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn execute_fragment_set_alpha() {
+        let instructions = vec![FragmentInstruction::SetColorAlpha(FloatExpr::Literal(0.5))];
+        let ctx = FragmentContext {
+            color: gdcore::math::Color::rgb(1.0, 0.0, 0.0),
+            ..Default::default()
+        };
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert_eq!(result.r, 1.0);
+        assert_eq!(result.a, 0.5);
+    }
+
+    #[test]
+    fn execute_fragment_multiply_rgb() {
+        let instructions = vec![FragmentInstruction::MultiplyColorRgb(FloatExpr::Literal(
+            0.5,
+        ))];
+        let ctx = FragmentContext {
+            color: gdcore::math::Color::new(1.0, 0.8, 0.6, 1.0),
+            ..Default::default()
+        };
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert!((result.r - 0.5).abs() < 0.001);
+        assert!((result.g - 0.4).abs() < 0.001);
+        assert!((result.b - 0.3).abs() < 0.001);
+        assert_eq!(result.a, 1.0); // alpha unchanged
+    }
+
+    #[test]
+    fn execute_fragment_multiply_all() {
+        let instructions = vec![FragmentInstruction::MultiplyColor(FloatExpr::Literal(0.5))];
+        let ctx = FragmentContext {
+            color: gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0),
+            ..Default::default()
+        };
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert!((result.r - 0.5).abs() < 0.001);
+        assert!((result.a - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn execute_fragment_uniform_color() {
+        let instructions = vec![FragmentInstruction::SetColor(ColorExpr::Uniform(
+            "tint".to_string(),
+        ))];
+        let ctx = FragmentContext::default();
+        let mut uniforms = HashMap::new();
+        let green = gdcore::math::Color::rgb(0.0, 1.0, 0.0);
+        uniforms.insert("tint".to_string(), Variant::Color(green));
+        let result = execute_fragment(&instructions, &ctx, &uniforms);
+        assert_eq!(result, green);
+    }
+
+    #[test]
+    fn execute_fragment_mix() {
+        let instructions = vec![FragmentInstruction::SetColor(ColorExpr::Mix(
+            Box::new(ColorExpr::Literal(1.0, 0.0, 0.0, 1.0)),
+            Box::new(ColorExpr::Literal(0.0, 0.0, 1.0, 1.0)),
+            FloatExpr::Literal(0.5),
+        ))];
+        let ctx = FragmentContext::default();
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert!((result.r - 0.5).abs() < 0.001);
+        assert!((result.b - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn execute_fragment_sin_time() {
+        let instructions = vec![FragmentInstruction::SetColorAlpha(FloatExpr::Sin(
+            Box::new(FloatExpr::BuiltinTime),
+        ))];
+        let ctx = FragmentContext {
+            time: std::f32::consts::FRAC_PI_2,
+            color: gdcore::math::Color::WHITE,
+            ..Default::default()
+        };
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert!((result.a - 1.0).abs() < 0.001); // sin(PI/2) = 1.0
+    }
+
+    #[test]
+    fn execute_fragment_uv_gradient() {
+        let instructions = vec![FragmentInstruction::SetColorAlpha(FloatExpr::UvComponent(
+            UvAxis::X,
+        ))];
+        let ctx = FragmentContext {
+            color: gdcore::math::Color::WHITE,
+            uv: (0.75, 0.25),
+            ..Default::default()
+        };
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert!((result.a - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn execute_fragment_empty_passthrough() {
+        let ctx = FragmentContext {
+            color: gdcore::math::Color::rgb(0.3, 0.6, 0.9),
+            ..Default::default()
+        };
+        let result = execute_fragment(&[], &ctx, &HashMap::new());
+        assert_eq!(result, ctx.color);
+    }
+
+    #[test]
+    fn execute_fragment_multiple_instructions() {
+        let instructions = vec![
+            FragmentInstruction::SetColor(ColorExpr::Literal(1.0, 1.0, 1.0, 1.0)),
+            FragmentInstruction::MultiplyColorRgb(FloatExpr::Literal(0.5)),
+            FragmentInstruction::SetColorAlpha(FloatExpr::Literal(0.8)),
+        ];
+        let ctx = FragmentContext::default();
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert!((result.r - 0.5).abs() < 0.001);
+        assert!((result.g - 0.5).abs() < 0.001);
+        assert!((result.b - 0.5).abs() < 0.001);
+        assert!((result.a - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn execute_fragment_set_color_rgb() {
+        let instructions = vec![FragmentInstruction::SetColorRgb(ColorExpr::Literal(
+            0.2, 0.4, 0.6, 1.0,
+        ))];
+        let ctx = FragmentContext {
+            color: gdcore::math::Color::new(0.0, 0.0, 0.0, 0.9),
+            ..Default::default()
+        };
+        let result = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert!((result.r - 0.2).abs() < 0.001);
+        assert!((result.g - 0.4).abs() < 0.001);
+        assert!((result.b - 0.6).abs() < 0.001);
+        assert!((result.a - 0.9).abs() < 0.001); // alpha unchanged
+    }
+
+    #[test]
+    fn fragment_context_default() {
+        let ctx = FragmentContext::default();
+        assert_eq!(ctx.color, gdcore::math::Color::WHITE);
+        assert_eq!(ctx.uv, (0.0, 0.0));
+        assert_eq!(ctx.screen_uv, (0.0, 0.0));
+        assert_eq!(ctx.time, 0.0);
+    }
+
+    #[test]
+    fn parse_full_shader_end_to_end() {
+        // Parse + execute a complete shader.
+        let src = r#"
+shader_type canvas_item;
+uniform vec4 tint_color;
+uniform float alpha_mult = 1.0;
+
+void fragment() {
+    COLOR = tint_color;
+    COLOR.a = alpha_mult;
+}
+"#;
+        let uniforms_parsed = parse_uniforms(src);
+        assert_eq!(uniforms_parsed.len(), 2);
+
+        let instructions = parse_fragment_body(src);
+        assert_eq!(instructions.len(), 2);
+
+        let mut uniforms = HashMap::new();
+        let red = gdcore::math::Color::rgb(1.0, 0.0, 0.0);
+        uniforms.insert("tint_color".to_string(), Variant::Color(red));
+        uniforms.insert("alpha_mult".to_string(), Variant::Float(0.7));
+
+        let ctx = FragmentContext::default();
+        let result = execute_fragment(&instructions, &ctx, &uniforms);
+        assert_eq!(result.r, 1.0);
+        assert_eq!(result.g, 0.0);
+        assert!((result.a - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn eval_float_uniform_fallback() {
+        let expr = FloatExpr::Uniform("missing".to_string());
+        let ctx = FragmentContext::default();
+        let result = eval_float_expr(&expr, &ctx, &HashMap::new());
+        assert_eq!(result, 0.0);
+    }
+
+    #[test]
+    fn eval_color_uniform_fallback() {
+        let expr = ColorExpr::Uniform("missing".to_string());
+        let ctx = FragmentContext::default();
+        let result = eval_color_expr(&expr, &ctx, &HashMap::new());
+        assert_eq!(result, ctx.color);
     }
 }

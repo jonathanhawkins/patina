@@ -10,6 +10,7 @@ use gdcore::math::{Transform2D, Vector2};
 
 use crate::body::{BodyId, PhysicsBody2D};
 use crate::collision;
+use crate::joint::{self, Joint2D, JointId};
 use crate::shape::Shape2D;
 
 /// Result of a raycast query.
@@ -54,7 +55,11 @@ pub struct CollisionEvent {
 /// A 2D physics world that owns bodies and steps the simulation.
 pub struct PhysicsWorld2D {
     bodies: HashMap<BodyId, PhysicsBody2D>,
+    joints: HashMap<JointId, Joint2D>,
     next_id: u64,
+    next_joint_id: u64,
+    /// Number of constraint solver iterations per step.
+    constraint_iterations: usize,
     /// Contacts from the previous frame, keyed by (min_id, max_id).
     previous_contacts: HashSet<(BodyId, BodyId)>,
 }
@@ -64,9 +69,20 @@ impl PhysicsWorld2D {
     pub fn new() -> Self {
         Self {
             bodies: HashMap::new(),
+            joints: HashMap::new(),
             next_id: 1,
+            next_joint_id: 1,
+            constraint_iterations: 10,
             previous_contacts: HashSet::new(),
         }
+    }
+
+    /// Sets the number of constraint solver iterations per step.
+    ///
+    /// More iterations produce more accurate joint constraint solving at the
+    /// cost of performance. The default is 10.
+    pub fn set_constraint_iterations(&mut self, count: usize) {
+        self.constraint_iterations = count;
     }
 
     /// Adds a body to the world and returns its unique ID.
@@ -98,6 +114,34 @@ impl PhysicsWorld2D {
         self.bodies.len()
     }
 
+    /// Adds a joint to the world and returns its unique ID.
+    pub fn add_joint(&mut self, joint: Joint2D) -> JointId {
+        let id = JointId(self.next_joint_id);
+        self.next_joint_id += 1;
+        self.joints.insert(id, joint);
+        id
+    }
+
+    /// Removes a joint from the world by ID.
+    pub fn remove_joint(&mut self, id: JointId) -> Option<Joint2D> {
+        self.joints.remove(&id)
+    }
+
+    /// Returns a reference to a joint by ID.
+    pub fn get_joint(&self, id: JointId) -> Option<&Joint2D> {
+        self.joints.get(&id)
+    }
+
+    /// Returns a mutable reference to a joint by ID.
+    pub fn get_joint_mut(&mut self, id: JointId) -> Option<&mut Joint2D> {
+        self.joints.get_mut(&id)
+    }
+
+    /// Returns the number of joints in the world.
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
     /// Steps the physics simulation by `dt` seconds.
     ///
     /// 1. Integrate all rigid/kinematic bodies.
@@ -111,6 +155,38 @@ impl PhysicsWorld2D {
             body.integrate(dt);
         }
 
+        // Phase 1.5: Apply joint constraints (iterated for convergence)
+        let joint_ids: Vec<JointId> = self.joints.keys().copied().collect();
+        for _iter in 0..self.constraint_iterations {
+            for &jid in &joint_ids {
+                let jt = &self.joints[&jid];
+                let body_a_id = jt.base().body_a;
+                let body_b_id = jt.base().body_b;
+                if body_a_id == body_b_id {
+                    continue;
+                }
+                if !self.bodies.contains_key(&body_a_id) || !self.bodies.contains_key(&body_b_id) {
+                    continue;
+                }
+                // SAFETY: body_a_id != body_b_id, so these are disjoint map entries.
+                let ptr = &mut self.bodies as *mut HashMap<BodyId, PhysicsBody2D>;
+                let ba = unsafe { &mut *ptr }.get_mut(&body_a_id).unwrap();
+                let bb = unsafe { &mut *ptr }.get_mut(&body_b_id).unwrap();
+                joint::apply_joint_constraints(jt, ba, bb, dt);
+            }
+        }
+
+        // Build set of jointed body pairs to skip collision between them
+        let mut jointed_pairs: HashSet<(BodyId, BodyId)> = HashSet::new();
+        for jt in self.joints.values() {
+            if jt.is_enabled() {
+                let a = jt.base().body_a;
+                let b = jt.base().body_b;
+                let pair = if a.0 < b.0 { (a, b) } else { (b, a) };
+                jointed_pairs.insert(pair);
+            }
+        }
+
         // Phase 2 & 3: Collision detection and resolution
         let ids: Vec<BodyId> = self.bodies.keys().copied().collect();
         let mut current_contacts = HashSet::new();
@@ -120,6 +196,16 @@ impl PhysicsWorld2D {
             for j in (i + 1)..ids.len() {
                 let id_a = ids[i];
                 let id_b = ids[j];
+
+                // Skip collision between jointed body pairs
+                let pair_key = if id_a.0 < id_b.0 {
+                    (id_a, id_b)
+                } else {
+                    (id_b, id_a)
+                };
+                if jointed_pairs.contains(&pair_key) {
+                    continue;
+                }
 
                 // Read shapes, positions, layers, and one-way info
                 let (
@@ -679,5 +765,169 @@ mod tests {
         let run1 = run_simulation();
         let run2 = run_simulation();
         assert_eq!(run1, run2, "Physics must be deterministic");
+    }
+
+    // ---- Joint integration tests ----
+
+    #[test]
+    fn world_add_remove_joint() {
+        use crate::joint::PinJoint2D;
+
+        let mut world = PhysicsWorld2D::new();
+        let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 1.0));
+        let id_b = world.add_body(make_rigid_circle(Vector2::new(5.0, 0.0), 1.0));
+
+        let pin = Joint2D::Pin(PinJoint2D::new(id_a, id_b, Vector2::new(2.5, 0.0)));
+        let jid = world.add_joint(pin);
+        assert_eq!(world.joint_count(), 1);
+        assert!(world.get_joint(jid).is_some());
+
+        world.remove_joint(jid);
+        assert_eq!(world.joint_count(), 0);
+    }
+
+    #[test]
+    fn world_pin_joint_constrains_during_step() {
+        use crate::joint::PinJoint2D;
+
+        let mut world = PhysicsWorld2D::new();
+        // Disable collision between bodies so collision resolution doesn't
+        // push them apart after the pin constraint snaps them together.
+        let mut ba = make_rigid_circle(Vector2::new(-5.0, 0.0), 0.5);
+        ba.collision_layer = 0;
+        ba.collision_mask = 0;
+        let mut bb = make_rigid_circle(Vector2::new(5.0, 0.0), 0.5);
+        bb.collision_layer = 0;
+        bb.collision_mask = 0;
+        let id_a = world.add_body(ba);
+        let id_b = world.add_body(bb);
+
+        let pin = Joint2D::Pin(PinJoint2D::new(id_a, id_b, Vector2::ZERO));
+        world.add_joint(pin);
+
+        world.step(0.0);
+
+        let a = world.get_body(id_a).unwrap();
+        let b = world.get_body(id_b).unwrap();
+        assert!(
+            approx_eq(a.position.x, 0.0),
+            "Body A should be at anchor, got {}",
+            a.position.x
+        );
+        assert!(
+            approx_eq(b.position.x, 0.0),
+            "Body B should be at anchor, got {}",
+            b.position.x
+        );
+    }
+
+    #[test]
+    fn world_spring_joint_applies_velocity_during_step() {
+        use crate::joint::DampedSpringJoint2D;
+
+        let mut world = PhysicsWorld2D::new();
+        // Bodies far apart, small shapes to avoid collision
+        let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 0.1));
+        let id_b = world.add_body(make_rigid_circle(Vector2::new(20.0, 0.0), 0.1));
+
+        let spring = Joint2D::DampedSpring(DampedSpringJoint2D::new(id_a, id_b, 5.0, 100.0, 1.0));
+        world.add_joint(spring);
+
+        let dt = 1.0 / 60.0;
+        world.step(dt);
+
+        let a = world.get_body(id_a).unwrap();
+        let b = world.get_body(id_b).unwrap();
+        // Spring should pull them together
+        assert!(a.linear_velocity.x > 0.0, "Body A should move toward B");
+        assert!(b.linear_velocity.x < 0.0, "Body B should move toward A");
+    }
+
+    #[test]
+    fn world_spring_converges_over_many_steps() {
+        use crate::joint::DampedSpringJoint2D;
+
+        let mut world = PhysicsWorld2D::new();
+        let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 0.1));
+        let id_b = world.add_body(make_rigid_circle(Vector2::new(15.0, 0.0), 0.1));
+
+        let spring = Joint2D::DampedSpring(DampedSpringJoint2D::new(id_a, id_b, 5.0, 80.0, 10.0));
+        world.add_joint(spring);
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..300 {
+            world.step(dt);
+        }
+
+        let a = world.get_body(id_a).unwrap();
+        let b = world.get_body(id_b).unwrap();
+        let dist = (b.position - a.position).length();
+        assert!(
+            (dist - 5.0).abs() < 1.0,
+            "Spring should converge to rest length 5.0, got {dist}"
+        );
+    }
+
+    #[test]
+    fn world_disabled_joint_has_no_effect() {
+        use crate::joint::PinJoint2D;
+
+        let mut world = PhysicsWorld2D::new();
+        let mut ba = make_rigid_circle(Vector2::new(-5.0, 0.0), 0.5);
+        ba.collision_layer = 0;
+        ba.collision_mask = 0;
+        let mut bb = make_rigid_circle(Vector2::new(5.0, 0.0), 0.5);
+        bb.collision_layer = 0;
+        bb.collision_mask = 0;
+        let id_a = world.add_body(ba);
+        let id_b = world.add_body(bb);
+
+        let mut pin = PinJoint2D::new(id_a, id_b, Vector2::ZERO);
+        pin.base.enabled = false;
+        let jid = world.add_joint(Joint2D::Pin(pin));
+
+        world.step(0.0);
+
+        let a = world.get_body(id_a).unwrap();
+        let b = world.get_body(id_b).unwrap();
+        assert!(
+            approx_eq(a.position.x, -5.0),
+            "Disabled joint should not move bodies"
+        );
+        assert!(
+            approx_eq(b.position.x, 5.0),
+            "Disabled joint should not move bodies"
+        );
+
+        // Now enable and re-step
+        world.get_joint_mut(jid).unwrap().set_enabled(true);
+        world.step(0.0);
+
+        let a = world.get_body(id_a).unwrap();
+        let b = world.get_body(id_b).unwrap();
+        assert!(
+            approx_eq(a.position.x, 0.0),
+            "Enabled joint should constrain"
+        );
+        assert!(
+            approx_eq(b.position.x, 0.0),
+            "Enabled joint should constrain"
+        );
+    }
+
+    #[test]
+    fn world_joint_with_missing_body_is_skipped() {
+        use crate::joint::PinJoint2D;
+
+        let mut world = PhysicsWorld2D::new();
+        let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 1.0));
+
+        // Joint references a non-existent body
+        let pin = Joint2D::Pin(PinJoint2D::new(id_a, BodyId(9999), Vector2::ZERO));
+        world.add_joint(pin);
+
+        // Should not panic
+        world.step(1.0 / 60.0);
+        assert!(world.get_body(id_a).is_some());
     }
 }

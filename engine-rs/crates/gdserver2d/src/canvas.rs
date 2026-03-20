@@ -44,6 +44,40 @@ pub enum DrawCommand {
         source_rect: Rect2,
         modulate: Color,
     },
+    /// Draw a text string at `position` with the given `color` and `font_size`.
+    DrawString {
+        /// The text to render.
+        text: String,
+        /// Top-left position for the text.
+        position: Vector2,
+        /// Text color.
+        color: Color,
+        /// Font size (used as scale multiplier over the built-in 5×7 font).
+        font_size: u32,
+    },
+    /// Draw a nine-patch (9-slice) texture into `rect`.
+    ///
+    /// The texture is divided into 9 regions by `margin_left`, `margin_top`,
+    /// `margin_right`, and `margin_bottom`. Corners are drawn at fixed size,
+    /// edges are stretched along one axis, and the center is stretched in both.
+    DrawNinePatch {
+        /// Path to the source texture.
+        texture_path: String,
+        /// Destination rectangle.
+        rect: Rect2,
+        /// Left margin in pixels (corner/edge width).
+        margin_left: f32,
+        /// Top margin in pixels (corner/edge height).
+        margin_top: f32,
+        /// Right margin in pixels (corner/edge width).
+        margin_right: f32,
+        /// Bottom margin in pixels (corner/edge height).
+        margin_bottom: f32,
+        /// Whether to draw the center region.
+        draw_center: bool,
+        /// Tint color applied to all nine regions.
+        modulate: Color,
+    },
 }
 
 /// A canvas item that holds a transform, draw commands, and child references.
@@ -118,6 +152,33 @@ mod tests {
             width: 1.0,
         });
         assert_eq!(item.commands.len(), 3);
+    }
+
+    #[test]
+    fn nine_patch_draw_command() {
+        let mut item = CanvasItem::new(CanvasItemId(10));
+        item.commands.push(DrawCommand::DrawNinePatch {
+            texture_path: "res://panel.png".to_string(),
+            rect: Rect2::new(Vector2::ZERO, Vector2::new(100.0, 50.0)),
+            margin_left: 8.0,
+            margin_top: 8.0,
+            margin_right: 8.0,
+            margin_bottom: 8.0,
+            draw_center: true,
+            modulate: Color::WHITE,
+        });
+        assert_eq!(item.commands.len(), 1);
+        match &item.commands[0] {
+            DrawCommand::DrawNinePatch {
+                margin_left,
+                draw_center,
+                ..
+            } => {
+                assert_eq!(*margin_left, 8.0);
+                assert!(*draw_center);
+            }
+            _ => panic!("expected DrawNinePatch"),
+        }
     }
 
     #[test]

@@ -1,3 +1,8 @@
+// NOTE: Editor work is maintenance-only until runtime parity exits are met.
+// No new editor features should be added until oracle parity reaches 98%+ across
+// all supported scenes. Maintenance work (bug fixes, server stability, smoke tests)
+// is permitted. See AGENTS.md § Project-Specific Rules for the full policy.
+
 //! # gdeditor
 //!
 //! Editor-facing layers for the Patina Engine runtime.

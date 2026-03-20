@@ -1,9 +1,19 @@
+// pat-oa3: WinitPlatform implements PlatformBackend. run_with_main_loop()
+// creates a WinitPlatform and calls MainLoop::run_frame() from inside the
+// winit callback. The old run_with_winit() is preserved for compatibility.
+// See PLATFORM_ROADMAP.md.
+
 //! Winit + softbuffer windowing backend.
 //!
 //! Gated behind the `windowed` feature. Provides a real OS window via
 //! [`winit`] and CPU-blitted framebuffer presentation via [`softbuffer`].
+//!
+//! The primary entry point is [`run_with_main_loop`], which creates a
+//! [`WinitPlatform`] (implementing [`PlatformBackend`]) and drives a
+//! [`MainLoop`] from the winit event callback.
 
-use crate::input::{InputEvent, InputState, Key};
+use crate::backend::PlatformBackend;
+use crate::input::{InputState, Key};
 use crate::window::{WindowConfig, WindowEvent, WindowId, WindowManager};
 use gdcore::math::Color;
 use gdrender2d::FrameBuffer;
@@ -211,7 +221,86 @@ impl WindowManager for WinitWindow {
 }
 
 // ---------------------------------------------------------------------------
-// run_with_winit
+// WinitPlatform — PlatformBackend implementation
+// ---------------------------------------------------------------------------
+
+/// Winit-backed platform that implements [`PlatformBackend`].
+///
+/// Created internally by [`run_with_main_loop`]. Buffers window events
+/// between winit callbacks so that [`MainLoop::run_frame`] can drain them
+/// each frame via [`poll_events`](PlatformBackend::poll_events).
+pub struct WinitPlatform {
+    winit_window: WinitWindow,
+    quit: bool,
+    last_frame: std::time::Instant,
+}
+
+impl WinitPlatform {
+    /// Creates a new `WinitPlatform` wrapping an existing `WinitWindow`.
+    pub fn new(winit_window: WinitWindow) -> Self {
+        Self {
+            winit_window,
+            quit: false,
+            last_frame: std::time::Instant::now(),
+        }
+    }
+
+    /// Returns a reference to the underlying [`WinitWindow`].
+    pub fn winit_window(&self) -> &WinitWindow {
+        &self.winit_window
+    }
+
+    /// Returns a mutable reference to the underlying [`WinitWindow`].
+    pub fn winit_window_mut(&mut self) -> &mut WinitWindow {
+        &mut self.winit_window
+    }
+
+    /// Pushes a window event into the buffer (called from the winit callback).
+    pub fn push_event(&mut self, event: WindowEvent) {
+        self.winit_window.push_event(event);
+    }
+
+    /// Signals that the platform should quit.
+    pub fn request_quit(&mut self) {
+        self.quit = true;
+        self.winit_window.open = false;
+    }
+
+    /// Returns the delta time since the last frame and resets the timer.
+    pub fn take_delta(&mut self) -> f64 {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f64();
+        self.last_frame = now;
+        dt
+    }
+
+    /// Presents a framebuffer to the window surface.
+    pub fn present(&mut self, fb: &FrameBuffer) {
+        blit_framebuffer(&mut self.winit_window.surface, fb);
+    }
+}
+
+impl PlatformBackend for WinitPlatform {
+    fn poll_events(&mut self) -> Vec<WindowEvent> {
+        self.winit_window.event_queue.drain(..).collect()
+    }
+
+    fn should_quit(&self) -> bool {
+        self.quit || !self.winit_window.open
+    }
+
+    fn window_size(&self) -> (u32, u32) {
+        let size = self.winit_window.window.inner_size();
+        (size.width, size.height)
+    }
+
+    fn end_frame(&mut self) {
+        self.winit_window.window.request_redraw();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run_with_winit (legacy)
 // ---------------------------------------------------------------------------
 
 /// Application handler that drives the game loop.

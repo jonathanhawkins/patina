@@ -4,12 +4,20 @@
 //! for the Patina Engine runtime.
 
 pub mod bus;
+pub mod decode;
 pub mod mixer;
+pub mod sample;
+pub mod server;
 pub mod stream;
+pub mod wav;
 
 pub use bus::AudioBus;
+pub use decode::{AudioBuffer, DecodeError};
 pub use mixer::AudioMixer;
+pub use sample::{AudioOutputStream, AudioSampleBuffer, ChannelLayout, NullAudioOutput};
+pub use server::{AudioServer, PlaybackId};
 pub use stream::{AudioStreamPlayback, LoopMode, PlaybackState};
+pub use wav::{decode_wav, parse_wav_header, WavError, WavHeader};
 
 #[cfg(test)]
 mod tests {

@@ -31,6 +31,10 @@ pub enum EngineError {
     /// A parse error occurred.
     #[error("parse error: {0}")]
     Parse(String),
+
+    /// A feature or format is recognized but not yet implemented.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 /// Convenience alias used throughout the engine.

@@ -136,6 +136,10 @@ impl ScriptInstance for GDScriptNodeInstance {
             .unwrap_or("GDScript")
     }
 
+    fn has_method(&self, name: &str) -> bool {
+        self.instance.class_def.methods.contains_key(name)
+    }
+
     fn set_scene_access(&mut self, access: Box<dyn SceneAccess>, node_id: u64) {
         self.interpreter.set_scene_access(access, node_id);
     }
@@ -161,6 +165,10 @@ pub struct InputSnapshot {
     pub just_pressed_keys: HashSet<String>,
     /// Action name → list of key names.
     pub input_map: std::collections::HashMap<String, Vec<String>>,
+    /// Current mouse position in screen coordinates.
+    pub mouse_position: gdcore::math::Vector2,
+    /// Mouse buttons currently held (button index strings: "1"=Left, "2"=Right, "3"=Middle).
+    pub mouse_buttons_pressed: HashSet<String>,
 }
 
 impl InputSnapshot {
@@ -185,6 +193,19 @@ impl InputSnapshot {
     /// Returns `true` if the raw key is held.
     pub fn is_key_pressed(&self, key: &str) -> bool {
         self.pressed_keys.contains(key)
+    }
+
+    /// Returns the current mouse position.
+    pub fn get_mouse_position(&self) -> gdcore::math::Vector2 {
+        self.mouse_position
+    }
+
+    /// Returns `true` if the given mouse button index is pressed.
+    ///
+    /// Button indices match Godot: 1=Left, 2=Right, 3=Middle.
+    pub fn is_mouse_button_pressed(&self, button_index: i64) -> bool {
+        self.mouse_buttons_pressed
+            .contains(&button_index.to_string())
     }
 }
 
@@ -347,6 +368,20 @@ impl SceneAccess for SceneTreeAccessor {
         self.input
             .as_ref()
             .map(|i| i.is_key_pressed(key))
+            .unwrap_or(false)
+    }
+
+    fn get_global_mouse_position(&self) -> (f32, f32) {
+        self.input
+            .as_ref()
+            .map(|i| (i.mouse_position.x, i.mouse_position.y))
+            .unwrap_or((0.0, 0.0))
+    }
+
+    fn is_mouse_button_pressed(&self, button_index: i64) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_mouse_button_pressed(button_index))
             .unwrap_or(false)
     }
 
