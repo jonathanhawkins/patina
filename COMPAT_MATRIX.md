@@ -2,7 +2,7 @@
 
 This document tracks the implementation and compatibility status of each Patina Engine subsystem relative to upstream Godot behavior.
 
-**Last updated**: 2026-03-19 (pat-4ap: audit reconciliation — oracle parity 90.5%, test count 3,200+)
+**Last updated**: 2026-03-20 (pat-s9b: all numbers measured against Godot 4.6.1 — oracle parity 83.1%)
 
 ---
 
@@ -31,7 +31,7 @@ This document tracks the implementation and compatibility status of each Patina 
 | Scene System | `gdscene` | **Measured** | 666 + 11 + 15 + 22 + 32 | 11 | ~90% | `gdscene` units (666), `golden_tests` (11), `instancing_ownership_test` (15), `packed_scene_edge_cases_test` (22), `frame_processing_semantics_test` (32) |
 | GDScript Interop | `gdscript-interop` | **Measured** | 368 + 13 | — | ~85% | `gdscript_interop` units (368), `demo_scenes_test` (13) |
 | Trace Parity | `gdscene` | **Measured** | 10 + 7 + 8 | 16 | — | `trace_parity_test` (10), `multi_scene_trace_parity_test` (7), `frame_trace_test` (8) |
-| Oracle Parity | `gdscene` | **Measured** | 32 + 43 | 9 scenes | 90.5% | `oracle_parity_test` (32), `oracle_regression_test` (43) |
+| Oracle Parity | `gdscene` | **Measured** | 32 + 43 | 9 scenes | 83.1% | `oracle_parity_test` (32), `oracle_regression_test` (43) — measured against Godot 4.6.1 |
 | 2D Rendering | `gdrender2d` | **Measured** | 84 + 37 + 29 | 9 | Golden-based | `gdrender2d` units (84), `render_pipeline` (37), `render_golden_test` (29) |
 | 2D Physics | `gdphysics2d` | **Measured** | 86 + 54 | 8 | Deterministic | `gdphysics2d` units (86), `physics_integration_test` (54) |
 | Input | `gdplatform` | **Measured** | 120 + 16 + 10 | — | Measured | `gdplatform` units (120), `input_map_loading_test` (16), `input_action_coverage_test` (10) |
@@ -61,7 +61,7 @@ This document tracks the implementation and compatibility status of each Patina 
 | Scene System | 746 tests: hierarchy, lifecycle, instancing, packed scenes, frame processing; 11 scene goldens |
 | GDScript Interop | 381 tests: tokenizer, parser, interpreter, built-ins, bindings |
 | Trace Parity | 25 tests against 16 trace goldens (patina vs upstream mock) |
-| Oracle Parity | 75 tests against 9 scene goldens; 90.5% property parity |
+| Oracle Parity | 75 tests against 9 scene goldens (Godot 4.6.1); 83.1% property parity |
 | 2D Rendering | 150 tests + 9 render goldens (pixel-level comparison) |
 | 2D Physics | 140 tests + 8 physics goldens (deterministic trace comparison) |
 | Input | 146 tests: input map loading, action coverage, snapshot routing |
@@ -89,13 +89,13 @@ This document tracks the implementation and compatibility status of each Patina 
 
 ## Oracle Parity Summary
 
-Measured against 9 Godot oracle outputs (63 comparisons, 57 matched = 90.5%):
+Measured against **Godot 4.6.1** (v4.6.1.stable.official.14d19694e) — 9 oracle scenes, 71 comparisons, 59 matched = 83.1%:
 
-- **Overall**: 90.5% (57/63 property comparisons match)
-- **Node structure**: 100% (all nodes present with correct names/classes)
-- **Explicit properties**: 100% for 7 of 9 scenes (positions, script vars, modulate all match)
-- **Remaining gaps**: `physics_playground` (66.7%) and `test_scripts` (80.0%)
-- **Improvement**: `class_defaults.rs` filtering removes spurious default-property mismatches; bare var sync and `self.position.x` fix closed additional gaps
+- **Overall**: 83.1% (59/71 property comparisons match)
+- **Node structure**: 100% (all nodes present with correct names/classes across all 9 scenes)
+- **Explicit properties**: 100% for 7 of 9 scenes (positions, collision masks, modulate all match)
+- **Remaining gaps**: `space_shooter` (61.5% — 5 missing script vars) and `test_scripts` (36.4% — 7 missing script vars + position divergence)
+- **vs 4.5.1**: physics_playground improved (66.7% → 100%); space_shooter and test_scripts regressed due to richer 4.6.1 oracle capture exposing more script variable properties
 
 Test files: `oracle_parity_test.rs` (32 tests), `oracle_regression_test.rs` (43 tests)
 

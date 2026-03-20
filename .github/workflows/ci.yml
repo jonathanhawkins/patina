@@ -197,6 +197,75 @@ jobs:
         working-directory: engine-rs
         run: cargo audit
 
+  # ── Oracle parity validation ────────────────────────────────────────────
+  # Validates that committed oracle outputs are consistent and parity tests
+  # pass against the current Godot pin.  Oracle regeneration is a local
+  # step (requires running upstream Godot); CI only validates artifacts.
+  #
+  # Regeneration workflow after a Godot repin:
+  #   1. Update upstream/godot submodule to the new tag
+  #   2. Run: tools/oracle/run_all.sh   (regenerate oracle outputs)
+  #   3. Run: cargo test --workspace    (verify parity against new outputs)
+  #   4. Review diffs in fixtures/oracle_outputs/ and tests/golden/
+  #   5. Update parity metrics in COMPAT_DASHBOARD.md / TEST_ORACLE.md
+  #   6. Commit regenerated outputs + updated docs together
+  #
+  # CI catches:
+  #   - Oracle golden staleness (golden_staleness_test)
+  #   - Parity regressions (oracle_parity_test, oracle_regression_test)
+  #   - Broken oracle JSON (golden_staleness_test validates JSON)
+  #
+  # These checks run as part of the `rust` job's `cargo test --workspace`.
+  # No separate job is needed because oracle validation tests are already
+  # included in the workspace test suite (Tier 2).
+  rust-oracle-parity:
+    name: Oracle parity check
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Verify upstream Godot pin
+        run: |
+          cd upstream/godot
+          echo "Pinned Godot commit: $(git rev-parse HEAD)"
+          echo "Pinned Godot tag: $(git describe --tags --exact-match 2>/dev/null || echo 'no exact tag')"
+
+      - name: Run oracle parity and staleness tests
+        working-directory: engine-rs
+        run: cargo test --workspace -- oracle_parity golden_staleness oracle_regression
+
   # ── Web: build and lint ───────────────────────────────────────────────────
   web:
     name: Web (build, lint)

@@ -138,10 +138,16 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
     }
 
     // Collect script variables if a script is attached.
+    // Script variables are also merged into properties, matching Godot's
+    // behavior where script-exported vars appear in the property list.
     let mut script_vars = serde_json::Map::new();
     if let Some(script) = tree.get_script(id) {
         for prop_info in script.list_properties() {
-            script_vars.insert(prop_info.name.clone(), to_json(&prop_info.default_value));
+            let json_val = to_json(&prop_info.default_value);
+            script_vars.insert(prop_info.name.clone(), json_val.clone());
+            // Merge script vars into properties so they match
+            // the oracle property dump format (Godot 4.6.1+).
+            props.insert(prop_info.name.clone(), json_val);
         }
     }
 
@@ -440,9 +446,9 @@ func _ready():
         assert_eq!(plain["script_vars"], json!({}));
     }
 
-    /// Script vars appear in script_vars but custom ones are filtered from properties.
+    /// Script vars appear in both script_vars and properties (matching Godot 4.6.1 oracle format).
     #[test]
-    fn dump_tree_json_script_vars_in_script_vars_not_properties() {
+    fn dump_tree_json_script_vars_merged_into_properties() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let child = Node::new("Player", "Node2D");
@@ -465,8 +471,8 @@ func _ready():
 
         // script_vars should have speed=300
         assert_eq!(player["script_vars"]["speed"]["value"], json!(300));
-        // properties should NOT have speed (it is a custom script var, not a Godot class property)
-        assert!(player["properties"]["speed"].is_null());
+        // properties should ALSO have speed (Godot 4.6.1+ reports script vars as properties)
+        assert_eq!(player["properties"]["speed"]["value"], json!(300));
     }
 
     #[test]
