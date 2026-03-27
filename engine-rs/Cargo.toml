@@ -12,6 +12,9 @@ members = [
     "crates/gdaudio",
     "crates/gdplatform",
     "crates/gdscript-interop",
+    "crates/gdphysics3d",
+    "crates/gdserver3d",
+    "crates/gdrender3d",
     "crates/gdeditor",
     "crates/patina-runner",
 ]
@@ -49,6 +52,9 @@ gdaudio = { path = "crates/gdaudio" }
 gdobject = { path = "crates/gdobject" }
 gdresource = { path = "crates/gdresource" }
 gdscript-interop = { path = "crates/gdscript-interop" }
+gdphysics3d = { path = "crates/gdphysics3d" }
+gdserver3d = { path = "crates/gdserver3d" }
+gdrender3d = { path = "crates/gdrender3d" }
 gdeditor = { path = "crates/gdeditor" }
 serde_json.workspace = true
 
@@ -79,6 +85,7 @@ path = "examples/space_shooter_live.rs"
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true
+proptest = "1"
 
 [[example]]
 name = "editor"

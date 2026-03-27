@@ -1,0 +1,14 @@
+[gd_resource type="PackedScene" format=3 uid="uid://scene_with_refs"]
+
+[ext_resource type="Texture2D" uid="uid://icon_texture" path="res://icon.png" id="1"]
+[ext_resource type="Script" uid="uid://player_script" path="res://scripts/player.gd" id="2"]
+[ext_resource type="PackedScene" path="res://scenes/enemy.tscn" id="3"]
+
+[sub_resource type="StyleBoxFlat" id="inline_style"]
+bg_color = Color(1.0, 0.0, 0.0, 1.0)
+border_width = 3
+
+[resource]
+name = "TestScene"
+texture_ref = "ExtResource(\"1\")"
+script_ref = "ExtResource(\"2\")"

@@ -1,0 +1,72 @@
+{
+  "fixture_id": "scene_signal_instantiation",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-22T06:57:54+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "GameWorld",
+        "class": "Node2D",
+        "path": "/root/GameWorld",
+        "children": [
+          {
+            "name": "Player",
+            "class": "Node2D",
+            "path": "/root/GameWorld/Player",
+            "children": [
+              {
+                "name": "Hitbox",
+                "class": "Node2D",
+                "path": "/root/GameWorld/Player/Hitbox",
+                "children": [],
+                "properties": {}
+              }
+            ],
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  100.0,
+                  200.0
+                ]
+              }
+            }
+          },
+          {
+            "name": "Enemy",
+            "class": "Node2D",
+            "path": "/root/GameWorld/Enemy",
+            "children": [],
+            "properties": {
+              "position": {
+                "type": "Vector2",
+                "value": [
+                  500.0,
+                  200.0
+                ]
+              }
+            }
+          },
+          {
+            "name": "HUD",
+            "class": "Node",
+            "path": "/root/GameWorld/HUD",
+            "children": [
+              {
+                "name": "ScoreLabel",
+                "class": "Node",
+                "path": "/root/GameWorld/HUD/ScoreLabel",
+                "children": [],
+                "properties": {}
+              }
+            ],
+            "properties": {}
+          }
+        ],
+        "properties": {}
+      }
+    ]
+  }
+}

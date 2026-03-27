@@ -1,0 +1,146 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/World",
+					"path": "/root/World/Camera"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "Sun",
+					"owner": "/root/World",
+					"path": "/root/World/Sun"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "BallShape",
+							"owner": "/root/World",
+							"path": "/root/World/Ball/BallShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "BallMesh",
+							"owner": "/root/World",
+							"path": "/root/World/Ball/BallMesh"
+						}
+					],
+					"class": "RigidBody3D",
+					"groups": [],
+					"name": "Ball",
+					"owner": "/root/World",
+					"path": "/root/World/Ball"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "CubeShape",
+							"owner": "/root/World",
+							"path": "/root/World/Cube/CubeShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "CubeMesh",
+							"owner": "/root/World",
+							"path": "/root/World/Cube/CubeMesh"
+						}
+					],
+					"class": "RigidBody3D",
+					"groups": [],
+					"name": "Cube",
+					"owner": "/root/World",
+					"path": "/root/World/Cube"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "HeavyShape",
+							"owner": "/root/World",
+							"path": "/root/World/HeavyBlock/HeavyShape"
+						}
+					],
+					"class": "RigidBody3D",
+					"groups": [],
+					"name": "HeavyBlock",
+					"owner": "/root/World",
+					"path": "/root/World/HeavyBlock"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "PlatformShape",
+							"owner": "/root/World",
+							"path": "/root/World/Platform/PlatformShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "PlatformMesh",
+							"owner": "/root/World",
+							"path": "/root/World/Platform/PlatformMesh"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Platform",
+					"owner": "/root/World",
+					"path": "/root/World/Platform"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "RampShape",
+							"owner": "/root/World",
+							"path": "/root/World/Ramp/RampShape"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Ramp",
+					"owner": "/root/World",
+					"path": "/root/World/Ramp"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "World",
+			"owner": "/root",
+			"path": "/root/World"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

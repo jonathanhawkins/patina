@@ -572,8 +572,9 @@ mod tests {
     use super::*;
     use crate::node::Node;
     use gdobject::notification::{
-        NOTIFICATION_INTERNAL_PHYSICS_PROCESS, NOTIFICATION_INTERNAL_PROCESS,
-        NOTIFICATION_PARENTED, NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_PROCESS,
+        NOTIFICATION_ENTER_TREE, NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
+        NOTIFICATION_INTERNAL_PROCESS, NOTIFICATION_PARENTED, NOTIFICATION_PHYSICS_PROCESS,
+        NOTIFICATION_POSTINITIALIZE, NOTIFICATION_PROCESS, NOTIFICATION_READY,
     };
 
     /// Helper: build a MainLoop with a tree containing root + one child.
@@ -697,14 +698,17 @@ mod tests {
         ml.step(1.0 / 60.0);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        // PARENTED fires during add_child, then per frame:
-        // INTERNAL_PHYSICS_PROCESS -> PHYSICS_PROCESS -> INTERNAL_PROCESS -> PROCESS
-        assert_eq!(log.len(), 5);
-        assert_eq!(log[0], NOTIFICATION_PARENTED);
-        assert_eq!(log[1], NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
-        assert_eq!(log[2], NOTIFICATION_PHYSICS_PROCESS);
-        assert_eq!(log[3], NOTIFICATION_INTERNAL_PROCESS);
-        assert_eq!(log[4], NOTIFICATION_PROCESS);
+        // POSTINITIALIZE + PARENTED + ENTER_TREE + READY from add_child to live root,
+        // then per frame: INTERNAL_PHYSICS -> PHYSICS -> INTERNAL_PROCESS -> PROCESS
+        assert_eq!(log.len(), 8);
+        assert_eq!(log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(log[1], NOTIFICATION_PARENTED);
+        assert_eq!(log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[3], NOTIFICATION_READY);
+        assert_eq!(log[4], NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
+        assert_eq!(log[5], NOTIFICATION_PHYSICS_PROCESS);
+        assert_eq!(log[6], NOTIFICATION_INTERNAL_PROCESS);
+        assert_eq!(log[7], NOTIFICATION_PROCESS);
     }
 
     #[test]
@@ -762,8 +766,16 @@ mod tests {
 
         assert_eq!(ml.frame_count(), 0);
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        // Only PARENTED from add_child, no frame notifications.
-        assert_eq!(log, &[NOTIFICATION_PARENTED]);
+        // POSTINITIALIZE + PARENTED + ENTER_TREE + READY from add_child, no frame notifications.
+        assert_eq!(
+            log,
+            &[
+                NOTIFICATION_POSTINITIALIZE,
+                NOTIFICATION_PARENTED,
+                NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_READY,
+            ]
+        );
     }
 
     #[test]
@@ -902,7 +914,10 @@ mod tests {
         assert_eq!(
             log,
             &[
+                NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
+                NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_READY,
                 NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
                 NOTIFICATION_PHYSICS_PROCESS,
                 NOTIFICATION_INTERNAL_PROCESS,
@@ -917,11 +932,14 @@ mod tests {
         ml.run_frames(5, 1.0 / 60.0);
 
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
-        // First entry is PARENTED from add_child, then per-frame notifications.
-        // With 1 physics tick per frame, the pattern repeats every 4 notifications.
-        assert_eq!(log[0], NOTIFICATION_PARENTED);
+        // First 4 entries from add_child: POSTINITIALIZE + PARENTED + ENTER_TREE + READY.
+        // Then per-frame notifications repeat every 4 notifications.
+        assert_eq!(log[0], NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(log[1], NOTIFICATION_PARENTED);
+        assert_eq!(log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[3], NOTIFICATION_READY);
         for frame in 0..5 {
-            let base = 1 + frame * 4; // +1 for leading PARENTED
+            let base = 4 + frame * 4; // +4 for leading lifecycle
             assert_eq!(
                 log[base], NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
                 "frame {frame}: expected INTERNAL_PHYSICS_PROCESS at pos {base}"
@@ -965,10 +983,10 @@ mod tests {
         let parent_log = ml.tree().get_node(parent_id).unwrap().notification_log();
         let child_log = ml.tree().get_node(child_id).unwrap().notification_log();
 
-        // Parent: PARENTED + CHILD_ORDER_CHANGED + 4 frame notifications = 6
-        // Child: PARENTED + 4 frame notifications = 5
-        assert_eq!(parent_log.len(), 6);
-        assert_eq!(child_log.len(), 5);
+        // Parent: POSTINITIALIZE + PARENTED + ENTER_TREE + READY + CHILD_ORDER_CHANGED + 4 frame = 9
+        // Child: POSTINITIALIZE + PARENTED + ENTER_TREE + READY + 4 frame = 8
+        assert_eq!(parent_log.len(), 9);
+        assert_eq!(child_log.len(), 8);
 
         // Verify tree order via all_nodes_in_tree_order.
         let order = ml.tree().all_nodes_in_tree_order();
@@ -1027,8 +1045,9 @@ mod tests {
             assert_eq!(ml.frame_count(), frame);
 
             let log = ml.tree().get_node(child_id).unwrap().notification_log();
-            // 1 PARENTED from add_child + each frame adds 4 notifications.
-            let expected_len = 1 + (frame as usize) * 4;
+            // 4 lifecycle from add_child (POSTINITIALIZE + PARENTED + ENTER_TREE + READY)
+            // + each frame adds 4 notifications.
+            let expected_len = 4 + (frame as usize) * 4;
             assert_eq!(
                 log.len(),
                 expected_len,
@@ -1237,14 +1256,15 @@ mod tests {
         assert!(a_pos < b_pos, "A before B");
         assert!(b_pos < c_pos, "B before C");
 
-        // Each node gets PARENTED + possibly CHILD_ORDER_CHANGED + 4 frame notifications.
+        // Each node gets POSTINITIALIZE + PARENTED + ENTER_TREE + READY + possibly
+        // CHILD_ORDER_CHANGED + 4 frame notifications.
         // A and B each have one child added, so they get CHILD_ORDER_CHANGED too.
         let a_log = ml.tree().get_node(a_id).unwrap().notification_log();
-        assert_eq!(a_log.len(), 6); // PARENTED + CHILD_ORDER_CHANGED + 4 frame
+        assert_eq!(a_log.len(), 9); // 4 lifecycle + CHILD_ORDER_CHANGED + 4 frame
         let b_log = ml.tree().get_node(b_id).unwrap().notification_log();
-        assert_eq!(b_log.len(), 6); // PARENTED + CHILD_ORDER_CHANGED + 4 frame
+        assert_eq!(b_log.len(), 9); // 4 lifecycle + CHILD_ORDER_CHANGED + 4 frame
         let c_log = ml.tree().get_node(c_id).unwrap().notification_log();
-        assert_eq!(c_log.len(), 5); // PARENTED + 4 frame (no children)
+        assert_eq!(c_log.len(), 8); // 4 lifecycle + 4 frame (no children)
     }
 
     #[test]

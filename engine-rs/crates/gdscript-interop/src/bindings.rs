@@ -150,6 +150,13 @@ pub trait ScriptInstance {
         self.list_methods().iter().any(|m| m.name == name)
     }
 
+    /// Resolves `@onready` variables by evaluating their default expressions.
+    /// Called by the scene tree just before `_ready` fires.
+    /// Default implementation is a no-op.
+    fn resolve_onready(&mut self) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
     /// Inject scene-tree access so the script can call get_node / emit_signal.
     fn set_scene_access(&mut self, _access: Box<dyn SceneAccess>, _node_id: u64) {}
 

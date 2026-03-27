@@ -1,0 +1,40 @@
+{
+  "_comment": "Instance-ID shape contract for Patina <-> Godot 4.6.1 structural compatibility.",
+  "_doc": "Patina's NodeId/ObjectId system must satisfy these shape invariants when compared against Godot's get_instance_id(). Value equality is NOT required \u2014 only structural shape.",
+  "contract": {
+    "type": "u64",
+    "min_value": 1,
+    "max_value": 18446744073709551615,
+    "zero_allowed": false,
+    "negative_allowed": false,
+    "uniqueness": "globally unique per session \u2014 no two live nodes share an ID",
+    "stability": "immutable for the lifetime of the node \u2014 survives reparenting, renaming, property mutation",
+    "monotonic": "IDs are allocated in strictly increasing order (creation order)",
+    "recycling": "IDs of removed nodes are never reused",
+    "display_format": "plain decimal integer string (no prefix, no hex)",
+    "variant_type": "Int (i64 in Patina Variant, maps to Godot Variant.Type.INT)",
+    "godot_api": "Object.get_instance_id() -> int",
+    "patina_api": "NodeId::raw() -> u64, ObjectId::raw() -> u64"
+  },
+  "oracle_property_mapping": {
+    "_comment": "Instance IDs are NOT serialised as properties in oracle fixtures \u2014 they are runtime-only method returns (Object.get_instance_id()). When oracle property fixtures include process_thread_group in the future, it will appear as an int property with values: INHERIT=0, MAIN_THREAD=1, SUB_THREAD=2."
+  },
+  "scenes_covered": [
+    "signal_instantiation",
+    "physics_playground",
+    "platformer",
+    "hierarchy",
+    "minimal",
+    "character_body_test",
+    "signals_complex",
+    "space_shooter",
+    "ui_menu",
+    "unique_name_resolution",
+    "with_properties",
+    "test_scripts"
+  ],
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-22T06:57:54+00:00",
+  "capture_type": "scene_tree"
+}

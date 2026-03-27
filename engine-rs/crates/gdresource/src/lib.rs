@@ -27,6 +27,7 @@ pub mod project;
 pub mod res_loader;
 pub mod resource;
 pub mod saver;
+pub mod shader_tokenizer;
 pub mod uid;
 pub mod unified;
 

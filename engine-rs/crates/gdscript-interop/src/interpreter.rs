@@ -3432,9 +3432,15 @@ impl Interpreter {
     ) -> Result<ClassInstance, RuntimeError> {
         let mut properties = HashMap::new();
         for var in &class_def.instance_vars {
-            let val = match &var.default {
-                Some(expr) => self.eval_expr(expr)?,
-                None => Variant::Nil,
+            let is_onready = var.annotations.iter().any(|a| a.name == "onready");
+            let val = if is_onready {
+                // @onready vars are deferred until _ready; start as Nil.
+                Variant::Nil
+            } else {
+                match &var.default {
+                    Some(expr) => self.eval_expr(expr)?,
+                    None => Variant::Nil,
+                }
             };
             properties.insert(var.name.clone(), val);
         }
@@ -3442,6 +3448,25 @@ impl Interpreter {
             class_def: class_def.clone(),
             properties,
         })
+    }
+
+    /// Resolves `@onready` variables by evaluating their default expressions.
+    ///
+    /// Call this after the `_ready` lifecycle callback fires to populate
+    /// deferred variables that were initialized to `Nil`.
+    pub fn resolve_onready_vars(
+        &mut self,
+        instance: &mut ClassInstance,
+    ) -> Result<(), RuntimeError> {
+        for var in &instance.class_def.instance_vars {
+            if var.annotations.iter().any(|a| a.name == "onready") {
+                if let Some(expr) = &var.default {
+                    let val = self.eval_expr(expr)?;
+                    instance.properties.insert(var.name.clone(), val);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Calls a method on a class instance.

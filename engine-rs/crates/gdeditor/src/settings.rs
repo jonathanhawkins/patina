@@ -76,27 +76,116 @@ impl EditorSettings {
 }
 
 /// Project-wide settings, analogous to Godot's `project.godot`.
+///
+/// Settings are organized by category: Application, Display, Physics,
+/// Audio, and Rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSettings {
+    // ---- Application ----
     /// The project's display name.
     pub project_name: String,
     /// Path to the main scene (e.g. `"res://scenes/main.tscn"`).
     pub main_scene_path: String,
+    /// Project description.
+    #[serde(default)]
+    pub description: String,
+    /// Path to the project icon.
+    #[serde(default)]
+    pub icon_path: String,
+
+    // ---- Display ----
+    /// Display resolution width.
+    #[serde(default = "default_resolution_w")]
+    pub resolution_w: u32,
+    /// Display resolution height.
+    #[serde(default = "default_resolution_h")]
+    pub resolution_h: u32,
+    /// Stretch mode: "disabled", "canvas_items", or "viewport".
+    #[serde(default = "default_stretch_mode")]
+    pub stretch_mode: String,
+    /// Stretch aspect: "ignore", "keep", "keep_width", "keep_height", "expand".
+    #[serde(default = "default_stretch_aspect")]
+    pub stretch_aspect: String,
+    /// Whether to start in fullscreen.
+    #[serde(default)]
+    pub fullscreen: bool,
+    /// Whether V-Sync is enabled.
+    #[serde(default = "default_true")]
+    pub vsync: bool,
+
+    // ---- Physics ----
     /// Physics ticks per second.
     pub physics_fps: u32,
     /// Default gravity in pixels/sec² (2D) or m/sec² (3D).
     pub default_gravity: f64,
+    /// Default linear damping.
+    #[serde(default = "default_linear_damp")]
+    pub default_linear_damp: f64,
+    /// Default angular damping.
+    #[serde(default = "default_angular_damp")]
+    pub default_angular_damp: f64,
+
+    // ---- Audio ----
+    /// Default audio bus layout resource path.
+    #[serde(default = "default_bus_layout")]
+    pub default_bus_layout: String,
+    /// Master volume in dB.
+    #[serde(default)]
+    pub master_volume_db: f64,
+    /// Whether audio input capture is enabled.
+    #[serde(default)]
+    pub enable_audio_input: bool,
+
+    // ---- Rendering ----
+    /// Renderer backend: "forward_plus", "mobile", or "compatibility".
+    #[serde(default = "default_renderer")]
+    pub renderer: String,
+    /// Anti-aliasing mode: "disabled", "fxaa", "msaa_2x", "msaa_4x", "msaa_8x".
+    #[serde(default = "default_aa")]
+    pub anti_aliasing: String,
+    /// Default environment resource path.
+    #[serde(default)]
+    pub environment_default: String,
+
+    // ---- Input ----
     /// Input action map: action name -> list of input events.
     pub input_map: HashMap<String, Vec<String>>,
 }
+
+fn default_resolution_w() -> u32 { 1152 }
+fn default_resolution_h() -> u32 { 648 }
+fn default_stretch_mode() -> String { "disabled".to_string() }
+fn default_stretch_aspect() -> String { "keep".to_string() }
+fn default_true() -> bool { true }
+fn default_linear_damp() -> f64 { 0.1 }
+fn default_angular_damp() -> f64 { 1.0 }
+fn default_bus_layout() -> String { "res://default_bus_layout.tres".to_string() }
+fn default_renderer() -> String { "forward_plus".to_string() }
+fn default_aa() -> String { "disabled".to_string() }
 
 impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             project_name: "New Project".to_string(),
             main_scene_path: String::new(),
+            description: String::new(),
+            icon_path: String::new(),
+            resolution_w: default_resolution_w(),
+            resolution_h: default_resolution_h(),
+            stretch_mode: default_stretch_mode(),
+            stretch_aspect: default_stretch_aspect(),
+            fullscreen: false,
+            vsync: true,
             physics_fps: 60,
             default_gravity: 980.0,
+            default_linear_damp: default_linear_damp(),
+            default_angular_damp: default_angular_damp(),
+            default_bus_layout: default_bus_layout(),
+            master_volume_db: 0.0,
+            enable_audio_input: false,
+            renderer: default_renderer(),
+            anti_aliasing: default_aa(),
+            environment_default: String::new(),
             input_map: HashMap::new(),
         }
     }
@@ -200,6 +289,77 @@ mod tests {
         assert_eq!(loaded.main_scene_path, "res://main.tscn");
         assert_eq!(loaded.physics_fps, 120);
         assert!(loaded.input_map.contains_key("jump"));
+    }
+
+    #[test]
+    fn project_settings_categorized_defaults() {
+        let settings = ProjectSettings::new();
+        // Display
+        assert_eq!(settings.resolution_w, 1152);
+        assert_eq!(settings.resolution_h, 648);
+        assert_eq!(settings.stretch_mode, "disabled");
+        assert_eq!(settings.stretch_aspect, "keep");
+        assert!(!settings.fullscreen);
+        assert!(settings.vsync);
+        // Physics
+        assert_eq!(settings.default_linear_damp, 0.1);
+        assert_eq!(settings.default_angular_damp, 1.0);
+        // Audio
+        assert_eq!(settings.default_bus_layout, "res://default_bus_layout.tres");
+        assert_eq!(settings.master_volume_db, 0.0);
+        assert!(!settings.enable_audio_input);
+        // Rendering
+        assert_eq!(settings.renderer, "forward_plus");
+        assert_eq!(settings.anti_aliasing, "disabled");
+        assert!(settings.environment_default.is_empty());
+    }
+
+    #[test]
+    fn project_settings_categorized_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("project_cat.json");
+
+        let mut settings = ProjectSettings::new();
+        settings.description = "A test game".to_string();
+        settings.resolution_w = 1920;
+        settings.resolution_h = 1080;
+        settings.renderer = "mobile".to_string();
+        settings.anti_aliasing = "fxaa".to_string();
+        settings.master_volume_db = -6.0;
+        settings.save(&path).unwrap();
+
+        let loaded = ProjectSettings::load(&path).unwrap();
+        assert_eq!(loaded.description, "A test game");
+        assert_eq!(loaded.resolution_w, 1920);
+        assert_eq!(loaded.resolution_h, 1080);
+        assert_eq!(loaded.renderer, "mobile");
+        assert_eq!(loaded.anti_aliasing, "fxaa");
+        assert_eq!(loaded.master_volume_db, -6.0);
+    }
+
+    #[test]
+    fn project_settings_backward_compat_load() {
+        // Old-format JSON (only original fields) should still deserialize
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("old_format.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "project_name": "OldGame",
+                "main_scene_path": "res://main.tscn",
+                "physics_fps": 60,
+                "default_gravity": 980.0,
+                "input_map": {}
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = ProjectSettings::load(&path).unwrap();
+        assert_eq!(loaded.project_name, "OldGame");
+        // New fields should have defaults
+        assert_eq!(loaded.resolution_w, 1152);
+        assert_eq!(loaded.renderer, "forward_plus");
+        assert!(loaded.vsync);
     }
 
     #[test]

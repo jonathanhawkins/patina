@@ -1,0 +1,337 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "MeshInstance3D",
+									"name": "Hand",
+									"path": "/root/World/Arm/Forearm/Hand",
+									"properties": {
+										"transform": {
+											"class_type": "",
+											"hint": 0,
+											"type": "Transform3D",
+											"value": {
+												"basis": {
+													"x": {
+														"x": 1.0,
+														"y": 0.0,
+														"z": 0.0
+													},
+													"y": {
+														"x": 0.0,
+														"y": 1.0,
+														"z": 0.0
+													},
+													"z": {
+														"x": 0.0,
+														"y": 0.0,
+														"z": 1.0
+													}
+												},
+												"origin": {
+													"x": 0.0,
+													"y": 1.0,
+													"z": 0.0
+												}
+											}
+										}
+									}
+								}
+							],
+							"class": "Node3D",
+							"name": "Forearm",
+							"path": "/root/World/Arm/Forearm",
+							"properties": {
+								"transform": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Transform3D",
+									"value": {
+										"basis": {
+											"x": {
+												"x": 1.0,
+												"y": 0.0,
+												"z": 0.0
+											},
+											"y": {
+												"x": 0.0,
+												"y": 1.0,
+												"z": 0.0
+											},
+											"z": {
+												"x": 0.0,
+												"y": 0.0,
+												"z": 1.0
+											}
+										},
+										"origin": {
+											"x": 0.0,
+											"y": 2.0,
+											"z": 0.0
+										}
+									}
+								}
+							}
+						}
+					],
+					"class": "Node3D",
+					"name": "Arm",
+					"path": "/root/World/Arm",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": {
+										"x": 1.0,
+										"y": 0.0,
+										"z": 0.0
+									},
+									"y": {
+										"x": 0.0,
+										"y": 1.0,
+										"z": 0.0
+									},
+									"z": {
+										"x": 0.0,
+										"y": 0.0,
+										"z": 1.0
+									}
+								},
+								"origin": {
+									"x": 0.0,
+									"y": 3.0,
+									"z": 0.0
+								}
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "Camera3D",
+					"name": "Camera",
+					"path": "/root/World/Camera",
+					"properties": {
+						"current": {
+							"class_type": "",
+							"hint": 0,
+							"type": "bool",
+							"value": true
+						},
+						"far": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 100.0
+						},
+						"fov": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 70.0
+						},
+						"near": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.100000001490116
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": {
+										"x": 1.0,
+										"y": 0.0,
+										"z": 0.0
+									},
+									"y": {
+										"x": 0.0,
+										"y": 1.0,
+										"z": 0.0
+									},
+									"z": {
+										"x": 0.0,
+										"y": 0.0,
+										"z": 1.0
+									}
+								},
+								"origin": {
+									"x": 0.0,
+									"y": 2.0,
+									"z": 8.0
+								}
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"name": "Light",
+					"path": "/root/World/Light",
+					"properties": {
+						"light_energy": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.800000011920929
+						},
+						"shadow_enabled": {
+							"class_type": "",
+							"hint": 42,
+							"type": "bool",
+							"value": true
+						}
+					}
+				}
+			],
+			"class": "Node3D",
+			"name": "World",
+			"path": "/root/World",
+			"properties": {
+				"transform": {
+					"class_type": "",
+					"hint": 0,
+					"type": "Transform3D",
+					"value": {
+						"basis": {
+							"x": {
+								"x": 1.0,
+								"y": 0.0,
+								"z": 0.0
+							},
+							"y": {
+								"x": 0.0,
+								"y": 1.0,
+								"z": 0.0
+							},
+							"z": {
+								"x": 0.0,
+								"y": 0.0,
+								"z": 1.0
+							}
+						},
+						"origin": {
+							"x": 2.0,
+							"y": 0.0,
+							"z": 0.0
+						}
+					}
+				}
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

@@ -11,7 +11,9 @@ pub mod export;
 pub mod input;
 pub mod network;
 pub mod os;
+pub mod platform_targets;
 pub mod time;
+pub mod signing;
 pub mod window;
 
 #[cfg(feature = "windowed")]
@@ -29,4 +31,8 @@ pub use network::{
 };
 pub use os::{current_platform, get_ticks_msec, get_ticks_usec, is_debug_build, OsInfo, Platform};
 pub use time::Timer;
+pub use signing::{
+    sign_macos, sign_windows, MacOsSigningConfig, SigningError, SigningResult,
+    WindowsSigningConfig,
+};
 pub use window::{HeadlessWindow, WindowConfig, WindowEvent, WindowId, WindowManager};

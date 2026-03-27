@@ -97,6 +97,30 @@ impl<L: ResourceLoader> UnifiedLoader<L> {
         &mut self.uid_registry
     }
 
+    /// Resolves a `uid://` or `res://` reference to a `res://` path string.
+    ///
+    /// - If `reference` starts with `uid://`, resolves via the UID registry.
+    /// - If `reference` starts with `res://`, returns it unchanged.
+    /// - Returns `EngineError::NotFound` if a `uid://` reference has no registered path.
+    pub fn resolve_to_path(&self, reference: &str) -> EngineResult<String> {
+        if reference.starts_with("uid://") {
+            let uid = parse_uid_string(reference);
+            if !uid.is_valid() {
+                return Err(EngineError::NotFound(format!(
+                    "invalid UID reference: {reference}"
+                )));
+            }
+            self.uid_registry
+                .lookup_uid(uid)
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    EngineError::NotFound(format!("no path registered for {reference}"))
+                })
+        } else {
+            Ok(reference.to_string())
+        }
+    }
+
     /// Invalidates a cached resource by path.
     pub fn invalidate(&mut self, path: &str) {
         self.cache.invalidate(path);

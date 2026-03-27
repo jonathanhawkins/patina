@@ -140,6 +140,12 @@ impl ScriptInstance for GDScriptNodeInstance {
         self.instance.class_def.methods.contains_key(name)
     }
 
+    fn resolve_onready(&mut self) -> Result<(), ScriptError> {
+        self.interpreter
+            .resolve_onready_vars(&mut self.instance)
+            .map_err(|e| ScriptError::TypeError(e.to_string()))
+    }
+
     fn set_scene_access(&mut self, access: Box<dyn SceneAccess>, node_id: u64) {
         self.interpreter.set_scene_access(access, node_id);
     }

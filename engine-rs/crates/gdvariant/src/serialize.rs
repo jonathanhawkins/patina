@@ -44,20 +44,20 @@ pub fn to_json(v: &Variant) -> Value {
         Variant::Basis(b) => json!({
             "type": "Basis",
             "value": {
-                "x": [b.x.x, b.x.y, b.x.z],
-                "y": [b.y.x, b.y.y, b.y.z],
-                "z": [b.z.x, b.z.y, b.z.z]
+                "x": {"x": b.x.x, "y": b.x.y, "z": b.x.z},
+                "y": {"x": b.y.x, "y": b.y.y, "z": b.y.z},
+                "z": {"x": b.z.x, "y": b.z.y, "z": b.z.z}
             }
         }),
         Variant::Transform3D(t) => json!({
             "type": "Transform3D",
             "value": {
                 "basis": {
-                    "x": [t.basis.x.x, t.basis.x.y, t.basis.x.z],
-                    "y": [t.basis.y.x, t.basis.y.y, t.basis.y.z],
-                    "z": [t.basis.z.x, t.basis.z.y, t.basis.z.z]
+                    "x": {"x": t.basis.x.x, "y": t.basis.x.y, "z": t.basis.x.z},
+                    "y": {"x": t.basis.y.x, "y": t.basis.y.y, "z": t.basis.y.z},
+                    "z": {"x": t.basis.z.x, "y": t.basis.z.y, "z": t.basis.z.z}
                 },
-                "origin": [t.origin.x, t.origin.y, t.origin.z]
+                "origin": {"x": t.origin.x, "y": t.origin.y, "z": t.origin.z}
             }
         }),
         Variant::Quaternion(q) => json!({ "type": "Quaternion", "value": [q.x, q.y, q.z, q.w] }),
@@ -93,9 +93,32 @@ pub fn to_json(v: &Variant) -> Value {
     }
 }
 
+/// Parse a Vector3 from either named-component format `{"x":1,"y":2,"z":3}`
+/// or legacy array format `[1,2,3]`.
+fn parse_vec3(val: &Value) -> Option<Vector3> {
+    if let Some(obj) = val.as_object() {
+        let x = obj.get("x")?.as_f64()? as f32;
+        let y = obj.get("y")?.as_f64()? as f32;
+        let z = obj.get("z")?.as_f64()? as f32;
+        Some(Vector3::new(x, y, z))
+    } else if let Some(arr) = val.as_array() {
+        if arr.len() != 3 {
+            return None;
+        }
+        Some(Vector3::new(
+            arr[0].as_f64()? as f32,
+            arr[1].as_f64()? as f32,
+            arr[2].as_f64()? as f32,
+        ))
+    } else {
+        None
+    }
+}
+
 /// Deserializes a `Variant` from a `serde_json::Value` produced by [`to_json`].
 ///
 /// Returns `None` if the JSON does not match the expected tagged format.
+/// Accepts both named-component format (oracle) and legacy array format.
 pub fn from_json(val: &Value) -> Option<Variant> {
     let obj = val.as_object()?;
     let ty = obj.get("type")?.as_str()?;
@@ -161,63 +184,21 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         }
         "Basis" => {
             let v = obj.get("value")?.as_object()?;
-            let x = v.get("x")?.as_array()?;
-            let y = v.get("y")?.as_array()?;
-            let z = v.get("z")?.as_array()?;
-            if x.len() != 3 || y.len() != 3 || z.len() != 3 {
-                return None;
-            }
-            Some(Variant::Basis(Basis {
-                x: Vector3::new(
-                    x[0].as_f64()? as f32,
-                    x[1].as_f64()? as f32,
-                    x[2].as_f64()? as f32,
-                ),
-                y: Vector3::new(
-                    y[0].as_f64()? as f32,
-                    y[1].as_f64()? as f32,
-                    y[2].as_f64()? as f32,
-                ),
-                z: Vector3::new(
-                    z[0].as_f64()? as f32,
-                    z[1].as_f64()? as f32,
-                    z[2].as_f64()? as f32,
-                ),
-            }))
+            let x = parse_vec3(v.get("x")?)?;
+            let y = parse_vec3(v.get("y")?)?;
+            let z = parse_vec3(v.get("z")?)?;
+            Some(Variant::Basis(Basis { x, y, z }))
         }
         "Transform3D" => {
             let v = obj.get("value")?.as_object()?;
             let b = v.get("basis")?.as_object()?;
-            let bx = b.get("x")?.as_array()?;
-            let by = b.get("y")?.as_array()?;
-            let bz = b.get("z")?.as_array()?;
-            let o = v.get("origin")?.as_array()?;
-            if bx.len() != 3 || by.len() != 3 || bz.len() != 3 || o.len() != 3 {
-                return None;
-            }
+            let bx = parse_vec3(b.get("x")?)?;
+            let by = parse_vec3(b.get("y")?)?;
+            let bz = parse_vec3(b.get("z")?)?;
+            let origin = parse_vec3(v.get("origin")?)?;
             Some(Variant::Transform3D(Transform3D {
-                basis: Basis {
-                    x: Vector3::new(
-                        bx[0].as_f64()? as f32,
-                        bx[1].as_f64()? as f32,
-                        bx[2].as_f64()? as f32,
-                    ),
-                    y: Vector3::new(
-                        by[0].as_f64()? as f32,
-                        by[1].as_f64()? as f32,
-                        by[2].as_f64()? as f32,
-                    ),
-                    z: Vector3::new(
-                        bz[0].as_f64()? as f32,
-                        bz[1].as_f64()? as f32,
-                        bz[2].as_f64()? as f32,
-                    ),
-                },
-                origin: Vector3::new(
-                    o[0].as_f64()? as f32,
-                    o[1].as_f64()? as f32,
-                    o[2].as_f64()? as f32,
-                ),
+                basis: Basis { x: bx, y: by, z: bz },
+                origin,
             }))
         }
         "Quaternion" => {
@@ -516,5 +497,138 @@ mod tests {
             "value": { "position": [0.0, 0.0] }
         });
         assert!(from_json(&j).is_none());
+    }
+
+    // -- Basis / Transform3D roundtrip and format tests -----------------------
+
+    #[test]
+    fn roundtrip_basis() {
+        let v = Variant::Basis(Basis {
+            x: Vector3::new(1.0, 0.0, 0.0),
+            y: Vector3::new(0.0, 1.0, 0.0),
+            z: Vector3::new(0.0, 0.0, 1.0),
+        });
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_transform3d() {
+        let v = Variant::Transform3D(Transform3D {
+            basis: Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            },
+            origin: Vector3::new(10.0, 20.0, 30.0),
+        });
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn basis_serializes_named_component_format() {
+        let v = Variant::Basis(Basis {
+            x: Vector3::new(1.0, 2.0, 3.0),
+            y: Vector3::new(4.0, 5.0, 6.0),
+            z: Vector3::new(7.0, 8.0, 9.0),
+        });
+        let json = to_json(&v);
+        let val = json.get("value").unwrap();
+        // Must use named-component format {"x": ..., "y": ..., "z": ...}
+        let x = val.get("x").unwrap().as_object().unwrap();
+        assert_eq!(x.get("x").unwrap().as_f64().unwrap() as f32, 1.0);
+        assert_eq!(x.get("y").unwrap().as_f64().unwrap() as f32, 2.0);
+        assert_eq!(x.get("z").unwrap().as_f64().unwrap() as f32, 3.0);
+    }
+
+    #[test]
+    fn transform3d_serializes_named_component_format() {
+        let v = Variant::Transform3D(Transform3D {
+            basis: Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            },
+            origin: Vector3::new(5.0, 10.0, 15.0),
+        });
+        let json = to_json(&v);
+        let val = json.get("value").unwrap();
+        // Origin must be named-component
+        let origin = val.get("origin").unwrap().as_object().unwrap();
+        assert_eq!(origin.get("x").unwrap().as_f64().unwrap() as f32, 5.0);
+        assert_eq!(origin.get("y").unwrap().as_f64().unwrap() as f32, 10.0);
+        assert_eq!(origin.get("z").unwrap().as_f64().unwrap() as f32, 15.0);
+        // Basis rows must be named-component
+        let bx = val.get("basis").unwrap().get("x").unwrap().as_object().unwrap();
+        assert_eq!(bx.get("x").unwrap().as_f64().unwrap() as f32, 1.0);
+    }
+
+    #[test]
+    fn basis_deserializes_legacy_array_format() {
+        // Legacy format: rows as arrays [x, y, z]
+        let j = serde_json::json!({
+            "type": "Basis",
+            "value": {
+                "x": [1.0, 0.0, 0.0],
+                "y": [0.0, 1.0, 0.0],
+                "z": [0.0, 0.0, 1.0]
+            }
+        });
+        let v = from_json(&j).unwrap();
+        assert_eq!(v, Variant::Basis(Basis {
+            x: Vector3::new(1.0, 0.0, 0.0),
+            y: Vector3::new(0.0, 1.0, 0.0),
+            z: Vector3::new(0.0, 0.0, 1.0),
+        }));
+    }
+
+    #[test]
+    fn transform3d_deserializes_legacy_array_format() {
+        // Legacy format: arrays instead of named-component objects
+        let j = serde_json::json!({
+            "type": "Transform3D",
+            "value": {
+                "basis": {
+                    "x": [1.0, 0.0, 0.0],
+                    "y": [0.0, 1.0, 0.0],
+                    "z": [0.0, 0.0, 1.0]
+                },
+                "origin": [10.0, 20.0, 30.0]
+            }
+        });
+        let v = from_json(&j).unwrap();
+        assert_eq!(v, Variant::Transform3D(Transform3D {
+            basis: Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            },
+            origin: Vector3::new(10.0, 20.0, 30.0),
+        }));
+    }
+
+    #[test]
+    fn parse_vec3_named_format() {
+        let j = serde_json::json!({"x": 1.0, "y": 2.0, "z": 3.0});
+        let v = parse_vec3(&j).unwrap();
+        assert_eq!(v, Vector3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn parse_vec3_array_format() {
+        let j = serde_json::json!([4.0, 5.0, 6.0]);
+        let v = parse_vec3(&j).unwrap();
+        assert_eq!(v, Vector3::new(4.0, 5.0, 6.0));
+    }
+
+    #[test]
+    fn parse_vec3_rejects_bad_array_length() {
+        assert!(parse_vec3(&serde_json::json!([1.0, 2.0])).is_none());
+        assert!(parse_vec3(&serde_json::json!([1.0, 2.0, 3.0, 4.0])).is_none());
+    }
+
+    #[test]
+    fn parse_vec3_rejects_non_numeric() {
+        assert!(parse_vec3(&serde_json::json!("not a vec")).is_none());
+        assert!(parse_vec3(&serde_json::json!(42)).is_none());
     }
 }

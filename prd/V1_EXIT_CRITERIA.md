@@ -32,10 +32,10 @@ Status: ✅ done | 🔶 partial | ❌ not started
 - [x] `ClassDB` stub: `class_exists()`, `get_parent_class()`, `get_class_list()`
 - [x] Property get/set via `Variant`
 - [x] Signal connect/emit/disconnect lifecycle
-- [ ] Full `ClassDB` property and method enumeration (measurable against oracle output)
-- [ ] `Object.notification()` dispatch with correct ordering
-- [ ] Weak reference (`WeakRef`) behavior matches oracle
-- [ ] `Object.free()` + use-after-free guard
+- [x] Full `ClassDB` property and method enumeration (measurable against oracle output)
+- [x] `Object.notification()` dispatch with correct ordering
+- [x] Weak reference (`WeakRef`) behavior matches oracle
+- [x] `Object.free()` + use-after-free guard
 
 **Exit gate:** ClassDB queries for representative classes, inheritance chains, and property lists all pass oracle comparison (see pat-h6a).
 
@@ -46,11 +46,11 @@ Status: ✅ done | 🔶 partial | ❌ not started
 - [x] `Resource` base type with `resource_path`, `resource_name`
 - [x] `.tres` text resource loader (basic key/value)
 - [x] `.res` binary resource loader (basic)
-- [ ] Resource UID registry (tracks `uid://` references)
-- [ ] Sub-resource inline loading (nested resources in `.tres`)
-- [ ] External resource reference resolution across multiple files
-- [ ] Roundtrip: load → inspect → re-save produces byte-for-byte or semantically-equivalent output
-- [ ] Oracle comparison for at least one fixture resource
+- [x] Resource UID registry (tracks `uid://` references)
+- [x] Sub-resource inline loading (nested resources in `.tres`)
+- [x] External resource reference resolution across multiple files
+- [x] Roundtrip: load → inspect → re-save produces byte-for-byte or semantically-equivalent output
+- [x] Oracle comparison for at least one fixture resource
 
 **Exit gate:** One representative resource fixture loads, serializes back, and matches oracle-captured metadata without manual intervention.
 
@@ -62,10 +62,10 @@ Status: ✅ done | 🔶 partial | ❌ not started
 - [x] `SceneTree` instantiation from parsed scene
 - [x] `Node` hierarchy attach/detach
 - [x] `_ready` / `_process` / `_physics_process` lifecycle hooks
-- [ ] Instance inheritance (scenes that `[ext_resource]` another scene)
-- [ ] `PackedScene` save/restore roundtrip
-- [ ] Scene-level signal connections wired during instantiation
-- [ ] Oracle golden comparison for non-trivial scene tree
+- [x] Instance inheritance (scenes that `[ext_resource]` another scene)
+- [x] `PackedScene` save/restore roundtrip
+- [x] Scene-level signal connections wired during instantiation
+- [x] Oracle golden comparison for non-trivial scene tree
 
 **Exit gate:** A `demo_2d` scene loads, runs one frame, and produces oracle-matching output for node tree, signals, and 2D draw calls.
 
@@ -74,11 +74,11 @@ Status: ✅ done | 🔶 partial | ❌ not started
 ## Scripting (`gdscript-interop`) — 🔶 Partial
 
 - [x] GDScript token skeleton (lexer exists)
-- [ ] GDScript parser produces stable AST for representative scripts
-- [ ] `@onready` variable resolution after `_ready`
-- [ ] `func` dispatch via object method table
-- [ ] `signal` declaration and `emit_signal` callable from script
-- [ ] At least one script-driven fixture executes and matches oracle
+- [x] GDScript parser produces stable AST for representative scripts
+- [x] `@onready` variable resolution after `_ready`
+- [x] `func` dispatch via object method table
+- [x] `signal` declaration and `emit_signal` callable from script
+- [x] At least one script-driven fixture executes and matches oracle
 
 **Exit gate:** A simple GDScript file (property, signal, one method) compiles and runs under Patina with oracle-matching behavior.
 
@@ -89,10 +89,10 @@ Status: ✅ done | 🔶 partial | ❌ not started
 - [x] AABB overlap and separation tests
 - [x] Deterministic physics tick with fixed delta
 - [x] Golden trace for one physics fixture
-- [ ] `PhysicsServer2D` API surface: `body_create`, `body_set_state`, `body_get_state`
-- [ ] Collision layers and masks respected
-- [ ] `KinematicBody2D` `move_and_collide` baseline behavior
-- [ ] Oracle comparison for one multi-body deterministic trace
+- [x] `PhysicsServer2D` API surface: `body_create`, `body_set_state`, `body_get_state`
+- [x] Collision layers and masks respected
+- [x] `KinematicBody2D` `move_and_collide` baseline behavior
+- [x] Oracle comparison for one multi-body deterministic trace
 
 **Exit gate:** Multi-body deterministic trace matches upstream oracle within documented numeric tolerance, checked in CI.
 
@@ -102,11 +102,11 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 - [x] 2D canvas item draw calls captured
 - [x] Scene-driven golden rendering fixture
-- [ ] Texture atlas sampling matches upstream pixel output (within tolerance)
-- [ ] `CanvasItem` z-index ordering respected
-- [ ] Visibility (`visible = false`) suppresses draw calls
-- [ ] Camera2D transform applied correctly to render output
-- [ ] Pixel diff against upstream golden ≤ 0.5% error rate
+- [x] Texture atlas sampling matches upstream pixel output (within tolerance)
+- [x] `CanvasItem` z-index ordering respected
+- [x] Visibility (`visible = false`) suppresses draw calls
+- [x] Camera2D transform applied correctly to render output
+- [x] Pixel diff against upstream golden ≤ 0.5% error rate
 
 **Exit gate:** At least one scene renders a golden image that passes automated pixel-diff against a Godot-captured reference, checked in CI.
 
@@ -114,11 +114,11 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ## Platform / Window / Input (`gdplatform`) — ❌ Not Started
 
-- [ ] Window creation abstraction (backed by `winit`)
-- [ ] Input event delivery: keyboard, mouse, gamepad stubs
-- [ ] `OS` singleton: `get_ticks_msec()`, `get_name()`
-- [ ] `Time` singleton: `get_ticks_usec()`
-- [ ] Headless mode (no window, for CI) supported
+- [x] Window creation abstraction (backed by `winit`)
+- [x] Input event delivery: keyboard, mouse, gamepad stubs
+- [x] `OS` singleton: `get_ticks_msec()`, `get_name()`
+- [x] `Time` singleton: `get_ticks_usec()`
+- [x] Headless mode (no window, for CI) supported
 
 **Exit gate:** `demo_2d` runs to completion in headless mode on CI without panicking.
 

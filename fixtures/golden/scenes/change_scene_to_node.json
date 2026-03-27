@@ -1,0 +1,89 @@
+{
+  "fixture_id": "change_scene_to_node",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "godot-4.6.1-stable",
+  "generated_at": "2026-03-21T00:00:00Z",
+  "description": "Oracle fixture for SceneTree::change_scene_to_node(). Captures lifecycle notification ordering when replacing an active scene (SceneA with children ChildA1, ChildA2) with a manually constructed node SceneB. Godot 4.6.1 contract: EXIT_TREE fires bottom-up on old scene, then new scene root receives ENTER_TREE + READY. Children added post-switch each receive ENTER_TREE then READY in order.",
+  "data": {
+    "nodes": [
+      {
+        "name": "Root",
+        "class": "Node",
+        "path": "/root",
+        "children": [
+          {
+            "name": "SceneB",
+            "class": "Node2D",
+            "path": "/root/SceneB",
+            "children": [
+              {
+                "name": "ChildB1",
+                "class": "Sprite2D",
+                "path": "/root/SceneB/ChildB1",
+                "children": []
+              },
+              {
+                "name": "ChildB2",
+                "class": "Node2D",
+                "path": "/root/SceneB/ChildB2",
+                "children": [
+                  {
+                    "name": "GrandchildB",
+                    "class": "Node2D",
+                    "path": "/root/SceneB/ChildB2/GrandchildB",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "initial_scene": {
+    "name": "SceneA",
+    "class": "Node2D",
+    "children": [
+      { "name": "ChildA1", "class": "Sprite2D" },
+      { "name": "ChildA2", "class": "Node2D" }
+    ]
+  },
+  "replacement_scene": {
+    "root": { "name": "SceneB", "class": "Node2D" },
+    "children": [
+      { "name": "ChildB1", "class": "Sprite2D" },
+      { "name": "ChildB2", "class": "Node2D", "children": [
+        { "name": "GrandchildB", "class": "Node2D" }
+      ]}
+    ]
+  },
+  "expected_scene_switch_lifecycle": {
+    "description": "Lifecycle events from change_scene_to_node(SceneB) with SceneA as the active scene. EXIT_TREE bottom-up on old, then ENTER_TREE + READY on new root.",
+    "events": [
+      { "node_path": "/root/SceneA/ChildA1", "notification": "EXIT_TREE", "phase": "old_scene_exit" },
+      { "node_path": "/root/SceneA/ChildA2", "notification": "EXIT_TREE", "phase": "old_scene_exit" },
+      { "node_path": "/root/SceneA", "notification": "EXIT_TREE", "phase": "old_scene_exit" },
+      { "node_path": "/root/SceneB", "notification": "ENTER_TREE", "phase": "new_scene_enter" },
+      { "node_path": "/root/SceneB", "notification": "READY", "phase": "new_scene_ready" }
+    ]
+  },
+  "expected_post_switch_child_lifecycle": {
+    "description": "Each child added after scene switch receives ENTER_TREE then READY. Subtree enter is top-down, ready is bottom-up.",
+    "child_events": [
+      { "node_path": "/root/SceneB/ChildB1", "notification": "ENTER_TREE" },
+      { "node_path": "/root/SceneB/ChildB1", "notification": "READY" },
+      { "node_path": "/root/SceneB/ChildB2", "notification": "ENTER_TREE" },
+      { "node_path": "/root/SceneB/ChildB2", "notification": "READY" },
+      { "node_path": "/root/SceneB/ChildB2/GrandchildB", "notification": "ENTER_TREE" },
+      { "node_path": "/root/SceneB/ChildB2/GrandchildB", "notification": "READY" }
+    ]
+  },
+  "validation_rules": {
+    "reject_node_already_in_tree": true,
+    "clears_packed_scene_source": true,
+    "reload_after_change_to_node_errors": true,
+    "current_scene_set_to_new_root": true
+  }
+}

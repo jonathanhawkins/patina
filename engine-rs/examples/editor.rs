@@ -135,23 +135,30 @@ fn main() {
                 let state = handle.state().lock().unwrap();
                 let zoom = state.viewport_zoom;
                 let pan = state.viewport_pan;
+                let gizmo = gdeditor::scene_renderer::GizmoMode::from_viewport_mode(
+                    &state.viewport_mode,
+                );
                 if let Some(ref main_loop) = state.run_main_loop {
-                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                    gdeditor::scene_renderer::render_scene_with_gizmo(
                         main_loop.tree(),
                         None,
                         WIDTH,
                         HEIGHT,
                         zoom,
                         pan,
+                        None,
+                        gizmo,
                     )
                 } else {
-                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                    gdeditor::scene_renderer::render_scene_with_gizmo(
                         &state.scene_tree,
                         state.selected_node,
                         WIDTH,
                         HEIGHT,
                         zoom,
                         pan,
+                        None,
+                        gizmo,
                     )
                 }
             };
@@ -164,13 +171,18 @@ fn main() {
                     let selected = state.selected_node;
                     let zoom = state.viewport_zoom;
                     let pan = state.viewport_pan;
-                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                    let gizmo = gdeditor::scene_renderer::GizmoMode::from_viewport_mode(
+                        &state.viewport_mode,
+                    );
+                    gdeditor::scene_renderer::render_scene_with_gizmo(
                         &state.scene_tree,
                         selected,
                         WIDTH,
                         HEIGHT,
                         zoom,
                         pan,
+                        None,
+                        gizmo,
                     )
                 };
                 handle.update_frame(fb);

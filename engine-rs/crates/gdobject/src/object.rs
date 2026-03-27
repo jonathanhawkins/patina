@@ -11,6 +11,7 @@ use gdvariant::Variant;
 
 use crate::notification::Notification;
 use crate::signal::SignalStore;
+use crate::weak_ref;
 
 /// Trait implemented by all engine objects.
 ///
@@ -33,6 +34,13 @@ pub trait GodotObject {
     /// Handles a notification. Implementations should dispatch to the
     /// appropriate lifecycle method based on the notification code.
     fn notification(&mut self, what: Notification);
+
+    /// Frees this object. After calling, property access returns safe
+    /// defaults and `is_freed()` returns `true`.
+    fn free(&mut self);
+
+    /// Returns `true` if this object has been freed.
+    fn is_freed(&self) -> bool;
 }
 
 /// The base data shared by every engine object instance.
@@ -57,31 +65,41 @@ pub struct ObjectBase {
     /// separate key-value namespace from regular properties, used for
     /// editor annotations, plugins, and runtime tagging.
     meta: HashMap<String, Variant>,
+    /// Whether this object has been freed. Once freed, all property access
+    /// returns `Nil` and mutations are no-ops. This mirrors Godot's
+    /// use-after-free guard behavior.
+    freed: bool,
 }
 
 impl ObjectBase {
     /// Creates a new `ObjectBase` with the given class name and a fresh ID.
     pub fn new(class_name: impl Into<String>) -> Self {
-        Self {
+        let base = Self {
             id: ObjectId::next(),
             class_name: class_name.into(),
             properties: HashMap::new(),
             signals: SignalStore::new(),
             notification_log: Vec::new(),
             meta: HashMap::new(),
-        }
+            freed: false,
+        };
+        weak_ref::register_object(base.id);
+        base
     }
 
     /// Creates an `ObjectBase` with a specific ID (for deserialization/tests).
     pub fn with_id(class_name: impl Into<String>, id: ObjectId) -> Self {
-        Self {
+        let base = Self {
             id,
             class_name: class_name.into(),
             properties: HashMap::new(),
             signals: SignalStore::new(),
             notification_log: Vec::new(),
             meta: HashMap::new(),
-        }
+            freed: false,
+        };
+        weak_ref::register_object(base.id);
+        base
     }
 
     /// Returns the unique instance ID.
@@ -95,14 +113,22 @@ impl ObjectBase {
     }
 
     /// Sets a property, returning the previous value (or `Nil`).
+    /// Returns `Nil` immediately if the object has been freed.
     pub fn set_property(&mut self, name: &str, value: Variant) -> Variant {
+        if self.freed {
+            return Variant::Nil;
+        }
         self.properties
             .insert(name.to_owned(), value)
             .unwrap_or(Variant::Nil)
     }
 
-    /// Gets a property by name. Returns `Nil` if absent.
+    /// Gets a property by name. Returns `Nil` if absent or if the object
+    /// has been freed.
     pub fn get_property(&self, name: &str) -> Variant {
+        if self.freed {
+            return Variant::Nil;
+        }
         self.properties.get(name).cloned().unwrap_or(Variant::Nil)
     }
 
@@ -200,6 +226,34 @@ impl ObjectBase {
     pub fn signals(&self) -> &SignalStore {
         &self.signals
     }
+
+    // -- Object.free() and use-after-free guard -----------------------------
+
+    /// Frees this object. After calling this method:
+    /// - `is_freed()` returns `true`
+    /// - `get_property()` returns `Nil` for all properties
+    /// - `set_property()` is a no-op (returns `Nil`)
+    /// - The object is unregistered from the alive-objects registry,
+    ///   so `WeakRef::get_ref()` returns `None`
+    ///
+    /// This mirrors Godot's `Object.free()` behavior. In Godot, accessing
+    /// a freed object prints an error rather than crashing; here we return
+    /// safe defaults instead of panicking.
+    pub fn free(&mut self) {
+        if self.freed {
+            return;
+        }
+        self.freed = true;
+        self.properties.clear();
+        self.meta.clear();
+        self.notification_log.clear();
+        weak_ref::unregister_object(self.id);
+    }
+
+    /// Returns `true` if this object has been freed.
+    pub fn is_freed(&self) -> bool {
+        self.freed
+    }
 }
 
 /// A generic object instance created from ClassDB.
@@ -242,6 +296,14 @@ impl GodotObject for GenericObject {
 
     fn notification(&mut self, what: Notification) {
         self.base.record_notification(what);
+    }
+
+    fn free(&mut self) {
+        self.base.free();
+    }
+
+    fn is_freed(&self) -> bool {
+        self.base.is_freed()
     }
 }
 

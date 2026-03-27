@@ -1,0 +1,7 @@
+[gd_scene format=3 uid="uid://signal_test"]
+
+[node name="Root" type="Node2D"]
+
+[node name="Emitter" type="Node2D" parent="."]
+
+[node name="Listener" type="Node2D" parent="."]
