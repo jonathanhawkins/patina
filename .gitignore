@@ -50,3 +50,9 @@ windsurf.mcp.json
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# beads recovery backups (SQLite WAL/SHM snapshots)
+.beads/.br_recovery/
+
+# Claude Code worktrees (agent-spawned isolated checkouts)
+.claude/worktrees/
