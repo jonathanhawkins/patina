@@ -1306,8 +1306,142 @@ fn handle_connection(
         ("POST", "/api/vcs/stage") => api_vcs_stage(&req.body, &mut stream),
         ("POST", "/api/vcs/unstage") => api_vcs_unstage(&req.body, &mut stream),
         ("POST", "/api/vcs/discard") => api_vcs_discard(&req.body, &mut stream),
+        // pat-nrtp9: Asset drag-drop to viewport
+        ("POST", "/api/asset/drop_to_viewport") => {
+            api_asset_drop_to_viewport(state, &req.body, &mut stream)
+        }
         _ => serve_404(&mut stream),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Asset drag-drop to viewport (pat-nrtp9)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/asset/drop_to_viewport` — creates a node from a dropped asset.
+///
+/// Expects JSON: `{ asset_path, asset_type, parent_id, viewport_x, viewport_y }`
+/// Returns JSON: `{ node_id, node_class }`
+fn api_asset_drop_to_viewport(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let asset_path = match parsed.get("asset_path").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing asset_path");
+            return;
+        }
+    };
+
+    let asset_type = match parsed.get("asset_type").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing asset_type");
+            return;
+        }
+    };
+
+    let parent_raw = match parsed.get("parent_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing parent_id");
+            return;
+        }
+    };
+
+    let _viewport_x = parsed
+        .get("viewport_x")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    let _viewport_y = parsed
+        .get("viewport_y")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+
+    // Determine node class from asset type
+    let node_class = match asset_type.as_str() {
+        "texture" => "Sprite2D",
+        "audio" => "AudioStreamPlayer",
+        "script" => "Node",
+        "mesh" => "MeshInstance3D",
+        _ => "Node2D",
+    };
+
+    // Derive node name from filename (strip extension)
+    let node_name = asset_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&asset_path)
+        .rsplit('.')
+        .last()
+        .unwrap_or("node");
+
+    let mut state = state.lock().unwrap();
+    let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "parent not found");
+            return;
+        }
+    };
+
+    let mut cmd = EditorCommand::AddNode {
+        parent_id,
+        name: node_name.to_string(),
+        class_name: node_class.to_string(),
+        created_id: None,
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    let created_id = match &cmd {
+        EditorCommand::AddNode { created_id, .. } => created_id.unwrap(),
+        _ => unreachable!(),
+    };
+
+    // Set asset-specific properties on the new node
+    if let Some(node) = state.scene_tree.get_node_mut(created_id) {
+        match asset_type.as_str() {
+            "texture" => {
+                node.set_property(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::new(_viewport_x, _viewport_y)),
+                );
+                node.set_property("texture", Variant::String(asset_path.clone()));
+            }
+            "script" => {
+                node.set_property("_script_path", Variant::String(asset_path.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!(
+            "Asset drop: created {} '{}' from {}",
+            node_class, node_name, asset_path
+        ),
+    );
+
+    let json = format!(
+        r#"{{"node_id":{},"node_class":"{}"}}"#,
+        created_id.raw(),
+        node_class
+    );
+    send_json(stream, &json);
 }
 
 // ---------------------------------------------------------------------------
