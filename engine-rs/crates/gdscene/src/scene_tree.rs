@@ -45,6 +45,12 @@ pub struct SceneTree {
     /// Snapshot of input state for the current frame, used by scripts
     /// that call `Input.is_action_pressed()` etc.
     input_snapshot: Option<crate::scripting::InputSnapshot>,
+    /// The packed scene that was used to load the current scene (if any).
+    /// Stored for `reload_current_scene()`.
+    current_packed_scene: Option<crate::packed_scene::PackedScene>,
+    /// The NodeId of the current scene root (first child of root after
+    /// `change_scene_to_packed` or `change_scene_to_node`).
+    current_scene_id: Option<NodeId>,
     /// Nodes marked for deferred deletion via `queue_free()`.
     /// They are removed at the end of the frame by `process_deletions()`.
     pending_deletions: Vec<NodeId>,
@@ -86,6 +92,8 @@ impl SceneTree {
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
+            current_packed_scene: None,
+            current_scene_id: None,
             pending_deletions: Vec::new(),
             event_trace: EventTrace::new(),
             trace_frame: 0,
@@ -96,6 +104,12 @@ impl SceneTree {
     /// Returns the ID of the root node.
     pub fn root_id(&self) -> NodeId {
         self.root_id
+    }
+
+    /// Returns the ID of the current scene root, if one has been set via
+    /// `change_scene_to_packed` or `change_scene_to_node`.
+    pub fn current_scene(&self) -> Option<NodeId> {
+        self.current_scene_id
     }
 
     /// Sets the input snapshot for the current frame. Scripts will see this
@@ -1044,6 +1058,10 @@ impl SceneTree {
             self.trace_record(node_id, TraceEventType::ScriptCall, method);
 
             let snapshot_clone = self.input_snapshot.clone();
+            // SAFETY: We pass `self` as a raw pointer to SceneTreeAccessor. This is
+            // safe because the accessor is used only within this call frame — it is
+            // created, passed to the script, and cleared (via `clear_scene_access`)
+            // before this method returns, so no dangling pointer can escape.
             let accessor = if let Some(snapshot) = snapshot_clone {
                 unsafe {
                     crate::scripting::SceneTreeAccessor::with_input(
@@ -1052,6 +1070,8 @@ impl SceneTree {
                     )
                 }
             } else {
+                // SAFETY: Same invariant as the branch above — accessor lives only
+                // within this call frame and is cleared before return.
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
@@ -1401,8 +1421,59 @@ impl SceneTree {
         // Process any pending deletions.
         self.process_deletions();
 
+        // Remember the packed scene for reload_current_scene().
+        self.current_packed_scene = Some(scene.clone());
+
         // Instance the new scene under root.
-        crate::packed_scene::add_packed_scene_to_tree(self, self.root_id, scene)
+        let id = crate::packed_scene::add_packed_scene_to_tree(self, self.root_id, scene)?;
+        self.current_scene_id = Some(id);
+        Ok(id)
+    }
+
+    /// Reloads the current scene from its packed source.
+    ///
+    /// Returns an error if no packed scene source is stored (e.g. scene was
+    /// set via `change_scene_to_node`).
+    pub fn reload_current_scene(&mut self) -> EngineResult<NodeId> {
+        let packed = self
+            .current_packed_scene
+            .clone()
+            .ok_or_else(|| EngineError::InvalidOperation(
+                "No packed scene source to reload from".into(),
+            ))?;
+        self.change_scene_to_packed(&packed)
+    }
+
+    /// Replaces the current scene with a manually constructed node.
+    ///
+    /// Unlike `change_scene_to_packed`, this clears the packed scene source,
+    /// so `reload_current_scene` will fail afterward.
+    pub fn change_scene_to_node(&mut self, node: Node) -> EngineResult<NodeId> {
+        // Remove existing children of root.
+        let children: Vec<NodeId> = self
+            .get_node(self.root_id)
+            .map(|root| root.children().to_vec())
+            .unwrap_or_default();
+
+        for child_id in children {
+            let mut subtree = Vec::new();
+            self.collect_subtree_top_down(child_id, &mut subtree);
+            for &nid in &subtree {
+                self.scripts.remove(&nid);
+                self.signal_stores.remove(&nid);
+                self.animation_players.remove(&nid);
+            }
+            let _ = self.remove_node(child_id);
+        }
+
+        self.process_deletions();
+
+        // Clear packed source — reload won't work after this.
+        self.current_packed_scene = None;
+
+        let id = self.add_child(self.root_id, node)?;
+        self.current_scene_id = Some(id);
+        Ok(id)
     }
 }
 

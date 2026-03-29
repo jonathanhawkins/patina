@@ -58,6 +58,16 @@ fn u32_prop(tree: &SceneTree, id: NodeId, key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+/// Reads a bool property from a node, defaulting to `default`.
+fn bool_prop(tree: &SceneTree, id: NodeId, key: &str, default: bool) -> bool {
+    tree.get_node(id)
+        .map(|n| match n.get_property(key) {
+            Variant::Bool(b) => b,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
 /// Reads a Vector2 property from a node, defaulting to `default`.
 fn vec2_prop(tree: &SceneTree, id: NodeId, key: &str, default: Vector2) -> Vector2 {
     tree.get_node(id)
@@ -263,6 +273,11 @@ impl PhysicsServer {
         self.node_to_body.get(&node_id).copied()
     }
 
+    /// Returns the area ID for a scene node, if registered.
+    pub fn area_for_node(&self, node_id: NodeId) -> Option<AreaId> {
+        self.node_to_area.get(&node_id).copied()
+    }
+
     /// Scans the scene tree and registers any physics body or area nodes
     /// that are not yet tracked.
     pub fn register_bodies(&mut self, tree: &SceneTree) {
@@ -309,6 +324,7 @@ impl PhysicsServer {
                 let mut area = Area2D::new(AreaId(0), pos, shape);
                 area.collision_layer = u32_prop(tree, node_id, "collision_layer", 1);
                 area.collision_mask = u32_prop(tree, node_id, "collision_mask", 1);
+                area.monitoring = bool_prop(tree, node_id, "monitoring", true);
                 let area_id = self.area_store.add_area(area);
                 self.node_to_area.insert(node_id, area_id);
                 self.area_to_node.insert(area_id, node_id);
@@ -317,15 +333,39 @@ impl PhysicsServer {
     }
 
     /// Pushes scene tree node transforms into the physics world.
+    ///
+    /// For kinematic bodies the scene tree is always authoritative.  For rigid
+    /// and static bodies we also sync position/rotation so that manual
+    /// `set_property("position", ...)` calls (e.g. teleporting a body) are
+    /// picked up by the physics engine and the area-overlap detector.
     pub fn sync_to_physics(&mut self, tree: &SceneTree) {
         for (&node_id, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body_mut(body_id) {
-                // Only sync kinematic body transforms from the scene tree.
-                // Rigid bodies are driven by the physics engine.
+                let scene_pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
+                let scene_rot = float_prop(tree, node_id, "rotation", 0.0) as f32;
                 if body.body_type == BodyType::Kinematic {
-                    body.position = vec2_prop(tree, node_id, "position", Vector2::ZERO);
-                    body.rotation = float_prop(tree, node_id, "rotation", 0.0) as f32;
+                    body.position = scene_pos;
+                    body.rotation = scene_rot;
+                } else {
+                    // For rigid/static bodies, only sync when the scene tree
+                    // value diverges from the physics world (i.e. user code
+                    // teleported the body).
+                    if (body.position - scene_pos).length_squared() > 1e-6 {
+                        body.position = scene_pos;
+                    }
+                    let rot_diff = (body.rotation - scene_rot).abs();
+                    if rot_diff > 1e-6 {
+                        body.rotation = scene_rot;
+                    }
                 }
+            }
+        }
+
+        // Sync Area2D positions and monitoring flag from the scene tree.
+        for (&node_id, &area_id) in &self.node_to_area {
+            if let Some(area) = self.area_store.get_area_mut(area_id) {
+                area.position = vec2_prop(tree, node_id, "position", Vector2::ZERO);
+                area.monitoring = bool_prop(tree, node_id, "monitoring", true);
             }
         }
     }

@@ -15,14 +15,15 @@ Patina is a monorepo for a Rust-native Godot-compatible game engine, its marketi
 - Website dev: `cd apps/web && pnpm dev`
 - Website build: `cd apps/web && pnpm build`
 - Engine build: `cd engine-rs && cargo build`
-- Engine test: `cd engine-rs && cargo test`
+- Engine test: `cd engine-rs && cargo nextest run` (preferred) or `cargo test`
 - Lint all: `pnpm lint` (root)
 
 ## Testing Rules (Non-Negotiable)
 - Every bug fix MUST include a test that would have caught the bug
 - Every new feature MUST include tests covering happy path AND edge cases
 - Stress/concurrency tests required for any server or networking code
-- Run `cargo test --workspace` before every commit — never commit with failing tests
+- Run `cargo nextest run --workspace` before every commit — never commit with failing tests
+- Prefer `cargo nextest run` over `cargo test` — it runs tests in parallel and is significantly faster with 333+ integration test files
 - If a test is flaky, fix the root cause — do not skip or ignore it
 
 ## Debugging Rules

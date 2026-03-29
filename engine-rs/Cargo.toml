@@ -56,6 +56,7 @@ gdphysics3d = { path = "crates/gdphysics3d" }
 gdserver3d = { path = "crates/gdserver3d" }
 gdrender3d = { path = "crates/gdrender3d" }
 gdeditor = { path = "crates/gdeditor" }
+patina-runner = { path = "crates/patina-runner" }
 serde_json.workspace = true
 
 [[example]]

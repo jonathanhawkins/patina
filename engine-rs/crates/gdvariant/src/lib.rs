@@ -6,6 +6,8 @@
 #![warn(clippy::all)]
 
 pub mod conversion;
+#[cfg(test)]
+mod fuzz_variant;
 pub mod serialize;
 pub mod variant;
 

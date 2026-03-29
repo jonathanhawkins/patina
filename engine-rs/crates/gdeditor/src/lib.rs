@@ -1,7 +1,5 @@
-// NOTE: Editor work is maintenance-only until runtime parity exits are met.
-// No new editor features should be added until oracle parity reaches 98%+ across
-// all supported scenes. Maintenance work (bug fixes, server stability, smoke tests)
-// is permitted. See AGENTS.md § Project-Specific Rules for the full policy.
+// NOTE: Editor feature gate was LIFTED on 2026-03-19 — runtime parity exits are green.
+// Editor feature work is now the primary focus. See CLAUDE.md.
 
 //! # gdeditor
 //!
@@ -19,9 +17,15 @@
 
 #![warn(clippy::all)]
 
+pub mod animation_editor;
+pub mod asset_drag_drop;
+pub mod command_palette;
 pub mod create_dialog;
 pub mod curve_editor;
 pub mod dock;
+pub mod editor_compat;
+pub mod editor_interface;
+pub mod editor_menu;
 pub mod editor_server;
 pub mod editor_plugin;
 pub mod editor_settings_dialog;
@@ -29,20 +33,28 @@ pub mod editor_ui;
 pub mod environment_preview;
 pub mod export_dialog;
 pub mod filesystem;
+pub mod find_replace;
 pub mod group_dialog;
 pub mod import;
+pub mod import_settings;
 pub mod inspector;
 pub mod output_panel;
 pub mod profiler_panel;
 pub mod project_settings_dialog;
 pub mod scene_editor;
 pub mod scene_renderer;
+pub mod script_completion;
+pub mod script_editor;
+pub mod script_gutter;
 pub mod shader_editor;
 pub mod signal_dialog;
 pub mod settings;
 pub mod texture_cache;
 pub mod theme_editor;
+pub mod tilemap_editor;
+pub mod undo_redo;
 pub mod vcs;
+pub mod viewport_2d;
 pub mod viewport_3d;
 
 use gdscene::node::{Node, NodeId};
@@ -51,7 +63,11 @@ use gdvariant::Variant;
 use thiserror::Error;
 
 // Re-exports for convenience.
-pub use dock::{DockPanel, PluginDockManager, PluginDockPanel, PropertyDock, SceneTreeDock};
+pub use dock::{
+    DockPanel, NodeIndicators, NodeTypeIcon, NodeWarning, PluginDockManager, PluginDockPanel,
+    PropertyDock, SceneTreeDock, SelectionState,
+};
+pub use editor_interface::EditorInterface;
 pub use export_dialog::{ExportBuildProfile, ExportDialog, ExportPlatform, ExportPreset};
 pub use filesystem::EditorFileSystem;
 pub use import::{
@@ -61,8 +77,10 @@ pub use import::{
     SceneImportOptions, TresImporter, TscnImporter,
 };
 pub use inspector::{
-    coerce_variant, CustomPropertyEditor, EditorInspectorPlugin, InspectorPanel,
-    InspectorPluginRegistry, InspectorSection, PropertyHint,
+    coerce_variant, validate_variant, CustomPropertyEditor, EditorHint,
+    EditorInspectorPlugin, InspectorPanel, InspectorPluginRegistry,
+    InspectorSection, PropertyEditor, PropertyHint, ResourceSubEditor,
+    SectionedInspector,
 };
 pub use scene_editor::SceneEditor;
 pub use settings::{EditorSettings, EditorTheme, ProjectSettings};
@@ -77,7 +95,7 @@ pub use profiler_panel::{
     FrameProfile, FunctionStats, ProfilerEntry, ProfilerPanel, ProfilerStats,
 };
 pub use project_settings_dialog::{
-    ProjectSettingsDialog, PropertyEditor, SettingsCategory, SettingsProperty, SettingsValue,
+    ProjectSettingsDialog, SettingsCategory, SettingsEditor, SettingsProperty, SettingsValue,
 };
 pub use shader_editor::{
     MaterialPreview, PreviewShape, PreviewUniformInfo, ShaderEditor, ShaderHighlightKind,
@@ -87,7 +105,15 @@ pub use theme_editor::{
     OverrideEntry, OverrideKind, PreviewControl, StyleBoxFlat, ThemeColorPalette, ThemeEditor,
     ThemeFont, ThemeItem, ThemeResource,
 };
-pub use create_dialog::{ClassEntry, ClassFilter, CreateDialogResult, CreateNodeDialog};
+pub use create_dialog::{
+    CatalogEntry, ClassEntry, ClassFilter, CreateDialogResult, CreateNodeDialog, HelperPreset,
+    NodeCatalog2D, NodeCategory,
+};
+pub use script_editor::{FindMatch, FindOptions, FindReplace, ScriptEditor};
+pub use find_replace::{
+    FindReplace as FindReplaceEngine, FindReplaceConfig, FindReplaceError,
+    ReplaceResult, SearchMatch, SearchMode,
+};
 pub use vcs::{
     BranchInfo, ChangeArea, CommitEntry, FileChangeStatus, VcsFileStatus, VcsStatus,
 };
@@ -114,6 +140,192 @@ pub enum EditorError {
 
 /// Convenience alias for editor results.
 pub type EditorResult<T> = Result<T, EditorError>;
+
+// ---------------------------------------------------------------------------
+// Editor mode (top bar mode switching)
+// ---------------------------------------------------------------------------
+
+/// The active editor workspace mode. Mirrors Godot's top-bar mode buttons:
+/// 2D, 3D, Script, Game, AssetLib.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditorMode {
+    /// 2D canvas editor.
+    Canvas2D,
+    /// 3D spatial editor.
+    Spatial3D,
+    /// Script/code editor.
+    Script,
+    /// Game preview (running scene).
+    Game,
+    /// Asset library browser.
+    AssetLib,
+}
+
+impl Default for EditorMode {
+    fn default() -> Self {
+        Self::Canvas2D
+    }
+}
+
+impl EditorMode {
+    /// Returns the display label for the toolbar button.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Canvas2D => "2D",
+            Self::Spatial3D => "3D",
+            Self::Script => "Script",
+            Self::Game => "Game",
+            Self::AssetLib => "AssetLib",
+        }
+    }
+
+    /// All modes in toolbar display order.
+    pub fn all() -> [EditorMode; 5] {
+        [
+            Self::Canvas2D,
+            Self::Spatial3D,
+            Self::Script,
+            Self::Game,
+            Self::AssetLib,
+        ]
+    }
+
+    /// Parse a mode from its string key (as used in the REST API).
+    pub fn from_str_key(s: &str) -> Option<Self> {
+        match s {
+            "2d" => Some(Self::Canvas2D),
+            "3d" => Some(Self::Spatial3D),
+            "script" => Some(Self::Script),
+            "game" => Some(Self::Game),
+            "assetlib" => Some(Self::AssetLib),
+            _ => None,
+        }
+    }
+
+    /// Returns the string key for the REST API.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Canvas2D => "2d",
+            Self::Spatial3D => "3d",
+            Self::Script => "script",
+            Self::Game => "game",
+            Self::AssetLib => "assetlib",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run controls (play/pause/stop)
+// ---------------------------------------------------------------------------
+
+/// The current play state of the editor's run controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlayState {
+    /// No scene is running.
+    Stopped,
+    /// A scene is running.
+    Playing,
+    /// A scene is running but paused.
+    Paused,
+}
+
+impl Default for PlayState {
+    fn default() -> Self {
+        Self::Stopped
+    }
+}
+
+/// Which scene to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunTarget {
+    /// Run the project's main scene.
+    MainScene,
+    /// Run the currently edited scene.
+    CurrentScene,
+    /// Run a specific scene by path.
+    CustomScene(String),
+}
+
+/// Editor run controls state — play, pause, stop, and run target.
+///
+/// Mirrors Godot's top-bar run buttons (F5 = Run Project, F6 = Run Current Scene,
+/// F7 = Pause, F8 = Stop).
+#[derive(Debug, Clone)]
+pub struct RunControls {
+    /// Current play state.
+    pub state: PlayState,
+    /// What to run next.
+    pub target: RunTarget,
+    /// Whether "Run Current Scene" was the last run action.
+    pub last_ran_current: bool,
+}
+
+impl Default for RunControls {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RunControls {
+    /// Creates new run controls in the stopped state.
+    pub fn new() -> Self {
+        Self {
+            state: PlayState::Stopped,
+            target: RunTarget::MainScene,
+            last_ran_current: false,
+        }
+    }
+
+    /// Starts playing the target scene.
+    pub fn play(&mut self, target: RunTarget) {
+        self.last_ran_current = matches!(target, RunTarget::CurrentScene);
+        self.target = target;
+        self.state = PlayState::Playing;
+    }
+
+    /// Pauses the running scene. No-op if not playing.
+    pub fn pause(&mut self) {
+        if self.state == PlayState::Playing {
+            self.state = PlayState::Paused;
+        }
+    }
+
+    /// Resumes a paused scene. No-op if not paused.
+    pub fn resume(&mut self) {
+        if self.state == PlayState::Paused {
+            self.state = PlayState::Playing;
+        }
+    }
+
+    /// Toggles between playing and paused.
+    pub fn toggle_pause(&mut self) {
+        match self.state {
+            PlayState::Playing => self.state = PlayState::Paused,
+            PlayState::Paused => self.state = PlayState::Playing,
+            PlayState::Stopped => {}
+        }
+    }
+
+    /// Stops the running scene.
+    pub fn stop(&mut self) {
+        self.state = PlayState::Stopped;
+    }
+
+    /// Whether a scene is currently running (playing or paused).
+    pub fn is_running(&self) -> bool {
+        self.state != PlayState::Stopped
+    }
+
+    /// Whether the scene is playing (not paused, not stopped).
+    pub fn is_playing(&self) -> bool {
+        self.state == PlayState::Playing
+    }
+
+    /// Whether the scene is paused.
+    pub fn is_paused(&self) -> bool {
+        self.state == PlayState::Paused
+    }
+}
 
 /// An undoable editor command.
 ///
@@ -1968,5 +2180,133 @@ position = Vector2(10, 20)
             target_object_id: 0,
             method: "handler".into(),
         }.label().contains("clicked"));
+    }
+
+    // -- EditorMode ---------------------------------------------------------
+
+    #[test]
+    fn editor_mode_default_is_2d() {
+        assert_eq!(EditorMode::default(), EditorMode::Canvas2D);
+    }
+
+    #[test]
+    fn editor_mode_labels() {
+        assert_eq!(EditorMode::Canvas2D.label(), "2D");
+        assert_eq!(EditorMode::Spatial3D.label(), "3D");
+        assert_eq!(EditorMode::Script.label(), "Script");
+        assert_eq!(EditorMode::Game.label(), "Game");
+        assert_eq!(EditorMode::AssetLib.label(), "AssetLib");
+    }
+
+    #[test]
+    fn editor_mode_all_returns_five() {
+        assert_eq!(EditorMode::all().len(), 5);
+    }
+
+    #[test]
+    fn editor_mode_from_str_key() {
+        assert_eq!(EditorMode::from_str_key("2d"), Some(EditorMode::Canvas2D));
+        assert_eq!(EditorMode::from_str_key("3d"), Some(EditorMode::Spatial3D));
+        assert_eq!(EditorMode::from_str_key("script"), Some(EditorMode::Script));
+        assert_eq!(EditorMode::from_str_key("game"), Some(EditorMode::Game));
+        assert_eq!(EditorMode::from_str_key("assetlib"), Some(EditorMode::AssetLib));
+        assert_eq!(EditorMode::from_str_key("invalid"), None);
+    }
+
+    #[test]
+    fn editor_mode_key_roundtrip() {
+        for mode in EditorMode::all() {
+            assert_eq!(EditorMode::from_str_key(mode.key()), Some(mode));
+        }
+    }
+
+    // -- PlayState / RunControls --------------------------------------------
+
+    #[test]
+    fn play_state_default_is_stopped() {
+        assert_eq!(PlayState::default(), PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_initial_state() {
+        let rc = RunControls::new();
+        assert_eq!(rc.state, PlayState::Stopped);
+        assert!(!rc.is_running());
+        assert!(!rc.is_playing());
+        assert!(!rc.is_paused());
+    }
+
+    #[test]
+    fn run_controls_play() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        assert!(rc.is_playing());
+        assert!(rc.is_running());
+        assert!(!rc.is_paused());
+        assert!(!rc.last_ran_current);
+    }
+
+    #[test]
+    fn run_controls_play_current_scene() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::CurrentScene);
+        assert!(rc.is_playing());
+        assert!(rc.last_ran_current);
+    }
+
+    #[test]
+    fn run_controls_pause_resume() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        rc.pause();
+        assert!(rc.is_paused());
+        assert!(rc.is_running());
+        assert!(!rc.is_playing());
+
+        rc.resume();
+        assert!(rc.is_playing());
+        assert!(!rc.is_paused());
+    }
+
+    #[test]
+    fn run_controls_toggle_pause() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        rc.toggle_pause();
+        assert!(rc.is_paused());
+        rc.toggle_pause();
+        assert!(rc.is_playing());
+    }
+
+    #[test]
+    fn run_controls_stop() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::MainScene);
+        rc.stop();
+        assert!(!rc.is_running());
+        assert_eq!(rc.state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_pause_when_stopped_is_noop() {
+        let mut rc = RunControls::new();
+        rc.pause();
+        assert_eq!(rc.state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_resume_when_stopped_is_noop() {
+        let mut rc = RunControls::new();
+        rc.resume();
+        assert_eq!(rc.state, PlayState::Stopped);
+    }
+
+    #[test]
+    fn run_controls_custom_scene() {
+        let mut rc = RunControls::new();
+        rc.play(RunTarget::CustomScene("res://levels/boss.tscn".into()));
+        assert!(rc.is_playing());
+        assert!(!rc.last_ran_current);
+        assert_eq!(rc.target, RunTarget::CustomScene("res://levels/boss.tscn".into()));
     }
 }

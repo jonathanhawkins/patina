@@ -42,7 +42,7 @@ fn classdb_navigation_region3d_inherits_node3d() {
 #[test]
 fn classdb_navigation_region3d_properties() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("NavigationRegion3D", false);
+    let props = gdobject::class_db::get_property_list("NavigationRegion3D");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"navigation_mesh"));
     assert!(names.contains(&"enabled"));
@@ -53,7 +53,7 @@ fn classdb_navigation_region3d_properties() {
 #[test]
 fn classdb_navigation_region3d_default_enabled() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("NavigationRegion3D", false);
+    let props = gdobject::class_db::get_property_list("NavigationRegion3D");
     let prop = props.iter().find(|p| p.name == "enabled").unwrap();
     assert_eq!(prop.default_value, Variant::Bool(true));
 }
@@ -61,7 +61,7 @@ fn classdb_navigation_region3d_default_enabled() {
 #[test]
 fn classdb_navigation_region3d_default_layers() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("NavigationRegion3D", false);
+    let props = gdobject::class_db::get_property_list("NavigationRegion3D");
     let prop = props.iter().find(|p| p.name == "navigation_layers").unwrap();
     assert_eq!(prop.default_value, Variant::Int(1));
 }

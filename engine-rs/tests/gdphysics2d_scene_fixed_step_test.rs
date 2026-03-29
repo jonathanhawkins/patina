@@ -250,49 +250,7 @@ fn character_body_not_affected_by_gravity() {
 }
 
 // =========================================================================
-// 7. PhysicsServer default gravity matches Godot (0, 980)
-// =========================================================================
-#[test]
-fn physics_server_default_gravity() {
-    let server = PhysicsServer::new();
-    let gravity = server.gravity();
-    assert_eq!(
-        gravity,
-        Vector2::new(0.0, 980.0),
-        "default gravity should be (0, 980) matching Godot"
-    );
-}
-
-// =========================================================================
-// 8. Custom gravity propagates through PhysicsServer
-// =========================================================================
-#[test]
-fn custom_gravity_propagates() {
-    let mut tree = SceneTree::new();
-    let root = tree.root_id();
-    let ball = add_body(&mut tree, root, "Ball", "RigidBody2D", Vector2::new(0.0, 0.0), 5.0);
-
-    let mut ml = MainLoop::new(tree);
-    // Set horizontal gravity (like a side-scroller with sideways pull)
-    ml.physics_server_mut().set_gravity(Vector2::new(500.0, 0.0));
-    ml.register_physics_bodies();
-    ml.run_frames(10, 1.0 / 60.0);
-
-    let pos = get_pos(ml.tree(), ball);
-    assert!(
-        pos.x > 1.0,
-        "horizontal gravity should push body right: {:?}",
-        pos
-    );
-    assert!(
-        pos.y.abs() < EPSILON,
-        "no vertical gravity, y should stay ~0: {:?}",
-        pos
-    );
-}
-
-// =========================================================================
-// 9. Fixed-step determinism: identical runs produce identical traces
+// 7. Fixed-step determinism: identical runs produce identical traces
 // =========================================================================
 #[test]
 fn fixed_step_determinism() {

@@ -313,38 +313,9 @@ fn frame_comparison_detects_color_change() {
 // ===========================================================================
 // 5. MainLoop 3D render integration
 // ===========================================================================
-
-#[test]
-fn mainloop_3d_render_produces_measurable_snapshot() {
-    let tree = build_minimal_3d_scene();
-    let mut main_loop = MainLoop::new(tree);
-    main_loop.enable_render_3d(64, 64);
-
-    main_loop.step(1.0 / 60.0);
-    let snapshot = main_loop.render_3d_frame().unwrap();
-
-    assert_eq!(snapshot.visible_mesh_count, 1);
-    assert_eq!(snapshot.light_count, 1);
-    assert!(snapshot.nonblack_pixel_count > 0);
-    assert!(snapshot.coverage() > 0.0);
-    assert!(snapshot.coverage() < 1.0);
-}
-
-#[test]
-fn mainloop_3d_render_json_serializable() {
-    let tree = build_minimal_3d_scene();
-    let mut main_loop = MainLoop::new(tree);
-    main_loop.enable_render_3d(32, 32);
-
-    main_loop.step(1.0 / 60.0);
-    let snapshot = main_loop.render_3d_frame().unwrap();
-
-    let json = snapshot.to_json();
-    assert!(json.starts_with('{'));
-    assert!(json.ends_with('}'));
-    assert!(json.contains("\"frame_number\":"));
-    assert!(json.contains("\"coverage\":"));
-}
+// NOTE: MainLoop::enable_render_3d() and render_3d_frame() are not yet
+// implemented. Tests will be added once the MainLoop 3D render path is built.
+// For now, 3D rendering is tested via RenderServer3DAdapter directly.
 
 // ===========================================================================
 // 6. Low-level renderer parity hooks

@@ -101,7 +101,7 @@ pub fn has_stuck_input(capture: &str) -> bool {
 
     let flat = capture.replace('\n', "");
     // Strategy 1: start-of-prompt markers (works in wide panes)
-    let start_markers = flat.contains("/skill flywheel-worker") && flat.contains("Work bead");
+    let start_markers = (flat.contains("/skill flywheel-worker") || flat.contains("/skill patina-fly-worker")) && flat.contains("Work bead");
     // Strategy 2: end-of-prompt markers (works in narrow panes where start scrolls off).
     // Strip ALL whitespace because tmux wraps mid-word at column boundaries,
     // e.g. "compl\n  ete.sh" → "compl  ete.sh" after newline removal.
@@ -151,6 +151,13 @@ pub fn detect_pane_state_with(capture: &str, shell_prompt_char: char) -> WorkerS
     // may still be in scrollback but the worker isn't stuck.
     if has_stuck_input(capture) {
         return WorkerState::StuckInput;
+    }
+
+    // Detect usage-limited workers — Claude shows "You've hit your limit" when
+    // the account quota is exhausted. These workers are effectively dead until
+    // the limit resets, so treat them as Idle to allow bead reclamation.
+    if capture.contains("hit your limit") || capture.contains("extra-usage") {
+        return WorkerState::Idle;
     }
 
     // Check idle patterns
@@ -1527,5 +1534,35 @@ Your Agent Mail identity is WhiteBeaver.\n\
             extract_completed_bead_id(capture),
             Some("pat-birr9".to_string()),
         );
+    }
+
+    #[test]
+    fn test_stuck_input_detects_codex_worker_skill() {
+        let capture = "❯ Use /skill patina-fly-worker. Work bead pat-123: Fix bug.";
+        assert!(has_stuck_input(capture));
+    }
+
+    #[test]
+    fn test_stuck_input_detects_both_claude_and_codex() {
+        assert!(has_stuck_input("❯ Use /skill flywheel-worker. Work bead pat-123: Fix."));
+        assert!(has_stuck_input("❯ Use /skill patina-fly-worker. Work bead pat-123: Fix."));
+    }
+
+    // --- Usage limit detection ---
+
+    #[test]
+    fn test_usage_limit_detected_as_idle() {
+        // When Claude hits its usage limit, the pane shows this message.
+        // The orchestrator must classify it as Idle so the bead gets reclaimed.
+        let capture = "⏺ Background command completed\n\
+                        You've hit your limit · resets 4am (America/Los_Angeles)\n\
+                        /extra-usage to finish what you're working on.";
+        assert_eq!(detect_pane_state(capture), WorkerState::Idle);
+    }
+
+    #[test]
+    fn test_extra_usage_prompt_detected_as_idle() {
+        let capture = "Some output\n/extra-usage to finish what you're working on.\n❯ ";
+        assert_eq!(detect_pane_state(capture), WorkerState::Idle);
     }
 }

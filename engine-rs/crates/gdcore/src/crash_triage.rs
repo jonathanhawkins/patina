@@ -990,6 +990,411 @@ impl Default for AutoIssueTracker {
 }
 
 // ===========================================================================
+// Automated stack trace collection
+// ===========================================================================
+
+/// A timestamped record of a collected crash.
+#[derive(Debug, Clone)]
+pub struct CrashRecord {
+    /// Monotonic sequence number (assigned by the collector).
+    pub seq: u64,
+    /// Timestamp as seconds since an arbitrary epoch (e.g. process start).
+    pub timestamp_secs: f64,
+    /// The parsed crash trace.
+    pub trace: CrashTrace,
+    /// The crash signature (cached from trace).
+    pub signature: String,
+    /// Detected subsystem.
+    pub subsystem: Subsystem,
+}
+
+/// Frequency statistics for a particular crash signature.
+#[derive(Debug, Clone)]
+pub struct CrashFrequency {
+    /// The crash signature.
+    pub signature: String,
+    /// Total number of occurrences.
+    pub count: u64,
+    /// Timestamp of the first occurrence.
+    pub first_seen: f64,
+    /// Timestamp of the most recent occurrence.
+    pub last_seen: f64,
+    /// Representative error message.
+    pub message: String,
+    /// Detected subsystem.
+    pub subsystem: Subsystem,
+}
+
+impl CrashFrequency {
+    /// Returns the average interval between crashes in seconds.
+    /// Returns `None` if only one occurrence.
+    pub fn avg_interval_secs(&self) -> Option<f64> {
+        if self.count <= 1 {
+            return None;
+        }
+        let span = self.last_seen - self.first_seen;
+        if span <= 0.0 {
+            return None;
+        }
+        Some(span / (self.count - 1) as f64)
+    }
+
+    /// Returns true if the crash is accelerating (last interval < average).
+    /// Requires at least 3 occurrences to be meaningful.
+    pub fn is_accelerating(&self, timestamps: &[f64]) -> bool {
+        if timestamps.len() < 3 {
+            return false;
+        }
+        let avg = match self.avg_interval_secs() {
+            Some(a) => a,
+            None => return false,
+        };
+        let last_interval = timestamps[timestamps.len() - 1] - timestamps[timestamps.len() - 2];
+        last_interval < avg * 0.8 // 20% faster than average
+    }
+}
+
+/// Trend assessment for a crash signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashTrend {
+    /// Single occurrence, no trend.
+    Isolated,
+    /// Stable — occurring at a roughly constant rate.
+    Stable,
+    /// Accelerating — getting more frequent.
+    Accelerating,
+    /// Decelerating — getting less frequent.
+    Decelerating,
+}
+
+impl CrashTrend {
+    /// Returns a human-readable label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CrashTrend::Isolated => "Isolated",
+            CrashTrend::Stable => "Stable",
+            CrashTrend::Accelerating => "Accelerating",
+            CrashTrend::Decelerating => "Decelerating",
+        }
+    }
+}
+
+impl std::fmt::Display for CrashTrend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+/// Automated crash collector that accumulates traces, deduplicates them,
+/// and feeds them into the triage pipeline.
+#[derive(Debug, Clone)]
+pub struct CrashCollector {
+    /// All collected crash records in order.
+    records: Vec<CrashRecord>,
+    /// Per-signature timestamp lists for frequency analysis.
+    sig_timestamps: std::collections::HashMap<String, Vec<f64>>,
+    /// Next sequence number.
+    next_seq: u64,
+    /// Maximum number of records to retain (0 = unlimited).
+    max_records: usize,
+    /// Known-fixed patterns for classification.
+    known_fixed: Vec<String>,
+    /// Known-open patterns for classification.
+    known_open: Vec<String>,
+}
+
+impl CrashCollector {
+    /// Creates a new collector with default settings.
+    pub fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            sig_timestamps: std::collections::HashMap::new(),
+            next_seq: 0,
+            max_records: 10_000,
+            known_fixed: Vec::new(),
+            known_open: Vec::new(),
+        }
+    }
+
+    /// Sets the maximum number of records to retain.
+    pub fn with_max_records(mut self, max: usize) -> Self {
+        self.max_records = max;
+        self
+    }
+
+    /// Adds a known-fixed pattern for regression detection.
+    pub fn add_known_fixed(&mut self, pattern: &str) {
+        self.known_fixed.push(pattern.to_string());
+    }
+
+    /// Adds a known-open pattern for classification.
+    pub fn add_known_open(&mut self, pattern: &str) {
+        self.known_open.push(pattern.to_string());
+    }
+
+    /// Collects a crash trace at the given timestamp.
+    ///
+    /// Returns the sequence number assigned to the record.
+    pub fn collect(&mut self, trace: CrashTrace, timestamp_secs: f64) -> u64 {
+        let signature = trace.signature();
+        let subsystem = trace.detect_subsystem();
+        let seq = self.next_seq;
+        self.next_seq += 1;
+
+        let record = CrashRecord {
+            seq,
+            timestamp_secs,
+            trace,
+            signature: signature.clone(),
+            subsystem,
+        };
+
+        self.sig_timestamps
+            .entry(signature)
+            .or_default()
+            .push(timestamp_secs);
+
+        self.records.push(record);
+
+        // Evict oldest records if over capacity.
+        if self.max_records > 0 && self.records.len() > self.max_records {
+            self.records.remove(0);
+        }
+
+        seq
+    }
+
+    /// Collects a crash from a raw backtrace string and panic message.
+    pub fn collect_from_backtrace(
+        &mut self,
+        message: &str,
+        backtrace: &str,
+        timestamp_secs: f64,
+    ) -> u64 {
+        let frames = parse_backtrace(backtrace);
+        let trace = CrashTrace::new(message, frames);
+        self.collect(trace, timestamp_secs)
+    }
+
+    /// Returns the total number of collected records.
+    pub fn total_records(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Returns the number of unique crash signatures seen.
+    pub fn unique_signatures(&self) -> usize {
+        self.sig_timestamps.len()
+    }
+
+    /// Returns all records (in collection order).
+    pub fn records(&self) -> &[CrashRecord] {
+        &self.records
+    }
+
+    /// Returns records matching a specific signature.
+    pub fn records_by_signature(&self, signature: &str) -> Vec<&CrashRecord> {
+        self.records
+            .iter()
+            .filter(|r| r.signature == signature)
+            .collect()
+    }
+
+    /// Returns records within a time window.
+    pub fn records_in_window(&self, start: f64, end: f64) -> Vec<&CrashRecord> {
+        self.records
+            .iter()
+            .filter(|r| r.timestamp_secs >= start && r.timestamp_secs <= end)
+            .collect()
+    }
+
+    /// Returns frequency statistics for all observed signatures.
+    pub fn frequencies(&self) -> Vec<CrashFrequency> {
+        let mut result = Vec::new();
+        for (sig, timestamps) in &self.sig_timestamps {
+            if timestamps.is_empty() {
+                continue;
+            }
+            // Find a representative record for message/subsystem.
+            let rep = self
+                .records
+                .iter()
+                .rfind(|r| r.signature == *sig);
+            let (message, subsystem) = match rep {
+                Some(r) => (r.trace.message.clone(), r.subsystem),
+                None => continue,
+            };
+            result.push(CrashFrequency {
+                signature: sig.clone(),
+                count: timestamps.len() as u64,
+                first_seen: timestamps[0],
+                last_seen: *timestamps.last().unwrap(),
+                message,
+                subsystem,
+            });
+        }
+        // Sort by count descending.
+        result.sort_by(|a, b| b.count.cmp(&a.count));
+        result
+    }
+
+    /// Returns the frequency data for a specific signature.
+    pub fn frequency_of(&self, signature: &str) -> Option<CrashFrequency> {
+        self.frequencies().into_iter().find(|f| f.signature == signature)
+    }
+
+    /// Determines the trend for a given crash signature.
+    pub fn trend(&self, signature: &str) -> CrashTrend {
+        let timestamps = match self.sig_timestamps.get(signature) {
+            Some(ts) => ts,
+            None => return CrashTrend::Isolated,
+        };
+        if timestamps.len() <= 1 {
+            return CrashTrend::Isolated;
+        }
+        if timestamps.len() < 3 {
+            return CrashTrend::Stable;
+        }
+
+        // Compare the last interval to the average interval.
+        let total_span = timestamps.last().unwrap() - timestamps.first().unwrap();
+        if total_span <= 0.0 {
+            return CrashTrend::Stable;
+        }
+        let avg_interval = total_span / (timestamps.len() - 1) as f64;
+        let last_interval = timestamps[timestamps.len() - 1] - timestamps[timestamps.len() - 2];
+
+        if last_interval < avg_interval * 0.8 {
+            CrashTrend::Accelerating
+        } else if last_interval > avg_interval * 1.2 {
+            CrashTrend::Decelerating
+        } else {
+            CrashTrend::Stable
+        }
+    }
+
+    /// Builds a `TriageQueue` from all collected records, deduplicating by
+    /// signature and setting occurrence counts from frequency data.
+    pub fn build_triage_queue(&self) -> TriageQueue {
+        let mut queue = TriageQueue::new();
+        let known_fixed: Vec<&str> = self.known_fixed.iter().map(|s| s.as_str()).collect();
+        let known_open: Vec<&str> = self.known_open.iter().map(|s| s.as_str()).collect();
+
+        // One report per unique signature, with occurrence count.
+        let mut seen_sigs = std::collections::HashSet::new();
+        for record in &self.records {
+            if !seen_sigs.insert(record.signature.clone()) {
+                continue; // already processed this signature
+            }
+            let count = self
+                .sig_timestamps
+                .get(&record.signature)
+                .map_or(1, |ts| ts.len() as u32);
+            let report = CrashReport::from_trace(&record.trace, &known_fixed, &known_open)
+                .with_occurrences(count);
+            queue.add(report);
+        }
+        queue
+    }
+
+    /// Runs the full pipeline: collect → deduplicate → triage → issue generation.
+    ///
+    /// Returns the `AutoIssueTracker` with any newly filed issues.
+    pub fn run_pipeline(&self) -> (TriageQueue, AutoIssueTracker) {
+        let queue = self.build_triage_queue();
+        let mut tracker = AutoIssueTracker::new();
+        tracker.process_queue(&queue);
+        (queue, tracker)
+    }
+
+    /// Returns a summary of the collector state.
+    pub fn summary(&self) -> CollectorSummary {
+        let freqs = self.frequencies();
+        let top_crashers: Vec<(String, u64)> = freqs
+            .iter()
+            .take(5)
+            .map(|f| (f.signature.clone(), f.count))
+            .collect();
+        let accelerating = freqs
+            .iter()
+            .filter(|f| {
+                self.sig_timestamps
+                    .get(&f.signature)
+                    .map_or(false, |ts| f.is_accelerating(ts))
+            })
+            .count();
+
+        CollectorSummary {
+            total_records: self.records.len() as u64,
+            unique_signatures: self.sig_timestamps.len() as u64,
+            top_crashers,
+            accelerating_count: accelerating as u64,
+        }
+    }
+
+    /// Renders a human-readable collection report.
+    pub fn render_report(&self) -> String {
+        let summary = self.summary();
+        let mut out = String::new();
+        out.push_str("============ Crash Collection Report ============\n\n");
+        out.push_str(&format!(
+            "Total crashes collected: {}\n",
+            summary.total_records
+        ));
+        out.push_str(&format!(
+            "Unique crash signatures: {}\n",
+            summary.unique_signatures
+        ));
+        out.push_str(&format!(
+            "Accelerating crashes:    {}\n\n",
+            summary.accelerating_count
+        ));
+
+        if !summary.top_crashers.is_empty() {
+            out.push_str("TOP CRASHERS\n");
+            for (i, (sig, count)) in summary.top_crashers.iter().enumerate() {
+                let trend = self.trend(sig);
+                out.push_str(&format!(
+                    "  {}. sig:{} — {} occurrences ({})\n",
+                    i + 1,
+                    &sig[..8.min(sig.len())],
+                    count,
+                    trend,
+                ));
+            }
+            out.push('\n');
+        }
+
+        out
+    }
+
+    /// Clears all collected data.
+    pub fn clear(&mut self) {
+        self.records.clear();
+        self.sig_timestamps.clear();
+        self.next_seq = 0;
+    }
+}
+
+impl Default for CrashCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Summary of collector state.
+#[derive(Debug, Clone)]
+pub struct CollectorSummary {
+    /// Total number of crash records.
+    pub total_records: u64,
+    /// Number of unique crash signatures.
+    pub unique_signatures: u64,
+    /// Top crashers by frequency: (signature, count).
+    pub top_crashers: Vec<(String, u64)>,
+    /// Number of crash signatures with accelerating trend.
+    pub accelerating_count: u64,
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -1820,5 +2225,358 @@ mod tests {
         let result = truncate("this is a very long string that should be truncated", 20);
         assert!(result.len() <= 20);
         assert!(result.ends_with("..."));
+    }
+
+    // -- CrashCollector -----------------------------------------------------
+
+    fn make_trace(symbol: &str, message: &str) -> CrashTrace {
+        CrashTrace::new(
+            message,
+            vec![
+                StackFrame::new(0, "core::panicking::panic"),
+                StackFrame::new(1, symbol),
+            ],
+        )
+    }
+
+    #[test]
+    fn collector_empty() {
+        let c = CrashCollector::new();
+        assert_eq!(c.total_records(), 0);
+        assert_eq!(c.unique_signatures(), 0);
+    }
+
+    #[test]
+    fn collector_collect_basic() {
+        let mut c = CrashCollector::new();
+        let trace = make_trace("gdscene::node::add_child", "panic");
+        let seq = c.collect(trace, 1.0);
+        assert_eq!(seq, 0);
+        assert_eq!(c.total_records(), 1);
+        assert_eq!(c.unique_signatures(), 1);
+    }
+
+    #[test]
+    fn collector_sequence_numbers_increment() {
+        let mut c = CrashCollector::new();
+        let s0 = c.collect(make_trace("gdscene::a", "p"), 1.0);
+        let s1 = c.collect(make_trace("gdscene::b", "p"), 2.0);
+        assert_eq!(s0, 0);
+        assert_eq!(s1, 1);
+    }
+
+    #[test]
+    fn collector_dedup_signatures() {
+        let mut c = CrashCollector::new();
+        // Same trace twice → same signature
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 2.0);
+        assert_eq!(c.total_records(), 2);
+        assert_eq!(c.unique_signatures(), 1);
+    }
+
+    #[test]
+    fn collector_different_signatures() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdphysics2d::world::step", "overflow"), 2.0);
+        assert_eq!(c.unique_signatures(), 2);
+    }
+
+    #[test]
+    fn collector_max_records_eviction() {
+        let mut c = CrashCollector::new().with_max_records(3);
+        for i in 0..5 {
+            c.collect(make_trace(&format!("gd{}::fn", i), "p"), i as f64);
+        }
+        assert_eq!(c.total_records(), 3);
+        // Oldest records evicted
+        assert_eq!(c.records()[0].seq, 2);
+    }
+
+    #[test]
+    fn collector_collect_from_backtrace() {
+        let mut c = CrashCollector::new();
+        let bt = "0: core::panicking::panic\n1: gdscene::node::add_child";
+        let seq = c.collect_from_backtrace("index out of bounds", bt, 1.0);
+        assert_eq!(seq, 0);
+        assert_eq!(c.total_records(), 1);
+        assert_eq!(c.records()[0].trace.frames.len(), 2);
+    }
+
+    #[test]
+    fn collector_records_by_signature() {
+        let mut c = CrashCollector::new();
+        let t1 = make_trace("gdscene::node::add_child", "panic");
+        let sig = t1.signature();
+        c.collect(t1, 1.0);
+        c.collect(make_trace("gdphysics2d::world::step", "overflow"), 2.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 3.0);
+
+        let matches = c.records_by_signature(&sig);
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn collector_records_in_window() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::a", "p"), 1.0);
+        c.collect(make_trace("gdscene::b", "p"), 5.0);
+        c.collect(make_trace("gdscene::c", "p"), 10.0);
+
+        let window = c.records_in_window(3.0, 8.0);
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].seq, 1);
+    }
+
+    #[test]
+    fn collector_frequencies() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 2.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 3.0);
+        c.collect(make_trace("gdphysics2d::world::step", "overflow"), 4.0);
+
+        let freqs = c.frequencies();
+        assert_eq!(freqs.len(), 2);
+        // First should be the most frequent
+        assert_eq!(freqs[0].count, 3);
+        assert_eq!(freqs[1].count, 1);
+    }
+
+    #[test]
+    fn collector_frequency_of() {
+        let mut c = CrashCollector::new();
+        let t = make_trace("gdscene::node::add_child", "panic");
+        let sig = t.signature();
+        c.collect(t, 1.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 5.0);
+
+        let freq = c.frequency_of(&sig).unwrap();
+        assert_eq!(freq.count, 2);
+        assert!((freq.first_seen - 1.0).abs() < f64::EPSILON);
+        assert!((freq.last_seen - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn crash_frequency_avg_interval() {
+        let freq = CrashFrequency {
+            signature: "abc".to_string(),
+            count: 4,
+            first_seen: 0.0,
+            last_seen: 9.0,
+            message: "p".to_string(),
+            subsystem: Subsystem::Other,
+        };
+        let avg = freq.avg_interval_secs().unwrap();
+        assert!((avg - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn crash_frequency_avg_interval_single() {
+        let freq = CrashFrequency {
+            signature: "abc".to_string(),
+            count: 1,
+            first_seen: 5.0,
+            last_seen: 5.0,
+            message: "p".to_string(),
+            subsystem: Subsystem::Other,
+        };
+        assert!(freq.avg_interval_secs().is_none());
+    }
+
+    #[test]
+    fn crash_frequency_is_accelerating() {
+        let freq = CrashFrequency {
+            signature: "abc".to_string(),
+            count: 4,
+            first_seen: 0.0,
+            last_seen: 7.0,
+            message: "p".to_string(),
+            subsystem: Subsystem::Other,
+        };
+        // Timestamps: 0, 3, 6, 7 — avg interval ~2.33, last interval 1 (< 2.33*0.8)
+        let ts = vec![0.0, 3.0, 6.0, 7.0];
+        assert!(freq.is_accelerating(&ts));
+    }
+
+    #[test]
+    fn crash_frequency_not_accelerating() {
+        let freq = CrashFrequency {
+            signature: "abc".to_string(),
+            count: 3,
+            first_seen: 0.0,
+            last_seen: 10.0,
+            message: "p".to_string(),
+            subsystem: Subsystem::Other,
+        };
+        // Even spacing: 0, 5, 10
+        let ts = vec![0.0, 5.0, 10.0];
+        assert!(!freq.is_accelerating(&ts));
+    }
+
+    // -- CrashTrend ---------------------------------------------------------
+
+    #[test]
+    fn trend_isolated_single_occurrence() {
+        let mut c = CrashCollector::new();
+        let t = make_trace("gdscene::node::add_child", "panic");
+        let sig = t.signature();
+        c.collect(t, 1.0);
+        assert_eq!(c.trend(&sig), CrashTrend::Isolated);
+    }
+
+    #[test]
+    fn trend_stable_even_spacing() {
+        let mut c = CrashCollector::new();
+        let t = make_trace("gdscene::node::add_child", "panic");
+        let sig = t.signature();
+        // Evenly spaced: 0, 5, 10, 15
+        for i in 0..4 {
+            c.collect(
+                make_trace("gdscene::node::add_child", "panic"),
+                i as f64 * 5.0,
+            );
+        }
+        assert_eq!(c.trend(&sig), CrashTrend::Stable);
+    }
+
+    #[test]
+    fn trend_accelerating() {
+        let mut c = CrashCollector::new();
+        let t = make_trace("gdscene::node::add_child", "panic");
+        let sig = t.signature();
+        // Accelerating: 0, 10, 18, 20 — avg 6.67, last interval 2
+        for ts in &[0.0, 10.0, 18.0, 20.0] {
+            c.collect(make_trace("gdscene::node::add_child", "panic"), *ts);
+        }
+        assert_eq!(c.trend(&sig), CrashTrend::Accelerating);
+    }
+
+    #[test]
+    fn trend_decelerating() {
+        let mut c = CrashCollector::new();
+        let t = make_trace("gdscene::node::add_child", "panic");
+        let sig = t.signature();
+        // Decelerating: 0, 1, 2, 20 — avg 6.67, last interval 18
+        for ts in &[0.0, 1.0, 2.0, 20.0] {
+            c.collect(make_trace("gdscene::node::add_child", "panic"), *ts);
+        }
+        assert_eq!(c.trend(&sig), CrashTrend::Decelerating);
+    }
+
+    #[test]
+    fn trend_unknown_signature() {
+        let c = CrashCollector::new();
+        assert_eq!(c.trend("nonexistent"), CrashTrend::Isolated);
+    }
+
+    // -- Build triage queue from collector ----------------------------------
+
+    #[test]
+    fn build_triage_queue_deduplicates() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 2.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 3.0);
+
+        let queue = c.build_triage_queue();
+        assert_eq!(queue.len(), 1); // deduplicated
+        let reports = queue.by_severity();
+        assert_eq!(reports[0].occurrence_count, 3);
+    }
+
+    #[test]
+    fn build_triage_queue_multiple_signatures() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdphysics2d::world::step", "overflow"), 2.0);
+
+        let queue = c.build_triage_queue();
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn build_triage_queue_with_known_patterns() {
+        let mut c = CrashCollector::new();
+        c.add_known_fixed("old_bug");
+        c.collect(make_trace("gdscene::node::add_child", "old_bug resurfaced"), 1.0);
+
+        let queue = c.build_triage_queue();
+        let reports = queue.by_severity();
+        assert_eq!(reports[0].classification, CrashClassification::Regression);
+    }
+
+    // -- Full pipeline ------------------------------------------------------
+
+    #[test]
+    fn run_pipeline_end_to_end() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdphysics2d::world::step", "overflow"), 2.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 3.0);
+
+        let (queue, tracker) = c.run_pipeline();
+        assert_eq!(queue.len(), 2);
+        assert_eq!(tracker.filed_count(), 2);
+    }
+
+    // -- CollectorSummary ---------------------------------------------------
+
+    #[test]
+    fn collector_summary_basic() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 2.0);
+        c.collect(make_trace("gdphysics2d::world::step", "overflow"), 3.0);
+
+        let s = c.summary();
+        assert_eq!(s.total_records, 3);
+        assert_eq!(s.unique_signatures, 2);
+        assert_eq!(s.top_crashers.len(), 2);
+        assert_eq!(s.top_crashers[0].1, 2); // most frequent
+    }
+
+    #[test]
+    fn collector_render_report_contains_sections() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 1.0);
+        c.collect(make_trace("gdscene::node::add_child", "panic"), 2.0);
+
+        let report = c.render_report();
+        assert!(report.contains("Crash Collection Report"));
+        assert!(report.contains("Total crashes collected: 2"));
+        assert!(report.contains("Unique crash signatures: 1"));
+        assert!(report.contains("TOP CRASHERS"));
+    }
+
+    #[test]
+    fn collector_clear() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdscene::a", "p"), 1.0);
+        c.collect(make_trace("gdscene::b", "q"), 2.0);
+        c.clear();
+        assert_eq!(c.total_records(), 0);
+        assert_eq!(c.unique_signatures(), 0);
+    }
+
+    #[test]
+    fn crash_trend_labels() {
+        assert_eq!(CrashTrend::Isolated.label(), "Isolated");
+        assert_eq!(CrashTrend::Stable.label(), "Stable");
+        assert_eq!(CrashTrend::Accelerating.label(), "Accelerating");
+        assert_eq!(CrashTrend::Decelerating.label(), "Decelerating");
+    }
+
+    #[test]
+    fn crash_trend_display() {
+        assert_eq!(format!("{}", CrashTrend::Accelerating), "Accelerating");
+    }
+
+    #[test]
+    fn collector_subsystem_detected_in_record() {
+        let mut c = CrashCollector::new();
+        c.collect(make_trace("gdphysics2d::world::step", "overflow"), 1.0);
+        assert_eq!(c.records()[0].subsystem, Subsystem::Physics);
     }
 }

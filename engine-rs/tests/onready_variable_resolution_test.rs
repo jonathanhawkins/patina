@@ -78,9 +78,15 @@ extends Node
 "#;
     let (mut interp, mut instance) = parse_and_instantiate(source);
 
-    assert!(!instance.onready_vars.is_empty(), "should have pending onready vars");
+    // Before resolution, @onready var should be Nil.
+    assert_eq!(instance.properties.get("x"), Some(&Variant::Nil));
     interp.resolve_onready_vars(&mut instance).unwrap();
-    assert!(instance.onready_vars.is_empty(), "onready_vars should be drained");
+    // After resolution, @onready var should have its value.
+    assert_eq!(
+        instance.properties.get("x"),
+        Some(&Variant::Int(1)),
+        "onready var should be resolved after resolve_onready_vars"
+    );
 }
 
 #[test]

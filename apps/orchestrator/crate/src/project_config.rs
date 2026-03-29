@@ -198,7 +198,7 @@ pub fn convention_fallback(project_root: &Path) -> ProjectPlannerConfig {
             let rel = PathBuf::from("prd").join(entry.file_name());
             if name.contains("EXIT_CRITERIA") {
                 criteria_files.push(rel);
-            } else if name.contains("EXECUTION_MAP") {
+            } else if name.contains("BEAD_EXECUTION_MAP") {
                 execution_map_files.push(rel);
             } else if name.contains("PLAN") && !name.contains("AGENT") {
                 next_sources.push(rel);
@@ -297,12 +297,19 @@ next_sources = ["prd/PLAN.md"]
             "should discover exit criteria files, got: {:?}",
             cfg.criteria_files
         );
-        // Should find V1_EXIT_EXECUTION_MAP.md
+        // Should find the live execution map, not the V1 handoff doc
         assert!(
             cfg.execution_map_files
                 .iter()
-                .any(|f| f.to_string_lossy().contains("EXECUTION_MAP")),
-            "should discover execution map files, got: {:?}",
+                .any(|f| f.to_string_lossy().contains("BEAD_EXECUTION_MAP")),
+            "should discover BEAD_EXECUTION_MAP.md, got: {:?}",
+            cfg.execution_map_files
+        );
+        assert!(
+            cfg.execution_map_files
+                .iter()
+                .all(|f| !f.to_string_lossy().contains("V1_EXIT_EXECUTION_MAP")),
+            "should not use V1_EXIT_EXECUTION_MAP.md as an active execution map: {:?}",
             cfg.execution_map_files
         );
     }

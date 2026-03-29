@@ -1,15 +1,7 @@
 //! V1 Acceptance Gate Tests
 //!
-//! Each test corresponds to an unchecked item in `prd/V1_EXIT_CRITERIA.md`.
-//! All tests use `#[ignore]` so `cargo test` passes, but
-//! `cargo test --test v1_acceptance_gate_test -- --ignored` runs them
-//! and they FAIL because the feature is not yet implemented.
-//!
-//! Workers pick up individual gates with:
-//! ```sh
-//! cargo test --test v1_acceptance_gate_test -- --ignored test_v1_<name>
-//! ```
-//! and make them pass as part of closing the corresponding V1 exit criteria.
+//! Each test corresponds to an item in `prd/V1_EXIT_CRITERIA.md`.
+//! All gates now pass — the V1 port is complete.
 
 // ==========================================================================
 // Object Model (gdobject) — V1_EXIT_CRITERIA.md lines 35-38
@@ -22,7 +14,6 @@
 /// explicitly registered properties, missing inherited ones and
 /// default values that Godot would report.
 #[test]
-#[ignore = "V1 gate: ClassDB property/method enumeration incomplete vs oracle"]
 fn test_v1_classdb_full_property_enumeration() {
     use gdobject::{
         clear_for_testing, get_method_list, get_property_list, register_class, ClassRegistration,
@@ -173,7 +164,6 @@ fn test_v1_classdb_full_property_enumeration() {
 /// per Godot semantics, but the three lifecycle notifications must appear
 /// in the correct relative order.
 #[test]
-#[ignore = "V1 gate: Object.notification() inheritance-chain dispatch ordering"]
 fn test_v1_notification_dispatch_ordering() {
     let mut tree = gdscene::SceneTree::new();
     let root = tree.root_id();
@@ -239,7 +229,6 @@ fn test_v1_notification_dispatch_ordering() {
 /// scene tree, without the caller manually invalidating it.
 /// Currently WeakRef only supports manual invalidation.
 #[test]
-#[ignore = "V1 gate: WeakRef auto-invalidation on object free"]
 fn test_v1_weakref_auto_invalidates_on_free() {
     let mut tree = gdscene::SceneTree::new();
     let root = tree.root_id();
@@ -279,7 +268,6 @@ fn test_v1_weakref_auto_invalidates_on_free() {
 ///
 /// After free(), property access must return an error/None, not panic.
 #[test]
-#[ignore = "V1 gate: Object.free() use-after-free guard"]
 fn test_v1_object_free_use_after_free_guard() {
     let mut tree = gdscene::SceneTree::new();
     let root = tree.root_id();
@@ -314,7 +302,6 @@ fn test_v1_object_free_use_after_free_guard() {
 /// The UID registry must persist across loads and resolve uid:// references
 /// that were parsed from .tres/.tscn files.
 #[test]
-#[ignore = "V1 gate: Resource UID registry auto-population from parsed files"]
 fn test_v1_resource_uid_registry_from_parsed_files() {
     let source = r#"[gd_resource type="Resource" format=3 uid="uid://abc123def"]
 
@@ -339,7 +326,6 @@ name = "UidTest"
 /// UnifiedLoader must resolve uid:// references to res:// paths, and
 /// parsed .tres files must carry their UID for later registry population.
 #[test]
-#[ignore = "V1 gate: Resource UID registry for uid:// references"]
 fn test_v1_uid_registry() {
     use gdcore::ResourceUid;
     use gdresource::UidRegistry;
@@ -420,7 +406,6 @@ name = "UidGateTest"
 /// Nested sub-resources in .tres files must be fully loaded and resolvable
 /// from the parent resource's properties.
 #[test]
-#[ignore = "V1 gate: Sub-resource inline loading with property resolution"]
 fn test_v1_subresource_inline_loading() {
     let source = r#"[gd_resource type="Theme" format=3]
 
@@ -464,7 +449,6 @@ button_style = SubResource("StyleBoxFlat_def")
 /// When a .tres references an ext_resource, the loader must populate
 /// the ext_resources map with type and path information.
 #[test]
-#[ignore = "V1 gate: External resource cross-file reference resolution"]
 fn test_v1_ext_resource_cross_file_resolution() {
     let main_source = r#"[gd_resource type="PackedScene" format=3]
 
@@ -494,7 +478,6 @@ texture = ExtResource("1")
 
 /// Alias for coordinator filter compatibility.
 #[test]
-#[ignore = "V1 gate: External resource reference (alias)"]
 fn test_v1_external_ref_resolution() {
     test_v1_ext_resource_cross_file_resolution();
 }
@@ -504,7 +487,6 @@ fn test_v1_external_ref_resolution() {
 /// Loading a resource and saving it back must produce semantically
 /// equivalent output that re-loads identically (including UID).
 #[test]
-#[ignore = "V1 gate: Resource load-save roundtrip semantic equivalence"]
 fn test_v1_resource_roundtrip_equivalence() {
     let source = r#"[gd_resource type="Resource" format=3 uid="uid://roundtrip_test"]
 
@@ -547,7 +529,6 @@ style = SubResource("StyleBoxFlat_001")
 ///
 /// At least one fixture resource must match oracle-captured metadata.
 #[test]
-#[ignore = "V1 gate: Oracle comparison for fixture resource"]
 fn test_v1_resource_oracle_comparison() {
     let fixture_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -585,7 +566,6 @@ fn test_v1_resource_oracle_comparison() {
 /// A PackedScene that references another scene via ext_resource must
 /// instantiate the sub-scene's nodes as part of its own tree.
 #[test]
-#[ignore = "V1 gate: Instance inheritance via ext_resource scenes"]
 fn test_v1_instance_inheritance_ext_resource() {
     let parent_tscn = r#"[gd_scene format=3]
 
@@ -638,7 +618,6 @@ fn test_v1_instance_inheritance_ext_resource() {
 ///
 /// Saving a SceneTree to .tscn and re-parsing must produce an equivalent hierarchy.
 #[test]
-#[ignore = "V1 gate: PackedScene save/restore roundtrip"]
 fn test_v1_packed_scene_save_restore_roundtrip() {
     let tscn = r#"[gd_scene format=3]
 
@@ -686,7 +665,6 @@ z_index = 5
 /// [connection] sections in .tscn files must result in signals being
 /// wired when the scene is instantiated into a SceneTree.
 #[test]
-#[ignore = "V1 gate: Scene signal connections wired during instantiation"]
 fn test_v1_scene_signal_connections_wired() {
     let tscn = r#"[gd_scene format=3]
 
@@ -736,7 +714,6 @@ fn test_v1_scene_signal_connections_wired() {
 /// Verifies that [connection] sections in .tscn files produce wired signals
 /// when instantiated, including multi-signal and cross-node scenarios.
 #[test]
-#[ignore = "V1 gate: Scene-level signal connections wired during instantiation"]
 fn test_v1_scene_signals() {
     // Scene with two signals: Button.pressed -> Root, and a custom signal
     let tscn = r#"[gd_scene format=3]
@@ -835,7 +812,6 @@ fn test_v1_scene_signals() {
 ///
 /// A loaded scene must produce a node tree that matches oracle golden output.
 #[test]
-#[ignore = "V1 gate: Oracle golden comparison for scene tree"]
 fn test_v1_scene_oracle_golden_comparison() {
     let golden_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -971,7 +947,6 @@ fn test_v1_scene_oracle_golden_comparison() {
 /// The parser must handle representative scripts without errors and produce
 /// a structured AST with class_name, variables, functions, and signals.
 #[test]
-#[ignore = "V1 gate: GDScript parser stable AST for representative scripts"]
 fn test_v1_gdscript_parser_stable_ast() {
     // The parser must handle a representative script with class_name,
     // @export, @onready, signals, and multiple functions.
@@ -1034,7 +1009,6 @@ func take_damage(amount: int):
 
 /// Alias for acceptance criteria pattern: `test_v1_gdscript_ast`
 #[test]
-#[ignore = "V1 gate: GDScript parser stable AST (alias)"]
 fn test_v1_gdscript_ast_stable() {
     test_v1_gdscript_parser_stable_ast();
 }
@@ -1045,7 +1019,6 @@ fn test_v1_gdscript_ast_stable() {
 /// expressions after the _ready lifecycle callback fires. Before lifecycle,
 /// they must be Nil.
 #[test]
-#[ignore = "V1 gate: @onready variable resolution after _ready"]
 fn test_v1_onready_variable_resolution() {
     use gdscene::scripting::GDScriptNodeInstance;
 
@@ -1117,7 +1090,6 @@ var tag = \"npc\"
 /// Script functions must be callable via the object's method table,
 /// allowing call("method_name", args) style dispatch.
 #[test]
-#[ignore = "V1 gate: func dispatch via object method table"]
 fn test_v1_func_dispatch_via_method_table() {
     // Script functions must be dispatchable by name from outside the script.
     // This requires: parse -> create ScriptInstance -> call method by name.
@@ -1167,7 +1139,6 @@ func greet():
 /// Scripts declaring `signal foo(args)` must register those signals on
 /// the object so they can be connected and emitted.
 #[test]
-#[ignore = "V1 gate: signal declaration and emit_signal from script"]
 fn test_v1_signal_declaration_from_script() {
     use gdscript_interop::interpreter::Interpreter;
 
@@ -1204,7 +1175,6 @@ var health = 100
 /// them via `emit_signal("foo", args)`. This test verifies the full pipeline:
 /// parse → declare → attach → connect → emit → handler fires.
 #[test]
-#[ignore = "V1 gate: script signal declaration and emit"]
 fn test_v1_script_signal_declaration_and_emit() {
     use gdscript_interop::interpreter::Interpreter;
     use std::sync::{
@@ -1292,7 +1262,6 @@ func _ready():
 /// At least one script-driven fixture must execute and produce output
 /// matching the oracle.
 #[test]
-#[ignore = "V1 gate: Script-driven fixture oracle match"]
 fn test_v1_script_fixture_oracle_match() {
     use gdscene::scene_tree::SceneTree;
     use gdscene::scripting::GDScriptNodeInstance;
@@ -1570,7 +1539,6 @@ fn test_v1_space_shooter_script_exported_properties() {
 /// PhysicsServer2D must expose body_create, body_set_state, body_get_state
 /// matching Godot's PhysicsServer2D API.
 #[test]
-#[ignore = "V1 gate: PhysicsServer2D API surface (body_create/set_state/get_state)"]
 fn test_v1_physics_server_2d_api_surface() {
     // body_create: create a body through PhysicsWorld2D
     let mut world = gdphysics2d::PhysicsWorld2D::new();
@@ -1616,7 +1584,6 @@ fn test_v1_physics_server_2d_api_surface() {
 
 /// Alias for coordinator filter compatibility.
 #[test]
-#[ignore = "V1 gate: PhysicsServer2D API surface (alias)"]
 fn test_v1_physics_server_api_surface() {
     test_v1_physics_server_2d_api_surface();
 }
@@ -1625,7 +1592,6 @@ fn test_v1_physics_server_api_surface() {
 ///
 /// Bodies must only collide when their layer/mask bits overlap.
 #[test]
-#[ignore = "V1 gate: Collision layers and masks respected"]
 fn test_v1_collision_layers_and_masks() {
     let mut world = gdphysics2d::PhysicsWorld2D::new();
 
@@ -1693,7 +1659,6 @@ fn test_v1_collision_layers_and_masks() {
 /// Kinematic bodies must support move_and_collide: move until first collision
 /// and return collision info, or None if no collision occurred.
 #[test]
-#[ignore = "V1 gate: KinematicBody2D move_and_collide"]
 fn test_v1_kinematic_move_and_collide() {
     use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D};
     use gdphysics2d::shape::Shape2D;
@@ -1746,7 +1711,6 @@ fn test_v1_kinematic_move_and_collide() {
 /// (A moving toward stationary B and C) for 30 frames at 60 TPS and
 /// compares positions against the golden trace.
 #[test]
-#[ignore = "V1 gate: Multi-body oracle trace comparison"]
 fn test_v1_multibody_oracle_trace() {
     use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D};
     use gdphysics2d::shape::Shape2D;
@@ -1875,7 +1839,6 @@ fn test_v1_multibody_oracle_trace() {
 ///
 /// The renderer must correctly sample from a texture atlas region.
 #[test]
-#[ignore = "V1 gate: Texture atlas sampling matches upstream"]
 fn test_v1_texture_atlas_sampling() {
     use gdcore::math::{Color, Rect2, Vector2};
     use gdrender2d::draw::draw_texture_region;
@@ -1964,7 +1927,6 @@ fn test_v1_texture_atlas_sampling() {
 ///
 /// Items with higher z_index must draw on top of items with lower z_index.
 #[test]
-#[ignore = "V1 gate: CanvasItem z-index ordering respected"]
 fn test_v1_canvas_item_z_index_ordering() {
     use gdcore::math::{Color, Rect2, Vector2};
     use gdserver2d::canvas::DrawCommand;
@@ -2010,7 +1972,6 @@ fn test_v1_canvas_item_z_index_ordering() {
 
 /// Alias for coordinator filter compatibility.
 #[test]
-#[ignore = "V1 gate: CanvasItem z-index ordering (alias)"]
 fn test_v1_zindex_ordering() {
     test_v1_canvas_item_z_index_ordering();
 }
@@ -2019,7 +1980,6 @@ fn test_v1_zindex_ordering() {
 ///
 /// Setting visible=false on a CanvasItem must suppress all draw calls.
 #[test]
-#[ignore = "V1 gate: Visibility suppression suppresses draw calls"]
 fn test_v1_visibility_suppression() {
     use gdcore::math::{Color, Rect2, Vector2};
     use gdserver2d::canvas::DrawCommand;
@@ -2057,7 +2017,6 @@ fn test_v1_visibility_suppression() {
 ///
 /// A Camera2D offset must shift all rendered content accordingly.
 #[test]
-#[ignore = "V1 gate: Camera2D transform applied to render output"]
 fn test_v1_camera2d_transform() {
     use gdcore::math::{Color, Rect2, Vector2};
     use gdrender2d::renderer::SoftwareRenderer;
@@ -2123,7 +2082,6 @@ fn test_v1_camera2d_transform() {
 ///
 /// At least one scene must render within 0.5% pixel error of a Godot reference.
 #[test]
-#[ignore = "V1 gate: Pixel diff <= 0.5% against upstream golden"]
 fn test_v1_pixel_diff_threshold() {
     let golden_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2165,7 +2123,6 @@ fn test_v1_pixel_diff_threshold() {
 ///
 /// The platform layer must be able to create a window. HeadlessWindow for CI.
 #[test]
-#[ignore = "V1 gate: Window creation abstraction (winit backend)"]
 fn test_v1_window_creation() {
     use gdplatform::window::WindowManager;
 
@@ -2185,7 +2142,6 @@ fn test_v1_window_creation() {
 ///
 /// Keyboard, mouse, and gamepad input events must be deliverable.
 #[test]
-#[ignore = "V1 gate: Input event delivery (keyboard, mouse, gamepad)"]
 fn test_v1_input_event_delivery() {
     use gdplatform::input::*;
 
@@ -2218,7 +2174,6 @@ fn test_v1_input_event_delivery() {
 
 /// Alias for coordinator filter compatibility.
 #[test]
-#[ignore = "V1 gate: Input event delivery (alias)"]
 fn test_v1_input_events_delivery() {
     test_v1_input_event_delivery();
 }
@@ -2227,7 +2182,6 @@ fn test_v1_input_events_delivery() {
 ///
 /// OS.get_ticks_msec() and OS.get_name() must work.
 #[test]
-#[ignore = "V1 gate: OS singleton (get_ticks_msec, get_name)"]
 fn test_v1_os_singleton() {
     let ticks = gdplatform::get_ticks_msec();
     // get_ticks_msec returns u64, always >= 0 by type. Sanity check it's callable.
@@ -2245,7 +2199,6 @@ fn test_v1_os_singleton() {
 ///
 /// Time.get_ticks_usec() must return monotonically increasing values.
 #[test]
-#[ignore = "V1 gate: Time singleton (get_ticks_usec)"]
 fn test_v1_time_singleton() {
     let t1 = gdplatform::get_ticks_usec();
     std::hint::black_box(0..1000).for_each(|_| {});
@@ -2263,7 +2216,6 @@ fn test_v1_time_singleton() {
 ///
 /// The engine must run a complete frame loop without an OS window.
 #[test]
-#[ignore = "V1 gate: Headless mode (no window) for CI"]
 fn test_v1_headless_mode() {
     let mut tree = gdscene::SceneTree::new();
     let root = tree.root_id();
@@ -2293,7 +2245,6 @@ fn test_v1_headless_mode() {
 /// Parse a .tscn → instance into SceneTree → save back to .tscn →
 /// re-parse and verify node count, names, types, and properties survive.
 #[test]
-#[ignore = "V1 gate: PackedScene save/restore roundtrip"]
 fn test_v1_packed_scene_roundtrip() {
     let source = r#"[gd_scene format=3]
 
@@ -2369,7 +2320,6 @@ position = Vector2(0, -16)
 /// CharacterBody2D.move_and_collide must move the body and return collision
 /// info when hitting an obstacle, or None when moving freely.
 #[test]
-#[ignore = "V1 gate: KinematicBody2D move_and_collide baseline behavior"]
 fn test_v1_kinematic_body_move_and_collide() {
     // Delegate to the main kinematic test.
     test_v1_kinematic_move_and_collide();
@@ -2385,7 +2335,6 @@ fn test_v1_kinematic_body_move_and_collide() {
 /// `hint = 42`. Our ClassDB registration must match so that property
 /// reflection and default-stripping logic align with upstream.
 #[test]
-#[ignore = "V1 gate: Light3D shadow_enabled hint alignment"]
 fn test_v1_light3d_shadow_enabled_hint_value() {
     use gdobject::{clear_for_testing, get_property_list, register_3d_classes};
 
@@ -2726,7 +2675,6 @@ fn normalize_oracle_float(val: &serde_json::Value) -> serde_json::Value {
 /// Runs the oracle_regression_test parity report across all golden scenes and
 /// asserts that the overall property parity (Patina vs Godot oracle) is >= 98%.
 #[test]
-#[ignore = "V1 gate: Oracle parity reaches 98 percent across all fixtures"]
 fn test_v1_overall_parity_gate() {
     // Build patina-runner first so the oracle regression test can use it.
     let build = std::process::Command::new("cargo")

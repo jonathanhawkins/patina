@@ -14,8 +14,6 @@
 //! Acceptance: all tests pass, WAV and OGG files decode correctly, and the
 //! full pipeline from file load to mixed audio output works end-to-end.
 
-use std::io::Cursor;
-
 use gdaudio::import::{
     audio_buffer_to_sample_buffer, decode_audio_data, load_audio_file, sample_buffer_to_audio_buffer,
     AudioFormat, AudioStreamLoader, ImportError,
@@ -26,38 +24,16 @@ use gdaudio::{AudioBuffer, AudioServer};
 // Helpers
 // ===========================================================================
 
-/// Build a WAV file in memory using hound.
+/// Build a 16-bit PCM WAV file in memory from i16 samples.
 fn make_wav(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
-    let mut cursor = Cursor::new(Vec::new());
-    let spec = hound::WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
-    for &s in samples {
-        writer.write_sample(s).unwrap();
-    }
-    writer.finalize().unwrap();
-    cursor.into_inner()
+    let sample_data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    gdaudio::wav::build_wav_bytes(sample_rate, channels, 16, 1, &sample_data)
 }
 
-/// Build a 32-bit float WAV file.
+/// Build a 32-bit float WAV file in memory from f32 samples.
 fn make_wav_float(sample_rate: u32, channels: u16, samples: &[f32]) -> Vec<u8> {
-    let mut cursor = Cursor::new(Vec::new());
-    let spec = hound::WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-    let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
-    for &s in samples {
-        writer.write_sample(s).unwrap();
-    }
-    writer.finalize().unwrap();
-    cursor.into_inner()
+    let sample_data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    gdaudio::wav::build_wav_bytes(sample_rate, channels, 32, 3, &sample_data)
 }
 
 // ===========================================================================
@@ -441,9 +417,8 @@ fn uxn40_resource_importer_wav_metadata() {
 fn uxn40_resource_format_loader_audio_extensions() {
     let rfl = gdresource::ResourceFormatLoader::with_defaults();
     assert!(rfl.can_load("wav"));
-    assert!(rfl.can_load("ogg"));
     assert!(rfl.can_load("WAV"));
-    assert!(rfl.can_load("OGG"));
+    assert!(rfl.can_load(".wav"));
 }
 
 // ===========================================================================

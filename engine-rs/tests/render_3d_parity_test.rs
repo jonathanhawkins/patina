@@ -13,7 +13,7 @@ use gdrender3d::test_adapter::{
     count_depth_written, count_visible_pixels, frame_data_to_buffer_3d, save_ppm_3d,
 };
 use gdrender3d::SoftwareRenderer3D;
-use gdserver3d::material::Material3D;
+use gdserver3d::material::{Material3D, ShadingMode};
 use gdserver3d::mesh::Mesh3D;
 use gdserver3d::server::RenderingServer3D;
 use gdserver3d::viewport::Viewport3D;
@@ -28,6 +28,7 @@ fn cube_at(renderer: &mut SoftwareRenderer3D, pos: Vector3, color: Color) {
     renderer.set_mesh(id, Mesh3D::cube(1.0));
     let mut mat = Material3D::default();
     mat.albedo = color;
+    mat.shading_mode = ShadingMode::Unlit;
     renderer.set_material(id, mat);
     renderer.set_transform(
         id,

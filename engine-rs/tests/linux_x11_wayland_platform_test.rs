@@ -27,7 +27,7 @@ fn classdb_linux_platform_layer_inherits_object() {
 #[test]
 fn classdb_has_display_properties() {
     class_db::register_3d_classes();
-    let props = class_db::get_property_list("LinuxPlatformLayer", true);
+    let props = class_db::get_property_list("LinuxPlatformLayer");
     assert!(props.iter().any(|p| p.name == "display_protocol"));
     assert!(props.iter().any(|p| p.name == "scale_factor"));
     assert!(props.iter().any(|p| p.name == "compositing_enabled"));

@@ -228,24 +228,11 @@ fn script_snapshot_uses_godot_button_indices() {
     let script_snap = ScriptSnapshot {
         pressed_keys: Default::default(),
         just_pressed_keys: Default::default(),
-        just_released_keys: Default::default(),
         input_map: Default::default(),
         mouse_position: Vector2::new(100.0, 200.0),
         mouse_buttons_pressed: ["1".to_string(), "3".to_string()]
             .into_iter()
             .collect(),
-        just_pressed_mouse_buttons: Default::default(),
-        just_released_mouse_buttons: Default::default(),
-        actions_just_released: Default::default(),
-        action_strengths: Default::default(),
-        touches_pressed: Default::default(),
-        touches_just_pressed: Default::default(),
-        touches_just_released: Default::default(),
-        touch_positions: Default::default(),
-        gamepad_buttons_pressed: Default::default(),
-        gamepad_buttons_just_pressed: Default::default(),
-        gamepad_buttons_just_released: Default::default(),
-        gamepad_axis_values: Default::default(),
     };
 
     // Godot indices: 1=Left, 2=Right, 3=Middle

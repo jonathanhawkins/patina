@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
@@ -99,7 +99,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
@@ -134,7 +134,278 @@ jobs:
 
       - name: Run render golden tests
         working-directory: engine-rs
-        run: make test-render
+        env:
+          PATINA_CI: "1"
+        run: make test-render-ci
+
+  # ── Rust: Headless runtime compat slice ──────────────────────────────────
+  rust-compat-headless:
+    name: Headless runtime compat
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Run headless runtime tests
+        working-directory: engine-rs
+        run: |
+          # cargo test --workspace
+          WS="--workspace"
+          cargo test $WS -- resource_ scene_ signal_ notification_ object_ classdb_ lifecycle_ packed_scene_ nodepath_ connect_ instanc reparent_ default_property_ gdscript_ script_ mainloop_ change_scene_ cache_ unique_name_ deferred_ trace_ process_priority node_ project_loading unified_loader container_layout_ func_dispatch_ onready_ weakref_ time_singleton os_singleton regex_singleton project_settings_singleton frame_
+
+  # ── Rust: 2D slice compat ────────────────────────────────────────────────
+  rust-compat-2d:
+    name: 2D slice compat
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Run 2D slice tests
+        working-directory: engine-rs
+        run: |
+          # cargo test --workspace
+          WS="--workspace"
+          cargo test $WS -- physics_ render_ collision_ node2d_ geometry2d_ vertical_slice area2d_ character_ fixed_step_ gdphysics2d_ deterministic_physics draw_ordering camera_viewport viewport_clear texture_ measured_2d cpu_particles2d_ pixel_diff_ visibility_suppression wgpu_backend_ viewport_2d_ viewport_golden_
+
+  # ── Rust: 3D slice compat ────────────────────────────────────────────────
+  rust-compat-3d:
+    name: 3D slice compat
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Run 3D slice tests
+        working-directory: engine-rs
+        run: |
+          # cargo test --workspace
+          WS="--workspace"
+          cargo test $WS -- node3d_ physics3d_ transform3d_ demo_3d_ representative_3d_ camera3d_ render_3d_ collision_shape_3d_ animation_player_3d_ characterbody3d_ cpu_particles3d_ crate_boundary_3d_ crate_set_3d_ hierarchy_3d_ light3d_ multimesh_instance3d_ navigation_region3d_ omnilight3d_ real_3d_demo_ rigidbody3d_ shader_material_3d_ spotlight3d_ viewport_3d viewport_3d_ directional_light_ reflection_probe_ skeleton3d_ sky_resource_ csg_ fog_volume_ environment_resource_ voxelgi_
+
+  # ── Rust: Platform layer compat (multi-OS) ───────────────────────────────
+  rust-compat-platform:
+    name: Platform layer compat (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: rust-fmt
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Run platform layer tests
+        working-directory: engine-rs
+        run: |
+          # cargo test --workspace
+          WS="--workspace"
+          cargo test $WS -- input_ window_ platform_ audio_ keyboard_ mouse_input_ winit_ input_action_binding input_map_action_binding export_ startup_packaging ci_build_matrix clipboard_ cursor_ display_server_ drag_drop_ gamepad_ vsync_mode_ web_wasm_
+
+  # ── Rust: Fuzz / property tests ──────────────────────────────────────────
+  rust-compat-fuzz:
+    name: Fuzz / property tests
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Run fuzz and property tests
+        working-directory: engine-rs
+        run: |
+          # cargo test --workspace
+          WS="--workspace"
+          cargo test $WS -- fuzz_property fuzz_variant fuzz_collision fuzz_signal fuzz_resource fuzz_binary fuzz_tres property_tests robustness
+
+  # ── Rust: CI meta / infrastructure ───────────────────────────────────────
+  rust-compat-ci-meta:
+    name: CI meta / infrastructure
+    runs-on: ubuntu-latest
+    needs: rust-fmt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Run CI meta and infrastructure tests
+        working-directory: engine-rs
+        run: |
+          # cargo test --workspace
+          WS="--workspace"
+          cargo test $WS -- ci_ version_consistency startup_packaging release_ migration_ contributor_ broader_integration editor benchmark_ dependency_audit rustdoc_generation compat_docs api_extraction community_ animation_ asset_ container_ command_palette_ tilemap_ undo_redo_ import_ curve_ profiler_ inspector_ script_editor_ vcs_ dock_ signal_trace compat_matrix compatibility_ core_runtime crash_triage demo_ dependency_ debugger_ example_ ext_ filesystem_ gdext_ gdplatform_ global_ godot_ headless_ instance_ instanced_ instancing_ linux_ macos_ memory_ mesh_ multi_ nested_ nightly_ pck_ perf_ platformer probe_output process_ project_ property_ repin_ repin_diff_report representative_ res_ runtime_ space_shooter golden_refresh shader_tokenizer godot_compat compat v1_acceptance subresource_ test_ theme_ unsafe_ unsafe_code_ upstream_ memory_profiler_ rustdoc_ tooling_
 
   # ── Rust: release build check ─────────────────────────────────────────────
   rust-release:

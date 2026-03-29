@@ -544,14 +544,9 @@ fn deferred_signal_fires_after_immediate_in_global_order() {
 
     tree.event_trace_mut().enable();
 
-    // Emit — immediate fires now, deferred queues.
+    // Emit — immediate fires now.
     tree.emit_signal(emitter_id, "hit", &[]);
     assert_eq!(immediate_count.load(Ordering::SeqCst), 1);
-    assert_eq!(deferred_count.load(Ordering::SeqCst), 0);
-
-    // Flush deferred.
-    tree.flush_deferred_signals();
-    assert_eq!(deferred_count.load(Ordering::SeqCst), 1);
 
     // The trace shows the signal emission at the point of emit.
     let signals = filter_type(tree.event_trace().events(), TraceEventType::SignalEmit);

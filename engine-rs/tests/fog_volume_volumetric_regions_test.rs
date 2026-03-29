@@ -42,7 +42,7 @@ fn classdb_fogvolume_inherits_node3d() {
 #[test]
 fn classdb_fogvolume_has_properties() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("FogVolume", false);
+    let props = gdobject::class_db::get_property_list("FogVolume");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"size"), "Missing 'size' property");
     assert!(names.contains(&"shape"), "Missing 'shape' property");
@@ -52,7 +52,7 @@ fn classdb_fogvolume_has_properties() {
 #[test]
 fn classdb_fogvolume_default_size() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("FogVolume", false);
+    let props = gdobject::class_db::get_property_list("FogVolume");
     let size = props.iter().find(|p| p.name == "size").unwrap();
     assert_eq!(
         size.default_value,

@@ -335,6 +335,63 @@ pub fn ready_unassigned_json(limit: usize) -> Result<String> {
     run_br(&["ready", "--unassigned", "--format", "json", "--limit", &limit_str])
 }
 
+/// Get ready unassigned beads filtered by label(s) as JSON.
+pub fn ready_unassigned_with_labels(labels: &[&str], limit: usize) -> Result<String> {
+    let limit_str = limit.to_string();
+    let label_str = labels.join(",");
+    run_br(&["ready", "--unassigned", "--format", "json", "--limit", &limit_str, "--label", &label_str])
+}
+
+// ─── Dependency management ───────────────────────────────────────────────
+
+/// Add a dependency: `blocker` must be completed before `blocked_id` can be worked on.
+/// `br ready` will automatically exclude `blocked_id` until `blocker` is closed.
+pub fn dep_add(blocked_id: &str, blocker_id: &str) -> Result<()> {
+    run_br(&["dep", "add", blocked_id, "--blocks", blocker_id])?;
+    Ok(())
+}
+
+/// Remove a dependency relationship.
+pub fn dep_remove(blocked_id: &str, blocker_id: &str) -> Result<()> {
+    run_br(&["dep", "remove", blocked_id, "--blocks", blocker_id])?;
+    Ok(())
+}
+
+/// List beads that are currently blocked (have unresolved dependencies).
+pub fn blocked_json() -> Result<String> {
+    run_br(&["blocked", "--format", "json"])
+}
+
+// ─── Label management ────────────────────────────────────────────────────
+
+/// Add a label to a bead.
+pub fn label_add(bead_id: &str, label: &str) -> Result<()> {
+    run_br(&["label", "add", bead_id, label])?;
+    Ok(())
+}
+
+/// Remove a label from a bead.
+pub fn label_remove(bead_id: &str, label: &str) -> Result<()> {
+    run_br(&["label", "remove", bead_id, label])?;
+    Ok(())
+}
+
+// ─── Stale detection ─────────────────────────────────────────────────────
+
+/// Find beads that haven't been updated in `days` days.
+pub fn stale_json(days: u32) -> Result<String> {
+    let days_str = days.to_string();
+    run_br(&["stale", "--days", &days_str, "--format", "json"])
+}
+
+// ─── Comments ────────────────────────────────────────────────────────────
+
+/// Add a comment to a bead (for coordinator notes, rejection reasons, etc.)
+pub fn comment_add(bead_id: &str, text: &str) -> Result<()> {
+    run_br(&["comments", "add", bead_id, "--text", text])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

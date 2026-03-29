@@ -49,6 +49,9 @@ pub struct Config {
     pub browser_verify_enabled: bool,
     pub browser_verify_panes: Vec<u32>,
 
+    // Agent type: "claude" or "codex"
+    pub agent_type: String,
+
     // Tmux worker detection
     pub min_worker_pane_index: u32,
     pub worker_command: String,
@@ -76,6 +79,7 @@ pub struct Config {
     pub deep_planner_cooldown_secs: u64,
     pub fast_planner_enabled: bool,
     pub deep_planner_enabled: bool,
+    pub planner_restart_cooldown_secs: u64,
 
     // Pull mode: workers discover and claim their own work.
     // When true, coordinator skips: assign_idle_workers, recover_stuck_workers,
@@ -148,6 +152,13 @@ impl Config {
             browser_verify_enabled: env_or("ORCH_BROWSER_VERIFY_ENABLED", false),
             browser_verify_panes,
 
+            // Agent type (infer from worker command if not set explicitly)
+            agent_type: env_string("ORCH_AGENT_TYPE")
+                .unwrap_or_else(|| {
+                    let wc = env_string("ORCH_WORKER_COMMAND").unwrap_or_default();
+                    if wc.contains("codex") { "codex".to_string() } else { "claude".to_string() }
+                }),
+
             // Tmux worker detection
             min_worker_pane_index: env_or("ORCH_MIN_WORKER_PANE_INDEX", 3),
             worker_command: env_string("ORCH_WORKER_COMMAND")
@@ -180,6 +191,7 @@ impl Config {
             deep_planner_cooldown_secs: env_or("ORCH_DEEP_PLANNER_COOLDOWN_SECS", 300),
             fast_planner_enabled: env_or("ORCH_FAST_PLANNER_ENABLED", true),
             deep_planner_enabled: env_or("ORCH_DEEP_PLANNER_ENABLED", true),
+            planner_restart_cooldown_secs: env_or("ORCH_PLANNER_RESTART_COOLDOWN_SECS", 180),
             pull_mode: env_or("ORCH_PULL_MODE", true),
 
             mail,
@@ -236,6 +248,22 @@ impl Config {
         self.browser_verify_enabled && self.browser_verify_panes.contains(&pane_index)
     }
 
+    pub fn is_codex(&self) -> bool {
+        self.agent_type == "codex"
+    }
+
+    pub fn agent_program_name(&self) -> &str {
+        if self.is_codex() { "codex" } else { "claude-code" }
+    }
+
+    pub fn worker_skill_name(&self) -> &str {
+        if self.is_codex() { "patina-fly-worker" } else { "flywheel-worker" }
+    }
+
+    pub fn completion_skill_name(&self) -> &str {
+        "mail-complete"
+    }
+
     /// Build a PromptConfig from the orchestrator config.
     pub fn prompt_config(&self) -> crate::tmux::PromptConfig {
         crate::tmux::PromptConfig {
@@ -257,7 +285,7 @@ impl Config {
     pub fn is_worker_pane(&self, pane: &crate::tmux::PaneInfo) -> bool {
         pane.index >= self.min_worker_pane_index
             && !pane.dead
-            && pane.current_command == self.worker_command
+            && pane.current_command.starts_with(&self.worker_command)
     }
 }
 
@@ -334,6 +362,7 @@ pub fn test_config() -> Config {
         verify_timeout_seconds: 900,
         browser_verify_enabled: false,
         browser_verify_panes: vec![],
+        agent_type: "claude".to_string(),
         min_worker_pane_index: 3,
         worker_command: "claude".to_string(),
         queue_prompt_marker: "Press up to edit".to_string(),
@@ -352,6 +381,7 @@ pub fn test_config() -> Config {
         deep_planner_cooldown_secs: 300,
         fast_planner_enabled: true,
         deep_planner_enabled: true,
+        planner_restart_cooldown_secs: 180,
         pull_mode: true,
         mail: MailConfig {
             url: String::new(),
@@ -523,6 +553,7 @@ mod tests {
         assert_eq!(cfg.deep_planner_cooldown_secs, 300);
         assert!(cfg.fast_planner_enabled);
         assert!(cfg.deep_planner_enabled);
+        assert_eq!(cfg.planner_restart_cooldown_secs, 180);
     }
 
     #[test]
@@ -530,11 +561,38 @@ mod tests {
         let cfg = test_config();
         assert_eq!(cfg.min_worker_pane_index, 3);
         assert_eq!(cfg.worker_command, "claude");
+        assert_eq!(cfg.agent_type, "claude");
         assert_eq!(cfg.queue_prompt_marker, "Press up to edit");
         assert_eq!(cfg.shell_prompt_char, '\u{276f}');
         assert_eq!(cfg.mail_server_suffix, "--agent-mail");
         assert_eq!(cfg.capture_lines, 40);
         assert_eq!(cfg.submit_retry_attempts, 3);
         assert_eq!(cfg.shell_prompt_timeout_secs, 5);
+    }
+
+    #[test]
+    fn test_agent_type_defaults_to_claude() {
+        let cfg = test_config();
+        assert_eq!(cfg.agent_type, "claude");
+        assert!(!cfg.is_codex());
+    }
+
+    #[test]
+    fn test_codex_helpers() {
+        let mut cfg = test_config();
+        cfg.agent_type = "codex".to_string();
+        assert!(cfg.is_codex());
+        assert_eq!(cfg.agent_program_name(), "codex");
+        assert_eq!(cfg.worker_skill_name(), "patina-fly-worker");
+        assert_eq!(cfg.completion_skill_name(), "mail-complete");
+    }
+
+    #[test]
+    fn test_claude_helpers() {
+        let cfg = test_config();
+        assert!(!cfg.is_codex());
+        assert_eq!(cfg.agent_program_name(), "claude-code");
+        assert_eq!(cfg.worker_skill_name(), "flywheel-worker");
+        assert_eq!(cfg.completion_skill_name(), "mail-complete");
     }
 }

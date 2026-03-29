@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_execution_map_real_patina() {
+    fn test_parse_execution_map_real_patina_handoff_doc() {
         let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -319,37 +319,10 @@ mod tests {
         let content = std::fs::read_to_string(&exec_map).unwrap();
         let specs = parse_execution_map(&content);
 
-        // Should find many bead specs
         assert!(
-            specs.len() >= 25,
-            "expected at least 25 bead specs, got {}",
+            specs.is_empty(),
+            "handoff execution map should not seed legacy V1 bead specs, got {} entries",
             specs.len()
-        );
-
-        // Check some known keys exist
-        let keys: Vec<&str> = specs.iter().map(|s| s.bead_key.as_str()).collect();
-        assert!(keys.contains(&"v1-obj-classdb"), "missing v1-obj-classdb");
-        assert!(keys.contains(&"v1-res-uid"), "missing v1-res-uid");
-        assert!(keys.contains(&"v1-phys-api"), "missing v1-phys-api");
-        assert!(keys.contains(&"v1-plat-window"), "missing v1-plat-window");
-
-        // Check priorities
-        let now_items: Vec<_> = specs.iter().filter(|s| s.priority == 1).collect();
-        let next_items: Vec<_> = specs.iter().filter(|s| s.priority == 2).collect();
-        let later_items: Vec<_> = specs.iter().filter(|s| s.priority == 3).collect();
-        assert!(!now_items.is_empty(), "should have Now (P1) items");
-        assert!(!next_items.is_empty(), "should have Next (P2) items");
-        assert!(!later_items.is_empty(), "should have Later (P3) items");
-
-        // Check acceptance commands
-        let with_acceptance: Vec<_> = specs
-            .iter()
-            .filter(|s| s.acceptance_command.is_some())
-            .collect();
-        assert!(
-            with_acceptance.len() >= 20,
-            "expected at least 20 specs with acceptance commands, got {}",
-            with_acceptance.len()
         );
     }
 
@@ -369,7 +342,7 @@ mod tests {
         let content = std::fs::read_to_string(&criteria_file).unwrap();
         let items = parse_criteria(&content);
 
-        // Should find both checked and unchecked items
+        // Current Patina V1 criteria should be fully checked.
         let checked: Vec<_> = items.iter().filter(|i| i.checked).collect();
         let unchecked: Vec<_> = items.iter().filter(|i| !i.checked).collect();
 
@@ -378,8 +351,9 @@ mod tests {
             "should have some checked criteria items"
         );
         assert!(
-            !unchecked.is_empty(),
-            "should have some unchecked criteria items"
+            unchecked.is_empty(),
+            "expected no unchecked criteria items, got {}",
+            unchecked.len()
         );
 
         // Verify sections exist

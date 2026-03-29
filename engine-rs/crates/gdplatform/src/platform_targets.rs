@@ -4,6 +4,7 @@
 //! feature requirements, and runtime capabilities. Provides compile-time
 //! and runtime validation helpers.
 
+use crate::export::ExportConfig;
 use crate::os::Platform;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,16 @@ impl Architecture {
         }
     }
 
+    /// Returns the display name of this architecture.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Architecture::X86_64 => "x86_64",
+            Architecture::Aarch64 => "aarch64",
+            Architecture::X86 => "x86",
+            Architecture::Wasm32 => "wasm32",
+        }
+    }
+
     /// Detects the architecture of the current build.
     pub fn current() -> Self {
         if cfg!(target_arch = "x86_64") {
@@ -48,6 +59,12 @@ impl Architecture {
             // Fallback — treat as x86_64 for unknown architectures.
             Architecture::X86_64
         }
+    }
+}
+
+impl std::fmt::Display for Architecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.display_name())
     }
 }
 
@@ -74,6 +91,36 @@ pub struct DesktopTarget {
     pub windowing_supported: bool,
     /// Minimum Rust toolchain version required.
     pub min_rust_version: &'static str,
+}
+
+impl DesktopTarget {
+    /// Returns the platform name string used by the export system
+    /// (e.g. "linux", "windows", "macos", "web").
+    pub fn platform_name(&self) -> &'static str {
+        match self.platform {
+            Platform::Linux => "linux",
+            Platform::MacOS => "macos",
+            Platform::Windows => "windows",
+            Platform::Web => "web",
+            Platform::Unknown => "unknown",
+        }
+    }
+
+    /// Creates an [`ExportConfig`] pre-filled for this target.
+    pub fn export_config(&self, app_name: impl Into<String>) -> ExportConfig {
+        ExportConfig::new(self.platform_name(), app_name)
+    }
+
+    /// Returns `true` if this target matches the given platform and architecture.
+    pub fn matches(&self, platform: Platform, arch: Architecture) -> bool {
+        self.platform == platform && self.arch == arch
+    }
+}
+
+impl std::fmt::Display for DesktopTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.rust_triple)
+    }
 }
 
 /// All supported desktop platform targets.
@@ -153,6 +200,11 @@ pub const DESKTOP_TARGETS: &[DesktopTarget] = &[
         min_rust_version: "1.75.0",
     },
 ];
+
+/// Finds a desktop target by its Rust target triple.
+pub fn find_target_by_triple(triple: &str) -> Option<&'static DesktopTarget> {
+    DESKTOP_TARGETS.iter().find(|t| t.rust_triple == triple)
+}
 
 /// Returns the desktop target matching the current build, if any.
 pub fn current_target() -> Option<&'static DesktopTarget> {
@@ -421,5 +473,76 @@ mod tests {
         if target.platform != Platform::Web {
             assert!(supports_capability(PlatformCapability::Threading));
         }
+    }
+
+    // -- New: Display impls ---------------------------------------------------
+
+    #[test]
+    fn architecture_display() {
+        assert_eq!(format!("{}", Architecture::X86_64), "x86_64");
+        assert_eq!(format!("{}", Architecture::Aarch64), "aarch64");
+        assert_eq!(format!("{}", Architecture::Wasm32), "wasm32");
+    }
+
+    #[test]
+    fn desktop_target_display() {
+        let target = current_target().unwrap();
+        let s = format!("{target}");
+        assert!(s.contains(target.name), "Display must include name");
+        assert!(s.contains(target.rust_triple), "Display must include triple");
+    }
+
+    // -- New: find_target_by_triple -------------------------------------------
+
+    #[test]
+    fn find_target_by_triple_known() {
+        let t = find_target_by_triple("x86_64-unknown-linux-gnu");
+        assert!(t.is_some());
+        assert_eq!(t.unwrap().platform, Platform::Linux);
+        assert_eq!(t.unwrap().arch, Architecture::X86_64);
+    }
+
+    #[test]
+    fn find_target_by_triple_unknown() {
+        assert!(find_target_by_triple("riscv64-unknown-linux-gnu").is_none());
+    }
+
+    // -- New: DesktopTarget methods -------------------------------------------
+
+    #[test]
+    fn desktop_target_platform_name() {
+        for target in DESKTOP_TARGETS {
+            let name = target.platform_name();
+            assert!(
+                ["linux", "macos", "windows", "web"].contains(&name),
+                "platform_name() for {} must be a known name, got '{}'",
+                target.name,
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_target_export_config() {
+        let target = current_target().unwrap();
+        let config = target.export_config("MyGame");
+        assert_eq!(config.target_platform, target.platform_name());
+        assert_eq!(config.app_name, "MyGame");
+    }
+
+    #[test]
+    fn desktop_target_export_config_all_targets() {
+        for target in DESKTOP_TARGETS {
+            let config = target.export_config("TestApp");
+            assert_eq!(config.target_platform, target.platform_name());
+            assert_eq!(config.app_name, "TestApp");
+        }
+    }
+
+    #[test]
+    fn desktop_target_matches() {
+        let target = current_target().unwrap();
+        assert!(target.matches(crate::os::current_platform(), Architecture::current()));
+        assert!(!target.matches(Platform::Unknown, Architecture::Wasm32));
     }
 }

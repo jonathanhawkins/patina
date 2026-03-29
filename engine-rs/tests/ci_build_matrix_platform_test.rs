@@ -1,4 +1,6 @@
-//! pat-1fo1e: CI build matrix for macOS, Windows, and Linux.
+//! pat-1fo1e / pat-s3700: CI build matrix for supported targets.
+//!
+//! Source of truth: `prd/PHASE7_PLATFORM_PARITY_AUDIT.md`
 //!
 //! Validates:
 //! 1. CI workflow YAML exists and contains a multi-platform matrix
@@ -11,6 +13,10 @@
 //! 8. Render golden tests also use the 3-platform matrix
 //! 9. Caching is configured per-platform
 //! 10. The workflow has the expected job structure
+//! 11. The Phase 7 audit doc exists and is cited as the source of truth
+//! 12. CI-tested targets match the documented supported target matrix
+//! 13. CI workflow jobs cover the expected domain lanes (headless, 2D, 3D,
+//!     platform, fuzz, meta, oracle)
 
 use gdplatform::platform_targets::{
     ci_tested_targets, current_target, targets_for_platform, validate_current_target,
@@ -304,4 +310,151 @@ fn web_target_has_limited_capabilities() {
         assert!(!target.windowing_supported, "Web should not claim windowing");
         assert!(!target.ci_tested, "Web is not yet CI-tested");
     }
+}
+
+// ── Phase 7 audit source of truth (pat-s3700) ──────────────────────
+
+fn audit_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../prd/PHASE7_PLATFORM_PARITY_AUDIT.md")
+}
+
+fn read_audit() -> String {
+    std::fs::read_to_string(audit_path())
+        .expect("prd/PHASE7_PLATFORM_PARITY_AUDIT.md must exist")
+}
+
+#[test]
+fn phase7_audit_doc_exists_and_is_cited() {
+    let audit = read_audit();
+    assert!(
+        audit.contains("Phase 7 Platform Parity Audit"),
+        "audit doc must have its title"
+    );
+    assert!(
+        audit.contains("pat-s3700"),
+        "audit doc must reference the CI matrix bead"
+    );
+}
+
+#[test]
+fn phase7_audit_documents_supported_targets() {
+    let audit = read_audit();
+    // The audit must mention each supported platform that appears in the
+    // DESKTOP_TARGETS registry so a reader can trace coverage.
+    for target in DESKTOP_TARGETS {
+        assert!(
+            audit.contains(target.platform_name()),
+            "audit must mention platform '{}'",
+            target.platform_name()
+        );
+    }
+}
+
+/// The CI-tested target set must match what the DESKTOP_TARGETS registry
+/// declares.  This guards against silent target drift.
+#[test]
+fn ci_tested_targets_match_documented_matrix() {
+    let ci = ci_tested_targets();
+
+    // Expected CI-tested triples from the DESKTOP_TARGETS registry.
+    let expected_ci_triples: Vec<&str> = DESKTOP_TARGETS
+        .iter()
+        .filter(|t| t.ci_tested)
+        .map(|t| t.rust_triple)
+        .collect();
+
+    // Every registry-declared CI target must appear in the ci_tested set.
+    for triple in &expected_ci_triples {
+        assert!(
+            ci.iter().any(|t| t.rust_triple == *triple),
+            "ci_tested_targets() must include registry target '{triple}'"
+        );
+    }
+
+    // And the sets must be the same size (no extras).
+    assert_eq!(
+        ci.len(),
+        expected_ci_triples.len(),
+        "ci_tested_targets() count ({}) must match registry count ({})",
+        ci.len(),
+        expected_ci_triples.len()
+    );
+}
+
+/// The CI YAML must contain jobs for each documented domain lane so that
+/// every Phase 7 validation area is actually exercised in the pipeline.
+#[test]
+fn ci_yaml_covers_documented_domain_lanes() {
+    let yaml = read_ci_yaml();
+
+    let expected_lanes = [
+        ("headless runtime", "Headless runtime compat"),
+        ("2D slice", "2D slice compat"),
+        ("3D slice", "3D slice compat"),
+        ("platform layer", "Platform layer compat"),
+        ("fuzz / property", "Fuzz / property tests"),
+        ("CI meta", "CI meta / infrastructure"),
+        ("oracle parity", "Oracle parity check"),
+    ];
+
+    for (label, job_name) in &expected_lanes {
+        assert!(
+            yaml.contains(job_name),
+            "CI must have a '{label}' lane (expected job name: '{job_name}')"
+        );
+    }
+}
+
+/// The CI YAML multi-platform matrix must include at least three OS
+/// runners matching the three desktop platforms in DESKTOP_TARGETS.
+#[test]
+fn ci_yaml_matrix_matches_desktop_platforms() {
+    let yaml = read_ci_yaml();
+
+    // Map platform → expected CI runner.
+    let platform_runners = [
+        (Platform::Linux, "ubuntu-latest"),
+        (Platform::MacOS, "macos-latest"),
+        (Platform::Windows, "windows-latest"),
+    ];
+
+    for (platform, runner) in &platform_runners {
+        let has_target = targets_for_platform(*platform)
+            .iter()
+            .any(|t| t.ci_tested);
+        if has_target {
+            assert!(
+                yaml.contains(runner),
+                "CI matrix must include runner '{runner}' for {platform:?}"
+            );
+        }
+    }
+}
+
+/// The platform-layer compat job must use the same multi-OS matrix as
+/// the main build job, ensuring platform tests run on all three OSes.
+#[test]
+fn ci_platform_compat_uses_multi_os_matrix() {
+    let yaml = read_ci_yaml();
+
+    // Find the platform layer compat section — it must reference the matrix.
+    let platform_section = yaml
+        .find("Platform layer compat")
+        .expect("CI must have Platform layer compat job");
+    let section_slice = &yaml[platform_section..];
+
+    // It must contain a matrix with all three runners.
+    assert!(
+        section_slice.contains("ubuntu-latest"),
+        "platform compat must test on Linux"
+    );
+    assert!(
+        section_slice.contains("macos-latest"),
+        "platform compat must test on macOS"
+    );
+    assert!(
+        section_slice.contains("windows-latest"),
+        "platform compat must test on Windows"
+    );
 }

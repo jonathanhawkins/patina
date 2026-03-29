@@ -33,6 +33,55 @@ pub enum CallableRef {
         /// Serialised body (stored as opaque bytes; the interpreter casts back).
         body: Arc<dyn std::any::Any + Send + Sync>,
     },
+    /// A callable with extra arguments bound (appended after call-site args).
+    Bound {
+        /// The inner callable to delegate to.
+        inner: Box<CallableRef>,
+        /// Arguments to append after call-site arguments.
+        bound_args: Vec<Variant>,
+    },
+    /// A callable that drops trailing arguments from the call-site.
+    Unbound {
+        /// The inner callable to delegate to.
+        inner: Box<CallableRef>,
+        /// Number of trailing call-site arguments to drop.
+        unbind_count: usize,
+    },
+}
+
+impl CallableRef {
+    /// Resolve the final argument list for this callable given call-site args.
+    ///
+    /// - `Bound`: appends `bound_args` after `call_args`
+    /// - `Unbound`: drops `unbind_count` trailing args from `call_args`
+    /// - `Method` / `Lambda`: passes args through unchanged
+    pub fn resolve_args(&self, call_args: &[Variant]) -> Vec<Variant> {
+        match self {
+            CallableRef::Bound { inner, bound_args } => {
+                let mut resolved = inner.resolve_args(call_args);
+                resolved.extend(bound_args.iter().cloned());
+                resolved
+            }
+            CallableRef::Unbound {
+                inner,
+                unbind_count,
+            } => {
+                let keep = call_args.len().saturating_sub(*unbind_count);
+                inner.resolve_args(&call_args[..keep])
+            }
+            _ => call_args.to_vec(),
+        }
+    }
+
+    /// Unwrap all `Bound`/`Unbound` layers to find the innermost callable.
+    pub fn inner_callable(&self) -> &CallableRef {
+        match self {
+            CallableRef::Bound { inner, .. } | CallableRef::Unbound { inner, .. } => {
+                inner.inner_callable()
+            }
+            _ => self,
+        }
+    }
 }
 
 impl fmt::Debug for CallableRef {
@@ -43,6 +92,15 @@ impl fmt::Debug for CallableRef {
             }
             CallableRef::Lambda { params, .. } => {
                 write!(f, "Callable(<lambda({})>)", params.join(", "))
+            }
+            CallableRef::Bound { inner, bound_args } => {
+                write!(f, "Callable({inner:?}).bind({bound_args:?})")
+            }
+            CallableRef::Unbound {
+                inner,
+                unbind_count,
+            } => {
+                write!(f, "Callable({inner:?}).unbind({unbind_count})")
             }
         }
     }
@@ -61,7 +119,27 @@ impl PartialEq for CallableRef {
                     method: bm,
                 },
             ) => a == b && am == bm,
-            _ => false, // lambdas are never equal
+            (
+                CallableRef::Bound {
+                    inner: a,
+                    bound_args: aa,
+                },
+                CallableRef::Bound {
+                    inner: b,
+                    bound_args: ba,
+                },
+            ) => a == b && aa == ba,
+            (
+                CallableRef::Unbound {
+                    inner: a,
+                    unbind_count: ac,
+                },
+                CallableRef::Unbound {
+                    inner: b,
+                    unbind_count: bc,
+                },
+            ) => a == b && ac == bc,
+            _ => false, // lambdas are never equal; mixed types are never equal
         }
     }
 }
@@ -208,6 +286,179 @@ impl Variant {
             Self::Callable(_) => true,
             Self::Resource(_) => true,
             _ => true,
+        }
+    }
+
+    /// Coerce to `i64` following Godot's rules.
+    ///
+    /// - `Int(i)` → `i`
+    /// - `Float(f)` → `f as i64` (truncate)
+    /// - `Bool(b)` → `0` or `1`
+    /// - `String(s)` → parse or `0`
+    /// - everything else → `0`
+    pub fn to_int(&self) -> i64 {
+        match self {
+            Self::Int(i) => *i,
+            Self::Float(f) => {
+                if f.is_nan() {
+                    0
+                } else {
+                    *f as i64
+                }
+            }
+            Self::Bool(b) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
+            Self::String(s) => s.trim().parse::<i64>().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// Coerce to `f64` following Godot's rules.
+    ///
+    /// - `Float(f)` → `f`
+    /// - `Int(i)` → `i as f64`
+    /// - `Bool(b)` → `0.0` or `1.0`
+    /// - `String(s)` → parse or `0.0`
+    /// - everything else → `0.0`
+    pub fn to_float(&self) -> f64 {
+        match self {
+            Self::Float(f) => *f,
+            Self::Int(i) => *i as f64,
+            Self::Bool(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::String(s) => s.trim().parse::<f64>().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// Coerce to `bool` following Godot's truthiness rules.
+    pub fn to_bool(&self) -> bool {
+        self.is_truthy()
+    }
+
+    /// Coerce to `String` (lossy — always succeeds, never panics).
+    pub fn to_string_lossy(&self) -> String {
+        self.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic operators
+// ---------------------------------------------------------------------------
+
+impl std::ops::Add for Variant {
+    type Output = Variant;
+
+    fn add(self, rhs: Variant) -> Variant {
+        match (&self, &rhs) {
+            (Variant::Int(a), Variant::Int(b)) => Variant::Int(a.wrapping_add(*b)),
+            (Variant::Float(a), Variant::Float(b)) => Variant::Float(a + b),
+            (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 + b),
+            (Variant::Float(a), Variant::Int(b)) => Variant::Float(a + *b as f64),
+            (Variant::String(a), Variant::String(b)) => {
+                Variant::String(format!("{a}{b}"))
+            }
+            _ => Variant::Nil,
+        }
+    }
+}
+
+impl std::ops::Sub for Variant {
+    type Output = Variant;
+
+    fn sub(self, rhs: Variant) -> Variant {
+        match (&self, &rhs) {
+            (Variant::Int(a), Variant::Int(b)) => Variant::Int(a.wrapping_sub(*b)),
+            (Variant::Float(a), Variant::Float(b)) => Variant::Float(a - b),
+            (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 - b),
+            (Variant::Float(a), Variant::Int(b)) => Variant::Float(a - *b as f64),
+            _ => Variant::Nil,
+        }
+    }
+}
+
+impl std::ops::Mul for Variant {
+    type Output = Variant;
+
+    fn mul(self, rhs: Variant) -> Variant {
+        match (&self, &rhs) {
+            (Variant::Int(a), Variant::Int(b)) => Variant::Int(a.wrapping_mul(*b)),
+            (Variant::Float(a), Variant::Float(b)) => Variant::Float(a * b),
+            (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 * b),
+            (Variant::Float(a), Variant::Int(b)) => Variant::Float(a * *b as f64),
+            _ => Variant::Nil,
+        }
+    }
+}
+
+impl std::ops::Div for Variant {
+    type Output = Variant;
+
+    fn div(self, rhs: Variant) -> Variant {
+        match (&self, &rhs) {
+            (Variant::Int(_), Variant::Int(0)) => Variant::Nil,
+            (Variant::Int(a), Variant::Int(b)) => Variant::Int(a.wrapping_div(*b)),
+            (Variant::Float(_), Variant::Float(b)) if *b == 0.0 => Variant::Nil,
+            (Variant::Float(a), Variant::Float(b)) => Variant::Float(a / b),
+            (Variant::Int(_), Variant::Float(b)) if *b == 0.0 => Variant::Nil,
+            (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 / b),
+            (Variant::Float(_), Variant::Int(0)) => Variant::Nil,
+            (Variant::Float(a), Variant::Int(b)) => Variant::Float(a / *b as f64),
+            _ => Variant::Nil,
+        }
+    }
+}
+
+impl std::ops::Rem for Variant {
+    type Output = Variant;
+
+    fn rem(self, rhs: Variant) -> Variant {
+        match (&self, &rhs) {
+            (Variant::Int(_), Variant::Int(0)) => Variant::Nil,
+            (Variant::Int(a), Variant::Int(b)) => Variant::Int(a.wrapping_rem(*b)),
+            (Variant::Float(_), Variant::Float(b)) if *b == 0.0 => Variant::Nil,
+            (Variant::Float(a), Variant::Float(b)) => Variant::Float(a % b),
+            _ => Variant::Nil,
+        }
+    }
+}
+
+impl std::ops::Neg for Variant {
+    type Output = Variant;
+
+    fn neg(self) -> Variant {
+        match self {
+            Variant::Int(i) => Variant::Int(i.wrapping_neg()),
+            Variant::Float(f) => Variant::Float(-f),
+            _ => Variant::Nil,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PartialOrd — cross-type numeric comparison
+// ---------------------------------------------------------------------------
+
+impl PartialOrd for Variant {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Variant::Int(a), Variant::Int(b)) => a.partial_cmp(b),
+            (Variant::Float(a), Variant::Float(b)) => a.partial_cmp(b),
+            (Variant::Int(a), Variant::Float(b)) => (*a as f64).partial_cmp(b),
+            (Variant::Float(a), Variant::Int(b)) => a.partial_cmp(&(*b as f64)),
+            (Variant::Bool(a), Variant::Bool(b)) => a.partial_cmp(b),
+            (Variant::String(a), Variant::String(b)) => a.partial_cmp(b),
+            _ => None,
         }
     }
 }

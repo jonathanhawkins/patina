@@ -35,7 +35,7 @@ fn classdb_registers_shader_material() {
 #[test]
 fn classdb_shader_material_has_expected_properties() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("ShaderMaterial", false);
+    let props = gdobject::class_db::get_property_list("ShaderMaterial");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"shader_code"), "missing shader_code property");
     assert!(names.contains(&"shader_type"), "missing shader_type property");

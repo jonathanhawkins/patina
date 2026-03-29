@@ -98,7 +98,7 @@ fn hierarchy_3d_golden_exists_and_valid() {
         golden["fixture_id"].as_str().unwrap(),
         "scene_hierarchy_3d"
     );
-    let nodes = golden["nodes"].as_array().unwrap();
+    let nodes = golden["data"]["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 6, "golden should have 6 nodes");
 }
 

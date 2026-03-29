@@ -251,10 +251,15 @@ impl SceneTreeAccessor {
     }
 
     fn tree(&self) -> &SceneTree {
+        // SAFETY: The raw pointer is valid for the lifetime of the SceneTreeAccessor.
+        // Callers of `new`/`with_input` (both `unsafe`) guarantee the pointer is valid
+        // and that no mutable alias exists while this shared reference is live.
         unsafe { &*self.tree }
     }
 
     fn tree_mut(&mut self) -> &mut SceneTree {
+        // SAFETY: We hold `&mut self`, so no other accessor can alias this pointer.
+        // The raw pointer validity is guaranteed by the caller of `new`/`with_input`.
         unsafe { &mut *self.tree }
     }
 }

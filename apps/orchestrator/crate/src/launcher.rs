@@ -43,10 +43,15 @@ pub fn compute_grid_dimensions(worker_count: u32) -> (u32, u32) {
     (cols, rows)
 }
 
-/// Ensure the model command includes --dangerously-skip-permissions.
+/// Ensure the model command includes the appropriate permissions-bypass flag.
+/// Claude uses --dangerously-skip-permissions; Codex uses --dangerously-bypass-approvals-and-sandbox.
 pub fn ensure_skip_permissions(model_cmd: &str) -> String {
-    if model_cmd.contains("dangerously-skip-permissions") {
+    if model_cmd.contains("dangerously-skip-permissions")
+        || model_cmd.contains("dangerously-bypass-approvals-and-sandbox")
+    {
         model_cmd.to_string()
+    } else if model_cmd.contains("codex") {
+        format!("{model_cmd} --dangerously-bypass-approvals-and-sandbox")
     } else {
         format!("{model_cmd} --dangerously-skip-permissions")
     }
@@ -186,25 +191,30 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
     // Step 5: Start planner and auto-start the planner loop
     let planner_cmd = ensure_skip_permissions("claude");
     tmux::send_literal(&config.session_name, 0, 1, &planner_cmd)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
     tmux::send_keys(&config.session_name, 0, 1, "Enter")?;
 
     // Give Claude a moment to boot, then queue the planner skill.
-    // The input is buffered by tmux and processed once Claude is ready.
-    std::thread::sleep(std::time::Duration::from_secs(8));
+    // Claude Code needs ~10-15s to initialize (load skills, connect MCP).
+    std::thread::sleep(std::time::Duration::from_secs(12));
     tmux::send_literal(&config.session_name, 0, 1, "/loop 10m /planner")?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
     tmux::send_keys(&config.session_name, 0, 1, "Enter")?;
 
     // Step 5b: Start worker autonomous loops.
-    // Send `/loop 2m /flywheel-worker` to each worker ONE AT A TIME with a
-    // delay between each. Claude needs ~2s to process the command before we
-    // can send to the next pane. Sending too fast causes "Press up to edit"
-    // queuing where the command never gets processed.
-    // NOTE: use `/flywheel-worker` not `/skill flywheel-worker` — the /loop
-    // command treats the first token after the interval as the skill name.
+    // Wait for workers to fully boot before sending /loop commands.
+    // Claude Code needs ~10-15s to initialize (load skills, connect MCP).
+    // Workers were launched before the planner, so they've had at least 8s already.
+    // Add another 8s to ensure reliable delivery of the /loop command.
+    if !config.model_command.contains("codex") {
+        std::thread::sleep(std::time::Duration::from_secs(8));
+    }
     for (pane_index, _agent_name) in &worker_identities {
-        // Wait for the worker's shell prompt to appear before sending
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        tmux::send_literal(&config.session_name, 0, *pane_index, "/loop 1m /flywheel-worker")?;
+        // Brief pause between typing and Enter — Claude Code's input buffer
+        // can swallow the Enter if it arrives during the boot splash animation.
         std::thread::sleep(std::time::Duration::from_millis(500));
-        tmux::send_literal(&config.session_name, 0, *pane_index, "/loop 2m /flywheel-worker")?;
         tmux::send_keys(&config.session_name, 0, *pane_index, "Enter")?;
     }
 
@@ -1474,5 +1484,32 @@ mod tests {
                  Agent Mail requires adjective+noun names like 'SapphireFalcon'"
             );
         }
+    }
+
+    #[test]
+    fn test_worker_loop_sent_after_boot_delay() {
+        let source = include_str!("launcher.rs");
+        let step5b = source.find("Step 5b: Start worker autonomous loops").unwrap();
+        let end = (step5b + 800).min(source.len());
+        let section = &source[step5b..end];
+        assert!(
+            section.contains("sleep(std::time::Duration::from_secs(8))")
+                || section.contains("sleep(std::time::Duration::from_secs(10))"),
+            "Must wait for Claude to boot before sending /loop to workers"
+        );
+    }
+
+    #[test]
+    fn test_skip_permissions_codex_uses_bypass_flag() {
+        assert_eq!(
+            ensure_skip_permissions("codex"),
+            "codex --dangerously-bypass-approvals-and-sandbox"
+        );
+    }
+
+    #[test]
+    fn test_skip_permissions_codex_not_duplicated() {
+        let cmd = "codex --dangerously-bypass-approvals-and-sandbox";
+        assert_eq!(ensure_skip_permissions(cmd), cmd);
     }
 }

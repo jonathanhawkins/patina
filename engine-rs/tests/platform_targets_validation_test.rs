@@ -1,4 +1,7 @@
-//! pat-oa8z: Validate desktop platform target definitions and coverage.
+//! pat-oa8z, pat-2uc5z: Validate desktop platform target definitions and coverage.
+//!
+//! Source of truth: `prd/PHASE7_PLATFORM_PARITY_AUDIT.md`
+//! Classification: Measured (desktop target registry and validation)
 //!
 //! These integration tests verify that:
 //! 1. The platform target registry is complete and consistent

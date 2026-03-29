@@ -74,6 +74,11 @@ impl MailClient {
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(config.connect_timeout_secs))
             .timeout_read(Duration::from_secs(config.max_time_secs))
+            // Disable connection pooling to prevent CLOSE_WAIT sockets.
+            // When Agent Mail restarts, pooled connections go stale and cause
+            // "Connection reset by peer" errors. Fresh connections per request
+            // are fine at our 8s poll interval.
+            .max_idle_connections(0)
             .build();
         Self {
             url: config.url.clone(),

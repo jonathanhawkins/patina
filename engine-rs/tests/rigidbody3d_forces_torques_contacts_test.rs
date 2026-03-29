@@ -68,7 +68,7 @@ fn classdb_rigidbody3d_inherits_node3d() {
 #[test]
 fn classdb_rigidbody3d_has_physics_properties() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("RigidBody3D", false);
+    let props = gdobject::class_db::get_property_list("RigidBody3D");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
 
     let expected = [
@@ -100,7 +100,7 @@ fn classdb_rigidbody3d_has_force_methods() {
 #[test]
 fn classdb_rigidbody3d_default_mass_is_1() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("RigidBody3D", false);
+    let props = gdobject::class_db::get_property_list("RigidBody3D");
     let mass = props.iter().find(|p| p.name == "mass").unwrap();
     assert_eq!(mass.default_value, Variant::Float(1.0));
 }

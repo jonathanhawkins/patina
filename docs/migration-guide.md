@@ -233,9 +233,33 @@ aligned with the project's milestone phases:
 
 ### What You Can Do
 
-- Build for Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), Windows (x86_64, aarch64)
+- Run against a defined desktop target matrix with validated target metadata
 - Query platform capabilities at runtime
-- Package your game with export configurations
+- Use Patina's current startup and packaging flow to stage runtime artifacts
+
+### Current Scope
+
+Phase 7 currently provides a measured desktop/runtime slice, not full native
+platform parity across every OS shell behavior.
+
+Measured today:
+
+- headless platform backend and stable-layer composition
+- supported-target metadata and CI matrix coverage
+- repeatable startup/bootstrap flow
+- Patina's current packaging/staging executor
+
+Implemented but not yet broadly parity-measured:
+
+- Linux, macOS, and Windows platform-layer APIs beyond the headless slice
+- native window-shell integrations such as menu bar, taskbar, DPI, and desktop
+  protocol behavior
+
+Deferred or limited:
+
+- mobile platforms
+- full web platform parity
+- full Godot export-template parity
 
 ### Migration Steps
 
@@ -253,7 +277,7 @@ aligned with the project's milestone phases:
    }
    ```
 
-2. **Export configuration** (Godot equivalent: Export dialog presets):
+2. **Export configuration** (Patina staging flow, not full Godot export-template parity):
    ```rust
    use gdplatform::export::ExportConfig;
 
@@ -274,6 +298,15 @@ aligned with the project's milestone phases:
    | Windows aarch64 | `aarch64-pc-windows-msvc` | No |
    | Web (WASM) | `wasm32-unknown-unknown` | No |
 
+4. **Key differences from Godot**:
+   - Patina's current packaging flow stages resources and manifest artifacts, but
+     does not yet imply full Godot export preset/template parity.
+   - Desktop target definitions and CI coverage are measured as metadata and
+     validation policy; they are not the same as full native runtime parity on
+     every supported OS.
+   - Native Linux/macOS/Windows integrations are present, but the strongest
+     measured Phase 7 evidence is still the headless/stable-layer slice.
+
 ---
 
 ## Milestone 6: Editor Support (Phase 8)
@@ -284,14 +317,42 @@ aligned with the project's milestone phases:
 
 ### What You Can Do
 
-- Run a local editor server for scene inspection
-- View and edit node properties through a web UI
+- Run a local browser-served editor shell for scene inspection
+- View and edit selected node properties through a web UI
+- Use the current editor-facing compatibility layer and selected tooling slices
+
+### Current Scope
+
+Phase 8 currently provides a measured editor-facing slice, not full Godot
+editor parity.
+
+Measured today:
+
+- browser-served editor shell and REST workflow
+- selected `EditorInterface` compatibility-layer behavior
+- tested menu, inspector, script editor, animation, theme, tilemap, and editor
+  systems slices
+
+Implemented but not yet broadly parity-measured:
+
+- broader editor workflows beyond the tested browser shell
+- import/export/editor-tooling breadth outside the selected measured slices
+- full Godot editor UX/workflow parity
 
 ### Migration Steps
 
-- Editor features are under active development
-- The editor is gated behind runtime parity milestones
-- See `docs/EDITOR_SETTINGS.md` for current configuration
+- Use the editor for the tested browser/editor-shell workflows first.
+- Treat `docs/EDITOR_ARCHITECTURE.md` as the architecture plan and module
+  inventory, not as proof of full editor parity.
+- See `docs/EDITOR_SETTINGS.md` for current configuration.
+
+### Key Differences From Godot
+
+- Patina's editor is browser-served rather than a native Godot editor shell.
+- The strongest measured claims today are around the browser/editor shell and
+  selected tooling slices, not blanket parity across the entire Godot editor.
+- Import, export, and broader multi-tool workflows should be treated as bounded
+  compatibility work unless a dedicated parity test proves otherwise.
 
 ---
 

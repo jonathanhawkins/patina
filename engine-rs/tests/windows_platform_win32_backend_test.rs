@@ -27,7 +27,7 @@ fn classdb_windows_platform_layer_inherits_object() {
 #[test]
 fn classdb_has_dpi_properties() {
     class_db::register_3d_classes();
-    let props = class_db::get_property_list("WindowsPlatformLayer", true);
+    let props = class_db::get_property_list("WindowsPlatformLayer");
     assert!(props.iter().any(|p| p.name == "dpi_awareness"));
     assert!(props.iter().any(|p| p.name == "system_dpi"));
     assert!(props.iter().any(|p| p.name == "scale_factor"));
@@ -36,7 +36,7 @@ fn classdb_has_dpi_properties() {
 #[test]
 fn classdb_has_display_properties() {
     class_db::register_3d_classes();
-    let props = class_db::get_property_list("WindowsPlatformLayer", true);
+    let props = class_db::get_property_list("WindowsPlatformLayer");
     assert!(props.iter().any(|p| p.name == "dwm_compositing"));
     assert!(props.iter().any(|p| p.name == "theme"));
 }

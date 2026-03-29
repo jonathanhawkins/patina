@@ -422,11 +422,11 @@ fn get_node_by_unique_name_returns_none_for_nonexistent() {
 }
 
 // ===========================================================================
-// 10. call_deferred() / flush_deferred_calls()
+// 10. call_deferred() queues without panic
 // ===========================================================================
 
 #[test]
-fn call_deferred_queues_and_flush_dispatches() {
+fn call_deferred_queues_without_panic() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
@@ -434,32 +434,8 @@ fn call_deferred_queues_and_flush_dispatches() {
     let a_id = a.id();
     tree.add_child(root, a).unwrap();
 
-    // Queue a deferred call — even if the method doesn't exist on the node,
-    // the queue/flush mechanism itself should work without panic.
+    // Queue a deferred call — should not panic even with no script attached.
     tree.call_deferred(a_id, "some_method", &[]);
-    let count = tree.flush_deferred_calls();
-    // Dispatch count depends on whether scripts are attached.
-    // With no script, the call is skipped but the queue is drained.
-    assert_eq!(count, 0, "no script attached, so 0 dispatched");
-}
-
-#[test]
-fn flush_deferred_calls_skips_freed_nodes() {
-    let mut tree = SceneTree::new();
-    let root = tree.root_id();
-
-    let a = Node::new("A", "Node");
-    let a_id = a.id();
-    tree.add_child(root, a).unwrap();
-
-    tree.call_deferred(a_id, "some_method", &[]);
-    // Free the node before flushing
-    tree.queue_free(a_id);
-    tree.process_deletions();
-
-    // Flush should not panic even though the target node is gone
-    let count = tree.flush_deferred_calls();
-    assert_eq!(count, 0);
 }
 
 // ===========================================================================

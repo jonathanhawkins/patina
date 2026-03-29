@@ -85,11 +85,28 @@ pub fn to_json(v: &Variant) -> Value {
                 dict.iter().map(|(k, v)| (k.clone(), to_json(v))).collect();
             json!({ "type": "Dictionary", "value": entries })
         }
-        Variant::Callable(c) => json!({ "type": "Callable", "value": format!("{c:?}") }),
-        Variant::Resource(r) => json!({
-            "type": "Resource",
-            "value": { "class_name": r.class_name, "path": r.path }
-        }),
+        Variant::Callable(c) => match c.as_ref() {
+            crate::variant::CallableRef::Method { target_id, method } => json!({
+                "type": "Callable",
+                "value": { "target_id": target_id, "method": method }
+            }),
+            _ => json!({ "type": "Callable", "value": format!("{c:?}") }),
+        },
+        Variant::Resource(r) => {
+            let props: serde_json::Map<String, Value> = r
+                .properties
+                .iter()
+                .map(|(k, v)| (k.clone(), to_json(v)))
+                .collect();
+            json!({
+                "type": "Resource",
+                "value": {
+                    "class_name": r.class_name,
+                    "path": r.path,
+                    "properties": props,
+                }
+            })
+        }
     }
 }
 
@@ -169,6 +186,34 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 Vector2::new(pos[0].as_f64()? as f32, pos[1].as_f64()? as f32),
                 Vector2::new(sz[0].as_f64()? as f32, sz[1].as_f64()? as f32),
             )))
+        }
+        "Transform2D" => {
+            let v = obj.get("value")?.as_object()?;
+            let x_arr = v.get("x")?.as_array()?;
+            let y_arr = v.get("y")?.as_array()?;
+            let o_arr = v.get("origin")?.as_array()?;
+            if x_arr.len() != 2 || y_arr.len() != 2 || o_arr.len() != 2 {
+                return None;
+            }
+            Some(Variant::Transform2D(gdcore::math::Transform2D {
+                x: Vector2::new(x_arr[0].as_f64()? as f32, x_arr[1].as_f64()? as f32),
+                y: Vector2::new(y_arr[0].as_f64()? as f32, y_arr[1].as_f64()? as f32),
+                origin: Vector2::new(o_arr[0].as_f64()? as f32, o_arr[1].as_f64()? as f32),
+            }))
+        }
+        "Callable" => {
+            let v = obj.get("value")?;
+            if let Some(cb_obj) = v.as_object() {
+                let target_id = cb_obj.get("target_id")?.as_u64()?;
+                let method = cb_obj.get("method")?.as_str()?.to_owned();
+                Some(Variant::Callable(Box::new(crate::variant::CallableRef::Method {
+                    target_id,
+                    method,
+                })))
+            } else {
+                // Legacy debug-string format — can't reconstruct, return None
+                None
+            }
         }
         "Color" => {
             let arr = obj.get("value")?.as_array()?;
@@ -265,6 +310,24 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 map.insert(k.clone(), from_json(v)?);
             }
             Some(Variant::Dictionary(map))
+        }
+        "Resource" => {
+            let v = obj.get("value")?.as_object()?;
+            let class_name = v.get("class_name")?.as_str()?.to_owned();
+            let path = v.get("path")?.as_str()?.to_owned();
+            let mut properties = std::collections::HashMap::new();
+            if let Some(props) = v.get("properties").and_then(|p| p.as_object()) {
+                for (k, pv) in props {
+                    if let Some(variant) = from_json(pv) {
+                        properties.insert(k.clone(), variant);
+                    }
+                }
+            }
+            Some(Variant::Resource(Box::new(crate::variant::ResourceRef {
+                path,
+                class_name,
+                properties,
+            })))
         }
         _ => None,
     }
@@ -381,15 +444,49 @@ mod tests {
 
     #[test]
     fn roundtrip_transform2d() {
-        let t = gdcore::math::Transform2D {
+        let v = Variant::Transform2D(gdcore::math::Transform2D {
             x: Vector2::new(1.0, 0.0),
             y: Vector2::new(0.0, 1.0),
             origin: Vector2::new(50.0, 100.0),
-        };
-        // Transform2D doesn't have from_json support yet, test to_json is valid
-        let json = to_json(&Variant::Transform2D(t));
-        let obj = json.as_object().unwrap();
-        assert_eq!(obj.get("type").unwrap().as_str().unwrap(), "Transform2D");
+        });
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_callable_method() {
+        let v = Variant::Callable(Box::new(crate::variant::CallableRef::Method {
+            target_id: 42,
+            method: "on_hit".to_string(),
+        }));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn callable_legacy_debug_string_returns_none() {
+        // Legacy format (debug string) can't be deserialized
+        let j = serde_json::json!({ "type": "Callable", "value": "Callable(Object#42, \"foo\")" });
+        assert!(from_json(&j).is_none());
+    }
+
+    #[test]
+    fn roundtrip_quaternion() {
+        let v = Variant::Quaternion(Quaternion::new(0.0, 0.707, 0.0, 0.707));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_aabb() {
+        let v = Variant::Aabb(Aabb::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(10.0, 20.0, 30.0),
+        ));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_plane() {
+        let v = Variant::Plane(Plane::new(Vector3::new(0.0, 1.0, 0.0), 5.0));
+        assert_eq!(roundtrip(v.clone()), v);
     }
 
     #[test]

@@ -424,6 +424,12 @@ impl Node {
     pub fn notification_log(&self) -> &[Notification] {
         &self.notification_log
     }
+
+    /// Clears the notification log. Useful in tests to isolate notifications
+    /// from a specific operation (e.g., reparent) without noise from setup.
+    pub fn clear_notification_log(&mut self) {
+        self.notification_log.clear();
+    }
 }
 
 #[cfg(test)]

@@ -247,8 +247,8 @@ fn deferred_connection_resolves_binds() {
 
     // The captured args should already have binds applied
     assert_eq!(
-        deferred[0].args,
-        vec![Variant::Int(42), Variant::Bool(true)],
+        deferred[0].args(),
+        &[Variant::Int(42), Variant::Bool(true)],
         "deferred call captures resolved (bound) args"
     );
 

@@ -402,6 +402,115 @@ impl OutputPanel {
             })
             .collect()
     }
+
+    /// Clears only the messages that match the current filter, keeping unmatched ones.
+    pub fn clear_filtered(&mut self) {
+        self.messages.retain(|m| !self.filter.matches(m));
+    }
+
+    /// Returns a clipboard-ready string of all currently filtered messages.
+    pub fn copy_filtered_to_string(&self) -> String {
+        self.formatted_output().join("\n")
+    }
+
+    /// Returns a clipboard-ready string of messages within the given ID range (inclusive).
+    pub fn copy_range_to_string(&self, from_id: u64, to_id: u64) -> String {
+        let (lo, hi) = if from_id <= to_id {
+            (from_id, to_id)
+        } else {
+            (to_id, from_id)
+        };
+        self.messages
+            .iter()
+            .filter(|m| m.id >= lo && m.id <= hi && self.filter.matches(m))
+            .map(|m| m.formatted(self.filter.show_timestamps))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Returns the ID of the most recent error message, if any.
+    pub fn last_error_id(&self) -> Option<u64> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| m.level == LogLevel::Error)
+            .map(|m| m.id)
+    }
+
+    /// Returns the ID of the most recent warning message, if any.
+    pub fn last_warning_id(&self) -> Option<u64> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| m.level == LogLevel::Warning)
+            .map(|m| m.id)
+    }
+
+    /// Returns the message with the given ID, if it's still in the buffer.
+    pub fn message_by_id(&self, id: u64) -> Option<&LogMessage> {
+        self.messages.iter().find(|m| m.id == id)
+    }
+
+    /// Returns messages grouped by consecutive identical text + level.
+    ///
+    /// Each group is `(message_ref, repeat_count)`. Repeated messages are
+    /// collapsed so the UI can show "message (x3)" like Godot does.
+    pub fn grouped_messages(&self) -> Vec<(&LogMessage, usize)> {
+        let filtered: Vec<&LogMessage> = self.filtered_messages();
+        let mut groups: Vec<(&LogMessage, usize)> = Vec::new();
+        for msg in filtered {
+            if let Some(last) = groups.last_mut() {
+                if last.0.level == msg.level && last.0.text == msg.text {
+                    last.1 += 1;
+                    continue;
+                }
+            }
+            groups.push((msg, 1));
+        }
+        groups
+    }
+
+    /// Returns statistics about the current panel state.
+    pub fn stats(&self) -> OutputPanelStats {
+        OutputPanelStats {
+            total_stored: self.messages.len(),
+            total_filtered: self.filtered_count(),
+            error_count: self.error_count,
+            warning_count: self.warning_count,
+            info_count: self.info_count,
+            debug_count: self.debug_count,
+            capacity: self.max_messages,
+            has_search: !self.filter.search_query.is_empty(),
+        }
+    }
+
+    /// Returns all messages at the given level (respects search filter but ignores level filter).
+    pub fn messages_at_level(&self, level: LogLevel) -> Vec<&LogMessage> {
+        self.messages
+            .iter()
+            .filter(|m| m.level == level && m.matches_search(&self.filter.search_query))
+            .collect()
+    }
+
+    /// Returns the index of a message by ID within the filtered view, for scroll targeting.
+    pub fn filtered_index_of(&self, id: u64) -> Option<usize> {
+        self.filtered_messages()
+            .iter()
+            .position(|m| m.id == id)
+    }
+}
+
+/// Summary statistics for the output panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputPanelStats {
+    pub total_stored: usize,
+    pub total_filtered: usize,
+    pub error_count: u64,
+    pub warning_count: u64,
+    pub info_count: u64,
+    pub debug_count: u64,
+    pub capacity: usize,
+    pub has_search: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -813,5 +922,249 @@ mod tests {
         panel.info("msg"); // Should not panic.
         assert_eq!(panel.total_count(), 0); // Evicted immediately.
         assert_eq!(panel.info_count(), 1); // Count still tracked.
+    }
+
+    // ── Clear filtered ──────────────────────────────────────────────
+
+    #[test]
+    fn panel_clear_filtered_keeps_unmatched() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("keep me");
+        panel.error("remove me");
+        panel.debug("hidden debug");
+
+        // Default filter shows info + error, hides debug.
+        panel.clear_filtered();
+
+        assert_eq!(panel.total_count(), 1); // only debug remains
+        let msgs = panel.messages.iter().collect::<Vec<_>>();
+        assert_eq!(msgs[0].text, "hidden debug");
+    }
+
+    #[test]
+    fn panel_clear_filtered_with_search() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("alpha");
+        panel.info("beta");
+        panel.info("gamma");
+
+        panel.set_search("beta");
+        panel.clear_filtered();
+
+        panel.clear_search();
+        assert_eq!(panel.filtered_count(), 2); // alpha + gamma remain
+    }
+
+    // ── Copy to string ──────────────────────────────────────────────
+
+    #[test]
+    fn panel_copy_filtered_to_string() {
+        let mut panel = OutputPanel::new(100);
+        panel.filter.show_timestamps = false;
+        panel.info("line one");
+        panel.error("line two");
+
+        let s = panel.copy_filtered_to_string();
+        assert_eq!(s, "[INFO] line one\n[ERROR] line two");
+    }
+
+    #[test]
+    fn panel_copy_range_to_string() {
+        let mut panel = OutputPanel::new(100);
+        panel.filter.show_timestamps = false;
+        panel.info("a"); // id=1
+        panel.info("b"); // id=2
+        panel.info("c"); // id=3
+        panel.info("d"); // id=4
+
+        let s = panel.copy_range_to_string(2, 3);
+        assert_eq!(s, "[INFO] b\n[INFO] c");
+    }
+
+    #[test]
+    fn panel_copy_range_reversed() {
+        let mut panel = OutputPanel::new(100);
+        panel.filter.show_timestamps = false;
+        panel.info("a"); // id=1
+        panel.info("b"); // id=2
+
+        let s = panel.copy_range_to_string(2, 1);
+        assert_eq!(s, "[INFO] a\n[INFO] b");
+    }
+
+    // ── Last error/warning navigation ───────────────────────────────
+
+    #[test]
+    fn panel_last_error_id() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("ok");
+        panel.error("first error");
+        panel.info("ok again");
+        panel.error("second error");
+
+        assert_eq!(panel.last_error_id(), Some(4));
+    }
+
+    #[test]
+    fn panel_last_error_id_none() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("no errors here");
+        assert_eq!(panel.last_error_id(), None);
+    }
+
+    #[test]
+    fn panel_last_warning_id() {
+        let mut panel = OutputPanel::new(100);
+        panel.warning("w1");
+        panel.warning("w2");
+        assert_eq!(panel.last_warning_id(), Some(2));
+    }
+
+    // ── Message by ID ───────────────────────────────────────────────
+
+    #[test]
+    fn panel_message_by_id_found() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("first");
+        panel.info("second");
+        let msg = panel.message_by_id(2).unwrap();
+        assert_eq!(msg.text, "second");
+    }
+
+    #[test]
+    fn panel_message_by_id_not_found() {
+        let panel = OutputPanel::new(100);
+        assert!(panel.message_by_id(999).is_none());
+    }
+
+    #[test]
+    fn panel_message_by_id_evicted() {
+        let mut panel = OutputPanel::new(2);
+        panel.info("evicted"); // id=1
+        panel.info("kept1"); // id=2
+        panel.info("kept2"); // id=3
+
+        assert!(panel.message_by_id(1).is_none());
+        assert!(panel.message_by_id(2).is_some());
+    }
+
+    // ── Grouped messages ────────────────────────────────────────────
+
+    #[test]
+    fn panel_grouped_messages_collapses_repeats() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("hello");
+        panel.info("hello");
+        panel.info("hello");
+        panel.info("world");
+        panel.info("world");
+
+        let groups = panel.grouped_messages();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0.text, "hello");
+        assert_eq!(groups[0].1, 3);
+        assert_eq!(groups[1].0.text, "world");
+        assert_eq!(groups[1].1, 2);
+    }
+
+    #[test]
+    fn panel_grouped_messages_different_levels_not_collapsed() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("msg");
+        panel.error("msg");
+
+        let groups = panel.grouped_messages();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].1, 1);
+        assert_eq!(groups[1].1, 1);
+    }
+
+    #[test]
+    fn panel_grouped_messages_alternating() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("a");
+        panel.info("b");
+        panel.info("a");
+
+        let groups = panel.grouped_messages();
+        assert_eq!(groups.len(), 3); // no collapse across different text
+    }
+
+    #[test]
+    fn panel_grouped_messages_empty() {
+        let panel = OutputPanel::new(100);
+        let groups = panel.grouped_messages();
+        assert!(groups.is_empty());
+    }
+
+    // ── Stats ───────────────────────────────────────────────────────
+
+    #[test]
+    fn panel_stats() {
+        let mut panel = OutputPanel::new(1000);
+        panel.info("a");
+        panel.error("b");
+        panel.warning("c");
+        panel.debug("d");
+        panel.set_search("a");
+
+        let stats = panel.stats();
+        assert_eq!(stats.total_stored, 4);
+        assert_eq!(stats.total_filtered, 1); // only "a" matches search + info visible
+        assert_eq!(stats.error_count, 1);
+        assert_eq!(stats.warning_count, 1);
+        assert_eq!(stats.info_count, 1);
+        assert_eq!(stats.debug_count, 1);
+        assert_eq!(stats.capacity, 1000);
+        assert!(stats.has_search);
+    }
+
+    // ── Messages at level ───────────────────────────────────────────
+
+    #[test]
+    fn panel_messages_at_level() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("i1");
+        panel.error("e1");
+        panel.info("i2");
+        panel.error("e2");
+
+        let errors = panel.messages_at_level(LogLevel::Error);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].text, "e1");
+        assert_eq!(errors[1].text, "e2");
+    }
+
+    #[test]
+    fn panel_messages_at_level_with_search() {
+        let mut panel = OutputPanel::new(100);
+        panel.error("load failed");
+        panel.error("parse failed");
+        panel.error("load timeout");
+
+        panel.set_search("load");
+        let errors = panel.messages_at_level(LogLevel::Error);
+        assert_eq!(errors.len(), 2);
+    }
+
+    // ── Filtered index for scroll targeting ─────────────────────────
+
+    #[test]
+    fn panel_filtered_index_of() {
+        let mut panel = OutputPanel::new(100);
+        panel.info("a"); // id=1
+        panel.debug("b"); // id=2 (hidden by default)
+        panel.info("c"); // id=3
+
+        // Filtered view: [a, c] (debug hidden)
+        assert_eq!(panel.filtered_index_of(1), Some(0));
+        assert_eq!(panel.filtered_index_of(3), Some(1));
+        assert_eq!(panel.filtered_index_of(2), None); // debug hidden
+    }
+
+    #[test]
+    fn panel_filtered_index_of_nonexistent() {
+        let panel = OutputPanel::new(100);
+        assert_eq!(panel.filtered_index_of(999), None);
     }
 }

@@ -110,6 +110,7 @@ fn viewport_from_camera(tree: &SceneTree, camera_id: gdscene::node::NodeId) -> V
         fov: fov_deg.to_radians(),
         near,
         far,
+        environment: None,
     }
 }
 

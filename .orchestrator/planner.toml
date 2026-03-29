@@ -2,9 +2,6 @@
 #
 # Defines the analysis commands, criteria files, and phase settings
 # used by `patina-orchestrator plan` to generate recommendations.
-#
-# Other projects can create their own .orchestrator/planner.toml with
-# different commands, criteria files, and completion conditions.
 
 [[analysis.commands]]
 name = "parity"
@@ -14,7 +11,7 @@ parser = "table"
 
 [[analysis.commands]]
 name = "gates"
-cmd = "cargo test --test v1_acceptance_gate_test -- --ignored"
+cmd = "cargo test --test v1_acceptance_gate_test"
 workdir = "engine-rs"
 parser = "test_pass_fail"
 

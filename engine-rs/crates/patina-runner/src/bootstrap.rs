@@ -19,7 +19,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use gdscene::scene_tree::SceneTree;
-use gdscene::{LifecycleManager, MainLoop, PackedScene};
+use gdscene::{GDScriptNodeInstance, LifecycleManager, MainLoop, PackedScene};
+use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
 // BootPhase
@@ -237,6 +238,7 @@ pub struct EngineBootstrap {
     scene_root_id: Option<gdscene::node::NodeId>,
     main_loop: Option<MainLoop>,
     log: Vec<BootstrapLogEntry>,
+    scripts_attached: usize,
 }
 
 impl EngineBootstrap {
@@ -249,6 +251,7 @@ impl EngineBootstrap {
             scene_root_id: None,
             main_loop: None,
             log: Vec::new(),
+            scripts_attached: 0,
         }
     }
 
@@ -295,6 +298,11 @@ impl EngineBootstrap {
     /// Returns the configuration.
     pub fn config(&self) -> &BootConfig {
         &self.config
+    }
+
+    /// Returns the number of scripts attached during the Scripts phase.
+    pub fn scripts_attached(&self) -> usize {
+        self.scripts_attached
     }
 
     /// Advances the bootstrap sequence by one phase.
@@ -414,10 +422,45 @@ impl EngineBootstrap {
         Ok(())
     }
 
-    fn init_scripts(&self) -> Result<(), BootError> {
-        // Script attachment is handled by the caller (patina-runner main.rs)
-        // since it requires filesystem access to resolve res:// paths.
-        // This phase is a placeholder for the sequence step.
+    fn init_scripts(&mut self) -> Result<(), BootError> {
+        let tree = self.tree.as_mut().ok_or_else(|| BootError {
+            phase: BootPhase::Scripts,
+            message: "SceneTree not initialized".to_string(),
+        })?;
+
+        let project_dir = self.config.project_dir.clone();
+        let mut attached = 0usize;
+
+        // Collect (node_id, script_path) pairs to avoid borrow conflict.
+        let mut scripts_to_load = Vec::new();
+        for node_id in tree.all_nodes_in_tree_order() {
+            if let Some(node) = tree.get_node(node_id) {
+                if let Variant::String(res_path) = node.get_property("_script_path") {
+                    let abs_path = resolve_res_path(&project_dir, &res_path);
+                    scripts_to_load.push((node_id, abs_path));
+                }
+            }
+        }
+
+        for (node_id, path) in scripts_to_load {
+            match std::fs::read_to_string(&path) {
+                Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
+                    Ok(instance) => {
+                        tree.attach_script(node_id, Box::new(instance));
+                        attached += 1;
+                    }
+                    Err(_) => {
+                        // Non-fatal: script parse failure doesn't block boot.
+                    }
+                },
+                Err(_) => {
+                    // Non-fatal: missing script file doesn't block boot in
+                    // headless/test mode where res:// paths may not resolve.
+                }
+            }
+        }
+
+        self.scripts_attached = attached;
         Ok(())
     }
 
@@ -451,9 +494,32 @@ impl fmt::Debug for EngineBootstrap {
             .field("has_tree", &self.tree.is_some())
             .field("has_main_loop", &self.main_loop.is_some())
             .field("scene_root_id", &self.scene_root_id)
+            .field("scripts_attached", &self.scripts_attached)
             .field("log_entries", &self.log.len())
             .finish()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Resolves a `res://` path against the project directory.
+fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
+    let relative = res_path.strip_prefix("res://").unwrap_or(res_path);
+    let candidate = project_dir.join(relative);
+    if candidate.exists() {
+        return candidate;
+    }
+    // Walk ancestors to handle nested project directories.
+    for ancestor in project_dir.ancestors().skip(1) {
+        let candidate = ancestor.join(relative);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Fall back to the direct join even if it doesn't exist.
+    project_dir.join(relative)
 }
 
 // ---------------------------------------------------------------------------

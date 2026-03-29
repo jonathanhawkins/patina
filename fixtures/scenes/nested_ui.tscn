@@ -1,0 +1,40 @@
+[gd_scene format=3 uid="uid://nested_ui"]
+
+[node name="UIRoot" type="Control"]
+
+[node name="MainVBox" type="VBoxContainer" parent="."]
+
+[node name="Header" type="HBoxContainer" parent="MainVBox"]
+
+[node name="Title" type="Label" parent="MainVBox/Header"]
+text = "Settings"
+
+[node name="CloseBtn" type="Button" parent="MainVBox/Header"]
+text = "X"
+
+[node name="Body" type="VBoxContainer" parent="MainVBox"]
+
+[node name="NameRow" type="HBoxContainer" parent="MainVBox/Body"]
+
+[node name="NameLabel" type="Label" parent="MainVBox/Body/NameRow"]
+text = "Name:"
+
+[node name="NameInput" type="LineEdit" parent="MainVBox/Body/NameRow"]
+placeholder_text = "Enter name"
+
+[node name="DescRow" type="HBoxContainer" parent="MainVBox/Body"]
+
+[node name="DescLabel" type="Label" parent="MainVBox/Body/DescRow"]
+text = "Description:"
+
+[node name="DescInput" type="TextEdit" parent="MainVBox/Body/DescRow"]
+
+[node name="Footer" type="HBoxContainer" parent="MainVBox"]
+
+[node name="CancelBtn" type="Button" parent="MainVBox/Footer"]
+text = "Cancel"
+
+[node name="SaveBtn" type="Button" parent="MainVBox/Footer"]
+text = "Save"
+
+[node name="StatusPanel" type="Panel" parent="MainVBox"]

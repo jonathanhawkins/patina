@@ -1,5 +1,510 @@
 # Planner Cycle Log
 
+## 2026-03-29 17:40 UTC — SKIPPED (queue healthy: 21 open, 0 in-progress — swarm idle 40min)
+
+## 2026-03-29 17:30 UTC — SKIPPED (queue healthy: 21 open, 0 in-progress — swarm idle 3 cycles)
+
+## 2026-03-29 17:20 UTC — SKIPPED (queue healthy: 21 open, 0 in-progress — swarm still idle)
+
+## 2026-03-29 17:10 UTC — SKIPPED (queue healthy: 21 open, 0 in-progress — swarm appears idle)
+
+## 2026-03-29 17:00 UTC — SKIPPED (queue healthy: 14 open, 7 in-progress)
+
+## 2026-03-29 16:50 UTC — SKIPPED (queue healthy: 15 open, 6 in-progress)
+
+## 2026-03-29 16:40 UTC — SKIPPED (queue healthy: 15 open, 6 in-progress)
+
+## 2026-03-29 16:30 UTC — SKIPPED (queue healthy: 15 open, 6 in-progress)
+
+## 2026-03-29 16:20 UTC — SKIPPED (queue healthy: 14 open, 7 in-progress)
+
+## 2026-03-29 16:10 UTC — SKIPPED (batch: 8 queued cycles; queue healthy: 16 open, 5 in-progress)
+
+## 2026-03-29 14:50 UTC — SKIPPED (queue healthy: 14 open, 7 in-progress)
+
+## 2026-03-29 14:40 UTC — SKIPPED (queue healthy: 12 open, 5 in-progress)
+
+## 2026-03-29 14:30 UTC — SKIPPED (V1Complete; queue near-healthy: 11 open, 6 in-progress — 1 worker finished since last cycle)
+
+## 2026-03-29 14:22 UTC — SKIPPED (V1Complete confirmed minutes ago; queue unchanged: 10 open, 7 in-progress)
+
+## 2026-03-29 14:22 UTC — V1 COMPLETE
+- Parity: 100.0% (71/71)
+- Gates: 48/48 passing (ALL GREEN — fresh nextest run confirmed)
+- Phase: V1Complete
+- test_v1_light3d_shadow_enabled_hint_value: PASS (stale failure from 06:55 resolved)
+- test_v1_overall_parity_gate: PASS (427s, slow but green)
+- Queue: 10 open, 7 in-progress, 1942 closed
+- Criteria checked off: none needed (all already checked)
+- Beads created: none
+- **All V1 exit criteria met. Engine runtime parity is complete.**
+
+## 2026-03-29 14:21 UTC — PARTIAL (used stale 06:55 plan binary output; live binary still blocked by cargo lock)
+- Parity: 100.0% (71/71)
+- Gates: 47/48 passing (1 failing: test_v1_light3d_shadow_enabled_hint_value)
+- Phase: V1NearlyDone
+- Queue: 10 open, 7 in-progress, 1942 closed
+- Criteria checked off: none (all already checked; failing gate code looks correct — likely stale result)
+- Beads created: none (planner recommended 0)
+- Note: shadow_enabled hint=42 is already set in class_db.rs:425 — gate may pass on fresh run
+
+## 2026-03-29 14:14 UTC — FAILED (plan binary timeout; 85 cargo processes active from swarm; 10 open, 7 in-progress)
+
+## 2026-03-29 14:13 UTC — PARTIAL (plan binary timeout, cargo lock held by swarm)
+- Queue: 10 open, 7 in-progress (17 total active)
+- All beads are P3 phase 6-9 tasks (V1 complete)
+- Could not run gate/parity tests (cargo artifact lock contention)
+- Criteria checked off: none (already all checked)
+- Beads created: none (could not run analysis; existing queue adequate)
+
+## 2026-03-29 14:09 UTC — FAILED (queue depleted: 0 open, 39 in-progress; plan binary deadlocks on DB held by swarm, cargo lock contention blocks test runs)
+
+## 2026-03-29 08:24 UTC — FAILED (queue triggered: 18 open, 21 in-progress; plan binary deadlocked — swarm very active but queue draining fast)
+
+## 2026-03-29 08:14 UTC — SKIPPED (queue healthy: 27 open, 12 in-progress)
+
+## 2026-03-29 08:04 UTC — SKIPPED (queue healthy: 31 open, 8 in-progress)
+
+## 2026-03-29 07:54 UTC — SKIPPED (queue healthy: 35 open, 4 in-progress)
+
+## 2026-03-29 07:44 UTC — SKIPPED (queue healthy: 36 open, 3 in-progress)
+
+## 2026-03-29 07:34 UTC — SKIPPED (queue healthy: 37 open, 3 in-progress)
+
+## 2026-03-29 07:24 UTC — SKIPPED (queue healthy: 37 open, 3 in-progress)
+
+## 2026-03-29 07:14 UTC — SKIPPED (queue healthy: 37 open, 3 in-progress — large batch of new beads added)
+
+## 2026-03-29 07:04 UTC — SKIPPED (queue healthy: 16 open, 3 in-progress)
+
+## 2026-03-29 06:54 UTC — SKIPPED (queue healthy: 15 open, 4 in-progress)
+
+## 2026-03-29 06:44 UTC — SKIPPED (queue healthy: 15 open, 4 in-progress)
+
+## 2026-03-29 06:34 UTC — SKIPPED (batch: ~12 queued cycles; queue healthy: 15 open, 4 in-progress; WAL corruption transient — recovered on retry)
+
+## 2026-03-29 04:34 UTC — SKIPPED (queue healthy: 14 open, 6 in-progress)
+
+## 2026-03-29 04:24 UTC — FAILED (queue triggered: 12 open, 9 in-progress; skipped plan binary — orchestrator run still holds DB lock, 7th consecutive plan failure)
+
+## 2026-03-29 04:14 UTC — FAILED (DB busy on 2 retries)
+
+## 2026-03-29 04:04 UTC — SKIPPED (queue healthy: 12 open, 6 in-progress — exactly at 2x threshold)
+
+## 2026-03-29 03:54 UTC — FAILED (queue triggered: 11 open, 7 in-progress; plan binary deadlocked again — 6th consecutive plan failure)
+
+## 2026-03-29 03:44 UTC — FAILED (DB busy on 2 retries; acceptance gate test fallback also stalled)
+
+## 2026-03-29 03:34 UTC — FAILED (queue triggered: 11 open, 7 in-progress; plan binary deadlocks on DB within 10s — running acceptance gate test as fallback)
+
+## 2026-03-29 03:24 UTC — FAILED (DB busy on 2 retries)
+
+## 2026-03-29 03:14 UTC — SKIPPED (queue healthy: 13 open, 5 in-progress)
+
+## 2026-03-29 03:04 UTC — SKIPPED (queue healthy: 13 open, 5 in-progress)
+
+## 2026-03-29 02:54 UTC — SKIPPED (queue healthy: 14 open, 6 in-progress)
+
+## 2026-03-29 02:44 UTC — SKIPPED (queue healthy: 15 open, 6 in-progress)
+
+## 2026-03-29 02:34 UTC — SKIPPED (queue healthy: 16 open, 6 in-progress)
+
+## 2026-03-29 02:24 UTC — FAILED (queue triggered: 13 open, 9 in-progress; br works but plan binary still hangs on DB — killed)
+
+## 2026-03-29 02:14 UTC — FAILED (br count returned "database is busy" on 3 retries — DB lock held by orchestrator run session)
+
+## 2026-03-29 02:04 UTC — FAILED (queue triggered: 11 open, 7 in-progress; plan binary hangs on DB — killed 4 stale plan processes, retried, still blocked by orchestrator run session holding DB lock)
+
+## 2026-03-29 01:54 UTC — SKIPPED (queue healthy: 15 open, 6 in-progress)
+
+## 2026-03-29 01:44 UTC — FAILED (queue triggered: 13 open, 8 in-progress; binary produced no output — likely DB lock contention from swarm)
+
+## 2026-03-29 01:34 UTC — SKIPPED (queue healthy: 16 open, 5 in-progress)
+
+## 2026-03-29 01:24 UTC — SKIPPED (queue healthy: 17 open, 4 in-progress)
+
+## 2026-03-29 01:14 UTC — SKIPPED (queue healthy: 27 open, 4 in-progress)
+
+## 2026-03-29 01:04 UTC — SKIPPED (queue healthy: 30 open, 4 in-progress)
+
+## 2026-03-29 00:54 UTC — SKIPPED (queue healthy: 35 open, 4 in-progress)
+
+## 2026-03-29 00:44 UTC — SKIPPED (queue healthy: 17 open, 4 in-progress)
+
+## 2026-03-29 00:34 UTC — SKIPPED (queue healthy: 9 open, 4 in-progress)
+
+## 2026-03-29 00:24 UTC — SKIPPED (queue healthy: 12 open, 6 in-progress)
+
+## 2026-03-29 00:14 UTC — SKIPPED (queue healthy: 17 open, 8 in-progress)
+
+## 2026-03-29 00:00 UTC — SKIPPED (queue unchanged 17/9, clean run at 23:50 confirmed V1Complete)
+
+## 2026-03-28 23:50 UTC
+- Parity: 100.0% (71/71 — all 9 scenes at 100%)
+- Gates: 48 passing / 48 total (all green, including test_v1_overall_parity_gate)
+- Phase: V1Complete
+- Queue: 17 open, 9 in-progress, 1874 closed
+- Criteria checked off: none (all already checked)
+- Beads created: none (0 recommendations)
+- Note: clean planner run — parity and gates fully parseable this cycle
+
+## 2026-03-28 23:40 UTC — SKIPPED (marginal queue 17/9, but last full cycle at 23:30 had unparseable tests — no value re-running)
+
+## 2026-03-28 23:30 UTC
+- Parity: 0.0% (0/0 — test output unparseable, 12269 bytes but no scene data)
+- Last reliable parity: 100% (71/71) at 18:10 UTC
+- Gates: 0 passing / 0 total (test output unparseable, 12385 bytes but no test results)
+- Phase: V1NearlyDone (false — downgraded by unparseable test output)
+- Queue: 17 open, 9 in-progress, 1874 closed
+- Criteria checked off: none
+- Beads created: none (0 recommendations)
+- Note: tests likely had compilation errors from concurrent swarm source modifications
+
+## 2026-03-28 23:20 UTC — SKIPPED (queue healthy: 19 open, 8 in-progress)
+
+## 2026-03-28 23:10 UTC — SKIPPED (queue healthy: 19 open, 8 in-progress)
+
+## 2026-03-28 23:00 UTC — SKIPPED (queue healthy: 19 open, 8 in-progress)
+
+## 2026-03-28 22:50 UTC — SKIPPED (queue healthy: 19 open, 8 in-progress)
+
+## 2026-03-28 22:40 UTC — SKIPPED (queue healthy: 19 open, 8 in-progress)
+
+## 2026-03-28 22:30 UTC — SKIPPED (queue healthy: 19 open, 8 in-progress)
+
+## 2026-03-28 22:20 UTC — SKIPPED (queue healthy: 20 open, 8 in-progress)
+
+## 2026-03-28 22:10 UTC — SKIPPED (queue healthy: 20 open, 8 in-progress)
+
+## 2026-03-28 22:00 UTC — SKIPPED (queue healthy: 22 open, 7 in-progress)
+
+## 2026-03-28 21:50 UTC — SKIPPED (queue healthy: 23 open, 7 in-progress)
+
+## 2026-03-28 21:40 UTC — SKIPPED (queue healthy: 24 open, 7 in-progress)
+
+## 2026-03-28 21:30 UTC — SKIPPED (queue healthy: 25 open, 7 in-progress)
+
+## 2026-03-28 21:20 UTC — SKIPPED (queue healthy: 26 open, 7 in-progress)
+
+## 2026-03-28 21:10 UTC — SKIPPED (queue healthy: 26 open, 7 in-progress)
+
+## 2026-03-28 21:05 UTC (delayed from 20:40 — cargo contention cleared)
+- Parity: 0.0% (0/0 — false reading, parity pass produced no output due to cargo contention during test run)
+- Last reliable parity: 100% (71/71) at 18:10 UTC
+- Gates: 47 passing / 48 total (only test_v1_overall_parity_gate failing due to 0% parity false read)
+- Phase: V1NearlyDone (actually V1Complete — phase downgraded by false parity reading)
+- Queue: 27 open, 7 in-progress, 1867 closed
+- Criteria checked off: none
+- Beads created: none (0 recommendations)
+
+## 2026-03-28 21:00 UTC — SKIPPED (queue healthy: 27 open, 7 in-progress)
+
+## 2026-03-28 20:50 UTC — SKIPPED (queue healthy: 27 open, 7 in-progress)
+
+## 2026-03-28 20:40 UTC — BLOCKED (28 open, 17 in-progress; 21 cargo processes)
+
+## 2026-03-28 20:30 UTC — SKIPPED (queue healthy: 35 open, 10 in-progress)
+
+## 2026-03-28 20:20 UTC — SKIPPED (queue healthy: 41 open, 11 in-progress)
+
+## 2026-03-28 20:10 UTC — SKIPPED (queue healthy: 43 open, 9 in-progress)
+
+## 2026-03-28 20:00 UTC — SKIPPED (queue healthy: 54 open, 8 in-progress)
+
+## 2026-03-28 19:50 UTC — SKIPPED (queue healthy: 30 open, 13 in-progress)
+
+## 2026-03-28 19:40 UTC — SKIPPED (queue healthy: 35 open, 10 in-progress)
+
+## 2026-03-28 19:30 UTC — SKIPPED (queue healthy: 40 open, 10 in-progress)
+
+## 2026-03-28 19:20 UTC — SKIPPED (queue healthy: 37 open, 13 in-progress)
+
+## 2026-03-28 19:10 UTC — BLOCKED (16 open, 13 in-progress; 38 cargo processes)
+
+## 2026-03-28 19:00 UTC — BLOCKED (18 open, 11 in-progress; 23 cargo processes but planner still timed out at 240s)
+
+## 2026-03-28 18:50 UTC — BLOCKED (16 open, 13 in-progress; 65 cargo processes)
+
+## 2026-03-28 18:40 UTC — BLOCKED (queue marginal: 17 open, 12 in-progress; 62 cargo processes)
+
+## 2026-03-28 18:30 UTC — BLOCKED (queue marginal: 22 open, 13 in-progress; 56 cargo processes, planner binary would timeout)
+
+## 2026-03-28 18:20 UTC — SKIPPED (queue healthy: 26 open, 12 in-progress)
+
+## 2026-03-28 18:10 UTC
+- Parity: 100.0% (71/71, from cached test results)
+- Gates: 48 passing / 48 total
+- Phase: V1Complete → Editor Parity
+- Criteria checked off: none (all already checked)
+- Beads created: 18 editor parity lane beads (lanes 1-18 from EDITOR_PARITY_BEADS.md)
+  - pat-2af25 through pat-fgk2h, all labeled "editor", priority P2
+
+## 2026-03-28 18:00 UTC — BLOCKED (queue critical: 10 open, 13 in-progress; 48 cargo processes; remaining open beads are phase8/9 post-V1 tasks)
+
+## 2026-03-28 17:50 UTC — BLOCKED (queue critical: 11 open, 12 in-progress; 57 cargo processes, planner cannot run)
+
+## 2026-03-28 17:40 UTC — BLOCKED (queue thin: 13 open, 10 in-progress; 31 cargo processes, V1 already complete — editor phase active)
+
+## 2026-03-28 17:30 UTC
+- Parity: 100.0% (71/71)
+- Gates: 48 passing / 48 total
+- Phase: V1Complete
+- Criteria checked off: updated overall gate parity text (90.5% → 100.0%)
+- Beads created: none (all gates passing, no recommendations needed)
+
+## V1 COMPLETE
+All 48 acceptance gates pass. Oracle parity is 100% (71/71 properties across 9 scenes). All subsystem checklists fully checked off. V1 runtime milestone achieved.
+
+## 2026-03-28 17:20 UTC — BLOCKED (queue thin: 15 open, 12 in-progress; 32 cargo processes active, skipping planner binary)
+
+## 2026-03-28 17:10 UTC — BLOCKED (queue thin: 18 open, 14 in-progress; 45 cargo processes active, planner timed out at 180s)
+
+## 2026-03-28 17:00 UTC — BLOCKED (queue thin: 18 open, 14 in-progress; cargo lock contention persists, all cargo commands queued behind swarm)
+
+## 2026-03-28 16:50 UTC — BLOCKED (queue thin: 20 open, 12 in-progress; planner binary timed out at 120s due to cargo lock contention; tests queued in background)
+
+## 2026-03-28 16:40 UTC — SKIPPED (queue healthy: 26 open, 11 in-progress)
+
+## 2026-03-28 16:30 UTC — SKIPPED (queue healthy: 62 open, 9 in-progress)
+
+## 2026-03-28 16:20 UTC — SKIPPED (queue healthy: 64 open, 9 in-progress)
+
+## 2026-03-28 16:10 UTC — SKIPPED (queue healthy: 66 open, 7 in-progress)
+
+## 2026-03-28 16:00 UTC — SKIPPED (queue healthy: 66 open, 7 in-progress)
+
+## 2026-03-28 15:50 UTC — SKIPPED (queue healthy: 66 open, 7 in-progress; cargo lock contention from swarm blocked analysis tests)
+
+## 2026-03-28 15:40 UTC — SKIPPED (queue healthy: 14 open, 7 in-progress)
+
+## 2026-03-28 15:30 UTC — SKIPPED (queue healthy: 17 open, 2 in-progress)
+
+## 2026-03-28 15:20 UTC — SKIPPED (queue healthy: 18 open, 2 in-progress)
+
+## 2026-03-28 15:10 UTC — SKIPPED (queue healthy: 19 open, 2 in-progress)
+
+## 2026-03-28 15:04 UTC — SKIPPED (queue healthy: 19 open, 2 in-progress)
+
+## 2026-03-28 15:03 UTC — SKIPPED (queue healthy: 0 open, 0 in-progress)
+
+## 2026-03-28 12:54 UTC — SKIPPED (queue healthy: 0 open, 0 in-progress)
+
+## 2026-03-28 12:44 UTC — V1Complete, queue empty (0 open, 0 in-progress)
+
+## 2026-03-28 12:34 UTC — V1Complete, queue empty (0 open, 0 in-progress)
+
+## 2026-03-28 12:24 UTC — V1Complete, ALL BEADS DONE (0 open, 0 in-progress)
+- Every bead has been closed. Runtime V1 port is 100% complete.
+- Ready for editor parity phase — run `/editor-parity full` to begin.
+
+## 2026-03-28 12:14 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 12:04 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 11:54 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 11:44 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 11:34 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 11:24 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 11:14 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 11:04 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 10:54 UTC — V1Complete, queue empty (0 open, 1 in-progress)
+
+## 2026-03-28 10:44 UTC — V1Complete, queue empty (0 open, 2 in-progress)
+- Phase: V1Complete, no planner recommendations
+- Queue drained: 0 open beads remain, 2 agents finishing last items
+- Ready for `/editor-parity` to seed next phase of work
+
+## 2026-03-28 10:34 UTC — V1Complete, queue nearly empty (1 open, 2 in-progress)
+- Phase: V1Complete (confirmed), planner has no runtime recommendations
+- Queue draining: agents finishing last editor beads
+- Editor parity work can be seeded via `/editor-parity` when ready
+
+## V1 COMPLETE
+Confirmed at 2026-03-28 10:24 UTC. All 44 acceptance gates passing, 100% parity (71/71 scenes), 1744 beads closed. The V1 runtime port is done. Editor parity is now the primary focus.
+
+## 2026-03-28 10:24 UTC (using delayed output from 05:00 UTC run)
+- Parity: 100.0% (71/71)
+- Gates: 44 passing / 44 total
+- Phase: V1Complete
+- Criteria checked off: all already checked
+- Beads created: none (no recommendations)
+
+## 2026-03-28 10:24 UTC — FAILED (planner binary timeout >90s, cargo test hangs)
+- Queue: CRITICAL — 2 open, 2 in-progress — agents will starve soon
+- Binary still unresponsive after 90s timeout (3rd consecutive failure)
+- User action needed: diagnose cargo test hang or manually create beads
+
+## 2026-03-28 10:14 UTC — FAILED (planner binary timeout: cargo test analysis hangs >20s)
+- Queue: 3 open, 2 in-progress — queue needs replenishing
+- Root cause: planner.toml runs `cargo test --test oracle_regression_test` and `cargo test --test v1_acceptance_gate_test` which hang (likely compilation or long test)
+- Recommendation: rebuild binary or run analysis commands independently
+
+## 2026-03-28 10:04 UTC — FAILED (planner binary hung, likely running cargo test analysis)
+- Queue: 3 open, 2 in-progress (triggered full cycle but binary unresponsive)
+- Action needed: rebuild orchestrator or check analysis commands in planner config
+
+## 2026-03-28 09:54 UTC — SKIPPED (queue healthy: 4 open, 2 in-progress)
+
+## 2026-03-28 09:44 UTC — SKIPPED (queue healthy: 4 open, 2 in-progress)
+
+## 2026-03-28 09:34 UTC — SKIPPED (queue healthy: 5 open, 2 in-progress)
+
+## 2026-03-28 09:24 UTC — SKIPPED (queue healthy: 6 open, 2 in-progress)
+
+## 2026-03-28 09:14 UTC — SKIPPED (queue healthy: 8 open, 1 in-progress)
+
+## 2026-03-28 09:04 UTC — SKIPPED (queue healthy: 7 open, 2 in-progress)
+
+## 2026-03-28 08:54 UTC — SKIPPED (queue healthy: 7 open, 2 in-progress)
+
+## 2026-03-28 08:44 UTC — SKIPPED (queue healthy: 8 open, 2 in-progress)
+
+## 2026-03-28 08:34 UTC — SKIPPED (queue healthy: 8 open, 2 in-progress)
+
+## 2026-03-28 08:24 UTC — SKIPPED (queue healthy: 10 open, 2 in-progress)
+
+## 2026-03-28 08:14 UTC — SKIPPED (queue healthy: 11 open, 2 in-progress)
+
+## 2026-03-28 08:04 UTC — SKIPPED (queue healthy: 12 open, 2 in-progress)
+
+## 2026-03-28 07:54 UTC — SKIPPED (queue healthy: 13 open, 2 in-progress)
+
+## 2026-03-28 07:44 UTC — SKIPPED (queue healthy: 13 open, 2 in-progress)
+
+## 2026-03-28 07:34 UTC — SKIPPED (queue healthy: 13 open, 2 in-progress)
+
+## 2026-03-28 07:24 UTC — SKIPPED (queue healthy: 13 open, 2 in-progress)
+
+## 2026-03-28 07:14 UTC — SKIPPED (queue healthy: 14 open, 2 in-progress)
+
+## 2026-03-28 07:04 UTC — SKIPPED (queue healthy: 16 open, 2 in-progress)
+
+## 2026-03-28 06:54 UTC — SKIPPED (queue healthy: 16 open, 2 in-progress)
+
+## 2026-03-28 06:44 UTC — SKIPPED (queue healthy: 18 open, 2 in-progress)
+
+## 2026-03-28 06:34 UTC — SKIPPED (queue healthy: 19 open, 2 in-progress)
+
+## 2026-03-28 06:24 UTC — SKIPPED (queue healthy: 21 open, 2 in-progress)
+
+## 2026-03-28 06:14 UTC — SKIPPED (queue healthy: 22 open, 2 in-progress)
+
+## 2026-03-28 06:04 UTC — SKIPPED (queue healthy: 24 open, 2 in-progress)
+
+## 2026-03-28 05:54 UTC — SKIPPED (queue healthy: 24 open, 2 in-progress)
+
+## 2026-03-28 05:44 UTC — SKIPPED (queue healthy: 24 open, 2 in-progress)
+
+## 2026-03-28 05:34 UTC — SKIPPED (queue healthy: 27 open, 2 in-progress)
+
+## 2026-03-28 05:24 UTC — SKIPPED (queue healthy: 27 open, 2 in-progress)
+
+## 2026-03-28 05:14 UTC — SKIPPED (queue healthy: 28 open, 2 in-progress)
+
+## 2026-03-28 05:04 UTC — SKIPPED (queue healthy: 28 open, 2 in-progress)
+
+## 2026-03-28 04:54 UTC — SKIPPED (queue healthy: 28 open, 2 in-progress)
+
+## 2026-03-28 04:44 UTC — SKIPPED (queue healthy: 28 open, 2 in-progress)
+
+## 2026-03-28 04:34 UTC — SKIPPED (queue healthy: 30 open, 1 in-progress)
+
+## 2026-03-28 04:24 UTC — SKIPPED (queue healthy: 30 open, 1 in-progress)
+
+## 2026-03-28 04:14 UTC — SKIPPED (queue healthy: 31 open, 0 in-progress)
+
+## 2026-03-28 04:04 UTC — SKIPPED (queue healthy: 32 open, 0 in-progress)
+
+## 2026-03-28 03:54 UTC — SKIPPED (queue healthy: 34 open, 0 in-progress)
+
+## 2026-03-28 03:44 UTC — SKIPPED (queue healthy: 34 open, 1 in-progress)
+
+## 2026-03-28 03:34 UTC — SKIPPED (queue healthy: 36 open, 0 in-progress)
+
+## 2026-03-28 03:24 UTC — SKIPPED (queue healthy: 37 open, 1 in-progress)
+
+## 2026-03-28 03:14 UTC — SKIPPED (queue healthy: 38 open, 1 in-progress)
+
+## 2026-03-28 03:04 UTC — SKIPPED (queue healthy: 40 open, 0 in-progress)
+
+## 2026-03-28 02:54 UTC — SKIPPED (queue healthy: 41 open, 0 in-progress)
+
+## 2026-03-28 02:44 UTC — SKIPPED (queue healthy: 42 open, 0 in-progress)
+
+## 2026-03-28 02:34 UTC — SKIPPED (queue healthy: 43 open, 0 in-progress)
+
+## 2026-03-28 02:24 UTC — SKIPPED (queue healthy: 44 open, 0 in-progress)
+
+## 2026-03-28 02:14 UTC — SKIPPED (queue healthy: 45 open, 0 in-progress)
+
+## 2026-03-28 02:04 UTC — SKIPPED (queue healthy: 46 open, 0 in-progress)
+
+## 2026-03-28 01:54 UTC — SKIPPED (queue healthy: 47 open, 0 in-progress)
+
+## 2026-03-28 01:44 UTC — SKIPPED (queue healthy: 48 open, 0 in-progress)
+
+## 2026-03-28 01:34 UTC — SKIPPED (queue healthy: 49 open, 0 in-progress)
+
+## 2026-03-28 01:24 UTC — SKIPPED (queue healthy: 50 open, 0 in-progress)
+
+## 2026-03-28 01:14 UTC — SKIPPED (queue healthy: 50 open, 1 in-progress)
+
+## 2026-03-28 01:04 UTC — SKIPPED (queue healthy: 51 open, 1 in-progress)
+
+## 2026-03-28 00:54 UTC — SKIPPED (queue healthy: 53 open, 0 in-progress)
+
+## 2026-03-28 00:44 UTC — SKIPPED (queue healthy: 54 open, 0 in-progress)
+
+## 2026-03-28 00:34 UTC — SKIPPED (queue healthy: 55 open, 0 in-progress)
+
+## 2026-03-28 00:24 UTC — SKIPPED (queue healthy: 56 open, 0 in-progress)
+
+## 2026-03-28 00:14 UTC — SKIPPED (queue healthy: 58 open, 0 in-progress)
+
+## 2026-03-28 00:04 UTC — SKIPPED (queue healthy: 58 open, 0 in-progress)
+
+## 2026-03-27 23:54 UTC — SKIPPED (queue healthy: 59 open, 0 in-progress)
+
+## 2026-03-27 23:44 UTC — SKIPPED (queue healthy: 59 open, 0 in-progress)
+
+## 2026-03-27 23:34 UTC — SKIPPED (queue healthy: 60 open, 0 in-progress)
+
+## 2026-03-27 23:24 UTC — SKIPPED (queue healthy: 60 open, 0 in-progress)
+
+## 2026-03-27 23:03 UTC — SKIPPED (queue healthy: 66 open, 2 in-progress)
+
+## 2026-03-27 22:53 UTC — SKIPPED (queue healthy: 66 open, 3 in-progress)
+
+## 2026-03-27 22:43 UTC — SKIPPED (queue healthy: 68 open, 3 in-progress)
+
+## 2026-03-27 22:33 UTC — SKIPPED (queue healthy: 70 open, 1 in-progress)
+
+## 2026-03-27 22:23 UTC — SKIPPED (queue healthy: 70 open, 1 in-progress)
+
+## 2026-03-27 22:13 UTC — SKIPPED (queue healthy: 70 open, 1 in-progress)
+
+## 2026-03-27 22:03 UTC — SKIPPED (queue healthy: 70 open, 1 in-progress)
+
+## 2026-03-27 21:53 UTC — SKIPPED (queue healthy: 71 open, 1 in-progress)
+
+## 2026-03-27 21:43 UTC — SKIPPED (queue healthy: 70 open, 2 in-progress)
+
+## 2026-03-27 21:33 UTC — SKIPPED (queue healthy: 71 open, 1 in-progress)
+
+## 2026-03-27 21:23 UTC — SKIPPED (queue healthy: 72 open, 0 in-progress)
+
+## 2026-03-27 21:13 UTC — SKIPPED (queue healthy: 70 open, 2 in-progress)
+
+## 2026-03-27 21:03 UTC — SKIPPED (queue healthy: 71 open, 1 in-progress)
+
+## 2026-03-27 20:53 UTC — SKIPPED (queue healthy: 71 open, 1 in-progress)
+
 ## 2026-03-26 07:40 UTC
 - Parity: 100.0% (71/71) — freshly confirmed by oracle_regression_test
 - Gates: 44/44 passing

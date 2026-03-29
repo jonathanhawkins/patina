@@ -595,6 +595,71 @@ impl EditorPluginRegistry {
             .map(|e| e.plugin.as_ref())
             .collect()
     }
+
+    /// Returns dock panels for enabled plugins only.
+    pub fn enabled_dock_panels(&self) -> Vec<&(String, DockSlot, String)> {
+        self.dock_panels
+            .iter()
+            .filter(|(plugin_id, _, _)| self.is_enabled(plugin_id))
+            .collect()
+    }
+
+    /// Returns enabled dock panels in a specific slot.
+    pub fn enabled_panels_in_slot(&self, slot: DockSlot) -> Vec<&str> {
+        self.dock_panels
+            .iter()
+            .filter(|(id, s, _)| *s == slot && self.is_enabled(id))
+            .map(|(_, _, title)| title.as_str())
+            .collect()
+    }
+
+    /// Moves a dock panel to a different slot.
+    pub fn move_dock(&mut self, plugin_id: &str, title: &str, new_slot: DockSlot) -> bool {
+        if let Some(panel) = self.dock_panels.iter_mut().find(|(id, _, t)| {
+            id == plugin_id && t == title
+        }) {
+            panel.1 = new_slot;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the number of dock panels for a specific plugin.
+    pub fn dock_count_for_plugin(&self, plugin_id: &str) -> usize {
+        self.dock_panels.iter().filter(|(id, _, _)| id == plugin_id).count()
+    }
+
+    /// Returns a summary of the dock layout (slot -> list of panel titles).
+    pub fn dock_layout_summary(&self) -> HashMap<DockSlot, Vec<String>> {
+        let mut layout: HashMap<DockSlot, Vec<String>> = HashMap::new();
+        for (id, slot, title) in &self.dock_panels {
+            if self.is_enabled(id) {
+                layout.entry(*slot).or_default().push(title.clone());
+            }
+        }
+        layout
+    }
+
+    /// Syncs dock visibility in a PluginDockManager based on plugin enable/disable state.
+    ///
+    /// This bridges EditorPluginRegistry with PluginDockManager: when a plugin
+    /// is disabled, its docks are hidden; when enabled, they are shown.
+    pub fn sync_dock_visibility(&self, dock_manager: &mut crate::dock::PluginDockManager) {
+        for (plugin_id, _, title) in &self.dock_panels {
+            let visible = self.is_enabled(plugin_id);
+            dock_manager.set_visible(plugin_id, title, visible);
+        }
+    }
+
+    /// Registers all plugin docks into a PluginDockManager.
+    pub fn populate_dock_manager(&self, dock_manager: &mut crate::dock::PluginDockManager) {
+        for (plugin_id, slot, title) in &self.dock_panels {
+            dock_manager.add_dock(plugin_id, *slot, title);
+            let visible = self.is_enabled(plugin_id);
+            dock_manager.set_visible(plugin_id, title, visible);
+        }
+    }
 }
 
 impl Default for EditorPluginRegistry {
@@ -955,6 +1020,98 @@ impl EditorPluginExt for QuickSceneSwitcherPlugin {
         } else {
             InputHandleResult::Pass
         }
+    }
+}
+
+/// Example plugin: Resource Preview Inspector.
+///
+/// Adds a custom inspector section showing a preview panel for resource
+/// properties (textures, meshes, materials). Also registers a dock panel
+/// for browsing recently previewed resources.
+pub struct ResourcePreviewPlugin {
+    previewed_resources: Vec<PreviewEntry>,
+    max_previews: usize,
+}
+
+/// A resource preview entry.
+#[derive(Debug, Clone)]
+pub struct PreviewEntry {
+    /// Resource path.
+    pub path: String,
+    /// Resource type.
+    pub resource_type: String,
+    /// Preview width in pixels.
+    pub width: u32,
+    /// Preview height in pixels.
+    pub height: u32,
+}
+
+impl ResourcePreviewPlugin {
+    pub fn new() -> Self {
+        Self {
+            previewed_resources: Vec::new(),
+            max_previews: 50,
+        }
+    }
+
+    /// Records a resource preview.
+    pub fn record_preview(&mut self, path: &str, resource_type: &str, width: u32, height: u32) {
+        self.previewed_resources.retain(|p| p.path != path);
+        self.previewed_resources.insert(0, PreviewEntry {
+            path: path.to_string(),
+            resource_type: resource_type.to_string(),
+            width,
+            height,
+        });
+        self.previewed_resources.truncate(self.max_previews);
+    }
+
+    /// Returns recent previews.
+    pub fn recent_previews(&self) -> &[PreviewEntry] {
+        &self.previewed_resources
+    }
+
+    /// Returns previews filtered by resource type.
+    pub fn previews_by_type(&self, resource_type: &str) -> Vec<&PreviewEntry> {
+        self.previewed_resources
+            .iter()
+            .filter(|p| p.resource_type == resource_type)
+            .collect()
+    }
+
+    /// Clears all previews.
+    pub fn clear_previews(&mut self) {
+        self.previewed_resources.clear();
+    }
+}
+
+impl EditorPluginExt for ResourcePreviewPlugin {
+    fn plugin_id(&self) -> &str {
+        "patina.resource_preview"
+    }
+
+    fn display_name(&self) -> &str {
+        "Resource Preview"
+    }
+
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn description(&self) -> &str {
+        "Shows previews of resource properties in the inspector and maintains a preview history dock."
+    }
+
+    fn dock_panels(&self) -> Vec<(DockSlot, String)> {
+        vec![(DockSlot::RightLower, "Preview History".to_string())]
+    }
+
+    fn handles(&self, class_name: &str) -> bool {
+        matches!(
+            class_name,
+            "Texture2D" | "ImageTexture" | "CompressedTexture2D"
+                | "MeshInstance3D" | "StandardMaterial3D" | "ShaderMaterial"
+        )
     }
 }
 
@@ -1666,7 +1823,7 @@ mod tests {
         assert_eq!(registry.autoloads().len(), 1);
     }
 
-    // -- All three plugins together --
+    // -- All example plugins together --
 
     #[test]
     fn all_example_plugins_coexist() {
@@ -1676,14 +1833,226 @@ mod tests {
         let mut switcher = QuickSceneSwitcherPlugin::new();
         switcher.add_scene_manager_autoload();
         registry.register(Box::new(switcher));
+        registry.register(Box::new(ResourcePreviewPlugin::new()));
 
-        assert_eq!(registry.plugin_count(), 3);
-        assert_eq!(registry.dock_panels().len(), 2); // TODOs + Favorites
+        assert_eq!(registry.plugin_count(), 4);
+        assert_eq!(registry.dock_panels().len(), 3); // TODOs + Favorites + Preview History
         assert_eq!(registry.autoloads().len(), 1); // SceneSwitcher
 
         let ids = registry.plugin_ids();
         assert!(ids.contains(&"patina.todo_list".to_string()));
         assert!(ids.contains(&"patina.node_favorites".to_string()));
         assert!(ids.contains(&"patina.quick_scene_switcher".to_string()));
+        assert!(ids.contains(&"patina.resource_preview".to_string()));
+    }
+
+    // -- ResourcePreviewPlugin --
+
+    #[test]
+    fn resource_preview_metadata() {
+        let plugin = ResourcePreviewPlugin::new();
+        assert_eq!(plugin.plugin_id(), "patina.resource_preview");
+        assert_eq!(plugin.display_name(), "Resource Preview");
+        assert!(!plugin.description().is_empty());
+    }
+
+    #[test]
+    fn resource_preview_dock_panels() {
+        let plugin = ResourcePreviewPlugin::new();
+        let panels = plugin.dock_panels();
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].0, DockSlot::RightLower);
+        assert_eq!(panels[0].1, "Preview History");
+    }
+
+    #[test]
+    fn resource_preview_handles_types() {
+        let plugin = ResourcePreviewPlugin::new();
+        assert!(plugin.handles("Texture2D"));
+        assert!(plugin.handles("MeshInstance3D"));
+        assert!(!plugin.handles("Node2D"));
+    }
+
+    #[test]
+    fn resource_preview_record_and_filter() {
+        let mut plugin = ResourcePreviewPlugin::new();
+        plugin.record_preview("res://icon.png", "Texture2D", 64, 64);
+        plugin.record_preview("res://mesh.obj", "Mesh", 128, 128);
+        plugin.record_preview("res://mat.tres", "Texture2D", 256, 256);
+
+        assert_eq!(plugin.recent_previews().len(), 3);
+        assert_eq!(plugin.previews_by_type("Texture2D").len(), 2);
+        assert_eq!(plugin.previews_by_type("Mesh").len(), 1);
+    }
+
+    #[test]
+    fn resource_preview_dedup() {
+        let mut plugin = ResourcePreviewPlugin::new();
+        plugin.record_preview("res://a.png", "Texture2D", 64, 64);
+        plugin.record_preview("res://b.png", "Texture2D", 128, 128);
+        plugin.record_preview("res://a.png", "Texture2D", 256, 256); // re-record
+        assert_eq!(plugin.recent_previews().len(), 2);
+        assert_eq!(plugin.recent_previews()[0].path, "res://a.png");
+        assert_eq!(plugin.recent_previews()[0].width, 256); // updated
+    }
+
+    #[test]
+    fn resource_preview_clear() {
+        let mut plugin = ResourcePreviewPlugin::new();
+        plugin.record_preview("res://a.png", "Texture2D", 64, 64);
+        plugin.clear_previews();
+        assert!(plugin.recent_previews().is_empty());
+    }
+
+    #[test]
+    fn resource_preview_registers_in_registry() {
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(ResourcePreviewPlugin::new()));
+        assert_eq!(registry.plugin_count(), 1);
+        let panels = registry.panels_in_slot(DockSlot::RightLower);
+        assert!(panels.iter().any(|p| *p == "Preview History"));
+    }
+
+    // -- Dock lifecycle (enable/disable affects visibility) --
+
+    #[test]
+    fn enabled_dock_panels_filters_disabled() {
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+        registry.register(Box::new(NodeFavoritesPlugin::new()));
+
+        assert_eq!(registry.enabled_dock_panels().len(), 2);
+
+        registry.disable("patina.todo_list");
+        assert_eq!(registry.enabled_dock_panels().len(), 1);
+        assert_eq!(
+            registry.enabled_dock_panels()[0].2,
+            "Favorites"
+        );
+    }
+
+    #[test]
+    fn enabled_panels_in_slot() {
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+        registry.register(Box::new(ResourcePreviewPlugin::new()));
+
+        let bottom = registry.enabled_panels_in_slot(DockSlot::Bottom);
+        assert_eq!(bottom, vec!["TODOs"]);
+
+        registry.disable("patina.todo_list");
+        let bottom = registry.enabled_panels_in_slot(DockSlot::Bottom);
+        assert!(bottom.is_empty());
+    }
+
+    #[test]
+    fn move_dock_panel() {
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+
+        assert_eq!(registry.panels_in_slot(DockSlot::Bottom), vec!["TODOs"]);
+        assert!(registry.move_dock("patina.todo_list", "TODOs", DockSlot::LeftLower));
+        assert!(registry.panels_in_slot(DockSlot::Bottom).is_empty());
+        assert_eq!(registry.panels_in_slot(DockSlot::LeftLower), vec!["TODOs"]);
+    }
+
+    #[test]
+    fn move_dock_nonexistent_returns_false() {
+        let mut registry = EditorPluginRegistry::new();
+        assert!(!registry.move_dock("nonexistent", "panel", DockSlot::Bottom));
+    }
+
+    #[test]
+    fn dock_count_for_plugin() {
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+        registry.register(Box::new(NodeFavoritesPlugin::new()));
+        assert_eq!(registry.dock_count_for_plugin("patina.todo_list"), 1);
+        assert_eq!(registry.dock_count_for_plugin("patina.node_favorites"), 1);
+        assert_eq!(registry.dock_count_for_plugin("nonexistent"), 0);
+    }
+
+    #[test]
+    fn dock_layout_summary() {
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+        registry.register(Box::new(NodeFavoritesPlugin::new()));
+        registry.register(Box::new(ResourcePreviewPlugin::new()));
+
+        let layout = registry.dock_layout_summary();
+        assert!(layout.get(&DockSlot::Bottom).unwrap().contains(&"TODOs".to_string()));
+        assert!(layout.get(&DockSlot::RightLower).unwrap().contains(&"Favorites".to_string()));
+        assert!(layout.get(&DockSlot::RightLower).unwrap().contains(&"Preview History".to_string()));
+    }
+
+    #[test]
+    fn dock_layout_summary_excludes_disabled() {
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+        registry.register(Box::new(NodeFavoritesPlugin::new()));
+        registry.disable("patina.todo_list");
+
+        let layout = registry.dock_layout_summary();
+        assert!(layout.get(&DockSlot::Bottom).is_none());
+        assert!(layout.get(&DockSlot::RightLower).is_some());
+    }
+
+    // -- Dock manager bridge --
+
+    #[test]
+    fn populate_dock_manager() {
+        use crate::dock::PluginDockManager;
+
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+        registry.register(Box::new(NodeFavoritesPlugin::new()));
+
+        let mut dock_mgr = PluginDockManager::new();
+        registry.populate_dock_manager(&mut dock_mgr);
+
+        assert_eq!(dock_mgr.panel_count(), 2);
+        let bottom = dock_mgr.visible_panels_in_slot(DockSlot::Bottom);
+        assert_eq!(bottom.len(), 1);
+    }
+
+    #[test]
+    fn sync_dock_visibility_hides_disabled() {
+        use crate::dock::PluginDockManager;
+
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+        registry.register(Box::new(NodeFavoritesPlugin::new()));
+
+        let mut dock_mgr = PluginDockManager::new();
+        registry.populate_dock_manager(&mut dock_mgr);
+
+        // Disable todo list
+        registry.disable("patina.todo_list");
+        registry.sync_dock_visibility(&mut dock_mgr);
+
+        let bottom = dock_mgr.visible_panels_in_slot(DockSlot::Bottom);
+        assert!(bottom.is_empty());
+        // Favorites still visible
+        let right = dock_mgr.visible_panels_in_slot(DockSlot::RightLower);
+        assert_eq!(right.len(), 1);
+    }
+
+    #[test]
+    fn sync_dock_visibility_shows_reenabled() {
+        use crate::dock::PluginDockManager;
+
+        let mut registry = EditorPluginRegistry::new();
+        registry.register(Box::new(TodoListPlugin::new()));
+
+        let mut dock_mgr = PluginDockManager::new();
+        registry.populate_dock_manager(&mut dock_mgr);
+
+        registry.disable("patina.todo_list");
+        registry.sync_dock_visibility(&mut dock_mgr);
+        assert!(dock_mgr.visible_panels_in_slot(DockSlot::Bottom).is_empty());
+
+        registry.enable("patina.todo_list");
+        registry.sync_dock_visibility(&mut dock_mgr);
+        assert_eq!(dock_mgr.visible_panels_in_slot(DockSlot::Bottom).len(), 1);
     }
 }

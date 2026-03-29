@@ -216,6 +216,7 @@ fn camera_transform_drives_rendered_viewport() {
         fov: fov_deg.to_radians(),
         near: 0.05,
         far: 4000.0,
+        environment: None,
     };
 
     // Render with camera-derived viewport

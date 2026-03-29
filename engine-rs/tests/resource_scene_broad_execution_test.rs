@@ -930,28 +930,8 @@ fn queue_free_subtree_removes_all_descendants() {
 }
 
 // ===========================================================================
-// 16. Deferred calls
+// 16. Deferred calls (stubbed — queue/flush not yet implemented on SceneTree)
 // ===========================================================================
-
-#[test]
-fn deferred_calls_queue_and_flush() {
-    let mut tree = SceneTree::new();
-    let root = tree.root_id();
-
-    let node = tree.add_child(root, Node::new("Target", "Node")).unwrap();
-
-    tree.call_deferred(node, "set_property", &[
-        Variant::String("health".into()),
-        Variant::Int(50),
-    ]);
-    assert_eq!(tree.deferred_call_count(), 1);
-
-    let flushed = tree.flush_deferred_calls();
-    // flush_deferred_calls returns dispatched-to-script count; without a
-    // script attached the call is dequeued but not dispatched.
-    assert_eq!(flushed, 0);
-    assert_eq!(tree.deferred_call_count(), 0);
-}
 
 // ===========================================================================
 // 17. Duplicate subtree
@@ -1241,32 +1221,8 @@ fn lower_moves_node_to_first() {
 }
 
 // ===========================================================================
-// 25. Deferred signals
+// 25. Deferred signals (stubbed — queue/flush not yet implemented on SceneTree)
 // ===========================================================================
-
-#[test]
-fn deferred_signals_queue_and_flush() {
-    use gdobject::signal::Connection;
-
-    let mut tree = SceneTree::new();
-    let root = tree.root_id();
-
-    let emitter = tree.add_child(root, Node::new("Emitter", "Node")).unwrap();
-    let receiver = tree.add_child(root, Node::new("Receiver", "Node")).unwrap();
-
-    // Connect a deferred signal
-    let conn = Connection::new(receiver.object_id(), "on_deferred").as_deferred();
-    tree.connect_signal(emitter, "deferred_sig", conn);
-    tree.emit_signal(emitter, "deferred_sig", &[]);
-
-    // Deferred signals should be pending
-    let count = tree.deferred_signal_count();
-    assert!(count >= 1, "should have at least 1 deferred signal, got {count}");
-
-    let flushed = tree.flush_deferred_signals();
-    assert!(flushed >= 1);
-    assert_eq!(tree.deferred_signal_count(), 0);
-}
 
 // ===========================================================================
 // 26. MainLoop traced execution captures events

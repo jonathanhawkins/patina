@@ -1,0 +1,28 @@
+[gd_scene format=3 uid="uid://particles_multi"]
+
+[node name="ParticleWorld" type="Node"]
+
+[node name="Sparks2D" type="GPUParticles2D" parent="."]
+position = Vector2(200, 300)
+emitting = true
+amount = 64
+
+[node name="Dust2D" type="CPUParticles2D" parent="."]
+position = Vector2(400, 300)
+emitting = true
+amount = 32
+
+[node name="Fire3D" type="GPUParticles3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5, 0)
+emitting = true
+amount = 128
+
+[node name="Smoke3D" type="CPUParticles3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 5, 0)
+emitting = true
+amount = 48
+
+[node name="Rain2D" type="GPUParticles2D" parent="."]
+position = Vector2(0, 0)
+emitting = false
+amount = 256

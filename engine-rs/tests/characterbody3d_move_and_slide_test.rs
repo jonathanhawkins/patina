@@ -104,7 +104,7 @@ fn classdb_characterbody3d_inherits_node3d() {
 #[test]
 fn classdb_characterbody3d_has_velocity_property() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("CharacterBody3D", false);
+    let props = gdobject::class_db::get_property_list("CharacterBody3D");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"velocity"));
     assert!(names.contains(&"up_direction"));
@@ -113,7 +113,7 @@ fn classdb_characterbody3d_has_velocity_property() {
 #[test]
 fn classdb_characterbody3d_has_methods() {
     gdobject::class_db::register_3d_classes();
-    let methods = gdobject::class_db::get_method_list("CharacterBody3D", false);
+    let methods = gdobject::class_db::get_method_list("CharacterBody3D");
     let names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
     assert!(names.contains(&"move_and_slide"), "Missing move_and_slide");
     assert!(names.contains(&"is_on_floor"), "Missing is_on_floor");
@@ -122,7 +122,7 @@ fn classdb_characterbody3d_has_methods() {
 #[test]
 fn classdb_characterbody3d_default_up_direction() {
     gdobject::class_db::register_3d_classes();
-    let props = gdobject::class_db::get_property_list("CharacterBody3D", false);
+    let props = gdobject::class_db::get_property_list("CharacterBody3D");
     let up = props.iter().find(|p| p.name == "up_direction").unwrap();
     assert_eq!(
         up.default_value,

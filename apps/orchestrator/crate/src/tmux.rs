@@ -129,6 +129,19 @@ pub fn ensure_bv_alive(session: &str, window: u32, workdir: &str) -> Result<bool
     Ok(false)
 }
 
+/// Respawn the planner pane (index 1) with the given model command.
+pub fn restart_planner_pane(
+    session: &str,
+    window: u32,
+    workdir: &str,
+    planner_cmd: &str,
+) -> Result<()> {
+    let target = format!("{session}:{window}.1");
+    let shell_cmd = format!("cd {workdir} && exec {planner_cmd}");
+    run_tmux(&["respawn-pane", "-k", "-t", &target, &shell_cmd])?;
+    Ok(())
+}
+
 /// A queued prompt task for batch/parallel submission.
 #[derive(Clone)]
 pub struct PromptTask {

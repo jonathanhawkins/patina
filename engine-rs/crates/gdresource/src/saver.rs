@@ -82,6 +82,15 @@ impl TresSaver {
 
         Ok(out)
     }
+
+    /// Serializes a resource preserving original subresource IDs (no renumbering).
+    ///
+    /// This is identical to `save_to_string` — the default serializer already
+    /// preserves original IDs. The `_raw` variant exists to contrast with a
+    /// hypothetical renumbered output.
+    pub fn save_to_string_raw(&self, resource: &Resource) -> EngineResult<String> {
+        self.save_to_string(resource)
+    }
 }
 
 impl ResourceSaver for TresSaver {

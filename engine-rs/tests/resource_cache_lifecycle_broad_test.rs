@@ -59,9 +59,9 @@ fn cache_replace_overwrites_existing() {
     let _ = cache.load("res://icon.tres").unwrap();
 
     let r2 = make_resource_with_prop("Texture2D", "width", Variant::Int(128));
-    cache.replace("res://icon.tres", r2.clone());
+    cache.insert("res://icon.tres", r2.clone());
 
-    let cached = cache.get_cached("res://icon.tres").unwrap();
+    let cached = cache.get("res://icon.tres").unwrap();
     assert_eq!(
         cached.get_property("width"),
         Some(&Variant::Int(128)),
@@ -72,12 +72,12 @@ fn cache_replace_overwrites_existing() {
 #[test]
 fn cache_replace_inserts_if_missing() {
     let mut cache = ResourceCache::new(StubLoader);
-    assert!(cache.get_cached("res://new.tres").is_none());
+    assert!(cache.get("res://new.tres").is_none());
 
     let r = make_resource("StyleBoxFlat");
-    cache.replace("res://new.tres", r);
+    cache.insert("res://new.tres", r);
 
-    assert!(cache.get_cached("res://new.tres").is_some());
+    assert!(cache.get("res://new.tres").is_some());
 }
 
 // ===========================================================================
@@ -94,8 +94,8 @@ fn cache_clear_empties_all_entries() {
     cache.clear();
 
     assert!(cache.is_empty());
-    assert!(cache.get_cached("res://a.tres").is_none());
-    assert!(cache.get_cached("res://b.tres").is_none());
+    assert!(cache.get("res://a.tres").is_none());
+    assert!(cache.get("res://b.tres").is_none());
 }
 
 #[test]
@@ -116,8 +116,8 @@ fn cache_invalidate_removes_single_entry() {
 
     cache.invalidate("res://a.tres");
 
-    assert!(cache.get_cached("res://a.tres").is_none());
-    assert!(cache.get_cached("res://b.tres").is_some());
+    assert!(cache.get("res://a.tres").is_none());
+    assert!(cache.get("res://b.tres").is_some());
 }
 
 #[test]

@@ -342,7 +342,7 @@ fn change_scene_to_node_exists_and_works() {
     // Add an initial scene
     let initial = Node::new("InitialScene", "Node2D");
     let initial_id = tree.add_child(root, initial).unwrap();
-    tree.set_current_scene(Some(initial_id));
+    // current_scene is set by change_scene_to_node/change_scene_to_packed
 
     // Change to a new node-based scene
     let new_scene = Node::new("NewScene", "Control");

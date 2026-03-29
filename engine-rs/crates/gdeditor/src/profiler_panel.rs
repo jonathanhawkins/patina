@@ -221,6 +221,33 @@ pub struct FunctionStats {
 }
 
 // ---------------------------------------------------------------------------
+// ProfilerMarker
+// ---------------------------------------------------------------------------
+
+/// A user-placed marker/bookmark on a specific frame.
+#[derive(Debug, Clone)]
+pub struct ProfilerMarker {
+    /// The frame number this marker is attached to.
+    pub frame_number: u64,
+    /// User-provided label for this marker.
+    pub label: String,
+}
+
+// ---------------------------------------------------------------------------
+// Helper: percentile calculation
+// ---------------------------------------------------------------------------
+
+fn percentile_from_durations(durations: &[Duration], pct: f64) -> f64 {
+    if durations.is_empty() {
+        return 0.0;
+    }
+    let mut ms: Vec<f64> = durations.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
+    ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((pct / 100.0) * (ms.len() - 1) as f64).round() as usize;
+    ms[idx.min(ms.len() - 1)]
+}
+
+// ---------------------------------------------------------------------------
 // ProfilerPanel
 // ---------------------------------------------------------------------------
 
@@ -243,6 +270,8 @@ pub struct ProfilerPanel {
     next_frame: u64,
     /// Total frames recorded in this session (including evicted).
     total_recorded: u64,
+    /// User-placed markers/bookmarks on specific frames.
+    markers: Vec<ProfilerMarker>,
 }
 
 impl Default for ProfilerPanel {
@@ -260,12 +289,14 @@ impl ProfilerPanel {
             recording: false,
             next_frame: 1,
             total_recorded: 0,
+            markers: Vec::new(),
         }
     }
 
     /// Starts a profiling session. Clears previous data.
     pub fn start(&mut self) {
         self.frames.clear();
+        self.markers.clear();
         self.next_frame = 1;
         self.total_recorded = 0;
         self.recording = true;
@@ -404,6 +435,413 @@ impl ProfilerPanel {
         self.frames.clear();
         self.total_recorded = 0;
         self.next_frame = 1;
+    }
+
+    /// Returns frames where CPU time exceeds the given threshold.
+    pub fn spike_frames(&self, threshold: Duration) -> Vec<&FrameProfile> {
+        self.frames.iter().filter(|f| f.cpu_time > threshold).collect()
+    }
+
+    /// Returns the percentile CPU frame time in ms (0.0–100.0).
+    ///
+    /// E.g., `percentile_cpu_ms(95.0)` returns the 95th percentile.
+    pub fn percentile_cpu_ms(&self, pct: f64) -> f64 {
+        percentile_from_durations(
+            &self.frames.iter().map(|f| f.cpu_time).collect::<Vec<_>>(),
+            pct,
+        )
+    }
+
+    /// Returns the percentile GPU frame time in ms.
+    pub fn percentile_gpu_ms(&self, pct: f64) -> f64 {
+        percentile_from_durations(
+            &self.frames.iter().map(|f| f.gpu_time).collect::<Vec<_>>(),
+            pct,
+        )
+    }
+
+    /// Returns a histogram of CPU frame times bucketed into `bucket_count` bins.
+    ///
+    /// Each entry is `(bucket_start_ms, bucket_end_ms, count)`.
+    pub fn cpu_time_histogram(&self, bucket_count: usize) -> Vec<(f64, f64, usize)> {
+        if self.frames.is_empty() || bucket_count == 0 {
+            return Vec::new();
+        }
+        let times: Vec<f64> = self.frames.iter().map(|f| f.cpu_time_ms()).collect();
+        let min = times.iter().cloned().fold(f64::MAX, f64::min);
+        let max = times.iter().cloned().fold(0.0_f64, f64::max);
+        if (max - min).abs() < f64::EPSILON {
+            return vec![(min, max, times.len())];
+        }
+        let width = (max - min) / bucket_count as f64;
+        let mut buckets = Vec::with_capacity(bucket_count);
+        for i in 0..bucket_count {
+            let lo = min + i as f64 * width;
+            let is_last = i == bucket_count - 1;
+            let hi = lo + width;
+            let count = times.iter().filter(|&&t| {
+                if is_last {
+                    t >= lo && t <= hi + f64::EPSILON
+                } else {
+                    t >= lo && t < hi
+                }
+            }).count();
+            buckets.push((lo, hi, count));
+        }
+        buckets
+    }
+
+    /// Returns per-function hotspot analysis: each function's percentage of total CPU time.
+    ///
+    /// Returns `Vec<(name, total_ms, percentage)>` sorted by percentage descending.
+    pub fn function_hotspots(&self) -> Vec<(String, f64, f64)> {
+        let total_cpu_ms: f64 = self.frames.iter().map(|f| f.cpu_time_ms()).sum();
+        if total_cpu_ms <= 0.0 {
+            return Vec::new();
+        }
+        let mut accum: HashMap<String, f64> = HashMap::new();
+        for frame in &self.frames {
+            for entry in &frame.entries {
+                *accum.entry(entry.name.clone()).or_default() += entry.time_ms();
+            }
+        }
+        let mut hotspots: Vec<(String, f64, f64)> = accum
+            .into_iter()
+            .map(|(name, ms)| {
+                let pct = (ms / total_cpu_ms) * 100.0;
+                (name, ms, pct)
+            })
+            .collect();
+        hotspots.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        hotspots
+    }
+
+    /// Adds a bookmark/marker at a specific frame number.
+    pub fn add_marker(&mut self, frame_number: u64, label: String) {
+        self.markers.push(ProfilerMarker { frame_number, label });
+    }
+
+    /// Returns all markers.
+    pub fn markers(&self) -> &[ProfilerMarker] {
+        &self.markers
+    }
+
+    /// Returns markers within a frame range (inclusive).
+    pub fn markers_in_range(&self, from: u64, to: u64) -> Vec<&ProfilerMarker> {
+        self.markers
+            .iter()
+            .filter(|m| m.frame_number >= from && m.frame_number <= to)
+            .collect()
+    }
+
+    /// Compares stats between two frame ranges.
+    ///
+    /// Returns `(stats_a, stats_b)` for the given frame number ranges.
+    pub fn compare_ranges(&self, range_a: (u64, u64), range_b: (u64, u64)) -> (ProfilerStats, ProfilerStats) {
+        let frames_a: Vec<FrameProfile> = self.frames.iter()
+            .filter(|f| f.frame_number >= range_a.0 && f.frame_number <= range_a.1)
+            .cloned()
+            .collect();
+        let frames_b: Vec<FrameProfile> = self.frames.iter()
+            .filter(|f| f.frame_number >= range_b.0 && f.frame_number <= range_b.1)
+            .cloned()
+            .collect();
+        (ProfilerStats::from_frames(&frames_a), ProfilerStats::from_frames(&frames_b))
+    }
+
+    /// Returns a summary line suitable for display (e.g., status bar).
+    pub fn summary_line(&self) -> String {
+        if self.frames.is_empty() {
+            return "No profiling data".to_string();
+        }
+        let stats = self.stats();
+        format!(
+            "Frames: {} | CPU: {:.1}ms avg ({:.1} FPS) | GPU: {:.1}ms avg | Spikes(>33ms): {}",
+            stats.frame_count,
+            stats.avg_cpu_ms,
+            stats.avg_fps,
+            stats.avg_gpu_ms,
+            self.spike_frames(Duration::from_millis(33)).len(),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FrameGraphBar
+// ---------------------------------------------------------------------------
+
+/// A single bar in the frame graph visualization.
+#[derive(Debug, Clone)]
+pub struct FrameGraphBar {
+    /// Frame number this bar represents.
+    pub frame_number: u64,
+    /// CPU time in ms (bar height source).
+    pub cpu_ms: f64,
+    /// GPU time in ms.
+    pub gpu_ms: f64,
+    /// Physics time in ms.
+    pub physics_ms: f64,
+    /// Normalized height (0.0–1.0) relative to the graph's y-axis max.
+    pub normalized_height: f64,
+    /// Whether this frame is a spike (exceeds target frame time).
+    pub is_spike: bool,
+}
+
+// ---------------------------------------------------------------------------
+// FrameGraphTooltip
+// ---------------------------------------------------------------------------
+
+/// Tooltip data shown when hovering over a frame bar.
+#[derive(Debug, Clone)]
+pub struct FrameGraphTooltip {
+    pub frame_number: u64,
+    pub cpu_ms: f64,
+    pub gpu_ms: f64,
+    pub physics_ms: f64,
+    pub fps: f64,
+    /// Top N hottest functions in this frame.
+    pub top_functions: Vec<(String, f64)>,
+}
+
+// ---------------------------------------------------------------------------
+// FrameGraph
+// ---------------------------------------------------------------------------
+
+/// Visual frame graph component for the profiler panel.
+///
+/// Produces data for rendering a bar chart timeline of frame times,
+/// matching Godot's profiler frame graph:
+/// - Scrollable/pannable viewport over recorded frames
+/// - Zoom control for time resolution
+/// - Frame selection with tooltip details
+/// - Target FPS line overlay
+/// - Color coding for spikes
+#[derive(Debug)]
+pub struct FrameGraph {
+    /// Index into the profiler's frame buffer for viewport start.
+    viewport_start: usize,
+    /// Number of frames visible in the viewport.
+    viewport_size: usize,
+    /// Currently selected frame index (within viewport), if any.
+    selected_index: Option<usize>,
+    /// Target frame time in ms (e.g., 16.67 for 60fps).
+    target_frame_ms: f64,
+    /// Y-axis maximum in ms (auto or manual).
+    y_max_ms: Option<f64>,
+    /// Whether to show GPU time bars.
+    show_gpu: bool,
+    /// Whether to show physics time bars.
+    show_physics: bool,
+    /// Number of top functions to include in tooltips.
+    tooltip_top_n: usize,
+}
+
+impl Default for FrameGraph {
+    fn default() -> Self {
+        Self {
+            viewport_start: 0,
+            viewport_size: 200,
+            selected_index: None,
+            target_frame_ms: 16.667, // 60 FPS
+            y_max_ms: None,
+            show_gpu: true,
+            show_physics: true,
+            tooltip_top_n: 5,
+        }
+    }
+}
+
+impl FrameGraph {
+    /// Creates a frame graph with a given viewport size.
+    pub fn new(viewport_size: usize) -> Self {
+        Self {
+            viewport_size,
+            ..Default::default()
+        }
+    }
+
+    /// Sets the target frame time in ms.
+    pub fn set_target_fps(&mut self, fps: f64) {
+        if fps > 0.0 {
+            self.target_frame_ms = 1000.0 / fps;
+        }
+    }
+
+    /// Returns the current target frame time in ms.
+    pub fn target_frame_ms(&self) -> f64 {
+        self.target_frame_ms
+    }
+
+    /// Sets a fixed y-axis maximum. Pass `None` for auto-scaling.
+    pub fn set_y_max(&mut self, ms: Option<f64>) {
+        self.y_max_ms = ms;
+    }
+
+    /// Toggles GPU bar visibility.
+    pub fn toggle_gpu(&mut self) {
+        self.show_gpu = !self.show_gpu;
+    }
+
+    /// Toggles physics bar visibility.
+    pub fn toggle_physics(&mut self) {
+        self.show_physics = !self.show_physics;
+    }
+
+    /// Returns whether GPU bars are shown.
+    pub fn show_gpu(&self) -> bool {
+        self.show_gpu
+    }
+
+    /// Returns whether physics bars are shown.
+    pub fn show_physics(&self) -> bool {
+        self.show_physics
+    }
+
+    /// Scrolls the viewport to the right by `n` frames.
+    pub fn scroll_right(&mut self, n: usize, total_frames: usize) {
+        let max_start = total_frames.saturating_sub(self.viewport_size);
+        self.viewport_start = (self.viewport_start + n).min(max_start);
+    }
+
+    /// Scrolls the viewport to the left by `n` frames.
+    pub fn scroll_left(&mut self, n: usize) {
+        self.viewport_start = self.viewport_start.saturating_sub(n);
+    }
+
+    /// Scrolls to the end (most recent frames).
+    pub fn scroll_to_end(&mut self, total_frames: usize) {
+        self.viewport_start = total_frames.saturating_sub(self.viewport_size);
+    }
+
+    /// Scrolls to the beginning.
+    pub fn scroll_to_start(&mut self) {
+        self.viewport_start = 0;
+    }
+
+    /// Zooms in (fewer frames visible, more detail).
+    pub fn zoom_in(&mut self) {
+        if self.viewport_size > 10 {
+            self.viewport_size /= 2;
+            if self.viewport_size < 10 {
+                self.viewport_size = 10;
+            }
+        }
+    }
+
+    /// Zooms out (more frames visible, less detail).
+    pub fn zoom_out(&mut self, total_frames: usize) {
+        self.viewport_size = (self.viewport_size * 2).min(total_frames.max(10));
+    }
+
+    /// Returns the current viewport size.
+    pub fn viewport_size(&self) -> usize {
+        self.viewport_size
+    }
+
+    /// Returns the current viewport start index.
+    pub fn viewport_start(&self) -> usize {
+        self.viewport_start
+    }
+
+    /// Selects a frame by viewport-relative index.
+    pub fn select(&mut self, index: usize) {
+        if index < self.viewport_size {
+            self.selected_index = Some(index);
+        }
+    }
+
+    /// Clears the selection.
+    pub fn deselect(&mut self) {
+        self.selected_index = None;
+    }
+
+    /// Returns the selected viewport index, if any.
+    pub fn selected_index(&self) -> Option<usize> {
+        self.selected_index
+    }
+
+    /// Generates the bar data for the current viewport from profiler frames.
+    pub fn bars(&self, frames: &[FrameProfile]) -> Vec<FrameGraphBar> {
+        let end = (self.viewport_start + self.viewport_size).min(frames.len());
+        let visible = &frames[self.viewport_start..end];
+
+        let y_max = self.y_max_ms.unwrap_or_else(|| {
+            visible
+                .iter()
+                .map(|f| f.cpu_time_ms())
+                .fold(self.target_frame_ms, f64::max)
+                * 1.1 // 10% headroom
+        });
+
+        visible
+            .iter()
+            .map(|f| {
+                let cpu_ms = f.cpu_time_ms();
+                FrameGraphBar {
+                    frame_number: f.frame_number,
+                    cpu_ms,
+                    gpu_ms: f.gpu_time_ms(),
+                    physics_ms: f.physics_time_ms(),
+                    normalized_height: if y_max > 0.0 {
+                        (cpu_ms / y_max).min(1.0)
+                    } else {
+                        0.0
+                    },
+                    is_spike: cpu_ms > self.target_frame_ms,
+                }
+            })
+            .collect()
+    }
+
+    /// Generates tooltip data for a specific viewport index.
+    pub fn tooltip(&self, frames: &[FrameProfile], viewport_index: usize) -> Option<FrameGraphTooltip> {
+        let abs_index = self.viewport_start + viewport_index;
+        let frame = frames.get(abs_index)?;
+
+        let mut top_funcs: Vec<(String, f64)> = frame
+            .entries
+            .iter()
+            .map(|e| (e.name.clone(), e.time_ms()))
+            .collect();
+        top_funcs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        top_funcs.truncate(self.tooltip_top_n);
+
+        Some(FrameGraphTooltip {
+            frame_number: frame.frame_number,
+            cpu_ms: frame.cpu_time_ms(),
+            gpu_ms: frame.gpu_time_ms(),
+            physics_ms: frame.physics_time_ms(),
+            fps: frame.fps(),
+            top_functions: top_funcs,
+        })
+    }
+
+    /// Returns tooltip for the currently selected frame.
+    pub fn selected_tooltip(&self, frames: &[FrameProfile]) -> Option<FrameGraphTooltip> {
+        self.selected_index.and_then(|i| self.tooltip(frames, i))
+    }
+
+    /// Returns the target FPS line position as normalized height (0.0–1.0).
+    pub fn target_line_height(&self, frames: &[FrameProfile]) -> f64 {
+        let end = (self.viewport_start + self.viewport_size).min(frames.len());
+        let visible = &frames[self.viewport_start..end];
+        let y_max = self.y_max_ms.unwrap_or_else(|| {
+            visible
+                .iter()
+                .map(|f| f.cpu_time_ms())
+                .fold(self.target_frame_ms, f64::max)
+                * 1.1
+        });
+        if y_max > 0.0 {
+            (self.target_frame_ms / y_max).min(1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Returns the number of spike frames in the current viewport.
+    pub fn spike_count(&self, frames: &[FrameProfile]) -> usize {
+        self.bars(frames).iter().filter(|b| b.is_spike).count()
     }
 }
 
@@ -773,5 +1211,496 @@ mod tests {
         let entry = f.get_entry("micro_func").unwrap();
         assert!((entry.time_ms() - 0.5).abs() < 0.001);
         assert!((entry.avg_time_per_call_ms() - 0.05).abs() < 0.001);
+    }
+
+    // ── Spike detection ─────────────────────────────────────────────
+
+    #[test]
+    fn panel_spike_frames() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        panel.record_frame(dur_ms(10), Duration::ZERO, Duration::ZERO, vec![]);
+        panel.record_frame(dur_ms(50), Duration::ZERO, Duration::ZERO, vec![]);
+        panel.record_frame(dur_ms(15), Duration::ZERO, Duration::ZERO, vec![]);
+        panel.record_frame(dur_ms(40), Duration::ZERO, Duration::ZERO, vec![]);
+
+        let spikes = panel.spike_frames(dur_ms(33));
+        assert_eq!(spikes.len(), 2);
+        assert_eq!(spikes[0].frame_number, 2);
+        assert_eq!(spikes[1].frame_number, 4);
+    }
+
+    #[test]
+    fn panel_spike_frames_none() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        panel.record_frame(dur_ms(10), Duration::ZERO, Duration::ZERO, vec![]);
+
+        let spikes = panel.spike_frames(dur_ms(33));
+        assert!(spikes.is_empty());
+    }
+
+    // ── Percentiles ─────────────────────────────────────────────────
+
+    #[test]
+    fn panel_percentile_cpu_ms() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        // 10 frames: 1ms, 2ms, ..., 10ms
+        for i in 1..=10 {
+            panel.record_frame(dur_ms(i), Duration::ZERO, Duration::ZERO, vec![]);
+        }
+
+        let p50 = panel.percentile_cpu_ms(50.0);
+        assert!(p50 >= 4.0 && p50 <= 7.0, "p50={}", p50); // ~median
+
+        let p90 = panel.percentile_cpu_ms(90.0);
+        assert!(p90 >= 9.0);
+
+        let p0 = panel.percentile_cpu_ms(0.0);
+        assert!((p0 - 1.0).abs() < 0.01);
+
+        let p100 = panel.percentile_cpu_ms(100.0);
+        assert!((p100 - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn panel_percentile_empty() {
+        let panel = ProfilerPanel::new(100);
+        assert!((panel.percentile_cpu_ms(50.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn panel_percentile_gpu_ms() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        panel.record_frame(Duration::ZERO, dur_ms(5), Duration::ZERO, vec![]);
+        panel.record_frame(Duration::ZERO, dur_ms(15), Duration::ZERO, vec![]);
+
+        let p50 = panel.percentile_gpu_ms(50.0);
+        assert!(p50 >= 5.0 && p50 <= 15.0);
+    }
+
+    // ── Histogram ───────────────────────────────────────────────────
+
+    #[test]
+    fn panel_cpu_time_histogram() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        // Spread across a range: 10, 12, 14, 16, 18, 20
+        for i in 0..6 {
+            panel.record_frame(dur_ms(10 + i * 2), Duration::ZERO, Duration::ZERO, vec![]);
+        }
+
+        let hist = panel.cpu_time_histogram(3);
+        assert_eq!(hist.len(), 3);
+        let total: usize = hist.iter().map(|b| b.2).sum();
+        assert_eq!(total, 6);
+        // Each bucket should have some frames
+        assert!(hist.iter().all(|b| b.0 < b.1)); // lo < hi
+    }
+
+    #[test]
+    fn panel_cpu_time_histogram_empty() {
+        let panel = ProfilerPanel::new(100);
+        let hist = panel.cpu_time_histogram(5);
+        assert!(hist.is_empty());
+    }
+
+    #[test]
+    fn panel_cpu_time_histogram_uniform() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        for _ in 0..10 {
+            panel.record_frame(dur_ms(16), Duration::ZERO, Duration::ZERO, vec![]);
+        }
+
+        let hist = panel.cpu_time_histogram(3);
+        // All same value → single bucket
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].2, 10);
+    }
+
+    // ── Function hotspots ───────────────────────────────────────────
+
+    #[test]
+    fn panel_function_hotspots() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+
+        panel.record_frame(
+            dur_ms(20),
+            Duration::ZERO,
+            Duration::ZERO,
+            vec![
+                ProfilerEntry::new("render", dur_ms(10), 1),
+                ProfilerEntry::new("physics", dur_ms(5), 1),
+                ProfilerEntry::new("script", dur_ms(3), 1),
+            ],
+        );
+
+        let hotspots = panel.function_hotspots();
+        assert_eq!(hotspots.len(), 3);
+        assert_eq!(hotspots[0].0, "render"); // highest percentage
+        assert!(hotspots[0].2 > hotspots[1].2); // render% > physics%
+        // Percentages should sum to < 100 (functions don't account for all CPU time)
+        let total_pct: f64 = hotspots.iter().map(|h| h.2).sum();
+        assert!(total_pct <= 100.0 + 0.01);
+    }
+
+    #[test]
+    fn panel_function_hotspots_empty() {
+        let panel = ProfilerPanel::new(100);
+        assert!(panel.function_hotspots().is_empty());
+    }
+
+    // ── Markers ─────────────────────────────────────────────────────
+
+    #[test]
+    fn panel_markers() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        panel.record_frame(dur_ms(16), Duration::ZERO, Duration::ZERO, vec![]);
+        panel.record_frame(dur_ms(50), Duration::ZERO, Duration::ZERO, vec![]);
+        panel.record_frame(dur_ms(16), Duration::ZERO, Duration::ZERO, vec![]);
+
+        panel.add_marker(2, "spike!".to_string());
+        panel.add_marker(3, "recovered".to_string());
+
+        assert_eq!(panel.markers().len(), 2);
+        assert_eq!(panel.markers()[0].label, "spike!");
+    }
+
+    #[test]
+    fn panel_markers_in_range() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.add_marker(1, "a".to_string());
+        panel.add_marker(5, "b".to_string());
+        panel.add_marker(10, "c".to_string());
+
+        let in_range = panel.markers_in_range(3, 8);
+        assert_eq!(in_range.len(), 1);
+        assert_eq!(in_range[0].label, "b");
+    }
+
+    #[test]
+    fn panel_start_clears_markers() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.add_marker(1, "old".to_string());
+        panel.start();
+        assert!(panel.markers().is_empty());
+    }
+
+    // ── Compare ranges ──────────────────────────────────────────────
+
+    #[test]
+    fn panel_compare_ranges() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+
+        // Range A: frames 1-3 at 10ms
+        for _ in 0..3 {
+            panel.record_frame(dur_ms(10), Duration::ZERO, Duration::ZERO, vec![]);
+        }
+        // Range B: frames 4-6 at 20ms
+        for _ in 0..3 {
+            panel.record_frame(dur_ms(20), Duration::ZERO, Duration::ZERO, vec![]);
+        }
+
+        let (a, b) = panel.compare_ranges((1, 3), (4, 6));
+        assert_eq!(a.frame_count, 3);
+        assert_eq!(b.frame_count, 3);
+        assert!((a.avg_cpu_ms - 10.0).abs() < 0.01);
+        assert!((b.avg_cpu_ms - 20.0).abs() < 0.01);
+    }
+
+    // ── Summary line ────────────────────────────────────────────────
+
+    #[test]
+    fn panel_summary_line_empty() {
+        let panel = ProfilerPanel::new(100);
+        assert_eq!(panel.summary_line(), "No profiling data");
+    }
+
+    #[test]
+    fn panel_summary_line_with_data() {
+        let mut panel = ProfilerPanel::new(100);
+        panel.start();
+        panel.record_frame(dur_ms(16), dur_ms(10), Duration::ZERO, vec![]);
+        panel.record_frame(dur_ms(50), dur_ms(10), Duration::ZERO, vec![]);
+
+        let line = panel.summary_line();
+        assert!(line.contains("Frames: 2"));
+        assert!(line.contains("CPU:"));
+        assert!(line.contains("GPU:"));
+        assert!(line.contains("Spikes"));
+    }
+
+    // ── FrameGraph ──────────────────────────────────────────────────
+
+    fn make_test_frames(count: usize) -> Vec<FrameProfile> {
+        (0..count)
+            .map(|i| {
+                let mut f = FrameProfile::new(i as u64 + 1);
+                f.cpu_time = dur_ms(10 + (i as u64 % 5) * 5); // 10, 15, 20, 25, 30, 10, ...
+                f.gpu_time = dur_ms(8 + (i as u64 % 3) * 2);
+                f.physics_time = dur_ms(3);
+                f.add_entry("render", dur_ms(5 + (i as u64 % 3) * 2), 1);
+                f.add_entry("physics", dur_ms(3), 1);
+                f
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frame_graph_default() {
+        let g = FrameGraph::default();
+        assert_eq!(g.viewport_size(), 200);
+        assert!((g.target_frame_ms() - 16.667).abs() < 0.01);
+        assert!(g.show_gpu());
+        assert!(g.show_physics());
+        assert!(g.selected_index().is_none());
+    }
+
+    #[test]
+    fn frame_graph_bars_basic() {
+        let frames = make_test_frames(10);
+        let g = FrameGraph::new(200);
+
+        let bars = g.bars(&frames);
+        assert_eq!(bars.len(), 10);
+        assert_eq!(bars[0].frame_number, 1);
+        assert!(bars[0].cpu_ms >= 10.0);
+        assert!(bars[0].normalized_height >= 0.0 && bars[0].normalized_height <= 1.0);
+    }
+
+    #[test]
+    fn frame_graph_bars_normalized_height() {
+        let mut frames = vec![];
+        let mut f1 = FrameProfile::new(1);
+        f1.cpu_time = dur_ms(10);
+        frames.push(f1);
+        let mut f2 = FrameProfile::new(2);
+        f2.cpu_time = dur_ms(30);
+        frames.push(f2);
+
+        let mut g = FrameGraph::new(200);
+        g.set_y_max(Some(30.0));
+
+        let bars = g.bars(&frames);
+        assert!((bars[0].normalized_height - 10.0 / 30.0).abs() < 0.01);
+        assert!((bars[1].normalized_height - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn frame_graph_spike_detection() {
+        let mut frames = vec![];
+        for i in 0..5 {
+            let mut f = FrameProfile::new(i + 1);
+            f.cpu_time = dur_ms(if i == 2 { 50 } else { 10 });
+            frames.push(f);
+        }
+
+        let g = FrameGraph::new(200);
+        let bars = g.bars(&frames);
+        // Only frame 3 (50ms) exceeds target (16.67ms)
+        assert!(!bars[0].is_spike);
+        assert!(bars[2].is_spike);
+    }
+
+    #[test]
+    fn frame_graph_set_target_fps() {
+        let mut g = FrameGraph::default();
+        g.set_target_fps(30.0);
+        assert!((g.target_frame_ms() - 33.333).abs() < 0.01);
+    }
+
+    #[test]
+    fn frame_graph_scroll() {
+        let frames = make_test_frames(100);
+        let mut g = FrameGraph::new(20);
+
+        assert_eq!(g.viewport_start(), 0);
+
+        g.scroll_right(10, frames.len());
+        assert_eq!(g.viewport_start(), 10);
+
+        g.scroll_left(5);
+        assert_eq!(g.viewport_start(), 5);
+
+        g.scroll_to_end(frames.len());
+        assert_eq!(g.viewport_start(), 80); // 100 - 20
+
+        g.scroll_to_start();
+        assert_eq!(g.viewport_start(), 0);
+    }
+
+    #[test]
+    fn frame_graph_scroll_clamping() {
+        let frames = make_test_frames(10);
+        let mut g = FrameGraph::new(20);
+
+        g.scroll_right(1000, frames.len());
+        // Can't scroll past end — viewport_size (20) > total (10), so max_start = 0
+        assert_eq!(g.viewport_start(), 0);
+
+        g.scroll_left(1000);
+        assert_eq!(g.viewport_start(), 0);
+    }
+
+    #[test]
+    fn frame_graph_zoom() {
+        let frames = make_test_frames(100);
+        let mut g = FrameGraph::new(100);
+
+        g.zoom_in();
+        assert_eq!(g.viewport_size(), 50);
+
+        g.zoom_in();
+        assert_eq!(g.viewport_size(), 25);
+
+        g.zoom_out(frames.len());
+        assert_eq!(g.viewport_size(), 50);
+
+        // Zoom out to max
+        for _ in 0..10 {
+            g.zoom_out(frames.len());
+        }
+        assert_eq!(g.viewport_size(), 100); // capped at total frames
+    }
+
+    #[test]
+    fn frame_graph_zoom_minimum() {
+        let mut g = FrameGraph::new(10);
+        g.zoom_in(); // 10 is minimum
+        assert_eq!(g.viewport_size(), 10);
+    }
+
+    #[test]
+    fn frame_graph_select() {
+        let mut g = FrameGraph::new(50);
+        assert!(g.selected_index().is_none());
+
+        g.select(5);
+        assert_eq!(g.selected_index(), Some(5));
+
+        g.deselect();
+        assert!(g.selected_index().is_none());
+    }
+
+    #[test]
+    fn frame_graph_select_out_of_bounds() {
+        let mut g = FrameGraph::new(10);
+        g.select(100); // beyond viewport size
+        assert!(g.selected_index().is_none());
+    }
+
+    #[test]
+    fn frame_graph_tooltip() {
+        let frames = make_test_frames(5);
+        let g = FrameGraph::new(200);
+
+        let tt = g.tooltip(&frames, 0).unwrap();
+        assert_eq!(tt.frame_number, 1);
+        assert!(tt.cpu_ms >= 10.0);
+        assert!(tt.fps > 0.0);
+        assert!(!tt.top_functions.is_empty());
+    }
+
+    #[test]
+    fn frame_graph_tooltip_out_of_bounds() {
+        let frames = make_test_frames(5);
+        let g = FrameGraph::new(200);
+
+        assert!(g.tooltip(&frames, 100).is_none());
+    }
+
+    #[test]
+    fn frame_graph_selected_tooltip() {
+        let frames = make_test_frames(5);
+        let mut g = FrameGraph::new(200);
+
+        assert!(g.selected_tooltip(&frames).is_none());
+
+        g.select(2);
+        let tt = g.selected_tooltip(&frames).unwrap();
+        assert_eq!(tt.frame_number, 3);
+    }
+
+    #[test]
+    fn frame_graph_tooltip_top_functions_sorted() {
+        let mut frame = FrameProfile::new(1);
+        frame.cpu_time = dur_ms(20);
+        frame.add_entry("slow", dur_ms(10), 1);
+        frame.add_entry("fast", dur_ms(1), 1);
+        frame.add_entry("medium", dur_ms(5), 1);
+
+        let g = FrameGraph::new(200);
+        let tt = g.tooltip(&[frame], 0).unwrap();
+        assert_eq!(tt.top_functions[0].0, "slow");
+        assert_eq!(tt.top_functions[1].0, "medium");
+        assert_eq!(tt.top_functions[2].0, "fast");
+    }
+
+    #[test]
+    fn frame_graph_target_line_height() {
+        let mut frames = vec![];
+        let mut f = FrameProfile::new(1);
+        f.cpu_time = dur_ms(33); // exactly 2x target
+        frames.push(f);
+
+        let mut g = FrameGraph::new(200);
+        g.set_target_fps(60.0); // target = 16.67ms
+
+        let h = g.target_line_height(&frames);
+        // y_max ≈ 33 * 1.1 = 36.3, target line ≈ 16.67/36.3 ≈ 0.459
+        assert!(h > 0.3 && h < 0.6, "h={}", h);
+    }
+
+    #[test]
+    fn frame_graph_spike_count() {
+        let mut frames = vec![];
+        for i in 0..10 {
+            let mut f = FrameProfile::new(i + 1);
+            f.cpu_time = dur_ms(if i % 3 == 0 { 50 } else { 10 });
+            frames.push(f);
+        }
+
+        let g = FrameGraph::new(200);
+        let count = g.spike_count(&frames);
+        assert_eq!(count, 4); // frames 0, 3, 6, 9
+    }
+
+    #[test]
+    fn frame_graph_toggle_gpu_physics() {
+        let mut g = FrameGraph::default();
+        assert!(g.show_gpu());
+        g.toggle_gpu();
+        assert!(!g.show_gpu());
+        g.toggle_gpu();
+        assert!(g.show_gpu());
+
+        assert!(g.show_physics());
+        g.toggle_physics();
+        assert!(!g.show_physics());
+    }
+
+    #[test]
+    fn frame_graph_bars_empty_frames() {
+        let g = FrameGraph::new(200);
+        let bars = g.bars(&[]);
+        assert!(bars.is_empty());
+    }
+
+    #[test]
+    fn frame_graph_viewport_clipping() {
+        let frames = make_test_frames(5);
+        let mut g = FrameGraph::new(3);
+        g.scroll_right(2, frames.len());
+
+        let bars = g.bars(&frames);
+        assert_eq!(bars.len(), 3);
+        assert_eq!(bars[0].frame_number, 3);
+        assert_eq!(bars[2].frame_number, 5);
     }
 }

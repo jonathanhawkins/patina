@@ -868,11 +868,11 @@ fn test_pcnuj_property_hints_enum() {
 fn test_pcnuj_inspector_sections() {
     // Verify InspectorSection and CustomPropertyEditor exist
     use gdeditor::inspector::{InspectorSection, CustomPropertyEditor};
-    let section = InspectorSection::new("Test Group")
+    let section = InspectorSection::new_custom("Test Group")
         .with_property(CustomPropertyEditor::new("speed").with_hint(
             gdeditor::inspector::PropertyHint::Range { min: 0, max: 100, step: 1 },
         ));
-    assert_eq!(section.title, "Test Group");
+    assert_eq!(section.name, "Test Group");
     assert_eq!(section.properties.len(), 1);
 }
 

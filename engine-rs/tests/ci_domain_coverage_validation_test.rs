@@ -72,6 +72,8 @@ const DOMAIN_2D_PREFIXES: &[&str] = &[
     "pixel_diff_",
     "visibility_suppression",
     "wgpu_backend_",
+    "viewport_2d_",
+    "viewport_golden_",
 ];
 
 const DOMAIN_3D_PREFIXES: &[&str] = &[
@@ -105,6 +107,7 @@ const DOMAIN_3D_PREFIXES: &[&str] = &[
     "fog_volume_",
     "environment_resource_",
     "voxelgi_",
+    "viewport_3d_",
 ];
 
 const PLATFORM_PREFIXES: &[&str] = &[
@@ -124,7 +127,17 @@ const PLATFORM_PREFIXES: &[&str] = &[
     "web_wasm_",
 ];
 
-const FUZZ_PREFIXES: &[&str] = &["fuzz_property", "fuzz_variant", "property_tests", "robustness"];
+const FUZZ_PREFIXES: &[&str] = &[
+    "fuzz_property",
+    "fuzz_variant",
+    "fuzz_collision",
+    "fuzz_signal",
+    "fuzz_resource",
+    "fuzz_binary",
+    "fuzz_tres",
+    "property_tests",
+    "robustness",
+];
 
 const ORACLE_PREFIXES: &[&str] = &["oracle_parity", "golden_staleness", "oracle_regression"];
 
@@ -154,6 +167,29 @@ const CI_META_PREFIXES: &[&str] = &[
     "v1_acceptance",
     "shader_tokenizer",
     "broader_integration",
+    "animation_",
+    "command_palette_",
+    "community_",
+    "debugger_",
+    "dependency_",
+    "example_",
+    "filesystem_",
+    "import_",
+    "memory_profiler_",
+    "perf_",
+    "rustdoc_",
+    "unsafe_code_",
+    "vcs_",
+    "asset_",
+    "container_",
+    "tilemap_",
+    "undo_redo_",
+    "curve_",
+    "profiler_",
+    "inspector_",
+    "script_editor_",
+    "dock_",
+    "tooling_",
 ];
 
 /// Returns true if `name` matches any prefix in the given set.

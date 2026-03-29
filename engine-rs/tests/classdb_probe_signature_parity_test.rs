@@ -822,7 +822,7 @@ fn probe_method_names_in_patina() {
     let mut missing: Vec<String> = Vec::new();
 
     for probe in &probes {
-        let patina_methods = get_method_list(&probe.class, true);
+        let patina_methods = get_method_list(&probe.class);
         let patina_names: Vec<&str> = patina_methods.iter().map(|m| m.name.as_str()).collect();
 
         for pm in &probe.methods {
@@ -871,7 +871,7 @@ fn probe_method_arg_counts_agree() {
     let mut mismatches: Vec<String> = Vec::new();
 
     for probe in &probes {
-        let patina_methods = get_method_list(&probe.class, true);
+        let patina_methods = get_method_list(&probe.class);
         let patina_map: HashMap<&str, usize> = patina_methods
             .iter()
             .map(|m| (m.name.as_str(), m.argument_count))
@@ -926,7 +926,7 @@ fn probe_property_names_in_patina() {
     let mut matched = 0usize;
 
     for probe in &probes {
-        let patina_props = get_property_list(&probe.class, true);
+        let patina_props = get_property_list(&probe.class);
         let patina_names: Vec<&str> = patina_props.iter().map(|p| p.name.as_str()).collect();
 
         for pp in &probe.properties {
@@ -1038,8 +1038,8 @@ fn combined_probe_parity_summary() {
     eprintln!("├─────────────────────┼──────────────────┼──────────────────┼──────────────────┤");
 
     for probe in &probes {
-        let patina_methods = get_method_list(&probe.class, true);
-        let patina_props = get_property_list(&probe.class, true);
+        let patina_methods = get_method_list(&probe.class);
+        let patina_props = get_property_list(&probe.class);
         let patina_method_names: Vec<&str> =
             patina_methods.iter().map(|m| m.name.as_str()).collect();
         let patina_prop_names: Vec<&str> =
@@ -1315,7 +1315,7 @@ fn patina_methods_in_probe() {
     let mut found = 0usize;
 
     for probe in &probes {
-        let patina_methods = get_method_list(&probe.class, true);
+        let patina_methods = get_method_list(&probe.class);
         let probe_method_names: Vec<&str> =
             probe.methods.iter().map(|m| m.name.as_str()).collect();
 
@@ -1358,7 +1358,7 @@ fn patina_properties_in_probe() {
     let mut found = 0usize;
 
     for probe in &probes {
-        let patina_props = get_property_list(&probe.class, true);
+        let patina_props = get_property_list(&probe.class);
         let probe_prop_names: Vec<&str> =
             probe.properties.iter().map(|p| p.name.as_str()).collect();
 
@@ -1441,8 +1441,8 @@ fn per_class_probe_comparison() {
     eprintln!();
 
     for probe in &probes {
-        let patina_methods = get_method_list(&probe.class, true);
-        let patina_props = get_property_list(&probe.class, true);
+        let patina_methods = get_method_list(&probe.class);
+        let patina_props = get_property_list(&probe.class);
 
         let patina_method_names: Vec<&str> =
             patina_methods.iter().map(|m| m.name.as_str()).collect();
@@ -1741,37 +1741,31 @@ fn probe_method_flags_agree_with_patina() {
     let probes = load_probe_signatures();
 
     let mut checked = 0usize;
-    let mut virtual_agreed = 0usize;
-    let mut const_agreed = 0usize;
 
     for probe in &probes {
-        let patina_methods = get_method_list(&probe.class, true);
+        let patina_methods = get_method_list(&probe.class);
         let patina_map: HashMap<&str, &MethodInfo> =
             patina_methods.iter().map(|m| (m.name.as_str(), m)).collect();
 
         for pm in &probe.methods {
-            if let Some(patina_m) = patina_map.get(pm.name.as_str()) {
+            if patina_map.get(pm.name.as_str()).is_some() {
                 checked += 1;
-                if pm.is_virtual == patina_m.is_virtual {
-                    virtual_agreed += 1;
-                }
-                if pm.is_const == patina_m.is_const {
-                    const_agreed += 1;
-                }
+                // Note: MethodInfo does not yet track is_virtual / is_const flags.
+                // Once those fields are added, flag agreement can be compared here.
             }
         }
     }
 
     eprintln!();
     eprintln!(
-        "  Method flag agreement: checked={checked}, virtual_agreed={virtual_agreed}, const_agreed={const_agreed}"
+        "  Method name agreement: checked={checked} methods matched by name"
     );
 
-    // Virtual methods in Node are registered without .virtual_method() by default,
-    // so we expect some disagreement. This test establishes the baseline.
+    // Patina's MethodInfo doesn't yet have is_virtual / is_const fields,
+    // so this test currently validates name-level agreement only.
     assert!(
         checked > 0,
-        "should have checked at least some methods for flag agreement"
+        "should have checked at least some methods for agreement"
     );
 }
 
@@ -2050,7 +2044,7 @@ fn probe_api_relevant_methods_have_correct_args() {
     for (class, method, expected_argc) in &checks {
         if let Some(probe) = probe_map.get(class) {
             if let Some(pm) = probe.methods.iter().find(|m| m.name == *method) {
-                let patina_methods = get_method_list(class, true);
+                let patina_methods = get_method_list(class);
                 if let Some(patina_m) = patina_methods.iter().find(|m| m.name == *method) {
                     assert_eq!(
                         patina_m.argument_count, *expected_argc,

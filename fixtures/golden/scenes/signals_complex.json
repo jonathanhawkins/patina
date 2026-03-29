@@ -1,57 +1,76 @@
 {
-  "fixture_id": "scene_signals_complex",
   "capture_type": "scene_tree",
-  "upstream_version": "pending",
+  "fixture_id": "scene_signals_complex",
+  "generated_at": "2026-03-22T08:00:00+00:00",
   "nodes": [
     {
-      "name": "Root",
-      "class": "Node",
-      "path": "/root/Root",
       "children": [
         {
-          "name": "Player",
-          "class": "Node2D",
-          "path": "/root/Root/Player",
           "children": [
             {
-              "name": "TriggerZone",
-              "class": "Node2D",
-              "path": "/root/Root/Player/TriggerZone",
               "children": [],
+              "class": "Node2D",
+              "name": "TriggerZone",
+              "path": "/root/Root/Player/TriggerZone",
               "properties": {}
             }
           ],
-          "properties": {
-            "position": { "type": "Vector2", "value": [200.0, 300.0] }
-          }
-        },
-        {
-          "name": "Enemy",
           "class": "Node2D",
-          "path": "/root/Root/Enemy",
-          "children": [],
+          "name": "Player",
+          "path": "/root/Root/Player",
           "properties": {
-            "position": { "type": "Vector2", "value": [600.0, 300.0] }
+            "position": {
+              "type": "Vector2",
+              "value": [
+                200.0,
+                300.0
+              ]
+            }
           }
         },
         {
-          "name": "HUD",
-          "class": "Node",
-          "path": "/root/Root/HUD",
           "children": [],
+          "class": "Node2D",
+          "name": "Enemy",
+          "path": "/root/Root/Enemy",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [
+                600.0,
+                300.0
+              ]
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "Node",
+          "name": "HUD",
+          "path": "/root/Root/HUD",
           "properties": {}
         },
         {
-          "name": "ItemDrop",
-          "class": "Node2D",
-          "path": "/root/Root/ItemDrop",
           "children": [],
+          "class": "Node2D",
+          "name": "ItemDrop",
+          "path": "/root/Root/ItemDrop",
           "properties": {
-            "position": { "type": "Vector2", "value": [400.0, 200.0] }
+            "position": {
+              "type": "Vector2",
+              "value": [
+                400.0,
+                200.0
+              ]
+            }
           }
         }
       ],
+      "class": "Node",
+      "name": "Root",
+      "path": "/root/Root",
       "properties": {}
     }
-  ]
+  ],
+  "upstream_version": "4.6.1-stable"
 }

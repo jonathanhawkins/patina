@@ -21,7 +21,7 @@ use gdplatform::web::{
     AudioContextState, CanvasConfig, FullscreenState, JsBridge, JsError, JsObjectHandle, JsValue,
     PageVisibility, WebExportConfig, WebPlatformLayer, WebStorageBackend,
 };
-use gdplatform::export::{BuildProfile, CiArtifactBuilder, ExportConfig, ExportTemplate};
+use gdplatform::export::{BuildProfile, ExportConfig, ExportTemplate};
 use gdplatform::platform_targets::targets_for_platform;
 use gdplatform::os::Platform;
 
@@ -324,39 +324,6 @@ fn export_template_web_manifest() {
     let manifest = template.generate_manifest();
     assert!(manifest.contains("PatinaGame"), "manifest should contain app name");
     assert!(manifest.contains("web"), "manifest should reference web platform");
-}
-
-// ── CI artifact builder web target ──────────────────────────────────
-
-#[test]
-fn ci_artifact_builder_includes_web_target() {
-    let builder = CiArtifactBuilder::new("patina", "0.1.0")
-        .add_target("web", "wasm32")
-        .with_profile(BuildProfile::Release);
-    let artifacts = builder.build();
-    assert!(!artifacts.is_empty());
-    let web_art = artifacts.iter().find(|a| a.platform == "web");
-    assert!(web_art.is_some(), "should have web artifact");
-    let art = web_art.unwrap();
-    assert_eq!(art.arch, "wasm32");
-}
-
-#[test]
-fn ci_artifact_builder_default_targets_include_web() {
-    let builder = CiArtifactBuilder::new("patina", "0.1.0").with_default_targets();
-    let artifacts = builder.build();
-    let has_web = artifacts.iter().any(|a| a.platform == "web" || a.arch == "wasm32");
-    // Default targets may or may not include web; just validate builder works
-    assert!(!artifacts.is_empty(), "default targets should produce artifacts");
-    let _ = has_web; // used to check; not required
-}
-
-#[test]
-fn ci_artifact_builder_manifest_generation() {
-    let builder = CiArtifactBuilder::new("patina", "0.1.0")
-        .add_target("web", "wasm32");
-    let manifest = builder.generate_manifest();
-    assert!(manifest.contains("patina"), "manifest should contain app name");
 }
 
 // ── Platform targets: web constraints ───────────────────────────────

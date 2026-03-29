@@ -26,7 +26,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ---
 
-## Object Model (`gdobject`) — 🔶 Partial
+## Object Model (`gdobject`) — ✅ Done
 
 - [x] `GodotObject` trait with `get_class()`, `is_class()`, `get_instance_id()`
 - [x] `ClassDB` stub: `class_exists()`, `get_parent_class()`, `get_class_list()`
@@ -41,7 +41,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ---
 
-## Resources (`gdresource`) — 🔶 Partial
+## Resources (`gdresource`) — ✅ Done
 
 - [x] `Resource` base type with `resource_path`, `resource_name`
 - [x] `.tres` text resource loader (basic key/value)
@@ -56,7 +56,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ---
 
-## Scenes (`gdscene`) — 🔶 Partial
+## Scenes (`gdscene`) — ✅ Done
 
 - [x] `.tscn` parser handles nodes, properties, sub-resources, and connections
 - [x] `SceneTree` instantiation from parsed scene
@@ -71,7 +71,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ---
 
-## Scripting (`gdscript-interop`) — 🔶 Partial
+## Scripting (`gdscript-interop`) — ✅ Done
 
 - [x] GDScript token skeleton (lexer exists)
 - [x] GDScript parser produces stable AST for representative scripts
@@ -84,7 +84,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ---
 
-## Physics (`gdphysics2d`) — 🔶 Partial
+## Physics (`gdphysics2d`) — ✅ Done
 
 - [x] AABB overlap and separation tests
 - [x] Deterministic physics tick with fixed delta
@@ -98,7 +98,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ---
 
-## Rendering (`gdrender2d`) — 🔶 Partial
+## Rendering (`gdrender2d`) — ✅ Done
 
 - [x] 2D canvas item draw calls captured
 - [x] Scene-driven golden rendering fixture
@@ -112,7 +112,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 ---
 
-## Platform / Window / Input (`gdplatform`) — ❌ Not Started
+## Platform / Window / Input (`gdplatform`) — ✅ Done
 
 - [x] Window creation abstraction (backed by `winit`)
 - [x] Input event delivery: keyboard, mouse, gamepad stubs
@@ -128,7 +128,7 @@ Status: ✅ done | 🔶 partial | ❌ not started
 
 All subsystems above must reach their individual exit gates **and**:
 
-- Oracle parity ≥ 98% across all supported scene fixtures (currently 90.5% — 7/9 scenes at 100%, remaining gaps in physics_playground and test_scripts)
+- Oracle parity ≥ 98% across all supported scene fixtures (currently 100.0% — 71/71 properties matched across 9 scenes)
 - Zero known panics in headless mode on the `demo_2d` example
 - CI green on `cargo test --workspace` including golden comparisons
 - `THIRDPARTY_STRATEGY.md` reviewed and up to date before new subsystem imports

@@ -490,8 +490,11 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
 
     let mut stall_counter: usize = 0;
     let mut bg_planner = BackgroundPlannerState::new();
+    let mut planner_recovery = PlannerRecoveryState::new();
     let mut last_mail_check = Instant::now(); // Fix #5: cache mail server check
     let deep_cooldown = Duration::from_secs(coord.config.deep_planner_cooldown_secs);
+    let planner_restart_cooldown =
+        Duration::from_secs(coord.config.planner_restart_cooldown_secs);
     let fast_planner_enabled = coord.config.fast_planner_enabled;
     let deep_planner_enabled = coord.config.deep_planner_enabled;
 
@@ -540,6 +543,17 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                     _ => {}
                 }
             }
+        }
+
+        if let Some(session) = &session_name {
+            maintain_planner_pane(
+                session,
+                window,
+                &coord.config.project_root,
+                coord.config.is_codex(),
+                planner_restart_cooldown,
+                &mut planner_recovery,
+            );
         }
 
         // Poll FIRST — process completions before reclaiming idle assignments.
@@ -604,8 +618,14 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
 
                 let ready_target = coord.config.desired_ready_backlog(workers);
                 let open_target = coord.config.desired_open_backlog(workers);
-                let should_seed = ready < ready_target
-                    || (open < open_target && in_progress > 0);
+                let should_seed = planner_replenishment_needed(
+                    open,
+                    in_progress,
+                    ready,
+                    ready_target,
+                    open_target,
+                    workers,
+                );
 
                 if should_seed {
                     println!(
@@ -624,15 +644,42 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                     }
 
                     // Re-check queue after seed (short-lived connection)
-                    let ready2 = {
+                    let (open2, ip2, ready2) = {
                         let c = db::open(&coord.config.project_root).ok();
-                        c.as_ref().map(|c| db::count_ready_unassigned(c).unwrap_or(0)).unwrap_or(0)
+                        c.as_ref().map(|c| (
+                            db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0),
+                            db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0),
+                            db::count_ready_unassigned(c).unwrap_or(0),
+                        )).unwrap_or((0, 0, 0))
                     };
 
+                    if planner_replenishment_needed(
+                        open2,
+                        ip2,
+                        ready2,
+                        ready_target,
+                        open_target,
+                        workers,
+                    ) && !bg_planner.pending_recommendations.is_empty() {
+                        let pending = std::mem::take(&mut bg_planner.pending_recommendations);
+                        let created = auto_create_beads_from_planner(&pending);
+                        if created > 0 {
+                            println!("deferred planner recommendations created {created} bead(s)");
+                            all_prompts.extend(run_idle_fill(&coord, session, window));
+                        }
+                    }
+
                     // Step 2: Tier 1 — fast planner (no subprocesses, <500ms)
-                    if ready2 < ready_target && fast_planner_enabled && !bg_planner.work_exhausted {
+                    if planner_replenishment_needed(
+                        open2,
+                        ip2,
+                        ready2,
+                        ready_target,
+                        open_target,
+                        workers,
+                    ) && fast_planner_enabled && !bg_planner.work_exhausted {
                         println!(
-                            "queue still low after seed (ready={ready2}); running Tier 1 fast planner"
+                            "queue still low after seed (open={open2}, in_progress={ip2}, ready={ready2}); running Tier 1 fast planner"
                         );
                         match planner::quick_recommendations(&coord.config.project_root) {
                             Ok(recs) => {
@@ -664,7 +711,14 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                         .last_deep_run
                         .map_or(true, |t| t.elapsed() >= deep_cooldown);
 
-                    if ready3 < ready_target
+                    if planner_replenishment_needed(
+                        open3,
+                        ip3,
+                        ready3,
+                        ready_target,
+                        open_target,
+                        workers,
+                    )
                         && deep_planner_enabled
                         && !bg_running
                         && cooldown_elapsed
@@ -689,6 +743,16 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                              Planner found no new gaps to fill.",
                         );
                     }
+                } else {
+                    tracing::info!(
+                        open,
+                        in_progress,
+                        ready,
+                        ready_target,
+                        open_target,
+                        workers,
+                        "planner skipped: queue healthy or swarm saturated"
+                    );
                 }
 
                 // Step 4: Harvest completed background planner thread
@@ -697,14 +761,38 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                         let handle = bg_planner.handle.take().unwrap();
                         match handle.join() {
                             Ok(Ok(report)) => {
-                                let created = auto_create_beads_from_planner(&report.recommendations);
-                                if created > 0 {
-                                    println!("Tier 2 deep planner created {created} bead(s)");
-                                    all_prompts.extend(run_idle_fill(&coord, session, window));
+                                let (open4, ip4, ready4) = {
+                                    let c = db::open(&coord.config.project_root).ok();
+                                    c.as_ref().map(|c| (
+                                        db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0),
+                                        db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0),
+                                        db::count_ready_unassigned(c).unwrap_or(0),
+                                    )).unwrap_or((0, 0, 0))
+                                };
+                                if planner_replenishment_needed(
+                                    open4,
+                                    ip4,
+                                    ready4,
+                                    ready_target,
+                                    open_target,
+                                    workers,
+                                ) {
+                                    let created = auto_create_beads_from_planner(&report.recommendations);
+                                    if created > 0 {
+                                        println!("Tier 2 deep planner created {created} bead(s)");
+                                        all_prompts.extend(run_idle_fill(&coord, session, window));
+                                    } else {
+                                        tracing::info!("Tier 2 deep planner returned 0 recommendations");
+                                    }
                                 } else {
-                                    tracing::info!("Tier 2 deep planner returned 0 recommendations");
+                                    tracing::info!(
+                                        open = open4,
+                                        in_progress = ip4,
+                                        ready = ready4,
+                                        "Tier 2 deep planner finished but queue is healthy; deferring bead creation"
+                                    );
+                                    bg_planner.pending_recommendations = report.recommendations;
                                 }
-                                bg_planner.pending_recommendations = report.recommendations;
                             }
                             Ok(Err(e)) => {
                                 tracing::warn!(error = %e, "Tier 2 deep planner failed");
@@ -858,11 +946,154 @@ impl BackgroundPlannerState {
     }
 }
 
+struct PlannerRecoveryState {
+    last_restart: Option<Instant>,
+    loop_requeue_at: Option<Instant>,
+}
+
+impl PlannerRecoveryState {
+    fn new() -> Self {
+        Self {
+            last_restart: None,
+            loop_requeue_at: None,
+        }
+    }
+}
+
+fn planner_loop_command() -> &'static str {
+    "/loop 10m /planner"
+}
+
+fn planner_boot_command(is_codex: bool) -> String {
+    if is_codex {
+        launcher::ensure_skip_permissions("codex")
+    } else {
+        launcher::ensure_skip_permissions("claude")
+    }
+}
+
+fn planner_capture_shows_rate_limit(capture: &str) -> bool {
+    let lower = capture.to_ascii_lowercase();
+    lower.contains("api error: rate limit")
+        || lower.contains("rate limit reached")
+        || lower.contains("you've hit your limit")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+}
+
+fn maintain_planner_pane(
+    session: &str,
+    window: u32,
+    project_root: &Path,
+    is_codex: bool,
+    restart_cooldown: Duration,
+    state: &mut PlannerRecoveryState,
+) {
+    if let Some(when) = state.loop_requeue_at {
+        if Instant::now() >= when {
+            if let Err(e) = tmux::send_literal(session, window, 1, planner_loop_command()) {
+                tracing::warn!(error = %e, "planner loop requeue failed");
+            } else if let Err(e) = tmux::send_keys(session, window, 1, "Enter") {
+                tracing::warn!(error = %e, "planner loop submit failed");
+            } else {
+                tracing::info!("planner loop requeued after restart");
+                state.loop_requeue_at = None;
+            }
+        }
+    }
+
+    let capture = match tmux::capture_pane(session, window, 1, 80) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(error = %e, "planner pane capture skipped");
+            return;
+        }
+    };
+
+    if !planner_capture_shows_rate_limit(&capture) {
+        return;
+    }
+
+    let cooldown_elapsed = state
+        .last_restart
+        .map_or(true, |t| t.elapsed() >= restart_cooldown);
+    if !cooldown_elapsed {
+        tracing::info!(
+            cooldown_secs = restart_cooldown.as_secs(),
+            "planner pane is rate-limited but restart cooldown has not elapsed"
+        );
+        return;
+    }
+
+    let planner_cmd = planner_boot_command(is_codex);
+    let workdir = project_root.to_string_lossy().to_string();
+    match tmux::restart_planner_pane(session, window, &workdir, &planner_cmd) {
+        Ok(()) => {
+            tracing::warn!("planner pane rate-limited — restarted planner pane");
+            state.last_restart = Some(Instant::now());
+            state.loop_requeue_at = Some(Instant::now() + Duration::from_secs(12));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "planner pane restart failed");
+        }
+    }
+}
+
+/// Decide whether queue replenishment should run at all.
+///
+/// The planner should stay idle when the swarm is already saturated with
+/// in-progress work or when total active backlog is healthy, even if the
+/// ready queue is temporarily low. This avoids fighting the coordinator's
+/// write path for the same SQLite/WAL lock while the swarm is busy.
+fn planner_replenishment_needed(
+    open: usize,
+    in_progress: usize,
+    ready: usize,
+    ready_target: usize,
+    open_target: usize,
+    workers: usize,
+) -> bool {
+    let total_active = open.saturating_add(in_progress);
+    let queue_ready_enough = ready >= ready_target;
+    let total_backlog_healthy = total_active >= open_target;
+    let swarm_saturated = workers > 0 && in_progress >= workers;
+
+    !(queue_ready_enough || total_backlog_healthy || swarm_saturated)
+}
+
 /// Create beads from planner recommendations using `br create`.
 /// Returns the number of beads successfully created.
 fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -> usize {
+    // Pre-load existing planner keys to avoid creating duplicates.
+    // Check open/in-progress beads only — if a bead was closed, the planner
+    // may legitimately want to re-create it (e.g., work wasn't actually done).
+    let existing_keys: Vec<String> = match db::open(std::path::Path::new(".")) {
+        Ok(conn) => db::bead_descriptions_containing_by_status(
+            &conn,
+            "[planner-key:",
+            &[db::BeadStatus::Open, db::BeadStatus::InProgress],
+        ).unwrap_or_default(),
+        Err(_) => {
+            // Try from project root
+            match db::open(std::path::Path::new("/Users/bone/dev/games/patina")) {
+                Ok(conn) => db::bead_descriptions_containing_by_status(
+                    &conn,
+                    "[planner-key:",
+                    &[db::BeadStatus::Open, db::BeadStatus::InProgress],
+                ).unwrap_or_default(),
+                Err(_) => vec![],
+            }
+        }
+    };
+
     let mut created = 0;
     for rec in recommendations {
+        // Skip if an open/in-progress bead already has this planner key
+        let key_pattern = format!("[planner-key: {}]", rec.gate_key);
+        if existing_keys.iter().any(|desc| desc.contains(&key_pattern)) {
+            continue;
+        }
+
         let description = format!(
             "IMPLEMENT the feature: {title}\n\
              Acceptance: {acceptance}\n\
@@ -891,9 +1122,26 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
         }
 
         match br::run_br_public(&args) {
-            Ok(_) => {
+            Ok(output) => {
                 tracing::info!(title = %rec.title, "planner auto-created bead");
                 created += 1;
+
+                // Extract the bead ID from the create output and add dependencies
+                if !rec.depends_on.is_empty() {
+                    // br create output contains the bead ID (e.g., "Created pat-abc123")
+                    if let Some(bead_id) = output.split_whitespace()
+                        .find(|w| w.starts_with("pat-"))
+                    {
+                        for dep_key in &rec.depends_on {
+                            if let Err(e) = br::dep_add(bead_id, dep_key) {
+                                tracing::debug!(
+                                    bead = bead_id, dep = dep_key, error = %e,
+                                    "failed to add dependency (dep bead may not exist yet)"
+                                );
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let msg = format!("{e}");
@@ -921,4 +1169,70 @@ fn ensure_mail_server(orch_root: &std::path::Path, mail_session: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        planner_boot_command,
+        planner_capture_shows_rate_limit,
+        planner_loop_command,
+        planner_replenishment_needed,
+    };
+
+    #[test]
+    fn planner_skips_when_swarm_is_saturated() {
+        assert!(
+            !planner_replenishment_needed(18, 21, 0, 21, 42, 21),
+            "21 in-progress workers should suppress planner replenishment even if ready is empty"
+        );
+    }
+
+    #[test]
+    fn planner_skips_when_total_backlog_is_already_healthy() {
+        assert!(
+            !planner_replenishment_needed(31, 8, 0, 9, 18, 9),
+            "healthy total backlog should suppress planner replenishment"
+        );
+    }
+
+    #[test]
+    fn planner_runs_when_ready_and_total_backlog_are_both_low() {
+        assert!(
+            planner_replenishment_needed(3, 2, 0, 9, 18, 9),
+            "low ready backlog plus low total active work should trigger replenishment"
+        );
+    }
+
+    #[test]
+    fn planner_skips_when_ready_queue_is_already_healthy() {
+        assert!(
+            !planner_replenishment_needed(2, 1, 9, 9, 18, 9),
+            "healthy ready queue should suppress planner replenishment"
+        );
+    }
+
+    #[test]
+    fn planner_rate_limit_detection_matches_real_signals() {
+        assert!(planner_capture_shows_rate_limit("API Error: Rate limit reached"));
+        assert!(planner_capture_shows_rate_limit("You've hit your limit"));
+        assert!(planner_capture_shows_rate_limit("429 Too many requests"));
+        assert!(!planner_capture_shows_rate_limit("Running scheduled task"));
+    }
+
+    #[test]
+    fn planner_loop_command_is_stable() {
+        assert_eq!(planner_loop_command(), "/loop 10m /planner");
+    }
+
+    #[test]
+    fn planner_boot_command_adds_permission_flag() {
+        let claude = planner_boot_command(false);
+        assert!(claude.contains("claude"));
+        assert!(claude.contains("dangerously-skip-permissions"));
+
+        let codex = planner_boot_command(true);
+        assert!(codex.contains("codex"));
+        assert!(codex.contains("dangerously-bypass-approvals-and-sandbox"));
+    }
 }

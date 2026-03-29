@@ -3184,12 +3184,26 @@ impl Interpreter {
                     let valid = match &**callable_ref {
                         CallableRef::Method { method, .. } => !method.is_empty(),
                         CallableRef::Lambda { .. } => true,
+                        CallableRef::Bound { inner, .. }
+                        | CallableRef::Unbound { inner, .. } => {
+                            match inner.inner_callable() {
+                                CallableRef::Method { method, .. } => !method.is_empty(),
+                                _ => true,
+                            }
+                        }
                     };
                     Ok(Variant::Bool(valid))
                 }
                 "get_method" => match &**callable_ref {
                     CallableRef::Method { method, .. } => Ok(Variant::String(method.clone())),
                     CallableRef::Lambda { .. } => Ok(Variant::String("<lambda>".into())),
+                    CallableRef::Bound { inner, .. }
+                    | CallableRef::Unbound { inner, .. } => {
+                        match inner.inner_callable() {
+                            CallableRef::Method { method, .. } => Ok(Variant::String(method.clone())),
+                            _ => Ok(Variant::String("<lambda>".into())),
+                        }
+                    }
                 },
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("Callable.{method}"),
@@ -3266,6 +3280,14 @@ impl Interpreter {
                 self.environment.pop_scope();
                 self.call_depth -= 1;
                 Ok(return_val)
+            }
+            CallableRef::Bound { inner, bound_args } => {
+                let resolved = callable.resolve_args(args);
+                self.invoke_callable(inner, &resolved)
+            }
+            CallableRef::Unbound { inner, .. } => {
+                let resolved = callable.resolve_args(args);
+                self.invoke_callable(inner, &resolved)
             }
         }
     }

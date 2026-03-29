@@ -622,6 +622,7 @@ fn all_3d_fixtures_parse_successfully() {
         "animated_scene_3d.tscn",
         "physics_playground_extended.tscn",
         "foggy_terrain_3d.tscn",
+        "csg_composition.tscn",
     ] {
         let path = fixture_path(fixture);
         let source = std::fs::read_to_string(&path)
@@ -654,10 +655,11 @@ fn corpus_has_at_least_10_scenes() {
         "animated_scene_3d.tscn",
         "physics_playground_extended.tscn",
         "foggy_terrain_3d.tscn",
+        "csg_composition.tscn",
     ];
     assert!(
-        fixtures.len() >= 11,
-        "corpus must have at least 11 representative 3D scenes, got {}",
+        fixtures.len() >= 12,
+        "corpus must have at least 12 representative 3D scenes, got {}",
         fixtures.len()
     );
     for f in &fixtures {
@@ -684,10 +686,16 @@ fn all_3d_golden_scenes_valid_json() {
         "animated_scene_3d",
         "physics_playground_extended",
         "foggy_terrain_3d",
+        "csg_composition",
     ] {
         let golden = load_golden_scene(name);
+        // Some golden files use "data.nodes", others use flat "nodes"
+        let nodes = golden["data"]["nodes"]
+            .as_array()
+            .or_else(|| golden["nodes"].as_array())
+            .unwrap_or_else(|| panic!("{} golden has no nodes array", name));
         assert!(
-            golden["data"]["nodes"].as_array().unwrap().len() > 0,
+            !nodes.is_empty(),
             "{} golden has no nodes",
             name
         );
@@ -732,6 +740,7 @@ fn fixture_corpus_covers_all_3d_node_classes() {
         "animated_scene_3d.tscn",
         "physics_playground_extended.tscn",
         "foggy_terrain_3d.tscn",
+        "csg_composition.tscn",
     ] {
         let tree = load_tscn_to_tree(fixture);
         for node_id in tree.all_nodes_in_tree_order() {
@@ -741,7 +750,7 @@ fn fixture_corpus_covers_all_3d_node_classes() {
         }
     }
 
-    // The corpus must collectively cover these 3D classes
+    // The corpus must collectively cover these 3D classes from the Phase 6 audit
     for required in &[
         "Node3D",
         "Camera3D",
@@ -756,6 +765,9 @@ fn fixture_corpus_covers_all_3d_node_classes() {
         "AnimationPlayer",
         "FogVolume",
         "WorldEnvironment",
+        "CSGCombiner3D",
+        "CSGBox3D",
+        "ReflectionProbe",
     ] {
         assert!(
             seen_classes.contains(*required),
@@ -1084,4 +1096,230 @@ fn golden_foggy_terrain_3d_has_fog_and_environment() {
         classes.contains(&"WorldEnvironment"),
         "missing WorldEnvironment in golden"
     );
+}
+
+// ===========================================================================
+// 15. CSG composition fixture — CSG families + ReflectionProbe
+// ===========================================================================
+
+#[test]
+fn csg_composition_tscn_exists() {
+    assert!(std::path::Path::new(&fixture_path("csg_composition.tscn")).exists());
+}
+
+#[test]
+fn csg_composition_loads_all_nodes() {
+    let _g = setup();
+    let tree = load_tscn_to_tree("csg_composition.tscn");
+
+    assert!(tree.get_node_by_path("/root/CSGWorld").is_some());
+    assert!(tree
+        .get_node_by_path("/root/CSGWorld/Combiner")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/CSGWorld/Combiner/Box")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/CSGWorld/Combiner/Sphere")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/CSGWorld/Combiner/Cylinder")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/CSGWorld/Standalone")
+        .is_some());
+    assert!(tree.get_node_by_path("/root/CSGWorld/Probe").is_some());
+}
+
+#[test]
+fn csg_composition_node_classes() {
+    let _g = setup();
+    let tree = load_tscn_to_tree("csg_composition.tscn");
+
+    let combiner_id = tree
+        .get_node_by_path("/root/CSGWorld/Combiner")
+        .unwrap();
+    assert_eq!(
+        tree.get_node(combiner_id).unwrap().class_name(),
+        "CSGCombiner3D"
+    );
+
+    let box_id = tree
+        .get_node_by_path("/root/CSGWorld/Combiner/Box")
+        .unwrap();
+    assert_eq!(tree.get_node(box_id).unwrap().class_name(), "CSGBox3D");
+
+    let sphere_id = tree
+        .get_node_by_path("/root/CSGWorld/Combiner/Sphere")
+        .unwrap();
+    assert_eq!(
+        tree.get_node(sphere_id).unwrap().class_name(),
+        "CSGSphere3D"
+    );
+
+    let probe_id = tree
+        .get_node_by_path("/root/CSGWorld/Probe")
+        .unwrap();
+    assert_eq!(
+        tree.get_node(probe_id).unwrap().class_name(),
+        "ReflectionProbe"
+    );
+}
+
+#[test]
+fn golden_csg_composition_valid() {
+    let golden = load_golden_scene("csg_composition");
+    // csg_composition golden uses flat "nodes" key (not nested under "data")
+    let nodes = golden["nodes"]
+        .as_array()
+        .or_else(|| golden["data"]["nodes"].as_array())
+        .expect("csg_composition golden must have nodes array");
+    assert!(
+        !nodes.is_empty(),
+        "csg_composition golden has no nodes"
+    );
+}
+
+/// Recursively collect all "class" values from a nested node tree.
+fn collect_classes(node: &serde_json::Value, out: &mut Vec<String>) {
+    if let Some(class) = node["class"].as_str() {
+        out.push(class.to_string());
+    }
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            collect_classes(child, out);
+        }
+    }
+}
+
+#[test]
+fn golden_csg_composition_has_csg_and_probe() {
+    let golden = load_golden_scene("csg_composition");
+    let nodes = golden["nodes"]
+        .as_array()
+        .or_else(|| golden["data"]["nodes"].as_array())
+        .expect("csg_composition golden must have nodes array");
+
+    let mut classes = Vec::new();
+    for node in nodes {
+        collect_classes(node, &mut classes);
+    }
+    assert!(
+        classes.iter().any(|c| c == "CSGCombiner3D"),
+        "missing CSGCombiner3D in golden (found: {:?})",
+        classes
+    );
+    assert!(
+        classes.iter().any(|c| c == "CSGBox3D"),
+        "missing CSGBox3D in golden (found: {:?})",
+        classes
+    );
+    assert!(
+        classes.iter().any(|c| c == "ReflectionProbe"),
+        "missing ReflectionProbe in golden (found: {:?})",
+        classes
+    );
+}
+
+// ===========================================================================
+// 16. Corpus ↔ Phase 6 audit mapping validation
+// ===========================================================================
+
+/// Validates that the corpus definition in prd/PHASE6_3D_PARITY_AUDIT.md
+/// stays in sync with the actual fixture corpus and audited class families.
+#[test]
+fn fixture_corpus_maps_to_audited_families() {
+    let audit_path = format!(
+        "{}/../prd/PHASE6_3D_PARITY_AUDIT.md",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let audit = std::fs::read_to_string(&audit_path)
+        .expect("should read PHASE6_3D_PARITY_AUDIT.md");
+
+    // The audit must contain the corpus definition section
+    assert!(
+        audit.contains("## 3D Fixture Corpus Definition"),
+        "PHASE6_3D_PARITY_AUDIT.md must contain '## 3D Fixture Corpus Definition'"
+    );
+
+    // The audit must reference each corpus fixture
+    for fixture in &[
+        "minimal_3d.tscn",
+        "indoor_3d.tscn",
+        "physics_3d_playground.tscn",
+        "multi_light_3d.tscn",
+        "hierarchy_3d.tscn",
+        "outdoor_3d.tscn",
+        "vehicle_3d.tscn",
+        "spotlight_gallery_3d.tscn",
+        "animated_scene_3d.tscn",
+        "physics_playground_extended.tscn",
+        "foggy_terrain_3d.tscn",
+        "csg_composition.tscn",
+    ] {
+        assert!(
+            audit.contains(fixture),
+            "PHASE6_3D_PARITY_AUDIT.md corpus section must reference {}",
+            fixture
+        );
+    }
+
+    // The audit must reference the coverage map for each measured family
+    for family in &[
+        "Node3D",
+        "Camera3D",
+        "MeshInstance3D",
+        "DirectionalLight3D",
+        "OmniLight3D",
+        "SpotLight3D",
+        "RigidBody3D",
+        "StaticBody3D",
+        "CollisionShape3D",
+        "Skeleton3D",
+        "FogVolume",
+        "WorldEnvironment",
+        "ReflectionProbe",
+    ] {
+        assert!(
+            audit.contains(family),
+            "PHASE6_3D_PARITY_AUDIT.md must reference audited family {}",
+            family
+        );
+    }
+}
+
+/// Validates that every corpus fixture has a matching golden JSON file.
+#[test]
+fn all_corpus_fixtures_have_golden_json() {
+    for name in &[
+        "minimal_3d",
+        "indoor_3d",
+        "physics_3d_playground",
+        "multi_light_3d",
+        "hierarchy_3d",
+        "outdoor_3d",
+        "vehicle_3d",
+        "spotlight_gallery_3d",
+        "animated_scene_3d",
+        "physics_playground_extended",
+        "foggy_terrain_3d",
+        "csg_composition",
+    ] {
+        let golden_path = golden_scene_path(name);
+        assert!(
+            std::path::Path::new(&golden_path).exists(),
+            "corpus fixture {} must have golden JSON at {}",
+            name,
+            golden_path
+        );
+        let golden = load_golden_scene(name);
+        // Some golden files use "data.nodes", others use flat "nodes"
+        let has_nodes = golden["data"]["nodes"].as_array().is_some()
+            || golden["nodes"].as_array().is_some();
+        assert!(
+            has_nodes,
+            "{} golden must have nodes array (checked data.nodes and nodes)",
+            name
+        );
+    }
 }

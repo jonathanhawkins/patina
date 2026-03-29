@@ -29,6 +29,8 @@ pub mod node3d;
 pub mod packed_scene;
 pub mod particle;
 pub mod physics_server;
+pub mod physics_server_3d;
+pub mod render_server_3d;
 pub mod scene_saver;
 pub mod scene_tree;
 pub mod scripting;

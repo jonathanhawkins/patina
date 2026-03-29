@@ -1,52 +1,53 @@
 {
-  "fixture_id": "scene_unique_name_resolution",
   "capture_type": "scene_tree",
-  "upstream_version": "pending",
+  "fixture_id": "scene_unique_name_resolution",
+  "generated_at": "2026-03-22T08:00:00+00:00",
   "nodes": [
     {
-      "name": "Root",
-      "class": "Node2D",
-      "path": "/root/Root",
       "children": [
         {
-          "name": "HealthBar",
-          "class": "ProgressBar",
-          "path": "/root/Root/HealthBar",
           "children": [],
+          "class": "ProgressBar",
+          "name": "HealthBar",
+          "path": "/root/Root/HealthBar",
           "properties": {}
         },
         {
-          "name": "Panel",
-          "class": "Panel",
-          "path": "/root/Root/Panel",
           "children": [
             {
-              "name": "ScoreLabel",
+              "children": [],
               "class": "Label",
+              "name": "ScoreLabel",
               "path": "/root/Root/Panel/ScoreLabel",
-              "children": [],
               "properties": {}
             }
           ],
+          "class": "Panel",
+          "name": "Panel",
+          "path": "/root/Root/Panel",
           "properties": {}
         },
         {
-          "name": "Container",
-          "class": "VBoxContainer",
-          "path": "/root/Root/Container",
           "children": [
             {
-              "name": "StatusIcon",
-              "class": "TextureRect",
-              "path": "/root/Root/Container/StatusIcon",
               "children": [],
+              "class": "TextureRect",
+              "name": "StatusIcon",
+              "path": "/root/Root/Container/StatusIcon",
               "properties": {}
             }
           ],
+          "class": "VBoxContainer",
+          "name": "Container",
+          "path": "/root/Root/Container",
           "properties": {}
         }
       ],
+      "class": "Node2D",
+      "name": "Root",
+      "path": "/root/Root",
       "properties": {}
     }
-  ]
+  ],
+  "upstream_version": "4.6.1-stable"
 }

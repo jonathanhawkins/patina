@@ -398,3 +398,89 @@ fn default_trait_works() {
     assert!(!d.is_visible());
     assert_eq!(d.filtered_classes().len(), 11);
 }
+
+// ── EditorState integration ─────────────────────────────────────────
+
+#[test]
+fn editor_state_has_create_dialog_with_default_favorites() {
+    let _g = setup();
+    let mut dlg = CreateNodeDialog::new();
+    dlg.add_favorite("Node2D");
+    dlg.add_favorite("Sprite2D");
+    dlg.add_favorite("Control");
+    dlg.add_favorite("Label");
+    dlg.add_favorite("CharacterBody2D");
+    assert_eq!(dlg.favorites().len(), 5);
+    assert!(dlg.favorites().contains(&"Node2D".to_string()));
+    assert!(dlg.favorites().contains(&"CharacterBody2D".to_string()));
+}
+
+#[test]
+fn editor_state_dialog_search_filters_classes() {
+    let _g = setup();
+    let mut dlg = CreateNodeDialog::new();
+    dlg.set_search("Control");
+    let classes = dlg.filtered_classes();
+    for c in &classes {
+        assert!(
+            c.class_name.to_lowercase().contains("control"),
+            "Unexpected class {} in search results for 'Control'",
+            c.class_name
+        );
+    }
+}
+
+#[test]
+fn editor_state_dialog_toggle_favorite() {
+    let _g = setup();
+    let mut dlg = CreateNodeDialog::new();
+    assert!(!dlg.favorites().contains(&"Node3D".to_string()));
+    dlg.add_favorite("Node3D");
+    assert!(dlg.favorites().contains(&"Node3D".to_string()));
+    dlg.remove_favorite("Node3D");
+    assert!(!dlg.favorites().contains(&"Node3D".to_string()));
+}
+
+#[test]
+fn editor_state_dialog_confirm_tracks_recent() {
+    let _g = setup();
+    let mut dlg = CreateNodeDialog::new();
+    dlg.select("Button");
+    let result = dlg.confirm();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().class_name, "Button");
+    assert_eq!(dlg.recent(), &["Button"]);
+}
+
+#[test]
+fn editor_state_dialog_base_class_filter() {
+    let _g = setup();
+    let mut dlg = CreateNodeDialog::new();
+    dlg.set_base_class(Some("Control".to_string()));
+    let classes = dlg.filtered_classes();
+    for c in &classes {
+        assert!(
+            c.class_name == "Control" || c.inheritance_chain.contains(&"Control".to_string()),
+            "Class {} should inherit from Control",
+            c.class_name
+        );
+    }
+    assert!(classes.len() >= 3);
+}
+
+#[test]
+fn editor_state_dialog_favorites_appear_first_in_results() {
+    let _g = setup();
+    let mut dlg = CreateNodeDialog::new();
+    dlg.add_favorite("Sprite2D");
+    let classes = dlg.filtered_classes();
+    let mut saw_non_favorite = false;
+    for c in &classes {
+        if !c.is_favorite {
+            saw_non_favorite = true;
+        }
+        if saw_non_favorite && c.is_favorite {
+            panic!("Favorite {} appeared after non-favorite classes", c.class_name);
+        }
+    }
+}

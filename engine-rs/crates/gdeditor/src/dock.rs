@@ -77,6 +77,12 @@ pub struct NodeIndicators {
     pub visible: bool,
     /// Whether this node has unique name access (%Name).
     pub is_unique_name: bool,
+    /// Whether the node is locked (cannot be selected in viewport).
+    pub locked: bool,
+    /// Whether this node is the root of an instanced scene.
+    pub is_instance: bool,
+    /// Source scene path for instanced nodes.
+    pub instance_source: Option<String>,
 }
 
 /// A warning attached to a scene tree node.
@@ -264,6 +270,8 @@ pub struct SceneTreeDock {
     script_paths: HashMap<NodeId, String>,
     /// Signal connection counts per node (from scene connection data).
     signal_counts: HashMap<NodeId, usize>,
+    /// Currently selected node IDs (supports multi-select).
+    selected_nodes: Vec<NodeId>,
 }
 
 impl SceneTreeDock {
@@ -273,6 +281,7 @@ impl SceneTreeDock {
             entries: Vec::new(),
             script_paths: HashMap::new(),
             signal_counts: HashMap::new(),
+            selected_nodes: Vec::new(),
         }
     }
 
@@ -331,6 +340,62 @@ impl SceneTreeDock {
             .collect()
     }
 
+    /// Returns entries that are instanced scene roots.
+    pub fn entries_with_instances(&self) -> Vec<&SceneTreeEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.indicators.is_instance)
+            .collect()
+    }
+
+    /// Returns entries that are locked.
+    pub fn entries_locked(&self) -> Vec<&SceneTreeEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.indicators.locked)
+            .collect()
+    }
+
+    // -- Selection management --
+
+    /// Select a single node, replacing any existing selection.
+    pub fn select_node(&mut self, id: NodeId) {
+        self.selected_nodes.clear();
+        self.selected_nodes.push(id);
+    }
+
+    /// Add a node to the current selection (multi-select).
+    pub fn add_to_selection(&mut self, id: NodeId) {
+        if !self.selected_nodes.contains(&id) {
+            self.selected_nodes.push(id);
+        }
+    }
+
+    /// Remove a node from the current selection.
+    pub fn remove_from_selection(&mut self, id: NodeId) {
+        self.selected_nodes.retain(|&n| n != id);
+    }
+
+    /// Clear the selection entirely.
+    pub fn clear_selection(&mut self) {
+        self.selected_nodes.clear();
+    }
+
+    /// Returns the currently selected node IDs.
+    pub fn selected_nodes(&self) -> &[NodeId] {
+        &self.selected_nodes
+    }
+
+    /// Returns true if a specific node is selected.
+    pub fn is_selected(&self, id: NodeId) -> bool {
+        self.selected_nodes.contains(&id)
+    }
+
+    /// Returns the number of selected nodes.
+    pub fn selection_count(&self) -> usize {
+        self.selected_nodes.len()
+    }
+
     /// Collects entries recursively from the scene tree.
     fn collect_entries(
         tree: &SceneTree,
@@ -363,6 +428,17 @@ impl SceneTreeDock {
             gdvariant::Variant::Bool(true)
         );
 
+        let locked = matches!(
+            node.get_property("_locked"),
+            gdvariant::Variant::Bool(true)
+        );
+
+        let instance_source = match node.get_property("_instance_source") {
+            gdvariant::Variant::String(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
+        let is_instance = instance_source.is_some();
+
         let signal_count = signal_counts.get(&id).copied().unwrap_or(0);
 
         let indicators = NodeIndicators {
@@ -377,6 +453,9 @@ impl SceneTreeDock {
                 gdvariant::Variant::Bool(false)
             ),
             is_unique_name,
+            locked,
+            is_instance,
+            instance_source,
         };
 
         out.push(SceneTreeEntry {
@@ -397,6 +476,38 @@ impl SceneTreeDock {
 impl Default for SceneTreeDock {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Represents the current selection state for the scene tree dock,
+/// including the primary selection and any multi-selected nodes.
+#[derive(Debug, Clone, Default)]
+pub struct SelectionState {
+    /// The primary (most recently selected) node.
+    pub primary: Option<NodeId>,
+    /// All selected nodes (including primary).
+    pub nodes: Vec<NodeId>,
+}
+
+impl SelectionState {
+    /// Returns true if any node is selected.
+    pub fn has_selection(&self) -> bool {
+        !self.nodes.is_empty()
+    }
+
+    /// Returns true if multiple nodes are selected.
+    pub fn is_multi_select(&self) -> bool {
+        self.nodes.len() > 1
+    }
+}
+
+impl SceneTreeDock {
+    /// Returns the current selection state as a snapshot.
+    pub fn selection_state(&self) -> SelectionState {
+        SelectionState {
+            primary: self.selected_nodes.last().copied(),
+            nodes: self.selected_nodes.clone(),
+        }
     }
 }
 
@@ -1025,5 +1136,236 @@ mod tests {
         assert!(ind.warnings.is_empty());
         assert!(!ind.visible); // Default for bool is false
         assert!(!ind.is_unique_name);
+        assert!(!ind.locked);
+        assert!(!ind.is_instance);
+        assert!(ind.instance_source.is_none());
+    }
+
+    // -- Lock indicator tests --
+
+    #[test]
+    fn locked_node_shows_lock_indicator() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut player = Node::new("Player", "Node2D");
+        player.set_property("_locked", gdvariant::Variant::Bool(true));
+        let player_id = tree.add_child(root, player).unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let entry = dock.find_entry(player_id).unwrap();
+        assert!(entry.indicators.locked);
+    }
+
+    #[test]
+    fn unlocked_node_no_lock_indicator() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        for entry in dock.entries() {
+            assert!(!entry.indicators.locked);
+        }
+    }
+
+    #[test]
+    fn entries_locked_filter() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut locked = Node::new("Locked", "Node2D");
+        locked.set_property("_locked", gdvariant::Variant::Bool(true));
+        tree.add_child(root, locked).unwrap();
+        let unlocked = Node::new("Unlocked", "Node2D");
+        tree.add_child(root, unlocked).unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let locked_entries = dock.entries_locked();
+        assert_eq!(locked_entries.len(), 1);
+        assert_eq!(locked_entries[0].name, "Locked");
+    }
+
+    // -- Instance indicator tests --
+
+    #[test]
+    fn instanced_node_shows_instance_indicator() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut instanced = Node::new("Level", "Node2D");
+        instanced.set_property(
+            "_instance_source",
+            gdvariant::Variant::String("res://scenes/level.tscn".to_string()),
+        );
+        let id = tree.add_child(root, instanced).unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let entry = dock.find_entry(id).unwrap();
+        assert!(entry.indicators.is_instance);
+        assert_eq!(
+            entry.indicators.instance_source.as_deref(),
+            Some("res://scenes/level.tscn")
+        );
+    }
+
+    #[test]
+    fn non_instanced_node_no_instance_indicator() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        for entry in dock.entries() {
+            assert!(!entry.indicators.is_instance);
+            assert!(entry.indicators.instance_source.is_none());
+        }
+    }
+
+    #[test]
+    fn entries_with_instances_filter() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut inst = Node::new("Scene", "Node2D");
+        inst.set_property(
+            "_instance_source",
+            gdvariant::Variant::String("instanced".to_string()),
+        );
+        tree.add_child(root, inst).unwrap();
+        let plain = Node::new("Plain", "Node2D");
+        tree.add_child(root, plain).unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let instances = dock.entries_with_instances();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].name, "Scene");
+    }
+
+    // -- Selection state tests --
+
+    #[test]
+    fn single_select() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let main_id = dock.entries()[1].id;
+        dock.select_node(main_id);
+
+        assert_eq!(dock.selection_count(), 1);
+        assert!(dock.is_selected(main_id));
+        assert_eq!(dock.selected_nodes(), &[main_id]);
+    }
+
+    #[test]
+    fn multi_select() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let main_id = dock.entries()[1].id;
+        let player_id = dock.entries()[2].id;
+
+        dock.select_node(main_id);
+        dock.add_to_selection(player_id);
+
+        assert_eq!(dock.selection_count(), 2);
+        assert!(dock.is_selected(main_id));
+        assert!(dock.is_selected(player_id));
+    }
+
+    #[test]
+    fn add_to_selection_no_duplicates() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let main_id = dock.entries()[1].id;
+        dock.select_node(main_id);
+        dock.add_to_selection(main_id);
+
+        assert_eq!(dock.selection_count(), 1);
+    }
+
+    #[test]
+    fn remove_from_selection() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let main_id = dock.entries()[1].id;
+        let player_id = dock.entries()[2].id;
+
+        dock.select_node(main_id);
+        dock.add_to_selection(player_id);
+        dock.remove_from_selection(main_id);
+
+        assert_eq!(dock.selection_count(), 1);
+        assert!(!dock.is_selected(main_id));
+        assert!(dock.is_selected(player_id));
+    }
+
+    #[test]
+    fn clear_selection() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let main_id = dock.entries()[1].id;
+        dock.select_node(main_id);
+        dock.clear_selection();
+
+        assert_eq!(dock.selection_count(), 0);
+        assert!(!dock.is_selected(main_id));
+    }
+
+    #[test]
+    fn selection_state_snapshot() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        // Empty state
+        let state = dock.selection_state();
+        assert!(!state.has_selection());
+        assert!(!state.is_multi_select());
+        assert!(state.primary.is_none());
+
+        // Single select
+        let main_id = dock.entries()[1].id;
+        dock.select_node(main_id);
+        let state = dock.selection_state();
+        assert!(state.has_selection());
+        assert!(!state.is_multi_select());
+        assert_eq!(state.primary, Some(main_id));
+
+        // Multi select
+        let player_id = dock.entries()[2].id;
+        dock.add_to_selection(player_id);
+        let state = dock.selection_state();
+        assert!(state.has_selection());
+        assert!(state.is_multi_select());
+        assert_eq!(state.primary, Some(player_id));
+        assert_eq!(state.nodes.len(), 2);
+    }
+
+    #[test]
+    fn select_replaces_previous() {
+        let tree = make_tree();
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let main_id = dock.entries()[1].id;
+        let player_id = dock.entries()[2].id;
+
+        dock.select_node(main_id);
+        dock.select_node(player_id);
+
+        assert_eq!(dock.selection_count(), 1);
+        assert!(!dock.is_selected(main_id));
+        assert!(dock.is_selected(player_id));
     }
 }

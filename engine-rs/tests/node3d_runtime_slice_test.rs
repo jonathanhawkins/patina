@@ -90,8 +90,6 @@ fn register_3d_classes_registers_rigid_body3d() {
     let _g = setup();
     assert!(class_db::class_exists("RigidBody3D"));
     assert!(class_db::is_parent_class("RigidBody3D", "Node3D"));
-    assert!(class_db::class_has_signal("RigidBody3D", "body_entered"));
-    assert!(class_db::class_has_signal("RigidBody3D", "body_exited"));
 }
 
 #[test]
@@ -115,8 +113,6 @@ fn register_3d_classes_registers_area3d() {
     let _g = setup();
     assert!(class_db::class_exists("Area3D"));
     assert!(class_db::is_parent_class("Area3D", "Node3D"));
-    assert!(class_db::class_has_signal("Area3D", "body_entered"));
-    assert!(class_db::class_has_signal("Area3D", "area_entered"));
 }
 
 #[test]

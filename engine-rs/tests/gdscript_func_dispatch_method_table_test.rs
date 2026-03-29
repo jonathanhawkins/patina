@@ -43,7 +43,7 @@ fn ra42_classdb_method_registration() {
             .method(gdobject::class_db::MethodInfo::new("set_position", 1)),
     );
 
-    let methods = gdobject::class_db::get_method_list("Node2D", false);
+    let methods = gdobject::class_db::get_method_list("Node2D");
     let method_names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
     assert!(method_names.contains(&"get_position"));
     assert!(method_names.contains(&"set_position"));
@@ -68,7 +68,7 @@ fn ra42_classdb_inherited_method_lookup() {
             .method(gdobject::class_db::MethodInfo::new("get_position", 0)),
     );
 
-    let methods = gdobject::class_db::get_method_list("Node2D", false);
+    let methods = gdobject::class_db::get_method_list("Node2D");
     let method_names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
     assert!(method_names.contains(&"get_name"), "Node2D should inherit get_name from Node");
 }

@@ -140,6 +140,16 @@ impl<L: ResourceLoader> UnifiedLoader<L> {
     pub fn is_cached(&self, path: &str) -> bool {
         self.cache.contains(path)
     }
+
+    /// Inserts or replaces a resource in the cache under the given path.
+    pub fn replace_cached(&mut self, path: &str, resource: Arc<Resource>) {
+        self.cache.insert(path, resource);
+    }
+
+    /// Returns a cached resource by path, or `None` if not cached.
+    pub fn get_cached(&self, path: &str) -> Option<Arc<Resource>> {
+        self.cache.get(path)
+    }
 }
 
 #[cfg(test)]

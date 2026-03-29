@@ -78,14 +78,35 @@ pub struct SettingsProperty {
     /// Category this property belongs to.
     pub category: SettingsCategory,
     /// What kind of editor to use.
-    pub editor: PropertyEditor,
+    pub editor: SettingsEditor,
     /// Current value.
     pub value: SettingsValue,
+    /// Description/tooltip text.
+    pub description: String,
+    /// Whether this is an advanced property (hidden by default).
+    pub advanced: bool,
+    /// Whether this is a user-defined custom property.
+    pub custom: bool,
+    /// The default value for reset.
+    pub default_value: SettingsValue,
+}
+
+/// Validation error for a settings value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingsValidationError {
+    /// Number out of range.
+    NumberOutOfRange { key: String, value: f64, min: f64, max: f64 },
+    /// Integer out of range.
+    IntegerOutOfRange { key: String, value: i64, min: i64, max: i64 },
+    /// Value not in the allowed enum options.
+    InvalidEnumValue { key: String, value: String, options: Vec<String> },
+    /// Type mismatch (expected vs actual).
+    TypeMismatch { key: String, expected: String, actual: String },
 }
 
 /// The type of editor control for a property.
 #[derive(Debug, Clone)]
-pub enum PropertyEditor {
+pub enum SettingsEditor {
     /// Single-line text input.
     Text,
     /// Numeric input with min/max/step.
@@ -132,6 +153,8 @@ pub struct ProjectSettingsDialog {
     properties: Vec<SettingsProperty>,
     /// Pending changes that haven't been saved yet.
     pending_changes: HashMap<String, SettingsValue>,
+    /// Whether to show advanced properties.
+    show_advanced: bool,
 }
 
 impl ProjectSettingsDialog {
@@ -143,6 +166,7 @@ impl ProjectSettingsDialog {
             search_text: String::new(),
             properties: Self::default_properties(),
             pending_changes: HashMap::new(),
+            show_advanced: false,
         }
     }
 
@@ -180,10 +204,17 @@ impl ProjectSettingsDialog {
     }
 
     /// Returns properties visible for the current category and search filter.
+    ///
+    /// Respects the advanced toggle: when `show_advanced` is false, advanced
+    /// properties are hidden unless a search is active.
     pub fn visible_properties(&self) -> Vec<&SettingsProperty> {
         self.properties
             .iter()
             .filter(|p| {
+                // Hide advanced properties unless toggled on or searching
+                if p.advanced && !self.show_advanced && self.search_text.is_empty() {
+                    return false;
+                }
                 if !self.search_text.is_empty() {
                     // When searching, show matches across all categories.
                     p.label.to_lowercase().contains(&self.search_text)
@@ -193,6 +224,21 @@ impl ProjectSettingsDialog {
                 }
             })
             .collect()
+    }
+
+    /// Returns whether advanced properties are shown.
+    pub fn show_advanced(&self) -> bool {
+        self.show_advanced
+    }
+
+    /// Toggles the advanced property visibility.
+    pub fn toggle_advanced(&mut self) {
+        self.show_advanced = !self.show_advanced;
+    }
+
+    /// Sets the advanced property visibility.
+    pub fn set_show_advanced(&mut self, show: bool) {
+        self.show_advanced = show;
     }
 
     /// Records a pending change for a property key.
@@ -242,6 +288,161 @@ impl ProjectSettingsDialog {
         self.properties.iter().filter(|p| p.category == category).count()
     }
 
+    /// Validates a pending value against its editor constraints.
+    ///
+    /// Returns errors if the value doesn't match the editor's constraints.
+    pub fn validate_value(&self, key: &str, value: &SettingsValue) -> Vec<SettingsValidationError> {
+        let mut errors = Vec::new();
+        let Some(prop) = self.properties.iter().find(|p| p.key == key) else {
+            return errors;
+        };
+        match (&prop.editor, value) {
+            (SettingsEditor::Number { min, max, .. }, SettingsValue::Number(n)) => {
+                if *n < *min || *n > *max {
+                    errors.push(SettingsValidationError::NumberOutOfRange {
+                        key: key.into(),
+                        value: *n,
+                        min: *min,
+                        max: *max,
+                    });
+                }
+            }
+            (SettingsEditor::Integer { min, max }, SettingsValue::Integer(n)) => {
+                if *n < *min || *n > *max {
+                    errors.push(SettingsValidationError::IntegerOutOfRange {
+                        key: key.into(),
+                        value: *n,
+                        min: *min,
+                        max: *max,
+                    });
+                }
+            }
+            (SettingsEditor::Enum(options), SettingsValue::Text(s)) => {
+                if !options.contains(s) {
+                    errors.push(SettingsValidationError::InvalidEnumValue {
+                        key: key.into(),
+                        value: s.clone(),
+                        options: options.clone(),
+                    });
+                }
+            }
+            (SettingsEditor::Bool, SettingsValue::Bool(_)) => {}
+            (SettingsEditor::Text, SettingsValue::Text(_)) => {}
+            (editor, val) => {
+                let expected = match editor {
+                    SettingsEditor::Text => "Text",
+                    SettingsEditor::Number { .. } => "Number",
+                    SettingsEditor::Integer { .. } => "Integer",
+                    SettingsEditor::Enum(_) => "Enum (Text)",
+                    SettingsEditor::Bool => "Bool",
+                };
+                let actual = match val {
+                    SettingsValue::Text(_) => "Text",
+                    SettingsValue::Number(_) => "Number",
+                    SettingsValue::Integer(_) => "Integer",
+                    SettingsValue::Bool(_) => "Bool",
+                };
+                errors.push(SettingsValidationError::TypeMismatch {
+                    key: key.into(),
+                    expected: expected.into(),
+                    actual: actual.into(),
+                });
+            }
+        }
+        errors
+    }
+
+    /// Validates all pending changes. Returns all validation errors.
+    pub fn validate_pending(&self) -> Vec<SettingsValidationError> {
+        let mut errors = Vec::new();
+        for (key, value) in &self.pending_changes {
+            errors.extend(self.validate_value(key, value));
+        }
+        errors
+    }
+
+    /// Resets a single property to its default value, recording it as a pending change.
+    pub fn reset_to_default(&mut self, key: &str) -> bool {
+        if let Some(prop) = self.properties.iter().find(|p| p.key == key) {
+            let default = prop.default_value.clone();
+            self.pending_changes.insert(key.to_string(), default);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resets all properties to their default values.
+    pub fn reset_all_to_defaults(&mut self) {
+        for prop in &self.properties {
+            if prop.value != prop.default_value {
+                self.pending_changes
+                    .insert(prop.key.clone(), prop.default_value.clone());
+            }
+        }
+    }
+
+    /// Returns true if the property at the given key has been modified from default.
+    pub fn is_modified(&self, key: &str) -> bool {
+        if let Some(prop) = self.properties.iter().find(|p| p.key == key) {
+            let effective = self.pending_changes.get(key).unwrap_or(&prop.value);
+            *effective != prop.default_value
+        } else {
+            false
+        }
+    }
+
+    /// Returns the description/tooltip for a property.
+    pub fn property_description(&self, key: &str) -> Option<&str> {
+        self.properties
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| p.description.as_str())
+    }
+
+    /// Adds a custom user-defined property.
+    ///
+    /// Returns true if added, false if a property with that key already exists.
+    pub fn add_custom_property(
+        &mut self,
+        key: impl Into<String>,
+        label: impl Into<String>,
+        category: SettingsCategory,
+        editor: SettingsEditor,
+        value: SettingsValue,
+        description: impl Into<String>,
+    ) -> bool {
+        let key = key.into();
+        if self.properties.iter().any(|p| p.key == key) {
+            return false;
+        }
+        self.properties.push(SettingsProperty {
+            key,
+            label: label.into(),
+            category,
+            editor,
+            default_value: value.clone(),
+            value,
+            description: description.into(),
+            advanced: false,
+            custom: true,
+        });
+        true
+    }
+
+    /// Removes a custom property by key. Only custom properties can be removed.
+    pub fn remove_custom_property(&mut self, key: &str) -> bool {
+        let len_before = self.properties.len();
+        self.properties.retain(|p| !(p.custom && p.key == key));
+        self.pending_changes.remove(key);
+        self.properties.len() < len_before
+    }
+
+    /// Returns all custom properties.
+    pub fn custom_properties(&self) -> Vec<&SettingsProperty> {
+        self.properties.iter().filter(|p| p.custom).collect()
+    }
+
     /// Returns all categories that have matching properties for the current search.
     pub fn matching_categories(&self) -> Vec<SettingsCategory> {
         if self.search_text.is_empty() {
@@ -260,189 +461,163 @@ impl ProjectSettingsDialog {
         cats
     }
 
+    fn prop(
+        key: &str,
+        label: &str,
+        category: SettingsCategory,
+        editor: SettingsEditor,
+        value: SettingsValue,
+        description: &str,
+        advanced: bool,
+    ) -> SettingsProperty {
+        SettingsProperty {
+            key: key.into(),
+            label: label.into(),
+            category,
+            editor,
+            default_value: value.clone(),
+            value,
+            description: description.into(),
+            advanced,
+            custom: false,
+        }
+    }
+
     fn default_properties() -> Vec<SettingsProperty> {
         vec![
             // ---- Application ----
-            SettingsProperty {
-                key: "application/project_name".into(),
-                label: "Project Name".into(),
-                category: SettingsCategory::Application,
-                editor: PropertyEditor::Text,
-                value: SettingsValue::Text("New Project".into()),
-            },
-            SettingsProperty {
-                key: "application/main_scene".into(),
-                label: "Main Scene".into(),
-                category: SettingsCategory::Application,
-                editor: PropertyEditor::Text,
-                value: SettingsValue::Text(String::new()),
-            },
-            SettingsProperty {
-                key: "application/description".into(),
-                label: "Description".into(),
-                category: SettingsCategory::Application,
-                editor: PropertyEditor::Text,
-                value: SettingsValue::Text(String::new()),
-            },
-            SettingsProperty {
-                key: "application/icon".into(),
-                label: "Icon Path".into(),
-                category: SettingsCategory::Application,
-                editor: PropertyEditor::Text,
-                value: SettingsValue::Text(String::new()),
-            },
+            Self::prop(
+                "application/project_name", "Project Name",
+                SettingsCategory::Application, SettingsEditor::Text,
+                SettingsValue::Text("New Project".into()),
+                "The name of the project, displayed in the title bar.", false,
+            ),
+            Self::prop(
+                "application/main_scene", "Main Scene",
+                SettingsCategory::Application, SettingsEditor::Text,
+                SettingsValue::Text(String::new()),
+                "The scene to load when the project runs.", false,
+            ),
+            Self::prop(
+                "application/description", "Description",
+                SettingsCategory::Application, SettingsEditor::Text,
+                SettingsValue::Text(String::new()),
+                "A short description of the project.", false,
+            ),
+            Self::prop(
+                "application/icon", "Icon Path",
+                SettingsCategory::Application, SettingsEditor::Text,
+                SettingsValue::Text(String::new()),
+                "Path to the project icon.", false,
+            ),
             // ---- Display ----
-            SettingsProperty {
-                key: "display/resolution_w".into(),
-                label: "Resolution Width".into(),
-                category: SettingsCategory::Display,
-                editor: PropertyEditor::Integer { min: 1, max: 7680 },
-                value: SettingsValue::Integer(1152),
-            },
-            SettingsProperty {
-                key: "display/resolution_h".into(),
-                label: "Resolution Height".into(),
-                category: SettingsCategory::Display,
-                editor: PropertyEditor::Integer { min: 1, max: 4320 },
-                value: SettingsValue::Integer(648),
-            },
-            SettingsProperty {
-                key: "display/stretch_mode".into(),
-                label: "Stretch Mode".into(),
-                category: SettingsCategory::Display,
-                editor: PropertyEditor::Enum(vec![
-                    "disabled".into(),
-                    "canvas_items".into(),
-                    "viewport".into(),
-                ]),
-                value: SettingsValue::Text("disabled".into()),
-            },
-            SettingsProperty {
-                key: "display/stretch_aspect".into(),
-                label: "Stretch Aspect".into(),
-                category: SettingsCategory::Display,
-                editor: PropertyEditor::Enum(vec![
-                    "ignore".into(),
-                    "keep".into(),
-                    "keep_width".into(),
-                    "keep_height".into(),
-                    "expand".into(),
-                ]),
-                value: SettingsValue::Text("keep".into()),
-            },
-            SettingsProperty {
-                key: "display/fullscreen".into(),
-                label: "Fullscreen".into(),
-                category: SettingsCategory::Display,
-                editor: PropertyEditor::Bool,
-                value: SettingsValue::Bool(false),
-            },
-            SettingsProperty {
-                key: "display/vsync".into(),
-                label: "V-Sync".into(),
-                category: SettingsCategory::Display,
-                editor: PropertyEditor::Bool,
-                value: SettingsValue::Bool(true),
-            },
+            Self::prop(
+                "display/resolution_w", "Resolution Width",
+                SettingsCategory::Display, SettingsEditor::Integer { min: 1, max: 7680 },
+                SettingsValue::Integer(1152),
+                "Viewport width in pixels.", false,
+            ),
+            Self::prop(
+                "display/resolution_h", "Resolution Height",
+                SettingsCategory::Display, SettingsEditor::Integer { min: 1, max: 4320 },
+                SettingsValue::Integer(648),
+                "Viewport height in pixels.", false,
+            ),
+            Self::prop(
+                "display/stretch_mode", "Stretch Mode",
+                SettingsCategory::Display,
+                SettingsEditor::Enum(vec!["disabled".into(), "canvas_items".into(), "viewport".into()]),
+                SettingsValue::Text("disabled".into()),
+                "How the viewport scales when the window is resized.", false,
+            ),
+            Self::prop(
+                "display/stretch_aspect", "Stretch Aspect",
+                SettingsCategory::Display,
+                SettingsEditor::Enum(vec!["ignore".into(), "keep".into(), "keep_width".into(), "keep_height".into(), "expand".into()]),
+                SettingsValue::Text("keep".into()),
+                "Aspect ratio handling when stretching.", true,
+            ),
+            Self::prop(
+                "display/fullscreen", "Fullscreen",
+                SettingsCategory::Display, SettingsEditor::Bool,
+                SettingsValue::Bool(false),
+                "Whether the window starts in fullscreen mode.", false,
+            ),
+            Self::prop(
+                "display/vsync", "V-Sync",
+                SettingsCategory::Display, SettingsEditor::Bool,
+                SettingsValue::Bool(true),
+                "Enable vertical synchronization.", false,
+            ),
             // ---- Physics ----
-            SettingsProperty {
-                key: "physics/fps".into(),
-                label: "Physics FPS".into(),
-                category: SettingsCategory::Physics,
-                editor: PropertyEditor::Integer { min: 1, max: 240 },
-                value: SettingsValue::Integer(60),
-            },
-            SettingsProperty {
-                key: "physics/gravity".into(),
-                label: "Default Gravity".into(),
-                category: SettingsCategory::Physics,
-                editor: PropertyEditor::Number {
-                    min: 0.0,
-                    max: 10000.0,
-                    step: 0.1,
-                },
-                value: SettingsValue::Number(980.0),
-            },
-            SettingsProperty {
-                key: "physics/default_linear_damp".into(),
-                label: "Default Linear Damp".into(),
-                category: SettingsCategory::Physics,
-                editor: PropertyEditor::Number {
-                    min: 0.0,
-                    max: 100.0,
-                    step: 0.01,
-                },
-                value: SettingsValue::Number(0.1),
-            },
-            SettingsProperty {
-                key: "physics/default_angular_damp".into(),
-                label: "Default Angular Damp".into(),
-                category: SettingsCategory::Physics,
-                editor: PropertyEditor::Number {
-                    min: 0.0,
-                    max: 100.0,
-                    step: 0.01,
-                },
-                value: SettingsValue::Number(1.0),
-            },
+            Self::prop(
+                "physics/fps", "Physics FPS",
+                SettingsCategory::Physics, SettingsEditor::Integer { min: 1, max: 240 },
+                SettingsValue::Integer(60),
+                "Number of physics simulation steps per second.", false,
+            ),
+            Self::prop(
+                "physics/gravity", "Default Gravity",
+                SettingsCategory::Physics,
+                SettingsEditor::Number { min: 0.0, max: 10000.0, step: 0.1 },
+                SettingsValue::Number(980.0),
+                "Default gravity strength (pixels/s² for 2D, m/s² for 3D).", false,
+            ),
+            Self::prop(
+                "physics/default_linear_damp", "Default Linear Damp",
+                SettingsCategory::Physics,
+                SettingsEditor::Number { min: 0.0, max: 100.0, step: 0.01 },
+                SettingsValue::Number(0.1),
+                "Default linear damping for rigid bodies.", true,
+            ),
+            Self::prop(
+                "physics/default_angular_damp", "Default Angular Damp",
+                SettingsCategory::Physics,
+                SettingsEditor::Number { min: 0.0, max: 100.0, step: 0.01 },
+                SettingsValue::Number(1.0),
+                "Default angular damping for rigid bodies.", true,
+            ),
             // ---- Audio ----
-            SettingsProperty {
-                key: "audio/default_bus_layout".into(),
-                label: "Default Bus Layout".into(),
-                category: SettingsCategory::Audio,
-                editor: PropertyEditor::Text,
-                value: SettingsValue::Text("res://default_bus_layout.tres".into()),
-            },
-            SettingsProperty {
-                key: "audio/master_volume_db".into(),
-                label: "Master Volume (dB)".into(),
-                category: SettingsCategory::Audio,
-                editor: PropertyEditor::Number {
-                    min: -80.0,
-                    max: 24.0,
-                    step: 0.1,
-                },
-                value: SettingsValue::Number(0.0),
-            },
-            SettingsProperty {
-                key: "audio/enable_audio_input".into(),
-                label: "Enable Audio Input".into(),
-                category: SettingsCategory::Audio,
-                editor: PropertyEditor::Bool,
-                value: SettingsValue::Bool(false),
-            },
+            Self::prop(
+                "audio/default_bus_layout", "Default Bus Layout",
+                SettingsCategory::Audio, SettingsEditor::Text,
+                SettingsValue::Text("res://default_bus_layout.tres".into()),
+                "Path to the default audio bus layout resource.", false,
+            ),
+            Self::prop(
+                "audio/master_volume_db", "Master Volume (dB)",
+                SettingsCategory::Audio,
+                SettingsEditor::Number { min: -80.0, max: 24.0, step: 0.1 },
+                SettingsValue::Number(0.0),
+                "Master output volume in decibels.", false,
+            ),
+            Self::prop(
+                "audio/enable_audio_input", "Enable Audio Input",
+                SettingsCategory::Audio, SettingsEditor::Bool,
+                SettingsValue::Bool(false),
+                "Allow microphone and audio input capture.", true,
+            ),
             // ---- Rendering ----
-            SettingsProperty {
-                key: "rendering/renderer".into(),
-                label: "Renderer".into(),
-                category: SettingsCategory::Rendering,
-                editor: PropertyEditor::Enum(vec![
-                    "forward_plus".into(),
-                    "mobile".into(),
-                    "compatibility".into(),
-                ]),
-                value: SettingsValue::Text("forward_plus".into()),
-            },
-            SettingsProperty {
-                key: "rendering/anti_aliasing".into(),
-                label: "Anti-Aliasing".into(),
-                category: SettingsCategory::Rendering,
-                editor: PropertyEditor::Enum(vec![
-                    "disabled".into(),
-                    "fxaa".into(),
-                    "msaa_2x".into(),
-                    "msaa_4x".into(),
-                    "msaa_8x".into(),
-                ]),
-                value: SettingsValue::Text("disabled".into()),
-            },
-            SettingsProperty {
-                key: "rendering/environment_default".into(),
-                label: "Default Environment".into(),
-                category: SettingsCategory::Rendering,
-                editor: PropertyEditor::Text,
-                value: SettingsValue::Text(String::new()),
-            },
+            Self::prop(
+                "rendering/renderer", "Renderer",
+                SettingsCategory::Rendering,
+                SettingsEditor::Enum(vec!["forward_plus".into(), "mobile".into(), "compatibility".into()]),
+                SettingsValue::Text("forward_plus".into()),
+                "Rendering backend to use.", false,
+            ),
+            Self::prop(
+                "rendering/anti_aliasing", "Anti-Aliasing",
+                SettingsCategory::Rendering,
+                SettingsEditor::Enum(vec!["disabled".into(), "fxaa".into(), "msaa_2x".into(), "msaa_4x".into(), "msaa_8x".into()]),
+                SettingsValue::Text("disabled".into()),
+                "Anti-aliasing method.", false,
+            ),
+            Self::prop(
+                "rendering/environment_default", "Default Environment",
+                SettingsCategory::Rendering, SettingsEditor::Text,
+                SettingsValue::Text(String::new()),
+                "Path to the default environment resource.", true,
+            ),
         ]
     }
 }
@@ -572,5 +747,284 @@ mod tests {
         assert_eq!(SettingsValue::Number(3.14).as_display(), "3.14");
         assert_eq!(SettingsValue::Integer(42).as_display(), "42");
         assert_eq!(SettingsValue::Bool(true).as_display(), "true");
+    }
+
+    // -- Advanced toggle --
+
+    #[test]
+    fn advanced_hidden_by_default() {
+        let dialog = ProjectSettingsDialog::new();
+        assert!(!dialog.show_advanced());
+    }
+
+    #[test]
+    fn advanced_properties_hidden_when_not_toggled() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.set_category(SettingsCategory::Display);
+        let props = dialog.visible_properties();
+        // stretch_aspect is advanced
+        assert!(!props.iter().any(|p| p.key == "display/stretch_aspect"));
+    }
+
+    #[test]
+    fn advanced_properties_shown_when_toggled() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.set_category(SettingsCategory::Display);
+        dialog.toggle_advanced();
+        assert!(dialog.show_advanced());
+        let props = dialog.visible_properties();
+        assert!(props.iter().any(|p| p.key == "display/stretch_aspect"));
+    }
+
+    #[test]
+    fn search_shows_advanced_regardless() {
+        let mut dialog = ProjectSettingsDialog::new();
+        assert!(!dialog.show_advanced());
+        dialog.set_search("stretch_aspect");
+        let props = dialog.visible_properties();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].key, "display/stretch_aspect");
+    }
+
+    // -- Validation --
+
+    #[test]
+    fn validate_integer_in_range() {
+        let dialog = ProjectSettingsDialog::new();
+        let errors = dialog.validate_value("physics/fps", &SettingsValue::Integer(60));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_integer_out_of_range() {
+        let dialog = ProjectSettingsDialog::new();
+        let errors = dialog.validate_value("physics/fps", &SettingsValue::Integer(999));
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], SettingsValidationError::IntegerOutOfRange { .. }));
+    }
+
+    #[test]
+    fn validate_number_in_range() {
+        let dialog = ProjectSettingsDialog::new();
+        let errors = dialog.validate_value("physics/gravity", &SettingsValue::Number(500.0));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_number_out_of_range() {
+        let dialog = ProjectSettingsDialog::new();
+        let errors = dialog.validate_value("physics/gravity", &SettingsValue::Number(-1.0));
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], SettingsValidationError::NumberOutOfRange { .. }));
+    }
+
+    #[test]
+    fn validate_enum_valid() {
+        let dialog = ProjectSettingsDialog::new();
+        let errors = dialog.validate_value(
+            "rendering/renderer",
+            &SettingsValue::Text("mobile".into()),
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn validate_enum_invalid() {
+        let dialog = ProjectSettingsDialog::new();
+        let errors = dialog.validate_value(
+            "rendering/renderer",
+            &SettingsValue::Text("vulkan_raw".into()),
+        );
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], SettingsValidationError::InvalidEnumValue { .. }));
+    }
+
+    #[test]
+    fn validate_type_mismatch() {
+        let dialog = ProjectSettingsDialog::new();
+        let errors = dialog.validate_value("physics/fps", &SettingsValue::Text("sixty".into()));
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], SettingsValidationError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_pending_all() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.set_value("physics/fps", SettingsValue::Integer(999));
+        dialog.set_value("rendering/renderer", SettingsValue::Text("vulkan".into()));
+        let errors = dialog.validate_pending();
+        assert_eq!(errors.len(), 2);
+    }
+
+    // -- Reset to default --
+
+    #[test]
+    fn reset_single_property() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.open();
+        dialog.set_value(
+            "application/project_name",
+            SettingsValue::Text("Changed".into()),
+        );
+        dialog.confirm();
+        assert_eq!(
+            *dialog.effective_value("application/project_name").unwrap(),
+            SettingsValue::Text("Changed".into()),
+        );
+
+        dialog.reset_to_default("application/project_name");
+        assert_eq!(
+            *dialog.effective_value("application/project_name").unwrap(),
+            SettingsValue::Text("New Project".into()),
+        );
+    }
+
+    #[test]
+    fn reset_unknown_key_returns_false() {
+        let mut dialog = ProjectSettingsDialog::new();
+        assert!(!dialog.reset_to_default("nonexistent/key"));
+    }
+
+    #[test]
+    fn reset_all_to_defaults() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.open();
+        dialog.set_value("application/project_name", SettingsValue::Text("X".into()));
+        dialog.set_value("physics/fps", SettingsValue::Integer(120));
+        dialog.confirm();
+
+        dialog.reset_all_to_defaults();
+        assert!(dialog.has_pending_changes());
+        dialog.confirm();
+
+        assert_eq!(
+            *dialog.effective_value("application/project_name").unwrap(),
+            SettingsValue::Text("New Project".into()),
+        );
+        assert_eq!(
+            *dialog.effective_value("physics/fps").unwrap(),
+            SettingsValue::Integer(60),
+        );
+    }
+
+    #[test]
+    fn is_modified_tracks_changes() {
+        let mut dialog = ProjectSettingsDialog::new();
+        assert!(!dialog.is_modified("application/project_name"));
+        dialog.set_value(
+            "application/project_name",
+            SettingsValue::Text("Changed".into()),
+        );
+        assert!(dialog.is_modified("application/project_name"));
+    }
+
+    // -- Property description --
+
+    #[test]
+    fn property_description() {
+        let dialog = ProjectSettingsDialog::new();
+        let desc = dialog.property_description("physics/gravity").unwrap();
+        assert!(!desc.is_empty());
+        assert!(desc.contains("gravity"));
+    }
+
+    #[test]
+    fn property_description_unknown_key() {
+        let dialog = ProjectSettingsDialog::new();
+        assert!(dialog.property_description("nonexistent").is_none());
+    }
+
+    // -- Custom properties --
+
+    #[test]
+    fn add_custom_property() {
+        let mut dialog = ProjectSettingsDialog::new();
+        let added = dialog.add_custom_property(
+            "custom/my_setting",
+            "My Setting",
+            SettingsCategory::Application,
+            SettingsEditor::Text,
+            SettingsValue::Text("hello".into()),
+            "A custom user setting.",
+        );
+        assert!(added);
+        assert_eq!(dialog.custom_properties().len(), 1);
+        let prop = dialog.custom_properties()[0];
+        assert_eq!(prop.key, "custom/my_setting");
+        assert!(prop.custom);
+    }
+
+    #[test]
+    fn add_custom_property_duplicate_rejected() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.add_custom_property(
+            "custom/x", "X", SettingsCategory::Application,
+            SettingsEditor::Bool, SettingsValue::Bool(false), "",
+        );
+        let added = dialog.add_custom_property(
+            "custom/x", "X Again", SettingsCategory::Application,
+            SettingsEditor::Bool, SettingsValue::Bool(true), "",
+        );
+        assert!(!added);
+    }
+
+    #[test]
+    fn add_custom_property_conflicting_builtin_rejected() {
+        let mut dialog = ProjectSettingsDialog::new();
+        let added = dialog.add_custom_property(
+            "physics/fps", "Override FPS", SettingsCategory::Physics,
+            SettingsEditor::Integer { min: 1, max: 999 },
+            SettingsValue::Integer(30), "",
+        );
+        assert!(!added);
+    }
+
+    #[test]
+    fn remove_custom_property() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.add_custom_property(
+            "custom/temp", "Temp", SettingsCategory::Audio,
+            SettingsEditor::Text, SettingsValue::Text("x".into()), "",
+        );
+        assert_eq!(dialog.custom_properties().len(), 1);
+        let removed = dialog.remove_custom_property("custom/temp");
+        assert!(removed);
+        assert!(dialog.custom_properties().is_empty());
+    }
+
+    #[test]
+    fn remove_builtin_property_fails() {
+        let mut dialog = ProjectSettingsDialog::new();
+        let count_before = dialog.category_count(SettingsCategory::Physics);
+        let removed = dialog.remove_custom_property("physics/fps");
+        assert!(!removed);
+        assert_eq!(dialog.category_count(SettingsCategory::Physics), count_before);
+    }
+
+    #[test]
+    fn custom_property_visible_in_category() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.add_custom_property(
+            "custom/game_mode", "Game Mode", SettingsCategory::Application,
+            SettingsEditor::Enum(vec!["single".into(), "multi".into()]),
+            SettingsValue::Text("single".into()), "Select game mode.",
+        );
+        dialog.set_category(SettingsCategory::Application);
+        let props = dialog.visible_properties();
+        assert!(props.iter().any(|p| p.key == "custom/game_mode"));
+    }
+
+    #[test]
+    fn custom_property_searchable() {
+        let mut dialog = ProjectSettingsDialog::new();
+        dialog.add_custom_property(
+            "custom/difficulty", "Difficulty Level", SettingsCategory::Application,
+            SettingsEditor::Integer { min: 1, max: 10 },
+            SettingsValue::Integer(5), "",
+        );
+        dialog.set_search("difficulty");
+        let props = dialog.visible_properties();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].key, "custom/difficulty");
     }
 }

@@ -75,6 +75,38 @@ impl EditorSettings {
     }
 }
 
+/// Configuration for launching an external code editor.
+///
+/// Mirrors Godot's external editor settings: an executable path and an
+/// argument template with `{file}`, `{line}`, `{col}` placeholders.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExternalEditorConfig {
+    /// Path to the editor executable (e.g. `"code"`, `"/usr/bin/vim"`).
+    pub exec_path: String,
+    /// Argument template tokens.  Each may contain `{file}`, `{line}`, `{col}`.
+    #[serde(default)]
+    pub exec_args: Vec<String>,
+}
+
+impl ExternalEditorConfig {
+    /// Returns `true` when a non-empty executable path has been set.
+    pub fn is_configured(&self) -> bool {
+        !self.exec_path.is_empty()
+    }
+
+    /// Expands placeholder tokens and returns the final argument list.
+    pub fn build_args(&self, file: &str, line: usize, col: usize) -> Vec<String> {
+        self.exec_args
+            .iter()
+            .map(|a| {
+                a.replace("{file}", file)
+                    .replace("{line}", &line.to_string())
+                    .replace("{col}", &col.to_string())
+            })
+            .collect()
+    }
+}
+
 /// Project-wide settings, analogous to Godot's `project.godot`.
 ///
 /// Settings are organized by category: Application, Display, Physics,

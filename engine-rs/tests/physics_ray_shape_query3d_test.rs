@@ -65,7 +65,7 @@ fn classdb_ray_query_inherits_refcounted() {
 #[test]
 fn classdb_ray_query_has_properties() {
     class_db::register_3d_classes();
-    let props = class_db::get_property_list("PhysicsRayQueryParameters3D", false);
+    let props = class_db::get_property_list("PhysicsRayQueryParameters3D");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"from"), "missing 'from' property");
     assert!(names.contains(&"to"), "missing 'to' property");
@@ -101,7 +101,7 @@ fn classdb_shape_query_inherits_refcounted() {
 #[test]
 fn classdb_shape_query_has_properties() {
     class_db::register_3d_classes();
-    let props = class_db::get_property_list("PhysicsShapeQueryParameters3D", false);
+    let props = class_db::get_property_list("PhysicsShapeQueryParameters3D");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"shape"), "missing 'shape'");
     assert!(names.contains(&"position"), "missing 'position'");

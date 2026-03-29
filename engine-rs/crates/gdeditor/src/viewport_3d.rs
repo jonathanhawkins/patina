@@ -719,6 +719,8 @@ pub struct Viewport3D {
     pub width: u32,
     /// Viewport height in pixels.
     pub height: u32,
+    /// In-progress gizmo drag state, if any.
+    pub gizmo_drag: Option<GizmoDragState3D>,
 }
 
 impl Default for Viewport3D {
@@ -730,6 +732,7 @@ impl Default for Viewport3D {
             environment: EnvironmentPreview3D::default(),
             width: 800,
             height: 600,
+            gizmo_drag: None,
         }
     }
 }
@@ -864,6 +867,52 @@ pub enum GizmoAxis {
     Y,
     /// Z axis (blue).
     Z,
+    /// XY plane (blue plane handle).
+    XY,
+    /// XZ plane (green plane handle).
+    XZ,
+    /// YZ plane (red plane handle).
+    YZ,
+}
+
+impl GizmoAxis {
+    /// Returns the unit direction vector(s) for this axis.
+    /// For single axes, returns the axis direction.
+    /// For plane axes, returns the plane normal.
+    pub fn direction(&self) -> Vector3 {
+        match self {
+            GizmoAxis::None => Vector3::ZERO,
+            GizmoAxis::X => Vector3::new(1.0, 0.0, 0.0),
+            GizmoAxis::Y => Vector3::new(0.0, 1.0, 0.0),
+            GizmoAxis::Z => Vector3::new(0.0, 0.0, 1.0),
+            GizmoAxis::XY => Vector3::new(0.0, 0.0, 1.0), // normal to XY plane
+            GizmoAxis::XZ => Vector3::new(0.0, 1.0, 0.0), // normal to XZ plane
+            GizmoAxis::YZ => Vector3::new(1.0, 0.0, 0.0), // normal to YZ plane
+        }
+    }
+
+    /// Returns true if this is a plane axis (XY, XZ, YZ).
+    pub fn is_plane(&self) -> bool {
+        matches!(self, GizmoAxis::XY | GizmoAxis::XZ | GizmoAxis::YZ)
+    }
+
+    /// Returns true if this is a single axis (X, Y, Z).
+    pub fn is_single(&self) -> bool {
+        matches!(self, GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z)
+    }
+
+    /// Masks a vector to only the components this axis allows.
+    pub fn mask(&self, v: Vector3) -> Vector3 {
+        match self {
+            GizmoAxis::None => Vector3::ZERO,
+            GizmoAxis::X => Vector3::new(v.x, 0.0, 0.0),
+            GizmoAxis::Y => Vector3::new(0.0, v.y, 0.0),
+            GizmoAxis::Z => Vector3::new(0.0, 0.0, v.z),
+            GizmoAxis::XY => Vector3::new(v.x, v.y, 0.0),
+            GizmoAxis::XZ => Vector3::new(v.x, 0.0, v.z),
+            GizmoAxis::YZ => Vector3::new(0.0, v.y, v.z),
+        }
+    }
 }
 
 /// A ray in 3D space, used for viewport picking.
@@ -1042,12 +1091,7 @@ impl Selection3D {
 
     /// Returns the axis direction vector for the active axis.
     pub fn axis_direction(&self) -> Vector3 {
-        match self.active_axis {
-            GizmoAxis::None => Vector3::ZERO,
-            GizmoAxis::X => Vector3::new(1.0, 0.0, 0.0),
-            GizmoAxis::Y => Vector3::new(0.0, 1.0, 0.0),
-            GizmoAxis::Z => Vector3::new(0.0, 0.0, 1.0),
-        }
+        self.active_axis.direction()
     }
 }
 
@@ -1171,27 +1215,37 @@ impl Viewport3D {
         drag_start_px: f32,
         drag_start_py: f32,
     ) -> Vector3 {
-        let axis_dir = match axis {
-            GizmoAxis::X => Vector3::new(1.0, 0.0, 0.0),
-            GizmoAxis::Y => Vector3::new(0.0, 1.0, 0.0),
-            GizmoAxis::Z => Vector3::new(0.0, 0.0, 1.0),
-            GizmoAxis::None => return Vector3::ZERO,
-        };
+        if axis == GizmoAxis::None {
+            return Vector3::ZERO;
+        }
 
-        // Cast rays for the start and current mouse positions
         let ray_start = self.screen_to_ray(drag_start_px, drag_start_py);
         let ray_now = self.screen_to_ray(px, py);
 
-        // Find the closest point on the axis line for each ray
-        let t_start = ray_closest_to_line(&ray_start, gizmo_center, axis_dir);
-        let t_now = ray_closest_to_line(&ray_now, gizmo_center, axis_dir);
-
-        let delta = t_now - t_start;
-        Vector3::new(
-            axis_dir.x * delta,
-            axis_dir.y * delta,
-            axis_dir.z * delta,
-        )
+        if axis.is_plane() {
+            // For plane axes, intersect rays with the plane
+            let plane_normal = axis.direction();
+            let t_start = ray_plane_intersect(&ray_start, gizmo_center, plane_normal);
+            let t_now = ray_plane_intersect(&ray_now, gizmo_center, plane_normal);
+            if let (Some(ts), Some(tn)) = (t_start, t_now) {
+                let p_start = ray_start.at(ts);
+                let p_now = ray_now.at(tn);
+                axis.mask(Vector3::new(
+                    p_now.x - p_start.x,
+                    p_now.y - p_start.y,
+                    p_now.z - p_start.z,
+                ))
+            } else {
+                Vector3::ZERO
+            }
+        } else {
+            // Single-axis: project rays onto the axis line
+            let axis_dir = axis.direction();
+            let t_start = ray_closest_to_line(&ray_start, gizmo_center, axis_dir);
+            let t_now = ray_closest_to_line(&ray_now, gizmo_center, axis_dir);
+            let delta = t_now - t_start;
+            Vector3::new(axis_dir.x * delta, axis_dir.y * delta, axis_dir.z * delta)
+        }
     }
 
     /// Computes a rotation angle (in radians) for the **rotate** gizmo based on
@@ -1299,6 +1353,474 @@ fn ray_closest_to_line(ray: &Ray3D, line_origin: Vector3, line_dir: Vector3) -> 
 
     // t parameter along the axis line
     (a * e - b * d) / denom
+}
+
+// ---------------------------------------------------------------------------
+// Gizmo configuration and snap
+// ---------------------------------------------------------------------------
+
+/// Configuration for 3D gizmo visual and interaction parameters.
+#[derive(Debug, Clone)]
+pub struct GizmoConfig3D {
+    /// Length of the gizmo arrows in world units.
+    pub arrow_length: f32,
+    /// Radius of the rotate ring in world units.
+    pub ring_radius: f32,
+    /// Scale handle length in world units.
+    pub scale_handle_length: f32,
+    /// Screen-space hit tolerance for picking gizmo elements (pixels).
+    pub pick_tolerance: f32,
+    /// Size of the plane handles as fraction of arrow_length.
+    pub plane_handle_fraction: f32,
+}
+
+impl Default for GizmoConfig3D {
+    fn default() -> Self {
+        Self {
+            arrow_length: 1.0,
+            ring_radius: 0.8,
+            scale_handle_length: 0.9,
+            pick_tolerance: 12.0,
+            plane_handle_fraction: 0.3,
+        }
+    }
+}
+
+/// Snap settings for 3D gizmo operations.
+#[derive(Debug, Clone)]
+pub struct GizmoSnap3D {
+    /// Translation snap step in world units (0 = no snap).
+    pub translate_step: f32,
+    /// Rotation snap step in radians (0 = no snap).
+    pub rotate_step: f32,
+    /// Scale snap step as a factor (0 = no snap).
+    pub scale_step: f32,
+}
+
+impl Default for GizmoSnap3D {
+    fn default() -> Self {
+        Self {
+            translate_step: 0.0,
+            rotate_step: 0.0,
+            scale_step: 0.0,
+        }
+    }
+}
+
+impl GizmoSnap3D {
+    /// Snaps a value to the nearest multiple of `step`. Returns the value unchanged if step <= 0.
+    pub fn snap_value(value: f32, step: f32) -> f32 {
+        if step <= 0.0 {
+            value
+        } else {
+            (value / step).round() * step
+        }
+    }
+
+    /// Snaps a translation vector component-wise.
+    pub fn snap_translate(&self, v: Vector3) -> Vector3 {
+        if self.translate_step <= 0.0 {
+            v
+        } else {
+            Vector3::new(
+                Self::snap_value(v.x, self.translate_step),
+                Self::snap_value(v.y, self.translate_step),
+                Self::snap_value(v.z, self.translate_step),
+            )
+        }
+    }
+
+    /// Snaps a rotation angle.
+    pub fn snap_rotate(&self, angle: f32) -> f32 {
+        Self::snap_value(angle, self.rotate_step)
+    }
+
+    /// Snaps a scale factor.
+    pub fn snap_scale(&self, factor: f32) -> f32 {
+        if self.scale_step <= 0.0 {
+            factor
+        } else {
+            Self::snap_value(factor, self.scale_step)
+        }
+    }
+}
+
+/// The result of a completed gizmo drag operation.
+#[derive(Debug, Clone)]
+pub enum GizmoTransform3D {
+    /// Translation by a world-space delta vector.
+    Move(Vector3),
+    /// Rotation by an angle (radians) around the given axis.
+    Rotate { axis: GizmoAxis, angle: f32 },
+    /// Scale by a factor along the given axis.
+    Scale { axis: GizmoAxis, factor: f32 },
+}
+
+/// State tracking an in-progress gizmo drag.
+#[derive(Debug, Clone)]
+pub struct GizmoDragState3D {
+    /// Which gizmo mode initiated this drag.
+    pub mode: GizmoMode3D,
+    /// Which axis is being dragged.
+    pub axis: GizmoAxis,
+    /// World position of the gizmo center at drag start.
+    pub gizmo_center: Vector3,
+    /// Screen pixel where the drag started.
+    pub start_px: f32,
+    /// Screen pixel where the drag started.
+    pub start_py: f32,
+    /// Current accumulated transform result.
+    pub current_transform: GizmoTransform3D,
+}
+
+impl Viewport3D {
+    /// Hit-tests the gizmo for the current selection at the given screen position.
+    ///
+    /// Returns the axis that was hit, considering the current gizmo mode.
+    /// For Move mode, tests arrow tips and plane handles.
+    /// For Rotate mode, tests ring intersections.
+    /// For Scale mode, tests scale handle tips.
+    pub fn hit_test_gizmo_full(
+        &self,
+        px: f32,
+        py: f32,
+        gizmo_center: Vector3,
+        config: &GizmoConfig3D,
+    ) -> GizmoAxis {
+        let ray = self.screen_to_ray(px, py);
+
+        match self.selection.gizmo_mode {
+            GizmoMode3D::Select => GizmoAxis::None,
+
+            GizmoMode3D::Move => {
+                // Test arrow tips (single axes)
+                let tip_radius = config.arrow_length * 0.15;
+                let tips = [
+                    (GizmoAxis::X, Vector3::new(gizmo_center.x + config.arrow_length, gizmo_center.y, gizmo_center.z)),
+                    (GizmoAxis::Y, Vector3::new(gizmo_center.x, gizmo_center.y + config.arrow_length, gizmo_center.z)),
+                    (GizmoAxis::Z, Vector3::new(gizmo_center.x, gizmo_center.y, gizmo_center.z + config.arrow_length)),
+                ];
+
+                let mut best_axis = GizmoAxis::None;
+                let mut best_t = f32::MAX;
+
+                for (axis, tip_pos) in tips {
+                    if let Some(t) = ray.intersect_sphere(tip_pos, tip_radius) {
+                        if t < best_t {
+                            best_t = t;
+                            best_axis = axis;
+                        }
+                    }
+                }
+
+                // Test plane handles (small squares at arrow_length * plane_handle_fraction along each pair of axes)
+                if best_axis == GizmoAxis::None {
+                    let pf = config.arrow_length * config.plane_handle_fraction;
+                    let plane_centers = [
+                        (GizmoAxis::XY, Vector3::new(gizmo_center.x + pf, gizmo_center.y + pf, gizmo_center.z)),
+                        (GizmoAxis::XZ, Vector3::new(gizmo_center.x + pf, gizmo_center.y, gizmo_center.z + pf)),
+                        (GizmoAxis::YZ, Vector3::new(gizmo_center.x, gizmo_center.y + pf, gizmo_center.z + pf)),
+                    ];
+                    let plane_radius = pf * 0.5;
+
+                    for (axis, center) in plane_centers {
+                        if let Some(t) = ray.intersect_sphere(center, plane_radius) {
+                            if t < best_t {
+                                best_t = t;
+                                best_axis = axis;
+                            }
+                        }
+                    }
+                }
+
+                best_axis
+            }
+
+            GizmoMode3D::Rotate => {
+                // Test ring intersections — each ring is a torus approximated by sampling
+                // points on the ring and testing sphere intersection at each sample.
+                let sample_count = 16;
+                let sample_radius = config.ring_radius * 0.1;
+                let axes = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z];
+
+                let mut best_axis = GizmoAxis::None;
+                let mut best_t = f32::MAX;
+
+                for &axis in &axes {
+                    for i in 0..sample_count {
+                        let angle = (i as f32 / sample_count as f32) * std::f32::consts::TAU;
+                        let (sin_a, cos_a) = angle.sin_cos();
+                        let point = match axis {
+                            GizmoAxis::X => Vector3::new(
+                                gizmo_center.x,
+                                gizmo_center.y + cos_a * config.ring_radius,
+                                gizmo_center.z + sin_a * config.ring_radius,
+                            ),
+                            GizmoAxis::Y => Vector3::new(
+                                gizmo_center.x + cos_a * config.ring_radius,
+                                gizmo_center.y,
+                                gizmo_center.z + sin_a * config.ring_radius,
+                            ),
+                            GizmoAxis::Z => Vector3::new(
+                                gizmo_center.x + cos_a * config.ring_radius,
+                                gizmo_center.y + sin_a * config.ring_radius,
+                                gizmo_center.z,
+                            ),
+                            _ => unreachable!(),
+                        };
+                        if let Some(t) = ray.intersect_sphere(point, sample_radius) {
+                            if t < best_t {
+                                best_t = t;
+                                best_axis = axis;
+                            }
+                        }
+                    }
+                }
+
+                best_axis
+            }
+
+            GizmoMode3D::Scale => {
+                // Scale handles are cubes at axis tips — approximate as spheres
+                let tip_radius = config.scale_handle_length * 0.15;
+                let tips = [
+                    (GizmoAxis::X, Vector3::new(gizmo_center.x + config.scale_handle_length, gizmo_center.y, gizmo_center.z)),
+                    (GizmoAxis::Y, Vector3::new(gizmo_center.x, gizmo_center.y + config.scale_handle_length, gizmo_center.z)),
+                    (GizmoAxis::Z, Vector3::new(gizmo_center.x, gizmo_center.y, gizmo_center.z + config.scale_handle_length)),
+                ];
+
+                let mut best_axis = GizmoAxis::None;
+                let mut best_t = f32::MAX;
+
+                for (axis, tip_pos) in tips {
+                    if let Some(t) = ray.intersect_sphere(tip_pos, tip_radius) {
+                        if t < best_t {
+                            best_t = t;
+                            best_axis = axis;
+                        }
+                    }
+                }
+
+                best_axis
+            }
+        }
+    }
+
+    /// Begins a gizmo drag interaction.
+    ///
+    /// Call this when the user clicks on a gizmo axis. Returns `true` if a drag was started.
+    pub fn begin_gizmo_drag(
+        &mut self,
+        px: f32,
+        py: f32,
+        gizmo_center: Vector3,
+        axis: GizmoAxis,
+    ) -> bool {
+        if axis == GizmoAxis::None || self.selection.gizmo_mode == GizmoMode3D::Select {
+            return false;
+        }
+
+        let initial_transform = match self.selection.gizmo_mode {
+            GizmoMode3D::Move => GizmoTransform3D::Move(Vector3::ZERO),
+            GizmoMode3D::Rotate => GizmoTransform3D::Rotate { axis, angle: 0.0 },
+            GizmoMode3D::Scale => GizmoTransform3D::Scale { axis, factor: 1.0 },
+            GizmoMode3D::Select => return false,
+        };
+
+        self.selection.begin_drag(axis, gizmo_center);
+        self.gizmo_drag = Some(GizmoDragState3D {
+            mode: self.selection.gizmo_mode,
+            axis,
+            gizmo_center,
+            start_px: px,
+            start_py: py,
+            current_transform: initial_transform,
+        });
+        true
+    }
+
+    /// Updates an in-progress gizmo drag with the current mouse position.
+    ///
+    /// Returns the current transform if a drag is active.
+    pub fn update_gizmo_drag(
+        &mut self,
+        px: f32,
+        py: f32,
+        snap: &GizmoSnap3D,
+    ) -> Option<GizmoTransform3D> {
+        let vp_w = self.width;
+        let vp_h = self.height;
+        let drag = self.gizmo_drag.as_mut()?;
+
+        match drag.mode {
+            GizmoMode3D::Move => {
+                let raw_delta = if drag.axis.is_plane() {
+                    // For plane movement, cast rays onto the plane
+                    let ray_start = screen_to_ray_static(
+                        drag.start_px, drag.start_py,
+                        vp_w, vp_h, &self.camera,
+                    );
+                    let ray_now = screen_to_ray_static(px, py, vp_w, vp_h, &self.camera);
+
+                    let plane_normal = drag.axis.direction();
+                    let t_start = ray_plane_intersect(&ray_start, drag.gizmo_center, plane_normal);
+                    let t_now = ray_plane_intersect(&ray_now, drag.gizmo_center, plane_normal);
+
+                    if let (Some(ts), Some(tn)) = (t_start, t_now) {
+                        let p_start = ray_start.at(ts);
+                        let p_now = ray_now.at(tn);
+                        drag.axis.mask(Vector3::new(
+                            p_now.x - p_start.x,
+                            p_now.y - p_start.y,
+                            p_now.z - p_start.z,
+                        ))
+                    } else {
+                        Vector3::ZERO
+                    }
+                } else {
+                    // Single-axis: use the existing ray-to-line projection
+                    let axis_dir = drag.axis.direction();
+                    let ray_start = screen_to_ray_static(
+                        drag.start_px, drag.start_py,
+                        vp_w, vp_h, &self.camera,
+                    );
+                    let ray_now = screen_to_ray_static(px, py, vp_w, vp_h, &self.camera);
+
+                    let t_start = ray_closest_to_line(&ray_start, drag.gizmo_center, axis_dir);
+                    let t_now = ray_closest_to_line(&ray_now, drag.gizmo_center, axis_dir);
+
+                    let d = t_now - t_start;
+                    Vector3::new(axis_dir.x * d, axis_dir.y * d, axis_dir.z * d)
+                };
+
+                let snapped = snap.snap_translate(raw_delta);
+                drag.current_transform = GizmoTransform3D::Move(snapped);
+                self.selection.update_drag(snapped);
+                Some(GizmoTransform3D::Move(snapped))
+            }
+
+            GizmoMode3D::Rotate => {
+                let center_screen = world_to_screen_static(
+                    drag.gizmo_center, vp_w, vp_h, &self.camera,
+                );
+                let (cx, cy) = center_screen;
+                let angle_start = (drag.start_py - cy).atan2(drag.start_px - cx);
+                let angle_now = (py - cy).atan2(px - cx);
+                let raw_angle = angle_now - angle_start;
+                let snapped = snap.snap_rotate(raw_angle);
+
+                drag.current_transform = GizmoTransform3D::Rotate { axis: drag.axis, angle: snapped };
+                let axis_dir = drag.axis.direction();
+                self.selection.update_drag(Vector3::new(
+                    axis_dir.x * snapped,
+                    axis_dir.y * snapped,
+                    axis_dir.z * snapped,
+                ));
+                Some(GizmoTransform3D::Rotate { axis: drag.axis, angle: snapped })
+            }
+
+            GizmoMode3D::Scale => {
+                let center_screen = world_to_screen_static(
+                    drag.gizmo_center, vp_w, vp_h, &self.camera,
+                );
+                let (cx, cy) = center_screen;
+                let dist_start = ((drag.start_px - cx).powi(2) + (drag.start_py - cy).powi(2)).sqrt();
+                let dist_now = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+                let raw_factor = if dist_start < 1.0 { 1.0 } else { dist_now / dist_start };
+                let snapped = snap.snap_scale(raw_factor);
+
+                drag.current_transform = GizmoTransform3D::Scale { axis: drag.axis, factor: snapped };
+                let axis_dir = drag.axis.direction();
+                self.selection.update_drag(Vector3::new(
+                    axis_dir.x * snapped,
+                    axis_dir.y * snapped,
+                    axis_dir.z * snapped,
+                ));
+                Some(GizmoTransform3D::Scale { axis: drag.axis, factor: snapped })
+            }
+
+            GizmoMode3D::Select => None,
+        }
+    }
+
+    /// Ends the current gizmo drag, returning the final transform.
+    pub fn end_gizmo_drag(&mut self) -> Option<GizmoTransform3D> {
+        let drag = self.gizmo_drag.take()?;
+        self.selection.end_drag();
+        Some(drag.current_transform)
+    }
+
+    /// Cancels the current gizmo drag without applying.
+    pub fn cancel_gizmo_drag(&mut self) {
+        self.gizmo_drag = None;
+        self.selection.cancel_drag();
+    }
+
+    /// Returns true if a gizmo drag is currently in progress.
+    pub fn is_gizmo_dragging(&self) -> bool {
+        self.gizmo_drag.is_some()
+    }
+
+    /// Returns the current gizmo drag axis, if dragging.
+    pub fn gizmo_drag_axis(&self) -> GizmoAxis {
+        self.gizmo_drag.as_ref().map_or(GizmoAxis::None, |d| d.axis)
+    }
+}
+
+/// Static helper: unproject screen pixel to world ray without borrowing Viewport3D.
+fn screen_to_ray_static(
+    px: f32, py: f32,
+    width: u32, height: u32,
+    camera: &ViewportCamera3D,
+) -> Ray3D {
+    let aspect = if height == 0 { 1.0 } else { width as f32 / height as f32 };
+    let ndc_x = (2.0 * px / width as f32) - 1.0;
+    let ndc_y = 1.0 - (2.0 * py / height as f32);
+    let half_fov = (camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
+    let local_dir = Vector3::new(ndc_x * half_fov * aspect, ndc_y * half_fov, -1.0).normalized();
+    let t = camera.transform();
+    let world_dir = Vector3::new(
+        t.basis.x.x * local_dir.x + t.basis.y.x * local_dir.y + t.basis.z.x * local_dir.z,
+        t.basis.x.y * local_dir.x + t.basis.y.y * local_dir.y + t.basis.z.y * local_dir.z,
+        t.basis.x.z * local_dir.x + t.basis.y.z * local_dir.y + t.basis.z.z * local_dir.z,
+    );
+    Ray3D::new(camera.position(), world_dir)
+}
+
+/// Static helper: project world point to screen without borrowing Viewport3D.
+fn world_to_screen_static(
+    world_pos: Vector3,
+    width: u32, height: u32,
+    camera: &ViewportCamera3D,
+) -> (f32, f32) {
+    let view = camera.view_transform();
+    let vx = view.basis.x.x * world_pos.x + view.basis.y.x * world_pos.y + view.basis.z.x * world_pos.z + view.origin.x;
+    let vy = view.basis.x.y * world_pos.x + view.basis.y.y * world_pos.y + view.basis.z.y * world_pos.z + view.origin.y;
+    let vz = view.basis.x.z * world_pos.x + view.basis.y.z * world_pos.y + view.basis.z.z * world_pos.z + view.origin.z;
+    let aspect = if height == 0 { 1.0 } else { width as f32 / height as f32 };
+    let half_fov = (camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
+    let inv_z = if vz.abs() < 1e-6 { -1e6 } else { -1.0 / vz };
+    let ndc_x = (vx * inv_z) / (half_fov * aspect);
+    let ndc_y = (vy * inv_z) / half_fov;
+    let px = (ndc_x + 1.0) * 0.5 * width as f32;
+    let py = (1.0 - ndc_y) * 0.5 * height as f32;
+    (px, py)
+}
+
+/// Intersects a ray with a plane defined by a point and normal.
+/// Returns the distance `t` along the ray, or None if parallel.
+fn ray_plane_intersect(ray: &Ray3D, plane_point: Vector3, plane_normal: Vector3) -> Option<f32> {
+    let denom = ray.direction.dot(plane_normal);
+    if denom.abs() < 1e-8 {
+        return None;
+    }
+    let diff = Vector3::new(
+        plane_point.x - ray.origin.x,
+        plane_point.y - ray.origin.y,
+        plane_point.z - ray.origin.z,
+    );
+    let t = diff.dot(plane_normal) / denom;
+    if t >= 0.0 { Some(t) } else { None }
 }
 
 #[cfg(test)]
@@ -2558,5 +3080,357 @@ mod tests {
         assert!(approx_eq(volume.material.emission.g, 1.0, 1e-4));
         assert!(approx_eq(volume.material.height_falloff, 2.5, 1e-4));
         assert!(approx_eq(volume.material.edge_fade, 0.3, 1e-4));
+    }
+
+    // -----------------------------------------------------------------------
+    // GizmoAxis extended tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gizmo_axis_direction_single() {
+        assert!(vec3_approx_eq(GizmoAxis::X.direction(), Vector3::new(1.0, 0.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::Y.direction(), Vector3::new(0.0, 1.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::Z.direction(), Vector3::new(0.0, 0.0, 1.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::None.direction(), Vector3::ZERO, 1e-6));
+    }
+
+    #[test]
+    fn test_gizmo_axis_direction_plane() {
+        // XY plane normal is Z
+        assert!(vec3_approx_eq(GizmoAxis::XY.direction(), Vector3::new(0.0, 0.0, 1.0), 1e-6));
+        // XZ plane normal is Y
+        assert!(vec3_approx_eq(GizmoAxis::XZ.direction(), Vector3::new(0.0, 1.0, 0.0), 1e-6));
+        // YZ plane normal is X
+        assert!(vec3_approx_eq(GizmoAxis::YZ.direction(), Vector3::new(1.0, 0.0, 0.0), 1e-6));
+    }
+
+    #[test]
+    fn test_gizmo_axis_is_plane_and_single() {
+        assert!(GizmoAxis::X.is_single());
+        assert!(!GizmoAxis::X.is_plane());
+        assert!(GizmoAxis::XY.is_plane());
+        assert!(!GizmoAxis::XY.is_single());
+        assert!(!GizmoAxis::None.is_plane());
+        assert!(!GizmoAxis::None.is_single());
+    }
+
+    #[test]
+    fn test_gizmo_axis_mask() {
+        let v = Vector3::new(3.0, 4.0, 5.0);
+        assert!(vec3_approx_eq(GizmoAxis::X.mask(v), Vector3::new(3.0, 0.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::Y.mask(v), Vector3::new(0.0, 4.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::Z.mask(v), Vector3::new(0.0, 0.0, 5.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::XY.mask(v), Vector3::new(3.0, 4.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::XZ.mask(v), Vector3::new(3.0, 0.0, 5.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::YZ.mask(v), Vector3::new(0.0, 4.0, 5.0), 1e-6));
+        assert!(vec3_approx_eq(GizmoAxis::None.mask(v), Vector3::ZERO, 1e-6));
+    }
+
+    // -----------------------------------------------------------------------
+    // GizmoConfig3D tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gizmo_config_defaults() {
+        let config = GizmoConfig3D::default();
+        assert!(config.arrow_length > 0.0);
+        assert!(config.ring_radius > 0.0);
+        assert!(config.scale_handle_length > 0.0);
+        assert!(config.pick_tolerance > 0.0);
+        assert!(config.plane_handle_fraction > 0.0 && config.plane_handle_fraction < 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // GizmoSnap3D tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snap_value_with_zero_step() {
+        assert!(approx_eq(GizmoSnap3D::snap_value(3.7, 0.0), 3.7, 1e-6));
+    }
+
+    #[test]
+    fn test_snap_value_rounds_to_nearest() {
+        assert!(approx_eq(GizmoSnap3D::snap_value(3.7, 1.0), 4.0, 1e-6));
+        assert!(approx_eq(GizmoSnap3D::snap_value(3.2, 1.0), 3.0, 1e-6));
+        assert!(approx_eq(GizmoSnap3D::snap_value(0.3, 0.25), 0.25, 1e-6));
+        assert!(approx_eq(GizmoSnap3D::snap_value(-0.3, 0.25), -0.25, 1e-6));
+    }
+
+    #[test]
+    fn test_snap_translate() {
+        let snap = GizmoSnap3D { translate_step: 0.5, ..Default::default() };
+        let v = Vector3::new(1.3, 2.7, -0.1);
+        let snapped = snap.snap_translate(v);
+        assert!(approx_eq(snapped.x, 1.5, 1e-6));
+        assert!(approx_eq(snapped.y, 2.5, 1e-6));
+        assert!(approx_eq(snapped.z, 0.0, 1e-6));
+    }
+
+    #[test]
+    fn test_snap_translate_no_snap() {
+        let snap = GizmoSnap3D::default();
+        let v = Vector3::new(1.3, 2.7, -0.1);
+        let snapped = snap.snap_translate(v);
+        assert!(vec3_approx_eq(snapped, v, 1e-6));
+    }
+
+    #[test]
+    fn test_snap_rotate() {
+        let snap = GizmoSnap3D {
+            rotate_step: std::f32::consts::FRAC_PI_4,
+            ..Default::default()
+        };
+        let snapped = snap.snap_rotate(0.3);
+        assert!(approx_eq(snapped, 0.0, 0.1), "0.3 should snap to 0 with PI/4 step");
+        let snapped2 = snap.snap_rotate(0.9);
+        assert!(approx_eq(snapped2, std::f32::consts::FRAC_PI_4, 0.1));
+    }
+
+    #[test]
+    fn test_snap_scale() {
+        let snap = GizmoSnap3D { scale_step: 0.1, ..Default::default() };
+        assert!(approx_eq(snap.snap_scale(1.34), 1.3, 0.05));
+        assert!(approx_eq(snap.snap_scale(1.06), 1.1, 0.05));
+    }
+
+    // -----------------------------------------------------------------------
+    // GizmoDragState3D / Viewport3D gizmo integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_viewport3d_gizmo_drag_not_started_in_select_mode() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Select);
+        let started = vp.begin_gizmo_drag(400.0, 300.0, Vector3::ZERO, GizmoAxis::X);
+        assert!(!started);
+        assert!(!vp.is_gizmo_dragging());
+    }
+
+    #[test]
+    fn test_viewport3d_gizmo_drag_not_started_with_none_axis() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Move);
+        let started = vp.begin_gizmo_drag(400.0, 300.0, Vector3::ZERO, GizmoAxis::None);
+        assert!(!started);
+    }
+
+    #[test]
+    fn test_viewport3d_gizmo_move_drag_lifecycle() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.camera.focus_point = Vector3::ZERO;
+        vp.camera.distance = 10.0;
+        vp.camera.yaw = 0.0;
+        vp.camera.pitch = 0.0;
+
+        vp.selection.select(42);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Move);
+
+        // Begin drag on X axis
+        let started = vp.begin_gizmo_drag(400.0, 300.0, Vector3::ZERO, GizmoAxis::X);
+        assert!(started);
+        assert!(vp.is_gizmo_dragging());
+        assert_eq!(vp.gizmo_drag_axis(), GizmoAxis::X);
+
+        // Update drag
+        let snap = GizmoSnap3D::default();
+        let transform = vp.update_gizmo_drag(500.0, 300.0, &snap);
+        assert!(transform.is_some());
+        match transform.unwrap() {
+            GizmoTransform3D::Move(delta) => {
+                assert!(delta.x > 0.0, "Moving right should produce positive X delta");
+                assert!(approx_eq(delta.y, 0.0, 1e-4));
+                assert!(approx_eq(delta.z, 0.0, 1e-4));
+            }
+            _ => panic!("Expected Move transform"),
+        }
+
+        // End drag
+        let result = vp.end_gizmo_drag();
+        assert!(result.is_some());
+        assert!(!vp.is_gizmo_dragging());
+        assert!(!vp.selection.dragging);
+    }
+
+    #[test]
+    fn test_viewport3d_gizmo_rotate_drag_lifecycle() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.camera.focus_point = Vector3::ZERO;
+        vp.camera.distance = 10.0;
+        vp.camera.yaw = 0.0;
+        vp.camera.pitch = 0.0;
+
+        vp.selection.select(7);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Rotate);
+
+        let started = vp.begin_gizmo_drag(500.0, 300.0, Vector3::ZERO, GizmoAxis::Y);
+        assert!(started);
+
+        let snap = GizmoSnap3D::default();
+        let transform = vp.update_gizmo_drag(500.0, 200.0, &snap);
+        assert!(transform.is_some());
+        match transform.unwrap() {
+            GizmoTransform3D::Rotate { axis, angle } => {
+                assert_eq!(axis, GizmoAxis::Y);
+                assert!(angle.abs() > 0.0, "Should have rotated");
+            }
+            _ => panic!("Expected Rotate transform"),
+        }
+
+        let result = vp.end_gizmo_drag();
+        assert!(result.is_some());
+        assert!(!vp.is_gizmo_dragging());
+    }
+
+    #[test]
+    fn test_viewport3d_gizmo_scale_drag_lifecycle() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.camera.focus_point = Vector3::ZERO;
+        vp.camera.distance = 10.0;
+        vp.camera.yaw = 0.0;
+        vp.camera.pitch = 0.0;
+
+        vp.selection.select(99);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Scale);
+
+        let center_screen = vp.world_to_screen(Vector3::ZERO);
+        let cx = center_screen.0;
+        let cy = center_screen.1;
+
+        let started = vp.begin_gizmo_drag(cx + 100.0, cy, Vector3::ZERO, GizmoAxis::X);
+        assert!(started);
+
+        let snap = GizmoSnap3D::default();
+        let transform = vp.update_gizmo_drag(cx + 200.0, cy, &snap);
+        assert!(transform.is_some());
+        match transform.unwrap() {
+            GizmoTransform3D::Scale { axis, factor } => {
+                assert_eq!(axis, GizmoAxis::X);
+                assert!(factor > 1.0, "Moving outward should scale up, got {}", factor);
+            }
+            _ => panic!("Expected Scale transform"),
+        }
+
+        vp.end_gizmo_drag();
+        assert!(!vp.is_gizmo_dragging());
+    }
+
+    #[test]
+    fn test_viewport3d_gizmo_cancel_drag() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.selection.select(1);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Move);
+        vp.begin_gizmo_drag(400.0, 300.0, Vector3::ZERO, GizmoAxis::Y);
+        assert!(vp.is_gizmo_dragging());
+
+        vp.cancel_gizmo_drag();
+        assert!(!vp.is_gizmo_dragging());
+        assert!(!vp.selection.dragging);
+    }
+
+    #[test]
+    fn test_viewport3d_gizmo_move_with_snap() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.camera.focus_point = Vector3::ZERO;
+        vp.camera.distance = 10.0;
+        vp.camera.yaw = 0.0;
+        vp.camera.pitch = 0.0;
+
+        vp.selection.select(42);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Move);
+        vp.begin_gizmo_drag(400.0, 300.0, Vector3::ZERO, GizmoAxis::X);
+
+        let snap = GizmoSnap3D { translate_step: 1.0, ..Default::default() };
+        let transform = vp.update_gizmo_drag(500.0, 300.0, &snap);
+        match transform.unwrap() {
+            GizmoTransform3D::Move(delta) => {
+                // Delta should be snapped to nearest integer
+                let remainder = delta.x % 1.0;
+                assert!(approx_eq(remainder, 0.0, 0.01) || approx_eq(remainder.abs(), 1.0, 0.01),
+                    "Delta X should be snapped to nearest 1.0, got {}", delta.x);
+            }
+            _ => panic!("Expected Move transform"),
+        }
+
+        vp.end_gizmo_drag();
+    }
+
+    #[test]
+    fn test_viewport3d_hit_test_gizmo_full_select_mode() {
+        let vp = Viewport3D::new(800, 600);
+        let config = GizmoConfig3D::default();
+        let axis = vp.hit_test_gizmo_full(400.0, 300.0, Vector3::ZERO, &config);
+        assert_eq!(axis, GizmoAxis::None, "Select mode should never hit a gizmo");
+    }
+
+    #[test]
+    fn test_viewport3d_hit_test_gizmo_full_miss() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.camera.focus_point = Vector3::ZERO;
+        vp.camera.distance = 10.0;
+        vp.camera.yaw = 0.0;
+        vp.camera.pitch = 0.0;
+        vp.selection.set_gizmo_mode(GizmoMode3D::Move);
+
+        let config = GizmoConfig3D::default();
+        // Click in the far corner — should miss
+        let axis = vp.hit_test_gizmo_full(0.0, 0.0, Vector3::ZERO, &config);
+        assert_eq!(axis, GizmoAxis::None);
+    }
+
+    #[test]
+    fn test_viewport3d_gizmo_plane_drag() {
+        let mut vp = Viewport3D::new(800, 600);
+        vp.camera.focus_point = Vector3::ZERO;
+        vp.camera.distance = 10.0;
+        vp.camera.yaw = 0.0;
+        vp.camera.pitch = 0.0;
+
+        vp.selection.select(42);
+        vp.selection.set_gizmo_mode(GizmoMode3D::Move);
+
+        // Begin drag on XY plane
+        let started = vp.begin_gizmo_drag(400.0, 300.0, Vector3::ZERO, GizmoAxis::XY);
+        assert!(started);
+        assert_eq!(vp.gizmo_drag_axis(), GizmoAxis::XY);
+
+        let snap = GizmoSnap3D::default();
+        let transform = vp.update_gizmo_drag(450.0, 250.0, &snap);
+        assert!(transform.is_some());
+        match transform.unwrap() {
+            GizmoTransform3D::Move(delta) => {
+                // Z should be zero for XY plane
+                assert!(approx_eq(delta.z, 0.0, 1e-4), "Z should be zero for XY plane drag");
+            }
+            _ => panic!("Expected Move transform"),
+        }
+
+        vp.end_gizmo_drag();
+    }
+
+    // -----------------------------------------------------------------------
+    // ray_plane_intersect tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ray_plane_intersect_hit() {
+        let ray = Ray3D::new(Vector3::new(0.0, 5.0, 0.0), Vector3::new(0.0, -1.0, 0.0));
+        let t = ray_plane_intersect(&ray, Vector3::ZERO, Vector3::new(0.0, 1.0, 0.0));
+        assert!(t.is_some());
+        assert!(approx_eq(t.unwrap(), 5.0, 1e-4));
+    }
+
+    #[test]
+    fn test_ray_plane_intersect_parallel() {
+        let ray = Ray3D::new(Vector3::new(0.0, 5.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
+        let t = ray_plane_intersect(&ray, Vector3::ZERO, Vector3::new(0.0, 1.0, 0.0));
+        assert!(t.is_none(), "Parallel ray should not intersect plane");
+    }
+
+    #[test]
+    fn test_ray_plane_intersect_behind() {
+        let ray = Ray3D::new(Vector3::new(0.0, -5.0, 0.0), Vector3::new(0.0, -1.0, 0.0));
+        let t = ray_plane_intersect(&ray, Vector3::ZERO, Vector3::new(0.0, 1.0, 0.0));
+        assert!(t.is_none(), "Intersection behind ray should return None");
     }
 }

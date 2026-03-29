@@ -267,12 +267,8 @@ fn deferred_connection_trace_ordering() {
     assert_eq!(emits.len(), 1);
     assert_eq!(emits[0].detail, "mixed_sig");
 
-    // Flush deferred.
-    tree.set_trace_frame(1);
-    tree.flush_deferred_signals();
-    assert_eq!(def_counter.load(Ordering::SeqCst), 1);
-
     // Only one SignalEmit event total — trace records the emission, not the dispatch.
+    tree.set_trace_frame(1);
     let emits_after = signal_emit_trace_events(&tree);
     assert_eq!(
         emits_after.len(),

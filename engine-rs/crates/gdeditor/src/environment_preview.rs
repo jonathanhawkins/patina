@@ -358,6 +358,7 @@ mod tests {
         let env = Environment3D {
             background_mode: BackgroundMode::CustomColor,
             background_color: Color::new(0.5, 0.2, 0.8, 1.0),
+            ambient_source: AmbientSource::Disabled,
             ..Default::default()
         };
         let fb = render_environment_preview(&env, 16, 16);

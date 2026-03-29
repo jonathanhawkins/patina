@@ -179,7 +179,7 @@ impl Coordinator {
         }
 
         // Get acceptance commands from bead description
-        let commands = match self.open_db() {
+        let mut commands = match self.open_db() {
             Ok(db) => {
                 let desc = db::bead_description(&db, bead_id).ok().flatten();
                 drop(db);
@@ -192,9 +192,11 @@ impl Coordinator {
         };
 
         if commands.is_empty() {
-            tracing::info!(bead = %bead_id, "Stale bead has no acceptance commands — reopening");
-            let _ = br::reopen(bead_id);
-            return;
+            // Fallback: just verify the workspace compiles. Running the full test suite
+            // takes 15+ minutes and times out, creating a reopen loop. A successful build
+            // is a reasonable signal that the bead's work didn't break anything.
+            tracing::info!(bead = %bead_id, "Stale bead has no acceptance commands — using build check fallback");
+            commands.push("cargo build --workspace".to_string());
         }
 
         // Mark as pending
@@ -241,6 +243,87 @@ impl Coordinator {
     /// Sweep beads that workers marked "done" or "complete" directly.
     /// In pull mode, workers sometimes use `br update --status done` instead
     /// of `/mail-complete`. This catches those and closes them properly.
+    /// Log blocked beads (waiting on dependencies) and stale beads (untouched for 2+ days).
+    /// Uses br's built-in `blocked` and `stale` commands for diagnostics.
+    /// Runs at most once per minute to avoid spamming br subprocesses.
+    fn log_blocked_and_stale(&self) {
+        // Rate-limit: only run every 60 seconds
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_RUN: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = LAST_RUN.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < 60 {
+            return;
+        }
+        LAST_RUN.store(now, Ordering::Relaxed);
+
+        // Log blocked beads
+        match br::blocked_json() {
+            Ok(json) if !json.trim().is_empty() && json.trim() != "[]" => {
+                let count = json.matches("\"id\"").count();
+                if count > 0 {
+                    tracing::info!(count, "Blocked beads (waiting on dependencies)");
+                }
+            }
+            _ => {}
+        }
+
+        // Log stale beads (in_progress for 2+ days)
+        match br::stale_json(2) {
+            Ok(json) if !json.trim().is_empty() && json.trim() != "[]" => {
+                let count = json.matches("\"id\"").count();
+                if count > 0 {
+                    tracing::warn!(count, "Stale beads (untouched for 2+ days)");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Recover stale assignments: detect in_progress beads assigned to workers
+    /// no longer in the tmux session, validate acceptance tests, and close or reopen.
+    fn recover_stale_assignments(&self, session: &str, window: u32) -> Result<()> {
+        let (stale, extras) = {
+            let db = self.open_db()?;
+            let workers = worker::worker_info_list_with_config(session, window, &db, &self.config)?;
+            let active_names: Vec<String> = workers
+                .iter()
+                .filter(|w| !w.worker_name.is_empty())
+                .map(|w| w.worker_name.clone())
+                .collect();
+            let stale = db::stale_assignments(&db, &active_names)?;
+            let extras = db::extra_assignments(&db)?;
+            (stale, extras)
+        };
+
+        for (bead_id, assignee) in &stale {
+            tracing::info!(bead = %bead_id, worker = %assignee, "Stale assignment detected (worker missing from session)");
+            let is_in_progress = match self.open_db() {
+                Ok(db) => {
+                    let state = db::bead_state(&db, bead_id).ok().flatten();
+                    drop(db);
+                    matches!(state, Some((db::BeadStatus::InProgress, _)))
+                }
+                Err(_) => false,
+            };
+            if is_in_progress && self.config.verify_reported_tests {
+                self.verify_stale_bead(bead_id);
+            } else {
+                let _ = br::reopen(bead_id);
+            }
+        }
+
+        for (assignee, bead_id) in &extras {
+            tracing::info!(bead = %bead_id, worker = %assignee, "Reclaiming extra assignment");
+            let _ = br::reopen(bead_id);
+        }
+
+        Ok(())
+    }
+
     fn sweep_self_completed(&self) -> usize {
         let ids: Vec<String> = match self.open_db() {
             Ok(conn) => {
@@ -301,6 +384,24 @@ impl Coordinator {
             if swept > 0 {
                 tracing::info!(swept, "Swept self-completed beads (workers used br update --status done)");
             }
+        }
+
+        // Recover stale assignments — runs every poll cycle (including pull mode).
+        // Detects in_progress beads assigned to workers no longer in the tmux session,
+        // validates their acceptance tests, and closes or reopens them.
+        if !self.dry_run {
+            if let Some(session) = &self.config.session_name {
+                let window = self.config.window_index;
+                if let Err(e) = self.recover_stale_assignments(session, window) {
+                    tracing::warn!(error = %e, "stale assignment recovery failed");
+                }
+            }
+        }
+
+        // Log blocked and stale beads periodically for diagnostics.
+        // Uses br's built-in dependency graph and staleness detection.
+        if !self.dry_run {
+            self.log_blocked_and_stale();
         }
 
         let coordinator = self.coordinator_name()?;
@@ -369,18 +470,25 @@ impl Coordinator {
                     continue;
                 }
 
-                // Warn on assignee mismatch but proceed with verification.
-                // The reclaim/reassign cycle can re-assign a bead to a different
-                // worker before the original completer's message is processed.
-                // If the work is done and tests pass, accept it regardless.
+                // Fix assignee mismatch: update DB to match the actual completer.
+                // This happens when worker A claims a bead, dies, worker B re-claims
+                // and completes it, but A's stale message arrives first — or vice versa.
+                // The worker who sent the completion did the work, so update the assignee.
                 if let Some(current_assignee) = assignee {
                     if !completion.worker.is_empty() && current_assignee != &completion.worker {
-                        tracing::warn!(
+                        tracing::info!(
                             bead = %completion.bead_id,
-                            current = %current_assignee,
-                            reported = %completion.worker,
-                            "assignee mismatch — proceeding with verification anyway"
+                            from = %current_assignee,
+                            to = %completion.worker,
+                            "reassigning to actual completer"
                         );
+                        if !self.dry_run {
+                            let _ = br::update_bead(
+                                &completion.bead_id,
+                                Some(&completion.worker),
+                                None,
+                            );
+                        }
                     }
                 }
             }
@@ -1361,9 +1469,11 @@ impl Coordinator {
 
     fn build_prompt_text(&self, bead_id: &str, bead_title: &str, worker_name: &str) -> String {
         // Single-line: newlines cause Claude Code to submit prematurely via tmux send-keys -l.
-        // The flywheel-worker skill handles reading inbox for full details.
+        // The worker skill name varies by agent type (flywheel-worker for Claude, patina-fly-worker for Codex).
+        let worker_skill = self.config.worker_skill_name();
+        let complete_skill = self.config.completion_skill_name();
         format!(
-            "Use /skill flywheel-worker. Work bead {bead_id}: {bead_title}. Your Agent Mail identity is {worker_name}. Read your inbox for full assignment details. Close out with /skill mail-complete, not a freehand completion message."
+            "Use /skill {worker_skill}. Work bead {bead_id}: {bead_title}. Your Agent Mail identity is {worker_name}. Read your inbox for full assignment details. Close out with /skill {complete_skill}, not a freehand completion message."
         )
     }
 
@@ -3132,5 +3242,97 @@ mod tests {
         let pending = coord.pending_verifications.lock().unwrap();
         assert!(pending.contains("pat-abc"));
         assert!(!pending.contains("pat-xyz"));
+    }
+
+    // =========================================================================
+    // Stale-PROG recovery + pull-mode tests
+    // =========================================================================
+
+    #[test]
+    fn test_verify_result_has_stale_recovery_field() {
+        let source = include_str!("coordinator.rs");
+        let s = source.find("struct VerifyResult").unwrap();
+        let body = &source[s..s + 500];
+        assert!(body.contains("is_stale_recovery"));
+    }
+
+    #[test]
+    fn test_verify_stale_bead_method_exists() {
+        assert!(include_str!("coordinator.rs").contains("fn verify_stale_bead("));
+    }
+
+    #[test]
+    fn test_recover_stale_assignments_method_exists() {
+        assert!(include_str!("coordinator.rs").contains("fn recover_stale_assignments("));
+    }
+
+    #[test]
+    fn test_poll_calls_stale_recovery_directly() {
+        let source = include_str!("coordinator.rs");
+        let poll_fn = source.find("pub fn poll(").unwrap();
+        let body = &source[poll_fn..poll_fn + 2000];
+        assert!(body.contains("recover_stale_assignments"),
+            "poll() must call recover_stale_assignments so it runs in pull mode too");
+    }
+
+    #[test]
+    fn test_verify_stale_bead_falls_back_to_workspace_test() {
+        let source = include_str!("coordinator.rs");
+        let method = source.find("fn verify_stale_bead(").unwrap();
+        let end = source[method + 1..].find("\n    fn ").unwrap_or(1000);
+        let body = &source[method..method + end];
+        assert!(body.contains("commands.is_empty()"));
+        assert!(body.contains("cargo build --workspace"),
+            "must fall back to workspace build check when no acceptance commands");
+    }
+
+    #[test]
+    fn test_stale_recovery_verify_result_channel() {
+        let coord = test_coordinator();
+        coord.verify_tx.clone().send(VerifyResult {
+            bead_id: "pat-stale".to_string(),
+            worker: String::new(),
+            msg_id: None,
+            ack_required: false,
+            files_changed: String::new(),
+            tests_run: String::new(),
+            passed: true,
+            reject_reason: None,
+            is_stale_recovery: true,
+        }).unwrap();
+        let rx = coord.verify_rx.lock().unwrap();
+        let result = rx.try_recv().unwrap();
+        assert!(result.is_stale_recovery);
+        assert!(result.worker.is_empty());
+    }
+
+    #[test]
+    fn test_verify_stale_bead_skips_if_already_pending() {
+        let coord = test_coordinator();
+        {
+            coord.pending_verifications.lock().unwrap().insert("pat-already".to_string());
+        }
+        coord.verify_stale_bead("pat-already");
+        assert!(coord.verify_rx.lock().unwrap().try_recv().is_err(),
+            "should not dispatch verification for already-pending bead");
+    }
+
+    /// Regression: auto_create_beads_from_planner must check planner keys
+    /// before creating beads to prevent duplicates across planner cycles.
+    #[test]
+    fn test_auto_create_checks_planner_keys() {
+        let source = include_str!("main.rs");
+        let func = source.find("fn auto_create_beads_from_planner(").unwrap();
+        let end = source[func..].find("\n}").unwrap_or(2000);
+        let body = &source[func..func + end];
+
+        assert!(
+            body.contains("planner-key"),
+            "must check planner keys before creating beads"
+        );
+        assert!(
+            body.contains("existing_keys"),
+            "must load existing planner keys for dedup"
+        );
     }
 }

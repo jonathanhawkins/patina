@@ -13,7 +13,9 @@ gdscene = { path = "../gdscene" }
 gdrender2d = { path = "../gdrender2d" }
 gdplatform = { path = "../gdplatform" }
 gdresource = { path = "../gdresource" }
+gdscript-interop = { path = "../gdscript-interop" }
 gdserver3d = { path = "../gdserver3d" }
+regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"

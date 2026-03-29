@@ -523,10 +523,18 @@ fn test_kj4_project_settings_get() {
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(v["project_name"], "New Project");
-    assert_eq!(v["resolution_w"], 1152);
-    assert_eq!(v["resolution_h"], 648);
-    assert_eq!(v["physics_fps"], 60);
-    assert_eq!(v["gravity"], 980.0);
+    // resolution_w etc. are nested in categories
+    let cats = &v["categories"];
+    let display = &cats[1]["properties"];
+    assert_eq!(display[0]["key"], "resolution_w");
+    assert_eq!(display[0]["value"], 1152);
+    assert_eq!(display[1]["key"], "resolution_h");
+    assert_eq!(display[1]["value"], 648);
+    let physics = &cats[2]["properties"];
+    assert_eq!(physics[0]["key"], "physics_fps");
+    assert_eq!(physics[0]["value"], 60);
+    assert_eq!(physics[1]["key"], "gravity");
+    assert_eq!(physics[1]["value"], 980.0);
     handle.stop();
 }
 
@@ -541,9 +549,11 @@ fn test_kj4_project_settings_set() {
     let resp2 = http_get(port, "/api/project_settings");
     let v: serde_json::Value = serde_json::from_str(extract_body(&resp2)).unwrap();
     assert_eq!(v["project_name"], "MyGame");
-    assert_eq!(v["resolution_w"], 1920);
-    assert_eq!(v["physics_fps"], 120);
     assert_eq!(v["main_scene"], "res://main.tscn");
+    let display = &v["categories"][1]["properties"];
+    assert_eq!(display[0]["value"], 1920);
+    let physics = &v["categories"][2]["properties"];
+    assert_eq!(physics[0]["value"], 120);
     handle.stop();
 }
 

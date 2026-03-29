@@ -526,6 +526,7 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("Skeleton3D").parent("Node3D"));
     register_class(ClassRegistration::new("BoneAttachment3D").parent("Node3D"));
     register_class(ClassRegistration::new("AnimationPlayer").parent("Node"));
+    register_class(ClassRegistration::new("AnimationTree").parent("Node"));
     register_class(ClassRegistration::new("GPUParticles3D").parent("Node3D"));
     register_class(ClassRegistration::new("CPUParticles3D").parent("Node3D"));
     register_class(ClassRegistration::new("Decal").parent("Node3D"));
@@ -544,6 +545,206 @@ pub fn register_3d_classes() {
         register_class(ClassRegistration::new("Resource").parent("Object"));
     }
     register_class(ClassRegistration::new("VisualScript").parent("Resource"));
+}
+
+/// Registers the standard Godot 2D class hierarchy in the ClassDB.
+///
+/// This includes the CanvasItem → Node2D chain, common 2D nodes (Sprite2D,
+/// AnimatedSprite2D, etc.), Control UI classes, and 2D physics bodies.
+pub fn register_2d_classes() {
+    use gdcore::math::Vector2;
+
+    if !class_exists("Object") {
+        register_class(ClassRegistration::new("Object"));
+    }
+    if !class_exists("Node") {
+        register_class(ClassRegistration::new("Node").parent("Object"));
+    }
+    if !class_exists("Resource") {
+        register_class(ClassRegistration::new("Resource").parent("Object"));
+    }
+
+    // -- CanvasItem (base for all 2D & UI nodes) --
+    if !class_exists("CanvasItem") {
+        register_class(
+            ClassRegistration::new("CanvasItem")
+                .parent("Node")
+                .property(PropertyInfo::new("visible", Variant::Bool(true)))
+                .property(PropertyInfo::new("modulate", Variant::Color(gdcore::math::Color::WHITE)))
+                .property(PropertyInfo::new("z_index", Variant::Int(0))),
+        );
+    }
+
+    // -- Node2D --
+    if !class_exists("Node2D") {
+        register_class(
+            ClassRegistration::new("Node2D")
+                .parent("CanvasItem")
+                .property(PropertyInfo::new("position", Variant::Vector2(Vector2::ZERO)))
+                .property(PropertyInfo::new("rotation", Variant::Float(0.0)))
+                .property(PropertyInfo::new("scale", Variant::Vector2(Vector2::ONE))),
+        );
+    }
+
+    // -- Common 2D nodes --
+    if !class_exists("Sprite2D") {
+        register_class(ClassRegistration::new("Sprite2D").parent("Node2D"));
+    }
+    if !class_exists("AnimatedSprite2D") {
+        register_class(ClassRegistration::new("AnimatedSprite2D").parent("Node2D"));
+    }
+    if !class_exists("Camera2D") {
+        register_class(ClassRegistration::new("Camera2D").parent("Node2D"));
+    }
+    if !class_exists("TileMapLayer") {
+        register_class(ClassRegistration::new("TileMapLayer").parent("Node2D"));
+    }
+    if !class_exists("GPUParticles2D") {
+        register_class(ClassRegistration::new("GPUParticles2D").parent("Node2D"));
+    }
+    if !class_exists("CPUParticles2D") {
+        register_class(ClassRegistration::new("CPUParticles2D").parent("Node2D"));
+    }
+    if !class_exists("Line2D") {
+        register_class(ClassRegistration::new("Line2D").parent("Node2D"));
+    }
+    if !class_exists("Path2D") {
+        register_class(ClassRegistration::new("Path2D").parent("Node2D"));
+    }
+    if !class_exists("PathFollow2D") {
+        register_class(ClassRegistration::new("PathFollow2D").parent("Node2D"));
+    }
+    if !class_exists("NavigationRegion2D") {
+        register_class(ClassRegistration::new("NavigationRegion2D").parent("Node2D"));
+    }
+
+    // -- Control (UI) hierarchy --
+    if !class_exists("Control") {
+        register_class(
+            ClassRegistration::new("Control")
+                .parent("CanvasItem")
+                .property(PropertyInfo::new("anchor_left", Variant::Float(0.0)))
+                .property(PropertyInfo::new("anchor_top", Variant::Float(0.0)))
+                .property(PropertyInfo::new("anchor_right", Variant::Float(0.0)))
+                .property(PropertyInfo::new("anchor_bottom", Variant::Float(0.0))),
+        );
+    }
+    if !class_exists("Button") {
+        register_class(ClassRegistration::new("Button").parent("Control"));
+    }
+    if !class_exists("Label") {
+        register_class(ClassRegistration::new("Label").parent("Control"));
+    }
+    if !class_exists("LineEdit") {
+        register_class(ClassRegistration::new("LineEdit").parent("Control"));
+    }
+    if !class_exists("TextEdit") {
+        register_class(ClassRegistration::new("TextEdit").parent("Control"));
+    }
+    if !class_exists("Panel") {
+        register_class(ClassRegistration::new("Panel").parent("Control"));
+    }
+    if !class_exists("Container") {
+        register_class(ClassRegistration::new("Container").parent("Control"));
+    }
+    if !class_exists("HBoxContainer") {
+        register_class(ClassRegistration::new("HBoxContainer").parent("Container"));
+    }
+    if !class_exists("VBoxContainer") {
+        register_class(ClassRegistration::new("VBoxContainer").parent("Container"));
+    }
+
+    // -- Physics 2D bodies --
+    if !class_exists("CollisionObject2D") {
+        register_class(
+            ClassRegistration::new("CollisionObject2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
+                .property(PropertyInfo::new("collision_mask", Variant::Int(1))),
+        );
+    }
+    if !class_exists("PhysicsBody2D") {
+        register_class(ClassRegistration::new("PhysicsBody2D").parent("CollisionObject2D"));
+    }
+    if !class_exists("StaticBody2D") {
+        register_class(ClassRegistration::new("StaticBody2D").parent("PhysicsBody2D"));
+    }
+    if !class_exists("RigidBody2D") {
+        register_class(
+            ClassRegistration::new("RigidBody2D")
+                .parent("PhysicsBody2D")
+                .property(PropertyInfo::new("mass", Variant::Float(1.0)))
+                .property(PropertyInfo::new("gravity_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("freeze", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("CharacterBody2D") {
+        register_class(
+            ClassRegistration::new("CharacterBody2D")
+                .parent("PhysicsBody2D")
+                .property(PropertyInfo::new("velocity", Variant::Vector2(Vector2::ZERO)))
+                .property(PropertyInfo::new("floor_max_angle", Variant::Float(0.785398))),
+        );
+    }
+    if !class_exists("Area2D") {
+        register_class(
+            ClassRegistration::new("Area2D")
+                .parent("CollisionObject2D")
+                .property(PropertyInfo::new("monitoring", Variant::Bool(true)))
+                .property(PropertyInfo::new("monitorable", Variant::Bool(true))),
+        );
+    }
+    if !class_exists("CollisionShape2D") {
+        register_class(
+            ClassRegistration::new("CollisionShape2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("disabled", Variant::Bool(false))),
+        );
+    }
+}
+
+/// Registers all core, 2D, and 3D classes for the editor.
+///
+/// Convenience function that ensures the full class hierarchy is available.
+/// Safe to call multiple times — each class is only registered if not already present.
+pub fn register_editor_classes() {
+    register_2d_classes();
+    register_3d_classes();
+
+    // -- EditorPlugin --
+    if !class_exists("EditorPlugin") {
+        register_class(
+            ClassRegistration::new("EditorPlugin")
+                .parent("Node")
+                .method(MethodInfo::new("get_editor_interface", 0))
+                .method(MethodInfo::new("add_control_to_dock", 2))
+                .method(MethodInfo::new("remove_control_from_docks", 1))
+                .method(MethodInfo::new("add_control_to_bottom_panel", 2))
+                .method(MethodInfo::new("remove_control_from_bottom_panel", 1))
+                .method(MethodInfo::new("add_custom_type", 4))
+                .method(MethodInfo::new("remove_custom_type", 1))
+                .method(MethodInfo::new("add_autoload_singleton", 2))
+                .method(MethodInfo::new("remove_autoload_singleton", 1)),
+        );
+    }
+
+    // -- EditorInterface --
+    if !class_exists("EditorInterface") {
+        register_class(
+            ClassRegistration::new("EditorInterface")
+                .parent("Node")
+                .method(MethodInfo::new("get_editor_settings", 0))
+                .method(MethodInfo::new("get_selection", 0))
+                .method(MethodInfo::new("get_inspector", 0))
+                .method(MethodInfo::new("get_file_system_dock", 0))
+                .method(MethodInfo::new("get_edited_scene_root", 0))
+                .method(MethodInfo::new("open_scene_from_path", 1))
+                .method(MethodInfo::new("save_scene", 0))
+                .method(MethodInfo::new("reload_scene_from_disk", 0))
+                .method(MethodInfo::new("set_distraction_free_mode", 1))
+                .method(MethodInfo::new("is_distraction_free_mode_enabled", 0)),
+        );
+    }
 }
 
 /// Clears all registered classes. **For testing only.**

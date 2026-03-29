@@ -26,6 +26,7 @@ use gdscene::SceneTree;
 use gdvariant::serialize::{from_json, to_json};
 use gdvariant::Variant;
 
+use crate::create_dialog::CreateNodeDialog;
 use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
@@ -384,6 +385,8 @@ pub struct EditorState {
     pub scene_tabs: Vec<SceneTab>,
     /// Index of the currently active scene tab.
     pub active_tab_index: usize,
+    /// Node creation dialog with class search and filtering.
+    pub create_node_dialog: CreateNodeDialog,
 }
 
 /// A single scene tab in the editor.
@@ -491,6 +494,7 @@ unsafe impl Send for EditorState {}
 impl EditorState {
     /// Creates a new editor state with the given scene tree.
     pub fn new(tree: SceneTree) -> Self {
+        gdobject::class_db::register_editor_classes();
         Self {
             scene_tree: tree,
             selected_node: None,
@@ -577,6 +581,15 @@ impl EditorState {
                 modified: false,
             }],
             active_tab_index: 0,
+            create_node_dialog: {
+                let mut dlg = CreateNodeDialog::with_catalog();
+                dlg.add_favorite("Node2D");
+                dlg.add_favorite("Sprite2D");
+                dlg.add_favorite("CharacterBody2D");
+                dlg.add_favorite("Control");
+                dlg.add_favorite("Label");
+                dlg
+            },
         }
     }
 
@@ -983,7 +996,21 @@ fn handle_connection(
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
-        ("POST", "/api/node/create_dialog") => api_create_dialog(&mut stream),
+        ("POST", "/api/node/create_dialog") => {
+            api_create_dialog(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/node/create_dialog/toggle_favorite") => {
+            api_create_dialog_toggle_favorite(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/node/create_dialog/confirm") => {
+            api_create_dialog_confirm(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/node/catalog_2d") => {
+            api_node_catalog_2d(state, &mut stream)
+        }
+        ("POST", "/api/resource/property/set") => {
+            api_set_resource_property(state, &req.body, &mut stream)
+        }
         ("POST", "/api/node/reorder") => api_reorder_node(state, &req.body, &mut stream),
         ("POST", "/api/property/set") => api_set_property(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
@@ -1737,49 +1764,139 @@ fn api_duplicate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     send_json(stream, &json);
 }
 
-/// `POST /api/node/reorder` — reorders a node within its parent's children.
-/// Available node class names for the create-node dialog.
-const AVAILABLE_CLASSES: &[&str] = &[
-    "Node",
-    "Node2D",
-    "Sprite2D",
-    "AnimatedSprite2D",
-    "Camera2D",
-    "Light2D",
-    "CanvasModulate",
-    "CharacterBody2D",
-    "RigidBody2D",
-    "StaticBody2D",
-    "Area2D",
-    "CollisionShape2D",
-    "Control",
-    "Button",
-    "Label",
-    "TextEdit",
-    "LineEdit",
-    "Panel",
-    "TextureRect",
-    "VBoxContainer",
-    "HBoxContainer",
-    "GridContainer",
-    "ScrollContainer",
-    "TabContainer",
-    "AudioStreamPlayer",
-    "AudioStreamPlayer2D",
-    "Timer",
-    "AnimationPlayer",
-    "NavigationAgent2D",
-    "Node3D",
-];
+/// `POST /api/node/create_dialog` — returns classes from ClassDB with search, filter, favorites, and recent.
+fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    use crate::create_dialog::NodeCategory;
 
-/// `POST /api/node/create_dialog` - returns available class names for creating nodes.
-fn api_create_dialog(stream: &mut TcpStream) {
-    let classes: Vec<serde_json::Value> = AVAILABLE_CLASSES
-        .iter()
-        .map(|&c| serde_json::Value::String(c.to_string()))
-        .collect();
-    let json = serde_json::json!({ "classes": classes }).to_string();
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    if !body.is_empty() {
+        if let Some(parsed) = parse_json_body(body) {
+            if let Some(search) = parsed.get("search").and_then(|v| v.as_str()) {
+                dlg.set_search(search);
+            } else {
+                dlg.set_search("");
+            }
+            if let Some(base) = parsed.get("base_class").and_then(|v| v.as_str()) {
+                if base.is_empty() { dlg.set_base_class(None); }
+                else { dlg.set_base_class(Some(base.to_string())); }
+            }
+            if let Some(cat) = parsed.get("category").and_then(|v| v.as_str()) {
+                let category = match cat {
+                    "Node2D" | "2D Nodes" => Some(NodeCategory::Node2D),
+                    "Physics2D" | "2D Physics" => Some(NodeCategory::Physics2D),
+                    "UI" | "UI Controls" => Some(NodeCategory::UI),
+                    "Utility" => Some(NodeCategory::Utility),
+                    _ => None,
+                };
+                dlg.set_category_filter(category);
+            } else {
+                dlg.set_category_filter(None);
+            }
+        }
+    } else {
+        dlg.set_search("");
+        dlg.set_base_class(None);
+        dlg.set_category_filter(None);
+    }
+    let classes = dlg.filtered_classes();
+    let recent = dlg.recent_entries();
+    let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
+    let class_names: Vec<&str> = classes.iter().map(|c| c.class_name.as_str()).collect();
+    let class_entries: Vec<serde_json::Value> = classes.iter().map(|c| {
+        serde_json::json!({
+            "class_name": c.class_name, "parent_class": c.parent_class,
+            "inheritance_chain": c.inheritance_chain, "is_favorite": c.is_favorite,
+            "description": c.description, "category": c.category.map(|cat| cat.label()),
+        })
+    }).collect();
+    let recent_json: Vec<serde_json::Value> = recent.iter().map(|c| {
+        serde_json::json!({ "class_name": c.class_name, "parent_class": c.parent_class })
+    }).collect();
+    let json = serde_json::json!({
+        "classes": class_names, "class_entries": class_entries, "favorites": favorites,
+        "recent": recent_json, "match_count": class_names.len(),
+    }).to_string();
     send_json(stream, &json);
+}
+
+/// `GET /api/node/catalog_2d` — returns the 2D node catalog with categories and helper presets.
+fn api_node_catalog_2d(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let st = state.lock().unwrap();
+    let dlg = &st.create_node_dialog;
+    if let Some(catalog) = dlg.catalog() {
+        let entries: Vec<serde_json::Value> = catalog.entries().iter().map(|e| {
+            serde_json::json!({
+                "class_name": e.class_name,
+                "category": e.category.label(),
+                "description": e.description,
+            })
+        }).collect();
+        let helpers: Vec<serde_json::Value> = catalog.helpers().iter().map(|h| {
+            serde_json::json!({
+                "name": h.name,
+                "description": h.description,
+                "root_class": h.root_class,
+                "children": h.children,
+            })
+        }).collect();
+        let categories: Vec<&str> = catalog.categories().iter().map(|c| c.label()).collect();
+        let json = serde_json::json!({
+            "entries": entries, "helpers": helpers, "categories": categories,
+        }).to_string();
+        send_json(stream, &json);
+    } else {
+        send_json(stream, r#"{"entries":[],"helpers":[],"categories":[]}"#);
+    }
+}
+
+/// `POST /api/node/create_dialog/toggle_favorite` — toggle a class favorite.
+fn api_create_dialog_toggle_favorite(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) { Some(v) => v, None => { send_error(stream, 400, "invalid JSON"); return; } };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) { Some(n) => n.to_string(), None => { send_error(stream, 400, "missing class_name"); return; } };
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    let is_favorite = if dlg.favorites().contains(&class_name) { dlg.remove_favorite(&class_name); false } else { dlg.add_favorite(&class_name); true };
+    let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
+    let json = serde_json::json!({ "is_favorite": is_favorite, "favorites": favorites }).to_string();
+    send_json(stream, &json);
+}
+
+/// `POST /api/node/create_dialog/confirm` — confirm selection, track in recent list.
+fn api_create_dialog_confirm(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) { Some(v) => v, None => { send_error(stream, 400, "invalid JSON"); return; } };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) { Some(n) => n.to_string(), None => { send_error(stream, 400, "missing class_name"); return; } };
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    dlg.select(&class_name);
+    dlg.confirm();
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/resource/property/set` — set a property within a resource sub-editor.
+fn api_set_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) { Some(v) => v, None => { send_error(stream, 400, "invalid JSON"); return; } };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) { Some(v) => v, None => { send_error(stream, 400, "missing node_id"); return; } };
+    let resource_property = match parsed.get("resource_property").and_then(|v| v.as_str()) { Some(v) => v.to_string(), None => { send_error(stream, 400, "missing resource_property"); return; } };
+    let sub_property = match parsed.get("sub_property").and_then(|v| v.as_str()) { Some(v) => v.to_string(), None => { send_error(stream, 400, "missing sub_property"); return; } };
+    let value_json = match parsed.get("value") { Some(v) => v, None => { send_error(stream, 400, "missing value"); return; } };
+    let new_sub_value = match from_json(value_json) { Some(v) => v, None => { send_error(stream, 400, "invalid variant value"); return; } };
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) { Some(id) => id, None => { send_error(stream, 404, "node not found"); return; } };
+    let current = match state.scene_tree.get_node(node_id).map(|n| n.get_property(&resource_property)) {
+        Some(v) => v, None => { send_error(stream, 404, "resource property not found"); return; }
+    };
+    let new_value = match current {
+        Variant::Resource(mut r) => { r.properties.insert(sub_property.clone(), new_sub_value); Variant::Resource(r) }
+        _ => { send_error(stream, 400, "property is not a Resource type"); return; }
+    };
+    let mut cmd = EditorCommand::SetProperty { node_id, property: resource_property.clone(), new_value, old_value: Variant::Nil };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) { send_error(stream, 500, &e.to_string()); return; }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log("info", format!("Changed resource property '{}.{}'", resource_property, sub_property));
+    send_json(stream, r#"{"ok":true}"#);
 }
 
 fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
@@ -6601,7 +6718,12 @@ fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStr
                 ]
             }
         ]);
-        serde_json::json!({"categories": categories}).to_string()
+        serde_json::json!({
+            "project_name": &s.project_name,
+            "main_scene": &s.project_main_scene,
+            "description": &s.project_description,
+            "categories": categories,
+        }).to_string()
     };
     send_json(stream, &json);
 }
@@ -10211,10 +10333,10 @@ position = Vector2(10, 20)
         handle.stop();
     }
 
-    /// pat-xse8a: Verify all 5 Godot-standard menus (Scene, Project, Debug,
-    /// Editor, Help) are present in the editor HTML with correct actions.
+    /// pat-xse8a: Verify all Godot-standard menus (Scene, Edit, Project,
+    /// Debug, Editor, Help) are present in the editor HTML with correct actions.
     #[test]
-    fn test_menu_bar_five_godot_menus_with_actions() {
+    fn test_menu_bar_godot_menus_with_actions() {
         let (handle, port) = make_server();
         let resp = http_get(port, "/editor");
         let body = extract_body(&resp);
@@ -10232,6 +10354,14 @@ position = Vector2(10, 20)
         assert!(body.contains("data-action=\"scene-save-as\""), "scene-save-as action missing");
         assert!(body.contains("data-action=\"scene-close\""), "scene-close action missing");
         assert!(body.contains("data-action=\"scene-quit\""), "scene-quit action missing");
+
+        // Edit menu and its actions
+        assert!(body.contains("data-menu=\"edit\""), "Edit menu missing");
+        assert!(body.contains("data-action=\"edit-undo\""), "edit-undo action missing");
+        assert!(body.contains("data-action=\"edit-redo\""), "edit-redo action missing");
+        assert!(body.contains("data-action=\"edit-cut\""), "edit-cut action missing");
+        assert!(body.contains("data-action=\"edit-copy\""), "edit-copy action missing");
+        assert!(body.contains("data-action=\"edit-paste\""), "edit-paste action missing");
 
         // Project menu and its actions
         assert!(body.contains("data-menu=\"project\""), "Project menu missing");

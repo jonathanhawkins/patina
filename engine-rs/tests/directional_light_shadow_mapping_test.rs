@@ -175,6 +175,7 @@ fn shadow_darkens_fragments_in_solid_render() {
         fov: std::f32::consts::FRAC_PI_4,
         near: 0.1,
         far: 100.0,
+        environment: None,
     };
 
     let frame = renderer.render_frame(&vp);

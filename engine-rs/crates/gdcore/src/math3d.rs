@@ -321,6 +321,29 @@ impl Basis {
     pub fn xform_inv(self, v: Vector3) -> Vector3 {
         Vector3::new(self.x.dot(v), self.y.dot(v), self.z.dot(v))
     }
+
+    /// Returns `true` if this basis is orthonormal within the given tolerance.
+    ///
+    /// An orthonormal basis has unit-length columns that are mutually
+    /// perpendicular and a determinant of +1.
+    pub fn is_orthonormal(self, epsilon: f32) -> bool {
+        let x_unit = (self.x.length() - 1.0).abs() < epsilon;
+        let y_unit = (self.y.length() - 1.0).abs() < epsilon;
+        let z_unit = (self.z.length() - 1.0).abs() < epsilon;
+        let xy_perp = self.x.dot(self.y).abs() < epsilon;
+        let xz_perp = self.x.dot(self.z).abs() < epsilon;
+        let yz_perp = self.y.dot(self.z).abs() < epsilon;
+        let det_one = (self.determinant() - 1.0).abs() < epsilon;
+        x_unit && y_unit && z_unit && xy_perp && xz_perp && yz_perp && det_one
+    }
+
+    /// Returns an orthonormalized copy of this basis using Gram-Schmidt.
+    pub fn orthonormalized(self) -> Self {
+        let x = self.x.normalized();
+        let y = (self.y - x * x.dot(self.y)).normalized();
+        let z = (self.z - x * x.dot(self.z) - y * y.dot(self.z)).normalized();
+        Self { x, y, z }
+    }
 }
 
 impl Mul for Basis {

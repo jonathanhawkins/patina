@@ -666,6 +666,209 @@ impl CiMemoryGate {
 }
 
 // ---------------------------------------------------------------------------
+// SnapshotDiff — compare two snapshots
+// ---------------------------------------------------------------------------
+
+/// The difference between two memory snapshots.
+#[derive(Debug, Clone)]
+pub struct SnapshotDiff {
+    /// Label of the "before" snapshot.
+    pub before_label: String,
+    /// Label of the "after" snapshot.
+    pub after_label: String,
+    /// Change in total bytes (positive = growth).
+    pub bytes_delta: i64,
+    /// Change in live allocation count.
+    pub count_delta: i64,
+    /// Per-tag byte deltas.
+    pub tag_deltas: HashMap<AllocationTag, i64>,
+}
+
+impl SnapshotDiff {
+    /// Computes the diff between two snapshots.
+    pub fn between(before: &MemorySnapshot, after: &MemorySnapshot) -> Self {
+        let bytes_delta = after.total_bytes as i64 - before.total_bytes as i64;
+        let count_delta = after.live_count as i64 - before.live_count as i64;
+
+        let mut tag_deltas = HashMap::new();
+        // Collect all tags from both snapshots.
+        let mut all_tags = std::collections::HashSet::new();
+        for tag in before.by_tag.keys() {
+            all_tags.insert(*tag);
+        }
+        for tag in after.by_tag.keys() {
+            all_tags.insert(*tag);
+        }
+        for tag in all_tags {
+            let b = *before.by_tag.get(&tag).unwrap_or(&0) as i64;
+            let a = *after.by_tag.get(&tag).unwrap_or(&0) as i64;
+            let delta = a - b;
+            if delta != 0 {
+                tag_deltas.insert(tag, delta);
+            }
+        }
+
+        Self {
+            before_label: before.label.clone(),
+            after_label: after.label.clone(),
+            bytes_delta,
+            count_delta,
+            tag_deltas,
+        }
+    }
+
+    /// Returns true if memory grew.
+    pub fn grew(&self) -> bool {
+        self.bytes_delta > 0
+    }
+
+    /// Returns true if memory shrank.
+    pub fn shrank(&self) -> bool {
+        self.bytes_delta < 0
+    }
+
+    /// Renders a human-readable diff report.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Diff: {} → {}\n",
+            self.before_label, self.after_label
+        ));
+        let sign = if self.bytes_delta >= 0 { "+" } else { "" };
+        out.push_str(&format!("  Bytes:  {}{}\n", sign, self.bytes_delta));
+        let csign = if self.count_delta >= 0 { "+" } else { "" };
+        out.push_str(&format!("  Count:  {}{}\n", csign, self.count_delta));
+        if !self.tag_deltas.is_empty() {
+            out.push_str("  By tag:\n");
+            let mut tags: Vec<_> = self.tag_deltas.iter().collect();
+            tags.sort_by_key(|(_, d)| std::cmp::Reverse(d.abs()));
+            for (tag, delta) in tags {
+                let s = if *delta >= 0 { "+" } else { "" };
+                out.push_str(&format!("    {}: {}{}\n", tag.as_str(), s, delta));
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MemoryTrend — detect slow leaks across multiple snapshots
+// ---------------------------------------------------------------------------
+
+/// Result of analyzing memory growth trend across snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryTrend {
+    /// Memory usage is stable (no significant growth).
+    Stable,
+    /// Memory is growing — possible slow leak.
+    Growing,
+    /// Memory is shrinking.
+    Shrinking,
+    /// Not enough data to determine trend (need >= 3 snapshots).
+    Insufficient,
+}
+
+impl MemoryTrend {
+    /// Returns a human-readable label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            MemoryTrend::Stable => "Stable",
+            MemoryTrend::Growing => "Growing (possible leak)",
+            MemoryTrend::Shrinking => "Shrinking",
+            MemoryTrend::Insufficient => "Insufficient data",
+        }
+    }
+}
+
+/// Analyzes a sequence of snapshots to detect memory growth trends.
+///
+/// Returns `Growing` if memory increased in more than half of the
+/// consecutive snapshot pairs, `Shrinking` if it decreased in more
+/// than half, and `Stable` otherwise.
+pub fn analyze_trend(snapshots: &[MemorySnapshot]) -> MemoryTrend {
+    if snapshots.len() < 3 {
+        return MemoryTrend::Insufficient;
+    }
+    let mut growing = 0usize;
+    let mut shrinking = 0usize;
+    for pair in snapshots.windows(2) {
+        let delta = pair[1].total_bytes as i64 - pair[0].total_bytes as i64;
+        if delta > 0 {
+            growing += 1;
+        } else if delta < 0 {
+            shrinking += 1;
+        }
+    }
+    let pairs = snapshots.len() - 1;
+    if growing > pairs / 2 {
+        MemoryTrend::Growing
+    } else if shrinking > pairs / 2 {
+        MemoryTrend::Shrinking
+    } else {
+        MemoryTrend::Stable
+    }
+}
+
+/// Computes the growth rate in bytes per snapshot interval.
+/// Returns `None` if fewer than 2 snapshots.
+pub fn growth_rate(snapshots: &[MemorySnapshot]) -> Option<f64> {
+    if snapshots.len() < 2 {
+        return None;
+    }
+    let first = snapshots.first().unwrap().total_bytes as f64;
+    let last = snapshots.last().unwrap().total_bytes as f64;
+    Some((last - first) / (snapshots.len() - 1) as f64)
+}
+
+// ---------------------------------------------------------------------------
+// CiTestRunner — run a test closure with memory profiling
+// ---------------------------------------------------------------------------
+
+/// Runs a test closure with memory profiling and gate enforcement.
+///
+/// Returns the gate result and the profiler for further inspection.
+///
+/// # Example
+/// ```rust,ignore
+/// let (result, profiler) = run_profiled_test(
+///     CiMemoryGate::new("scene-load"),
+///     |profiler| {
+///         let id = profiler.record_alloc(AllocationTag::Scene, 1024, "node");
+///         profiler.record_free(id);
+///     },
+/// );
+/// assert!(result.passed());
+/// ```
+pub fn run_profiled_test<F>(gate: CiMemoryGate, test_fn: F) -> (GateResult, MemoryProfiler)
+where
+    F: FnOnce(&mut MemoryProfiler),
+{
+    let mut profiler = MemoryProfiler::new();
+    test_fn(&mut profiler);
+    let result = gate.check(&profiler);
+    (result, profiler)
+}
+
+/// Runs a test closure with periodic snapshots and leak+trend detection.
+///
+/// The `phases` function receives the profiler and should call
+/// `profiler.snapshot("label")` between logical phases.
+/// Returns the gate result, trend analysis, and profiler.
+pub fn run_phased_test<F>(
+    gate: CiMemoryGate,
+    phases: F,
+) -> (GateResult, MemoryTrend, MemoryProfiler)
+where
+    F: FnOnce(&mut MemoryProfiler),
+{
+    let mut profiler = MemoryProfiler::new();
+    phases(&mut profiler);
+    let result = gate.check(&profiler);
+    let trend = analyze_trend(profiler.snapshots());
+    (result, trend, profiler)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -927,5 +1130,303 @@ mod tests {
         let json = gate.run_json_report(&p);
         assert!(json.contains("\"status\": \"fail\""));
         assert!(json.contains("\"exit_code\": 1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SnapshotDiff
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn snapshot_diff_growth() {
+        let mut p = MemoryProfiler::new();
+        p.record_alloc(AllocationTag::Scene, 100, "a");
+        let s1 = p.snapshot("before");
+        p.record_alloc(AllocationTag::Scene, 200, "b");
+        let s2 = p.snapshot("after");
+
+        let diff = SnapshotDiff::between(&s1, &s2);
+        assert!(diff.grew());
+        assert!(!diff.shrank());
+        assert_eq!(diff.bytes_delta, 200);
+        assert_eq!(diff.count_delta, 1);
+        assert_eq!(diff.before_label, "before");
+        assert_eq!(diff.after_label, "after");
+    }
+
+    #[test]
+    fn snapshot_diff_shrink() {
+        let mut p = MemoryProfiler::new();
+        let a = p.record_alloc(AllocationTag::Resource, 500, "big");
+        p.record_alloc(AllocationTag::Resource, 100, "small");
+        let s1 = p.snapshot("full");
+        p.record_free(a);
+        let s2 = p.snapshot("freed");
+
+        let diff = SnapshotDiff::between(&s1, &s2);
+        assert!(diff.shrank());
+        assert!(!diff.grew());
+        assert_eq!(diff.bytes_delta, -500);
+    }
+
+    #[test]
+    fn snapshot_diff_no_change() {
+        let mut p = MemoryProfiler::new();
+        p.record_alloc(AllocationTag::General, 100, "x");
+        let s1 = p.snapshot("a");
+        let s2 = p.snapshot("b");
+
+        let diff = SnapshotDiff::between(&s1, &s2);
+        assert!(!diff.grew());
+        assert!(!diff.shrank());
+        assert_eq!(diff.bytes_delta, 0);
+        assert_eq!(diff.count_delta, 0);
+    }
+
+    #[test]
+    fn snapshot_diff_tag_deltas() {
+        let mut p = MemoryProfiler::new();
+        p.record_alloc(AllocationTag::Scene, 100, "s");
+        let s1 = p.snapshot("t1");
+        p.record_alloc(AllocationTag::Render, 300, "r");
+        let s2 = p.snapshot("t2");
+
+        let diff = SnapshotDiff::between(&s1, &s2);
+        assert_eq!(*diff.tag_deltas.get(&AllocationTag::Render).unwrap(), 300);
+        // Scene didn't change, so it shouldn't appear in deltas
+        assert!(!diff.tag_deltas.contains_key(&AllocationTag::Scene));
+    }
+
+    #[test]
+    fn snapshot_diff_render_contains_labels() {
+        let mut p = MemoryProfiler::new();
+        let s1 = p.snapshot("phase1");
+        p.record_alloc(AllocationTag::General, 50, "x");
+        let s2 = p.snapshot("phase2");
+
+        let diff = SnapshotDiff::between(&s1, &s2);
+        let rendered = diff.render();
+        assert!(rendered.contains("phase1"));
+        assert!(rendered.contains("phase2"));
+        assert!(rendered.contains("+50"));
+    }
+
+    #[test]
+    fn snapshot_diff_render_negative() {
+        let mut p = MemoryProfiler::new();
+        let id = p.record_alloc(AllocationTag::General, 200, "x");
+        let s1 = p.snapshot("before");
+        p.record_free(id);
+        let s2 = p.snapshot("after");
+
+        let diff = SnapshotDiff::between(&s1, &s2);
+        let rendered = diff.render();
+        assert!(rendered.contains("-200"));
+    }
+
+    // -----------------------------------------------------------------------
+    // MemoryTrend + analyze_trend
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trend_insufficient_empty() {
+        assert_eq!(analyze_trend(&[]), MemoryTrend::Insufficient);
+    }
+
+    #[test]
+    fn trend_insufficient_two_snapshots() {
+        let mut p = MemoryProfiler::new();
+        let s1 = p.snapshot("a");
+        p.record_alloc(AllocationTag::General, 100, "x");
+        let s2 = p.snapshot("b");
+        assert_eq!(analyze_trend(&[s1, s2]), MemoryTrend::Insufficient);
+    }
+
+    #[test]
+    fn trend_growing() {
+        let mut p = MemoryProfiler::new();
+        let s1 = p.snapshot("t1");
+        p.record_alloc(AllocationTag::General, 100, "a");
+        let s2 = p.snapshot("t2");
+        p.record_alloc(AllocationTag::General, 100, "b");
+        let s3 = p.snapshot("t3");
+        p.record_alloc(AllocationTag::General, 100, "c");
+        let s4 = p.snapshot("t4");
+
+        assert_eq!(analyze_trend(&[s1, s2, s3, s4]), MemoryTrend::Growing);
+    }
+
+    #[test]
+    fn trend_shrinking() {
+        let mut p = MemoryProfiler::new();
+        let a = p.record_alloc(AllocationTag::General, 300, "a");
+        let b = p.record_alloc(AllocationTag::General, 200, "b");
+        let c = p.record_alloc(AllocationTag::General, 100, "c");
+        let s1 = p.snapshot("t1");
+        p.record_free(c);
+        let s2 = p.snapshot("t2");
+        p.record_free(b);
+        let s3 = p.snapshot("t3");
+        p.record_free(a);
+        let s4 = p.snapshot("t4");
+
+        assert_eq!(analyze_trend(&[s1, s2, s3, s4]), MemoryTrend::Shrinking);
+    }
+
+    #[test]
+    fn trend_stable() {
+        let mut p = MemoryProfiler::new();
+        p.record_alloc(AllocationTag::General, 100, "base");
+        let s1 = p.snapshot("t1");
+        // Alloc and free — net zero each phase
+        let id = p.record_alloc(AllocationTag::General, 50, "tmp");
+        p.record_free(id);
+        let s2 = p.snapshot("t2");
+        let id = p.record_alloc(AllocationTag::General, 50, "tmp2");
+        p.record_free(id);
+        let s3 = p.snapshot("t3");
+
+        assert_eq!(analyze_trend(&[s1, s2, s3]), MemoryTrend::Stable);
+    }
+
+    #[test]
+    fn trend_labels() {
+        assert_eq!(MemoryTrend::Stable.label(), "Stable");
+        assert_eq!(MemoryTrend::Growing.label(), "Growing (possible leak)");
+        assert_eq!(MemoryTrend::Shrinking.label(), "Shrinking");
+        assert_eq!(MemoryTrend::Insufficient.label(), "Insufficient data");
+    }
+
+    // -----------------------------------------------------------------------
+    // growth_rate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn growth_rate_none_for_empty() {
+        assert!(growth_rate(&[]).is_none());
+    }
+
+    #[test]
+    fn growth_rate_none_for_single() {
+        let mut p = MemoryProfiler::new();
+        let s = p.snapshot("only");
+        assert!(growth_rate(&[s]).is_none());
+    }
+
+    #[test]
+    fn growth_rate_positive() {
+        let mut p = MemoryProfiler::new();
+        let s1 = p.snapshot("t1");
+        p.record_alloc(AllocationTag::General, 100, "a");
+        let s2 = p.snapshot("t2");
+        p.record_alloc(AllocationTag::General, 100, "b");
+        let s3 = p.snapshot("t3");
+
+        let rate = growth_rate(&[s1, s2, s3]).unwrap();
+        assert!((rate - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn growth_rate_negative() {
+        let mut p = MemoryProfiler::new();
+        let a = p.record_alloc(AllocationTag::General, 200, "a");
+        let s1 = p.snapshot("t1");
+        p.record_free(a);
+        let s2 = p.snapshot("t2");
+
+        let rate = growth_rate(&[s1, s2]).unwrap();
+        assert!((rate - (-200.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn growth_rate_zero() {
+        let mut p = MemoryProfiler::new();
+        p.record_alloc(AllocationTag::General, 100, "x");
+        let s1 = p.snapshot("t1");
+        let s2 = p.snapshot("t2");
+
+        let rate = growth_rate(&[s1, s2]).unwrap();
+        assert!(rate.abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // run_profiled_test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn profiled_test_pass() {
+        let gate = CiMemoryGate::new("test");
+        let (result, profiler) = run_profiled_test(gate, |p| {
+            let id = p.record_alloc(AllocationTag::General, 100, "tmp");
+            p.record_free(id);
+        });
+        assert!(result.passed());
+        assert_eq!(profiler.current_bytes(), 0);
+    }
+
+    #[test]
+    fn profiled_test_fail_leak() {
+        let gate = CiMemoryGate::new("leak-test");
+        let (result, profiler) = run_profiled_test(gate, |p| {
+            p.record_alloc(AllocationTag::Scene, 512, "leaked");
+        });
+        assert!(!result.passed());
+        assert_eq!(profiler.live_count(), 1);
+    }
+
+    #[test]
+    fn profiled_test_fail_budget() {
+        let budget = MemoryBudget::unlimited().with_total_limit(100);
+        let gate = CiMemoryGate::new("budget").with_budget(budget).with_zero_leaks(false);
+        let (result, _) = run_profiled_test(gate, |p| {
+            p.record_alloc(AllocationTag::General, 500, "over");
+        });
+        assert!(!result.passed());
+    }
+
+    // -----------------------------------------------------------------------
+    // run_phased_test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn phased_test_growing() {
+        let gate = CiMemoryGate::new("phased").with_zero_leaks(false);
+        let (result, trend, profiler) = run_phased_test(gate, |p| {
+            p.snapshot("phase0");
+            p.record_alloc(AllocationTag::General, 100, "a");
+            p.snapshot("phase1");
+            p.record_alloc(AllocationTag::General, 100, "b");
+            p.snapshot("phase2");
+            p.record_alloc(AllocationTag::General, 100, "c");
+            p.snapshot("phase3");
+        });
+        assert!(result.passed()); // no leak check
+        assert_eq!(trend, MemoryTrend::Growing);
+        assert_eq!(profiler.snapshots().len(), 4);
+    }
+
+    #[test]
+    fn phased_test_stable() {
+        let gate = CiMemoryGate::new("phased-stable");
+        let (result, trend, _) = run_phased_test(gate, |p| {
+            p.snapshot("p0");
+            let id = p.record_alloc(AllocationTag::General, 100, "x");
+            p.record_free(id);
+            p.snapshot("p1");
+            let id = p.record_alloc(AllocationTag::General, 100, "y");
+            p.record_free(id);
+            p.snapshot("p2");
+        });
+        assert!(result.passed());
+        assert_eq!(trend, MemoryTrend::Stable);
+    }
+
+    #[test]
+    fn phased_test_insufficient_no_snapshots() {
+        let gate = CiMemoryGate::new("phased-none");
+        let (_, trend, _) = run_phased_test(gate, |p| {
+            let id = p.record_alloc(AllocationTag::General, 100, "tmp");
+            p.record_free(id);
+        });
+        assert_eq!(trend, MemoryTrend::Insufficient);
     }
 }

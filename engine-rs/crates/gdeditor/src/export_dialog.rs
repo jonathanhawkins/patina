@@ -247,15 +247,19 @@ pub struct ExportDialog {
     visible: bool,
     presets: Vec<ExportPreset>,
     selected_index: Option<usize>,
+    export_history: Vec<ExportHistoryEntry>,
 }
 
 impl ExportDialog {
+    const MAX_HISTORY: usize = 50;
+
     /// Creates a new empty export dialog.
     pub fn new() -> Self {
         Self {
             visible: false,
             presets: Vec::new(),
             selected_index: None,
+            export_history: Vec::new(),
         }
     }
 
@@ -436,6 +440,382 @@ impl ExportDialog {
             self.selected_index = Some(0);
         }
     }
+
+    /// Duplicates a preset at the given index with a new unique name.
+    ///
+    /// Returns the index of the new preset, or an error if the source index is invalid.
+    pub fn duplicate_preset(&mut self, index: usize) -> Result<usize, ExportError> {
+        let source = self
+            .presets
+            .get(index)
+            .ok_or(ExportError::InvalidIndex(index))?
+            .clone();
+
+        // Generate a unique name by appending " (copy)", " (copy 2)", etc.
+        let base_name = source.name.clone();
+        let mut new_name = format!("{} (copy)", base_name);
+        let mut counter = 2u32;
+        while self.presets.iter().any(|p| p.name == new_name) {
+            new_name = format!("{} (copy {})", base_name, counter);
+            counter += 1;
+        }
+
+        let mut new_preset = source;
+        new_preset.name = new_name;
+        // Update export path to reflect the new name
+        new_preset.export_path = format!(
+            "export/{}/{}{}",
+            new_preset.platform.id(),
+            new_preset.name,
+            new_preset.platform.default_extension(),
+        );
+
+        self.presets.push(new_preset);
+        let idx = self.presets.len() - 1;
+        self.selected_index = Some(idx);
+        Ok(idx)
+    }
+
+    /// Renames the preset at the given index.
+    ///
+    /// Validates that the new name is non-empty and unique.
+    pub fn rename_preset(
+        &mut self,
+        index: usize,
+        new_name: impl Into<String>,
+    ) -> Result<(), ExportValidationError> {
+        let new_name = new_name.into();
+        if new_name.is_empty() {
+            return Err(ExportValidationError::EmptyName);
+        }
+        if self
+            .presets
+            .iter()
+            .enumerate()
+            .any(|(i, p)| i != index && p.name == new_name)
+        {
+            return Err(ExportValidationError::DuplicateName(new_name));
+        }
+        if let Some(preset) = self.presets.get_mut(index) {
+            preset.name = new_name;
+            Ok(())
+        } else {
+            Err(ExportValidationError::EmptyName) // index out of range
+        }
+    }
+
+    /// Creates presets for all desktop platforms (Windows, Linux, macOS) at once.
+    ///
+    /// Returns the number of presets successfully added (skips duplicates).
+    pub fn add_desktop_presets(&mut self) -> usize {
+        let desktops = [
+            ("Windows Desktop", ExportPlatform::Windows),
+            ("Linux Desktop", ExportPlatform::Linux),
+            ("macOS Desktop", ExportPlatform::MacOS),
+        ];
+        let mut added = 0;
+        for (name, platform) in desktops {
+            if self.add_preset(ExportPreset::new(name, platform)).is_ok() {
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Returns presets filtered by platform.
+    pub fn presets_for_platform(&self, platform: ExportPlatform) -> Vec<(usize, &ExportPreset)> {
+        self.presets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.platform == platform)
+            .collect()
+    }
+
+    /// Finds a preset by name, returning its index.
+    pub fn find_preset(&self, name: &str) -> Option<usize> {
+        self.presets.iter().position(|p| p.name == name)
+    }
+
+    /// Serializes all presets to a portable text format.
+    ///
+    /// Format: one line per field, presets separated by `---`.
+    pub fn serialize_presets(&self) -> String {
+        let mut out = String::new();
+        for (i, preset) in self.presets.iter().enumerate() {
+            if i > 0 {
+                out.push_str("---\n");
+            }
+            out.push_str(&format!("name={}\n", preset.name));
+            out.push_str(&format!("platform={}\n", preset.platform.id()));
+            out.push_str(&format!("build_profile={}\n", preset.build_profile.as_str()));
+            out.push_str(&format!("export_path={}\n", preset.export_path));
+            if !preset.app_name.is_empty() {
+                out.push_str(&format!("app_name={}\n", preset.app_name));
+            }
+            if !preset.icon_path.is_empty() {
+                out.push_str(&format!("icon_path={}\n", preset.icon_path));
+            }
+            for filter in &preset.include_filters {
+                out.push_str(&format!("include={}\n", filter));
+            }
+            for filter in &preset.exclude_filters {
+                out.push_str(&format!("exclude={}\n", filter));
+            }
+            for (k, v) in &preset.custom_properties {
+                out.push_str(&format!("custom.{}={}\n", k, v));
+            }
+        }
+        out
+    }
+
+    /// Deserializes presets from the portable text format.
+    ///
+    /// Returns the number of presets loaded.
+    pub fn deserialize_presets(&mut self, data: &str) -> usize {
+        let mut presets = Vec::new();
+        let blocks: Vec<&str> = data.split("---\n").collect();
+
+        for block in blocks {
+            let block = block.trim();
+            if block.is_empty() {
+                continue;
+            }
+
+            let mut name = String::new();
+            let mut platform_id = String::new();
+            let mut build_profile = ExportBuildProfile::Release;
+            let mut export_path = String::new();
+            let mut app_name = String::new();
+            let mut icon_path = String::new();
+            let mut includes = Vec::new();
+            let mut excludes = Vec::new();
+            let mut custom = HashMap::new();
+
+            for line in block.lines() {
+                let line = line.trim();
+                if let Some((key, value)) = line.split_once('=') {
+                    match key {
+                        "name" => name = value.to_string(),
+                        "platform" => platform_id = value.to_string(),
+                        "build_profile" => {
+                            if let Some(bp) = ExportBuildProfile::from_str_name(value) {
+                                build_profile = bp;
+                            }
+                        }
+                        "export_path" => export_path = value.to_string(),
+                        "app_name" => app_name = value.to_string(),
+                        "icon_path" => icon_path = value.to_string(),
+                        "include" => includes.push(value.to_string()),
+                        "exclude" => excludes.push(value.to_string()),
+                        k if k.starts_with("custom.") => {
+                            let prop_name = &k["custom.".len()..];
+                            custom.insert(prop_name.to_string(), value.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if name.is_empty() || platform_id.is_empty() {
+                continue;
+            }
+
+            let Some(platform) = ExportPlatform::from_id(&platform_id) else {
+                continue;
+            };
+
+            if includes.is_empty() {
+                includes.push("*".to_string());
+            }
+
+            if export_path.is_empty() {
+                export_path = format!(
+                    "export/{}/{}{}",
+                    platform.id(),
+                    name,
+                    platform.default_extension()
+                );
+            }
+
+            // Merge default custom properties (serialized ones override)
+            let mut merged_custom = ExportPreset::default_custom_properties(platform);
+            for (k, v) in custom {
+                merged_custom.insert(k, v);
+            }
+
+            presets.push(ExportPreset {
+                name,
+                platform,
+                build_profile,
+                app_name,
+                icon_path,
+                export_path,
+                include_filters: includes,
+                exclude_filters: excludes,
+                custom_properties: merged_custom,
+            });
+        }
+
+        let count = presets.len();
+        self.load_presets(presets);
+        count
+    }
+
+    /// One-click export all desktop presets. Returns results for each desktop preset.
+    pub fn export_all_desktop(
+        &self,
+        project_name: &str,
+    ) -> Vec<(String, Result<PackageResult, ExportError>)> {
+        self.presets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_desktop())
+            .map(|(i, p)| (p.name.clone(), self.export_one_click(i, project_name)))
+            .collect()
+    }
+
+    /// Quick-export: ensures desktop presets exist, then exports all of them.
+    /// Creates missing desktop presets automatically if needed.
+    pub fn quick_export_desktop(
+        &mut self,
+        project_name: &str,
+    ) -> Vec<(String, Result<PackageResult, ExportError>)> {
+        self.add_desktop_presets(); // no-op if already exist
+        self.export_all_desktop(project_name)
+    }
+
+    /// Returns desktop presets only.
+    pub fn desktop_presets(&self) -> Vec<(usize, &ExportPreset)> {
+        self.presets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_desktop())
+            .collect()
+    }
+
+    /// Records an export result in the history.
+    pub fn record_export(&mut self, entry: ExportHistoryEntry) {
+        self.export_history.insert(0, entry);
+        self.export_history.truncate(Self::MAX_HISTORY);
+    }
+
+    /// Returns the export history.
+    pub fn export_history(&self) -> &[ExportHistoryEntry] {
+        &self.export_history
+    }
+
+    /// Clears the export history.
+    pub fn clear_export_history(&mut self) {
+        self.export_history.clear();
+    }
+
+    /// Performs a one-click export and records the result in history.
+    pub fn export_one_click_with_history(
+        &mut self,
+        index: usize,
+        project_name: &str,
+    ) -> Result<PackageResult, ExportError> {
+        let preset_name = self
+            .presets
+            .get(index)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let platform = self
+            .presets
+            .get(index)
+            .map(|p| p.platform)
+            .unwrap_or(ExportPlatform::Windows);
+
+        // Borrow `self` immutably for the export
+        let result = self.export_one_click(index, project_name);
+
+        let status = match &result {
+            Ok(_) => ExportStatus::Completed,
+            Err(e) => ExportStatus::Failed(format!("{e:?}")),
+        };
+
+        self.record_export(ExportHistoryEntry {
+            preset_name,
+            platform,
+            status,
+            output_path: result
+                .as_ref()
+                .map(|r| r.output_path.clone())
+                .unwrap_or_default(),
+        });
+
+        result
+    }
+
+    /// Quick-export all desktop presets with history tracking.
+    pub fn quick_export_desktop_with_history(
+        &mut self,
+        project_name: &str,
+    ) -> Vec<(String, Result<PackageResult, ExportError>)> {
+        self.add_desktop_presets();
+
+        let desktop_indices: Vec<(usize, String, ExportPlatform)> = self
+            .presets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_desktop())
+            .map(|(i, p)| (i, p.name.clone(), p.platform))
+            .collect();
+
+        let mut results = Vec::new();
+        for (idx, name, platform) in desktop_indices {
+            let result = self.export_one_click(idx, project_name);
+
+            let status = match &result {
+                Ok(_) => ExportStatus::Completed,
+                Err(e) => ExportStatus::Failed(format!("{e:?}")),
+            };
+
+            self.export_history.insert(
+                0,
+                ExportHistoryEntry {
+                    preset_name: name.clone(),
+                    platform,
+                    status,
+                    output_path: result
+                        .as_ref()
+                        .map(|r| r.output_path.clone())
+                        .unwrap_or_default(),
+                },
+            );
+
+            results.push((name, result));
+        }
+
+        self.export_history.truncate(Self::MAX_HISTORY);
+        results
+    }
+}
+
+/// Status of an export operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportStatus {
+    /// Export is queued / not yet started.
+    Pending,
+    /// Export is currently in progress.
+    InProgress,
+    /// Export completed successfully.
+    Completed,
+    /// Export failed with an error message.
+    Failed(String),
+}
+
+/// A record of a past export operation.
+#[derive(Debug, Clone)]
+pub struct ExportHistoryEntry {
+    /// Name of the preset used.
+    pub preset_name: String,
+    /// Target platform.
+    pub platform: ExportPlatform,
+    /// Result status.
+    pub status: ExportStatus,
+    /// Output path (empty if failed).
+    pub output_path: String,
 }
 
 impl Default for ExportDialog {
@@ -744,5 +1124,385 @@ mod tests {
         ]);
         assert_eq!(dialog.preset_count(), 2);
         assert_eq!(dialog.presets()[0].name, "New1");
+    }
+
+    // -- Duplicate preset --
+
+    #[test]
+    fn duplicate_preset_creates_copy() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Win", ExportPlatform::Windows))
+            .unwrap();
+        let idx = dialog.duplicate_preset(0).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(dialog.preset_count(), 2);
+        assert_eq!(dialog.presets()[1].name, "Win (copy)");
+        assert_eq!(dialog.presets()[1].platform, ExportPlatform::Windows);
+        assert_eq!(dialog.selected_index(), Some(1));
+    }
+
+    #[test]
+    fn duplicate_preset_increments_copy_number() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("A", ExportPlatform::Linux))
+            .unwrap();
+        dialog.duplicate_preset(0).unwrap();
+        // Now we have "A" and "A (copy)", duplicate again
+        dialog.duplicate_preset(0).unwrap();
+        assert_eq!(dialog.presets()[2].name, "A (copy 2)");
+    }
+
+    #[test]
+    fn duplicate_preset_preserves_settings() {
+        let mut dialog = ExportDialog::new();
+        let mut preset = ExportPreset::new("Mac", ExportPlatform::MacOS);
+        preset.build_profile = ExportBuildProfile::Debug;
+        preset.app_name = "TestApp".into();
+        preset.icon_path = "icon.icns".into();
+        dialog.add_preset(preset).unwrap();
+
+        dialog.duplicate_preset(0).unwrap();
+        let dup = &dialog.presets()[1];
+        assert_eq!(dup.build_profile, ExportBuildProfile::Debug);
+        assert_eq!(dup.app_name, "TestApp");
+        assert_eq!(dup.icon_path, "icon.icns");
+        assert_eq!(dup.platform, ExportPlatform::MacOS);
+    }
+
+    #[test]
+    fn duplicate_preset_invalid_index() {
+        let mut dialog = ExportDialog::new();
+        assert!(dialog.duplicate_preset(0).is_err());
+    }
+
+    // -- Rename preset --
+
+    #[test]
+    fn rename_preset_success() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Old", ExportPlatform::Windows))
+            .unwrap();
+        dialog.rename_preset(0, "New").unwrap();
+        assert_eq!(dialog.presets()[0].name, "New");
+    }
+
+    #[test]
+    fn rename_preset_empty_rejected() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Test", ExportPlatform::Linux))
+            .unwrap();
+        let err = dialog.rename_preset(0, "").unwrap_err();
+        assert_eq!(err, ExportValidationError::EmptyName);
+    }
+
+    #[test]
+    fn rename_preset_duplicate_rejected() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("A", ExportPlatform::Windows))
+            .unwrap();
+        dialog
+            .add_preset(ExportPreset::new("B", ExportPlatform::Linux))
+            .unwrap();
+        let err = dialog.rename_preset(1, "A").unwrap_err();
+        assert_eq!(err, ExportValidationError::DuplicateName("A".into()));
+    }
+
+    #[test]
+    fn rename_preset_same_name_ok() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("A", ExportPlatform::Windows))
+            .unwrap();
+        // Renaming to the same name should succeed
+        dialog.rename_preset(0, "A").unwrap();
+        assert_eq!(dialog.presets()[0].name, "A");
+    }
+
+    // -- Quick-add desktop presets --
+
+    #[test]
+    fn add_desktop_presets_creates_three() {
+        let mut dialog = ExportDialog::new();
+        let added = dialog.add_desktop_presets();
+        assert_eq!(added, 3);
+        assert_eq!(dialog.preset_count(), 3);
+        assert!(dialog.presets().iter().any(|p| p.platform == ExportPlatform::Windows));
+        assert!(dialog.presets().iter().any(|p| p.platform == ExportPlatform::Linux));
+        assert!(dialog.presets().iter().any(|p| p.platform == ExportPlatform::MacOS));
+    }
+
+    #[test]
+    fn add_desktop_presets_skips_existing() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Windows Desktop", ExportPlatform::Windows))
+            .unwrap();
+        let added = dialog.add_desktop_presets();
+        assert_eq!(added, 2); // Linux + macOS
+        assert_eq!(dialog.preset_count(), 3);
+    }
+
+    // -- Filter by platform --
+
+    #[test]
+    fn presets_for_platform() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Win1", ExportPlatform::Windows))
+            .unwrap();
+        dialog
+            .add_preset(ExportPreset::new("Linux1", ExportPlatform::Linux))
+            .unwrap();
+        dialog
+            .add_preset(ExportPreset::new("Win2", ExportPlatform::Windows))
+            .unwrap();
+        let wins = dialog.presets_for_platform(ExportPlatform::Windows);
+        assert_eq!(wins.len(), 2);
+        assert_eq!(wins[0].0, 0); // index
+        assert_eq!(wins[1].0, 2);
+    }
+
+    // -- Find preset --
+
+    #[test]
+    fn find_preset_by_name() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("A", ExportPlatform::Windows))
+            .unwrap();
+        dialog
+            .add_preset(ExportPreset::new("B", ExportPlatform::Linux))
+            .unwrap();
+        assert_eq!(dialog.find_preset("B"), Some(1));
+        assert_eq!(dialog.find_preset("C"), None);
+    }
+
+    // -- Serialize / Deserialize --
+
+    #[test]
+    fn serialize_presets_roundtrip() {
+        let mut dialog = ExportDialog::new();
+        let mut preset = ExportPreset::new("Win", ExportPlatform::Windows);
+        preset.app_name = "TestApp".into();
+        preset.build_profile = ExportBuildProfile::Debug;
+        dialog.add_preset(preset).unwrap();
+        dialog
+            .add_preset(ExportPreset::new("Linux", ExportPlatform::Linux))
+            .unwrap();
+
+        let serialized = dialog.serialize_presets();
+        assert!(serialized.contains("name=Win"));
+        assert!(serialized.contains("platform=windows"));
+        assert!(serialized.contains("build_profile=debug"));
+        assert!(serialized.contains("app_name=TestApp"));
+        assert!(serialized.contains("---"));
+        assert!(serialized.contains("name=Linux"));
+
+        let mut dialog2 = ExportDialog::new();
+        let count = dialog2.deserialize_presets(&serialized);
+        assert_eq!(count, 2);
+        assert_eq!(dialog2.presets()[0].name, "Win");
+        assert_eq!(dialog2.presets()[0].platform, ExportPlatform::Windows);
+        assert_eq!(dialog2.presets()[0].build_profile, ExportBuildProfile::Debug);
+        assert_eq!(dialog2.presets()[0].app_name, "TestApp");
+        assert_eq!(dialog2.presets()[1].name, "Linux");
+        assert_eq!(dialog2.presets()[1].platform, ExportPlatform::Linux);
+    }
+
+    #[test]
+    fn serialize_includes_custom_properties() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Web", ExportPlatform::Web))
+            .unwrap();
+        let serialized = dialog.serialize_presets();
+        assert!(serialized.contains("custom.canvas_resize_policy=adaptive"));
+    }
+
+    #[test]
+    fn deserialize_empty_string() {
+        let mut dialog = ExportDialog::new();
+        let count = dialog.deserialize_presets("");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn deserialize_invalid_platform_skipped() {
+        let mut dialog = ExportDialog::new();
+        let count = dialog.deserialize_presets("name=Bad\nplatform=dreamcast\n");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn deserialize_missing_name_skipped() {
+        let mut dialog = ExportDialog::new();
+        let count = dialog.deserialize_presets("platform=windows\n");
+        assert_eq!(count, 0);
+    }
+
+    // -- One-click desktop export batch --
+
+    #[test]
+    fn export_all_desktop() {
+        let mut dialog = ExportDialog::new();
+        dialog.add_desktop_presets();
+        dialog
+            .add_preset(ExportPreset::new("Web", ExportPlatform::Web))
+            .unwrap();
+        let results = dialog.export_all_desktop("TestGame");
+        assert_eq!(results.len(), 3); // Windows, Linux, macOS only
+        for (name, result) in &results {
+            assert!(result.is_ok(), "Export failed for {name}");
+        }
+    }
+
+    #[test]
+    fn export_all_desktop_empty_presets() {
+        let dialog = ExportDialog::new();
+        let results = dialog.export_all_desktop("Game");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn quick_export_desktop_creates_presets() {
+        let mut dialog = ExportDialog::new();
+        assert_eq!(dialog.preset_count(), 0);
+        let results = dialog.quick_export_desktop("TestGame");
+        assert_eq!(results.len(), 3);
+        assert_eq!(dialog.preset_count(), 3); // auto-created
+        for (_, result) in &results {
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn quick_export_desktop_idempotent() {
+        let mut dialog = ExportDialog::new();
+        dialog.quick_export_desktop("Game");
+        assert_eq!(dialog.preset_count(), 3);
+        // Second call doesn't add more presets
+        dialog.quick_export_desktop("Game");
+        assert_eq!(dialog.preset_count(), 3);
+    }
+
+    #[test]
+    fn desktop_presets_filter() {
+        let mut dialog = ExportDialog::new();
+        dialog.add_desktop_presets();
+        dialog
+            .add_preset(ExportPreset::new("Web", ExportPlatform::Web))
+            .unwrap();
+        dialog
+            .add_preset(ExportPreset::new("Android", ExportPlatform::Android))
+            .unwrap();
+        let desktops = dialog.desktop_presets();
+        assert_eq!(desktops.len(), 3);
+        for (_, p) in &desktops {
+            assert!(p.is_desktop());
+        }
+    }
+
+    // -- Export history --
+
+    #[test]
+    fn export_with_history_records_success() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Win", ExportPlatform::Windows))
+            .unwrap();
+        let result = dialog.export_one_click_with_history(0, "Game");
+        assert!(result.is_ok());
+        assert_eq!(dialog.export_history().len(), 1);
+        assert_eq!(dialog.export_history()[0].preset_name, "Win");
+        assert_eq!(dialog.export_history()[0].status, ExportStatus::Completed);
+        assert!(!dialog.export_history()[0].output_path.is_empty());
+    }
+
+    #[test]
+    fn export_with_history_records_failure() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Web", ExportPlatform::Web))
+            .unwrap();
+        let result = dialog.export_one_click_with_history(0, "Game");
+        assert!(result.is_err());
+        assert_eq!(dialog.export_history().len(), 1);
+        assert!(matches!(
+            dialog.export_history()[0].status,
+            ExportStatus::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn export_history_most_recent_first() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Win", ExportPlatform::Windows))
+            .unwrap();
+        dialog
+            .add_preset(ExportPreset::new("Linux", ExportPlatform::Linux))
+            .unwrap();
+        dialog.export_one_click_with_history(0, "Game");
+        dialog.export_one_click_with_history(1, "Game");
+        assert_eq!(dialog.export_history()[0].preset_name, "Linux");
+        assert_eq!(dialog.export_history()[1].preset_name, "Win");
+    }
+
+    #[test]
+    fn clear_export_history() {
+        let mut dialog = ExportDialog::new();
+        dialog
+            .add_preset(ExportPreset::new("Win", ExportPlatform::Windows))
+            .unwrap();
+        dialog.export_one_click_with_history(0, "Game");
+        assert_eq!(dialog.export_history().len(), 1);
+        dialog.clear_export_history();
+        assert!(dialog.export_history().is_empty());
+    }
+
+    #[test]
+    fn quick_export_desktop_with_history() {
+        let mut dialog = ExportDialog::new();
+        let results = dialog.quick_export_desktop_with_history("TestGame");
+        assert_eq!(results.len(), 3);
+        assert_eq!(dialog.export_history().len(), 3);
+        // Most recent is last exported (macOS)
+        for entry in dialog.export_history() {
+            assert_eq!(entry.status, ExportStatus::Completed);
+        }
+    }
+
+    #[test]
+    fn export_status_variants() {
+        let pending = ExportStatus::Pending;
+        let progress = ExportStatus::InProgress;
+        let done = ExportStatus::Completed;
+        let failed = ExportStatus::Failed("test error".into());
+        assert_ne!(pending, progress);
+        assert_ne!(done, failed);
+    }
+
+    #[test]
+    fn serialize_includes_filters() {
+        let mut dialog = ExportDialog::new();
+        let mut preset = ExportPreset::new("Test", ExportPlatform::Linux);
+        preset.include_filters = vec!["*.tscn".into(), "*.tres".into()];
+        preset.exclude_filters = vec!["*.tmp".into()];
+        dialog.add_preset(preset).unwrap();
+
+        let serialized = dialog.serialize_presets();
+        assert!(serialized.contains("include=*.tscn"));
+        assert!(serialized.contains("include=*.tres"));
+        assert!(serialized.contains("exclude=*.tmp"));
+
+        let mut dialog2 = ExportDialog::new();
+        dialog2.deserialize_presets(&serialized);
+        assert_eq!(dialog2.presets()[0].include_filters, vec!["*.tscn", "*.tres"]);
+        assert_eq!(dialog2.presets()[0].exclude_filters, vec!["*.tmp"]);
     }
 }

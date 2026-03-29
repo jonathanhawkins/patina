@@ -75,7 +75,7 @@ fn clone_mutate_replace_basic_workflow() {
     mutated.set_property("name", Variant::String("Hero".to_string()));
     let mutated_arc = Arc::new(mutated);
 
-    cache.replace("res://player.tres", Arc::clone(&mutated_arc));
+    cache.insert("res://player.tres", Arc::clone(&mutated_arc));
 
     // New load returns mutated version.
     let fetched = cache.load("res://player.tres").unwrap();
@@ -107,7 +107,7 @@ fn old_arc_holders_survive_replace() {
 
     // Replace.
     let replacement = Arc::new(Resource::new("Replaced"));
-    cache.replace("res://item.tres", replacement);
+    cache.insert("res://item.tres", replacement);
 
     // Old holders still alive, strong_count dropped by 1 (cache replaced its ref).
     assert_eq!(Arc::strong_count(&holder_a), 2); // a + b
@@ -134,7 +134,7 @@ fn multiple_replace_cycles_produce_correct_state() {
         mutated.set_property("version", Variant::Int(i));
         let new_arc = Arc::new(mutated);
         arcs.push(Arc::clone(&new_arc));
-        cache.replace("res://counter.tres", new_arc);
+        cache.insert("res://counter.tres", new_arc);
     }
 
     // Final load returns the last replacement.
@@ -171,7 +171,7 @@ fn invalidate_after_replace_reloads_from_loader() {
     // Replace with in-memory mutation.
     let mut mutated = (*original).clone();
     mutated.set_property("origin", Variant::String("memory".to_string()));
-    cache.replace("res://scene.tres", Arc::new(mutated));
+    cache.insert("res://scene.tres", Arc::new(mutated));
 
     let after_replace = cache.load("res://scene.tres").unwrap();
     assert_eq!(
@@ -196,14 +196,14 @@ fn invalidate_after_replace_reloads_from_loader() {
 #[test]
 fn get_cached_returns_none_for_uncached() {
     let cache = ResourceCache::new(CountingLoader::new());
-    assert!(cache.get_cached("res://missing.tres").is_none());
+    assert!(cache.get("res://missing.tres").is_none());
 }
 
 #[test]
 fn get_cached_returns_correct_arc_after_load() {
     let mut cache = ResourceCache::new(CountingLoader::new());
     let loaded = cache.load("res://item.tres").unwrap();
-    let cached = cache.get_cached("res://item.tres").unwrap();
+    let cached = cache.get("res://item.tres").unwrap();
     assert!(Arc::ptr_eq(&loaded, &cached));
 }
 
@@ -215,9 +215,9 @@ fn get_cached_returns_replaced_arc() {
     let mut mutated = Resource::new("Mutated");
     mutated.set_property("replaced", Variant::Bool(true));
     let mutated_arc = Arc::new(mutated);
-    cache.replace("res://item.tres", Arc::clone(&mutated_arc));
+    cache.insert("res://item.tres", Arc::clone(&mutated_arc));
 
-    let cached = cache.get_cached("res://item.tres").unwrap();
+    let cached = cache.get("res://item.tres").unwrap();
     assert!(Arc::ptr_eq(&cached, &mutated_arc));
 }
 
@@ -226,7 +226,7 @@ fn get_cached_returns_none_after_invalidate() {
     let mut cache = ResourceCache::new(CountingLoader::new());
     cache.load("res://item.tres").unwrap();
     cache.invalidate("res://item.tres");
-    assert!(cache.get_cached("res://item.tres").is_none());
+    assert!(cache.get("res://item.tres").is_none());
 }
 
 // ===========================================================================
@@ -301,7 +301,7 @@ fn replace_with_modified_subresources() {
     mutated
         .subresources
         .insert("style_1".to_string(), Arc::new(sub));
-    cache.replace("res://theme.tres", Arc::new(mutated));
+    cache.insert("res://theme.tres", Arc::new(mutated));
 
     // Reload and verify sub-resource is present.
     let fetched = cache.load("res://theme.tres").unwrap();
@@ -330,7 +330,7 @@ fn replace_can_remove_properties() {
     let mut mutated = (*original).clone();
     mutated.remove_property("load_index");
     mutated.set_property("custom", Variant::Bool(true));
-    cache.replace("res://item.tres", Arc::new(mutated));
+    cache.insert("res://item.tres", Arc::new(mutated));
 
     let fetched = cache.load("res://item.tres").unwrap();
     assert!(fetched.get_property("load_index").is_none());
@@ -352,7 +352,7 @@ fn strong_count_consistent_through_replace() {
     assert_eq!(Arc::strong_count(&r1), 3); // cache + r1 + r2
 
     let replacement = Arc::new(Resource::new("New"));
-    cache.replace("res://counted.tres", Arc::clone(&replacement));
+    cache.insert("res://counted.tres", Arc::clone(&replacement));
 
     // Old Arcs lost the cache ref.
     assert_eq!(Arc::strong_count(&r1), 2); // r1 + r2
@@ -376,11 +376,11 @@ fn cache_len_consistent_through_replace() {
     assert_eq!(cache.len(), 2);
 
     // Replace A — len stays 2.
-    cache.replace("res://a.tres", Arc::new(Resource::new("NewA")));
+    cache.insert("res://a.tres", Arc::new(Resource::new("NewA")));
     assert_eq!(cache.len(), 2);
 
     // Replace a new path — len becomes 3.
-    cache.replace("res://c.tres", Arc::new(Resource::new("C")));
+    cache.insert("res://c.tres", Arc::new(Resource::new("C")));
     assert_eq!(cache.len(), 3);
 
     // Invalidate B — len becomes 2.
