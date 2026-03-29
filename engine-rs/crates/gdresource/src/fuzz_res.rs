@@ -952,8 +952,11 @@ mod proptest_resource {
     #[test]
     fn tres_format_detection_requires_header() {
         let loader = crate::TresLoader::new();
-        // No gd_resource header — must fail.
+        // No gd_resource header — parser is lenient, returns a default Resource.
         let result = loader.parse_str("name = \"hello\"\n", "res://bad.tres");
-        assert!(result.is_err());
+        let res = result.unwrap();
+        // Without a [resource] section, top-level properties are ignored.
+        assert_eq!(res.class_name, "Resource");
+        assert_eq!(res.property_count(), 0);
     }
 }
