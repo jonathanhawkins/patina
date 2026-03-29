@@ -579,6 +579,8 @@ impl Interpreter {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = match iter_val {
                     Variant::Array(a) => a,
+                    // GDScript: `for i in N` iterates 0..N
+                    Variant::Int(n) => (0..n.max(0)).map(Variant::Int).collect(),
                     other => {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot iterate over {}",
