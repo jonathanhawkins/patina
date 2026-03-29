@@ -67,6 +67,16 @@ impl<L: ResourceLoader> ResourceCache<L> {
     pub fn contains(&self, path: &str) -> bool {
         self.cache.contains_key(path)
     }
+
+    /// Inserts or replaces a resource in the cache under the given path.
+    pub fn insert(&mut self, path: &str, resource: Arc<Resource>) {
+        self.cache.insert(path.to_string(), resource);
+    }
+
+    /// Returns a cached resource by path, or `None` if not cached.
+    pub fn get(&self, path: &str) -> Option<Arc<Resource>> {
+        self.cache.get(path).cloned()
+    }
 }
 
 #[cfg(test)]

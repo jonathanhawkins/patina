@@ -47,7 +47,7 @@ pub mod world3d;
 // Re-export key types for convenience.
 pub use area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};
 pub use body::{BodyId, BodyType, PhysicsBody2D};
-pub use character::CharacterBody2D;
+pub use character::{CharacterBody2D, KinematicCollision2D};
 pub use collision::CollisionResult;
 pub use joint::{
     apply_joint_constraints, DampedSpringJoint2D, Joint2D, Joint2DBase, JointId, PinJoint2D,

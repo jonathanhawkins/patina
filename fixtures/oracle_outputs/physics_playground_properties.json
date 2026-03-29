@@ -10,15 +10,7 @@
 							"name": "CollisionShape",
 							"path": "/root/World/Ball/CollisionShape",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 0.0,
-										"y": 0.0
-									}
-								}
+
 							}
 						}
 					],
@@ -45,15 +37,7 @@
 							"name": "CollisionShape",
 							"path": "/root/World/Wall/CollisionShape",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 0.0,
-										"y": 0.0
-									}
-								}
+
 							}
 						}
 					],
@@ -61,6 +45,12 @@
 					"name": "Wall",
 					"path": "/root/World/Wall",
 					"properties": {
+						"collision_mask": {
+							"class_type": "",
+							"hint": 8,
+							"type": "int",
+							"value": 0
+						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
@@ -80,15 +70,7 @@
 							"name": "CollisionShape",
 							"path": "/root/World/Floor/CollisionShape",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 0.0,
-										"y": 0.0
-									}
-								}
+
 							}
 						}
 					],
@@ -96,6 +78,12 @@
 					"name": "Floor",
 					"path": "/root/World/Floor",
 					"properties": {
+						"collision_mask": {
+							"class_type": "",
+							"hint": 8,
+							"type": "int",
+							"value": 0
+						},
 						"position": {
 							"class_type": "",
 							"hint": 1,

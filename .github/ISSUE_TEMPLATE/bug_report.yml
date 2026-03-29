@@ -1,0 +1,133 @@
+name: Bug Report
+description: Report a bug in the Patina Engine
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill in as much detail as possible
+        so we can reproduce and fix the issue.
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem
+      description: Which engine subsystem is affected?
+      options:
+        - Core (gdcore) — math, types, IDs
+        - Variant (gdvariant) — type system, conversions
+        - Object (gdobject) — signals, notifications, class model
+        - Resource (gdresource) — .tres loading/saving, UID registry
+        - Scene (gdscene) — .tscn loading, scene tree, nodes
+        - 2D Physics (gdphysics2d) — collision, bodies, physics world
+        - 3D Physics (gdphysics3d) — 3D collision, bodies, raycasting
+        - 2D Rendering (gdrender2d/gdserver2d) — sprites, draw commands
+        - 3D Rendering (gdrender3d/gdserver3d) — meshes, lights, cameras
+        - Audio (gdaudio) — playback, bus routing, spatial audio
+        - Platform (gdplatform) — input, windowing, OS, export
+        - GDScript (gdscript-interop) — parsing, interpretation, bindings
+        - Editor (gdeditor) — editor UI, inspector, server
+        - Other / Unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How severe is this bug?
+      options:
+        - P0 Critical — engine cannot start, data loss, blocks all work
+        - P1 High — major feature broken, no workaround
+        - P2 Medium — feature broken but workaround exists
+        - P3 Low — cosmetic, edge case, minor inconvenience
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Clear description of what went wrong.
+      placeholder: Describe the bug...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the issue.
+      placeholder: |
+        1. Load scene `res://test.tscn`
+        2. Call `node.move_and_slide()`
+        3. Observe incorrect collision response
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages if any.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal Reproduction
+      description: |
+        A minimal code snippet, test case, or .tscn file that reproduces
+        the issue. This dramatically speeds up fixing the bug.
+      placeholder: |
+        ```rust
+        use gdscene::packed_scene::PackedScene;
+        let scene = PackedScene::load("res://test.tscn").unwrap();
+        // Bug happens here...
+        ```
+
+  - type: input
+    id: version
+    attributes:
+      label: Patina Version
+      description: Which version or commit hash?
+      placeholder: "0.1.0 or commit abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture
+      placeholder: "macOS 15.3 aarch64 / Ubuntu 24.04 x86_64 / Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: rust_version
+    attributes:
+      label: Rust Version
+      description: Output of `rustc --version`
+      placeholder: "rustc 1.82.0 (f6e511eec 2024-10-15)"
+
+  - type: dropdown
+    id: godot_parity
+    attributes:
+      label: Godot Parity
+      description: Does Godot 4.6 handle this correctly?
+      options:
+        - "Yes — Godot works, Patina doesn't (parity bug)"
+        - "No — Godot has the same issue"
+        - "N/A — Patina-specific feature"
+        - "Unknown — haven't tested in Godot"

@@ -88,6 +88,24 @@ impl Resource {
         keys.sort();
         keys
     }
+
+    /// Resolves a sub-resource reference from a property value.
+    ///
+    /// If the property named `prop_name` contains a `SubResource("id")`
+    /// reference (stored as `Variant::String("SubResource:id")`), looks up
+    /// the corresponding sub-resource by ID and returns it.
+    ///
+    /// Returns `None` if the property doesn't exist, isn't a sub-resource
+    /// reference, or the referenced sub-resource ID is not found.
+    pub fn resolve_subresource(&self, prop_name: &str) -> Option<&Arc<Resource>> {
+        let value = self.properties.get(prop_name)?;
+        if let Variant::String(s) = value {
+            if let Some(id) = s.strip_prefix("SubResource:") {
+                return self.subresources.get(id);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +147,57 @@ mod tests {
         let a = Arc::new(r);
         let b = Arc::clone(&a);
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn resolve_subresource_found() {
+        let mut r = Resource::new("Theme");
+        let mut sub = Resource::new("StyleBoxFlat");
+        sub.set_property("bg_color", Variant::String("red".into()));
+        r.subresources
+            .insert("StyleBoxFlat_abc".into(), Arc::new(sub));
+        r.set_property(
+            "panel_style",
+            Variant::String("SubResource:StyleBoxFlat_abc".into()),
+        );
+
+        let resolved = r.resolve_subresource("panel_style");
+        assert!(resolved.is_some());
+        let resolved = resolved.unwrap();
+        assert_eq!(resolved.class_name, "StyleBoxFlat");
+        assert_eq!(
+            resolved.get_property("bg_color"),
+            Some(&Variant::String("red".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_subresource_missing_property() {
+        let r = Resource::new("Theme");
+        assert!(r.resolve_subresource("nonexistent").is_none());
+    }
+
+    #[test]
+    fn resolve_subresource_not_a_subresource_ref() {
+        let mut r = Resource::new("Theme");
+        r.set_property("name", Variant::String("hello".into()));
+        assert!(r.resolve_subresource("name").is_none());
+    }
+
+    #[test]
+    fn resolve_subresource_dangling_reference() {
+        let mut r = Resource::new("Theme");
+        r.set_property(
+            "panel_style",
+            Variant::String("SubResource:missing_id".into()),
+        );
+        assert!(r.resolve_subresource("panel_style").is_none());
+    }
+
+    #[test]
+    fn resolve_subresource_non_string_variant() {
+        let mut r = Resource::new("Theme");
+        r.set_property("count", Variant::Int(42));
+        assert!(r.resolve_subresource("count").is_none());
     }
 }

@@ -1,0 +1,25 @@
+{
+  "batch_id": "spawn-20260320-143719-e1d87220",
+  "started_at": "2026-03-20T14:37:19.295038-07:00",
+  "stagger_seconds": 5,
+  "total_agents": 2,
+  "prompts": [
+    {
+      "pane": "patina--opus__cc_1_opus",
+      "pane_id": "%144",
+      "order": 1,
+      "scheduled": "2026-03-20T14:37:19.738262-07:00",
+      "sent": true,
+      "sent_at": "2026-03-20T14:37:23.495937-07:00"
+    },
+    {
+      "pane": "patina--opus__cc_2_opus",
+      "pane_id": "%145",
+      "order": 2,
+      "scheduled": "2026-03-20T14:37:24.858068-07:00",
+      "sent": true,
+      "sent_at": "2026-03-20T14:37:28.616672-07:00"
+    }
+  ],
+  "completed_at": "2026-03-20T14:37:28.621187-07:00"
+}

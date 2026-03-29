@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
+use gdcore::math3d::{Basis, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::ResourceUid;
 use gdvariant::Variant;
@@ -319,6 +320,34 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
             }));
         }
         return Err(EngineError::Parse(format!("invalid Transform2D: {s}")));
+    }
+
+    // Transform3D(xx, xy, xz, yx, yy, yz, zx, zy, zz, ox, oy, oz)
+    if let Some(inner) = try_strip_call(s, "Transform3D") {
+        let parts = split_args(inner);
+        if parts.len() == 12 {
+            let xx = parse_f32(&parts[0])?;
+            let xy = parse_f32(&parts[1])?;
+            let xz = parse_f32(&parts[2])?;
+            let yx = parse_f32(&parts[3])?;
+            let yy = parse_f32(&parts[4])?;
+            let yz = parse_f32(&parts[5])?;
+            let zx = parse_f32(&parts[6])?;
+            let zy = parse_f32(&parts[7])?;
+            let zz = parse_f32(&parts[8])?;
+            let ox = parse_f32(&parts[9])?;
+            let oy = parse_f32(&parts[10])?;
+            let oz = parse_f32(&parts[11])?;
+            return Ok(Variant::Transform3D(Transform3D {
+                basis: Basis {
+                    x: Vector3::new(xx, xy, xz),
+                    y: Vector3::new(yx, yy, yz),
+                    z: Vector3::new(zx, zy, zz),
+                },
+                origin: Vector3::new(ox, oy, oz),
+            }));
+        }
+        return Err(EngineError::Parse(format!("invalid Transform3D: {s}")));
     }
 
     // NodePath("path") — stored as Variant::NodePath

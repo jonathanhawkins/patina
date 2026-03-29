@@ -117,12 +117,26 @@ impl AreaStore {
     /// Detects overlaps between all areas and the given bodies.
     ///
     /// Returns enter/exit events by comparing against the previous frame.
+    ///
+    /// Areas with `monitoring == false` are skipped entirely: they produce no
+    /// enter events and their previous-overlap entries are silently cleared so
+    /// that re-enabling monitoring later correctly fires `Entered` for any
+    /// bodies already inside the region.
     pub fn detect_overlaps(
         &mut self,
         bodies: &HashMap<BodyId, PhysicsBody2D>,
     ) -> Vec<OverlapEvent> {
         let mut current_overlaps = HashSet::new();
         let mut events = Vec::new();
+
+        // Collect the set of area IDs that are not monitoring so we can
+        // suppress exit events and clean up stale previous-overlap entries.
+        let non_monitoring: HashSet<AreaId> = self
+            .areas
+            .values()
+            .filter(|a| !a.monitoring)
+            .map(|a| a.id)
+            .collect();
 
         for area in self.areas.values() {
             if !area.monitoring {
@@ -160,8 +174,13 @@ impl AreaStore {
             }
         }
 
-        // Detect exited
+        // Detect exited — only for areas that are still monitoring.
+        // Non-monitoring areas silently drop their previous state.
         for &pair in &self.previous_overlaps {
+            if non_monitoring.contains(&pair.0) {
+                // Area stopped monitoring — silently forget the overlap.
+                continue;
+            }
             if !current_overlaps.contains(&pair) {
                 events.push(OverlapEvent {
                     area_id: pair.0,

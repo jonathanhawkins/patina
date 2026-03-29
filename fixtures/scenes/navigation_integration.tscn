@@ -1,0 +1,38 @@
+[gd_scene format=3 uid="uid://navigation_integration"]
+
+[node name="NavWorld" type="Node2D"]
+
+[node name="Player" type="CharacterBody2D" parent="."]
+position = Vector2(50, 100)
+
+[node name="PlayerCollision" type="CollisionShape2D" parent="Player"]
+
+[node name="PlayerNavAgent" type="NavigationAgent2D" parent="Player"]
+
+[node name="Enemy1" type="CharacterBody2D" parent="."]
+position = Vector2(400, 100)
+
+[node name="Enemy1Collision" type="CollisionShape2D" parent="Enemy1"]
+
+[node name="Enemy1NavAgent" type="NavigationAgent2D" parent="Enemy1"]
+
+[node name="Enemy2" type="CharacterBody2D" parent="."]
+position = Vector2(300, 300)
+
+[node name="Enemy2Collision" type="CollisionShape2D" parent="Enemy2"]
+
+[node name="Enemy2NavAgent" type="NavigationAgent2D" parent="Enemy2"]
+
+[node name="Patrol" type="Node2D" parent="."]
+
+[node name="Waypoint1" type="Marker2D" parent="Patrol"]
+position = Vector2(100, 50)
+
+[node name="Waypoint2" type="Marker2D" parent="Patrol"]
+position = Vector2(500, 50)
+
+[node name="Waypoint3" type="Marker2D" parent="Patrol"]
+position = Vector2(500, 350)
+
+[node name="Waypoint4" type="Marker2D" parent="Patrol"]
+position = Vector2(100, 350)

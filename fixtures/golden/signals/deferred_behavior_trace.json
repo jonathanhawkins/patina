@@ -1,0 +1,37 @@
+{
+  "description": "Golden trace for deferred signal behavior parity. Godot queues deferred callbacks and fires them on idle-frame flush in FIFO order. Immediate callbacks fire synchronously during emit_signal.",
+  "upstream_version": "4.6.1-stable",
+  "source": "godot behavioral contract + oracle signal_instantiation_connections.json (flags=4 is CONNECT_ONE_SHOT)",
+  "scenarios": {
+    "deferred_only": {
+      "description": "Three deferred signals emitted in order; callbacks fire only after flush in FIFO order.",
+      "event_trace": [
+        { "event_type": "signal_emit", "node_path": "/root/Emitter", "detail": "sig_first", "frame": 0 },
+        { "event_type": "signal_emit", "node_path": "/root/Emitter", "detail": "sig_second", "frame": 0 },
+        { "event_type": "signal_emit", "node_path": "/root/Emitter", "detail": "sig_third", "frame": 0 }
+      ],
+      "expected_callback_order_after_flush": ["first", "second", "third"],
+      "callbacks_before_flush": 0
+    },
+    "mixed_immediate_deferred": {
+      "description": "One immediate and one deferred connection on the same signal. Immediate fires during emit, deferred fires on flush.",
+      "event_trace": [
+        { "event_type": "signal_emit", "node_path": "/root/Emitter", "detail": "mixed_sig", "frame": 0 }
+      ],
+      "expected_callback_order": ["immediate", "deferred"],
+      "callbacks_before_flush": 1,
+      "callbacks_after_flush": 2
+    },
+    "one_shot_deferred": {
+      "description": "One-shot connection fires callback once on first emission, then auto-disconnects. Second emission still produces a trace event but no callback.",
+      "event_trace": [
+        { "event_type": "signal_emit", "node_path": "/root/Emitter", "detail": "one_shot_sig", "frame": 0 },
+        { "event_type": "signal_emit", "node_path": "/root/Emitter", "detail": "one_shot_sig", "frame": 1 }
+      ],
+      "callback_count_after_first_emit": 1,
+      "callback_count_after_second_emit": 1,
+      "connection_count_after_second_emit": 0
+    }
+  },
+  "notes": "CONNECT_ONE_SHOT (flags=4) in oracle maps to as_one_shot(). Deferred signals use as_deferred(). Trace records emission events regardless of callback behavior."
+}

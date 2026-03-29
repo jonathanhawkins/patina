@@ -1,0 +1,58 @@
+[gd_scene format=3 uid="uid://ui_complex"]
+
+[node name="UIRoot" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Header" type="Control" parent="."]
+anchor_right = 1.0
+offset_bottom = 64.0
+
+[node name="Title" type="Label" parent="Header"]
+text = "Game HUD"
+
+[node name="ScoreLabel" type="Label" parent="Header"]
+text = "Score: 0"
+
+[node name="HealthLabel" type="Label" parent="Header"]
+text = "HP: 100"
+
+[node name="Sidebar" type="Control" parent="."]
+offset_top = 64.0
+offset_right = 200.0
+anchor_bottom = 1.0
+
+[node name="InventoryLabel" type="Label" parent="Sidebar"]
+text = "Inventory"
+
+[node name="Slot1" type="Button" parent="Sidebar"]
+text = "Sword"
+
+[node name="Slot2" type="Button" parent="Sidebar"]
+text = "Shield"
+
+[node name="Slot3" type="Button" parent="Sidebar"]
+text = "Potion"
+
+[node name="DialogBox" type="Control" parent="."]
+anchor_top = 0.75
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="SpeakerName" type="Label" parent="DialogBox"]
+text = "NPC"
+
+[node name="DialogText" type="Label" parent="DialogBox"]
+text = "Welcome, adventurer!"
+
+[node name="NextButton" type="Button" parent="DialogBox"]
+text = "Next"
+
+[node name="SkipButton" type="Button" parent="DialogBox"]
+text = "Skip"
+
+[connection signal="pressed" from="Sidebar/Slot1" to="." method="_on_slot_pressed"]
+[connection signal="pressed" from="Sidebar/Slot2" to="." method="_on_slot_pressed"]
+[connection signal="pressed" from="Sidebar/Slot3" to="." method="_on_slot_pressed"]
+[connection signal="pressed" from="DialogBox/NextButton" to="." method="_on_next_pressed"]
+[connection signal="pressed" from="DialogBox/SkipButton" to="." method="_on_skip_pressed"]

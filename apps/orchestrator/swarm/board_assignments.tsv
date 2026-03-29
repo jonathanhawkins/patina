@@ -1,0 +1,9 @@
+2	grid9-p2	pat-4p9l	Fix test_scripts Mover frame-accumulation drift
+3	grid9-p3	pat-xl4b	Verify ClassDB class_list stable sorted order against Godot 4.6.1
+4	grid9-p4	pat-c0qf	Support headless demo_2d runtime path for CI
+5	grid9-p5	pat-qd8j	Implement Time.get_ticks_usec parity
+6	grid9-p6	pat-ps3l	GDScript @onready, func dispatch, and script signal callable parity
+7	grid9-p7	pat-o2k3	Add oracle-backed fixture for scene-level signal connections on instantiation
+8	grid9-p8	pat-1zej	Check instanced-scene resource sharing after 4.6.1 repin
+9	grid9-p9	pat-4nvk	Verify NodeId/get_instance_id structural parity in oracle-backed fixtures
+10	grid9-p10	pat-4w43	Add platform windowing behavior parity smoke coverage

@@ -1,0 +1,101 @@
+{
+  "fixture_id": "scene_hierarchy_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "note": "3D hierarchy scene \u2014 verifies global transform accumulation through nested Node3D chain",
+  "transform_chain": {
+    "note": "Expected global positions for verifying transform accumulation",
+    "World": [
+      2.0,
+      0.0,
+      0.0
+    ],
+    "Arm": [
+      2.0,
+      3.0,
+      0.0
+    ],
+    "Forearm": [
+      2.0,
+      5.0,
+      0.0
+    ],
+    "Hand": [
+      2.0,
+      6.0,
+      0.0
+    ]
+  },
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-22T06:57:54+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "World",
+        "class": "Node3D",
+        "path": "/root/World",
+        "children": [
+          "Arm",
+          "Camera",
+          "Light"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0, 0)"
+        }
+      },
+      {
+        "name": "Arm",
+        "class": "Node3D",
+        "path": "/root/World/Arm",
+        "children": [
+          "Forearm"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0)"
+        }
+      },
+      {
+        "name": "Forearm",
+        "class": "Node3D",
+        "path": "/root/World/Arm/Forearm",
+        "children": [
+          "Hand"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)"
+        }
+      },
+      {
+        "name": "Hand",
+        "class": "MeshInstance3D",
+        "path": "/root/World/Arm/Forearm/Hand",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)"
+        }
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/World/Camera",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 8)",
+          "fov": 70.0,
+          "near": 0.1,
+          "far": 100.0
+        }
+      },
+      {
+        "name": "Light",
+        "class": "DirectionalLight3D",
+        "path": "/root/World/Light",
+        "children": [],
+        "properties": {
+          "light_energy": 0.8,
+          "shadow_enabled": true
+        }
+      }
+    ]
+  }
+}

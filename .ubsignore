@@ -1,0 +1,23 @@
+# Patina-specific UBS ignores
+
+# Vendored upstream engine source used as an oracle, not Patina implementation.
+upstream/godot/
+
+# Generated or cached task-tracker state.
+.beads/
+
+# Repo-local agent/mail stores and generated worktree state.
+.agent-mail-store/
+.claude/worktrees/
+
+# Build artifacts and dependency caches.
+target/
+node_modules/
+.next/
+dist/
+build/
+.turbo/
+
+# Large generated fixtures and captures.
+fixtures/golden/
+fixtures/oracle_outputs/

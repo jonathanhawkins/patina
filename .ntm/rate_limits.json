@@ -1,0 +1,39 @@
+{
+  "state": {
+    "anthropic": {
+      "current_delay": 50625000000,
+      "consecutive_success": 1,
+      "last_rate_limit": "2026-03-20T15:14:49.926591-07:00",
+      "cooldown_until": "2026-03-20T15:15:40.551591-07:00",
+      "total_rate_limits": 3,
+      "total_successes": 3
+    },
+    "openai": {
+      "current_delay": 10000000000,
+      "consecutive_success": 1,
+      "last_rate_limit": "0001-01-01T00:00:00Z",
+      "cooldown_until": "0001-01-01T00:00:00Z",
+      "total_rate_limits": 0,
+      "total_successes": 1
+    }
+  },
+  "history": {
+    "anthropic": [
+      {
+        "time": "2026-03-20T14:42:39.90812-07:00",
+        "provider": "anthropic",
+        "action": "send"
+      },
+      {
+        "time": "2026-03-20T15:12:09.922822-07:00",
+        "provider": "anthropic",
+        "action": "send"
+      },
+      {
+        "time": "2026-03-20T15:14:49.926591-07:00",
+        "provider": "anthropic",
+        "action": "send"
+      }
+    ]
+  }
+}

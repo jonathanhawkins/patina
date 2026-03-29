@@ -1,0 +1,216 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_ui_complex",
+  "generated_at": "2026-03-28T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "Label",
+              "name": "Title",
+              "path": "/root/UIRoot/Header/Title",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Game HUD"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Label",
+              "name": "ScoreLabel",
+              "path": "/root/UIRoot/Header/ScoreLabel",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Score: 0"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Label",
+              "name": "HealthLabel",
+              "path": "/root/UIRoot/Header/HealthLabel",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "HP: 100"
+                }
+              }
+            }
+          ],
+          "class": "Control",
+          "name": "Header",
+          "path": "/root/UIRoot/Header",
+          "properties": {
+            "anchor_right": {
+              "type": "Float",
+              "value": 1.0
+            },
+            "offset_bottom": {
+              "type": "Float",
+              "value": 64.0
+            }
+          }
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "Label",
+              "name": "InventoryLabel",
+              "path": "/root/UIRoot/Sidebar/InventoryLabel",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Inventory"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "Slot1",
+              "path": "/root/UIRoot/Sidebar/Slot1",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Sword"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "Slot2",
+              "path": "/root/UIRoot/Sidebar/Slot2",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Shield"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "Slot3",
+              "path": "/root/UIRoot/Sidebar/Slot3",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Potion"
+                }
+              }
+            }
+          ],
+          "class": "Control",
+          "name": "Sidebar",
+          "path": "/root/UIRoot/Sidebar",
+          "properties": {
+            "offset_top": {
+              "type": "Float",
+              "value": 64.0
+            },
+            "offset_right": {
+              "type": "Float",
+              "value": 200.0
+            },
+            "anchor_bottom": {
+              "type": "Float",
+              "value": 1.0
+            }
+          }
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "Label",
+              "name": "SpeakerName",
+              "path": "/root/UIRoot/DialogBox/SpeakerName",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "NPC"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Label",
+              "name": "DialogText",
+              "path": "/root/UIRoot/DialogBox/DialogText",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Welcome, adventurer!"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "NextButton",
+              "path": "/root/UIRoot/DialogBox/NextButton",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Next"
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Button",
+              "name": "SkipButton",
+              "path": "/root/UIRoot/DialogBox/SkipButton",
+              "properties": {
+                "text": {
+                  "type": "String",
+                  "value": "Skip"
+                }
+              }
+            }
+          ],
+          "class": "Control",
+          "name": "DialogBox",
+          "path": "/root/UIRoot/DialogBox",
+          "properties": {
+            "anchor_top": {
+              "type": "Float",
+              "value": 0.75
+            },
+            "anchor_right": {
+              "type": "Float",
+              "value": 1.0
+            },
+            "anchor_bottom": {
+              "type": "Float",
+              "value": 1.0
+            }
+          }
+        }
+      ],
+      "class": "Control",
+      "name": "UIRoot",
+      "path": "/root/UIRoot",
+      "properties": {
+        "anchor_right": {
+          "type": "Float",
+          "value": 1.0
+        },
+        "anchor_bottom": {
+          "type": "Float",
+          "value": 1.0
+        }
+      }
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

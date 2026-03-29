@@ -1,0 +1,102 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/Camera"
+				},
+				{
+					"children": [],
+					"class": "SpotLight3D",
+					"groups": [],
+					"name": "SpotRed",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/SpotRed"
+				},
+				{
+					"children": [],
+					"class": "SpotLight3D",
+					"groups": [],
+					"name": "SpotGreen",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/SpotGreen"
+				},
+				{
+					"children": [],
+					"class": "SpotLight3D",
+					"groups": [],
+					"name": "SpotBlue",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/SpotBlue"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Statue1",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/Statue1"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Statue2",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/Statue2"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Statue3",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/Statue3"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "FloorShape",
+							"owner": "/root/Gallery",
+							"path": "/root/Gallery/Floor/FloorShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "FloorMesh",
+							"owner": "/root/Gallery",
+							"path": "/root/Gallery/Floor/FloorMesh"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Floor",
+					"owner": "/root/Gallery",
+					"path": "/root/Gallery/Floor"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "Gallery",
+			"owner": "/root",
+			"path": "/root/Gallery"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

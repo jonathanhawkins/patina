@@ -1,5 +1,9 @@
 # Godot 4.5.1 Feature Audit
 
+Historical note: this audit was written against the pre-repin `4.5.1-stable`
+target. Patina is now pinned to `4.6.1-stable`; use this file as pre-repin
+context, not as the current oracle-version source of truth.
+
 This audit answers one question:
 
 Can Patina honestly claim the pinned `Godot 4.5.1-stable` target is complete enough to repin to `4.6.1`?

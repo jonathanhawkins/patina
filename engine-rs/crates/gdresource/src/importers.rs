@@ -326,6 +326,7 @@ impl ResourceFormatLoader {
         rfl.register(".otf", import_font);
         rfl.register(".tres", tres_loader);
         rfl.register(".tscn", tscn_loader);
+        rfl.register(".vs", vs_loader);
         rfl
     }
 
@@ -340,8 +341,19 @@ impl ResourceFormatLoader {
     }
 
     /// Returns `true` if a loader is registered for the extension.
+    ///
+    /// Accepts extensions with or without a leading dot (e.g. both `".vs"` and `"vs"`).
     pub fn can_load(&self, extension: &str) -> bool {
-        self.loaders.contains_key(&extension.to_lowercase())
+        let ext = extension.to_lowercase();
+        if self.loaders.contains_key(&ext) {
+            return true;
+        }
+        // Try with a leading dot if one wasn't provided
+        if !ext.starts_with('.') {
+            self.loaders.contains_key(&format!(".{ext}"))
+        } else {
+            false
+        }
     }
 
     /// Loads a resource by dispatching to the registered loader for its extension.
@@ -378,6 +390,26 @@ fn tres_loader(path: &Path) -> EngineResult<Arc<Resource>> {
 /// Re-uses the `.tres` parser since `.tscn` uses the same text format.
 fn tscn_loader(path: &Path) -> EngineResult<Arc<Resource>> {
     TresLoader::new().load(path.to_str().unwrap_or(""))
+}
+
+/// Loader function for `.vs` (VisualScript) files.
+///
+/// VisualScript was deprecated in Godot 4. This loader creates a stub
+/// resource so that scenes referencing `.vs` files can load without errors.
+fn vs_loader(path: &Path) -> EngineResult<Arc<Resource>> {
+    if !path.exists() {
+        return Err(EngineError::NotFound(format!(
+            "VisualScript file not found: {}",
+            path.display()
+        )));
+    }
+    let mut res = Resource::new("VisualScript");
+    res.path = format!(
+        "res://{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    res.set_property("_deprecated", Variant::Bool(true));
+    Ok(Arc::new(res))
 }
 
 // ---------------------------------------------------------------------------
@@ -705,7 +737,7 @@ antialiased=true
         assert!(rfl.can_load(".otf"));
         assert!(rfl.can_load(".tres"));
         assert!(rfl.can_load(".tscn"));
-        assert_eq!(rfl.extension_count(), 6);
+        assert_eq!(rfl.extension_count(), 7);
     }
 
     #[test]

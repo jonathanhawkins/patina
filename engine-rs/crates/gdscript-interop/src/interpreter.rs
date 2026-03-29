@@ -579,6 +579,8 @@ impl Interpreter {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = match iter_val {
                     Variant::Array(a) => a,
+                    // GDScript: `for i in N` iterates 0..N
+                    Variant::Int(n) => (0..n.max(0)).map(Variant::Int).collect(),
                     other => {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot iterate over {}",
@@ -3184,12 +3186,26 @@ impl Interpreter {
                     let valid = match &**callable_ref {
                         CallableRef::Method { method, .. } => !method.is_empty(),
                         CallableRef::Lambda { .. } => true,
+                        CallableRef::Bound { inner, .. } | CallableRef::Unbound { inner, .. } => {
+                            match inner.inner_callable() {
+                                CallableRef::Method { method, .. } => !method.is_empty(),
+                                _ => true,
+                            }
+                        }
                     };
                     Ok(Variant::Bool(valid))
                 }
                 "get_method" => match &**callable_ref {
                     CallableRef::Method { method, .. } => Ok(Variant::String(method.clone())),
                     CallableRef::Lambda { .. } => Ok(Variant::String("<lambda>".into())),
+                    CallableRef::Bound { inner, .. } | CallableRef::Unbound { inner, .. } => {
+                        match inner.inner_callable() {
+                            CallableRef::Method { method, .. } => {
+                                Ok(Variant::String(method.clone()))
+                            }
+                            _ => Ok(Variant::String("<lambda>".into())),
+                        }
+                    }
                 },
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("Callable.{method}"),
@@ -3266,6 +3282,14 @@ impl Interpreter {
                 self.environment.pop_scope();
                 self.call_depth -= 1;
                 Ok(return_val)
+            }
+            CallableRef::Bound { inner, bound_args } => {
+                let resolved = callable.resolve_args(args);
+                self.invoke_callable(inner, &resolved)
+            }
+            CallableRef::Unbound { inner, .. } => {
+                let resolved = callable.resolve_args(args);
+                self.invoke_callable(inner, &resolved)
             }
         }
     }
@@ -3432,9 +3456,15 @@ impl Interpreter {
     ) -> Result<ClassInstance, RuntimeError> {
         let mut properties = HashMap::new();
         for var in &class_def.instance_vars {
-            let val = match &var.default {
-                Some(expr) => self.eval_expr(expr)?,
-                None => Variant::Nil,
+            let is_onready = var.annotations.iter().any(|a| a.name == "onready");
+            let val = if is_onready {
+                // @onready vars are deferred until _ready; start as Nil.
+                Variant::Nil
+            } else {
+                match &var.default {
+                    Some(expr) => self.eval_expr(expr)?,
+                    None => Variant::Nil,
+                }
             };
             properties.insert(var.name.clone(), val);
         }
@@ -3442,6 +3472,25 @@ impl Interpreter {
             class_def: class_def.clone(),
             properties,
         })
+    }
+
+    /// Resolves `@onready` variables by evaluating their default expressions.
+    ///
+    /// Call this after the `_ready` lifecycle callback fires to populate
+    /// deferred variables that were initialized to `Nil`.
+    pub fn resolve_onready_vars(
+        &mut self,
+        instance: &mut ClassInstance,
+    ) -> Result<(), RuntimeError> {
+        for var in &instance.class_def.instance_vars {
+            if var.annotations.iter().any(|a| a.name == "onready") {
+                if let Some(expr) = &var.default {
+                    let val = self.eval_expr(expr)?;
+                    instance.properties.insert(var.name.clone(), val);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Calls a method on a class instance.

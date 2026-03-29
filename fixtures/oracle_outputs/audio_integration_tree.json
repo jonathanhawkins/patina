@@ -1,0 +1,89 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "PlayerCollision",
+							"owner": "/root/AudioWorld",
+							"path": "/root/AudioWorld/Player/PlayerCollision"
+						},
+						{
+							"children": [],
+							"class": "AudioStreamPlayer2D",
+							"groups": [],
+							"name": "FootstepAudio",
+							"owner": "/root/AudioWorld",
+							"path": "/root/AudioWorld/Player/FootstepAudio"
+						}
+					],
+					"class": "CharacterBody2D",
+					"groups": [],
+					"name": "Player",
+					"owner": "/root/AudioWorld",
+					"path": "/root/AudioWorld/Player"
+				},
+				{
+					"children": [],
+					"class": "AudioStreamPlayer2D",
+					"groups": [],
+					"name": "BGM",
+					"owner": "/root/AudioWorld",
+					"path": "/root/AudioWorld/BGM"
+				},
+				{
+					"children": [],
+					"class": "AudioStreamPlayer2D",
+					"groups": [],
+					"name": "SFXEmitter",
+					"owner": "/root/AudioWorld",
+					"path": "/root/AudioWorld/SFXEmitter"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "EnemyCollision",
+							"owner": "/root/AudioWorld",
+							"path": "/root/AudioWorld/Enemy/EnemyCollision"
+						},
+						{
+							"children": [],
+							"class": "AudioStreamPlayer2D",
+							"groups": [],
+							"name": "EnemyAudio",
+							"owner": "/root/AudioWorld",
+							"path": "/root/AudioWorld/Enemy/EnemyAudio"
+						}
+					],
+					"class": "CharacterBody2D",
+					"groups": [],
+					"name": "Enemy",
+					"owner": "/root/AudioWorld",
+					"path": "/root/AudioWorld/Enemy"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "AudioWorld",
+			"owner": "/root",
+			"path": "/root/AudioWorld"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

@@ -397,6 +397,13 @@ impl RenderingServer2D for SoftwareRenderer {
             self.rasterize_item(&mut fb, item, camera_xform * parent_xform);
         }
 
+        // Render server-owned items (created via create_canvas_item).
+        // This matches Godot's RenderingServer where items created on the
+        // server are rendered alongside viewport items.
+        for item in &self.items {
+            self.rasterize_item(&mut fb, item, camera_xform);
+        }
+
         FrameData {
             width: fb.width,
             height: fb.height,

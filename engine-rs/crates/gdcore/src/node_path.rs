@@ -364,3 +364,151 @@ mod tests {
         assert!(prop.is_empty());
     }
 }
+
+/// Property-based tests for NodePath parsing roundtrips.
+///
+/// Uses `proptest` to verify that `NodePath::new(s).to_string()` → `NodePath::new()`
+/// produces an equivalent path for all valid inputs.
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy for valid node name segments (no `/` or `:`).
+    fn node_name() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[a-zA-Z_][a-zA-Z0-9_]{0,15}",
+            Just("..".to_string()),
+            Just(".".to_string()),
+        ]
+    }
+
+    /// Strategy for a non-empty list of node name segments.
+    fn node_names() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(node_name(), 1..6)
+    }
+
+    /// Strategy for property subname segments.
+    fn subname() -> impl Strategy<Value = String> {
+        "[a-zA-Z_][a-zA-Z0-9_]{0,10}"
+    }
+
+    /// Strategy for optional subnames.
+    fn subnames() -> impl Strategy<Value = Vec<String>> {
+        prop::collection::vec(subname(), 0..4)
+    }
+
+    proptest! {
+        /// Roundtrip: parse → display → parse produces an equivalent NodePath.
+        #[test]
+        fn roundtrip_parse_display(
+            abs in any::<bool>(),
+            names in node_names(),
+            subs in subnames(),
+        ) {
+            let mut path_str = String::new();
+            if abs {
+                path_str.push('/');
+            }
+            path_str.push_str(&names.join("/"));
+            for s in &subs {
+                path_str.push(':');
+                path_str.push_str(s);
+            }
+
+            let p1 = NodePath::new(&path_str);
+            let displayed = format!("{p1}");
+            let p2 = NodePath::new(&displayed);
+
+            prop_assert_eq!(p1.is_absolute(), p2.is_absolute(),
+                "Absolute flag mismatch after roundtrip: {:?} vs {:?}", path_str, displayed);
+            prop_assert_eq!(p1.get_name_count(), p2.get_name_count(),
+                "Name count mismatch after roundtrip");
+            for i in 0..p1.get_name_count() {
+                prop_assert_eq!(p1.get_name(i), p2.get_name(i),
+                    "Name mismatch at index {}", i);
+            }
+            prop_assert_eq!(p1.get_subname_count(), p2.get_subname_count(),
+                "Subname count mismatch after roundtrip");
+            for i in 0..p1.get_subname_count() {
+                prop_assert_eq!(p1.get_subname(i), p2.get_subname(i),
+                    "Subname mismatch at index {}", i);
+            }
+        }
+
+        /// Display output is idempotent: displaying twice gives the same string.
+        #[test]
+        fn display_idempotent(
+            abs in any::<bool>(),
+            names in node_names(),
+            subs in subnames(),
+        ) {
+            let mut path_str = String::new();
+            if abs {
+                path_str.push('/');
+            }
+            path_str.push_str(&names.join("/"));
+            for s in &subs {
+                path_str.push(':');
+                path_str.push_str(s);
+            }
+
+            let p = NodePath::new(&path_str);
+            let s1 = format!("{p}");
+            let s2 = format!("{}", NodePath::new(&s1));
+            prop_assert_eq!(&s1, &s2,
+                "Display not idempotent: first={:?}, second={:?}", s1, s2);
+        }
+
+        /// Empty path always produces is_empty() = true.
+        #[test]
+        fn empty_is_empty(_dummy in 0u8..1) {
+            let p = NodePath::new("");
+            prop_assert!(p.is_empty());
+            prop_assert!(!p.is_absolute());
+        }
+
+        /// Absolute paths always start with `/` in display.
+        #[test]
+        fn absolute_display_starts_with_slash(
+            names in node_names(),
+        ) {
+            let path_str = format!("/{}", names.join("/"));
+            let p = NodePath::new(&path_str);
+            let displayed = format!("{p}");
+            prop_assert!(displayed.starts_with('/'),
+                "Absolute path display should start with /: {:?}", displayed);
+        }
+
+        /// Relative paths never start with `/` in display.
+        #[test]
+        fn relative_display_no_leading_slash(
+            names in node_names(),
+        ) {
+            let path_str = names.join("/");
+            let p = NodePath::new(&path_str);
+            let displayed = format!("{p}");
+            prop_assert!(!displayed.starts_with('/'),
+                "Relative path display should not start with /: {:?}", displayed);
+        }
+
+        /// Subname count matches the number of `:` separated segments after the path.
+        #[test]
+        fn subname_count_matches_input(
+            names in node_names(),
+            subs in prop::collection::vec(subname(), 1..5),
+        ) {
+            let path_str = format!("{}:{}", names.join("/"), subs.join(":"));
+            let p = NodePath::new(&path_str);
+            prop_assert_eq!(p.get_subname_count(), subs.len(),
+                "Expected {} subnames, got {}", subs.len(), p.get_subname_count());
+        }
+
+        /// Fuzz: arbitrary byte strings never cause a panic in NodePath::new.
+        #[test]
+        fn no_panic_on_arbitrary_input(s in "\\PC{0,100}") {
+            let _p = NodePath::new(&s);
+            // Just verifying no panic occurs
+        }
+    }
+}

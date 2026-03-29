@@ -1,0 +1,355 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Label",
+							"name": "Title",
+							"path": "/root/UIRoot/Header/Title",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Game HUD"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Label",
+							"name": "ScoreLabel",
+							"path": "/root/UIRoot/Header/ScoreLabel",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Score: 0"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Label",
+							"name": "HealthLabel",
+							"path": "/root/UIRoot/Header/HealthLabel",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "HP: 100"
+								}
+							}
+						}
+					],
+					"class": "Control",
+					"name": "Header",
+					"path": "/root/UIRoot/Header",
+					"properties": {
+						"anchor_right": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 1.0
+						},
+						"offset_bottom": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 64.0
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Label",
+							"name": "InventoryLabel",
+							"path": "/root/UIRoot/Sidebar/InventoryLabel",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Inventory"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"name": "Slot1",
+							"path": "/root/UIRoot/Sidebar/Slot1",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Sword"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"name": "Slot2",
+							"path": "/root/UIRoot/Sidebar/Slot2",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Shield"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"name": "Slot3",
+							"path": "/root/UIRoot/Sidebar/Slot3",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Potion"
+								}
+							}
+						}
+					],
+					"class": "Control",
+					"name": "Sidebar",
+					"path": "/root/UIRoot/Sidebar",
+					"properties": {
+						"anchor_bottom": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 1.0
+						},
+						"offset_right": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 200.0
+						},
+						"offset_top": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 64.0
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Label",
+							"name": "SpeakerName",
+							"path": "/root/UIRoot/DialogBox/SpeakerName",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "NPC"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Label",
+							"name": "DialogText",
+							"path": "/root/UIRoot/DialogBox/DialogText",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Welcome, adventurer!"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"name": "NextButton",
+							"path": "/root/UIRoot/DialogBox/NextButton",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Next"
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"name": "SkipButton",
+							"path": "/root/UIRoot/DialogBox/SkipButton",
+							"properties": {
+								"text": {
+									"class_type": "",
+									"hint": 0,
+									"type": "String",
+									"value": "Skip"
+								}
+							}
+						}
+					],
+					"class": "Control",
+					"name": "DialogBox",
+					"path": "/root/UIRoot/DialogBox",
+					"properties": {
+						"anchor_bottom": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 1.0
+						},
+						"anchor_right": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 1.0
+						},
+						"anchor_top": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.75
+						}
+					}
+				}
+			],
+			"class": "Control",
+			"name": "UIRoot",
+			"path": "/root/UIRoot",
+			"properties": {
+				"anchor_bottom": {
+					"class_type": "",
+					"hint": 1,
+					"type": "float",
+					"value": 1.0
+				},
+				"anchor_right": {
+					"class_type": "",
+					"hint": 1,
+					"type": "float",
+					"value": 1.0
+				}
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

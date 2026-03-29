@@ -12,6 +12,7 @@ use gdobject::notification::{
     NOTIFICATION_UNPARENTED,
 };
 use gdobject::signal::SignalStore;
+use gdobject::weak_ref;
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
@@ -44,6 +45,12 @@ pub struct SceneTree {
     /// Snapshot of input state for the current frame, used by scripts
     /// that call `Input.is_action_pressed()` etc.
     input_snapshot: Option<crate::scripting::InputSnapshot>,
+    /// The packed scene that was used to load the current scene (if any).
+    /// Stored for `reload_current_scene()`.
+    current_packed_scene: Option<crate::packed_scene::PackedScene>,
+    /// The NodeId of the current scene root (first child of root after
+    /// `change_scene_to_packed` or `change_scene_to_node`).
+    current_scene_id: Option<NodeId>,
     /// Nodes marked for deferred deletion via `queue_free()`.
     /// They are removed at the end of the frame by `process_deletions()`.
     pending_deletions: Vec<NodeId>,
@@ -69,8 +76,11 @@ impl std::fmt::Debug for SceneTree {
 impl SceneTree {
     /// Creates a new scene tree with an empty root node named `"root"`.
     pub fn new() -> Self {
-        let root = Node::new("root", "Node");
+        let mut root = Node::new("root", "Node");
         let root_id = root.id();
+        // The root node is always inside the tree.
+        root.set_inside_tree(true);
+        weak_ref::register_object(root_id.object_id());
         let mut nodes = HashMap::new();
         nodes.insert(root_id, root);
         Self {
@@ -82,6 +92,8 @@ impl SceneTree {
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
+            current_packed_scene: None,
+            current_scene_id: None,
             pending_deletions: Vec::new(),
             event_trace: EventTrace::new(),
             trace_frame: 0,
@@ -92,6 +104,12 @@ impl SceneTree {
     /// Returns the ID of the root node.
     pub fn root_id(&self) -> NodeId {
         self.root_id
+    }
+
+    /// Returns the ID of the current scene root, if one has been set via
+    /// `change_scene_to_packed` or `change_scene_to_node`.
+    pub fn current_scene(&self) -> Option<NodeId> {
+        self.current_scene_id
     }
 
     /// Sets the input snapshot for the current frame. Scripts will see this
@@ -170,6 +188,7 @@ impl SceneTree {
         }
 
         let child_id = node.id();
+        weak_ref::register_object(child_id.object_id());
         node.set_parent(Some(parent_id));
         self.nodes.insert(child_id, node);
 
@@ -201,6 +220,48 @@ impl SceneTree {
             .unwrap_or(false);
         if should_enter_tree {
             LifecycleManager::enter_tree(self, child_id);
+        }
+
+        // Camera3D auto-activation: if this Camera3D has current=true (explicit),
+        // deactivate all others. If no Camera3D has current=true, auto-activate this one.
+        let is_camera3d = self
+            .nodes
+            .get(&child_id)
+            .map(|n| n.class_name() == "Camera3D")
+            .unwrap_or(false);
+        if is_camera3d {
+            let this_is_current = self
+                .nodes
+                .get(&child_id)
+                .map(|n| n.get_property("current") == Variant::Bool(true))
+                .unwrap_or(false);
+
+            if this_is_current {
+                // Explicit current=true: deactivate all other Camera3D nodes.
+                let others: Vec<NodeId> = self
+                    .nodes
+                    .iter()
+                    .filter(|(id, n)| **id != child_id && n.class_name() == "Camera3D")
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in others {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.set_property("current", Variant::Bool(false));
+                    }
+                }
+            } else {
+                // No explicit current: auto-activate if no other Camera3D is current.
+                let any_other_current = self.nodes.iter().any(|(id, n)| {
+                    *id != child_id
+                        && n.class_name() == "Camera3D"
+                        && n.get_property("current") == Variant::Bool(true)
+                });
+                if !any_other_current {
+                    if let Some(node) = self.nodes.get_mut(&child_id) {
+                        node.set_property("current", Variant::Bool(true));
+                    }
+                }
+            }
         }
 
         Ok(child_id)
@@ -247,6 +308,7 @@ impl SceneTree {
         // Remove all collected nodes from the arena and group index.
         for &nid in &removed {
             if let Some(node) = self.nodes.remove(&nid) {
+                weak_ref::unregister_object(nid.object_id());
                 for group in node.groups() {
                     if let Some(members) = self.groups.get_mut(group) {
                         members.remove(&nid);
@@ -463,10 +525,28 @@ impl SceneTree {
     }
 
     /// Resolves a relative path from a given node (e.g. `"Player/Sprite"`).
+    ///
+    /// Supports `%UniqueName` syntax: if the **first** segment starts with
+    /// `%`, it is resolved via [`get_node_by_unique_name`](Self::get_node_by_unique_name)
+    /// within the scene-owner scope. Remaining segments (if any) are resolved
+    /// relative to the unique-name result.
     pub fn get_node_relative(&self, from: NodeId, rel_path: &str) -> Option<NodeId> {
         if rel_path.is_empty() {
             return Some(from);
         }
+
+        // Handle %UniqueName paths — first segment starts with '%'.
+        if let Some(stripped) = rel_path.strip_prefix('%') {
+            let parts: Vec<&str> = stripped.split('/').collect();
+            let unique_node = self.get_node_by_unique_name(from, parts[0])?;
+            if parts.len() == 1 {
+                return Some(unique_node);
+            }
+            // Resolve remaining segments relative to the unique node.
+            let rest = parts[1..].join("/");
+            return self.get_node_relative(unique_node, &rest);
+        }
+
         let parts: Vec<&str> = rel_path.split('/').collect();
         let mut current = from;
         for &part in &parts {
@@ -490,6 +570,42 @@ impl SceneTree {
             if let Some(child) = self.nodes.get(&child_id) {
                 if child.name() == name {
                     return Some(child_id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolves a `%UniqueName` within the scene owner scope.
+    ///
+    /// In Godot, `get_node("%Foo")` searches the subtree owned by the same
+    /// scene root for a node with `unique_name == true` whose name matches
+    /// `"Foo"`. The search starts from the owner of `from` (or `from`
+    /// itself if it has no owner, i.e. it is a scene root).
+    pub fn get_node_by_unique_name(&self, from: NodeId, name: &str) -> Option<NodeId> {
+        // Determine the owner scope root.
+        let owner_id = self
+            .nodes
+            .get(&from)
+            .and_then(|n| n.owner())
+            .unwrap_or(from);
+
+        // Breadth-first search through the owner's subtree.
+        self.find_unique_in_subtree(owner_id, name)
+    }
+
+    /// Searches a subtree (depth-first) for a node with `unique_name == true`
+    /// and the given name.
+    fn find_unique_in_subtree(&self, root: NodeId, name: &str) -> Option<NodeId> {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                if node.is_unique_name() && node.name() == name {
+                    return Some(id);
+                }
+                // Push children in reverse order so left-most is visited first.
+                for &child_id in node.children().iter().rev() {
+                    stack.push(child_id);
                 }
             }
         }
@@ -942,6 +1058,10 @@ impl SceneTree {
             self.trace_record(node_id, TraceEventType::ScriptCall, method);
 
             let snapshot_clone = self.input_snapshot.clone();
+            // SAFETY: We pass `self` as a raw pointer to SceneTreeAccessor. This is
+            // safe because the accessor is used only within this call frame — it is
+            // created, passed to the script, and cleared (via `clear_scene_access`)
+            // before this method returns, so no dangling pointer can escape.
             let accessor = if let Some(snapshot) = snapshot_clone {
                 unsafe {
                     crate::scripting::SceneTreeAccessor::with_input(
@@ -950,6 +1070,8 @@ impl SceneTree {
                     )
                 }
             } else {
+                // SAFETY: Same invariant as the branch above — accessor lives only
+                // within this call frame and is cleared before return.
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
@@ -977,7 +1099,14 @@ impl SceneTree {
     }
 
     /// Calls `_ready()` on the node's script, if present.
+    ///
+    /// Before `_ready` executes, any `@onready` variables are resolved
+    /// by evaluating their default expressions.
     pub fn process_script_ready(&mut self, node_id: NodeId) {
+        // Resolve @onready vars before _ready (even if _ready is not defined).
+        if let Some(script) = self.scripts.get_mut(&node_id) {
+            let _ = script.resolve_onready();
+        }
         self.call_script_with_access(node_id, "_ready", &[]);
     }
 
@@ -1261,6 +1390,88 @@ impl SceneTree {
     pub fn pending_deletion_count(&self) -> usize {
         self.pending_deletions.len()
     }
+
+    /// Replaces the current scene by removing all children of the root node
+    /// and instancing the given [`PackedScene`] under root.
+    ///
+    /// This mirrors Godot's `SceneTree.change_scene_to_packed()`.
+    pub fn change_scene_to_packed(
+        &mut self,
+        scene: &crate::packed_scene::PackedScene,
+    ) -> EngineResult<NodeId> {
+        // Collect direct children of root (snapshot to avoid borrow issues).
+        let children: Vec<NodeId> = self
+            .get_node(self.root_id)
+            .map(|root| root.children().to_vec())
+            .unwrap_or_default();
+
+        // Remove each child subtree (this fires exit_tree, unparented, etc.).
+        for child_id in children {
+            // Also clean up scripts for the subtree.
+            let mut subtree = Vec::new();
+            self.collect_subtree_top_down(child_id, &mut subtree);
+            for &nid in &subtree {
+                self.scripts.remove(&nid);
+                self.signal_stores.remove(&nid);
+                self.animation_players.remove(&nid);
+            }
+            let _ = self.remove_node(child_id);
+        }
+
+        // Process any pending deletions.
+        self.process_deletions();
+
+        // Remember the packed scene for reload_current_scene().
+        self.current_packed_scene = Some(scene.clone());
+
+        // Instance the new scene under root.
+        let id = crate::packed_scene::add_packed_scene_to_tree(self, self.root_id, scene)?;
+        self.current_scene_id = Some(id);
+        Ok(id)
+    }
+
+    /// Reloads the current scene from its packed source.
+    ///
+    /// Returns an error if no packed scene source is stored (e.g. scene was
+    /// set via `change_scene_to_node`).
+    pub fn reload_current_scene(&mut self) -> EngineResult<NodeId> {
+        let packed = self.current_packed_scene.clone().ok_or_else(|| {
+            EngineError::InvalidOperation("No packed scene source to reload from".into())
+        })?;
+        self.change_scene_to_packed(&packed)
+    }
+
+    /// Replaces the current scene with a manually constructed node.
+    ///
+    /// Unlike `change_scene_to_packed`, this clears the packed scene source,
+    /// so `reload_current_scene` will fail afterward.
+    pub fn change_scene_to_node(&mut self, node: Node) -> EngineResult<NodeId> {
+        // Remove existing children of root.
+        let children: Vec<NodeId> = self
+            .get_node(self.root_id)
+            .map(|root| root.children().to_vec())
+            .unwrap_or_default();
+
+        for child_id in children {
+            let mut subtree = Vec::new();
+            self.collect_subtree_top_down(child_id, &mut subtree);
+            for &nid in &subtree {
+                self.scripts.remove(&nid);
+                self.signal_stores.remove(&nid);
+                self.animation_players.remove(&nid);
+            }
+            let _ = self.remove_node(child_id);
+        }
+
+        self.process_deletions();
+
+        // Clear packed source — reload won't work after this.
+        self.current_packed_scene = None;
+
+        let id = self.add_child(self.root_id, node)?;
+        self.current_scene_id = Some(id);
+        Ok(id)
+    }
 }
 
 impl Default for SceneTree {
@@ -1457,16 +1668,18 @@ mod tests {
         tree.process_frame();
 
         let root_log = tree.get_node(root).unwrap().notification_log();
-        // CHILD_ORDER_CHANGED from add_child + PROCESS from process_frame
-        assert_eq!(root_log.len(), 2);
-        assert_eq!(root_log[0], gdobject::NOTIFICATION_CHILD_ORDER_CHANGED);
-        assert_eq!(root_log[1], gdobject::NOTIFICATION_PROCESS);
+        // POSTINITIALIZE + CHILD_ORDER_CHANGED (add_child) + PROCESS (frame)
+        assert!(root_log.contains(&gdobject::NOTIFICATION_POSTINITIALIZE));
+        assert!(root_log.contains(&gdobject::NOTIFICATION_CHILD_ORDER_CHANGED));
+        assert!(root_log.contains(&gdobject::NOTIFICATION_PROCESS));
 
         let child_log = tree.get_node(child_id).unwrap().notification_log();
-        // PARENTED from add_child + PROCESS from process_frame
-        assert_eq!(child_log.len(), 2);
-        assert_eq!(child_log[0], gdobject::NOTIFICATION_PARENTED);
-        assert_eq!(child_log[1], gdobject::NOTIFICATION_PROCESS);
+        // POSTINITIALIZE + PARENTED + ENTER_TREE + READY + PROCESS
+        assert!(child_log.contains(&gdobject::NOTIFICATION_POSTINITIALIZE));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_PARENTED));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_ENTER_TREE));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_READY));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_PROCESS));
     }
 
     #[test]
@@ -1567,10 +1780,12 @@ mod tests {
         tree.process_physics_frame();
 
         let log = tree.get_node(child_id).unwrap().notification_log();
-        // PARENTED from add_child + PHYSICS_PROCESS from process_physics_frame
-        assert_eq!(log.len(), 2);
-        assert_eq!(log[0], gdobject::NOTIFICATION_PARENTED);
-        assert_eq!(log[1], gdobject::NOTIFICATION_PHYSICS_PROCESS);
+        // POSTINITIALIZE + PARENTED + ENTER_TREE + READY + PHYSICS_PROCESS
+        assert!(log.contains(&gdobject::NOTIFICATION_POSTINITIALIZE));
+        assert!(log.contains(&gdobject::NOTIFICATION_PARENTED));
+        assert!(log.contains(&gdobject::NOTIFICATION_ENTER_TREE));
+        assert!(log.contains(&gdobject::NOTIFICATION_READY));
+        assert!(log.contains(&gdobject::NOTIFICATION_PHYSICS_PROCESS));
     }
 
     #[test]

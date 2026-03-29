@@ -162,6 +162,73 @@ impl CharacterBody2D {
     pub fn get_wall_normal(&self) -> Vector2 {
         self.wall_normal
     }
+
+    /// Moves the character by `motion` and stops at the first collision.
+    ///
+    /// Unlike `move_and_slide`, this does NOT slide along surfaces. Returns
+    /// collision info if a collision occurred, or `None` if the full motion
+    /// completed without hitting anything.
+    pub fn move_and_collide(
+        &mut self,
+        motion: Vector2,
+        bodies: &[&PhysicsBody2D],
+    ) -> Option<KinematicCollision2D> {
+        let target = self.position + motion;
+        let tf_target = Transform2D::translated(target);
+
+        let mut deepest: Option<(collision::CollisionResult, usize)> = None;
+
+        for (idx, body) in bodies.iter().enumerate() {
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+
+            let tf_body = Transform2D::translated(body.position);
+            if let Some(result) =
+                collision::test_collision(&self.shape, &tf_target, &body.shape, &tf_body)
+            {
+                if result.colliding
+                    && result.depth > 0.0
+                    && (deepest.is_none() || result.depth > deepest.as_ref().unwrap().0.depth)
+                {
+                    deepest = Some((result, idx));
+                }
+            }
+        }
+
+        match deepest {
+            None => {
+                // No collision — move full distance.
+                self.position = target;
+                None
+            }
+            Some((result, _body_idx)) => {
+                let surface_normal = -result.normal;
+                // Push out of the collision.
+                self.position = target + surface_normal * result.depth;
+                self.classify_surface(surface_normal);
+                Some(KinematicCollision2D {
+                    normal: surface_normal,
+                    depth: result.depth,
+                    position: self.position,
+                    remainder: Vector2::ZERO, // no sliding
+                })
+            }
+        }
+    }
+}
+
+/// Collision information returned by [`CharacterBody2D::move_and_collide`].
+#[derive(Debug, Clone)]
+pub struct KinematicCollision2D {
+    /// The surface normal at the collision point (pointing away from the body).
+    pub normal: Vector2,
+    /// Penetration depth.
+    pub depth: f32,
+    /// Position of the character after collision resolution.
+    pub position: Vector2,
+    /// Remaining motion not applied (always zero for move_and_collide).
+    pub remainder: Vector2,
 }
 
 #[cfg(test)]

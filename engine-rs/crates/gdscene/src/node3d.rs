@@ -66,10 +66,20 @@ pub fn get_scale(tree: &SceneTree, node_id: NodeId) -> Vector3 {
         .unwrap_or(Vector3::ONE)
 }
 
-/// Composes a local [`Transform3D`] from position, rotation (Euler), and scale.
+/// Returns the local [`Transform3D`] for a node.
 ///
-/// The composition order matches Godot: translate * rotate * scale.
+/// If the node has an explicit `"transform"` property (as stored by `.tscn`
+/// files using `transform = Transform3D(…)`), that value is returned directly.
+/// Otherwise the transform is composed from separate `position`, `rotation`,
+/// and `scale` properties (composition order matches Godot: T * R * S).
 pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform3D {
+    // Check for an explicit Transform3D property first (set by .tscn parser).
+    if let Some(node) = tree.get_node(node_id) {
+        if let Variant::Transform3D(t) = node.get_property("transform") {
+            return t;
+        }
+    }
+
     let pos = get_position(tree, node_id);
     let rot = get_rotation(tree, node_id);
     let scl = get_scale(tree, node_id);
@@ -315,6 +325,124 @@ pub fn set_attenuation(tree: &mut SceneTree, node_id: NodeId, attenuation: f64) 
     if let Some(node) = tree.get_node_mut(node_id) {
         node.set_property("attenuation", Variant::Float(attenuation));
     }
+}
+
+// ---------------------------------------------------------------------------
+// MultiMeshInstance3D helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the number of instances in a MultiMeshInstance3D.
+pub fn get_multimesh_instance_count(tree: &SceneTree, node_id: NodeId) -> u32 {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("instance_count") {
+            Variant::Int(v) => Some(v as u32),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// Returns the per-instance transform for the given instance index.
+pub fn get_multimesh_instance_transform(
+    tree: &SceneTree,
+    node_id: NodeId,
+    _index: usize,
+) -> gdcore::math3d::Transform3D {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("instance_transform") {
+            Variant::Transform3D(t) => Some(t),
+            _ => None,
+        })
+        .unwrap_or(gdcore::math3d::Transform3D::IDENTITY)
+}
+
+/// Returns the per-instance color for the given instance index.
+pub fn get_multimesh_instance_color(tree: &SceneTree, node_id: NodeId, _index: usize) -> Color {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("instance_color") {
+            Variant::Color(c) => Some(c),
+            _ => None,
+        })
+        .unwrap_or(Color::WHITE)
+}
+
+/// Returns the mesh type name for a MultiMeshInstance3D, if set.
+pub fn get_multimesh_mesh_type(tree: &SceneTree, node_id: NodeId) -> Option<String> {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("multimesh_mesh_type") {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Material override helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the `material_override` path on a MeshInstance3D, if set.
+pub fn get_material_override(tree: &SceneTree, node_id: NodeId) -> Option<String> {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("material_override") {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
+}
+
+/// Returns the per-surface material override path for the given surface index.
+pub fn get_surface_override_material(
+    tree: &SceneTree,
+    node_id: NodeId,
+    surface: usize,
+) -> Option<String> {
+    let key = format!("surface_material_override/{surface}");
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property(&key) {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
+}
+
+// ---------------------------------------------------------------------------
+// SpotLight3D helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the spot angle in degrees.
+pub fn get_spot_angle(tree: &SceneTree, node_id: NodeId) -> f64 {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("spot_angle") {
+            Variant::Float(v) => Some(v),
+            _ => None,
+        })
+        .unwrap_or(45.0)
+}
+
+/// Returns the spot range.
+pub fn get_spot_range(tree: &SceneTree, node_id: NodeId) -> f64 {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("spot_range") {
+            Variant::Float(v) => Some(v),
+            _ => None,
+        })
+        .unwrap_or(10.0)
+}
+
+/// Returns the spot attenuation.
+pub fn get_spot_attenuation(tree: &SceneTree, node_id: NodeId) -> f64 {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("spot_attenuation") {
+            Variant::Float(v) => Some(v),
+            _ => None,
+        })
+        .unwrap_or(1.0)
+}
+
+/// Returns the spot angle attenuation.
+pub fn get_spot_angle_attenuation(tree: &SceneTree, node_id: NodeId) -> f64 {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("spot_angle_attenuation") {
+            Variant::Float(v) => Some(v),
+            _ => None,
+        })
+        .unwrap_or(1.0)
 }
 
 // ===========================================================================

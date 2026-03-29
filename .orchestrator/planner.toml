@@ -1,0 +1,27 @@
+# Patina Engine planner configuration.
+#
+# Defines the analysis commands, criteria files, and phase settings
+# used by `patina-orchestrator plan` to generate recommendations.
+
+[[analysis.commands]]
+name = "parity"
+cmd = "cargo test --test oracle_regression_test -- --nocapture golden_all_scenes_property_parity_report"
+workdir = "engine-rs"
+parser = "table"
+
+[[analysis.commands]]
+name = "gates"
+cmd = "cargo test --test v1_acceptance_gate_test"
+workdir = "engine-rs"
+parser = "test_pass_fail"
+
+[criteria]
+files = ["prd/V1_EXIT_CRITERIA.md"]
+
+[execution_maps]
+files = ["prd/V1_EXIT_EXECUTION_MAP.md"]
+
+[phases]
+label = "v1"
+completion = ["all_gates_passing", { parity_threshold = 98.0 }]
+next_sources = ["prd/PORT_GODOT_TO_RUST_PLAN.md"]

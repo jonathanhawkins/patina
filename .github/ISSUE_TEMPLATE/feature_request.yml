@@ -1,0 +1,74 @@
+name: Feature Request
+description: Request a new feature or enhancement
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suggest a feature or improvement for the Patina Engine.
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem
+      description: Which area does this feature affect?
+      options:
+        - Core (gdcore)
+        - Variant (gdvariant)
+        - Object (gdobject)
+        - Resource (gdresource)
+        - Scene (gdscene)
+        - 2D Physics (gdphysics2d)
+        - 3D Physics (gdphysics3d)
+        - 2D Rendering (gdrender2d/gdserver2d)
+        - 3D Rendering (gdrender3d/gdserver3d)
+        - Audio (gdaudio)
+        - Platform (gdplatform)
+        - GDScript (gdscript-interop)
+        - Editor (gdeditor)
+        - Documentation
+        - CI / Tooling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem does this feature solve? Why is it needed?
+      placeholder: |
+        When porting a Godot project that uses X, I can't do Y because...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: How should this feature work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What alternatives did you consider?
+
+  - type: dropdown
+    id: godot_parity
+    attributes:
+      label: Godot Parity
+      description: Is this a Godot feature that Patina should match?
+      options:
+        - "Yes — this exists in Godot 4.6 and Patina should support it"
+        - "No — this is a Patina-specific enhancement"
+        - "Partial — Godot has something similar but this improves on it"
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Screenshots, links to Godot docs, or related issues.

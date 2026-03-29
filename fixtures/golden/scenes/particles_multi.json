@@ -1,0 +1,116 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_particles_multi",
+  "generated_at": "2026-03-28T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "GPUParticles2D",
+          "name": "Sparks2D",
+          "path": "/root/ParticleWorld/Sparks2D",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [200.0, 300.0]
+            },
+            "emitting": {
+              "type": "Bool",
+              "value": true
+            },
+            "amount": {
+              "type": "Int",
+              "value": 64
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "CPUParticles2D",
+          "name": "Dust2D",
+          "path": "/root/ParticleWorld/Dust2D",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [400.0, 300.0]
+            },
+            "emitting": {
+              "type": "Bool",
+              "value": true
+            },
+            "amount": {
+              "type": "Int",
+              "value": 32
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "GPUParticles3D",
+          "name": "Fire3D",
+          "path": "/root/ParticleWorld/Fire3D",
+          "properties": {
+            "transform": {
+              "type": "Transform3D",
+              "value": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, 0.0]
+            },
+            "emitting": {
+              "type": "Bool",
+              "value": true
+            },
+            "amount": {
+              "type": "Int",
+              "value": 128
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "CPUParticles3D",
+          "name": "Smoke3D",
+          "path": "/root/ParticleWorld/Smoke3D",
+          "properties": {
+            "transform": {
+              "type": "Transform3D",
+              "value": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 0.0]
+            },
+            "emitting": {
+              "type": "Bool",
+              "value": true
+            },
+            "amount": {
+              "type": "Int",
+              "value": 48
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "GPUParticles2D",
+          "name": "Rain2D",
+          "path": "/root/ParticleWorld/Rain2D",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [0.0, 0.0]
+            },
+            "emitting": {
+              "type": "Bool",
+              "value": false
+            },
+            "amount": {
+              "type": "Int",
+              "value": 256
+            }
+          }
+        }
+      ],
+      "class": "Node",
+      "name": "ParticleWorld",
+      "path": "/root/ParticleWorld",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

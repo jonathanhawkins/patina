@@ -19,6 +19,25 @@ use gdvariant::Variant;
 /// A boxed signal callback function.
 type SignalCallback = Arc<dyn Fn(&[Variant]) -> Variant + Send + Sync>;
 
+/// A deferred signal callback, ready to be invoked later.
+#[derive(Clone)]
+pub struct DeferredCall {
+    connection: Connection,
+    args: Vec<Variant>,
+}
+
+impl DeferredCall {
+    /// Execute the deferred call.
+    pub fn call(&self) -> Variant {
+        self.connection.call(&self.args)
+    }
+
+    /// Returns the resolved arguments that will be passed when the call is dispatched.
+    pub fn args(&self) -> &[Variant] {
+        &self.args
+    }
+}
+
 /// A connection between a signal and a target.
 ///
 /// Each connection stores enough data to identify the target (ObjectId +
@@ -34,6 +53,13 @@ pub struct Connection {
     /// When `true`, the connection auto-disconnects after the first emission
     /// (Godot's `CONNECT_ONE_SHOT` flag).
     pub one_shot: bool,
+    /// Extra arguments appended after signal-emitted arguments (Godot's `binds`).
+    pub binds: Vec<Variant>,
+    /// Number of trailing signal arguments to drop (Godot's `unbinds`).
+    pub unbinds: usize,
+    /// When `true`, the connection fires in the deferred queue rather than
+    /// immediately (Godot's `CONNECT_DEFERRED` flag).
+    pub deferred: bool,
 }
 
 impl Connection {
@@ -44,6 +70,9 @@ impl Connection {
             method: method.into(),
             callback: None,
             one_shot: false,
+            binds: Vec::new(),
+            unbinds: 0,
+            deferred: false,
         }
     }
 
@@ -58,6 +87,9 @@ impl Connection {
             method: method.into(),
             callback: Some(Arc::new(callback)),
             one_shot: false,
+            binds: Vec::new(),
+            unbinds: 0,
+            deferred: false,
         }
     }
 
@@ -65,6 +97,33 @@ impl Connection {
     pub fn as_one_shot(mut self) -> Self {
         self.one_shot = true;
         self
+    }
+
+    /// Returns a copy of this connection with the deferred flag set.
+    pub fn as_deferred(mut self) -> Self {
+        self.deferred = true;
+        self
+    }
+
+    /// Returns a copy with extra bound arguments appended after signal args.
+    pub fn with_binds(mut self, binds: Vec<Variant>) -> Self {
+        self.binds = binds;
+        self
+    }
+
+    /// Returns a copy that drops `n` trailing signal arguments.
+    pub fn with_unbinds(mut self, n: usize) -> Self {
+        self.unbinds = n;
+        self
+    }
+
+    /// Resolve the final argument list: drop `unbinds` trailing signal args,
+    /// then append `binds`.
+    pub fn resolve_args(&self, signal_args: &[Variant]) -> Vec<Variant> {
+        let keep = signal_args.len().saturating_sub(self.unbinds);
+        let mut resolved = signal_args[..keep].to_vec();
+        resolved.extend(self.binds.iter().cloned());
+        resolved
     }
 
     /// Invokes this connection's callback (if present) with the given arguments.
@@ -100,6 +159,9 @@ impl Clone for Connection {
             method: self.method.clone(),
             callback: self.callback.clone(),
             one_shot: self.one_shot,
+            binds: self.binds.clone(),
+            unbinds: self.unbinds,
+            deferred: self.deferred,
         }
     }
 }
@@ -169,6 +231,34 @@ impl Signal {
         results
     }
 
+    /// Emits this signal, separating immediate and deferred connections.
+    ///
+    /// Returns `(immediate_results, deferred_connections)`. Immediate
+    /// connections fire now; deferred connections are returned for later
+    /// dispatch by the caller.
+    pub fn emit_collecting_deferred(
+        &mut self,
+        args: &[Variant],
+    ) -> (Vec<Variant>, Vec<DeferredCall>) {
+        let mut immediate = Vec::new();
+        let mut deferred = Vec::new();
+
+        for c in &self.connections {
+            let resolved = c.resolve_args(args);
+            if c.deferred {
+                deferred.push(DeferredCall {
+                    connection: c.clone(),
+                    args: resolved,
+                });
+            } else {
+                immediate.push(c.call(&resolved));
+            }
+        }
+
+        self.connections.retain(|c| !c.one_shot);
+        (immediate, deferred)
+    }
+
     /// Returns the number of active connections.
     pub fn connection_count(&self) -> usize {
         self.connections.len()
@@ -235,6 +325,18 @@ impl SignalStore {
         self.signals
             .get_mut(signal_name)
             .map_or_else(Vec::new, |s| s.emit(args))
+    }
+
+    /// Emits a named signal, separating immediate and deferred results.
+    pub fn emit_collecting_deferred(
+        &mut self,
+        signal_name: &str,
+        args: &[Variant],
+    ) -> (Vec<Variant>, Vec<DeferredCall>) {
+        self.signals.get_mut(signal_name).map_or_else(
+            || (Vec::new(), Vec::new()),
+            |s| s.emit_collecting_deferred(args),
+        )
     }
 
     /// Returns `true` if the named signal exists.

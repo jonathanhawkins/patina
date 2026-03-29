@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use gdcore::ObjectId;
-use gdobject::notification::Notification;
+use gdobject::notification::{Notification, NOTIFICATION_POSTINITIALIZE};
 use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
@@ -128,8 +128,11 @@ pub struct Node {
 
 impl Node {
     /// Creates a new detached node with the given name and class.
+    ///
+    /// Fires `NOTIFICATION_POSTINITIALIZE` immediately, matching Godot's
+    /// behavior where the notification is sent right after construction.
     pub fn new(name: impl Into<String>, class_name: impl Into<String>) -> Self {
-        Self {
+        let mut node = Self {
             id: NodeId::next(),
             name: name.into(),
             class_name: class_name.into(),
@@ -145,12 +148,16 @@ impl Node {
             ready: false,
             process_priority: 0,
             process_mode: ProcessMode::default(),
-        }
+        };
+        node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
+        node
     }
 
     /// Creates a node with a specific [`NodeId`] (for deserialization / tests).
+    ///
+    /// Fires `NOTIFICATION_POSTINITIALIZE` immediately.
     pub fn with_id(id: NodeId, name: impl Into<String>, class_name: impl Into<String>) -> Self {
-        Self {
+        let mut node = Self {
             id,
             name: name.into(),
             class_name: class_name.into(),
@@ -166,7 +173,9 @@ impl Node {
             ready: false,
             process_priority: 0,
             process_mode: ProcessMode::default(),
-        }
+        };
+        node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
+        node
     }
 
     // -- identity -----------------------------------------------------------
@@ -415,6 +424,12 @@ impl Node {
     pub fn notification_log(&self) -> &[Notification] {
         &self.notification_log
     }
+
+    /// Clears the notification log. Useful in tests to isolate notifications
+    /// from a specific operation (e.g., reparent) without noise from setup.
+    pub fn clear_notification_log(&mut self) {
+        self.notification_log.clear();
+    }
 }
 
 #[cfg(test)]
@@ -521,14 +536,16 @@ mod tests {
     #[test]
     fn notification_log_records_in_order() {
         let mut node = Node::new("N", "Node");
+        // POSTINITIALIZE is automatically logged at construction.
         node.receive_notification(gdobject::NOTIFICATION_ENTER_TREE);
         node.receive_notification(gdobject::NOTIFICATION_READY);
         node.receive_notification(gdobject::NOTIFICATION_EXIT_TREE);
         let log = node.notification_log();
-        assert_eq!(log.len(), 3);
-        assert_eq!(log[0], gdobject::NOTIFICATION_ENTER_TREE);
-        assert_eq!(log[1], gdobject::NOTIFICATION_READY);
-        assert_eq!(log[2], gdobject::NOTIFICATION_EXIT_TREE);
+        assert_eq!(log.len(), 4);
+        assert_eq!(log[0], gdobject::NOTIFICATION_POSTINITIALIZE);
+        assert_eq!(log[1], gdobject::NOTIFICATION_ENTER_TREE);
+        assert_eq!(log[2], gdobject::NOTIFICATION_READY);
+        assert_eq!(log[3], gdobject::NOTIFICATION_EXIT_TREE);
     }
 
     #[test]

@@ -1,0 +1,143 @@
+{
+  "report_id": "real_3d_demo_parity_report",
+  "bead_id": "pat-57aw6",
+  "phase": "Phase 6: 3D Runtime Slice",
+  "status": "implemented",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-29T12:00:00+00:00",
+  "audit_source": "prd/PHASE6_3D_PARITY_AUDIT.md",
+  "classification": {
+    "measured": [
+      {"family": "Node3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "node3d_runtime_slice_test.rs"]},
+      {"family": "Camera3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "render_3d_parity_test.rs"]},
+      {"family": "MeshInstance3D", "evidence": ["render_3d_parity_test.rs", "real_3d_demo_unified_parity_test.rs"]},
+      {"family": "DirectionalLight3D", "evidence": ["render_3d_parity_test.rs", "directional_light_shadow_mapping_test.rs"]},
+      {"family": "OmniLight3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "render_3d_parity_test.rs"]},
+      {"family": "SpotLight3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "render_3d_parity_test.rs"]},
+      {"family": "CollisionShape3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "node3d_runtime_slice_test.rs"]},
+      {"family": "RigidBody3D", "evidence": ["rigidbody3d_forces_torques_contacts_test.rs", "physics_3d_freefall_matches_golden_trace"]},
+      {"family": "StaticBody3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "node3d_runtime_slice_test.rs"]},
+      {"family": "CharacterBody3D", "evidence": ["characterbody3d_move_and_slide_test.rs"]},
+      {"family": "PhysicsRayQuery3D", "evidence": ["physics_ray_shape_query3d_test.rs"]},
+      {"family": "PhysicsShapeQuery3D", "evidence": ["physics_ray_shape_query3d_test.rs"]},
+      {"family": "RenderingServer3D", "evidence": ["render_3d_parity_test.rs", "render_3d_parity_hooks_test.rs"]},
+      {"family": "ShaderMaterial3D", "evidence": ["shader_material_3d_scene_integration_test.rs", "render_3d_parity_test.rs"]}
+    ],
+    "implemented_not_yet_measured": [
+      {"family": "Area3D", "reason": "Low-level overlap storage exists but no runtime signal parity test"},
+      {"family": "ReflectionProbe", "reason": "Data model and default values tested, no rendered reflection parity"},
+      {"family": "FogVolume", "reason": "Fog volume model exists with editor-preview tests, no scene runtime parity"},
+      {"family": "Decal", "reason": "Decal3D model and registry exist, no parity fixture against upstream"},
+      {"family": "NavigationRegion3D", "reason": "Mesh baking model exists, runtime pathfinding deferred"},
+      {"family": "MultiMeshInstance3D", "reason": "Implementation exists but no direct parity measurement"},
+      {"family": "StandardMaterial3D", "reason": "Albedo/shading tested but not broad property parity"},
+      {"family": "WorldEnvironment", "reason": "Typed resources and preview tests exist, not scene runtime parity"},
+      {"family": "Sky", "reason": "Procedural/Panoramic/Physical handling tested, resource semantics only"},
+      {"family": "PhysicsJoints", "reason": "Data types exist (Pin/Hinge/Slider) but no runtime integration"},
+      {"family": "Skeleton3D", "reason": "Appears in animated_scene_3d fixture but no dedicated parity test"},
+      {"family": "AnimationPlayer", "reason": "Appears in animated_scene_3d fixture but no animation parity test"},
+      {"family": "CSGCombiner3D", "reason": "Appears in csg_composition fixture but no CSG boolean parity test"},
+      {"family": "CSGBox3D", "reason": "Appears in csg_composition fixture but no CSG shape parity test"},
+      {"family": "CSGSphere3D", "reason": "Appears in csg_composition fixture but no CSG shape parity test"},
+      {"family": "CSGCylinder3D", "reason": "Appears in csg_composition fixture but no CSG shape parity test"}
+    ],
+    "deferred": [
+      {"family": "VehicleBody3D", "reason": "Outside bounded Phase 6 slice"},
+      {"family": "SoftBody3D", "reason": "Outside bounded Phase 6 slice"},
+      {"family": "SpringArm3D", "reason": "Not in current slice"},
+      {"family": "RayCast3D", "reason": "Low-level query support only, no node-level parity"},
+      {"family": "ShapeCast3D", "reason": "Low-level query support only, no node-level parity"},
+      {"family": "NavigationAgent3D", "reason": "Runtime pathfinding outside Phase 6 scope"},
+      {"family": "GPUPostProcessing", "reason": "Broad GPU/post-processing parity deferred"}
+    ]
+  },
+  "scene_fixtures": [
+    {
+      "name": "minimal_3d",
+      "scene_path": "fixtures/scenes/minimal_3d.tscn",
+      "golden_path": "fixtures/golden/scenes/minimal_3d.json",
+      "expected_node_count": 6,
+      "camera_count": 1,
+      "light_count": 1,
+      "physics_body_count": 1
+    },
+    {
+      "name": "hierarchy_3d",
+      "scene_path": "fixtures/scenes/hierarchy_3d.tscn",
+      "golden_path": "fixtures/golden/scenes/hierarchy_3d.json",
+      "expected_node_count": 6,
+      "camera_count": 1,
+      "light_count": 1,
+      "physics_body_count": 0
+    },
+    {
+      "name": "indoor_3d",
+      "scene_path": "fixtures/scenes/indoor_3d.tscn",
+      "golden_path": "fixtures/golden/scenes/indoor_3d.json",
+      "expected_node_count": 10,
+      "camera_count": 1,
+      "light_count": 2,
+      "physics_body_count": 2
+    },
+    {
+      "name": "multi_light_3d",
+      "scene_path": "fixtures/scenes/multi_light_3d.tscn",
+      "golden_path": "fixtures/golden/scenes/multi_light_3d.json",
+      "expected_node_count": 10,
+      "camera_count": 1,
+      "light_count": 4,
+      "physics_body_count": 1
+    },
+    {
+      "name": "physics_3d_playground",
+      "scene_path": "fixtures/scenes/physics_3d_playground.tscn",
+      "golden_path": "fixtures/golden/scenes/physics_3d_playground.json",
+      "expected_node_count": 16,
+      "camera_count": 1,
+      "light_count": 1,
+      "physics_body_count": 5
+    }
+  ],
+  "physics_goldens": [
+    {
+      "name": "gravity_fall_30frames",
+      "golden_path": "fixtures/golden/physics/gravity_fall_30frames.json",
+      "frame_count": 30,
+      "description": "Single rigid body freefall under gravity for 30 physics ticks"
+    },
+    {
+      "name": "multi_body_3d_20frames",
+      "golden_path": "fixtures/golden/physics/multi_body_3d_20frames.json",
+      "frame_count": 30,
+      "description": "Three rigid bodies (Ball, Cube, HeavyBlock) freefall from physics_3d_playground"
+    },
+    {
+      "name": "rigid_sphere_bounce_3d_20frames",
+      "golden_path": "fixtures/golden/physics/rigid_sphere_bounce_3d_20frames.json",
+      "frame_count": 20,
+      "description": "Rigid sphere bounce trajectory over 20 physics ticks"
+    }
+  ],
+  "summary": {
+    "scene_fixture_count": 5,
+    "total_scene_nodes": 48,
+    "total_cameras": 5,
+    "total_lights": 9,
+    "total_physics_bodies": 9,
+    "physics_trace_count": 3,
+    "physics_trace_frames": 80
+  },
+  "evidence": {
+    "test_files": [
+      "engine-rs/tests/real_3d_demo_unified_parity_test.rs",
+      "engine-rs/tests/real_3d_demo_aggregate_parity_test.rs",
+      "engine-rs/tests/real_3d_demo_parity_report_artifact_test.rs"
+    ],
+    "tests": [
+      "cargo test -p patina-engine --test real_3d_demo_unified_parity_test",
+      "cargo test -p patina-engine --test real_3d_demo_aggregate_parity_test",
+      "cargo test -p patina-engine --test real_3d_demo_parity_report_artifact_test"
+    ]
+  }
+}

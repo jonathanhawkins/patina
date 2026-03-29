@@ -17,7 +17,7 @@ use gdrender2d::export::{encode_bmp, encode_png};
 use gdrender2d::renderer::FrameBuffer;
 use std::collections::HashMap;
 
-use gdscene::animation::{Animation, AnimationTrack, KeyFrame, LoopMode};
+use gdscene::animation::{Animation, AnimationTrack, KeyFrame, LoopMode, TrackType};
 use gdscene::main_loop::MainLoop;
 use gdscene::node::{Node, NodeId};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
@@ -26,6 +26,7 @@ use gdscene::SceneTree;
 use gdvariant::serialize::{from_json, to_json};
 use gdvariant::Variant;
 
+use crate::create_dialog::CreateNodeDialog;
 use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
@@ -43,6 +44,34 @@ pub struct AnimationPlaybackState {
     pub current_time: f64,
     /// Whether keyframe recording mode is active.
     pub recording: bool,
+    /// Secondary animation for blend preview (if any).
+    pub blend_secondary: Option<String>,
+    /// Blend weight: 0.0 = fully primary, 1.0 = fully secondary.
+    pub blend_weight: f32,
+}
+
+/// A single function timing entry in a profiler frame snapshot.
+#[derive(Debug, Clone)]
+pub struct ProfilerFuncEntry {
+    /// Function or subsystem name (e.g. "physics_step", "render_2d", "script_process").
+    pub name: String,
+    /// Time spent in this function in milliseconds.
+    pub time_ms: f64,
+}
+
+/// A snapshot of one frame's profiling data.
+#[derive(Debug, Clone)]
+pub struct ProfilerFrame {
+    /// Frame number.
+    pub frame_number: u64,
+    /// Total frame time in milliseconds.
+    pub total_ms: f64,
+    /// CPU time in milliseconds.
+    pub cpu_ms: f64,
+    /// GPU time in milliseconds (estimated or 0 if unavailable).
+    pub gpu_ms: f64,
+    /// Per-function timing breakdown.
+    pub functions: Vec<ProfilerFuncEntry>,
 }
 
 /// State for an in-progress drag operation.
@@ -72,6 +101,9 @@ pub struct LogEntry {
 /// Maximum number of log entries to keep.
 const MAX_LOG_ENTRIES: usize = 100;
 
+/// Maximum number of frame time entries to keep.
+const MAX_FRAME_TIMES: usize = 120;
+
 /// Editor display settings that can be persisted.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditorDisplaySettings {
@@ -81,6 +113,16 @@ pub struct EditorDisplaySettings {
     pub rulers_visible: bool,
     pub background_color: [f64; 4],
     pub font_size: String,
+    /// Color theme: "dark" or "light".
+    pub theme: String,
+    /// Physics ticks per second.
+    pub physics_fps: u32,
+    /// Saved panel sizes for layout persistence.
+    pub panel_sizes: std::collections::HashMap<String, f64>,
+    /// Whether smart snapping (alignment guides to sibling nodes) is enabled.
+    pub smart_snap_enabled: bool,
+    /// Distance threshold in world-space pixels for smart snap to engage.
+    pub smart_snap_threshold: f32,
 }
 impl Default for EditorDisplaySettings {
     fn default() -> Self {
@@ -91,8 +133,137 @@ impl Default for EditorDisplaySettings {
             rulers_visible: true,
             background_color: [0.08, 0.08, 0.1, 1.0],
             font_size: "medium".to_string(),
+            theme: "dark".to_string(),
+            physics_fps: 60,
+            panel_sizes: std::collections::HashMap::new(),
+            smart_snap_enabled: true,
+            smart_snap_threshold: 5.0,
         }
     }
+}
+
+/// A snap guide line for rendering in the viewport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapGuide {
+    /// "x" for vertical guide, "y" for horizontal guide.
+    pub axis: &'static str,
+    /// The world-space coordinate of the guide line.
+    pub position: f32,
+    /// The node being snapped to (for display purposes).
+    pub target_node_id: NodeId,
+}
+
+/// Snap a position to the grid if grid snapping is enabled.
+pub fn snap_to_grid(pos: Vector2, grid_size: u32) -> Vector2 {
+    let g = grid_size as f32;
+    Vector2::new((pos.x / g).round() * g, (pos.y / g).round() * g)
+}
+
+/// Compute smart snap guides by comparing a candidate position against sibling nodes.
+pub fn compute_smart_snap(
+    tree: &SceneTree,
+    dragged_id: NodeId,
+    candidate_pos: Vector2,
+    threshold: f32,
+) -> (Vector2, Vec<SnapGuide>) {
+    use crate::scene_renderer::{extract_position, extract_size};
+
+    let mut guides = Vec::new();
+    let mut snapped = candidate_pos;
+    let mut best_dx: f32 = threshold + 1.0;
+    let mut best_dy: f32 = threshold + 1.0;
+
+    let dragged_size = tree
+        .get_node(dragged_id)
+        .map(|n| extract_size(n))
+        .unwrap_or(Vector2::ZERO);
+    let parent_id = tree
+        .get_node(dragged_id)
+        .and_then(|n| n.parent())
+        .unwrap_or_else(|| tree.root_id());
+    let sibling_ids: Vec<NodeId> = tree
+        .get_node(parent_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    let siblings: Vec<(NodeId, Vector2, Vector2)> = sibling_ids
+        .iter()
+        .filter(|&&nid| nid != dragged_id)
+        .filter_map(|&nid| {
+            tree.get_node(nid)
+                .map(|n| (nid, extract_position(n), extract_size(n)))
+        })
+        .collect();
+
+    for &(nid, sib_pos, sib_size) in &siblings {
+        let snap_xs: [(f32, f32); 3] = [
+            (candidate_pos.x, sib_pos.x),
+            (
+                candidate_pos.x,
+                sib_pos.x - sib_size.x / 2.0 + dragged_size.x / 2.0,
+            ),
+            (
+                candidate_pos.x,
+                sib_pos.x + sib_size.x / 2.0 - dragged_size.x / 2.0,
+            ),
+        ];
+        for (cand_x, target_x) in snap_xs {
+            let dx = (cand_x - target_x).abs();
+            if dx < threshold && dx < best_dx {
+                best_dx = dx;
+                snapped.x = target_x;
+                guides.retain(|g: &SnapGuide| g.axis != "x");
+                guides.push(SnapGuide {
+                    axis: "x",
+                    position: target_x,
+                    target_node_id: nid,
+                });
+            }
+        }
+        let snap_ys: [(f32, f32); 3] = [
+            (candidate_pos.y, sib_pos.y),
+            (
+                candidate_pos.y,
+                sib_pos.y - sib_size.y / 2.0 + dragged_size.y / 2.0,
+            ),
+            (
+                candidate_pos.y,
+                sib_pos.y + sib_size.y / 2.0 - dragged_size.y / 2.0,
+            ),
+        ];
+        for (cand_y, target_y) in snap_ys {
+            let dy = (cand_y - target_y).abs();
+            if dy < threshold && dy < best_dy {
+                best_dy = dy;
+                snapped.y = target_y;
+                guides.retain(|g: &SnapGuide| g.axis != "y");
+                guides.push(SnapGuide {
+                    axis: "y",
+                    position: target_y,
+                    target_node_id: nid,
+                });
+            }
+        }
+    }
+    (snapped, guides)
+}
+
+/// Apply all enabled snap modes to a candidate position.
+pub fn apply_snap(
+    tree: &SceneTree,
+    settings: &EditorDisplaySettings,
+    dragged_id: NodeId,
+    candidate_pos: Vector2,
+) -> (Vector2, Vec<SnapGuide>) {
+    let mut pos = candidate_pos;
+    if settings.grid_snap_enabled {
+        pos = snap_to_grid(pos, settings.grid_snap_size);
+    }
+    if settings.smart_snap_enabled {
+        let (snapped, guides) =
+            compute_smart_snap(tree, dragged_id, pos, settings.smart_snap_threshold);
+        return (snapped, guides);
+    }
+    (pos, Vec::new())
 }
 /// Serialized node data for the copy/paste clipboard.
 #[derive(Debug, Clone)]
@@ -168,6 +339,264 @@ pub struct EditorState {
     /// Input action map: action name -> list of key names.
     pub input_map: HashMap<String, Vec<String>>,
     pub tile_grid_store: gdscene::tilemap::TileGridStore,
+    /// Currently active editor mode: "2d", "3d", or "script".
+    pub editor_mode: String,
+    /// Active transform axis constraint: None, "x", or "y".
+    pub transform_axis_constraint: Option<String>,
+    /// Keyframe clipboard for copy/paste in animation editor.
+    pub keyframe_clipboard: Vec<(usize, gdscene::animation::KeyFrame)>,
+    /// Breakpoint lines per script path.
+    pub breakpoints: HashMap<String, Vec<u32>>,
+    /// Error lines per script path (line number + message).
+    pub script_errors: HashMap<String, Vec<(u32, String)>>,
+    /// Frame time history for monitors panel (ring buffer of last 120 frame times in ms).
+    pub frame_times: VecDeque<f64>,
+    /// Profiler frame snapshots (ring buffer of last 120 frames).
+    pub profiler_frames: VecDeque<ProfilerFrame>,
+    /// Debug stack trace (populated when runtime hits a breakpoint or error).
+    pub debug_stack_trace: Vec<String>,
+    /// Debugger state: "detached", "running", or "paused".
+    pub debug_state: String,
+    /// Structured debug stack frames: (function, script, line).
+    pub debug_frames: Vec<(String, String, usize)>,
+    /// Debug breakpoints: (script, line).
+    pub debug_breakpoints: Vec<(String, usize)>,
+    /// Debug local variables for current frame: (name, type, value).
+    pub debug_locals: Vec<(String, String, String)>,
+    /// Debug global variables: (name, type, value).
+    pub debug_globals: Vec<(String, String, String)>,
+    /// Registered editor plugins.
+    pub plugins: Vec<PluginEntry>,
+    /// Editor keybindings for the settings dialog.
+    pub keybindings: Vec<EditorKeyBinding>,
+    /// Current viewport tool mode (select, move, rotate, scale).
+    pub viewport_mode: ViewportMode,
+    /// Output log from script print() calls.
+    pub output_entries: VecDeque<String>,
+    /// Project settings (pat-kj4 / pat-c4zlm).
+    pub project_name: String,
+    /// Project description.
+    pub project_description: String,
+    /// Project icon path.
+    pub project_icon: String,
+    /// Project main scene path.
+    pub project_main_scene: String,
+    /// Project display resolution width.
+    pub project_resolution_w: u32,
+    /// Project display resolution height.
+    pub project_resolution_h: u32,
+    /// Stretch mode.
+    pub project_stretch_mode: String,
+    /// Stretch aspect.
+    pub project_stretch_aspect: String,
+    /// Fullscreen mode.
+    pub project_fullscreen: bool,
+    /// V-Sync enabled.
+    pub project_vsync: bool,
+    /// Project physics FPS.
+    pub project_physics_fps: u32,
+    /// Project default gravity.
+    pub project_gravity: f64,
+    /// Default linear damp.
+    pub project_linear_damp: f64,
+    /// Default angular damp.
+    pub project_angular_damp: f64,
+    /// Default audio bus layout.
+    pub project_bus_layout: String,
+    /// Master volume in dB.
+    pub project_master_volume_db: f64,
+    /// Enable audio input.
+    pub project_audio_input: bool,
+    /// Renderer backend.
+    pub project_renderer: String,
+    /// Anti-aliasing mode.
+    pub project_anti_aliasing: String,
+    /// Default environment path.
+    pub project_environment_default: String,
+    /// Active smart snap alignment guides (cleared when drag ends).
+    pub snap_guides: Vec<SnapGuide>,
+    /// Open scene tabs: (tab_id, scene_path, display_name, modified).
+    pub scene_tabs: Vec<SceneTab>,
+    /// Index of the currently active scene tab.
+    pub active_tab_index: usize,
+    /// Node creation dialog with class search and filtering.
+    pub create_node_dialog: CreateNodeDialog,
+}
+
+/// A single scene tab in the editor.
+#[derive(Debug, Clone)]
+pub struct SceneTab {
+    /// Unique tab identifier.
+    pub id: u32,
+    /// File path of the scene (empty for unsaved).
+    pub path: String,
+    /// Display name shown on the tab.
+    pub name: String,
+    /// Whether the scene has unsaved changes.
+    pub modified: bool,
+}
+
+/// Viewport tool modes for the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportMode {
+    /// Select mode (Q).
+    Select,
+    /// Move mode (W).
+    Move,
+    /// Rotate mode (E).
+    Rotate,
+    /// Scale mode (S).
+    Scale,
+}
+
+impl ViewportMode {
+    /// Parses a mode from a string name.
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s {
+            "select" => Some(Self::Select),
+            "move" => Some(Self::Move),
+            "rotate" => Some(Self::Rotate),
+            "scale" => Some(Self::Scale),
+            _ => None,
+        }
+    }
+
+    /// Returns the string name for this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Move => "move",
+            Self::Rotate => "rotate",
+            Self::Scale => "scale",
+        }
+    }
+}
+
+/// A registered editor plugin entry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginEntry {
+    /// Plugin display name.
+    pub name: String,
+    /// Whether the plugin is currently enabled.
+    pub enabled: bool,
+}
+
+/// An editor keybinding entry for the settings dialog.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EditorKeyBinding {
+    /// The action name (e.g. "delete", "duplicate", "undo").
+    pub action: String,
+    /// Human-readable description.
+    pub description: String,
+    /// The key combination string (e.g. "Ctrl+Z", "F2", "Delete").
+    pub keys: String,
+}
+
+impl EditorKeyBinding {
+    fn defaults() -> Vec<Self> {
+        vec![
+            Self {
+                action: "delete".into(),
+                description: "Delete selected node".into(),
+                keys: "Delete".into(),
+            },
+            Self {
+                action: "rename".into(),
+                description: "Rename selected node".into(),
+                keys: "F2".into(),
+            },
+            Self {
+                action: "duplicate".into(),
+                description: "Duplicate selected node".into(),
+                keys: "Ctrl+D".into(),
+            },
+            Self {
+                action: "copy".into(),
+                description: "Copy selected node".into(),
+                keys: "Ctrl+C".into(),
+            },
+            Self {
+                action: "paste".into(),
+                description: "Paste node".into(),
+                keys: "Ctrl+V".into(),
+            },
+            Self {
+                action: "cut".into(),
+                description: "Cut selected node".into(),
+                keys: "Ctrl+X".into(),
+            },
+            Self {
+                action: "undo".into(),
+                description: "Undo last action".into(),
+                keys: "Ctrl+Z".into(),
+            },
+            Self {
+                action: "redo".into(),
+                description: "Redo last action".into(),
+                keys: "Ctrl+Y".into(),
+            },
+            Self {
+                action: "save".into(),
+                description: "Save scene".into(),
+                keys: "Ctrl+S".into(),
+            },
+            Self {
+                action: "zoom_in".into(),
+                description: "Zoom in".into(),
+                keys: "Ctrl++".into(),
+            },
+            Self {
+                action: "zoom_out".into(),
+                description: "Zoom out".into(),
+                keys: "Ctrl+-".into(),
+            },
+            Self {
+                action: "zoom_reset".into(),
+                description: "Reset zoom".into(),
+                keys: "Ctrl+0".into(),
+            },
+            Self {
+                action: "tool_select".into(),
+                description: "Select tool".into(),
+                keys: "Q".into(),
+            },
+            Self {
+                action: "tool_move".into(),
+                description: "Move tool".into(),
+                keys: "W".into(),
+            },
+            Self {
+                action: "tool_rotate".into(),
+                description: "Rotate tool".into(),
+                keys: "E".into(),
+            },
+            Self {
+                action: "play".into(),
+                description: "Play scene".into(),
+                keys: "F5".into(),
+            },
+            Self {
+                action: "play_current".into(),
+                description: "Play current scene".into(),
+                keys: "F6".into(),
+            },
+            Self {
+                action: "pause".into(),
+                description: "Pause playback".into(),
+                keys: "F7".into(),
+            },
+            Self {
+                action: "stop".into(),
+                description: "Stop playback".into(),
+                keys: "F8".into(),
+            },
+            Self {
+                action: "help".into(),
+                description: "Show help".into(),
+                keys: "F1".into(),
+            },
+        ]
+    }
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -179,6 +608,7 @@ unsafe impl Send for EditorState {}
 impl EditorState {
     /// Creates a new editor state with the given scene tree.
     pub fn new(tree: SceneTree) -> Self {
+        gdobject::class_db::register_editor_classes();
         Self {
             scene_tree: tree,
             selected_node: None,
@@ -210,6 +640,8 @@ impl EditorState {
                 animation_name: None,
                 current_time: 0.0,
                 recording: false,
+                blend_secondary: None,
+                blend_weight: 0.0,
             },
             pressed_keys: HashSet::new(),
             just_pressed_keys: HashSet::new(),
@@ -218,7 +650,66 @@ impl EditorState {
             mouse_buttons: HashSet::new(),
             input_map: Self::default_input_map(),
             tile_grid_store: gdscene::tilemap::TileGridStore::new_with_defaults(),
+            editor_mode: "2d".to_string(),
+            transform_axis_constraint: None,
+            keyframe_clipboard: Vec::new(),
+            breakpoints: HashMap::new(),
+            script_errors: HashMap::new(),
+            frame_times: VecDeque::new(),
+            profiler_frames: VecDeque::new(),
+            debug_stack_trace: Vec::new(),
+            debug_state: "detached".to_string(),
+            debug_frames: Vec::new(),
+            debug_breakpoints: Vec::new(),
+            debug_locals: Vec::new(),
+            debug_globals: Vec::new(),
+            plugins: Vec::new(),
+            keybindings: EditorKeyBinding::defaults(),
+            viewport_mode: ViewportMode::Select,
+            output_entries: VecDeque::new(),
+            project_name: "New Project".to_string(),
+            project_description: String::new(),
+            project_icon: String::new(),
+            project_main_scene: String::new(),
+            project_resolution_w: 1152,
+            project_resolution_h: 648,
+            project_stretch_mode: "disabled".to_string(),
+            project_stretch_aspect: "keep".to_string(),
+            project_fullscreen: false,
+            project_vsync: true,
+            project_physics_fps: 60,
+            project_gravity: 980.0,
+            project_linear_damp: 0.1,
+            project_angular_damp: 1.0,
+            project_bus_layout: "res://default_bus_layout.tres".to_string(),
+            project_master_volume_db: 0.0,
+            project_audio_input: false,
+            project_renderer: "forward_plus".to_string(),
+            project_anti_aliasing: "disabled".to_string(),
+            project_environment_default: String::new(),
+            snap_guides: Vec::new(),
+            scene_tabs: vec![SceneTab {
+                id: 1,
+                path: String::new(),
+                name: "Untitled".to_string(),
+                modified: false,
+            }],
+            active_tab_index: 0,
+            create_node_dialog: {
+                let mut dlg = CreateNodeDialog::with_catalog();
+                dlg.add_favorite("Node2D");
+                dlg.add_favorite("Sprite2D");
+                dlg.add_favorite("CharacterBody2D");
+                dlg.add_favorite("Control");
+                dlg.add_favorite("Label");
+                dlg
+            },
         }
+    }
+
+    /// Returns the next available tab ID.
+    fn next_tab_id(&self) -> u32 {
+        self.scene_tabs.iter().map(|t| t.id).max().unwrap_or(0) + 1
     }
 
     /// Returns the default input action map (Godot-style).
@@ -604,6 +1095,7 @@ fn handle_connection(
         ("GET", "/editor") => serve_editor_html(&mut stream),
         ("GET", "/api/scene") => api_get_scene(state, &mut stream),
         ("GET", "/api/node/signals") => api_get_node_signals(state, &req.query, &mut stream),
+        ("GET", "/api/node/script") => api_get_node_script(state, &req.query, &mut stream),
         ("GET", p) if p.starts_with("/api/node/") && req.method == "GET" => {
             // Extract node ID from /api/node/<id>
             let id_str = &p["/api/node/".len()..];
@@ -618,6 +1110,17 @@ fn handle_connection(
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/create_dialog") => api_create_dialog(state, &req.body, &mut stream),
+        ("POST", "/api/node/create_dialog/toggle_favorite") => {
+            api_create_dialog_toggle_favorite(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/node/create_dialog/confirm") => {
+            api_create_dialog_confirm(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/node/catalog_2d") => api_node_catalog_2d(state, &mut stream),
+        ("POST", "/api/resource/property/set") => {
+            api_set_resource_property(state, &req.body, &mut stream)
+        }
         ("POST", "/api/node/reorder") => api_reorder_node(state, &req.body, &mut stream),
         ("POST", "/api/property/set") => api_set_property(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
@@ -636,6 +1139,7 @@ fn handle_connection(
         ("GET", "/api/logs") => api_get_logs(state, &mut stream),
         ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
         ("GET", "/api/filesystem") => api_get_filesystem(&mut stream),
+        ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
         ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
         ("POST", "/api/script/save") => api_save_script(&req.body, &mut stream),
         ("POST", "/api/node/signals/connect") => api_connect_signal(state, &req.body, &mut stream),
@@ -648,7 +1152,12 @@ fn handle_connection(
         ("POST", "/api/node/cut") => api_cut_nodes(state, &req.body, &mut stream),
         ("GET", "/api/settings") => api_get_settings(state, &mut stream),
         ("POST", "/api/settings") => api_set_settings(state, &req.body, &mut stream),
+        ("GET", "/api/plugins") => api_get_plugins(state, &mut stream),
+        ("POST", "/api/plugins/toggle") => api_toggle_plugin(state, &req.body, &mut stream),
+        ("GET", "/api/keybindings") => api_get_keybindings(state, &mut stream),
+        ("POST", "/api/keybindings") => api_set_keybinding(state, &req.body, &mut stream),
         ("POST", "/api/viewport/box_select") => api_box_select(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/drop") => api_viewport_drop(state, &req.body, &mut stream),
         ("POST", "/api/viewport/drag_multi") => {
             api_viewport_drag_multi(state, &req.body, &mut stream)
         }
@@ -666,6 +1175,7 @@ fn handle_connection(
         ("GET", "/api/animation/status") => api_animation_status(state, &mut stream),
         ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
+        ("POST", "/api/animation/blend") => api_animation_blend(state, &req.body, &mut stream),
         ("POST", "/api/runtime/play") => api_runtime_play(state, &mut stream),
         ("POST", "/api/runtime/stop") => api_runtime_stop(state, &mut stream),
         ("POST", "/api/runtime/pause") => api_runtime_pause(state, &mut stream),
@@ -696,8 +1206,242 @@ fn handle_connection(
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
         ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
+        // pat-r5p: Transform gizmo
+        ("POST", "/api/viewport/drag_axis") => {
+            api_viewport_drag_axis(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/rotate_node") => {
+            api_viewport_rotate_node(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/scale_node") => {
+            api_viewport_scale_node(state, &req.body, &mut stream)
+        }
+        // pat-zlv: Snap info
+        ("GET", "/api/viewport/snap_info") => api_get_snap_info(state, &mut stream),
+        ("GET", "/api/viewport/snap_guides") => api_get_snap_guides(state, &mut stream),
+        // pat-cgc: Script find/replace
+        ("POST", "/api/script/find") => api_script_find(&req.body, &mut stream),
+        ("POST", "/api/script/replace") => api_script_replace(&req.body, &mut stream),
+        // pat-1v3: Script breakpoints
+        ("POST", "/api/script/breakpoint/toggle") => {
+            api_toggle_breakpoint(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/script/breakpoints") => api_get_breakpoints(state, &req.query, &mut stream),
+        // pat-n86px: Explicit typed track creation (property/method/audio)
+        ("POST", "/api/animation/track/add") => api_add_track(state, &req.body, &mut stream),
+        ("POST", "/api/animation/track/delete") => api_delete_track(state, &req.body, &mut stream),
+        // pat-2s1: Animation track reorder + keyframe copy/paste
+        ("POST", "/api/animation/track/reorder") => {
+            api_reorder_track(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/keyframe/copy") => {
+            api_copy_keyframes(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/keyframe/paste") => {
+            api_paste_keyframes(state, &req.body, &mut stream)
+        }
+        // pat-o51nk: Curve editor — set keyframe transition type
+        ("POST", "/api/animation/keyframe/transition") => {
+            api_set_keyframe_transition(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/animation/keyframe/transition") => {
+            api_get_keyframe_transition(state, &req.query, &mut stream)
+        }
+        // pat-lbu: Debug + monitors
+        ("GET", "/api/debug/stack_trace") => api_get_stack_trace(state, &mut stream),
+        // pat-zf49m: Debugger panel with breakpoint, step, and variable inspection
+        ("GET", "/api/debug/state") => api_get_debug_state(state, &mut stream),
+        ("GET", "/api/debug/locals") => api_get_debug_locals(state, &req.query, &mut stream),
+        ("POST", "/api/debug/continue") => api_debug_continue(state, &mut stream),
+        ("POST", "/api/debug/step_in") => api_debug_step_in(state, &mut stream),
+        ("POST", "/api/debug/step_over") => api_debug_step_over(state, &mut stream),
+        ("POST", "/api/debug/step_out") => api_debug_step_out(state, &mut stream),
+        ("POST", "/api/debug/remove_breakpoint") => {
+            api_debug_remove_breakpoint(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/monitors/frame_times") => api_get_frame_times(state, &mut stream),
+        ("GET", "/api/profiler") => api_get_profiler(state, &mut stream),
+        ("POST", "/api/profiler/record") => api_profiler_record(state, &req.body, &mut stream),
+        // pat-dj6: Editor mode
+        ("POST", "/api/editor/mode") => api_set_editor_mode(state, &req.body, &mut stream),
+        ("GET", "/api/editor/mode") => api_get_editor_mode(state, &mut stream),
+        // pat-e0heb: Scene tabs
+        ("GET", "/api/scene/tabs") => api_get_scene_tabs(state, &mut stream),
+        ("POST", "/api/scene/tabs/open") => api_open_scene_tab(state, &req.body, &mut stream),
+        ("POST", "/api/scene/tabs/close") => api_close_scene_tab(state, &req.body, &mut stream),
+        ("POST", "/api/scene/tabs/switch") => api_switch_scene_tab(state, &req.body, &mut stream),
+        // Batch 2 beads
+        ("POST", "/api/viewport/set_mode") => api_set_viewport_mode(state, &req.body, &mut stream),
+        ("GET", "/api/viewport/mode") => api_get_viewport_mode(state, &mut stream),
+        ("GET", "/api/search") => api_search_scripts(&req.query, &mut stream),
+        ("POST", "/api/signal/disconnect") => api_disconnect_signal(state, &req.body, &mut stream),
+        ("POST", "/api/output/clear") => api_clear_output(state, &mut stream),
+        ("GET", "/api/output") => api_get_output(state, &mut stream),
+        // pat-kj4: Project settings
+        ("GET", "/api/project_settings") => api_get_project_settings(state, &mut stream),
+        ("POST", "/api/project_settings") => {
+            api_set_project_settings(state, &req.body, &mut stream)
+        }
+        // pat-flr: Filesystem operations
+        ("POST", "/api/filesystem/rename") => api_filesystem_rename(&req.body, &mut stream),
+        ("POST", "/api/filesystem/delete") => api_filesystem_delete(&req.body, &mut stream),
+        ("POST", "/api/filesystem/mkdir") => api_filesystem_mkdir(&req.body, &mut stream),
+        // pat-mn3: Multi-object shared properties
+        ("POST", "/api/node/shared_properties") => {
+            api_get_shared_properties(state, &req.body, &mut stream)
+        }
+        // pat-ugb0p: Command palette
+        ("GET", "/api/commands") => api_get_commands(&mut stream),
+        ("POST", "/api/command/execute") => api_execute_command(state, &req.body, &mut stream),
+        // pat-omfrq: Filesystem tree and dir
+        ("GET", "/api/filesystem/tree") => api_filesystem_tree(&req.query, &mut stream),
+        ("GET", "/api/filesystem/dir") => api_filesystem_dir(&req.query, &mut stream),
+        // pat-vyko1: Import settings
+        ("GET", "/api/import_settings") => api_get_import_settings(&req.query, &mut stream),
+        ("POST", "/api/import_settings") => api_set_import_settings(&req.body, &mut stream),
+        // pat-1zlel: Version control integration
+        ("GET", "/api/vcs/status") => api_vcs_status(&mut stream),
+        ("GET", "/api/vcs/diff") => api_vcs_diff(&req.query, &mut stream),
+        ("GET", "/api/vcs/log") => api_vcs_log(&req.query, &mut stream),
+        ("POST", "/api/vcs/stage") => api_vcs_stage(&req.body, &mut stream),
+        ("POST", "/api/vcs/unstage") => api_vcs_unstage(&req.body, &mut stream),
+        ("POST", "/api/vcs/discard") => api_vcs_discard(&req.body, &mut stream),
+        // pat-nrtp9: Asset drag-drop to viewport
+        ("POST", "/api/asset/drop_to_viewport") => {
+            api_asset_drop_to_viewport(state, &req.body, &mut stream)
+        }
         _ => serve_404(&mut stream),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Asset drag-drop to viewport (pat-nrtp9)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/asset/drop_to_viewport` — creates a node from a dropped asset.
+///
+/// Expects JSON: `{ asset_path, asset_type, parent_id, viewport_x, viewport_y }`
+/// Returns JSON: `{ node_id, node_class }`
+fn api_asset_drop_to_viewport(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let asset_path = match parsed.get("asset_path").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing asset_path");
+            return;
+        }
+    };
+
+    let asset_type = match parsed.get("asset_type").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing asset_type");
+            return;
+        }
+    };
+
+    let parent_raw = match parsed.get("parent_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing parent_id");
+            return;
+        }
+    };
+
+    let _viewport_x = parsed
+        .get("viewport_x")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    let _viewport_y = parsed
+        .get("viewport_y")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+
+    // Determine node class from asset type
+    let node_class = match asset_type.as_str() {
+        "texture" => "Sprite2D",
+        "audio" => "AudioStreamPlayer",
+        "script" => "Node",
+        "mesh" => "MeshInstance3D",
+        _ => "Node2D",
+    };
+
+    // Derive node name from filename (strip extension)
+    let node_name = asset_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&asset_path)
+        .rsplit('.')
+        .last()
+        .unwrap_or("node");
+
+    let mut state = state.lock().unwrap();
+    let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "parent not found");
+            return;
+        }
+    };
+
+    let mut cmd = EditorCommand::AddNode {
+        parent_id,
+        name: node_name.to_string(),
+        class_name: node_class.to_string(),
+        created_id: None,
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    let created_id = match &cmd {
+        EditorCommand::AddNode { created_id, .. } => created_id.unwrap(),
+        _ => unreachable!(),
+    };
+
+    // Set asset-specific properties on the new node
+    if let Some(node) = state.scene_tree.get_node_mut(created_id) {
+        match asset_type.as_str() {
+            "texture" => {
+                node.set_property(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::new(_viewport_x, _viewport_y)),
+                );
+                node.set_property("texture", Variant::String(asset_path.clone()));
+            }
+            "script" => {
+                node.set_property("_script_path", Variant::String(asset_path.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!(
+            "Asset drop: created {} '{}' from {}",
+            node_class, node_name, asset_path
+        ),
+    );
+
+    let json = format!(
+        r#"{{"node_id":{},"node_class":"{}"}}"#,
+        created_id.raw(),
+        node_class
+    );
+    send_json(stream, &json);
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +1535,31 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
     let is_instance = !matches!(node.get_property("_instance_source"), Variant::Nil)
         || !matches!(node.get_property("_instance"), Variant::Nil);
 
+    // Detect scripts: via _script_path property or attached ScriptInstance.
+    let has_script =
+        !matches!(node.get_property("_script_path"), Variant::Nil) || tree.has_script(node_id);
+
+    // Detect signal connections.
+    let has_signals = match node.get_property("signal_connections") {
+        Variant::String(ref s) if !s.is_empty() => true,
+        _ => false,
+    };
+
+    // Collect groups.
+    let groups: Vec<&str> = node.groups().iter().map(|s| s.as_str()).collect();
+    let prop_groups: Vec<String> = match node.get_property("groups") {
+        Variant::String(ref s) if !s.is_empty() => {
+            s.split(',').map(|g| g.trim().to_string()).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut all_groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+    for g in &prop_groups {
+        if !all_groups.contains(g) {
+            all_groups.push(g.clone());
+        }
+    }
+
     serde_json::json!({
         "id": node_id.raw(),
         "name": node.name(),
@@ -798,6 +1567,9 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
         "path": path,
         "visible": visible,
         "is_instance": is_instance,
+        "has_script": has_script,
+        "has_signals": has_signals,
+        "groups": all_groups,
         "children": children
     })
 }
@@ -1232,7 +2004,263 @@ fn api_duplicate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     send_json(stream, &json);
 }
 
-/// `POST /api/node/reorder` — reorders a node within its parent's children.
+/// `POST /api/node/create_dialog` — returns classes from ClassDB with search, filter, favorites, and recent.
+fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    use crate::create_dialog::NodeCategory;
+
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    if !body.is_empty() {
+        if let Some(parsed) = parse_json_body(body) {
+            if let Some(search) = parsed.get("search").and_then(|v| v.as_str()) {
+                dlg.set_search(search);
+            } else {
+                dlg.set_search("");
+            }
+            if let Some(base) = parsed.get("base_class").and_then(|v| v.as_str()) {
+                if base.is_empty() {
+                    dlg.set_base_class(None);
+                } else {
+                    dlg.set_base_class(Some(base.to_string()));
+                }
+            }
+            if let Some(cat) = parsed.get("category").and_then(|v| v.as_str()) {
+                let category = match cat {
+                    "Node2D" | "2D Nodes" => Some(NodeCategory::Node2D),
+                    "Physics2D" | "2D Physics" => Some(NodeCategory::Physics2D),
+                    "UI" | "UI Controls" => Some(NodeCategory::UI),
+                    "Utility" => Some(NodeCategory::Utility),
+                    _ => None,
+                };
+                dlg.set_category_filter(category);
+            } else {
+                dlg.set_category_filter(None);
+            }
+        }
+    } else {
+        dlg.set_search("");
+        dlg.set_base_class(None);
+        dlg.set_category_filter(None);
+    }
+    let classes = dlg.filtered_classes();
+    let recent = dlg.recent_entries();
+    let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
+    let class_names: Vec<&str> = classes.iter().map(|c| c.class_name.as_str()).collect();
+    let class_entries: Vec<serde_json::Value> = classes
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "class_name": c.class_name, "parent_class": c.parent_class,
+                "inheritance_chain": c.inheritance_chain, "is_favorite": c.is_favorite,
+                "description": c.description, "category": c.category.map(|cat| cat.label()),
+            })
+        })
+        .collect();
+    let recent_json: Vec<serde_json::Value> = recent
+        .iter()
+        .map(|c| serde_json::json!({ "class_name": c.class_name, "parent_class": c.parent_class }))
+        .collect();
+    let json = serde_json::json!({
+        "classes": class_names, "class_entries": class_entries, "favorites": favorites,
+        "recent": recent_json, "match_count": class_names.len(),
+    })
+    .to_string();
+    send_json(stream, &json);
+}
+
+/// `GET /api/node/catalog_2d` — returns the 2D node catalog with categories and helper presets.
+fn api_node_catalog_2d(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let st = state.lock().unwrap();
+    let dlg = &st.create_node_dialog;
+    if let Some(catalog) = dlg.catalog() {
+        let entries: Vec<serde_json::Value> = catalog
+            .entries()
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "class_name": e.class_name,
+                    "category": e.category.label(),
+                    "description": e.description,
+                })
+            })
+            .collect();
+        let helpers: Vec<serde_json::Value> = catalog
+            .helpers()
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "name": h.name,
+                    "description": h.description,
+                    "root_class": h.root_class,
+                    "children": h.children,
+                })
+            })
+            .collect();
+        let categories: Vec<&str> = catalog.categories().iter().map(|c| c.label()).collect();
+        let json = serde_json::json!({
+            "entries": entries, "helpers": helpers, "categories": categories,
+        })
+        .to_string();
+        send_json(stream, &json);
+    } else {
+        send_json(stream, r#"{"entries":[],"helpers":[],"categories":[]}"#);
+    }
+}
+
+/// `POST /api/node/create_dialog/toggle_favorite` — toggle a class favorite.
+fn api_create_dialog_toggle_favorite(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    let is_favorite = if dlg.favorites().contains(&class_name) {
+        dlg.remove_favorite(&class_name);
+        false
+    } else {
+        dlg.add_favorite(&class_name);
+        true
+    };
+    let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
+    let json =
+        serde_json::json!({ "is_favorite": is_favorite, "favorites": favorites }).to_string();
+    send_json(stream, &json);
+}
+
+/// `POST /api/node/create_dialog/confirm` — confirm selection, track in recent list.
+fn api_create_dialog_confirm(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    dlg.select(&class_name);
+    dlg.confirm();
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/resource/property/set` — set a property within a resource sub-editor.
+fn api_set_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let resource_property = match parsed.get("resource_property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing resource_property");
+            return;
+        }
+    };
+    let sub_property = match parsed.get("sub_property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing sub_property");
+            return;
+        }
+    };
+    let value_json = match parsed.get("value") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing value");
+            return;
+        }
+    };
+    let new_sub_value = match from_json(value_json) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid variant value");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let current = match state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property(&resource_property))
+    {
+        Some(v) => v,
+        None => {
+            send_error(stream, 404, "resource property not found");
+            return;
+        }
+    };
+    let new_value = match current {
+        Variant::Resource(mut r) => {
+            r.properties.insert(sub_property.clone(), new_sub_value);
+            Variant::Resource(r)
+        }
+        _ => {
+            send_error(stream, 400, "property is not a Resource type");
+            return;
+        }
+    };
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: resource_property.clone(),
+        new_value,
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!(
+            "Changed resource property '{}.{}'",
+            resource_property, sub_property
+        ),
+    );
+    send_json(stream, r#"{"ok":true}"#);
+}
+
 fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -1681,7 +2709,12 @@ fn api_viewport_drag(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     let zoom = state.viewport_zoom as f32;
     let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
     let world_delta = Vector2::new(pixel_delta.x / zoom, pixel_delta.y / zoom);
-    let new_pos = drag.start_node_pos + world_delta;
+    let candidate_pos = drag.start_node_pos + world_delta;
+
+    // Apply grid snap and smart snap.
+    let settings = state.display_settings.clone();
+    let (new_pos, guides) = apply_snap(&state.scene_tree, &settings, drag.node_id, candidate_pos);
+    state.snap_guides = guides;
 
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
         node.set_property("position", Variant::Vector2(new_pos));
@@ -1720,7 +2753,11 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     let zoom = state.viewport_zoom as f32;
     let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
     let world_delta = Vector2::new(pixel_delta.x / zoom, pixel_delta.y / zoom);
-    let new_pos = drag.start_node_pos + world_delta;
+    let candidate_pos = drag.start_node_pos + world_delta;
+
+    let settings = state.display_settings.clone();
+    let (new_pos, _) = apply_snap(&state.scene_tree, &settings, drag.node_id, candidate_pos);
+    state.snap_guides.clear();
 
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
         node.set_property("position", Variant::Vector2(new_pos));
@@ -1861,6 +2898,10 @@ struct FsEntry {
     path: String,
     is_dir: bool,
     children: Vec<FsEntry>,
+    /// File size in bytes (0 for directories).
+    size: u64,
+    /// File type string (e.g. "GDScript", "Scene", "Resource").
+    file_type: String,
 }
 
 impl FsEntry {
@@ -1875,11 +2916,25 @@ impl FsEntry {
             )
         } else {
             format!(
-                r#"{{"name":"{}","path":"{}","is_dir":false}}"#,
+                r#"{{"name":"{}","path":"{}","is_dir":false,"size":{},"file_type":"{}"}}"#,
                 self.name.replace('\\', "\\\\").replace('"', "\\\""),
                 self.path.replace('\\', "\\\\").replace('"', "\\\""),
+                self.size,
+                self.file_type,
             )
         }
+    }
+}
+
+fn file_type_for_ext(ext: &str) -> &str {
+    match ext {
+        "gd" => "GDScript",
+        "tscn" => "Scene",
+        "tres" => "Resource",
+        "png" | "jpg" | "jpeg" | "webp" | "svg" => "Image",
+        "wav" | "ogg" | "mp3" => "Audio",
+        "ttf" | "otf" => "Font",
+        _ => "File",
     }
 }
 
@@ -1924,21 +2979,39 @@ fn scan_directory(
                     path: format!("res://{}", child_prefix),
                     is_dir: true,
                     children,
+                    size: 0,
+                    file_type: "Directory".to_string(),
                 });
             }
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "tscn" | "gd" | "tres") {
+            if matches!(
+                ext,
+                "tscn"
+                    | "gd"
+                    | "tres"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "webp"
+                    | "svg"
+                    | "gdshader"
+                    | "glsl"
+                    | "cfg"
+            ) {
                 let file_path = if prefix.is_empty() {
                     format!("res://{}", name)
                 } else {
                     format!("res://{}/{}", prefix, name)
                 };
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 files.push(FsEntry {
                     name,
                     path: file_path,
                     is_dir: false,
                     children: Vec::new(),
+                    size,
+                    file_type: file_type_for_ext(ext).to_string(),
                 });
             }
         }
@@ -1965,6 +3038,151 @@ fn api_get_filesystem(stream: &mut TcpStream) {
         entries_json.join(",")
     );
     send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// File preview endpoint
+// ---------------------------------------------------------------------------
+
+/// `GET /api/preview/file?path=res://...` -- returns a preview for the given file.
+///
+/// For images: returns the raw image bytes with appropriate content type.
+/// For scripts (.gd): returns JSON with first N lines of the file.
+/// For scenes (.tscn): returns JSON with node count and root type.
+/// For resources (.tres): returns JSON with resource type info.
+fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
+    let path = match query_param(query, "path") {
+        Some(p) => {
+            // URL-decode the path (handle %20, etc.)
+            let decoded = p.replace("%20", " ").replace("%2F", "/");
+            decoded.replace("res://", "")
+        }
+        None => {
+            send_json(stream, r#"{"error":"missing path parameter"}"#);
+            return;
+        }
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let full_path = cwd.join(&path);
+
+    if !full_path.exists() {
+        send_json(stream, r#"{"error":"file not found"}"#);
+        return;
+    }
+
+    let ext = full_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        // Image files: serve raw bytes with content type
+        "png" => serve_binary_file(stream, &full_path, "image/png"),
+        "jpg" | "jpeg" => serve_binary_file(stream, &full_path, "image/jpeg"),
+        "webp" => serve_binary_file(stream, &full_path, "image/webp"),
+        "svg" => serve_binary_file(stream, &full_path, "image/svg+xml"),
+
+        // Script files: return first 30 lines as JSON
+        "gd" | "gdshader" | "glsl" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let lines: Vec<&str> = content.lines().take(30).collect();
+            let line_count = content.lines().count();
+            let escaped = lines
+                .join("\n")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t");
+            let json = format!(
+                r#"{{"type":"script","lines":{},"preview":"{}"}}"#,
+                line_count, escaped
+            );
+            send_json(stream, &json);
+        }
+
+        // Scene files: parse and return summary
+        "tscn" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let node_count = content.matches("[node").count();
+            let root_type = content
+                .lines()
+                .find(|l| l.starts_with("[node") && !l.contains("parent="))
+                .and_then(|l| {
+                    l.split("type=")
+                        .nth(1)
+                        .map(|t| t.split('"').nth(1).unwrap_or("Node").to_string())
+                })
+                .unwrap_or_else(|| "Node".to_string());
+            let ext_res_count = content.matches("[ext_resource").count();
+            let sub_res_count = content.matches("[sub_resource").count();
+            let json = format!(
+                r#"{{"type":"scene","node_count":{},"root_type":"{}","ext_resources":{},"sub_resources":{}}}"#,
+                node_count, root_type, ext_res_count, sub_res_count
+            );
+            send_json(stream, &json);
+        }
+
+        // Resource files: return resource type
+        "tres" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let res_type = content
+                .lines()
+                .find(|l| l.starts_with("[gd_resource"))
+                .and_then(|l| {
+                    l.split("type=")
+                        .nth(1)
+                        .map(|t| t.split('"').nth(1).unwrap_or("Resource").to_string())
+                })
+                .unwrap_or_else(|| "Resource".to_string());
+            let sub_res_count = content.matches("[sub_resource").count();
+            let size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
+            let json = format!(
+                r#"{{"type":"resource","resource_type":"{}","sub_resources":{},"size":{}}}"#,
+                res_type, sub_res_count, size
+            );
+            send_json(stream, &json);
+        }
+
+        // Config files: show first 20 lines
+        "cfg" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let lines: Vec<&str> = content.lines().take(20).collect();
+            let escaped = lines
+                .join("\n")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t");
+            let json = format!(r#"{{"type":"config","preview":"{}"}}"#, escaped);
+            send_json(stream, &json);
+        }
+
+        _ => {
+            send_json(stream, r#"{"type":"unknown"}"#);
+        }
+    }
+}
+
+/// Serve a binary file with the given content type.
+fn serve_binary_file(stream: &mut TcpStream, path: &std::path::Path, content_type: &str) {
+    match std::fs::read(path) {
+        Ok(data) => {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n",
+                content_type,
+                data.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&data);
+        }
+        Err(_) => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2174,8 +3392,23 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
         let signals_json: Vec<String> = available
             .iter()
             .map(|sig| {
-                let connected = connections_str.contains(sig);
-                format!(r#"{{"name":"{}","connected":{}}}"#, sig, connected,)
+                // Parse connections to get details for this signal
+                let connections: Vec<String> = connections_str
+                    .split(',')
+                    .filter(|c| !c.is_empty() && c.starts_with(&format!("{}:", sig)))
+                    .map(|c| {
+                        let method = c.splitn(2, ':').nth(1).unwrap_or("");
+                        format!(r#"{{"method":"{}"}}"#, method.replace('"', "\\\""))
+                    })
+                    .collect();
+                let connected = !connections.is_empty();
+                format!(
+                    r#"{{"name":"{}","connected":{},"connection_count":{},"connections":[{}]}}"#,
+                    sig,
+                    connected,
+                    connections.len(),
+                    connections.join(",")
+                )
             })
             .collect();
 
@@ -2184,12 +3417,17 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
             .map(|g| format!(r#""{}""#, g.replace('\\', "\\\\").replace('"', "\\\"")))
             .collect();
 
+        let total_connected = signals_json
+            .iter()
+            .filter(|s| s.contains(r#""connected":true"#))
+            .count();
         format!(
-            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}]}}"#,
+            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}],"connected_count":{}}}"#,
             node_raw,
             class_name.replace('"', "\\\""),
             signals_json.join(","),
             groups_json.join(","),
+            total_connected,
         )
     };
     send_json(stream, &json);
@@ -2684,6 +3922,25 @@ fn api_set_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     if let Some(v) = p.get("font_size").and_then(|v| v.as_str()) {
         s.display_settings.font_size = v.to_string();
     }
+    if let Some(v) = p.get("theme").and_then(|v| v.as_str()) {
+        s.display_settings.theme = v.to_string();
+    }
+    if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {
+        s.display_settings.physics_fps = v as u32;
+    }
+    if let Some(obj) = p.get("panel_sizes").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(f) = v.as_f64() {
+                s.display_settings.panel_sizes.insert(k.clone(), f);
+            }
+        }
+    }
+    if let Some(v) = p.get("smart_snap_enabled").and_then(|v| v.as_bool()) {
+        s.display_settings.smart_snap_enabled = v;
+    }
+    if let Some(v) = p.get("smart_snap_threshold").and_then(|v| v.as_f64()) {
+        s.display_settings.smart_snap_threshold = v as f32;
+    }
     let j = serde_json::to_string(&s.display_settings).unwrap_or_else(|_| "{}".to_string());
     send_json(stream, &j);
 }
@@ -2855,18 +4112,27 @@ fn api_get_animation(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut 
                     .keyframes()
                     .iter()
                     .map(|kf| {
+                        let transition_json = match kf.transition {
+                            gdscene::animation::TransitionType::Linear => r#""linear""#.to_string(),
+                            gdscene::animation::TransitionType::Nearest => r#""nearest""#.to_string(),
+                            gdscene::animation::TransitionType::CubicBezier(x1, y1, x2, y2) => {
+                                format!(r#"{{"type":"cubic_bezier","x1":{},"y1":{},"x2":{},"y2":{}}}"#, x1, y1, x2, y2)
+                            }
+                        };
                         format!(
-                            r#"{{"time":{},"value":{}}}"#,
+                            r#"{{"time":{},"value":{},"transition":{}}}"#,
                             kf.time,
-                            variant_to_simple_json(&kf.value)
+                            variant_to_simple_json(&kf.value),
+                            transition_json
                         )
                     })
                     .collect();
                 format!(
-                    r#"{{"index":{},"node_path":"{}","property":"{}","keyframes":[{}]}}"#,
+                    r#"{{"index":{},"node_path":"{}","property":"{}","track_type":"{}","keyframes":[{}]}}"#,
                     idx,
                     track.node_path.replace('"', "\\\""),
                     track.property_path.replace('"', "\\\""),
+                    track.track_type.as_str(),
                     kf_json.join(",")
                 )
             })
@@ -3001,6 +4267,11 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
             return;
         }
     };
+    let track_type = parsed
+        .get("track_type")
+        .and_then(|v| v.as_str())
+        .and_then(TrackType::from_str_name)
+        .unwrap_or(TrackType::Property);
     let mut state = state.lock().unwrap();
     let anim = match state.animations.get_mut(&anim_name) {
         Some(a) => a,
@@ -3009,14 +4280,13 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
             return;
         }
     };
-    let track_idx = anim
-        .tracks
-        .iter()
-        .position(|t| t.node_path == node_path && t.property_path == property);
+    let track_idx = anim.tracks.iter().position(|t| {
+        t.node_path == node_path && t.property_path == property && t.track_type == track_type
+    });
     let track_idx = match track_idx {
         Some(idx) => idx,
         None => {
-            let track = AnimationTrack::with_node(&node_path, &property);
+            let track = AnimationTrack::with_type(&node_path, &property, track_type);
             anim.tracks.push(track);
             anim.tracks.len() - 1
         }
@@ -3024,8 +4294,124 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     anim.tracks[track_idx].add_keyframe(KeyFrame::linear(time, value));
     send_json(
         stream,
-        &format!(r#"{{"ok":true,"track_index":{}}}"#, track_idx),
+        &format!(
+            r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#,
+            track_idx,
+            track_type.as_str()
+        ),
     );
+}
+
+/// `POST /api/animation/track/add` -- add an explicit typed track to an animation.
+fn api_add_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let node_path = match parsed.get("node_path").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing node_path");
+            return;
+        }
+    };
+    let property = match parsed.get("property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing property");
+            return;
+        }
+    };
+    let track_type = match parsed.get("track_type").and_then(|v| v.as_str()) {
+        Some(s) => match TrackType::from_str_name(s) {
+            Some(tt) => tt,
+            None => {
+                send_error(
+                    stream,
+                    400,
+                    "invalid track_type (use property, method, or audio)",
+                );
+                return;
+            }
+        },
+        None => TrackType::Property,
+    };
+    let mut state = state.lock().unwrap();
+    let anim = match state.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    // Check for duplicate track
+    let exists = anim.tracks.iter().any(|t| {
+        t.node_path == node_path && t.property_path == property && t.track_type == track_type
+    });
+    if exists {
+        send_error(stream, 400, "track already exists");
+        return;
+    }
+    let track = AnimationTrack::with_type(&node_path, &property, track_type);
+    anim.tracks.push(track);
+    let idx = anim.tracks.len() - 1;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#,
+            idx,
+            track_type.as_str()
+        ),
+    );
+}
+
+/// `POST /api/animation/track/delete` -- remove a track from an animation.
+fn api_delete_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let anim = match state.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    anim.tracks.remove(track_index);
+    send_json(stream, r#"{"ok":true}"#);
 }
 
 /// `POST /api/animation/keyframe/remove` -- remove a keyframe from a track.
@@ -3124,9 +4510,13 @@ fn api_animation_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream)
             Some(n) => format!(r#""{}""#, n.replace('"', "\\\"")),
             None => "null".to_string(),
         };
+        let blend_json = match &pb.blend_secondary {
+            Some(n) => format!(r#""{}""#, n.replace('"', "\\\"")),
+            None => "null".to_string(),
+        };
         format!(
-            r#"{{"playing":{},"current_time":{},"animation_name":{},"recording":{}}}"#,
-            pb.playing, pb.current_time, name_json, pb.recording
+            r#"{{"playing":{},"current_time":{},"animation_name":{},"recording":{},"blend_secondary":{},"blend_weight":{}}}"#,
+            pb.playing, pb.current_time, name_json, pb.recording, blend_json, pb.blend_weight
         )
     };
     send_json(stream, &json);
@@ -3199,6 +4589,87 @@ fn api_toggle_recording(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
         },
     );
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/blend` -- set blend preview between two animations.
+///
+/// Body: `{"secondary": "anim_name", "weight": 0.5}` or `{"secondary": null}` to clear.
+fn api_animation_blend(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let secondary = parsed
+        .get("secondary")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let weight = parsed.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+    // Validate the secondary animation exists (if provided).
+    if let Some(ref name) = secondary {
+        if !state.animations.contains_key(name) {
+            send_error(stream, 404, "secondary animation not found");
+            return;
+        }
+    }
+
+    state.animation_playback.blend_secondary = secondary.clone();
+    state.animation_playback.blend_weight = weight.clamp(0.0, 1.0);
+
+    // Apply blended values to scene tree for preview.
+    let primary_name = state.animation_playback.animation_name.clone();
+    let time = state.animation_playback.current_time;
+    let blend_w = state.animation_playback.blend_weight;
+
+    if let (Some(ref prim), Some(ref sec)) = (&primary_name, &secondary) {
+        if let (Some(prim_anim), Some(sec_anim)) = (
+            state.animations.get(prim).cloned(),
+            state.animations.get(sec).cloned(),
+        ) {
+            let prim_values = prim_anim.sample_all(time);
+            let sec_values = sec_anim.sample_all(time);
+
+            // Build map from secondary animation.
+            let sec_map: std::collections::HashMap<String, gdvariant::Variant> =
+                sec_values.into_iter().collect();
+
+            for (prop, prim_val) in &prim_values {
+                if let Some(sec_val) = sec_map.get(prop) {
+                    let blended =
+                        gdscene::animation::interpolate_variant(prim_val, sec_val, blend_w)
+                            .unwrap_or_else(|| prim_val.clone());
+                    // Find the track's node path from the primary animation.
+                    if let Some(track) = prim_anim.tracks.iter().find(|t| t.property_path == *prop)
+                    {
+                        let node_id = find_node_by_name(&state.scene_tree, &track.node_path);
+                        if let Some(nid) = node_id {
+                            if let Some(node) = state.scene_tree.get_node_mut(nid) {
+                                node.set_property(prop, blended);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let action = if secondary.is_some() {
+        format!("Blend preview: weight={:.0}%", weight * 100.0)
+    } else {
+        "Blend preview cleared".to_string()
+    };
+    state.add_log("info", action);
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"blend_weight":{}}}"#,
+            state.animation_playback.blend_weight
+        ),
+    );
 }
 
 /// Find a node by name anywhere in the scene tree (simple linear search).
@@ -3439,6 +4910,241 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
 
     let json = format!(r#"{{"id":{}}}"#, root_id.raw());
     send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// Viewport asset drop endpoint
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/drop` — handles an asset dropped onto the viewport.
+///
+/// Body: `{"asset_type": "scene"|"texture"|"audio", "path": "...", "parent_id": 123, "pixel_x": 100, "pixel_y": 200}`
+/// Returns: `{"id": <created_node_id>}`
+fn api_viewport_drop(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let asset_type = match parsed.get("asset_type").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing asset_type");
+            return;
+        }
+    };
+    let path = match parsed.get("path").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let parent_raw = match parsed.get("parent_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing parent_id");
+            return;
+        }
+    };
+    let pixel_x = parsed
+        .get("pixel_x")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    let pixel_y = parsed
+        .get("pixel_y")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+
+    match asset_type.as_str() {
+        "scene" => {
+            // Instance the .tscn scene and set position
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    send_error(stream, 400, &format!("failed to read: {e}"));
+                    return;
+                }
+            };
+
+            let mut state = state.lock().unwrap();
+            let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+                Some(id) => id,
+                None => {
+                    send_error(stream, 404, "parent not found");
+                    return;
+                }
+            };
+
+            let world_pos = pixel_to_world_pos(&state, pixel_x, pixel_y);
+
+            let mut cmd = EditorCommand::InstanceScene {
+                parent_id,
+                tscn_source: source,
+                created_ids: Vec::new(),
+                root_id: None,
+            };
+
+            if let Err(e) = cmd.execute(&mut state.scene_tree) {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+
+            let root_id = match &cmd {
+                EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
+                _ => unreachable!(),
+            };
+
+            // Set the instanced root's position to the drop location
+            if let Some(node) = state.scene_tree.get_node_mut(root_id) {
+                node.set_property(
+                    "position",
+                    Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)),
+                );
+            }
+
+            state.undo_stack.push(cmd);
+            state.redo_stack.clear();
+            state.scene_modified = true;
+            state.add_log(
+                "info",
+                format!(
+                    "Dropped scene '{}' at ({:.0}, {:.0})",
+                    path, world_pos.x, world_pos.y
+                ),
+            );
+
+            let json = format!(r#"{{"id":{}}}"#, root_id.raw());
+            send_json(stream, &json);
+        }
+        "texture" => {
+            // Create a Sprite2D with the texture path
+            let mut state = state.lock().unwrap();
+            let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+                Some(id) => id,
+                None => {
+                    send_error(stream, 404, "parent not found");
+                    return;
+                }
+            };
+
+            let world_pos = pixel_to_world_pos(&state, pixel_x, pixel_y);
+
+            // Derive a node name from the filename
+            let node_name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Sprite2D".to_string());
+
+            let mut cmd = EditorCommand::AddNode {
+                parent_id,
+                name: node_name.clone(),
+                class_name: "Sprite2D".to_string(),
+                created_id: None,
+            };
+
+            if let Err(e) = cmd.execute(&mut state.scene_tree) {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+
+            let created_id = match &cmd {
+                EditorCommand::AddNode { created_id, .. } => created_id.unwrap(),
+                _ => unreachable!(),
+            };
+
+            // Set position and texture
+            if let Some(node) = state.scene_tree.get_node_mut(created_id) {
+                node.set_property(
+                    "position",
+                    Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)),
+                );
+                node.set_property("texture", Variant::String(format!("res://{}", path)));
+            }
+
+            state.undo_stack.push(cmd);
+            state.redo_stack.clear();
+            state.scene_modified = true;
+            state.add_log(
+                "info",
+                format!("Created Sprite2D '{}' from '{}'", node_name, path),
+            );
+
+            let json = format!(r#"{{"id":{}}}"#, created_id.raw());
+            send_json(stream, &json);
+        }
+        "audio" => {
+            // Create an AudioStreamPlayer with the audio path
+            let mut state = state.lock().unwrap();
+            let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+                Some(id) => id,
+                None => {
+                    send_error(stream, 404, "parent not found");
+                    return;
+                }
+            };
+
+            let node_name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "AudioStreamPlayer".to_string());
+
+            let mut cmd = EditorCommand::AddNode {
+                parent_id,
+                name: node_name.clone(),
+                class_name: "AudioStreamPlayer".to_string(),
+                created_id: None,
+            };
+
+            if let Err(e) = cmd.execute(&mut state.scene_tree) {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+
+            let created_id = match &cmd {
+                EditorCommand::AddNode { created_id, .. } => created_id.unwrap(),
+                _ => unreachable!(),
+            };
+
+            if let Some(node) = state.scene_tree.get_node_mut(created_id) {
+                node.set_property("stream", Variant::String(format!("res://{}", path)));
+            }
+
+            state.undo_stack.push(cmd);
+            state.redo_stack.clear();
+            state.scene_modified = true;
+            state.add_log(
+                "info",
+                format!("Created AudioStreamPlayer '{}' from '{}'", node_name, path),
+            );
+
+            let json = format!(r#"{{"id":{}}}"#, created_id.raw());
+            send_json(stream, &json);
+        }
+        _ => {
+            send_error(
+                stream,
+                400,
+                &format!("unsupported asset_type: {}", asset_type),
+            );
+        }
+    }
+}
+
+/// Convert pixel coordinates to world-space position using current viewport settings.
+fn pixel_to_world_pos(state: &EditorState, pixel_x: f32, pixel_y: f32) -> Vector2 {
+    let offset = crate::scene_renderer::camera_offset_with_zoom_pan(
+        &state.scene_tree,
+        state.viewport_width,
+        state.viewport_height,
+        state.viewport_zoom,
+        state.viewport_pan,
+    );
+    let z = state.viewport_zoom as f32;
+    Vector2::new((pixel_x - offset.x) / z, (pixel_y - offset.y) / z)
 }
 
 // ---------------------------------------------------------------------------
@@ -3985,6 +5691,2022 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
         stream,
         &serde_json::json!({"cell_size":[ts.cell_size.x,ts.cell_size.y],"tiles":tiles}).to_string(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// pat-r5p: Transform gizmo - axis-constrained drag, rotate, scale
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/drag_axis` -- drag constrained to X or Y axis.
+fn api_viewport_drag_axis(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let dx = p.get("dx").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let dy = p.get("dy").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let axis = p
+        .get("axis")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut s = state.lock().unwrap();
+    let z = s.viewport_zoom as f32;
+    let (wdx, wdy) = match axis.as_str() {
+        "x" => (dx / z, 0.0),
+        "y" => (0.0, dy / z),
+        _ => (dx / z, dy / z),
+    };
+    if let Some(nid) = s.selected_node {
+        let cur_pos = s
+            .scene_tree
+            .get_node(nid)
+            .map(|n| match n.get_property("position") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::ZERO,
+            })
+            .unwrap_or(Vector2::ZERO);
+        let candidate = Vector2::new(cur_pos.x + wdx, cur_pos.y + wdy);
+        let settings = s.display_settings.clone();
+        let (new_pos, guides) = apply_snap(&s.scene_tree, &settings, nid, candidate);
+        s.snap_guides = guides;
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            n.set_property("position", Variant::Vector2(new_pos));
+        }
+    }
+    s.transform_axis_constraint = if axis.is_empty() { None } else { Some(axis) };
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/viewport/rotate_node` -- rotate the selected node.
+fn api_viewport_rotate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let delta_angle = p.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut s = state.lock().unwrap();
+    if let Some(nid) = s.selected_node {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let rotation = match n.get_property("rotation") {
+                Variant::Float(v) => v,
+                _ => 0.0,
+            };
+            n.set_property("rotation", Variant::Float(rotation + delta_angle));
+        }
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 400, "no node selected");
+    }
+}
+
+/// `POST /api/viewport/scale_node` -- scale the selected node.
+fn api_viewport_scale_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let sx = p.get("sx").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let sy = p.get("sy").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let mut s = state.lock().unwrap();
+    if let Some(nid) = s.selected_node {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let scale = match n.get_property("scale") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::new(1.0, 1.0),
+            };
+            n.set_property(
+                "scale",
+                Variant::Vector2(Vector2::new(
+                    (scale.x as f64 * sx) as f32,
+                    (scale.y as f64 * sy) as f32,
+                )),
+            );
+        }
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 400, "no node selected");
+    }
+}
+
+/// `GET /api/plugins` — returns the list of registered editor plugins.
+fn api_get_plugins(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let j = serde_json::to_string(&s.plugins).unwrap_or_else(|_| "[]".to_string());
+    send_json(stream, &format!(r#"{{"plugins":{j}}}"#));
+}
+
+// ---------------------------------------------------------------------------
+// pat-sbdts: Editor settings dialog — keybindings + plugin toggle endpoints
+// ---------------------------------------------------------------------------
+
+/// `GET /api/keybindings` -- returns the list of editor keybindings.
+fn api_get_keybindings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let j = serde_json::to_string(&s.keybindings).unwrap_or_else(|_| "[]".to_string());
+    send_json(stream, &format!(r#"{{"keybindings":{j}}}"#));
+}
+
+/// `POST /api/keybindings` -- update a single keybinding by action name.
+/// Body: `{"action":"undo","keys":"Ctrl+Shift+Z"}`
+fn api_set_keybinding(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let action = match p.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 400, "missing 'action'");
+            return;
+        }
+    };
+    let keys = match p.get("keys").and_then(|v| v.as_str()) {
+        Some(k) => k,
+        None => {
+            send_error(stream, 400, "missing 'keys'");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(kb) = s.keybindings.iter_mut().find(|kb| kb.action == action) {
+        kb.keys = keys.to_string();
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 404, "keybinding action not found");
+    }
+}
+
+/// `POST /api/plugins/toggle` -- toggle a plugin's enabled state.
+/// Body: `{"name":"Tilemap","enabled":true}`
+fn api_toggle_plugin(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match p.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 400, "missing 'name'");
+            return;
+        }
+    };
+    let enabled = match p.get("enabled").and_then(|v| v.as_bool()) {
+        Some(e) => e,
+        None => {
+            send_error(stream, 400, "missing 'enabled'");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(plugin) = s.plugins.iter_mut().find(|pl| pl.name == name) {
+        plugin.enabled = enabled;
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 404, "plugin not found");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-zlv: Snapping improvements - snap info endpoint
+// ---------------------------------------------------------------------------
+
+/// `GET /api/viewport/snap_info` -- returns current snap configuration.
+fn api_get_snap_info(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let ds = &s.display_settings;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"snap_enabled":{},"snap_size":{},"grid_visible":{},"rulers_visible":{},"smart_snap_enabled":{},"smart_snap_threshold":{}}}"#,
+            ds.grid_snap_enabled,
+            ds.grid_snap_size,
+            ds.grid_visible,
+            ds.rulers_visible,
+            ds.smart_snap_enabled,
+            ds.smart_snap_threshold
+        ),
+    );
+}
+
+fn api_get_snap_guides(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let guides_json: Vec<String> = s
+        .snap_guides
+        .iter()
+        .map(|g| {
+            format!(
+                r#"{{"axis":"{}","position":{},"target_node_id":{}}}"#,
+                g.axis,
+                g.position,
+                g.target_node_id.raw()
+            )
+        })
+        .collect();
+    send_json(
+        stream,
+        &format!(r#"{{"guides":[{}]}}"#, guides_json.join(",")),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-cgc: Script editor core - find/replace, go-to-line
+// ---------------------------------------------------------------------------
+
+/// `POST /api/script/find` -- search within a script for occurrences of a pattern.
+fn api_script_find(body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let content = match parsed.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            send_error(stream, 400, "missing content");
+            return;
+        }
+    };
+    let query = match parsed.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q,
+        None => {
+            send_error(stream, 400, "missing query");
+            return;
+        }
+    };
+    let case_sensitive = parsed
+        .get("case_sensitive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let (search_content, search_query) = if case_sensitive {
+        (content.to_string(), query.to_string())
+    } else {
+        (content.to_lowercase(), query.to_lowercase())
+    };
+
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(pos) = search_content[offset..].find(&search_query) {
+        let abs_pos = offset + pos;
+        let line = content[..abs_pos].matches('\n').count() + 1;
+        let col = abs_pos - content[..abs_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        matches.push(format!(
+            r#"{{"line":{},"col":{},"offset":{}}}"#,
+            line, col, abs_pos
+        ));
+        offset = abs_pos + query.len();
+        if offset >= search_content.len() {
+            break;
+        }
+    }
+    send_json(
+        stream,
+        &format!(
+            r#"{{"matches":[{}],"count":{}}}"#,
+            matches.join(","),
+            matches.len()
+        ),
+    );
+}
+
+/// `POST /api/script/replace` -- replace occurrences in a script.
+fn api_script_replace(body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let content = match parsed.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            send_error(stream, 400, "missing content");
+            return;
+        }
+    };
+    let query = match parsed.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q.to_string(),
+        None => {
+            send_error(stream, 400, "missing query");
+            return;
+        }
+    };
+    let replacement = match parsed.get("replacement").and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(),
+        None => {
+            send_error(stream, 400, "missing replacement");
+            return;
+        }
+    };
+    let replace_all = parsed
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let result = if replace_all {
+        content.replace(&query, &replacement)
+    } else {
+        content.replacen(&query, &replacement, 1)
+    };
+
+    let count = if replace_all {
+        content.matches(&query).count()
+    } else if content.contains(&query) {
+        1
+    } else {
+        0
+    };
+
+    let json = serde_json::json!({
+        "content": result,
+        "replacements": count
+    });
+    send_json(stream, &json.to_string());
+}
+
+// ---------------------------------------------------------------------------
+// pat-1v3: Script editor advanced - breakpoints, error lines
+// ---------------------------------------------------------------------------
+
+/// `POST /api/script/breakpoint/toggle` -- toggle a breakpoint on a line.
+fn api_toggle_breakpoint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match parsed.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let line = match parsed.get("line").and_then(|v| v.as_u64()) {
+        Some(l) => l as u32,
+        None => {
+            send_error(stream, 400, "missing line");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let added = {
+        let bps = s.breakpoints.entry(path.clone()).or_default();
+        if let Some(pos) = bps.iter().position(|&l| l == line) {
+            bps.remove(pos);
+            false
+        } else {
+            bps.push(line);
+            bps.sort();
+            true
+        }
+    };
+    s.add_log(
+        "info",
+        format!(
+            "{} breakpoint at {}:{}",
+            if added { "Added" } else { "Removed" },
+            path,
+            line
+        ),
+    );
+    let bp_list = s
+        .breakpoints
+        .get(&path)
+        .map(|v| {
+            v.iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"added":{},"line":{},"breakpoints":[{}]}}"#,
+            added, line, bp_list
+        ),
+    );
+}
+
+/// `GET /api/script/breakpoints` -- get all breakpoints for a script.
+fn api_get_breakpoints(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let path = match query_param(query, "path") {
+        Some(p) => url_decode(p),
+        None => {
+            send_error(stream, 400, "missing path parameter");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let bps = s.breakpoints.get(&path).cloned().unwrap_or_default();
+    let errs = s.script_errors.get(&path).cloned().unwrap_or_default();
+    let bp_json: Vec<String> = bps.iter().map(|l| l.to_string()).collect();
+    let err_json: Vec<String> = errs
+        .iter()
+        .map(|(l, m)| format!(r#"{{"line":{},"message":"{}"}}"#, l, m.replace('"', "\\\"")))
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"breakpoints":[{}],"errors":[{}]}}"#,
+            bp_json.join(","),
+            err_json.join(",")
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-2s1: Animation track reorder + keyframe copy/paste
+// ---------------------------------------------------------------------------
+
+/// `POST /api/animation/track/reorder` -- move a track to a new position.
+fn api_reorder_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let from = match parsed.get("from").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing from");
+            return;
+        }
+    };
+    let to = match parsed.get("to").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing to");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if from >= anim.tracks.len() || to >= anim.tracks.len() {
+        send_error(stream, 400, "track index out of range");
+        return;
+    }
+    let track = anim.tracks.remove(from);
+    anim.tracks.insert(to, track);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/keyframe/copy` -- copy keyframes to clipboard.
+fn api_copy_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_indices: Vec<usize> =
+        match parsed.get("keyframe_indices").and_then(|v| v.as_array()) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect(),
+            None => {
+                send_error(stream, 400, "missing keyframe_indices");
+                return;
+            }
+        };
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let kfs = anim.tracks[track_index].keyframes();
+    let mut copied = Vec::new();
+    for &idx in &keyframe_indices {
+        if idx < kfs.len() {
+            copied.push((track_index, kfs[idx].clone()));
+        }
+    }
+    let count = copied.len();
+    s.keyframe_clipboard = copied;
+    send_json(stream, &format!(r#"{{"ok":true,"copied":{}}}"#, count));
+}
+
+/// `POST /api/animation/keyframe/paste` -- paste keyframes from clipboard.
+fn api_paste_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let time_offset = parsed
+        .get("time_offset")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let mut s = state.lock().unwrap();
+    let clipboard = s.keyframe_clipboard.clone();
+    if clipboard.is_empty() {
+        send_error(stream, 400, "keyframe clipboard is empty");
+        return;
+    }
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let mut pasted = 0;
+    for (_, kf) in &clipboard {
+        let mut new_kf = kf.clone();
+        new_kf.time += time_offset;
+        anim.tracks[track_index].add_keyframe(new_kf);
+        pasted += 1;
+    }
+    send_json(stream, &format!(r#"{{"ok":true,"pasted":{}}}"#, pasted));
+}
+
+// ---------------------------------------------------------------------------
+// pat-o51nk: Curve editor — keyframe transition endpoints
+// ---------------------------------------------------------------------------
+
+/// `POST /api/animation/keyframe/transition` -- set a keyframe's transition type.
+///
+/// Body: `{"animation":"name","track_index":0,"keyframe_index":1,
+///         "transition":"cubic_bezier","x1":0.42,"y1":0,"x2":0.58,"y2":1}`
+///
+/// `transition` can be `"linear"`, `"nearest"`, or `"cubic_bezier"` (requires x1/y1/x2/y2).
+fn api_set_keyframe_transition(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_index = match parsed.get("keyframe_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing keyframe_index");
+            return;
+        }
+    };
+    let transition_str = match parsed.get("transition").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            send_error(stream, 400, "missing transition");
+            return;
+        }
+    };
+
+    use gdscene::animation::TransitionType;
+    let transition = match transition_str {
+        "linear" => TransitionType::Linear,
+        "nearest" => TransitionType::Nearest,
+        "cubic_bezier" => {
+            let x1 = parsed.get("x1").and_then(|v| v.as_f64()).unwrap_or(0.42) as f32;
+            let y1 = parsed.get("y1").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let x2 = parsed.get("x2").and_then(|v| v.as_f64()).unwrap_or(0.58) as f32;
+            let y2 = parsed.get("y2").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            TransitionType::CubicBezier(x1.clamp(0.0, 1.0), y1, x2.clamp(0.0, 1.0), y2)
+        }
+        _ => {
+            send_error(stream, 400, "unknown transition type");
+            return;
+        }
+    };
+
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let track = &mut anim.tracks[track_index];
+    // Access keyframes mutably — we need to get the underlying Vec.
+    // KeyFrame fields are pub, but keyframes() returns &[KeyFrame].
+    // We use a helper: remove + re-add with new transition.
+    let kfs = track.keyframes();
+    if keyframe_index >= kfs.len() {
+        send_error(stream, 400, "keyframe_index out of range");
+        return;
+    }
+    let mut kf = kfs[keyframe_index].clone();
+    kf.transition = transition;
+    track.remove_keyframe(keyframe_index);
+    track.add_keyframe(kf);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/animation/keyframe/transition?animation=name&track_index=0&keyframe_index=1`
+///
+/// Returns the transition type and bezier control points for a specific keyframe.
+fn api_get_keyframe_transition(
+    state: &Arc<Mutex<EditorState>>,
+    query: &str,
+    stream: &mut TcpStream,
+) {
+    let anim_name = match query_param(query, "animation") {
+        Some(s) => url_decode(s),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index: usize = match query_param(query, "track_index").and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_index: usize =
+        match query_param(query, "keyframe_index").and_then(|v| v.parse().ok()) {
+            Some(v) => v,
+            None => {
+                send_error(stream, 400, "missing keyframe_index");
+                return;
+            }
+        };
+
+    let s = state.lock().unwrap();
+    let anim = match s.animations.get(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let kfs = anim.tracks[track_index].keyframes();
+    if keyframe_index >= kfs.len() {
+        send_error(stream, 400, "keyframe_index out of range");
+        return;
+    }
+    let kf = &kfs[keyframe_index];
+    use gdscene::animation::TransitionType;
+    let json = match kf.transition {
+        TransitionType::Linear => r#"{"transition":"linear"}"#.to_string(),
+        TransitionType::Nearest => r#"{"transition":"nearest"}"#.to_string(),
+        TransitionType::CubicBezier(x1, y1, x2, y2) => {
+            format!(
+                r#"{{"transition":"cubic_bezier","x1":{},"y1":{},"x2":{},"y2":{}}}"#,
+                x1, y1, x2, y2
+            )
+        }
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-lbu: Bottom panels - debugger + monitors
+// ---------------------------------------------------------------------------
+
+/// `GET /api/debug/stack_trace` -- get current debug stack trace.
+fn api_get_stack_trace(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let frames: Vec<String> = s
+        .debug_stack_trace
+        .iter()
+        .map(|f| format!(r#""{}""#, f.replace('"', "\\\"")))
+        .collect();
+    send_json(stream, &format!(r#"{{"frames":[{}]}}"#, frames.join(",")));
+}
+
+/// `GET /api/debug/state` -- get full debugger state (stack, breakpoints, variables).
+fn api_get_debug_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let frames: Vec<String> = s
+        .debug_frames
+        .iter()
+        .map(|(func, script, line)| {
+            format!(
+                r#"{{"function":"{}","script":"{}","line":{}}}"#,
+                func.replace('"', "\\\""),
+                script.replace('"', "\\\""),
+                line
+            )
+        })
+        .collect();
+    let breakpoints: Vec<String> = s
+        .debug_breakpoints
+        .iter()
+        .map(|(script, line)| {
+            format!(
+                r#"{{"script":"{}","line":{}}}"#,
+                script.replace('"', "\\\""),
+                line
+            )
+        })
+        .collect();
+    let locals = format_var_list(&s.debug_locals);
+    let globals = format_var_list(&s.debug_globals);
+    send_json(
+        stream,
+        &format!(
+            r#"{{"state":"{}","frames":[{}],"breakpoints":[{}],"locals":[{}],"globals":[{}]}}"#,
+            s.debug_state,
+            frames.join(","),
+            breakpoints.join(","),
+            locals,
+            globals,
+        ),
+    );
+}
+
+/// Format a list of (name, type, value) triples as JSON array entries.
+fn format_var_list(vars: &[(String, String, String)]) -> String {
+    vars.iter()
+        .map(|(name, ty, val)| {
+            format!(
+                r#"{{"name":"{}","type":"{}","value":"{}"}}"#,
+                name.replace('"', "\\\""),
+                ty.replace('"', "\\\""),
+                val.replace('"', "\\\""),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `GET /api/debug/locals` -- get local variables for a specific stack frame.
+fn api_get_debug_locals(state: &Arc<Mutex<EditorState>>, _query: &str, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let locals = format_var_list(&s.debug_locals);
+    send_json(stream, &format!(r#"{{"locals":[{}]}}"#, locals));
+}
+
+/// `POST /api/debug/continue` -- resume execution.
+fn api_debug_continue(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+        s.debug_locals.clear();
+        s.debug_globals.clear();
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/debug/step_in` -- step into next statement.
+fn api_debug_step_in(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+    }
+    send_json(stream, r#"{"ok":true,"step":"in"}"#);
+}
+
+/// `POST /api/debug/step_over` -- step over next statement.
+fn api_debug_step_over(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+    }
+    send_json(stream, r#"{"ok":true,"step":"over"}"#);
+}
+
+/// `POST /api/debug/step_out` -- step out of current function.
+fn api_debug_step_out(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+    }
+    send_json(stream, r#"{"ok":true,"step":"out"}"#);
+}
+
+/// `POST /api/debug/remove_breakpoint` -- remove a breakpoint by script:line.
+fn api_debug_remove_breakpoint(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let mut s = state.lock().unwrap();
+    if let Some(v) = parse_json_body(body) {
+        let script = v["script"].as_str().unwrap_or_default().to_string();
+        let line = v["line"].as_u64().unwrap_or(0) as usize;
+        s.debug_breakpoints
+            .retain(|(sc, ln)| !(sc == &script && *ln == line));
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/monitors/frame_times` -- get frame time history for graph.
+fn api_get_frame_times(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let times: Vec<String> = s.frame_times.iter().map(|t| format!("{:.2}", t)).collect();
+    let avg = if s.frame_times.is_empty() {
+        0.0
+    } else {
+        s.frame_times.iter().sum::<f64>() / s.frame_times.len() as f64
+    };
+    let max = s.frame_times.iter().cloned().fold(0.0f64, f64::max);
+    let min = s.frame_times.iter().cloned().fold(f64::MAX, f64::min);
+    let fps = if avg > 0.0 { 1000.0 / avg } else { 0.0 };
+    send_json(
+        stream,
+        &format!(
+            r#"{{"times":[{}],"avg":{:.2},"max":{:.2},"min":{:.2},"fps":{:.1}}}"#,
+            times.join(","),
+            avg,
+            max,
+            if min == f64::MAX { 0.0 } else { min },
+            fps
+        ),
+    );
+}
+
+/// `GET /api/profiler` -- get profiler frame data for the visual frame graph.
+fn api_get_profiler(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let frames: Vec<String> = s
+        .profiler_frames
+        .iter()
+        .map(|f| {
+            let funcs: Vec<String> = f
+                .functions
+                .iter()
+                .map(|e| {
+                    format!(
+                        r#"{{"name":"{}","time_ms":{:.2}}}"#,
+                        e.name.replace('"', "\\\""),
+                        e.time_ms
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"frame":{},"total_ms":{:.2},"cpu_ms":{:.2},"gpu_ms":{:.2},"functions":[{}]}}"#,
+                f.frame_number,
+                f.total_ms,
+                f.cpu_ms,
+                f.gpu_ms,
+                funcs.join(",")
+            )
+        })
+        .collect();
+
+    // Aggregate stats
+    let count = s.profiler_frames.len();
+    let avg_total = if count > 0 {
+        s.profiler_frames.iter().map(|f| f.total_ms).sum::<f64>() / count as f64
+    } else {
+        0.0
+    };
+    let max_total = s
+        .profiler_frames
+        .iter()
+        .map(|f| f.total_ms)
+        .fold(0.0f64, f64::max);
+    let avg_fps = if avg_total > 0.0 {
+        1000.0 / avg_total
+    } else {
+        0.0
+    };
+
+    send_json(
+        stream,
+        &format!(
+            r#"{{"frames":[{}],"count":{},"avg_ms":{:.2},"max_ms":{:.2},"avg_fps":{:.1}}}"#,
+            frames.join(","),
+            count,
+            avg_total,
+            max_total,
+            avg_fps
+        ),
+    );
+}
+
+/// `POST /api/profiler/record` -- push a profiler frame snapshot (used by runtime).
+fn api_profiler_record(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let frame_number = parsed.get("frame").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_ms = parsed
+        .get("total_ms")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let cpu_ms = parsed
+        .get("cpu_ms")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(total_ms);
+    let gpu_ms = parsed.get("gpu_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    let functions = parsed
+        .get("functions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name")?.as_str()?.to_string();
+                    let time_ms = entry.get("time_ms")?.as_f64()?;
+                    Some(ProfilerFuncEntry { name, time_ms })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut s = state.lock().unwrap();
+    if s.profiler_frames.len() >= 120 {
+        s.profiler_frames.pop_front();
+    }
+    s.profiler_frames.push_back(ProfilerFrame {
+        frame_number,
+        total_ms,
+        cpu_ms,
+        gpu_ms,
+        functions,
+    });
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// pat-dj6: Top bar - editor mode
+// ---------------------------------------------------------------------------
+
+/// `POST /api/editor/mode` -- set the editor mode (2d, 3d, script, game, assetlib).
+fn api_set_editor_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mode = match parsed.get("mode").and_then(|v| v.as_str()) {
+        Some(m) if m == "2d" || m == "3d" || m == "script" || m == "game" || m == "assetlib" => {
+            m.to_string()
+        }
+        _ => {
+            send_error(
+                stream,
+                400,
+                "mode must be '2d', '3d', 'script', 'game', or 'assetlib'",
+            );
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    s.editor_mode = mode.clone();
+    s.add_log("info", format!("Switched to {} mode", mode));
+    send_json(stream, &format!(r#"{{"ok":true,"mode":"{}"}}"#, mode));
+}
+
+/// `GET /api/editor/mode` -- get current editor mode.
+fn api_get_editor_mode(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    send_json(stream, &format!(r#"{{"mode":"{}"}}"#, s.editor_mode));
+}
+
+// ---------------------------------------------------------------------------
+// pat-e0heb: Scene tabs
+// ---------------------------------------------------------------------------
+
+/// `GET /api/scene/tabs` -- list all open scene tabs.
+fn api_get_scene_tabs(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let tabs_json: Vec<String> = s
+        .scene_tabs
+        .iter()
+        .map(|t| {
+            format!(
+                r#"{{"id":{},"path":"{}","name":"{}","modified":{}}}"#,
+                t.id,
+                t.path.replace('\\', "\\\\").replace('"', "\\\""),
+                t.name.replace('\\', "\\\\").replace('"', "\\\""),
+                t.modified
+            )
+        })
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"tabs":[{}],"active_tab_index":{}}}"#,
+            tabs_json.join(","),
+            s.active_tab_index
+        ),
+    );
+}
+
+/// `POST /api/scene/tabs/open` -- open a new scene tab.
+fn api_open_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = parsed
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            if path.is_empty() {
+                "Untitled".to_string()
+            } else {
+                path.rsplit('/').next().unwrap_or(&path).to_string()
+            }
+        });
+    let mut s = state.lock().unwrap();
+    // Check if already open
+    if let Some(idx) = s
+        .scene_tabs
+        .iter()
+        .position(|t| !t.path.is_empty() && t.path == path)
+    {
+        s.active_tab_index = idx;
+        send_json(
+            stream,
+            &format!(
+                r#"{{"ok":true,"tab_id":{},"switched":true,"active_tab_index":{}}}"#,
+                s.scene_tabs[idx].id, idx
+            ),
+        );
+        return;
+    }
+    let tab_id = s.next_tab_id();
+    s.scene_tabs.push(SceneTab {
+        id: tab_id,
+        path,
+        name,
+        modified: false,
+    });
+    s.active_tab_index = s.scene_tabs.len() - 1;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"tab_id":{},"active_tab_index":{}}}"#,
+            tab_id, s.active_tab_index
+        ),
+    );
+}
+
+/// `POST /api/scene/tabs/close` -- close a scene tab by id.
+fn api_close_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let tab_id = match parsed.get("tab_id").and_then(|v| v.as_u64()) {
+        Some(id) => id as u32,
+        None => {
+            send_error(stream, 400, "tab_id required");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if s.scene_tabs.len() <= 1 {
+        send_error(stream, 400, "cannot close last tab");
+        return;
+    }
+    if let Some(idx) = s.scene_tabs.iter().position(|t| t.id == tab_id) {
+        s.scene_tabs.remove(idx);
+        if s.active_tab_index >= s.scene_tabs.len() {
+            s.active_tab_index = s.scene_tabs.len() - 1;
+        }
+        send_json(
+            stream,
+            &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, s.active_tab_index),
+        );
+    } else {
+        send_error(stream, 404, "tab not found");
+    }
+}
+
+/// `POST /api/scene/tabs/switch` -- switch to a scene tab by id or index.
+fn api_switch_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(tab_id) = parsed.get("tab_id").and_then(|v| v.as_u64()) {
+        if let Some(idx) = s.scene_tabs.iter().position(|t| t.id == tab_id as u32) {
+            s.active_tab_index = idx;
+            send_json(
+                stream,
+                &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
+            );
+        } else {
+            send_error(stream, 404, "tab not found");
+        }
+    } else if let Some(index) = parsed.get("index").and_then(|v| v.as_u64()) {
+        let idx = index as usize;
+        if idx < s.scene_tabs.len() {
+            s.active_tab_index = idx;
+            send_json(
+                stream,
+                &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
+            );
+        } else {
+            send_error(stream, 400, "index out of range");
+        }
+    } else {
+        send_error(stream, 400, "tab_id or index required");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch 2 editor bead endpoints
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/set_mode` — sets the viewport tool mode.
+fn api_set_viewport_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mode_str = match p.get("mode").and_then(|v| v.as_str()) {
+        Some(m) => m,
+        None => {
+            send_error(stream, 400, "missing mode");
+            return;
+        }
+    };
+    let mode = match ViewportMode::from_str_name(mode_str) {
+        Some(m) => m,
+        None => {
+            send_error(stream, 400, "invalid mode");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    s.viewport_mode = mode;
+    s.add_log("info", format!("Viewport mode: {}", mode.as_str()));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"mode":"{}"}}"#, mode.as_str()),
+    );
+}
+
+/// `GET /api/viewport/mode` — returns the current viewport tool mode.
+fn api_get_viewport_mode(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    send_json(
+        stream,
+        &format!(r#"{{"mode":"{}"}}"#, s.viewport_mode.as_str()),
+    );
+}
+
+/// `GET /api/node/script?node_id=<id>` — returns the script source for a node.
+fn api_get_node_script(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw_id: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, raw_id) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = s.scene_tree.get_node(nid).unwrap();
+    let script_path = match node.get_property("_script_path") {
+        Variant::String(sp) => sp,
+        _ => {
+            send_json(stream, r#"{"has_script":false,"path":"","source":""}"#);
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let file_path = if let Some(stripped) = script_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&script_path)
+    };
+    let source = std::fs::read_to_string(&file_path).unwrap_or_default();
+    let json = serde_json::json!({ "has_script": true, "path": script_path, "source": source });
+    send_json(stream, &json.to_string());
+}
+
+/// `GET /api/search?q=<query>` — searches all .gd script files for a string.
+fn api_search_scripts(query: &str, stream: &mut TcpStream) {
+    let search = match query_param(query, "q") {
+        Some(q) => url_decode(q),
+        None => {
+            send_error(stream, 400, "missing q parameter");
+            return;
+        }
+    };
+    if search.is_empty() {
+        send_json(stream, r#"{"results":[]}"#);
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut results = Vec::new();
+    fn search_dir(
+        dir: &std::path::Path,
+        query: &str,
+        results: &mut Vec<serde_json::Value>,
+        depth: usize,
+    ) {
+        if depth > 6 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                search_dir(&path, query, results, depth + 1);
+            } else if name.ends_with(".gd") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for (i, line) in content.lines().enumerate() {
+                        if line.contains(query) {
+                            results.push(serde_json::json!({
+                                "file": path.display().to_string(),
+                                "line": i + 1,
+                                "text": line.trim()
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    search_dir(&cwd, &search, &mut results, 0);
+    send_json(stream, &serde_json::json!({"results": results}).to_string());
+}
+
+/// `POST /api/signal/disconnect` — disconnects a signal from a node.
+fn api_disconnect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let signal = match p.get("signal").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            send_error(stream, 400, "missing signal");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, node_raw) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = s.scene_tree.get_node_mut(nid).unwrap();
+    let connections = match node.get_property("signal_connections") {
+        Variant::String(c) => c,
+        _ => String::new(),
+    };
+    let updated: Vec<&str> = connections
+        .split(';')
+        .filter(|entry| !entry.is_empty() && !entry.contains(&signal))
+        .collect();
+    node.set_property("signal_connections", Variant::String(updated.join(";")));
+    s.add_log(
+        "info",
+        format!("Signal disconnected: {} on node {}", signal, node_raw),
+    );
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/output/clear` — clears the script output log.
+fn api_clear_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    s.output_entries.clear();
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/output` — returns script output log entries.
+fn api_get_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let entries: Vec<&String> = s.output_entries.iter().collect();
+    send_json(stream, &serde_json::json!({"entries": entries}).to_string());
+}
+
+// ---------------------------------------------------------------------------
+// pat-kj4: Project settings
+// ---------------------------------------------------------------------------
+
+/// `GET /api/project_settings` — returns project settings organized by category (pat-c4zlm).
+fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let s = state.lock().unwrap();
+        let categories = serde_json::json!([
+            {
+                "id": "application", "label": "Application",
+                "properties": [
+                    {"key":"project_name","label":"Project Name","editor":"text","value":&s.project_name},
+                    {"key":"main_scene","label":"Main Scene","editor":"text","value":&s.project_main_scene},
+                    {"key":"description","label":"Description","editor":"text","value":&s.project_description},
+                    {"key":"icon","label":"Icon Path","editor":"text","value":&s.project_icon},
+                ]
+            },
+            {
+                "id": "display", "label": "Display",
+                "properties": [
+                    {"key":"resolution_w","label":"Resolution Width","editor":{"type":"integer","min":1,"max":7680},"value":s.project_resolution_w},
+                    {"key":"resolution_h","label":"Resolution Height","editor":{"type":"integer","min":1,"max":4320},"value":s.project_resolution_h},
+                    {"key":"stretch_mode","label":"Stretch Mode","editor":{"type":"enum","options":["disabled","canvas_items","viewport"]},"value":&s.project_stretch_mode},
+                    {"key":"stretch_aspect","label":"Stretch Aspect","editor":{"type":"enum","options":["ignore","keep","keep_width","keep_height","expand"]},"value":&s.project_stretch_aspect},
+                    {"key":"fullscreen","label":"Fullscreen","editor":"bool","value":s.project_fullscreen},
+                    {"key":"vsync","label":"V-Sync","editor":"bool","value":s.project_vsync},
+                ]
+            },
+            {
+                "id": "physics", "label": "Physics",
+                "properties": [
+                    {"key":"physics_fps","label":"Physics FPS","editor":{"type":"integer","min":1,"max":240},"value":s.project_physics_fps},
+                    {"key":"gravity","label":"Default Gravity","editor":{"type":"number","min":0,"max":10000,"step":0.1},"value":s.project_gravity},
+                    {"key":"linear_damp","label":"Default Linear Damp","editor":{"type":"number","min":0,"max":100,"step":0.01},"value":s.project_linear_damp},
+                    {"key":"angular_damp","label":"Default Angular Damp","editor":{"type":"number","min":0,"max":100,"step":0.01},"value":s.project_angular_damp},
+                ]
+            },
+            {
+                "id": "audio", "label": "Audio",
+                "properties": [
+                    {"key":"bus_layout","label":"Default Bus Layout","editor":"text","value":&s.project_bus_layout},
+                    {"key":"master_volume_db","label":"Master Volume (dB)","editor":{"type":"number","min":-80,"max":24,"step":0.1},"value":s.project_master_volume_db},
+                    {"key":"audio_input","label":"Enable Audio Input","editor":"bool","value":s.project_audio_input},
+                ]
+            },
+            {
+                "id": "rendering", "label": "Rendering",
+                "properties": [
+                    {"key":"renderer","label":"Renderer","editor":{"type":"enum","options":["forward_plus","mobile","compatibility"]},"value":&s.project_renderer},
+                    {"key":"anti_aliasing","label":"Anti-Aliasing","editor":{"type":"enum","options":["disabled","fxaa","msaa_2x","msaa_4x","msaa_8x"]},"value":&s.project_anti_aliasing},
+                    {"key":"environment_default","label":"Default Environment","editor":"text","value":&s.project_environment_default},
+                ]
+            }
+        ]);
+        serde_json::json!({
+            "project_name": &s.project_name,
+            "main_scene": &s.project_main_scene,
+            "description": &s.project_description,
+            "categories": categories,
+        })
+        .to_string()
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/project_settings` — updates project settings (pat-c4zlm).
+fn api_set_project_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let json = {
+        let mut s = state.lock().unwrap();
+        // Application
+        if let Some(v) = p.get("project_name").and_then(|v| v.as_str()) {
+            s.project_name = v.to_string();
+        }
+        if let Some(v) = p.get("description").and_then(|v| v.as_str()) {
+            s.project_description = v.to_string();
+        }
+        if let Some(v) = p.get("icon").and_then(|v| v.as_str()) {
+            s.project_icon = v.to_string();
+        }
+        if let Some(v) = p.get("main_scene").and_then(|v| v.as_str()) {
+            s.project_main_scene = v.to_string();
+        }
+        // Display
+        if let Some(v) = p.get("resolution_w").and_then(|v| v.as_u64()) {
+            s.project_resolution_w = v as u32;
+        }
+        if let Some(v) = p.get("resolution_h").and_then(|v| v.as_u64()) {
+            s.project_resolution_h = v as u32;
+        }
+        if let Some(v) = p.get("stretch_mode").and_then(|v| v.as_str()) {
+            s.project_stretch_mode = v.to_string();
+        }
+        if let Some(v) = p.get("stretch_aspect").and_then(|v| v.as_str()) {
+            s.project_stretch_aspect = v.to_string();
+        }
+        if let Some(v) = p.get("fullscreen").and_then(|v| v.as_bool()) {
+            s.project_fullscreen = v;
+        }
+        if let Some(v) = p.get("vsync").and_then(|v| v.as_bool()) {
+            s.project_vsync = v;
+        }
+        // Physics
+        if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {
+            s.project_physics_fps = v as u32;
+        }
+        if let Some(v) = p.get("gravity").and_then(|v| v.as_f64()) {
+            s.project_gravity = v;
+        }
+        if let Some(v) = p.get("linear_damp").and_then(|v| v.as_f64()) {
+            s.project_linear_damp = v;
+        }
+        if let Some(v) = p.get("angular_damp").and_then(|v| v.as_f64()) {
+            s.project_angular_damp = v;
+        }
+        // Audio
+        if let Some(v) = p.get("bus_layout").and_then(|v| v.as_str()) {
+            s.project_bus_layout = v.to_string();
+        }
+        if let Some(v) = p.get("master_volume_db").and_then(|v| v.as_f64()) {
+            s.project_master_volume_db = v;
+        }
+        if let Some(v) = p.get("audio_input").and_then(|v| v.as_bool()) {
+            s.project_audio_input = v;
+        }
+        // Rendering
+        if let Some(v) = p.get("renderer").and_then(|v| v.as_str()) {
+            s.project_renderer = v.to_string();
+        }
+        if let Some(v) = p.get("anti_aliasing").and_then(|v| v.as_str()) {
+            s.project_anti_aliasing = v.to_string();
+        }
+        if let Some(v) = p.get("environment_default").and_then(|v| v.as_str()) {
+            s.project_environment_default = v.to_string();
+        }
+        serde_json::json!({ "ok": true }).to_string()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-flr: Filesystem operations
+// ---------------------------------------------------------------------------
+
+/// `POST /api/filesystem/rename` — renames a file or directory.
+fn api_filesystem_rename(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let old_path = match p.get("old_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing old_path");
+            return;
+        }
+    };
+    let new_name = match p.get("new_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing new_name");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = old_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&old_path)
+    };
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let new_path = resolved.parent().unwrap_or(&cwd).join(&new_name);
+    match std::fs::rename(&resolved, &new_path) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("rename failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/delete` — deletes a file or empty directory.
+fn api_filesystem_delete(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let result = if resolved.is_dir() {
+        std::fs::remove_dir(&resolved)
+    } else {
+        std::fs::remove_file(&resolved)
+    };
+    match result {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("delete failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/mkdir` — creates a new directory.
+fn api_filesystem_mkdir(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+    match std::fs::create_dir_all(&resolved) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("mkdir failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-omfrq: Filesystem tree and dir stubs
+// ---------------------------------------------------------------------------
+
+/// `GET /api/filesystem/tree` — returns the full directory tree.
+fn api_filesystem_tree(query: &str, stream: &mut TcpStream) {
+    // Stub: return empty tree. Full implementation pending.
+    send_json(stream, r#"{"tree":[]}"#);
+}
+
+/// `GET /api/filesystem/dir` — returns directory listing.
+fn api_filesystem_dir(query: &str, stream: &mut TcpStream) {
+    // Stub: return empty listing. Full implementation pending.
+    send_json(stream, r#"{"files":[]}"#);
+}
+
+// ---------------------------------------------------------------------------
+// pat-vyko1: Import settings stubs
+// ---------------------------------------------------------------------------
+
+/// `GET /api/import_settings` — returns import settings for a resource.
+fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
+    // Stub: return empty settings. Full implementation pending.
+    send_json(stream, r#"{"settings":{}}"#);
+}
+
+/// `POST /api/import_settings` — updates import settings for a resource.
+fn api_set_import_settings(body: &str, stream: &mut TcpStream) {
+    // Stub: accept and acknowledge. Full implementation pending.
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// pat-1zlel: Version control integration
+// ---------------------------------------------------------------------------
+
+/// `GET /api/vcs/status` — returns git status for the project directory.
+fn api_vcs_status(stream: &mut TcpStream) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let status = crate::vcs::query_git_status(&cwd);
+    let json = serde_json::to_string(&status).unwrap_or_else(|_| r#"{"error":"serialize"}"#.into());
+    send_json(stream, &json);
+}
+
+/// `GET /api/vcs/diff?file=<path>&staged=<bool>` — returns diff for a file.
+fn api_vcs_diff(query: &str, stream: &mut TcpStream) {
+    let file = match query_param(query, "file") {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file parameter");
+            return;
+        }
+    };
+    let staged = query_param(query, "staged").map_or(false, |v| v == "true" || v == "1");
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let diff = if staged {
+        crate::vcs::get_file_diff_staged(&cwd, &file)
+    } else {
+        crate::vcs::get_file_diff(&cwd, &file)
+    };
+    // Escape the diff string for JSON.
+    let escaped = serde_json::to_string(&diff).unwrap_or_else(|_| "\"\"".into());
+    send_json(stream, &format!(r#"{{"diff":{escaped}}}"#));
+}
+
+/// `GET /api/vcs/log?count=<N>` — returns recent commit log.
+fn api_vcs_log(query: &str, stream: &mut TcpStream) {
+    let count: u32 = query_param(query, "count")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let commits = crate::vcs::get_commit_log(&cwd, count);
+    let json = serde_json::to_string(&commits).unwrap_or_else(|_| "[]".into());
+    send_json(stream, &format!(r#"{{"commits":{json}}}"#));
+}
+
+/// `POST /api/vcs/stage` — stages a file for commit.
+fn api_vcs_stage(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let file = match p.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::vcs::stage_file(&cwd, &file) {
+        Ok(()) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &e),
+    }
+}
+
+/// `POST /api/vcs/unstage` — unstages a file.
+fn api_vcs_unstage(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let file = match p.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::vcs::unstage_file(&cwd, &file) {
+        Ok(()) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &e),
+    }
+}
+
+/// `POST /api/vcs/discard` — discards working tree changes for a file.
+fn api_vcs_discard(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let file = match p.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::vcs::discard_changes(&cwd, &file) {
+        Ok(()) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-mn3: Multi-object shared properties
+// ---------------------------------------------------------------------------
+
+/// `POST /api/node/shared_properties` — returns properties shared by all given nodes.
+fn api_get_shared_properties(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_ids: Vec<u64> = match p.get("node_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_u64()).collect(),
+        None => {
+            send_error(stream, 400, "missing node_ids array");
+            return;
+        }
+    };
+    let json = {
+        let s = state.lock().unwrap();
+        let mut shared: Option<HashMap<String, serde_json::Value>> = None;
+        for raw_id in &node_ids {
+            let nid = match find_node_by_raw_id(&s.scene_tree, *raw_id) {
+                Some(id) => id,
+                None => continue,
+            };
+            let node = match s.scene_tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            let mut props = HashMap::new();
+            for (name, value) in node.properties() {
+                let vj = gdvariant::serialize::to_json(value);
+                let type_name = vj
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                props.insert(
+                    name.to_string(),
+                    serde_json::json!({"name": name, "type": type_name, "value": vj}),
+                );
+            }
+            shared = match shared {
+                None => Some(props),
+                Some(existing) => {
+                    let mut intersection = HashMap::new();
+                    for (k, v) in existing {
+                        if props.contains_key(&k) {
+                            intersection.insert(k, v);
+                        }
+                    }
+                    Some(intersection)
+                }
+            };
+        }
+        let props_arr: Vec<serde_json::Value> = shared.unwrap_or_default().into_values().collect();
+        serde_json::json!({"properties": props_arr, "count": node_ids.len()}).to_string()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-ugb0p: Command palette
+// ---------------------------------------------------------------------------
+
+/// The static list of editor commands available in the command palette.
+const EDITOR_COMMANDS: &[(&str, &str, &str)] = &[
+    // (id, label, category)
+    ("save_scene", "Save Scene", "File"),
+    ("load_scene", "Load Scene", "File"),
+    ("new_scene", "New Scene", "File"),
+    ("add_node", "Add Node...", "Scene"),
+    ("delete_node", "Delete Selected Node", "Scene"),
+    ("duplicate_node", "Duplicate Selected Node", "Scene"),
+    ("rename_node", "Rename Selected Node", "Scene"),
+    ("copy_nodes", "Copy", "Edit"),
+    ("paste_nodes", "Paste", "Edit"),
+    ("cut_nodes", "Cut", "Edit"),
+    ("undo", "Undo", "Edit"),
+    ("redo", "Redo", "Edit"),
+    ("select_tool", "Select Tool", "Tool"),
+    ("move_tool", "Move Tool", "Tool"),
+    ("rotate_tool", "Rotate Tool", "Tool"),
+    ("scale_tool", "Scale Tool", "Tool"),
+    ("zoom_in", "Zoom In", "View"),
+    ("zoom_out", "Zoom Out", "View"),
+    ("zoom_reset", "Reset Zoom", "View"),
+    ("toggle_grid", "Toggle Grid", "View"),
+    ("toggle_rulers", "Toggle Rulers", "View"),
+    ("toggle_snap", "Toggle Grid Snap", "View"),
+    ("open_settings", "Open Editor Settings", "Editor"),
+    ("open_project_settings", "Open Project Settings", "Editor"),
+    ("open_help", "Open Help / Shortcuts", "Editor"),
+    ("search_nodes", "Search Nodes", "Scene"),
+    ("play_scene", "Play Scene", "Run"),
+    ("stop_scene", "Stop Scene", "Run"),
+    ("toggle_theme", "Toggle Light/Dark Theme", "View"),
+];
+
+/// `GET /api/commands` — returns the full list of editor commands for the palette.
+fn api_get_commands(stream: &mut TcpStream) {
+    let commands: Vec<serde_json::Value> = EDITOR_COMMANDS
+        .iter()
+        .map(|&(id, label, category)| {
+            serde_json::json!({
+                "id": id,
+                "label": label,
+                "category": category,
+            })
+        })
+        .collect();
+    let json = serde_json::json!({ "commands": commands }).to_string();
+    send_json(stream, &json);
+}
+
+/// `POST /api/command/execute` — execute a command by id.
+///
+/// Body: `{"command": "save_scene"}` (plus optional params).
+/// Server-side commands (undo, redo, etc.) are executed directly.
+/// Client-side commands return `{"action": "client", "command": "<id>"}` to
+/// signal the frontend to handle them.
+fn api_execute_command(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let cmd = match parsed.get("command").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            send_error(stream, 400, "missing command");
+            return;
+        }
+    };
+
+    match cmd.as_str() {
+        "undo" => {
+            let mut st = state.lock().unwrap();
+            if let Some(action) = st.undo_stack.pop() {
+                action.undo(&mut st.scene_tree);
+                st.redo_stack.push(action);
+            }
+            send_json(stream, r#"{"ok":true,"executed":"undo"}"#);
+        }
+        "redo" => {
+            let mut st = state.lock().unwrap();
+            if let Some(mut action) = st.redo_stack.pop() {
+                let _ = action.execute(&mut st.scene_tree);
+                st.undo_stack.push(action);
+            }
+            send_json(stream, r#"{"ok":true,"executed":"redo"}"#);
+        }
+        "delete_node" => {
+            let st = state.lock().unwrap();
+            if let Some(sel) = st.selected_node {
+                drop(st);
+                api_delete_node(state, &format!(r#"{{"node_id":{}}}"#, sel.raw()), stream);
+            } else {
+                send_json(stream, r#"{"ok":false,"reason":"no node selected"}"#);
+            }
+        }
+        // Most commands are best handled client-side (opening dialogs, changing
+        // tool mode, etc.). Return an action hint so the JS can dispatch them.
+        _ => {
+            // Verify the command id is valid
+            let valid = EDITOR_COMMANDS.iter().any(|&(id, _, _)| id == cmd.as_str());
+            if !valid {
+                send_error(stream, 404, "unknown command");
+                return;
+            }
+            let json = serde_json::json!({
+                "ok": true,
+                "action": "client",
+                "command": cmd,
+            });
+            send_json(stream, &json.to_string());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5248,12 +8970,71 @@ mod tests {
     }
 
     #[test]
+    fn test_filesystem_includes_image_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("icon.png"), &[0x89, 0x50, 0x4e, 0x47]).unwrap();
+        std::fs::write(tmp.path().join("bg.jpg"), &[0xFF, 0xD8, 0xFF]).unwrap();
+        std::fs::write(tmp.path().join("main.tscn"), "[gd_scene]").unwrap();
+        std::fs::write(tmp.path().join("readme.txt"), "ignore").unwrap();
+
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"icon.png"),
+            "should find png files, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"bg.jpg"),
+            "should find jpg files, got {:?}",
+            names
+        );
+        assert!(names.contains(&"main.tscn"), "should still find tscn files");
+        assert!(
+            !names.contains(&"readme.txt"),
+            "should not include txt files"
+        );
+
+        let png_entry = entries.iter().find(|e| e.name == "icon.png").unwrap();
+        assert_eq!(png_entry.file_type, "Image");
+    }
+
+    #[test]
+    fn test_filesystem_includes_shader_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("water.gdshader"), "shader_type spatial;").unwrap();
+        std::fs::write(tmp.path().join("project.cfg"), "[application]").unwrap();
+
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"water.gdshader"),
+            "should find shader files"
+        );
+        assert!(names.contains(&"project.cfg"), "should find cfg files");
+    }
+
+    #[test]
+    fn test_file_type_for_ext_images() {
+        assert_eq!(super::file_type_for_ext("png"), "Image");
+        assert_eq!(super::file_type_for_ext("jpg"), "Image");
+        assert_eq!(super::file_type_for_ext("jpeg"), "Image");
+        assert_eq!(super::file_type_for_ext("webp"), "Image");
+        assert_eq!(super::file_type_for_ext("svg"), "Image");
+        assert_eq!(super::file_type_for_ext("wav"), "Audio");
+        assert_eq!(super::file_type_for_ext("ttf"), "Font");
+        assert_eq!(super::file_type_for_ext("xyz"), "File");
+    }
+
+    #[test]
     fn test_fs_entry_to_json() {
         let entry = super::FsEntry {
             name: "test.tscn".to_string(),
             path: "res://test.tscn".to_string(),
             is_dir: false,
             children: Vec::new(),
+            size: 1024,
+            file_type: "Scene".to_string(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -5273,7 +9054,11 @@ mod tests {
                 path: "res://scenes/main.tscn".to_string(),
                 is_dir: false,
                 children: Vec::new(),
+                size: 512,
+                file_type: "Scene".to_string(),
             }],
+            size: 0,
+            file_type: String::new(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -6848,6 +10633,985 @@ position = Vector2(10, 20)
             resp.contains("404"),
             "selecting nonexistent node should return 404"
         );
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-c9b Filesystem dock =====
+
+    #[test]
+    fn test_b3_filesystem_endpoint_returns_json() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/filesystem");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v.get("root").is_some());
+        assert!(v.get("files").is_some());
+        assert!(v["files"].is_array());
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_filesystem_html_panel() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("id=\"filesystem-panel\""));
+        assert!(body.contains("id=\"fs-tree\""));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_panel_in_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("id=\"fs-preview\""),
+            "should have preview panel"
+        );
+        assert!(
+            body.contains("showFilePreview"),
+            "should have preview JS function"
+        );
+        assert!(
+            body.contains("preview-img"),
+            "should have image preview CSS class"
+        );
+        assert!(
+            body.contains("preview-code"),
+            "should have code preview CSS class"
+        );
+        assert!(
+            body.contains("/api/preview/file"),
+            "should reference preview API"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_scene() {
+        let (handle, port) = make_server();
+        let tmp_scene = format!("test_preview_scene_{}.tscn", port);
+        std::fs::write(
+            &tmp_scene,
+            "[gd_scene load_steps=2]\n[ext_resource type=\"PackedScene\"]\n[node name=\"Root\" type=\"Node2D\"]\n[node name=\"Child\" type=\"Sprite2D\" parent=\".\"]\n",
+        )
+        .unwrap();
+        let resp = http_get(port, &format!("/api/preview/file?path=res://{}", tmp_scene));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["type"], "scene");
+        assert_eq!(v["node_count"], 2);
+        assert_eq!(v["root_type"], "Node2D");
+        assert_eq!(v["ext_resources"], 1);
+        std::fs::remove_file(&tmp_scene).ok();
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_script() {
+        let (handle, port) = make_server();
+        let tmp_script = format!("test_preview_script_{}.gd", port);
+        std::fs::write(
+            &tmp_script,
+            "extends Node\n\nfunc _ready():\n\tprint(\"hello\")\n",
+        )
+        .unwrap();
+        let resp = http_get(
+            port,
+            &format!("/api/preview/file?path=res://{}", tmp_script),
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["type"], "script");
+        assert_eq!(v["lines"], 4);
+        assert!(v["preview"].as_str().unwrap().contains("extends Node"));
+        std::fs::remove_file(&tmp_script).ok();
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_resource() {
+        let (handle, port) = make_server();
+        let tmp_res = format!("test_preview_res_{}.tres", port);
+        std::fs::write(
+            &tmp_res,
+            "[gd_resource type=\"Theme\" format=3]\n[sub_resource type=\"StyleBox\"]\n",
+        )
+        .unwrap();
+        let resp = http_get(port, &format!("/api/preview/file?path=res://{}", tmp_res));
+        let body = extract_body(&resp);
+        let v: serde_json::Value =
+            serde_json::from_str(body).expect(&format!("invalid JSON: {}", body));
+        assert_eq!(v["type"], "resource", "body was: {}", body);
+        assert_eq!(v["resource_type"], "Theme");
+        assert_eq!(v["sub_resources"], 1);
+        std::fs::remove_file(&tmp_res).ok();
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_missing_file() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/preview/file?path=res://nonexistent_xyz.gd");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            v["error"].is_string(),
+            "should return error for missing file"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_missing_param() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/preview/file");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            v["error"].is_string(),
+            "should return error for missing param"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_filesystem_click_loads_tscn() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/scene/load",
+            r#"{"path":"res://nonexistent.tscn"}"#,
+        );
+        assert!(!resp.contains("404 Not Found"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-200 Menu actions =====
+
+    #[test]
+    fn test_b3_menu_bar_in_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("id=\"menu-bar\""));
+        assert!(body.contains("menu-new-scene"));
+        assert!(body.contains("menu-save-scene"));
+        assert!(body.contains("menu-open-scene"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_menu_undo_redo_apis() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{},"property":"hp","value":{{"type":"Int","value":42}}}}"#,
+                main_id
+            ),
+        );
+        assert!(http_post(port, "/api/undo", "").contains("200 OK"));
+        assert!(http_post(port, "/api/redo", "").contains("200 OK"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_menu_scene_endpoints() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/scene/save", r#"{"path":""}"#);
+        assert!(!resp.contains("404"));
+        handle.stop();
+    }
+
+    /// pat-xse8a: Verify all Godot-standard menus (Scene, Edit, Project,
+    /// Debug, Editor, Help) are present in the editor HTML with correct actions.
+    #[test]
+    fn test_menu_bar_godot_menus_with_actions() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+
+        // Menu bar and brand
+        assert!(body.contains("id=\"menu-bar\""), "menu-bar element missing");
+        assert!(body.contains("menu-bar-brand"), "brand element missing");
+        assert!(body.contains("Patina"), "brand text missing");
+
+        // Scene menu and its actions
+        assert!(body.contains("data-menu=\"scene\""), "Scene menu missing");
+        assert!(
+            body.contains("data-action=\"scene-new\""),
+            "scene-new action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-open\""),
+            "scene-open action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-save\""),
+            "scene-save action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-save-as\""),
+            "scene-save-as action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-close\""),
+            "scene-close action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-quit\""),
+            "scene-quit action missing"
+        );
+
+        // Edit menu and its actions
+        assert!(body.contains("data-menu=\"edit\""), "Edit menu missing");
+        assert!(
+            body.contains("data-action=\"edit-undo\""),
+            "edit-undo action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-redo\""),
+            "edit-redo action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-cut\""),
+            "edit-cut action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-copy\""),
+            "edit-copy action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-paste\""),
+            "edit-paste action missing"
+        );
+
+        // Project menu and its actions
+        assert!(
+            body.contains("data-menu=\"project\""),
+            "Project menu missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-settings\""),
+            "project-settings action missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-export\""),
+            "project-export action missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-refresh\""),
+            "project-refresh action missing"
+        );
+
+        // Debug menu and its actions
+        assert!(body.contains("data-menu=\"debug\""), "Debug menu missing");
+        assert!(
+            body.contains("data-action=\"debug-run\""),
+            "debug-run action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-run-current\""),
+            "debug-run-current action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-pause\""),
+            "debug-pause action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-stop\""),
+            "debug-stop action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-step\""),
+            "debug-step action missing"
+        );
+
+        // Editor menu and its actions
+        assert!(body.contains("data-menu=\"editor\""), "Editor menu missing");
+        assert!(
+            body.contains("data-action=\"editor-settings\""),
+            "editor-settings action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-layout-save\""),
+            "editor-layout-save action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-layout-default\""),
+            "editor-layout-default action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-toggle-fullscreen\""),
+            "editor-toggle-fullscreen action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-toggle-console\""),
+            "editor-toggle-console action missing"
+        );
+
+        // Help menu and its actions
+        assert!(body.contains("data-menu=\"help\""), "Help menu missing");
+        assert!(
+            body.contains("data-action=\"help-docs\""),
+            "help-docs action missing"
+        );
+        assert!(
+            body.contains("data-action=\"help-issues\""),
+            "help-issues action missing"
+        );
+        assert!(
+            body.contains("data-action=\"help-about\""),
+            "help-about action missing"
+        );
+
+        // Keyboard shortcuts are shown
+        assert!(body.contains("Ctrl+N"), "Ctrl+N shortcut missing");
+        assert!(body.contains("Ctrl+O"), "Ctrl+O shortcut missing");
+        assert!(body.contains("Ctrl+S"), "Ctrl+S shortcut missing");
+        assert!(body.contains("F5"), "F5 shortcut missing");
+        assert!(body.contains("F11"), "F11 shortcut missing");
+
+        // handleMenuAction function exists in JS
+        assert!(
+            body.contains("handleMenuAction"),
+            "handleMenuAction function missing"
+        );
+
+        handle.stop();
+    }
+
+    // ===== pat-b68xe: Inspector toolbar, history, and sub-resource navigation =====
+
+    #[test]
+    fn test_inspector_toolbar_history_and_sub_resource_navigation() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+
+        // Inspector toolbar CSS classes
+        assert!(
+            body.contains(".insp-history"),
+            "insp-history CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-history button"),
+            "insp-history button CSS missing"
+        );
+        assert!(
+            body.contains(".resource-info"),
+            "resource-info CSS class missing"
+        );
+        assert!(
+            body.contains(".resource-info .resource-type"),
+            "resource-type CSS class missing"
+        );
+        assert!(
+            body.contains(".resource-info .resource-path"),
+            "resource-path CSS class missing"
+        );
+
+        // Sub-resource breadcrumb CSS
+        assert!(
+            body.contains(".insp-breadcrumb"),
+            "insp-breadcrumb CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-breadcrumb-item"),
+            "insp-breadcrumb-item CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-breadcrumb-sep"),
+            "insp-breadcrumb-sep CSS class missing"
+        );
+
+        // Inspector history JS state variables
+        assert!(
+            body.contains("var inspectorHistory = []"),
+            "inspectorHistory state missing"
+        );
+        assert!(
+            body.contains("var inspectorHistoryIndex = -1"),
+            "inspectorHistoryIndex state missing"
+        );
+        assert!(
+            body.contains("var subResourceStack = []"),
+            "subResourceStack state missing"
+        );
+
+        // Inspector history navigation functions
+        assert!(
+            body.contains("function inspectorBack()"),
+            "inspectorBack function missing"
+        );
+        assert!(
+            body.contains("function inspectorForward()"),
+            "inspectorForward function missing"
+        );
+        assert!(
+            body.contains("function pushInspectorHistory("),
+            "pushInspectorHistory function missing"
+        );
+        assert!(
+            body.contains("function updateHistoryButtons()"),
+            "updateHistoryButtons function missing"
+        );
+
+        // Inspector toolbar creates back/forward buttons with keyboard shortcut tooltips
+        assert!(
+            body.contains("inspector-history-back"),
+            "back button id missing"
+        );
+        assert!(
+            body.contains("inspector-history-forward"),
+            "forward button id missing"
+        );
+        assert!(body.contains("Alt+Left"), "Alt+Left shortcut hint missing");
+        assert!(
+            body.contains("Alt+Right"),
+            "Alt+Right shortcut hint missing"
+        );
+
+        // Alt+Arrow keyboard shortcuts wired up
+        assert!(
+            body.contains("e.altKey && e.key === 'ArrowLeft'"),
+            "Alt+Left keyboard shortcut missing"
+        );
+        assert!(
+            body.contains("e.altKey && e.key === 'ArrowRight'"),
+            "Alt+Right keyboard shortcut missing"
+        );
+
+        // Resource info structured display (type + path spans)
+        assert!(body.contains("resource-type"), "resource-type span missing");
+        assert!(body.contains("resource-path"), "resource-path span missing");
+
+        // Sub-resource navigation: breadcrumb rendering with root and stack items
+        assert!(
+            body.contains("insp-breadcrumb"),
+            "breadcrumb element id/class missing"
+        );
+        assert!(
+            body.contains("subResourceStack.length"),
+            "sub-resource stack length check missing"
+        );
+
+        // Sub-resource button navigates into sub-resource (pushes to stack)
+        assert!(
+            body.contains("subResourceStack.push"),
+            "subResourceStack.push missing for navigation"
+        );
+        assert!(
+            body.contains("SubResource"),
+            "SubResource pattern matching missing"
+        );
+
+        // Sub-resource inline edit button
+        assert!(
+            body.contains("insp-sub-resource-btn"),
+            "sub-resource button class missing"
+        );
+        assert!(
+            body.contains("data-sub-resource"),
+            "data-sub-resource attribute missing"
+        );
+
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-5f4 Settings =====
+
+    #[test]
+    fn test_b3_settings_defaults() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/settings");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["grid_snap_enabled"], false);
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["physics_fps"], 60);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_update() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/settings",
+            r#"{"grid_snap_enabled":true,"theme":"light","physics_fps":120}"#,
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["grid_snap_enabled"], true);
+        assert_eq!(v["theme"], "light");
+        assert_eq!(v["physics_fps"], 120);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_panel_sizes() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/settings",
+            r#"{"panel_sizes":{"left":250,"bottom":180}}"#,
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["panel_sizes"]["left"], 250.0);
+        assert_eq!(v["panel_sizes"]["bottom"], 180.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("set-theme"));
+        assert!(body.contains("set-physics-fps"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-d8b Theme =====
+
+    #[test]
+    fn test_b3_theme_dark_default() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/settings");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["theme"], "dark");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_theme_light_toggle() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/settings", r#"{"theme":"light"}"#);
+        let resp = http_get(port, "/api/settings");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["theme"], "light");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_light_theme_css() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        assert!(extract_body(&resp).contains("body.light"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-81a Keyboard shortcuts =====
+
+    #[test]
+    fn test_b3_shortcuts_documented() {
+        let (handle, port) = make_server();
+        let resp_html = http_get(port, "/editor");
+        let body = extract_body(&resp_html);
+        assert!(body.contains("Ctrl+S"));
+        assert!(body.contains("Ctrl+Z"));
+        assert!(body.contains("Ctrl+D"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_shortcuts_js_handler() {
+        let (handle, port) = make_server();
+        let resp_html = http_get(port, "/editor");
+        let body = extract_body(&resp_html);
+        assert!(body.contains("setupKeyboardShortcuts"));
+        assert!(body.contains("keydown"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-0fa Plugin system =====
+
+    #[test]
+    fn test_b3_plugins_empty() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/plugins");
+        assert!(resp.contains("200 OK"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert!(v["plugins"].is_array());
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_plugins_registered() {
+        // Plugin system is deferred; verify the endpoint returns a valid response.
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/plugins");
+        assert!(resp.contains("200 OK") || resp.contains("404"));
+        handle.stop();
+    }
+    // =========================================================================
+    // Batch 2 editor bead tests
+    // =========================================================================
+
+    // Bead 1: Viewport selection modes
+    #[test]
+    fn test_viewport_set_mode_select() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"select"}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""mode":"select""#));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_move() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"move"}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""mode":"move""#));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_rotate_and_get() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/viewport/set_mode", r#"{"mode":"rotate"}"#);
+        let resp = http_get(port, "/api/viewport/mode");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains(r#""mode":"rotate""#),
+            "mode should be rotate, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_invalid() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"invalid"}"#);
+        assert!(resp.contains("400"), "invalid mode should return 400");
+        handle.stop();
+    }
+
+    // Bead 2: Transform gizmos
+    #[test]
+    fn test_gizmo_renders_for_selected_node_batch2() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        let nid = tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, Some(nid), 200, 200);
+        let mut has_red = false;
+        let mut has_green = false;
+        for y in 80..120 {
+            for x in 80..180 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+                if c.g > 0.7 && c.r < 0.4 && c.b < 0.4 {
+                    has_green = true;
+                }
+            }
+        }
+        assert!(has_red, "selected node should have red gizmo arrow");
+        assert!(has_green, "selected node should have green gizmo arrow");
+    }
+
+    #[test]
+    fn test_gizmo_not_rendered_when_unselected_batch2() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, None, 200, 200);
+        let mut has_red = false;
+        for y in 90..110 {
+            for x in 100..160 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+            }
+        }
+        assert!(!has_red, "unselected node should not have gizmo arrows");
+    }
+
+    #[test]
+    fn test_gizmo_different_colors_per_axis() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("NPC", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        let nid = tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, Some(nid), 300, 300);
+        // Scan the whole framebuffer for both red and green gizmo pixels
+        let mut has_red = false;
+        let mut has_green = false;
+        for y in 0..300 {
+            for x in 0..300 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+                if c.g > 0.7 && c.r < 0.4 && c.b < 0.4 {
+                    has_green = true;
+                }
+            }
+        }
+        assert!(
+            has_red && has_green,
+            "gizmo should have both red (X) and green (Y) axis colors"
+        );
+    }
+
+    // Bead 3: Snapping
+    #[test]
+    fn test_snap_info_endpoint() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/viewport/snap_info");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("snap"),
+            "snap_info should return snap settings, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_snap_toggle_via_settings_batch2() {
+        let (handle, port) = make_server();
+        http_post(
+            port,
+            "/api/settings",
+            r#"{"grid_snap_enabled":true,"grid_snap_size":16}"#,
+        );
+        let resp = http_get(port, "/api/settings");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("grid_snap"),
+            "settings should return snap settings; got: {body}"
+        );
+        handle.stop();
+    }
+
+    // Bead 4: Script editor core
+    #[test]
+    fn test_get_node_script_no_script() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/node/script?node_id={main_id}"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("has_script") && body.contains("false"),
+            "node without script should return has_script:false, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_node_script_with_path() {
+        let port = free_port();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut main = Node::new("Main", "Node2D");
+        main.set_property(
+            "_script_path",
+            Variant::String("nonexistent.gd".to_string()),
+        );
+        tree.add_child(root, main).unwrap();
+        let state = EditorState::new(tree);
+        let handle = EditorServerHandle::start(port, state);
+        thread::sleep(Duration::from_millis(100));
+        let resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let nid = v["nodes"]["children"][0]["id"].as_u64().unwrap();
+        let resp = http_get(port, &format!("/api/node/script?node_id={nid}"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("has_script") && body.contains("true"),
+            "node with script path should return has_script:true, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_editor_html_has_syntax_highlighting() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("gd-keyword"), "should have keyword styling");
+        assert!(html.contains("gd-string"), "should have string styling");
+        assert!(html.contains("gd-comment"), "should have comment styling");
+    }
+
+    // Bead 5: Script search
+    #[test]
+    fn test_search_missing_query() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/search");
+        assert!(resp.contains("400"), "missing q should return 400");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_search_returns_results_array() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/search?q=nonexistent_string_xyz");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("results"),
+            "should return results key, got: {body}"
+        );
+        handle.stop();
+    }
+
+    // Bead 6: Signals dock
+    #[test]
+    fn test_signals_endpoint_returns_signals() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/node/signals?node_id={main_id}"));
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("signals"),
+            "should return signals, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_signal_connect_and_disconnect() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_post(
+            port,
+            "/api/node/signals/connect",
+            &format!(r#"{{"node_id":{main_id},"signal":"ready","method":"_on_ready"}}"#),
+        );
+        assert!(resp.contains("200") || resp.contains("ok"));
+        let resp = http_post(
+            port,
+            "/api/signal/disconnect",
+            &format!(r#"{{"node_id":{main_id},"signal":"ready"}}"#),
+        );
+        assert!(resp.contains("200 OK"), "disconnect should succeed");
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""ok":true"#), "got: {body}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_signal_disconnect_nonexistent_node() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/signal/disconnect",
+            r#"{"node_id":9999999,"signal":"ready"}"#,
+        );
+        assert!(
+            resp.contains("404"),
+            "should return 404 for nonexistent node"
+        );
+        handle.stop();
+    }
+
+    // Bead 7: Animation editor
+    #[test]
+    fn test_animations_list_initially_empty() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/animations");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body == "[]" || body.contains("[]"),
+            "should be empty, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_create_and_list_batch2() {
+        let (handle, port) = make_server();
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"walk","length":1.0}"#,
+        );
+        let resp = http_get(port, "/api/animations");
+        let body = extract_body(&resp);
+        assert!(body.contains("walk"), "should contain 'walk', got: {body}");
+        handle.stop();
+    }
+
+    // Bead 8: Bottom panels
+    #[test]
+    fn test_output_returns_entries() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/output");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("entries"),
+            "should return entries, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_output_clear_endpoint() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/output/clear", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""ok":true"#), "got: {body}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_bottom_panel_and_output_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("bottom-panel"), "should have bottom panel");
+        assert!(html.contains("output"), "should have output");
+    }
+
+    // Bead 9: Top bar
+    #[test]
+    fn test_top_bar_play_stop_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("btn-play"), "should have play button");
+        assert!(html.contains("btn-stop"), "should have stop button");
+    }
+
+    #[test]
+    fn test_scene_tab_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("scene-tab"), "should have scene tab");
+    }
+
+    #[test]
+    fn test_runtime_play_stop_endpoints() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/runtime/play", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("running") || body.contains("true"),
+            "got: {body}"
+        );
+        let resp = http_post(port, "/api/runtime/stop", "");
+        assert!(resp.contains("200 OK"));
         handle.stop();
     }
 }

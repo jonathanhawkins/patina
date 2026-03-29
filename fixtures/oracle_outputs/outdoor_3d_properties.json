@@ -1,0 +1,330 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"name": "Camera",
+					"path": "/root/Outdoor/Camera",
+					"properties": {
+						"far": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 1000.0
+						},
+						"fov": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 70.0
+						},
+						"near": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.100000001490116
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 0.939999997615814, "z": -0.340000003576279 },
+									"z": { "x": 0.0, "y": 0.340000003576279, "z": 0.939999997615814 }
+								},
+								"origin": { "x": 0.0, "y": 10.0, "z": 20.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"name": "Sun",
+					"path": "/root/Outdoor/Sun",
+					"properties": {
+						"light_energy": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 1.20000004768372
+						},
+						"shadow_enabled": {
+							"class_type": "",
+							"hint": 42,
+							"type": "bool",
+							"value": true
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 0.699999988079071, "z": -0.699999988079071 },
+									"z": { "x": 0.0, "y": 0.699999988079071, "z": 0.699999988079071 }
+								},
+								"origin": { "x": 0.0, "y": 50.0, "z": 0.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"name": "TerrainShape",
+							"path": "/root/Outdoor/Terrain/TerrainShape",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"name": "TerrainMesh",
+							"path": "/root/Outdoor/Terrain/TerrainMesh",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "StaticBody3D",
+					"name": "Terrain",
+					"path": "/root/Outdoor/Terrain",
+					"properties": {
+
+					}
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"name": "Tree1",
+					"path": "/root/Outdoor/Tree1",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": 5.0, "y": 0.0, "z": -3.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"name": "Tree2",
+					"path": "/root/Outdoor/Tree2",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": -8.0, "y": 0.0, "z": 4.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"name": "RockShape",
+							"path": "/root/Outdoor/Rock/RockShape",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"name": "RockMesh",
+							"path": "/root/Outdoor/Rock/RockMesh",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "RigidBody3D",
+					"name": "Rock",
+					"path": "/root/Outdoor/Rock",
+					"properties": {
+						"mass": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 50.0
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": 2.0, "y": 5.0, "z": -1.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"name": "AmbientLight",
+					"path": "/root/Outdoor/AmbientLight",
+					"properties": {
+						"light_energy": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.300000011920929
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": 0.0, "y": 15.0, "z": 0.0 }
+							}
+						}
+					}
+				}
+			],
+			"class": "Node3D",
+			"name": "Outdoor",
+			"path": "/root/Outdoor",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

@@ -15,14 +15,15 @@ Patina is a monorepo for a Rust-native Godot-compatible game engine, its marketi
 - Website dev: `cd apps/web && pnpm dev`
 - Website build: `cd apps/web && pnpm build`
 - Engine build: `cd engine-rs && cargo build`
-- Engine test: `cd engine-rs && cargo test`
+- Engine test: `cd engine-rs && cargo nextest run` (preferred) or `cargo test`
 - Lint all: `pnpm lint` (root)
 
 ## Testing Rules (Non-Negotiable)
 - Every bug fix MUST include a test that would have caught the bug
 - Every new feature MUST include tests covering happy path AND edge cases
 - Stress/concurrency tests required for any server or networking code
-- Run `cargo test --workspace` before every commit — never commit with failing tests
+- Run `cargo nextest run --workspace` before every commit — never commit with failing tests
+- Prefer `cargo nextest run` over `cargo test` — it runs tests in parallel and is significantly faster with 333+ integration test files
 - If a test is flaky, fix the root cause — do not skip or ignore it
 
 ## Debugging Rules
@@ -31,9 +32,10 @@ Patina is a monorepo for a Rust-native Godot-compatible game engine, its marketi
 - Never assume a fix works — verify in the browser with error tracking active for at least 15 seconds
 - For network errors (ERR_CONNECTION_RESET, ERR_EMPTY_RESPONSE), the root cause is almost always server-side — check Rust panic/error output
 
-## Editor Feature Gate
-- No new `gdeditor` features until runtime parity exits are green — see `AGENTS.md` "Editor Feature Gate" section and `EXIT_CRITERIA.md` Gates 1–8
-- Editor test files (`editor_test.rs`, `gdeditor` unit tests) are maintenance-only — no new feature coverage, only stability/regression checks
+## Editor Feature Gate — LIFTED (2026-03-19)
+- **GATE LIFTED** — runtime parity exits are green. Editor feature work is the primary focus.
+- All editor beads (UI, viewport, asset browser, shader editor, etc.) are available for implementation.
+- DO NOT revert this gate — it was lifted because Gates 1-8 passed. See AGENTS.md.
 
 ## Important
 - Always read AGENTS.md first for safety rules and conventions
