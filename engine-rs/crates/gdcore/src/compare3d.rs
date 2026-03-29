@@ -92,10 +92,7 @@ impl PhysicsTraceCompareResult {
     /// Generates a human-readable parity report.
     pub fn parity_report(&self, label: &str) -> String {
         let mut report = String::new();
-        report.push_str(&format!(
-            "=== 3D Physics Trace Parity: {} ===\n",
-            label
-        ));
+        report.push_str(&format!("=== 3D Physics Trace Parity: {} ===\n", label));
         report.push_str(&format!(
             "Entries: {}/{} matched ({:.1}%)\n",
             self.matching_entries,
@@ -218,9 +215,7 @@ pub fn assert_deterministic(run_a: &[PhysicsTraceEntry3D], run_b: &[PhysicsTrace
         if a.name != b.name || a.frame != b.frame {
             return false;
         }
-        if (a.position - b.position).length() > 0.0
-            || (a.velocity - b.velocity).length() > 0.0
-        {
+        if (a.position - b.position).length() > 0.0 || (a.velocity - b.velocity).length() > 0.0 {
             return false;
         }
     }
@@ -830,8 +825,7 @@ impl AggregateParityReport3D {
 
     /// Renders a JSON report.
     pub fn render_json(&self) -> String {
-        let fixture_jsons: Vec<String> =
-            self.fixtures.iter().map(|f| f.render_json()).collect();
+        let fixture_jsons: Vec<String> = self.fixtures.iter().map(|f| f.render_json()).collect();
 
         let (pass, partial, fail, skipped) = self.verdict_counts();
         format!(
@@ -874,13 +868,7 @@ mod tests {
     use super::*;
 
     fn entry(name: &str, frame: u64, px: f32, py: f32, pz: f32) -> PhysicsTraceEntry3D {
-        PhysicsTraceEntry3D::new(
-            name,
-            frame,
-            Vector3::new(px, py, pz),
-            Vector3::ZERO,
-            0.0,
-        )
+        PhysicsTraceEntry3D::new(name, frame, Vector3::new(px, py, pz), Vector3::ZERO, 0.0)
     }
 
     fn entry_with_vel(
@@ -960,9 +948,9 @@ mod tests {
             entry("B", 1, 0.0, 0.0, 0.0),
         ];
         let actual = vec![
-            entry("A", 0, 0.0, 0.0, 0.0), // match
-            entry("B", 0, 0.0, 0.0, 0.0), // match
-            entry("A", 1, 1.0, 0.0, 0.0), // match
+            entry("A", 0, 0.0, 0.0, 0.0),  // match
+            entry("B", 0, 0.0, 0.0, 0.0),  // match
+            entry("A", 1, 1.0, 0.0, 0.0),  // match
             entry("B", 1, 99.0, 0.0, 0.0), // mismatch
         ];
         let result = compare_physics_traces(&expected, &actual, 0.001, 0.001);
@@ -1079,10 +1067,7 @@ mod tests {
 
     #[test]
     fn max_and_avg_diffs_tracked() {
-        let expected = vec![
-            entry("A", 0, 0.0, 0.0, 0.0),
-            entry("A", 1, 0.0, 0.0, 0.0),
-        ];
+        let expected = vec![entry("A", 0, 0.0, 0.0, 0.0), entry("A", 1, 0.0, 0.0, 0.0)];
         let actual = vec![
             entry("A", 0, 1.0, 0.0, 0.0), // dist = 1.0
             entry("A", 1, 3.0, 0.0, 0.0), // dist = 3.0
@@ -1269,8 +1254,8 @@ mod tests {
 
     #[test]
     fn fixture_report_json_structure() {
-        let report = FixtureParityReport3D::new("test_fixture")
-            .with_render(RenderCompareResult3D {
+        let report =
+            FixtureParityReport3D::new("test_fixture").with_render(RenderCompareResult3D {
                 matching_pixels: 95,
                 total_pixels: 100,
                 max_diff: 0.01,

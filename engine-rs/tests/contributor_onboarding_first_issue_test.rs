@@ -17,12 +17,13 @@
 
 use std::fs;
 
-const ONBOARDING_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/contributor-onboarding.md");
+const ONBOARDING_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs/contributor-onboarding.md"
+);
 
 fn read_onboarding() -> String {
-    fs::read_to_string(ONBOARDING_PATH)
-        .expect("contributor-onboarding.md must exist")
+    fs::read_to_string(ONBOARDING_PATH).expect("contributor-onboarding.md must exist")
 }
 
 // ===========================================================================

@@ -160,8 +160,14 @@ fn shape_godot_int_roundtrip_all() {
 
 #[test]
 fn shape_invalid_int_returns_ellipsoid() {
-    assert_eq!(FogVolumeShape::from_godot_int(-1), FogVolumeShape::Ellipsoid);
-    assert_eq!(FogVolumeShape::from_godot_int(99), FogVolumeShape::Ellipsoid);
+    assert_eq!(
+        FogVolumeShape::from_godot_int(-1),
+        FogVolumeShape::Ellipsoid
+    );
+    assert_eq!(
+        FogVolumeShape::from_godot_int(99),
+        FogVolumeShape::Ellipsoid
+    );
 }
 
 // ===========================================================================
@@ -423,7 +429,10 @@ fn density_no_height_falloff_uniform() {
     v.material.edge_fade = 0.0;
     let bottom = v.sample_density(Vector3::new(0.0, -4.0, 0.0));
     let top = v.sample_density(Vector3::new(0.0, 4.0, 0.0));
-    assert!(approx(bottom, top), "No falloff should be uniform: {bottom} vs {top}");
+    assert!(
+        approx(bottom, top),
+        "No falloff should be uniform: {bottom} vs {top}"
+    );
 }
 
 #[test]
@@ -445,8 +454,14 @@ fn density_world_uniform_everywhere() {
     let mut v = FogVolume::world();
     v.material.density = 0.5;
     v.material.height_falloff = 0.0;
-    assert!(approx(v.sample_density(Vector3::new(100.0, 200.0, 300.0)), 0.5));
-    assert!(approx(v.sample_density(Vector3::new(-100.0, -200.0, -300.0)), 0.5));
+    assert!(approx(
+        v.sample_density(Vector3::new(100.0, 200.0, 300.0)),
+        0.5
+    ));
+    assert!(approx(
+        v.sample_density(Vector3::new(-100.0, -200.0, -300.0)),
+        0.5
+    ));
 }
 
 #[test]
@@ -457,7 +472,10 @@ fn density_ellipsoid_center_vs_surface() {
     v.material.edge_fade = 1.0;
     let center = v.sample_density(Vector3::ZERO);
     let near_surface = v.sample_density(Vector3::new(2.8, 0.0, 0.0));
-    assert!(center > near_surface, "Center should be denser than near-surface");
+    assert!(
+        center > near_surface,
+        "Center should be denser than near-surface"
+    );
 }
 
 // ===========================================================================
@@ -475,7 +493,10 @@ fn scene_with_environment_and_fog_volume() {
     let fog = Node::new("ValleyFog", "FogVolume");
     let fog_id = tree.add_child(root, fog).unwrap();
 
-    assert_eq!(tree.get_node(env_id).unwrap().class_name(), "WorldEnvironment");
+    assert_eq!(
+        tree.get_node(env_id).unwrap().class_name(),
+        "WorldEnvironment"
+    );
     assert_eq!(tree.get_node(fog_id).unwrap().class_name(), "FogVolume");
 }
 

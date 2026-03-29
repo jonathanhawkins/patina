@@ -15,15 +15,15 @@
 
 use std::sync::Arc;
 
+use gdresource::loader::TresLoader;
 use gdresource::resource::{ExtResource, Resource};
 use gdresource::saver::TresSaver;
-use gdresource::loader::TresLoader;
 use gdresource::ResourceLoader;
 use gdresource::UnifiedLoader;
-use gdscene::packed_scene::{PackedScene, add_packed_scene_to_tree};
+use gdscene::node::{Node, NodeId};
+use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_saver::TscnSaver;
 use gdscene::scene_tree::SceneTree;
-use gdscene::node::{Node, NodeId};
 use gdvariant::Variant;
 
 /// Helper: replace all root children with nodes from a packed scene.
@@ -31,7 +31,8 @@ use gdvariant::Variant;
 fn change_scene_to_packed(tree: &mut SceneTree, packed: &PackedScene) -> NodeId {
     let root = tree.root_id();
     // Remove existing children of root.
-    let children: Vec<NodeId> = tree.get_node(root)
+    let children: Vec<NodeId> = tree
+        .get_node(root)
         .map(|n| n.children().to_vec())
         .unwrap_or_default();
     for child in children {
@@ -45,11 +46,7 @@ fn change_scene_to_packed(tree: &mut SceneTree, packed: &PackedScene) -> NodeId 
 // ===========================================================================
 
 fn fixture_path(name: &str) -> String {
-    format!(
-        "{}/../fixtures/{}",
-        env!("CARGO_MANIFEST_DIR"),
-        name
-    )
+    format!("{}/../fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
 }
 
 fn load_fixture(name: &str) -> String {
@@ -73,16 +70,13 @@ fn load_animation_resource_from_fixture() {
         res.get_property("name"),
         Some(&Variant::String("walk_cycle".into()))
     );
-    assert_eq!(
-        res.get_property("length"),
-        Some(&Variant::Float(1.0))
-    );
-    assert_eq!(
-        res.get_property("loop_mode"),
-        Some(&Variant::Int(1))
-    );
+    assert_eq!(res.get_property("length"), Some(&Variant::Float(1.0)));
+    assert_eq!(res.get_property("loop_mode"), Some(&Variant::Int(1)));
     // Verify we have at least the key animation properties
-    assert!(res.property_count() >= 3, "animation must have >=3 properties");
+    assert!(
+        res.property_count() >= 3,
+        "animation must have >=3 properties"
+    );
     // Confirm uid was parsed
     let _ = content; // used above
 }
@@ -131,10 +125,16 @@ fn load_resource_with_ext_refs() {
     );
 
     // Verify we parsed the texture reference
-    let has_texture = res.ext_resources.values().any(|e| e.resource_type == "Texture2D");
+    let has_texture = res
+        .ext_resources
+        .values()
+        .any(|e| e.resource_type == "Texture2D");
     assert!(has_texture, "must have Texture2D ext_resource");
 
-    let has_script = res.ext_resources.values().any(|e| e.resource_type == "Script");
+    let has_script = res
+        .ext_resources
+        .values()
+        .any(|e| e.resource_type == "Script");
     assert!(has_script, "must have Script ext_resource");
 
     // Also has inline sub-resource
@@ -345,7 +345,10 @@ fn change_scene_to_packed_replaces_children() {
 
     // Verify old child name is gone
     let has_old = tree.get_node_by_path("/root/OldChild");
-    assert!(has_old.is_none(), "old child must be removed after scene change");
+    assert!(
+        has_old.is_none(),
+        "old child must be removed after scene change"
+    );
 }
 
 #[test]
@@ -364,13 +367,20 @@ fn change_scene_preserves_root() {
 fn sequential_scene_changes() {
     let mut tree = SceneTree::new();
 
-    let scenes = ["scenes/minimal.tscn", "scenes/hierarchy.tscn", "scenes/minimal.tscn"];
+    let scenes = [
+        "scenes/minimal.tscn",
+        "scenes/hierarchy.tscn",
+        "scenes/minimal.tscn",
+    ];
 
     for scene_name in &scenes {
         let src = load_fixture(scene_name);
         let packed = PackedScene::from_tscn(&src).unwrap();
         change_scene_to_packed(&mut tree, &packed);
-        assert!(tree.node_count() >= 2, "must have nodes after loading {scene_name}");
+        assert!(
+            tree.node_count() >= 2,
+            "must have nodes after loading {scene_name}"
+        );
     }
 }
 
@@ -411,7 +421,10 @@ fn tscn_saver_roundtrip_minimal() {
 
     // Must contain gd_scene header and at least one node section
     assert!(saved.contains("[gd_scene"), "saved scene must have header");
-    assert!(saved.contains("[node"), "saved scene must have node sections");
+    assert!(
+        saved.contains("[node"),
+        "saved scene must have node sections"
+    );
 }
 
 #[test]
@@ -426,8 +439,14 @@ fn tscn_saver_preserves_node_types() {
     let saved = TscnSaver::save_tree(&tree, root);
 
     // The hierarchy scene has named nodes — verify they appear in output
-    assert!(saved.contains("name="), "saved scene must preserve node names");
-    assert!(saved.contains("type="), "saved scene must preserve node types");
+    assert!(
+        saved.contains("name="),
+        "saved scene must preserve node names"
+    );
+    assert!(
+        saved.contains("type="),
+        "saved scene must preserve node types"
+    );
 }
 
 #[test]
@@ -574,7 +593,8 @@ fn wire_connections_on_signals_complex_scene() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let scene_root = gdscene::packed_scene::add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
+    let scene_root =
+        gdscene::packed_scene::add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
 
     // Wire connections (should not panic even if paths don't resolve)
     let _ = gdscene::packed_scene::wire_connections(&mut tree, scene_root, connections);
@@ -600,7 +620,10 @@ fn physics_scene_loads_and_instantiates() {
     let src = load_fixture("scenes/physics_playground.tscn");
     let packed = PackedScene::from_tscn(&src).unwrap();
 
-    assert!(packed.node_count() >= 3, "physics scene must have multiple nodes");
+    assert!(
+        packed.node_count() >= 3,
+        "physics scene must have multiple nodes"
+    );
 
     let nodes = packed.instance().unwrap();
     assert!(!nodes.is_empty());
@@ -616,7 +639,10 @@ fn physics_scene_loads_and_instantiates() {
 fn physics_extended_scene_loads() {
     let src = load_fixture("scenes/physics_playground_extended.tscn");
     let packed = PackedScene::from_tscn(&src).unwrap();
-    assert!(packed.node_count() >= 5, "extended physics must have many nodes");
+    assert!(
+        packed.node_count() >= 5,
+        "extended physics must have many nodes"
+    );
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
@@ -794,7 +820,10 @@ fn all_fixture_scenes_load_successfully() {
             loaded += 1;
         }
     }
-    assert!(loaded >= 5, "must load at least 5 fixture scenes (got {loaded})");
+    assert!(
+        loaded >= 5,
+        "must load at least 5 fixture scenes (got {loaded})"
+    );
 }
 
 #[test]
@@ -821,7 +850,10 @@ fn all_fixture_resources_load_successfully() {
             loaded += 1;
         }
     }
-    assert!(loaded >= 3, "must load at least 3 fixture resources (got {loaded})");
+    assert!(
+        loaded >= 3,
+        "must load at least 3 fixture resources (got {loaded})"
+    );
 }
 
 // ===========================================================================
@@ -874,7 +906,9 @@ fn reparent_node_updates_hierarchy() {
 
     let parent_a = tree.add_child(root, Node::new("ParentA", "Node")).unwrap();
     let parent_b = tree.add_child(root, Node::new("ParentB", "Node")).unwrap();
-    let child = tree.add_child(parent_a, Node::new("Child", "Node2D")).unwrap();
+    let child = tree
+        .add_child(parent_a, Node::new("Child", "Node2D"))
+        .unwrap();
 
     // Verify child is under ParentA
     assert_eq!(tree.get_node(child).unwrap().parent(), Some(parent_a));
@@ -897,7 +931,9 @@ fn queue_free_removes_node_after_process_deletions() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let child = tree.add_child(root, Node::new("Ephemeral", "Node")).unwrap();
+    let child = tree
+        .add_child(root, Node::new("Ephemeral", "Node"))
+        .unwrap();
     assert_eq!(tree.node_count(), 2);
 
     tree.queue_free(child);
@@ -942,12 +978,20 @@ fn duplicate_subtree_preserves_structure() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let parent = tree.add_child(root, Node::new("Original", "Node2D")).unwrap();
-    let c1 = tree.add_child(parent, Node::new("ChildA", "Sprite2D")).unwrap();
-    let _c2 = tree.add_child(parent, Node::new("ChildB", "Label")).unwrap();
+    let parent = tree
+        .add_child(root, Node::new("Original", "Node2D"))
+        .unwrap();
+    let c1 = tree
+        .add_child(parent, Node::new("ChildA", "Sprite2D"))
+        .unwrap();
+    let _c2 = tree
+        .add_child(parent, Node::new("ChildB", "Label"))
+        .unwrap();
 
     // Set a property on c1
-    tree.get_node_mut(c1).unwrap().set_property("texture", Variant::String("icon.png".into()));
+    tree.get_node_mut(c1)
+        .unwrap()
+        .set_property("texture", Variant::String("icon.png".into()));
 
     let cloned = tree.duplicate_subtree(parent).unwrap();
     assert_eq!(cloned.len(), 3); // parent + 2 children
@@ -973,7 +1017,9 @@ fn duplicate_subtree_copies_groups() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let node = tree.add_child(root, Node::new("GroupNode", "Node")).unwrap();
+    let node = tree
+        .add_child(root, Node::new("GroupNode", "Node"))
+        .unwrap();
     let _ = tree.add_to_group(node, "enemies");
     let _ = tree.add_to_group(node, "targetable");
 
@@ -1076,7 +1122,9 @@ fn main_loop_pause_unpause_dispatches_notifications() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let _node = tree.add_child(root, Node::new("PauseTarget", "Node")).unwrap();
+    let _node = tree
+        .add_child(root, Node::new("PauseTarget", "Node"))
+        .unwrap();
 
     let mut main_loop = MainLoop::new(tree);
     assert!(!main_loop.paused());
@@ -1102,7 +1150,8 @@ fn main_loop_scene_change_mid_execution() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    tree.add_child(root, Node::new("OldNode", "Node2D")).unwrap();
+    tree.add_child(root, Node::new("OldNode", "Node2D"))
+        .unwrap();
 
     let mut main_loop = MainLoop::new(tree);
     main_loop.run_frames(5, 1.0 / 60.0);
@@ -1110,7 +1159,10 @@ fn main_loop_scene_change_mid_execution() {
     // Change scene mid-execution
     let scene_src = load_fixture("scenes/minimal.tscn");
     let packed = PackedScene::from_tscn(&scene_src).unwrap();
-    main_loop.tree_mut().change_scene_to_packed(&packed).unwrap();
+    main_loop
+        .tree_mut()
+        .change_scene_to_packed(&packed)
+        .unwrap();
 
     // Continue running — should not crash
     main_loop.run_frames(5, 1.0 / 60.0);
@@ -1234,7 +1286,8 @@ fn main_loop_step_traced_captures_frame_record() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    tree.add_child(root, Node::new("TracedNode", "Node2D")).unwrap();
+    tree.add_child(root, Node::new("TracedNode", "Node2D"))
+        .unwrap();
 
     let mut main_loop = MainLoop::new(tree);
     let record = main_loop.step_traced(1.0 / 60.0);
@@ -1250,7 +1303,8 @@ fn main_loop_run_frames_traced_produces_frame_trace() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    tree.add_child(root, Node::new("TracedNode", "Node")).unwrap();
+    tree.add_child(root, Node::new("TracedNode", "Node"))
+        .unwrap();
 
     let mut main_loop = MainLoop::new(tree);
     let trace = main_loop.run_frames_traced(5, 1.0 / 60.0);
@@ -1326,7 +1380,9 @@ fn should_process_node_respects_pause_state() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let node = tree.add_child(root, Node::new("PausableNode", "Node")).unwrap();
+    let node = tree
+        .add_child(root, Node::new("PausableNode", "Node"))
+        .unwrap();
 
     // When tree is not paused, node should process
     assert!(tree.should_process_node(node));
@@ -1383,7 +1439,9 @@ fn remove_from_group_updates_group_membership() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let node = tree.add_child(root, Node::new("GroupMember", "Node")).unwrap();
+    let node = tree
+        .add_child(root, Node::new("GroupMember", "Node"))
+        .unwrap();
     let _ = tree.add_to_group(node, "players");
     assert_eq!(tree.get_nodes_in_group("players").len(), 1);
 

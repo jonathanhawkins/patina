@@ -212,7 +212,10 @@ fn triage_queue_end_to_end() {
 
     // Regressions
     assert_eq!(queue.regressions().len(), 1);
-    assert_eq!(queue.regressions()[0].summary, "Physics trace drift after repin");
+    assert_eq!(
+        queue.regressions()[0].summary,
+        "Physics trace drift after repin"
+    );
 
     // Escalations (P0 + regressions)
     assert_eq!(queue.escalations().len(), 2);
@@ -303,8 +306,8 @@ fn occurrence_count_default_is_one() {
 
 #[test]
 fn occurrence_count_can_be_set() {
-    let r = CrashReport::new("test", Severity::P3Low, Subsystem::Other, "e", "t")
-        .with_occurrences(42);
+    let r =
+        CrashReport::new("test", Severity::P3Low, Subsystem::Other, "e", "t").with_occurrences(42);
     assert_eq!(r.occurrence_count, 42);
 }
 

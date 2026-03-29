@@ -3,17 +3,15 @@
 //! Validates that WeakRef.get_ref() returns None after the referenced object
 //! is freed via queue_free + process_deletions, matching Godot's behavior.
 
-use gdscene::scene_tree::SceneTree;
-use gdscene::node::Node;
 use gdobject::weak_ref::{self, WeakRef};
+use gdscene::node::Node;
+use gdscene::scene_tree::SceneTree;
 
 #[test]
 fn weakref_valid_before_free() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child_id = tree
-        .add_child(root, Node::new("Temp", "Node"))
-        .unwrap();
+    let child_id = tree.add_child(root, Node::new("Temp", "Node")).unwrap();
 
     let obj_id = child_id.object_id();
     let weak = WeakRef::new(obj_id);
@@ -28,14 +26,15 @@ fn weakref_valid_before_free() {
 fn weakref_auto_invalidates_after_queue_free() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child_id = tree
-        .add_child(root, Node::new("Temp", "Node"))
-        .unwrap();
+    let child_id = tree.add_child(root, Node::new("Temp", "Node")).unwrap();
 
     let obj_id = child_id.object_id();
     let weak = WeakRef::new(obj_id);
 
-    assert!(weak.get_ref().is_some(), "WeakRef should be valid before free");
+    assert!(
+        weak.get_ref().is_some(),
+        "WeakRef should be valid before free"
+    );
 
     tree.queue_free(child_id);
     tree.process_deletions();
@@ -55,9 +54,7 @@ fn weakref_auto_invalidates_after_queue_free() {
 fn weakref_auto_invalidates_subtree() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let parent_id = tree
-        .add_child(root, Node::new("Parent", "Node"))
-        .unwrap();
+    let parent_id = tree.add_child(root, Node::new("Parent", "Node")).unwrap();
     let child_id = tree
         .add_child(parent_id, Node::new("Child", "Node"))
         .unwrap();
@@ -86,12 +83,8 @@ fn weakref_auto_invalidates_subtree() {
 fn weakref_still_valid_after_unrelated_free() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let a_id = tree
-        .add_child(root, Node::new("NodeA", "Node"))
-        .unwrap();
-    let b_id = tree
-        .add_child(root, Node::new("NodeB", "Node"))
-        .unwrap();
+    let a_id = tree.add_child(root, Node::new("NodeA", "Node")).unwrap();
+    let b_id = tree.add_child(root, Node::new("NodeB", "Node")).unwrap();
 
     let weak_a = WeakRef::new(a_id.object_id());
     let weak_b = WeakRef::new(b_id.object_id());
@@ -108,9 +101,7 @@ fn weakref_still_valid_after_unrelated_free() {
 fn weakref_to_variant_returns_nil_after_free() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child_id = tree
-        .add_child(root, Node::new("Temp", "Node"))
-        .unwrap();
+    let child_id = tree.add_child(root, Node::new("Temp", "Node")).unwrap();
 
     let weak = WeakRef::new(child_id.object_id());
     assert!(matches!(weak.to_variant(), gdvariant::Variant::Int(_)));
@@ -125,9 +116,7 @@ fn weakref_to_variant_returns_nil_after_free() {
 fn weakref_manual_invalidation_still_works() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child_id = tree
-        .add_child(root, Node::new("Temp", "Node"))
-        .unwrap();
+    let child_id = tree.add_child(root, Node::new("Temp", "Node")).unwrap();
 
     let mut weak = WeakRef::new(child_id.object_id());
     assert!(weak.get_ref().is_some());

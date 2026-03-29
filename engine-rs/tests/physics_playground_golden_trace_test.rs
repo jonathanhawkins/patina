@@ -76,7 +76,11 @@ fn load_physics_playground_from_tscn() -> SceneTree {
 }
 
 /// Run a physics simulation and collect the sorted trace.
-fn run_traced_physics(tree: SceneTree, frames: u64, delta: f64) -> (MainLoop, Vec<PhysicsTraceEntry>) {
+fn run_traced_physics(
+    tree: SceneTree,
+    frames: u64,
+    delta: f64,
+) -> (MainLoop, Vec<PhysicsTraceEntry>) {
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
     ml.physics_server_mut().set_tracing(true);
@@ -154,12 +158,22 @@ fn golden_trace_matches_programmatic_scene() {
         assert!(
             approx_eq(t.position.x, g.px) && approx_eq(t.position.y, g.py),
             "entry {i} ({}, frame {}): position drift: ({}, {}) vs golden ({}, {})",
-            t.name, t.frame, t.position.x, t.position.y, g.px, g.py
+            t.name,
+            t.frame,
+            t.position.x,
+            t.position.y,
+            g.px,
+            g.py
         );
         assert!(
             approx_eq(t.velocity.x, g.vx) && approx_eq(t.velocity.y, g.vy),
             "entry {i} ({}, frame {}): velocity drift: ({}, {}) vs golden ({}, {})",
-            t.name, t.frame, t.velocity.x, t.velocity.y, g.vx, g.vy
+            t.name,
+            t.frame,
+            t.velocity.x,
+            t.velocity.y,
+            g.vx,
+            g.vy
         );
     }
 }
@@ -188,12 +202,22 @@ fn golden_trace_matches_tscn_scene() {
         assert!(
             approx_eq(t.position.x, g.px) && approx_eq(t.position.y, g.py),
             "entry {i} ({}, frame {}): position drift: ({}, {}) vs golden ({}, {})",
-            t.name, t.frame, t.position.x, t.position.y, g.px, g.py
+            t.name,
+            t.frame,
+            t.position.x,
+            t.position.y,
+            g.px,
+            g.py
         );
         assert!(
             approx_eq(t.velocity.x, g.vx) && approx_eq(t.velocity.y, g.vy),
             "entry {i} ({}, frame {}): velocity drift: ({}, {}) vs golden ({}, {})",
-            t.name, t.frame, t.velocity.x, t.velocity.y, g.vx, g.vy
+            t.name,
+            t.frame,
+            t.velocity.x,
+            t.velocity.y,
+            g.vx,
+            g.vy
         );
     }
 }
@@ -221,12 +245,22 @@ fn programmatic_and_tscn_traces_identical() {
         assert!(
             approx_eq(p.position.x, t.position.x) && approx_eq(p.position.y, t.position.y),
             "entry {i} ({}, frame {}): position drift: prog=({}, {}) tscn=({}, {})",
-            p.name, p.frame, p.position.x, p.position.y, t.position.x, t.position.y
+            p.name,
+            p.frame,
+            p.position.x,
+            p.position.y,
+            t.position.x,
+            t.position.y
         );
         assert!(
             approx_eq(p.velocity.x, t.velocity.x) && approx_eq(p.velocity.y, t.velocity.y),
             "entry {i} ({}, frame {}): velocity drift: prog=({}, {}) tscn=({}, {})",
-            p.name, p.frame, p.velocity.x, p.velocity.y, t.velocity.x, t.velocity.y
+            p.name,
+            p.frame,
+            p.velocity.x,
+            p.velocity.y,
+            t.velocity.x,
+            t.velocity.y
         );
     }
 }
@@ -241,7 +275,11 @@ fn golden_file_structure_valid() {
     let golden = load_golden("physics_playground_60frames.json");
 
     // 3 bodies (Ball, Wall, Floor) × 60 frames = 180 entries.
-    assert_eq!(golden.len(), 180, "expected 180 entries (3 bodies × 60 frames)");
+    assert_eq!(
+        golden.len(),
+        180,
+        "expected 180 entries (3 bodies × 60 frames)"
+    );
 
     // All expected bodies present.
     let names: std::collections::HashSet<&str> = golden.iter().map(|e| e.name.as_str()).collect();
@@ -275,12 +313,16 @@ fn golden_static_bodies_stationary() {
         assert!(
             approx_eq(entry.px, 800.0) && approx_eq(entry.py, 300.0),
             "Wall should stay at (800, 300), got ({}, {}) at frame {}",
-            entry.px, entry.py, entry.frame
+            entry.px,
+            entry.py,
+            entry.frame
         );
         assert!(
             approx_eq(entry.vx, 0.0) && approx_eq(entry.vy, 0.0),
             "Wall velocity should be zero, got ({}, {}) at frame {}",
-            entry.vx, entry.vy, entry.frame
+            entry.vx,
+            entry.vy,
+            entry.frame
         );
     }
 
@@ -288,12 +330,16 @@ fn golden_static_bodies_stationary() {
         assert!(
             approx_eq(entry.px, 400.0) && approx_eq(entry.py, 600.0),
             "Floor should stay at (400, 600), got ({}, {}) at frame {}",
-            entry.px, entry.py, entry.frame
+            entry.px,
+            entry.py,
+            entry.frame
         );
         assert!(
             approx_eq(entry.vx, 0.0) && approx_eq(entry.vy, 0.0),
             "Floor velocity should be zero, got ({}, {}) at frame {}",
-            entry.vx, entry.vy, entry.frame
+            entry.vx,
+            entry.vy,
+            entry.frame
         );
     }
 }
@@ -375,7 +421,8 @@ fn tscn_regression_golden_matches() {
         assert!(
             approx_eq(t.position.x, g.px) && approx_eq(t.position.y, g.py),
             "entry {i} ({}, frame {}): position mismatch vs tscn regression golden",
-            t.name, t.frame
+            t.name,
+            t.frame
         );
     }
 }

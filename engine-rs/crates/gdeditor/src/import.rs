@@ -384,7 +384,10 @@ impl SceneFormatImporterRegistry {
 
     /// Register a scene format importer.
     pub fn register_importer(&mut self, importer: Box<dyn EditorSceneFormatImporter>) {
-        tracing::debug!("Registered scene format importer: {}", importer.importer_name());
+        tracing::debug!(
+            "Registered scene format importer: {}",
+            importer.importer_name()
+        );
         self.importers.push(importer);
     }
 
@@ -436,14 +439,9 @@ impl SceneFormatImporterRegistry {
         path: &Path,
         options: Option<&SceneImportOptions>,
     ) -> EngineResult<ImportedScene> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let importer = self.find_importer(ext).ok_or_else(|| {
-            EngineError::NotFound(format!(
-                "no scene format importer for extension '{ext}'"
-            ))
+            EngineError::NotFound(format!("no scene format importer for extension '{ext}'"))
         })?;
 
         let opts = match options {
@@ -511,14 +509,13 @@ impl EditorSceneFormatImporter for GltfSceneImporter {
             .to_string();
 
         let mut root = ImportedSceneNode::new(&root_name, "Node3D");
-        root.properties
-            .insert("transform/origin".into(), Variant::String("(0, 0, 0)".into()));
+        root.properties.insert(
+            "transform/origin".into(),
+            Variant::String("(0, 0, 0)".into()),
+        );
 
         // Stub: create a mesh child to represent imported geometry.
-        let mesh_node = ImportedSceneNode::new(
-            format!("{root_name}_Mesh"),
-            "MeshInstance3D",
-        );
+        let mesh_node = ImportedSceneNode::new(format!("{root_name}_Mesh"), "MeshInstance3D");
         root.children.push(mesh_node);
 
         // Stub: extract animation if enabled.
@@ -585,11 +582,10 @@ impl EditorSceneFormatImporter for ObjSceneImporter {
             .unwrap_or("ObjScene")
             .to_string();
 
-        let root = ImportedSceneNode::new(&root_name, "Node3D")
-            .with_child(ImportedSceneNode::new(
-                format!("{root_name}_Mesh"),
-                "MeshInstance3D",
-            ));
+        let root = ImportedSceneNode::new(&root_name, "Node3D").with_child(ImportedSceneNode::new(
+            format!("{root_name}_Mesh"),
+            "MeshInstance3D",
+        ));
 
         Ok(ImportedScene {
             root,
@@ -936,7 +932,12 @@ mod tests {
         assert_eq!(scene.root.name, "character");
         assert_eq!(scene.root.children.len(), 2);
         // Should have MeshInstance3D and Skeleton3D children.
-        let types: Vec<&str> = scene.root.children.iter().map(|c| c.node_type.as_str()).collect();
+        let types: Vec<&str> = scene
+            .root
+            .children
+            .iter()
+            .map(|c| c.node_type.as_str())
+            .collect();
         assert!(types.contains(&"MeshInstance3D"));
         assert!(types.contains(&"Skeleton3D"));
         assert_eq!(scene.animations.len(), 1);
@@ -973,7 +974,10 @@ mod tests {
         let imp = GltfSceneImporter;
         let opts = imp.get_default_options();
         assert_eq!(opts.get("animation/import"), Some(&Variant::Bool(true)));
-        assert_eq!(opts.get("meshes/ensure_tangents"), Some(&Variant::Bool(true)));
+        assert_eq!(
+            opts.get("meshes/ensure_tangents"),
+            Some(&Variant::Bool(true))
+        );
     }
 
     #[test]
@@ -1015,7 +1019,10 @@ mod tests {
     impl EditorScenePostImport for TestPostImport {
         fn post_import(&self, mut scene: ImportedScene) -> EngineResult<ImportedScene> {
             scene.warnings.push("post-import ran".into());
-            scene.root.properties.insert("_imported".into(), Variant::Bool(true));
+            scene
+                .root
+                .properties
+                .insert("_imported".into(), Variant::Bool(true));
             Ok(scene)
         }
 

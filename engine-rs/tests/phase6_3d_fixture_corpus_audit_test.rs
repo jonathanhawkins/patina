@@ -72,13 +72,11 @@ fn build_3d_fixture_map() -> BTreeMap<String, BTreeSet<String>> {
             continue;
         }
         let classes = extract_classes(&path);
-        let is_3d = classes.iter().any(|c| MARKER_3D_CLASSES.contains(&c.as_str()));
+        let is_3d = classes
+            .iter()
+            .any(|c| MARKER_3D_CLASSES.contains(&c.as_str()));
         if is_3d {
-            let name = path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
             map.insert(name, classes);
         }
     }

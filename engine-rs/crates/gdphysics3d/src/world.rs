@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use gdcore::math::Vector3;
 
-use crate::body::{BodyId3D, ContactPoint3D, PhysicsBody3D};
 #[cfg(test)]
 use crate::body::BodyType3D;
+use crate::body::{BodyId3D, ContactPoint3D, PhysicsBody3D};
 use crate::collision;
 use crate::shape::Shape3D;
 
@@ -140,9 +140,8 @@ impl PhysicsWorld3D {
 
                         // Only resolve if bodies are moving toward each other.
                         if vel_along_normal > 0.0 {
-                            let restitution = self.bodies[&id_a]
-                                .bounce
-                                .min(self.bodies[&id_b].bounce);
+                            let restitution =
+                                self.bodies[&id_a].bounce.min(self.bodies[&id_b].bounce);
                             let j = -(1.0 + restitution) * vel_along_normal / total_inv;
                             let impulse = result.normal * j;
 
@@ -279,7 +278,10 @@ mod tests {
         let a = world.get_body(id_a).unwrap();
         let b = world.get_body(id_b).unwrap();
         let dist = (b.position - a.position).length();
-        assert!(dist >= 1.9, "spheres should be separated after collision, dist={dist}");
+        assert!(
+            dist >= 1.9,
+            "spheres should be separated after collision, dist={dist}"
+        );
     }
 
     #[test]

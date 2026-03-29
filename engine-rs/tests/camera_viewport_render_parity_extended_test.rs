@@ -142,7 +142,10 @@ fn item_transform_composes_with_camera_position() {
     let fb = capture_frame(&mut renderer, &vp);
     // Item at world (20,20), camera at (20,20): item maps to viewport center.
     let center_red = has_color_at(&fb, 20, 20, red());
-    assert!(center_red, "item at camera position should appear at viewport center");
+    assert!(
+        center_red,
+        "item at camera position should appear at viewport center"
+    );
 }
 
 #[test]
@@ -232,7 +235,10 @@ fn item_one_pixel_outside_viewport_is_invisible() {
 
     let fb = capture_frame(&mut renderer, &vp);
     let red_count = count_color(&fb, red());
-    assert_eq!(red_count, 0, "item fully outside viewport should be invisible");
+    assert_eq!(
+        red_count, 0,
+        "item fully outside viewport should be invisible"
+    );
 }
 
 #[test]
@@ -249,8 +255,14 @@ fn camera_shift_pushes_item_to_exact_edge() {
     let fb = capture_frame(&mut renderer, &vp);
     let blue_count = count_color(&fb, blue());
     // Only partial rect visible (clipped on right).
-    assert!(blue_count > 0, "shifted item at edge should be partially visible");
-    assert!(blue_count < 200, "item should be clipped, not fully visible");
+    assert!(
+        blue_count > 0,
+        "shifted item at edge should be partially visible"
+    );
+    assert!(
+        blue_count < 200,
+        "item should be clipped, not fully visible"
+    );
 }
 
 // ===========================================================================
@@ -277,7 +289,10 @@ fn two_viewports_same_scene_different_cameras() {
     let red2 = count_color(&fb2, red());
 
     assert!(red1 > 0, "viewport 1 should see the item");
-    assert_eq!(red2, 0, "viewport 2 should not see the item (camera far away)");
+    assert_eq!(
+        red2, 0,
+        "viewport 2 should not see the item (camera far away)"
+    );
 }
 
 #[test]
@@ -504,7 +519,11 @@ fn invisible_item_with_transform_produces_no_pixels() {
     vp.add_canvas_item(item);
 
     let fb = capture_frame(&mut renderer, &vp);
-    assert_eq!(count_color(&fb, red()), 0, "invisible item should produce no pixels");
+    assert_eq!(
+        count_color(&fb, red()),
+        0,
+        "invisible item should produce no pixels"
+    );
 }
 
 #[test]
@@ -524,7 +543,11 @@ fn visible_item_behind_invisible_item_renders() {
 
     let fb = capture_frame(&mut renderer, &vp);
     assert!(count_color(&fb, green()) > 0, "visible item should render");
-    assert_eq!(count_color(&fb, red()), 0, "invisible item should not render");
+    assert_eq!(
+        count_color(&fb, red()),
+        0,
+        "invisible item should not render"
+    );
 }
 
 #[test]
@@ -542,7 +565,11 @@ fn invisible_layer_hides_transformed_items() {
     vp.add_canvas_item(item);
 
     let fb = capture_frame(&mut renderer, &vp);
-    assert_eq!(count_color(&fb, red()), 0, "invisible layer should hide all items");
+    assert_eq!(
+        count_color(&fb, red()),
+        0,
+        "invisible layer should hide all items"
+    );
 }
 
 // ===========================================================================
@@ -634,7 +661,10 @@ fn deterministic_item_transform_rendering() {
     let fb1 = capture_frame(&mut renderer, &build_vp());
     let fb2 = capture_frame(&mut renderer, &build_vp());
 
-    assert_eq!(fb1.pixels, fb2.pixels, "item transform rendering must be deterministic");
+    assert_eq!(
+        fb1.pixels, fb2.pixels,
+        "item transform rendering must be deterministic"
+    );
 }
 
 #[test]
@@ -662,7 +692,10 @@ fn deterministic_triple_composition_rendering() {
     let fb1 = capture_frame(&mut renderer, &build_vp());
     let fb2 = capture_frame(&mut renderer, &build_vp());
 
-    assert_eq!(fb1.pixels, fb2.pixels, "triple composition must be deterministic");
+    assert_eq!(
+        fb1.pixels, fb2.pixels,
+        "triple composition must be deterministic"
+    );
 }
 
 #[test]
@@ -689,7 +722,10 @@ fn deterministic_multi_item_multi_layer_rendering() {
     let fb1 = capture_frame(&mut renderer, &build_vp());
     let fb2 = capture_frame(&mut renderer, &build_vp());
 
-    assert_eq!(fb1.pixels, fb2.pixels, "multi-item multi-layer rendering must be deterministic");
+    assert_eq!(
+        fb1.pixels, fb2.pixels,
+        "multi-item multi-layer rendering must be deterministic"
+    );
 }
 
 // ===========================================================================
@@ -777,8 +813,17 @@ fn viewport_clear_color_fills_empty_regions() {
 fn different_clear_colors_produce_different_backgrounds() {
     let mut renderer = SoftwareRenderer::new();
 
-    let fb1 = capture_frame(&mut renderer, &Viewport::new(20, 20, Color::rgb(1.0, 0.0, 0.0)));
-    let fb2 = capture_frame(&mut renderer, &Viewport::new(20, 20, Color::rgb(0.0, 1.0, 0.0)));
+    let fb1 = capture_frame(
+        &mut renderer,
+        &Viewport::new(20, 20, Color::rgb(1.0, 0.0, 0.0)),
+    );
+    let fb2 = capture_frame(
+        &mut renderer,
+        &Viewport::new(20, 20, Color::rgb(0.0, 1.0, 0.0)),
+    );
 
-    assert_ne!(fb1.pixels, fb2.pixels, "different clear colors must produce different output");
+    assert_ne!(
+        fb1.pixels, fb2.pixels,
+        "different clear colors must produce different output"
+    );
 }

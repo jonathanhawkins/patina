@@ -26,8 +26,8 @@ pub mod dock;
 pub mod editor_compat;
 pub mod editor_interface;
 pub mod editor_menu;
-pub mod editor_server;
 pub mod editor_plugin;
+pub mod editor_server;
 pub mod editor_settings_dialog;
 pub mod editor_ui;
 pub mod environment_preview;
@@ -46,9 +46,9 @@ pub mod scene_renderer;
 pub mod script_completion;
 pub mod script_editor;
 pub mod script_gutter;
+pub mod settings;
 pub mod shader_editor;
 pub mod signal_dialog;
-pub mod settings;
 pub mod texture_cache;
 pub mod theme_editor;
 pub mod tilemap_editor;
@@ -63,13 +63,22 @@ use gdvariant::Variant;
 use thiserror::Error;
 
 // Re-exports for convenience.
+pub use create_dialog::{
+    CatalogEntry, ClassEntry, ClassFilter, CreateDialogResult, CreateNodeDialog, HelperPreset,
+    NodeCatalog2D, NodeCategory,
+};
 pub use dock::{
     DockPanel, NodeIndicators, NodeTypeIcon, NodeWarning, PluginDockManager, PluginDockPanel,
     PropertyDock, SceneTreeDock, SelectionState,
 };
 pub use editor_interface::EditorInterface;
+pub use editor_settings_dialog::{EditorSettingsDialog, KeyBinding, PluginInfo, SettingsTab};
 pub use export_dialog::{ExportBuildProfile, ExportDialog, ExportPlatform, ExportPreset};
 pub use filesystem::EditorFileSystem;
+pub use find_replace::{
+    FindReplace as FindReplaceEngine, FindReplaceConfig, FindReplaceError, ReplaceResult,
+    SearchMatch, SearchMode,
+};
 pub use import::{
     AnimationLoopMode, EditorSceneFormatImporter, EditorScenePostImport, FbxSceneImporter,
     GltfSceneImporter, ImportPipeline, ImportedAnimation, ImportedResource, ImportedScene,
@@ -77,19 +86,9 @@ pub use import::{
     SceneImportOptions, TresImporter, TscnImporter,
 };
 pub use inspector::{
-    coerce_variant, validate_variant, CustomPropertyEditor, EditorHint,
-    EditorInspectorPlugin, InspectorPanel, InspectorPluginRegistry,
-    InspectorSection, PropertyEditor, PropertyHint, ResourceSubEditor,
-    SectionedInspector,
-};
-pub use scene_editor::SceneEditor;
-pub use settings::{EditorSettings, EditorTheme, ProjectSettings};
-pub use viewport_3d::{
-    CameraMode, EnvironmentPreview3D, GizmoAxis, GizmoMode3D, Grid3D, GridLine, PickResult,
-    Projection, Ray3D, Selection3D, Viewport3D, ViewportCamera3D,
-};
-pub use editor_settings_dialog::{
-    EditorSettingsDialog, KeyBinding, PluginInfo, SettingsTab,
+    coerce_variant, validate_variant, CustomPropertyEditor, EditorHint, EditorInspectorPlugin,
+    InspectorPanel, InspectorPluginRegistry, InspectorSection, PropertyEditor, PropertyHint,
+    ResourceSubEditor, SectionedInspector,
 };
 pub use profiler_panel::{
     FrameProfile, FunctionStats, ProfilerEntry, ProfilerPanel, ProfilerStats,
@@ -97,6 +96,9 @@ pub use profiler_panel::{
 pub use project_settings_dialog::{
     ProjectSettingsDialog, SettingsCategory, SettingsEditor, SettingsProperty, SettingsValue,
 };
+pub use scene_editor::SceneEditor;
+pub use script_editor::{FindMatch, FindOptions, FindReplace, ScriptEditor};
+pub use settings::{EditorSettings, EditorTheme, ProjectSettings};
 pub use shader_editor::{
     MaterialPreview, PreviewShape, PreviewUniformInfo, ShaderEditor, ShaderHighlightKind,
     ShaderHighlightSpan, ShaderHighlighter, ShaderTab, UniformValue,
@@ -105,17 +107,10 @@ pub use theme_editor::{
     OverrideEntry, OverrideKind, PreviewControl, StyleBoxFlat, ThemeColorPalette, ThemeEditor,
     ThemeFont, ThemeItem, ThemeResource,
 };
-pub use create_dialog::{
-    CatalogEntry, ClassEntry, ClassFilter, CreateDialogResult, CreateNodeDialog, HelperPreset,
-    NodeCatalog2D, NodeCategory,
-};
-pub use script_editor::{FindMatch, FindOptions, FindReplace, ScriptEditor};
-pub use find_replace::{
-    FindReplace as FindReplaceEngine, FindReplaceConfig, FindReplaceError,
-    ReplaceResult, SearchMatch, SearchMode,
-};
-pub use vcs::{
-    BranchInfo, ChangeArea, CommitEntry, FileChangeStatus, VcsFileStatus, VcsStatus,
+pub use vcs::{BranchInfo, ChangeArea, CommitEntry, FileChangeStatus, VcsFileStatus, VcsStatus};
+pub use viewport_3d::{
+    CameraMode, EnvironmentPreview3D, GizmoAxis, GizmoMode3D, Grid3D, GridLine, PickResult,
+    Projection, Ray3D, Selection3D, Viewport3D, ViewportCamera3D,
 };
 
 /// Errors specific to editor operations.
@@ -657,16 +652,18 @@ impl EditorCommand {
                 old_index,
             } => {
                 // Find the current index of the child.
-                let parent = tree
-                    .get_node(*parent_id)
-                    .ok_or_else(|| gdcore::error::EngineError::NotFound("parent not found".into()))?;
+                let parent = tree.get_node(*parent_id).ok_or_else(|| {
+                    gdcore::error::EngineError::NotFound("parent not found".into())
+                })?;
                 let children = parent.children();
-                *old_index = children
-                    .iter()
-                    .position(|&c| c == *child_id)
-                    .unwrap_or(0);
+                *old_index = children.iter().position(|&c| c == *child_id).unwrap_or(0);
                 tree.move_child(*parent_id, *child_id, *new_index)?;
-                tracing::debug!("MoveNode {:?} index {} -> {}", child_id, old_index, new_index);
+                tracing::debug!(
+                    "MoveNode {:?} index {} -> {}",
+                    child_id,
+                    old_index,
+                    new_index
+                );
                 Ok(())
             }
             EditorCommand::ConnectSignal {
@@ -682,7 +679,10 @@ impl EditorCommand {
                 tree.connect_signal(*source_id, signal_name, conn);
                 tracing::debug!(
                     "ConnectSignal {:?}.{} -> {}::{}",
-                    source_id, signal_name, target_object_id, method
+                    source_id,
+                    signal_name,
+                    target_object_id,
+                    method
                 );
                 Ok(())
             }
@@ -693,10 +693,17 @@ impl EditorCommand {
                 method,
             } => {
                 let store = tree.signal_store_mut(*source_id);
-                store.disconnect(signal_name, gdcore::id::ObjectId::from_raw(*target_object_id), method);
+                store.disconnect(
+                    signal_name,
+                    gdcore::id::ObjectId::from_raw(*target_object_id),
+                    method,
+                );
                 tracing::debug!(
                     "DisconnectSignal {:?}.{} -> {}::{}",
-                    source_id, signal_name, target_object_id, method
+                    source_id,
+                    signal_name,
+                    target_object_id,
+                    method
                 );
                 Ok(())
             }
@@ -910,7 +917,11 @@ impl EditorCommand {
             } => {
                 // Undo connect = disconnect.
                 let store = tree.signal_store_mut(*source_id);
-                store.disconnect(signal_name, gdcore::id::ObjectId::from_raw(*target_object_id), method);
+                store.disconnect(
+                    signal_name,
+                    gdcore::id::ObjectId::from_raw(*target_object_id),
+                    method,
+                );
                 Ok(())
             }
             EditorCommand::DisconnectSignal {
@@ -951,10 +962,14 @@ impl EditorCommand {
     pub fn label(&self) -> String {
         match self {
             EditorCommand::SetProperty { property, .. } => format!("Set {property}"),
-            EditorCommand::AddNode { name, class_name, .. } => format!("Add {class_name} '{name}'"),
+            EditorCommand::AddNode {
+                name, class_name, ..
+            } => format!("Add {class_name} '{name}'"),
             EditorCommand::RemoveNode { name, .. } => format!("Remove '{name}'"),
             EditorCommand::ReparentNode { .. } => "Reparent node".into(),
-            EditorCommand::RenameNode { old_name, new_name, .. } => {
+            EditorCommand::RenameNode {
+                old_name, new_name, ..
+            } => {
                 format!("Rename '{old_name}' -> '{new_name}'")
             }
             EditorCommand::DuplicateNode { .. } => "Duplicate node".into(),
@@ -963,10 +978,18 @@ impl EditorCommand {
             EditorCommand::TileMapFill { .. } => "Fill tiles".into(),
             EditorCommand::TileMapResize { .. } => "Resize tilemap".into(),
             EditorCommand::MoveNode { .. } => "Move node".into(),
-            EditorCommand::ConnectSignal { signal_name, method, .. } => {
+            EditorCommand::ConnectSignal {
+                signal_name,
+                method,
+                ..
+            } => {
                 format!("Connect {signal_name} -> {method}")
             }
-            EditorCommand::DisconnectSignal { signal_name, method, .. } => {
+            EditorCommand::DisconnectSignal {
+                signal_name,
+                method,
+                ..
+            } => {
                 format!("Disconnect {signal_name} -> {method}")
             }
             EditorCommand::AddToGroup { group, .. } => format!("Add to group '{group}'"),
@@ -1206,7 +1229,11 @@ impl Editor {
                     // apply the new value to the tree, and push directly
                     // (bypassing EditorCommand::execute which would overwrite old_value).
                     let prev = self.undo_stack.pop().unwrap();
-                    if let EditorCommand::SetProperty { old_value: prev_old, .. } = prev {
+                    if let EditorCommand::SetProperty {
+                        old_value: prev_old,
+                        ..
+                    } = prev
+                    {
                         if let EditorCommand::SetProperty {
                             node_id,
                             ref property,
@@ -1794,12 +1821,14 @@ position = Vector2(10, 20)
 
         let root = editor.tree().root_id();
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
-        editor.execute(EditorCommand::SetProperty {
-            node_id: main_id,
-            property: "x".into(),
-            new_value: Variant::Int(1),
-            old_value: Variant::Nil,
-        }).unwrap();
+        editor
+            .execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "x".into(),
+                new_value: Variant::Int(1),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
 
         assert!(editor.can_undo());
         assert!(!editor.can_redo());
@@ -1814,12 +1843,14 @@ position = Vector2(10, 20)
         let mut editor = make_editor();
         let root = editor.tree().root_id();
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
-        editor.execute(EditorCommand::SetProperty {
-            node_id: main_id,
-            property: "x".into(),
-            new_value: Variant::Int(1),
-            old_value: Variant::Nil,
-        }).unwrap();
+        editor
+            .execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "x".into(),
+                new_value: Variant::Int(1),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
         editor.undo().unwrap();
         assert!(editor.can_redo());
 
@@ -1834,17 +1865,21 @@ position = Vector2(10, 20)
         let root = editor.tree().root_id();
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
 
-        editor.execute(EditorCommand::SetProperty {
-            node_id: main_id,
-            property: "hp".into(),
-            new_value: Variant::Int(10),
-            old_value: Variant::Nil,
-        }).unwrap();
-        editor.execute(EditorCommand::RenameNode {
-            node_id: main_id,
-            new_name: "Player".into(),
-            old_name: String::new(),
-        }).unwrap();
+        editor
+            .execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "hp".into(),
+                new_value: Variant::Int(10),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
+        editor
+            .execute(EditorCommand::RenameNode {
+                node_id: main_id,
+                new_name: "Player".into(),
+                old_name: String::new(),
+            })
+            .unwrap();
 
         let history = editor.undo_history();
         assert_eq!(history.len(), 2);
@@ -1864,12 +1899,14 @@ position = Vector2(10, 20)
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
 
         for i in 0..5 {
-            editor.execute(EditorCommand::SetProperty {
-                node_id: main_id,
-                property: format!("p{i}"),
-                new_value: Variant::Int(i),
-                old_value: Variant::Nil,
-            }).unwrap();
+            editor
+                .execute(EditorCommand::SetProperty {
+                    node_id: main_id,
+                    property: format!("p{i}"),
+                    new_value: Variant::Int(i),
+                    old_value: Variant::Nil,
+                })
+                .unwrap();
         }
 
         assert_eq!(editor.undo_depth(), 5);
@@ -1891,34 +1928,46 @@ position = Vector2(10, 20)
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
 
         // First edit
-        editor.merge_or_execute(EditorCommand::SetProperty {
-            node_id: main_id,
-            property: "speed".into(),
-            new_value: Variant::Int(10),
-            old_value: Variant::Nil,
-        }).unwrap();
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "speed".into(),
+                new_value: Variant::Int(10),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
 
         // Second edit on same property — should merge
-        editor.merge_or_execute(EditorCommand::SetProperty {
-            node_id: main_id,
-            property: "speed".into(),
-            new_value: Variant::Int(20),
-            old_value: Variant::Nil,
-        }).unwrap();
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "speed".into(),
+                new_value: Variant::Int(20),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
 
         // Only one undo entry
         assert_eq!(editor.undo_depth(), 1);
 
         // Current value is 20
         assert_eq!(
-            editor.tree().get_node(main_id).unwrap().get_property("speed"),
+            editor
+                .tree()
+                .get_node(main_id)
+                .unwrap()
+                .get_property("speed"),
             Variant::Int(20)
         );
 
         // Undo should go back to original (Nil), not to 10
         editor.undo().unwrap();
         assert_eq!(
-            editor.tree().get_node(main_id).unwrap().get_property("speed"),
+            editor
+                .tree()
+                .get_node(main_id)
+                .unwrap()
+                .get_property("speed"),
             Variant::Nil
         );
     }
@@ -1929,19 +1978,23 @@ position = Vector2(10, 20)
         let root = editor.tree().root_id();
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
 
-        editor.merge_or_execute(EditorCommand::SetProperty {
-            node_id: main_id,
-            property: "a".into(),
-            new_value: Variant::Int(1),
-            old_value: Variant::Nil,
-        }).unwrap();
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "a".into(),
+                new_value: Variant::Int(1),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
 
-        editor.merge_or_execute(EditorCommand::SetProperty {
-            node_id: main_id,
-            property: "b".into(),
-            new_value: Variant::Int(2),
-            old_value: Variant::Nil,
-        }).unwrap();
+        editor
+            .merge_or_execute(EditorCommand::SetProperty {
+                node_id: main_id,
+                property: "b".into(),
+                new_value: Variant::Int(2),
+                old_value: Variant::Nil,
+            })
+            .unwrap();
 
         // Different properties — no merge
         assert_eq!(editor.undo_depth(), 2);
@@ -1953,31 +2006,40 @@ position = Vector2(10, 20)
         let root = editor.tree().root_id();
 
         // Add two more children
-        editor.execute(EditorCommand::AddNode {
-            parent_id: root,
-            name: "Child1".into(),
-            class_name: "Node".into(),
-            created_id: None,
-        }).unwrap();
-        editor.execute(EditorCommand::AddNode {
-            parent_id: root,
-            name: "Child2".into(),
-            class_name: "Node".into(),
-            created_id: None,
-        }).unwrap();
+        editor
+            .execute(EditorCommand::AddNode {
+                parent_id: root,
+                name: "Child1".into(),
+                class_name: "Node".into(),
+                created_id: None,
+            })
+            .unwrap();
+        editor
+            .execute(EditorCommand::AddNode {
+                parent_id: root,
+                name: "Child2".into(),
+                class_name: "Node".into(),
+                created_id: None,
+            })
+            .unwrap();
 
         let children: Vec<_> = editor.tree().get_node(root).unwrap().children().to_vec();
         let last_child = *children.last().unwrap();
 
         // Move last child to index 0
-        editor.execute(EditorCommand::MoveNode {
-            parent_id: root,
-            child_id: last_child,
-            new_index: 0,
-            old_index: 0,
-        }).unwrap();
+        editor
+            .execute(EditorCommand::MoveNode {
+                parent_id: root,
+                child_id: last_child,
+                new_index: 0,
+                old_index: 0,
+            })
+            .unwrap();
 
-        assert_eq!(editor.tree().get_node(root).unwrap().children()[0], last_child);
+        assert_eq!(
+            editor.tree().get_node(root).unwrap().children()[0],
+            last_child
+        );
 
         // Undo should restore original order
         editor.undo().unwrap();
@@ -1991,18 +2053,35 @@ position = Vector2(10, 20)
         let root = editor.tree().root_id();
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
 
-        editor.execute(EditorCommand::AddToGroup {
-            node_id: main_id,
-            group: "enemies".into(),
-        }).unwrap();
+        editor
+            .execute(EditorCommand::AddToGroup {
+                node_id: main_id,
+                group: "enemies".into(),
+            })
+            .unwrap();
 
-        assert!(editor.tree().get_node(main_id).unwrap().groups().contains("enemies"));
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("enemies"));
 
         editor.undo().unwrap();
-        assert!(!editor.tree().get_node(main_id).unwrap().groups().contains("enemies"));
+        assert!(!editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("enemies"));
 
         editor.redo().unwrap();
-        assert!(editor.tree().get_node(main_id).unwrap().groups().contains("enemies"));
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("enemies"));
     }
 
     #[test]
@@ -2013,18 +2092,35 @@ position = Vector2(10, 20)
 
         // First add to a group directly
         editor.tree_mut().add_to_group(main_id, "players").unwrap();
-        assert!(editor.tree().get_node(main_id).unwrap().groups().contains("players"));
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("players"));
 
         // Then remove via command
-        editor.execute(EditorCommand::RemoveFromGroup {
-            node_id: main_id,
-            group: "players".into(),
-        }).unwrap();
-        assert!(!editor.tree().get_node(main_id).unwrap().groups().contains("players"));
+        editor
+            .execute(EditorCommand::RemoveFromGroup {
+                node_id: main_id,
+                group: "players".into(),
+            })
+            .unwrap();
+        assert!(!editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("players"));
 
         // Undo brings it back
         editor.undo().unwrap();
-        assert!(editor.tree().get_node(main_id).unwrap().groups().contains("players"));
+        assert!(editor
+            .tree()
+            .get_node(main_id)
+            .unwrap()
+            .groups()
+            .contains("players"));
     }
 
     #[test]
@@ -2034,12 +2130,14 @@ position = Vector2(10, 20)
         let main_id = editor.tree().get_node(root).unwrap().children()[0];
         let target_oid = gdcore::id::ObjectId::next().raw();
 
-        editor.execute(EditorCommand::ConnectSignal {
-            source_id: main_id,
-            signal_name: "pressed".into(),
-            target_object_id: target_oid,
-            method: "on_pressed".into(),
-        }).unwrap();
+        editor
+            .execute(EditorCommand::ConnectSignal {
+                source_id: main_id,
+                signal_name: "pressed".into(),
+                target_object_id: target_oid,
+                method: "on_pressed".into(),
+            })
+            .unwrap();
 
         // Signal should be connected
         let store = editor.tree().signal_store(main_id).unwrap();
@@ -2071,12 +2169,14 @@ position = Vector2(10, 20)
         editor.tree_mut().connect_signal(main_id, "clicked", conn);
 
         // Disconnect via command
-        editor.execute(EditorCommand::DisconnectSignal {
-            source_id: main_id,
-            signal_name: "clicked".into(),
-            target_object_id: target_oid.raw(),
-            method: "on_click".into(),
-        }).unwrap();
+        editor
+            .execute(EditorCommand::DisconnectSignal {
+                source_id: main_id,
+                signal_name: "clicked".into(),
+                target_object_id: target_oid.raw(),
+                method: "on_click".into(),
+            })
+            .unwrap();
 
         let store = editor.tree().signal_store(main_id).unwrap();
         let sig = store.get_signal("clicked").unwrap();
@@ -2158,28 +2258,36 @@ position = Vector2(10, 20)
             property: "pos".into(),
             new_value: Variant::Nil,
             old_value: Variant::Nil,
-        }.label().contains("pos"));
+        }
+        .label()
+        .contains("pos"));
 
         assert!(EditorCommand::AddNode {
             parent_id: nid,
             name: "Foo".into(),
             class_name: "Sprite2D".into(),
             created_id: None,
-        }.label().contains("Sprite2D"));
+        }
+        .label()
+        .contains("Sprite2D"));
 
         assert!(EditorCommand::MoveNode {
             parent_id: nid,
             child_id: nid,
             new_index: 0,
             old_index: 0,
-        }.label().contains("Move"));
+        }
+        .label()
+        .contains("Move"));
 
         assert!(EditorCommand::ConnectSignal {
             source_id: nid,
             signal_name: "clicked".into(),
             target_object_id: 0,
             method: "handler".into(),
-        }.label().contains("clicked"));
+        }
+        .label()
+        .contains("clicked"));
     }
 
     // -- EditorMode ---------------------------------------------------------
@@ -2209,7 +2317,10 @@ position = Vector2(10, 20)
         assert_eq!(EditorMode::from_str_key("3d"), Some(EditorMode::Spatial3D));
         assert_eq!(EditorMode::from_str_key("script"), Some(EditorMode::Script));
         assert_eq!(EditorMode::from_str_key("game"), Some(EditorMode::Game));
-        assert_eq!(EditorMode::from_str_key("assetlib"), Some(EditorMode::AssetLib));
+        assert_eq!(
+            EditorMode::from_str_key("assetlib"),
+            Some(EditorMode::AssetLib)
+        );
         assert_eq!(EditorMode::from_str_key("invalid"), None);
     }
 
@@ -2307,6 +2418,9 @@ position = Vector2(10, 20)
         rc.play(RunTarget::CustomScene("res://levels/boss.tscn".into()));
         assert!(rc.is_playing());
         assert!(!rc.last_ran_current);
-        assert_eq!(rc.target, RunTarget::CustomScene("res://levels/boss.tscn".into()));
+        assert_eq!(
+            rc.target,
+            RunTarget::CustomScene("res://levels/boss.tscn".into())
+        );
     }
 }

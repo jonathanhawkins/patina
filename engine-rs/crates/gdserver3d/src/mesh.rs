@@ -91,12 +91,36 @@ impl Mesh3D {
         let mut indices = Vec::with_capacity(36);
 
         let faces: [(Vector3, Vector3, Vector3); 6] = [
-            (Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, -1.0), Vector3::new(0.0, 1.0, 0.0)),
-            (Vector3::new(-1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0)),
-            (Vector3::new(0.0, 1.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),
-            (Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, -1.0)),
-            (Vector3::new(0.0, 0.0, 1.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0)),
-            (Vector3::new(0.0, 0.0, -1.0), Vector3::new(-1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0)),
+            (
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
+            (
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
+            (
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ),
+            (
+                Vector3::new(0.0, -1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+            ),
+            (
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
+            (
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
         ];
 
         for (normal, u_dir, v_dir) in &faces {
@@ -127,7 +151,14 @@ impl Mesh3D {
             indices.push(base + 3);
         }
 
-        Self { vertices, normals, uvs, indices, primitive_type: PrimitiveType::Triangles, surfaces: Vec::new() }
+        Self {
+            vertices,
+            normals,
+            uvs,
+            indices,
+            primitive_type: PrimitiveType::Triangles,
+            surfaces: Vec::new(),
+        }
     }
 
     /// Generates a UV sphere centered at the origin.
@@ -173,7 +204,14 @@ impl Mesh3D {
             }
         }
 
-        Self { vertices, normals, uvs, indices, primitive_type: PrimitiveType::Triangles, surfaces: Vec::new() }
+        Self {
+            vertices,
+            normals,
+            uvs,
+            indices,
+            primitive_type: PrimitiveType::Triangles,
+            surfaces: Vec::new(),
+        }
     }
 
     /// Generates a flat plane on the XZ axis centered at the origin.
@@ -256,8 +294,8 @@ impl Mesh3D {
 
         // Bottom hemisphere
         for r in 0..=cap_rings {
-            let phi =
-                std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_2 * r as f32 / cap_rings as f32;
+            let phi = std::f32::consts::FRAC_PI_2
+                + std::f32::consts::FRAC_PI_2 * r as f32 / cap_rings as f32;
             let (sin_phi, cos_phi) = phi.sin_cos();
             let y = cos_phi * radius - half_mid;
 
@@ -311,7 +349,13 @@ impl Mesh3D {
     /// equal for a regular cylinder, set one to zero for a cone).
     /// `height` is the full height. Caps are generated when the corresponding
     /// radius is > 0.
-    pub fn cylinder(top_radius: f32, bottom_radius: f32, height: f32, radial_segments: u32, rings: u32) -> Self {
+    pub fn cylinder(
+        top_radius: f32,
+        bottom_radius: f32,
+        height: f32,
+        radial_segments: u32,
+        rings: u32,
+    ) -> Self {
         let half_h = height * 0.5;
 
         let mut vertices = Vec::new();
@@ -323,7 +367,11 @@ impl Mesh3D {
         let slope = (bottom_radius - top_radius) / height;
         let slope_len = (1.0 + slope * slope).sqrt();
         let ny = 1.0 / slope_len;
-        let nr = if slope.abs() < 1e-8 { 1.0 } else { -slope / slope_len };
+        let nr = if slope.abs() < 1e-8 {
+            1.0
+        } else {
+            -slope / slope_len
+        };
 
         for r in 0..=rings {
             let t = r as f32 / rings as f32;
@@ -335,7 +383,11 @@ impl Mesh3D {
                 let (sin_t, cos_t) = theta.sin_cos();
 
                 vertices.push(Vector3::new(cos_t * radius, y, sin_t * radius));
-                let n = Vector3::new(cos_t * nr, ny * slope.signum().max(0.0) + (1.0 - slope.abs().min(1.0)), sin_t * nr);
+                let n = Vector3::new(
+                    cos_t * nr,
+                    ny * slope.signum().max(0.0) + (1.0 - slope.abs().min(1.0)),
+                    sin_t * nr,
+                );
                 // For straight cylinders, normal is purely radial.
                 let normal = if slope.abs() < 1e-6 {
                     Vector3::new(cos_t, 0.0, sin_t)
@@ -401,7 +453,11 @@ impl Mesh3D {
                 let theta = 2.0 * std::f32::consts::PI * s as f32 / radial_segments as f32;
                 let (sin_t, cos_t) = theta.sin_cos();
 
-                vertices.push(Vector3::new(cos_t * bottom_radius, -half_h, sin_t * bottom_radius));
+                vertices.push(Vector3::new(
+                    cos_t * bottom_radius,
+                    -half_h,
+                    sin_t * bottom_radius,
+                ));
                 normals.push(Vector3::new(0.0, -1.0, 0.0));
                 uvs.push([cos_t * 0.5 + 0.5, sin_t * 0.5 + 0.5]);
             }
@@ -504,7 +560,10 @@ impl Mesh3D {
                         .collect::<Result<_, _>>()
                         .map_err(|e| format!("line {}: bad texcoord: {e}", line_num + 1))?;
                     if coords.is_empty() {
-                        return Err(format!("line {}: texcoord needs at least 1 component", line_num + 1));
+                        return Err(format!(
+                            "line {}: texcoord needs at least 1 component",
+                            line_num + 1
+                        ));
                     }
                     let u = coords[0];
                     let v = if coords.len() > 1 { coords[1] } else { 0.0 };
@@ -554,7 +613,9 @@ impl Mesh3D {
         }
 
         // If no normals were provided, compute flat normals per triangle.
-        let needs_normals = normals.iter().all(|n| n.x == 0.0 && n.y == 0.0 && n.z == 0.0);
+        let needs_normals = normals
+            .iter()
+            .all(|n| n.x == 0.0 && n.y == 0.0 && n.z == 0.0);
         if needs_normals && !indices.is_empty() {
             Self::compute_flat_normals(&vertices, &indices, &mut normals);
         }
@@ -608,14 +669,27 @@ impl Mesh3D {
 
         let new_idx = out_verts.len() as u32;
         out_verts.push(positions[vi]);
-        out_uvs.push(if ti < tex_coords.len() { tex_coords[ti] } else { [0.0, 0.0] });
-        out_normals.push(if ni < obj_normals.len() { obj_normals[ni] } else { Vector3::ZERO });
+        out_uvs.push(if ti < tex_coords.len() {
+            tex_coords[ti]
+        } else {
+            [0.0, 0.0]
+        });
+        out_normals.push(if ni < obj_normals.len() {
+            obj_normals[ni]
+        } else {
+            Vector3::ZERO
+        });
         vertex_map.insert(key, new_idx);
         Ok(new_idx)
     }
 
     /// Parses a 1-based (possibly negative) OBJ index into a 0-based index.
-    fn parse_obj_index(s: &str, count: usize, line_num: usize, kind: &str) -> Result<usize, String> {
+    fn parse_obj_index(
+        s: &str,
+        count: usize,
+        line_num: usize,
+        kind: &str,
+    ) -> Result<usize, String> {
         let idx: i64 = s
             .parse()
             .map_err(|e| format!("line {line_num}: bad {kind} index '{s}': {e}"))?;
@@ -642,11 +716,7 @@ impl Mesh3D {
     }
 
     /// Computes flat (per-face) normals for triangles and overwrites the normal array.
-    fn compute_flat_normals(
-        vertices: &[Vector3],
-        indices: &[u32],
-        normals: &mut Vec<Vector3>,
-    ) {
+    fn compute_flat_normals(vertices: &[Vector3], indices: &[u32], normals: &mut Vec<Vector3>) {
         // Accumulate face normals per vertex, then normalize.
         for n in normals.iter_mut() {
             *n = Vector3::ZERO;
@@ -814,8 +884,10 @@ mod tests {
             .iter()
             .zip(mesh.normals.iter())
             .filter(|(v, n)| {
-                (v.y - 0.5).abs() < 1e-4 && (n.y - 1.0).abs() < 1e-4
-                    && v.x.abs() < 1e-4 && v.z.abs() < 1e-4
+                (v.y - 0.5).abs() < 1e-4
+                    && (n.y - 1.0).abs() < 1e-4
+                    && v.x.abs() < 1e-4
+                    && v.z.abs() < 1e-4
             })
             .count();
         assert_eq!(top_centers, 0);

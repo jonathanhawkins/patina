@@ -273,7 +273,11 @@ fn signal_store_basic_lifecycle() {
     // Disconnect
     store.disconnect("pressed", ObjectId::from_raw(1), "on_pressed");
     store.emit("pressed", &[]);
-    assert_eq!(*counter.lock().unwrap(), 1, "Should not fire after disconnect");
+    assert_eq!(
+        *counter.lock().unwrap(),
+        1,
+        "Should not fire after disconnect"
+    );
 }
 
 #[test]
@@ -295,13 +299,17 @@ fn signal_store_deferred_queue_fifo() {
                     }
                     Variant::Nil
                 },
-            ).as_deferred(),
+            )
+            .as_deferred(),
         );
     }
 
     // Emit using emit_collecting_deferred — deferred connections should NOT fire immediately
     let (immediate, deferred) = store.emit_collecting_deferred("tick", &[Variant::Int(42)]);
-    assert!(immediate.is_empty(), "No immediate results from deferred-only connections");
+    assert!(
+        immediate.is_empty(),
+        "No immediate results from deferred-only connections"
+    );
 
     // Invoke the deferred calls
     for call in &deferred {
@@ -309,7 +317,11 @@ fn signal_store_deferred_queue_fifo() {
     }
 
     let recorded = log.lock().unwrap();
-    assert_eq!(recorded.len(), 3, "All 3 deferred callbacks should fire on flush");
+    assert_eq!(
+        recorded.len(),
+        3,
+        "All 3 deferred callbacks should fire on flush"
+    );
     for val in recorded.iter() {
         assert_eq!(*val, 42);
     }
@@ -347,8 +359,11 @@ fn deferred_one_shot_fires_once() {
         call.call();
     }
 
-    assert_eq!(*counter.lock().unwrap(), 1,
-        "Deferred one-shot should fire exactly once");
+    assert_eq!(
+        *counter.lock().unwrap(),
+        1,
+        "Deferred one-shot should fire exactly once"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -373,17 +388,19 @@ fn duplicate_connections_both_fire() {
 
     for _ in 0..3 {
         let c = Arc::clone(&counter);
-        let conn = Connection::with_callback(
-            ObjectId::from_raw(1),
-            "on_event",
-            move |_| { *c.lock().unwrap() += 1; Variant::Nil },
-        );
+        let conn = Connection::with_callback(ObjectId::from_raw(1), "on_event", move |_| {
+            *c.lock().unwrap() += 1;
+            Variant::Nil
+        });
         signal.connect(conn);
     }
 
     signal.emit(&[]);
-    assert_eq!(*counter.lock().unwrap(), 3,
-        "All duplicate connections should fire");
+    assert_eq!(
+        *counter.lock().unwrap(),
+        3,
+        "All duplicate connections should fire"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +414,10 @@ fn disconnect_removes_first_only() {
 
     for _ in 0..3 {
         let c = Arc::clone(&counter);
-        let conn = Connection::with_callback(
-            ObjectId::from_raw(1),
-            "handler",
-            move |_| { *c.lock().unwrap() += 1; Variant::Nil },
-        );
+        let conn = Connection::with_callback(ObjectId::from_raw(1), "handler", move |_| {
+            *c.lock().unwrap() += 1;
+            Variant::Nil
+        });
         signal.connect(conn);
     }
 
@@ -409,8 +425,11 @@ fn disconnect_removes_first_only() {
     signal.disconnect(ObjectId::from_raw(1), "handler");
 
     signal.emit(&[]);
-    assert_eq!(*counter.lock().unwrap(), 2,
-        "After disconnecting one of three dups, two should remain");
+    assert_eq!(
+        *counter.lock().unwrap(),
+        2,
+        "After disconnecting one of three dups, two should remain"
+    );
 }
 
 // ---------------------------------------------------------------------------

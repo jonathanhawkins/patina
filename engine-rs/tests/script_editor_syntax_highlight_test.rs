@@ -108,7 +108,9 @@ fn highlighter_func_keyword() {
 #[test]
 fn highlighter_annotations() {
     let hl = SyntaxHighlighter::new();
-    let spans = hl.highlight("@export var speed = 1.0\n@onready var node = $Node").unwrap();
+    let spans = hl
+        .highlight("@export var speed = 1.0\n@onready var node = $Node")
+        .unwrap();
 
     let annotations: Vec<&HighlightSpan> = spans
         .iter()
@@ -174,7 +176,9 @@ fn highlighter_highlight_line() {
 
     // Line 3: var flag = true
     let line3 = hl.highlight_line(HIGHLIGHT_SAMPLE, 3).unwrap();
-    assert!(line3.iter().any(|s| s.kind == HighlightKind::ConstantLiteral));
+    assert!(line3
+        .iter()
+        .any(|s| s.kind == HighlightKind::ConstantLiteral));
 }
 
 #[test]
@@ -219,7 +223,10 @@ fn highlighter_complex_script() {
     // Should have string literal ("ready")
     assert!(spans.iter().any(|s| s.kind == HighlightKind::StringLiteral));
     // Should have many keywords
-    let kw_count = spans.iter().filter(|s| s.kind == HighlightKind::Keyword).count();
+    let kw_count = spans
+        .iter()
+        .filter(|s| s.kind == HighlightKind::Keyword)
+        .count();
     assert!(kw_count >= 6);
 }
 

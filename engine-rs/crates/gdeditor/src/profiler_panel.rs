@@ -439,7 +439,10 @@ impl ProfilerPanel {
 
     /// Returns frames where CPU time exceeds the given threshold.
     pub fn spike_frames(&self, threshold: Duration) -> Vec<&FrameProfile> {
-        self.frames.iter().filter(|f| f.cpu_time > threshold).collect()
+        self.frames
+            .iter()
+            .filter(|f| f.cpu_time > threshold)
+            .collect()
     }
 
     /// Returns the percentile CPU frame time in ms (0.0–100.0).
@@ -479,13 +482,16 @@ impl ProfilerPanel {
             let lo = min + i as f64 * width;
             let is_last = i == bucket_count - 1;
             let hi = lo + width;
-            let count = times.iter().filter(|&&t| {
-                if is_last {
-                    t >= lo && t <= hi + f64::EPSILON
-                } else {
-                    t >= lo && t < hi
-                }
-            }).count();
+            let count = times
+                .iter()
+                .filter(|&&t| {
+                    if is_last {
+                        t >= lo && t <= hi + f64::EPSILON
+                    } else {
+                        t >= lo && t < hi
+                    }
+                })
+                .count();
             buckets.push((lo, hi, count));
         }
         buckets
@@ -518,7 +524,10 @@ impl ProfilerPanel {
 
     /// Adds a bookmark/marker at a specific frame number.
     pub fn add_marker(&mut self, frame_number: u64, label: String) {
-        self.markers.push(ProfilerMarker { frame_number, label });
+        self.markers.push(ProfilerMarker {
+            frame_number,
+            label,
+        });
     }
 
     /// Returns all markers.
@@ -537,16 +546,27 @@ impl ProfilerPanel {
     /// Compares stats between two frame ranges.
     ///
     /// Returns `(stats_a, stats_b)` for the given frame number ranges.
-    pub fn compare_ranges(&self, range_a: (u64, u64), range_b: (u64, u64)) -> (ProfilerStats, ProfilerStats) {
-        let frames_a: Vec<FrameProfile> = self.frames.iter()
+    pub fn compare_ranges(
+        &self,
+        range_a: (u64, u64),
+        range_b: (u64, u64),
+    ) -> (ProfilerStats, ProfilerStats) {
+        let frames_a: Vec<FrameProfile> = self
+            .frames
+            .iter()
             .filter(|f| f.frame_number >= range_a.0 && f.frame_number <= range_a.1)
             .cloned()
             .collect();
-        let frames_b: Vec<FrameProfile> = self.frames.iter()
+        let frames_b: Vec<FrameProfile> = self
+            .frames
+            .iter()
             .filter(|f| f.frame_number >= range_b.0 && f.frame_number <= range_b.1)
             .cloned()
             .collect();
-        (ProfilerStats::from_frames(&frames_a), ProfilerStats::from_frames(&frames_b))
+        (
+            ProfilerStats::from_frames(&frames_a),
+            ProfilerStats::from_frames(&frames_b),
+        )
     }
 
     /// Returns a summary line suitable for display (e.g., status bar).
@@ -794,7 +814,11 @@ impl FrameGraph {
     }
 
     /// Generates tooltip data for a specific viewport index.
-    pub fn tooltip(&self, frames: &[FrameProfile], viewport_index: usize) -> Option<FrameGraphTooltip> {
+    pub fn tooltip(
+        &self,
+        frames: &[FrameProfile],
+        viewport_index: usize,
+    ) -> Option<FrameGraphTooltip> {
         let abs_index = self.viewport_start + viewport_index;
         let frame = frames.get(abs_index)?;
 
@@ -1343,7 +1367,7 @@ mod tests {
         assert_eq!(hotspots.len(), 3);
         assert_eq!(hotspots[0].0, "render"); // highest percentage
         assert!(hotspots[0].2 > hotspots[1].2); // render% > physics%
-        // Percentages should sum to < 100 (functions don't account for all CPU time)
+                                                // Percentages should sum to < 100 (functions don't account for all CPU time)
         let total_pct: f64 = hotspots.iter().map(|h| h.2).sum();
         assert!(total_pct <= 100.0 + 0.01);
     }

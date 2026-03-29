@@ -72,12 +72,16 @@ fn build_test_tree() -> TestTree {
     hero_node.set_unique_name(true);
     let hero = tree.add_child(players, hero_node).unwrap();
 
-    let sprite = tree.add_child(hero, owned_node("Sprite", "Sprite2D")).unwrap();
+    let sprite = tree
+        .add_child(hero, owned_node("Sprite", "Sprite2D"))
+        .unwrap();
     let collider = tree
         .add_child(hero, owned_node("Collider", "CollisionShape2D"))
         .unwrap();
 
-    let ally = tree.add_child(players, owned_node("Ally", "Node2D")).unwrap();
+    let ally = tree
+        .add_child(players, owned_node("Ally", "Node2D"))
+        .unwrap();
 
     let world = tree.add_child(root, owned_node("World", "Node")).unwrap();
     let ground = tree
@@ -167,20 +171,14 @@ fn subtree_ids_resolve_relative_paths() {
 
     // Each ID should work as a from-handle for get_node_relative
     // Players → Hero via "Hero"
-    assert_eq!(
-        t.tree.get_node_relative(subtree[0], "Hero"),
-        Some(t.hero)
-    );
+    assert_eq!(t.tree.get_node_relative(subtree[0], "Hero"), Some(t.hero));
     // Hero → Sprite via "Sprite"
     assert_eq!(
         t.tree.get_node_relative(subtree[1], "Sprite"),
         Some(t.sprite)
     );
     // Sprite → Hero via ".."
-    assert_eq!(
-        t.tree.get_node_relative(subtree[2], ".."),
-        Some(t.hero)
-    );
+    assert_eq!(t.tree.get_node_relative(subtree[2], ".."), Some(t.hero));
     // Collider → Sprite via "../Sprite"
     assert_eq!(
         t.tree.get_node_relative(subtree[3], "../Sprite"),
@@ -283,10 +281,7 @@ fn group_ids_work_with_get_node_or_null() {
     let chars = t.tree.get_nodes_in_group("chars");
     for &id in &chars {
         // Absolute path resolution
-        assert_eq!(
-            t.tree.get_node_or_null(id, "/root/UI/Score"),
-            Some(t.score)
-        );
+        assert_eq!(t.tree.get_node_or_null(id, "/root/UI/Score"), Some(t.score));
         // Relative parent
         let parent = t.tree.get_node_or_null(id, "..");
         assert!(parent.is_some());
@@ -362,14 +357,8 @@ fn packed_scene_instances_have_distinct_nodeids() {
     assert_ne!(inst1, inst2);
 
     // Both resolve correctly via their own paths
-    assert_eq!(
-        tree.get_node_by_path("/root/Enemy1"),
-        Some(inst1)
-    );
-    assert_eq!(
-        tree.get_node_by_path("/root/Enemy2"),
-        Some(inst2)
-    );
+    assert_eq!(tree.get_node_by_path("/root/Enemy1"), Some(inst1));
+    assert_eq!(tree.get_node_by_path("/root/Enemy2"), Some(inst2));
 
     // Children are also distinct
     let ai1 = tree.get_node_relative(inst1, "AI").unwrap();
@@ -481,22 +470,13 @@ fn cross_api_matrix_all_sources_resolve_via_all_methods() {
         assert_eq!(t.tree.get_node_relative(id, ".."), Some(t.players));
 
         // Method 2: get_node_or_null (absolute)
-        assert_eq!(
-            t.tree.get_node_or_null(id, "/root/World"),
-            Some(t.world)
-        );
+        assert_eq!(t.tree.get_node_or_null(id, "/root/World"), Some(t.world));
 
         // Method 3: get_node_or_null (relative)
-        assert_eq!(
-            t.tree.get_node_or_null(id, "Collider"),
-            Some(t.collider)
-        );
+        assert_eq!(t.tree.get_node_or_null(id, "Collider"), Some(t.collider));
 
         // Method 4: node_path
-        assert_eq!(
-            t.tree.node_path(id),
-            Some("/root/Players/Hero".to_string())
-        );
+        assert_eq!(t.tree.node_path(id), Some("/root/Players/Hero".to_string()));
 
         // Method 5: get_index
         assert_eq!(t.tree.get_index(id), Some(0));
@@ -552,10 +532,7 @@ fn unique_name_with_child_path_resolves() {
     );
 
     // %Score (unique in UI subtree)
-    assert_eq!(
-        t.tree.get_node_relative(t.root, "%Score"),
-        Some(t.score)
-    );
+    assert_eq!(t.tree.get_node_relative(t.root, "%Score"), Some(t.score));
 }
 
 // ===========================================================================
@@ -809,28 +786,16 @@ fn move_child_preserves_nodeid_identity() {
     t.tree.move_child(t.players, t.hero, 1).unwrap();
 
     // NodeIds should be unchanged
-    assert_eq!(
-        t.tree.get_node(t.hero).unwrap().name(),
-        "Hero"
-    );
-    assert_eq!(
-        t.tree.get_node(t.ally).unwrap().name(),
-        "Ally"
-    );
+    assert_eq!(t.tree.get_node(t.hero).unwrap().name(), "Hero");
+    assert_eq!(t.tree.get_node(t.ally).unwrap().name(), "Ally");
 
     // Indices should be swapped
     assert_eq!(t.tree.get_index(t.ally), Some(0));
     assert_eq!(t.tree.get_index(t.hero), Some(1));
 
     // Path resolution still works
-    assert_eq!(
-        t.tree.get_node_by_path("/root/Players/Hero"),
-        Some(t.hero)
-    );
-    assert_eq!(
-        t.tree.get_node_by_path("/root/Players/Ally"),
-        Some(t.ally)
-    );
+    assert_eq!(t.tree.get_node_by_path("/root/Players/Hero"), Some(t.hero));
+    assert_eq!(t.tree.get_node_by_path("/root/Players/Ally"), Some(t.ally));
 }
 
 #[test]
@@ -841,10 +806,7 @@ fn move_child_nodeid_still_resolves_children() {
     t.tree.move_child(t.players, t.hero, 1).unwrap();
 
     // Hero's children should still be reachable
-    assert_eq!(
-        t.tree.get_node_relative(t.hero, "Sprite"),
-        Some(t.sprite)
-    );
+    assert_eq!(t.tree.get_node_relative(t.hero, "Sprite"), Some(t.sprite));
     assert_eq!(
         t.tree.get_node_relative(t.hero, "Collider"),
         Some(t.collider)
@@ -873,10 +835,7 @@ fn u64_roundtrip_through_children_ids() {
         let path = t.tree.node_path(reconstructed).unwrap();
         assert_eq!(t.tree.get_node_by_path(&path), Some(reconstructed));
         // Parent resolution
-        assert_eq!(
-            t.tree.get_node_relative(reconstructed, ".."),
-            Some(t.hero)
-        );
+        assert_eq!(t.tree.get_node_relative(reconstructed, ".."), Some(t.hero));
     }
 }
 
@@ -911,10 +870,7 @@ fn u64_roundtrip_through_group_ids() {
         assert_eq!(reconstructed, id);
 
         // Use reconstructed ID for resolution
-        assert_eq!(
-            t.tree.get_node_relative(reconstructed, ".."),
-            Some(t.world)
-        );
+        assert_eq!(t.tree.get_node_relative(reconstructed, ".."), Some(t.world));
     }
 }
 
@@ -951,10 +907,7 @@ fn packed_scene_children_and_parent_ids_as_handles() {
         let path = tree.node_path(child_id).unwrap();
         assert_eq!(tree.get_node_by_path(&path), Some(child_id));
         // Parent should be container
-        assert_eq!(
-            tree.get_node(child_id).unwrap().parent(),
-            Some(container)
-        );
+        assert_eq!(tree.get_node(child_id).unwrap().parent(), Some(container));
     }
 
     // Child2's child (Nested) — get via children API then resolve

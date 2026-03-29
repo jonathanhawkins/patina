@@ -79,11 +79,7 @@ impl Default for MacOsDisplayInfo {
     fn default() -> Self {
         Self {
             retina: cfg!(target_os = "macos"),
-            scale_factor: if cfg!(target_os = "macos") {
-                2.0
-            } else {
-                1.0
-            },
+            scale_factor: if cfg!(target_os = "macos") { 2.0 } else { 1.0 },
             theme: SystemTheme::Light,
             reduce_motion: false,
             reduce_transparency: false,
@@ -523,17 +519,10 @@ mod tests {
         {
             let file = layer.menu_bar.get_menu_mut(file_id).unwrap();
             file.add_item(
-                MenuItem::action(new_id, "New Project")
-                    .with_shortcut(MenuShortcut::cmd("N")),
+                MenuItem::action(new_id, "New Project").with_shortcut(MenuShortcut::cmd("N")),
             );
-            file.add_item(
-                MenuItem::action(save_id, "Save")
-                    .with_shortcut(MenuShortcut::cmd("S")),
-            );
-            file.add_item(
-                MenuItem::action(quit_id, "Quit")
-                    .with_shortcut(MenuShortcut::cmd("Q")),
-            );
+            file.add_item(MenuItem::action(save_id, "Save").with_shortcut(MenuShortcut::cmd("S")));
+            file.add_item(MenuItem::action(quit_id, "Quit").with_shortcut(MenuShortcut::cmd("Q")));
         }
 
         // 3. Add View menu with toggle.

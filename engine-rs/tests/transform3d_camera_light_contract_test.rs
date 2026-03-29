@@ -335,7 +335,10 @@ fn perspective_projection_matrix_not_degenerate() {
     assert!(mat[0][0].abs() > 0.0, "m00 should be non-zero");
     assert!(mat[1][1].abs() > 0.0, "m11 should be non-zero");
     assert!(mat[2][2].abs() > 0.0, "m22 should be non-zero");
-    assert!(mat[2][3].abs() > 0.0, "m23 should be non-zero (perspective divide)");
+    assert!(
+        mat[2][3].abs() > 0.0,
+        "m23 should be non-zero (perspective divide)"
+    );
 }
 
 #[test]
@@ -517,7 +520,11 @@ fn camera_under_rotated_parent_gets_correct_global_transform() {
     let arm = Node::new("CameraArm", "Node3D");
     let arm_id = tree.add_child(root, arm).unwrap();
     node3d::set_position(&mut tree, arm_id, Vector3::new(0.0, 5.0, 0.0));
-    node3d::set_rotation(&mut tree, arm_id, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        arm_id,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     let cam = Node::new("Camera", "Camera3D");
     let cam_id = tree.add_child(arm_id, cam).unwrap();
@@ -530,7 +537,8 @@ fn camera_under_rotated_parent_gets_correct_global_transform() {
     // After 90° Y rotation: local -Z becomes +X
     assert!(
         approx(world_pos.y, 5.0),
-        "Y should be 5.0 from parent, got {}", world_pos.y
+        "Y should be 5.0 from parent, got {}",
+        world_pos.y
     );
 }
 
@@ -654,7 +662,11 @@ fn parent_rotation_rotates_child_global_position() {
     let parent = Node::new("Parent", "Node3D");
     let parent_id = tree.add_child(root, parent).unwrap();
     // Rotate parent 90° around Y axis
-    node3d::set_rotation(&mut tree, parent_id, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent_id,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     let child = Node::new("Child", "Node3D");
     let child_id = tree.add_child(parent_id, child).unwrap();
@@ -699,7 +711,11 @@ fn parent_translate_rotate_child_translate_composition() {
     let parent = Node::new("Parent", "Node3D");
     let parent_id = tree.add_child(root, parent).unwrap();
     node3d::set_position(&mut tree, parent_id, Vector3::new(100.0, 0.0, 0.0));
-    node3d::set_rotation(&mut tree, parent_id, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent_id,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     // Child at (0, 0, 5) local — 90° Y maps local Z to -X in parent space
     let child = Node::new("Child", "Node3D");
@@ -802,7 +818,11 @@ fn set_global_position_with_rotated_parent() {
     let parent = Node::new("Parent", "Node3D");
     let parent_id = tree.add_child(root, parent).unwrap();
     node3d::set_position(&mut tree, parent_id, Vector3::new(10.0, 0.0, 0.0));
-    node3d::set_rotation(&mut tree, parent_id, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent_id,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     let child = Node::new("Child", "Node3D");
     let child_id = tree.add_child(parent_id, child).unwrap();
@@ -838,8 +858,14 @@ fn sibling_transforms_independent() {
     let global_a = node3d::get_global_transform(&tree, a_id).xform(Vector3::ZERO);
     let global_b = node3d::get_global_transform(&tree, b_id).xform(Vector3::ZERO);
 
-    assert!(approx_vec3(global_a, Vector3::new(15.0, 0.0, 0.0)), "sibling A: got {global_a:?}");
-    assert!(approx_vec3(global_b, Vector3::new(10.0, 5.0, 0.0)), "sibling B: got {global_b:?}");
+    assert!(
+        approx_vec3(global_a, Vector3::new(15.0, 0.0, 0.0)),
+        "sibling A: got {global_a:?}"
+    );
+    assert!(
+        approx_vec3(global_b, Vector3::new(10.0, 5.0, 0.0)),
+        "sibling B: got {global_b:?}"
+    );
 
     // Mutating A should not affect B
     node3d::set_position(&mut tree, a_id, Vector3::new(100.0, 0.0, 0.0));

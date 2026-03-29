@@ -3,10 +3,10 @@
 //! Tests both SceneTree-level queue_free/process_deletions and the ObjectBase-level
 //! free() API with use-after-free guards.
 
-use gdscene::scene_tree::SceneTree;
-use gdscene::node::Node;
 use gdobject::object::{GenericObject, GodotObject, ObjectBase};
 use gdobject::weak_ref::{self, WeakRef};
+use gdscene::node::Node;
+use gdscene::scene_tree::SceneTree;
 use gdvariant::Variant;
 
 #[test]
@@ -18,7 +18,10 @@ fn get_node_returns_none_after_free() {
     tree.queue_free(child_id);
     tree.process_deletions();
 
-    assert!(tree.get_node(child_id).is_none(), "get_node must return None after free");
+    assert!(
+        tree.get_node(child_id).is_none(),
+        "get_node must return None after free"
+    );
 }
 
 #[test]
@@ -30,9 +33,7 @@ fn get_node_does_not_panic_after_free() {
     tree.queue_free(child_id);
     tree.process_deletions();
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tree.get_node(child_id)
-    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree.get_node(child_id)));
 
     match result {
         Ok(None) => {}
@@ -50,7 +51,10 @@ fn node_path_returns_none_after_free() {
     tree.queue_free(child_id);
     tree.process_deletions();
 
-    assert!(tree.node_path(child_id).is_none(), "node_path must return None after free");
+    assert!(
+        tree.node_path(child_id).is_none(),
+        "node_path must return None after free"
+    );
 }
 
 #[test]
@@ -72,7 +76,9 @@ fn free_subtree_cleans_all_descendants() {
     let root = tree.root_id();
     let parent = tree.add_child(root, Node::new("Parent", "Node")).unwrap();
     let child = tree.add_child(parent, Node::new("Child", "Node")).unwrap();
-    let grandchild = tree.add_child(child, Node::new("Grandchild", "Node")).unwrap();
+    let grandchild = tree
+        .add_child(child, Node::new("Grandchild", "Node"))
+        .unwrap();
 
     tree.queue_free(parent);
     tree.process_deletions();
@@ -125,7 +131,10 @@ fn object_base_double_free_is_safe() {
 fn object_base_get_property_nil_after_free() {
     let mut base = ObjectBase::new("Sprite2D");
     base.set_property("texture", Variant::String("player.png".into()));
-    assert_eq!(base.get_property("texture"), Variant::String("player.png".into()));
+    assert_eq!(
+        base.get_property("texture"),
+        Variant::String("player.png".into())
+    );
 
     base.free();
     assert_eq!(base.get_property("texture"), Variant::Nil);

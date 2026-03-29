@@ -237,7 +237,10 @@ fn t7tno_directional_light_registered() {
     let mut adapter = RenderServer3DAdapter::new(32, 32);
     let (snapshot, _) = adapter.render_frame(&tree);
 
-    assert_eq!(snapshot.light_count, 1, "DirectionalLight3D should register");
+    assert_eq!(
+        snapshot.light_count, 1,
+        "DirectionalLight3D should register"
+    );
 }
 
 #[test]
@@ -273,9 +276,12 @@ fn t7tno_all_three_light_types_together() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
-    tree.add_child(root, Node::new("Lamp", "OmniLight3D")).unwrap();
-    tree.add_child(root, Node::new("Spot", "SpotLight3D")).unwrap();
+    tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
+    tree.add_child(root, Node::new("Lamp", "OmniLight3D"))
+        .unwrap();
+    tree.add_child(root, Node::new("Spot", "SpotLight3D"))
+        .unwrap();
 
     let mut adapter = RenderServer3DAdapter::new(32, 32);
     let (snapshot, _) = adapter.render_frame(&tree);
@@ -295,8 +301,12 @@ fn t7tno_light_count_updates_on_removal() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let sun_id = tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
-    let lamp_id = tree.add_child(root, Node::new("Lamp", "OmniLight3D")).unwrap();
+    let sun_id = tree
+        .add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
+    let lamp_id = tree
+        .add_child(root, Node::new("Lamp", "OmniLight3D"))
+        .unwrap();
 
     let mut adapter = RenderServer3DAdapter::new(32, 32);
 
@@ -316,7 +326,10 @@ fn t7tno_light_count_updates_on_removal() {
 
     // Frame 3: no lights.
     let (snap3, _) = adapter.render_frame(&tree);
-    assert_eq!(snap3.light_count, 0, "all lights removed should give count 0");
+    assert_eq!(
+        snap3.light_count, 0,
+        "all lights removed should give count 0"
+    );
 }
 
 #[test]
@@ -331,7 +344,8 @@ fn t7tno_light_count_updates_on_addition() {
     assert_eq!(snap1.light_count, 0);
 
     // Add a light.
-    tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+    tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
 
     // Frame 2: one light.
     let (snap2, _) = adapter.render_frame(&tree);
@@ -464,7 +478,10 @@ fn t7tno_snapshot_empty_scene_no_camera_no_lights() {
     let (snapshot, _) = adapter.render_frame(&tree);
 
     assert_eq!(snapshot.light_count, 0, "empty scene should have 0 lights");
-    assert_eq!(snapshot.visible_mesh_count, 0, "empty scene should have 0 meshes");
+    assert_eq!(
+        snapshot.visible_mesh_count, 0,
+        "empty scene should have 0 meshes"
+    );
 }
 
 #[test]
@@ -480,17 +497,25 @@ fn t7tno_snapshot_with_camera_mesh_and_lights() {
     let mesh = Node::new("Cube", "MeshInstance3D");
     tree.add_child(root, mesh).unwrap();
 
-    tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
-    tree.add_child(root, Node::new("Lamp", "OmniLight3D")).unwrap();
+    tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
+    tree.add_child(root, Node::new("Lamp", "OmniLight3D"))
+        .unwrap();
 
     let mut adapter = RenderServer3DAdapter::new(64, 64);
     let (snapshot, _) = adapter.render_frame(&tree);
 
     // Camera FOV should be non-zero (camera is present).
-    assert!(snapshot.camera_fov > 0.0, "should detect camera via non-zero FOV");
+    assert!(
+        snapshot.camera_fov > 0.0,
+        "should detect camera via non-zero FOV"
+    );
     assert_eq!(snapshot.light_count, 2, "should count both lights");
     assert_eq!(snapshot.visible_mesh_count, 1, "should count mesh");
-    assert!(snapshot.nonblack_pixel_count > 0, "camera+mesh should produce visible pixels");
+    assert!(
+        snapshot.nonblack_pixel_count > 0,
+        "camera+mesh should produce visible pixels"
+    );
 }
 
 #[test]
@@ -498,7 +523,8 @@ fn t7tno_snapshot_json_includes_light_count() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+    tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
 
     let mut adapter = RenderServer3DAdapter::new(32, 32);
     let (snapshot, _) = adapter.render_frame(&tree);
@@ -524,8 +550,8 @@ fn load_fixture_to_tree(filename: &str) -> SceneTree {
     let path = fixture_path(filename);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("should read {}: {}", filename, e));
-    let scene = PackedScene::from_tscn(&source)
-        .unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
+    let scene =
+        PackedScene::from_tscn(&source).unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene)
@@ -545,7 +571,10 @@ fn t7tno_fixture_minimal_3d_camera_detected() {
 
     // Camera at (0, 2, 5) with FOV 75°.
     let report = snapshot.parity_report();
-    assert!(report.has_camera, "minimal_3d fixture should detect Camera3D");
+    assert!(
+        report.has_camera,
+        "minimal_3d fixture should detect Camera3D"
+    );
 
     let expected_fov = 75.0_f32.to_radians();
     assert!(
@@ -676,7 +705,10 @@ fn t7tno_fixture_parity_report_complete() {
     assert!(report.has_camera, "parity report should show camera");
     assert_eq!(report.light_count, 4, "parity report light count");
     assert_eq!(report.mesh_count, 2, "parity report mesh count");
-    assert!(report.viewport_pixels > 0, "parity report should have pixels");
+    assert!(
+        report.viewport_pixels > 0,
+        "parity report should have pixels"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -690,7 +722,11 @@ fn t7tno_fixture_snapshot_json_well_formed() {
     let (snapshot, _) = adapter.render_frame(&tree);
 
     let json = snapshot.to_json();
-    assert!(json.contains("\"light_count\":1"), "JSON light_count: {}", json);
+    assert!(
+        json.contains("\"light_count\":1"),
+        "JSON light_count: {}",
+        json
+    );
     assert!(
         json.contains("\"visible_mesh_count\":1"),
         "JSON visible_mesh_count: {}",
@@ -702,7 +738,10 @@ fn t7tno_fixture_snapshot_json_well_formed() {
         json
     );
     // Verify it's valid JSON (braces balanced, no trailing comma issues).
-    assert!(json.starts_with('{') && json.ends_with('}'), "should be valid JSON object");
+    assert!(
+        json.starts_with('{') && json.ends_with('}'),
+        "should be valid JSON object"
+    );
 }
 
 // ===========================================================================
@@ -774,15 +813,18 @@ fn t7tno_light_count_updates_across_frames() {
     assert_eq!(snap1.light_count, 0, "frame 1: no lights");
 
     // Add a light.
-    tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+    tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
 
     // Frame 2: 1 light.
     let (snap2, _) = adapter.render_frame(&tree);
     assert_eq!(snap2.light_count, 1, "frame 2: one light");
 
     // Add two more lights.
-    tree.add_child(root, Node::new("Lamp1", "OmniLight3D")).unwrap();
-    tree.add_child(root, Node::new("Lamp2", "OmniLight3D")).unwrap();
+    tree.add_child(root, Node::new("Lamp1", "OmniLight3D"))
+        .unwrap();
+    tree.add_child(root, Node::new("Lamp2", "OmniLight3D"))
+        .unwrap();
 
     // Frame 3: 3 lights.
     let (snap3, _) = adapter.render_frame(&tree);

@@ -4,10 +4,10 @@
 //! [`SyntaxHighlighter`] that tokenizes GDScript source and assigns
 //! [`HighlightKind`] categories to each token span for rendering.
 
-use std::collections::BTreeSet;
 pub use crate::script_gutter::GutterMarker;
 use crate::settings::ExternalEditorConfig;
 use gdscript_interop::tokenizer::{tokenize, LexError, Token, TokenSpan};
+use std::collections::BTreeSet;
 
 // ── Syntax highlighting ─────────────────────────────────────────────────
 
@@ -701,10 +701,7 @@ impl ScriptEditor {
     ///
     /// Uses the tab's current cursor position for `{line}` and `{col}`.
     /// Returns [`ExternalEditorResult::NotConfigured`] if no external editor is set.
-    pub fn open_in_external_editor(
-        &self,
-        config: &ExternalEditorConfig,
-    ) -> ExternalEditorResult {
+    pub fn open_in_external_editor(&self, config: &ExternalEditorConfig) -> ExternalEditorResult {
         let tab = match self.active() {
             Some(t) => t,
             None => return ExternalEditorResult::LaunchError("no active tab".into()),
@@ -794,69 +791,116 @@ impl FindReplace {
     }
 
     /// Returns the current query.
-    pub fn query(&self) -> &str { &self.query }
+    pub fn query(&self) -> &str {
+        &self.query
+    }
 
     /// Sets a new query.
-    pub fn set_query(&mut self, query: impl Into<String>) { self.query = query.into(); }
+    pub fn set_query(&mut self, query: impl Into<String>) {
+        self.query = query.into();
+    }
 
     /// Returns the current replacement text.
-    pub fn replacement(&self) -> &str { &self.replacement }
+    pub fn replacement(&self) -> &str {
+        &self.replacement
+    }
 
     /// Sets a new replacement text.
-    pub fn set_replacement(&mut self, replacement: impl Into<String>) { self.replacement = replacement.into(); }
+    pub fn set_replacement(&mut self, replacement: impl Into<String>) {
+        self.replacement = replacement.into();
+    }
 
     /// Returns the current options.
-    pub fn options(&self) -> &FindOptions { &self.options }
+    pub fn options(&self) -> &FindOptions {
+        &self.options
+    }
 
     /// Sets new options.
-    pub fn set_options(&mut self, options: FindOptions) { self.options = options; }
+    pub fn set_options(&mut self, options: FindOptions) {
+        self.options = options;
+    }
 
     /// Finds all matches in the given source text.
     pub fn find_all(&self, source: &str) -> Vec<FindMatch> {
-        if self.query.is_empty() { return Vec::new(); }
-        if self.options.regex { self.find_all_regex(source) } else { self.find_all_plain(source) }
+        if self.query.is_empty() {
+            return Vec::new();
+        }
+        if self.options.regex {
+            self.find_all_regex(source)
+        } else {
+            self.find_all_plain(source)
+        }
     }
 
     /// Counts the total number of matches.
-    pub fn count(&self, source: &str) -> usize { self.find_all(source).len() }
+    pub fn count(&self, source: &str) -> usize {
+        self.find_all(source).len()
+    }
 
     /// Finds the next match starting from the given line and column.
     pub fn find_next(&self, source: &str, from_line: usize, from_col: usize) -> Option<FindMatch> {
         let matches = self.find_all(source);
-        let next = matches.iter().find(|m| m.line > from_line || (m.line == from_line && m.col >= from_col));
-        if let Some(m) = next { return Some(m.clone()); }
-        if self.options.wrap_around { return matches.into_iter().next(); }
+        let next = matches
+            .iter()
+            .find(|m| m.line > from_line || (m.line == from_line && m.col >= from_col));
+        if let Some(m) = next {
+            return Some(m.clone());
+        }
+        if self.options.wrap_around {
+            return matches.into_iter().next();
+        }
         None
     }
 
     /// Finds the previous match before the given line and column.
     pub fn find_prev(&self, source: &str, from_line: usize, from_col: usize) -> Option<FindMatch> {
         let matches = self.find_all(source);
-        let prev = matches.iter().rev().find(|m| m.line < from_line || (m.line == from_line && m.col < from_col));
-        if let Some(m) = prev { return Some(m.clone()); }
-        if self.options.wrap_around { return matches.into_iter().last(); }
+        let prev = matches
+            .iter()
+            .rev()
+            .find(|m| m.line < from_line || (m.line == from_line && m.col < from_col));
+        if let Some(m) = prev {
+            return Some(m.clone());
+        }
+        if self.options.wrap_around {
+            return matches.into_iter().last();
+        }
         None
     }
 
     /// Replaces the first occurrence and returns the new source.
     pub fn replace_next(&self, source: &str) -> Option<String> {
-        if self.options.regex { self.replace_regex(source, false) } else { self.replace_plain(source, false) }
+        if self.options.regex {
+            self.replace_regex(source, false)
+        } else {
+            self.replace_plain(source, false)
+        }
     }
 
     /// Replaces all occurrences and returns the new source.
     pub fn replace_all(&self, source: &str) -> String {
         if self.options.regex {
-            self.replace_regex(source, true).unwrap_or_else(|| source.to_string())
+            self.replace_regex(source, true)
+                .unwrap_or_else(|| source.to_string())
         } else {
-            self.replace_plain(source, true).unwrap_or_else(|| source.to_string())
+            self.replace_plain(source, true)
+                .unwrap_or_else(|| source.to_string())
         }
     }
 
     fn find_all_plain(&self, source: &str) -> Vec<FindMatch> {
         let mut results = Vec::new();
-        let query = if self.options.case_sensitive { self.query.clone() } else { self.query.to_lowercase() };
+        let query = if self.options.case_sensitive {
+            self.query.clone()
+        } else {
+            self.query.to_lowercase()
+        };
         for (line_idx, line) in source.lines().enumerate() {
-            let search_line = if self.options.case_sensitive { line.to_string() } else { line.to_lowercase() };
+            let search_line = if self.options.case_sensitive {
+                line.to_string()
+            } else {
+                line.to_lowercase()
+            };
             let mut start = 0;
             while let Some(pos) = search_line[start..].find(&query) {
                 let col = start + pos;
@@ -865,7 +909,9 @@ impl FindReplace {
                     continue;
                 }
                 results.push(FindMatch {
-                    line: line_idx, col, length: self.query.len(),
+                    line: line_idx,
+                    col,
+                    length: self.query.len(),
                     text: line[col..col + self.query.len()].to_string(),
                 });
                 start = col + self.query.len();
@@ -875,7 +921,11 @@ impl FindReplace {
     }
 
     fn find_all_regex(&self, source: &str) -> Vec<FindMatch> {
-        let pattern = if self.options.case_sensitive { self.query.clone() } else { format!("(?i){}", self.query) };
+        let pattern = if self.options.case_sensitive {
+            self.query.clone()
+        } else {
+            format!("(?i){}", self.query)
+        };
         let re = match gdcore::regex::RegEx::create_from_string(&pattern) {
             Some(re) => re,
             None => return Vec::new(),
@@ -885,9 +935,13 @@ impl FindReplace {
             for m in re.search_all(line, 0, 0) {
                 let col = m.start;
                 let length = m.end - m.start;
-                if self.options.whole_word && !is_whole_word(line, col, length) { continue; }
+                if self.options.whole_word && !is_whole_word(line, col, length) {
+                    continue;
+                }
                 results.push(FindMatch {
-                    line: line_idx, col, length,
+                    line: line_idx,
+                    col,
+                    length,
                     text: m.strings.first().cloned().unwrap_or_default(),
                 });
             }
@@ -896,31 +950,59 @@ impl FindReplace {
     }
 
     fn replace_plain(&self, source: &str, all: bool) -> Option<String> {
-        if self.query.is_empty() { return None; }
+        if self.query.is_empty() {
+            return None;
+        }
         if self.options.case_sensitive {
             if source.contains(&self.query) {
-                Some(if all { source.replace(&self.query, &self.replacement) } else { source.replacen(&self.query, &self.replacement, 1) })
-            } else { None }
+                Some(if all {
+                    source.replace(&self.query, &self.replacement)
+                } else {
+                    source.replacen(&self.query, &self.replacement, 1)
+                })
+            } else {
+                None
+            }
         } else {
             let pattern = format!("(?i){}", regex::escape(&self.query));
             let re = regex::Regex::new(&pattern).ok()?;
             if re.is_match(source) {
-                Some(if all { re.replace_all(source, self.replacement.as_str()).to_string() } else { re.replace(source, self.replacement.as_str()).to_string() })
-            } else { None }
+                Some(if all {
+                    re.replace_all(source, self.replacement.as_str())
+                        .to_string()
+                } else {
+                    re.replace(source, self.replacement.as_str()).to_string()
+                })
+            } else {
+                None
+            }
         }
     }
 
     fn replace_regex(&self, source: &str, all: bool) -> Option<String> {
-        let pattern = if self.options.case_sensitive { self.query.clone() } else { format!("(?i){}", self.query) };
+        let pattern = if self.options.case_sensitive {
+            self.query.clone()
+        } else {
+            format!("(?i){}", self.query)
+        };
         let re = regex::Regex::new(&pattern).ok()?;
         if re.is_match(source) {
-            Some(if all { re.replace_all(source, self.replacement.as_str()).to_string() } else { re.replace(source, self.replacement.as_str()).to_string() })
-        } else { None }
+            Some(if all {
+                re.replace_all(source, self.replacement.as_str())
+                    .to_string()
+            } else {
+                re.replace(source, self.replacement.as_str()).to_string()
+            })
+        } else {
+            None
+        }
     }
 }
 
 impl Default for FindReplace {
-    fn default() -> Self { Self::new("") }
+    fn default() -> Self {
+        Self::new("")
+    }
 }
 
 // ── Code Completion ─────────────────────────────────────────────────
@@ -974,37 +1056,89 @@ impl CompletionProvider {
     pub fn new() -> Self {
         Self {
             keywords: vec![
-                "var", "func", "class", "extends", "signal", "enum", "const",
-                "static", "if", "elif", "else", "for", "while", "match",
-                "return", "pass", "break", "continue", "in", "is", "as",
-                "self", "super", "await", "yield", "true", "false", "null",
+                "var", "func", "class", "extends", "signal", "enum", "const", "static", "if",
+                "elif", "else", "for", "while", "match", "return", "pass", "break", "continue",
+                "in", "is", "as", "self", "super", "await", "yield", "true", "false", "null",
                 "export", "onready", "tool", "preload", "load",
             ]
             .into_iter()
             .map(String::from)
             .collect(),
             builtin_classes: vec![
-                "Node", "Node2D", "Node3D", "Sprite2D", "Sprite3D",
-                "Camera2D", "Camera3D", "Control", "Label", "Button",
-                "TextureRect", "Area2D", "Area3D", "CollisionShape2D",
-                "CollisionShape3D", "CharacterBody2D", "CharacterBody3D",
-                "RigidBody2D", "RigidBody3D", "StaticBody2D", "StaticBody3D",
-                "Timer", "AnimationPlayer", "AudioStreamPlayer",
-                "RayCast2D", "RayCast3D", "TileMap", "CanvasLayer",
-                "Resource", "PackedScene", "Vector2", "Vector3",
-                "Color", "Rect2", "Transform2D", "Transform3D",
+                "Node",
+                "Node2D",
+                "Node3D",
+                "Sprite2D",
+                "Sprite3D",
+                "Camera2D",
+                "Camera3D",
+                "Control",
+                "Label",
+                "Button",
+                "TextureRect",
+                "Area2D",
+                "Area3D",
+                "CollisionShape2D",
+                "CollisionShape3D",
+                "CharacterBody2D",
+                "CharacterBody3D",
+                "RigidBody2D",
+                "RigidBody3D",
+                "StaticBody2D",
+                "StaticBody3D",
+                "Timer",
+                "AnimationPlayer",
+                "AudioStreamPlayer",
+                "RayCast2D",
+                "RayCast3D",
+                "TileMap",
+                "CanvasLayer",
+                "Resource",
+                "PackedScene",
+                "Vector2",
+                "Vector3",
+                "Color",
+                "Rect2",
+                "Transform2D",
+                "Transform3D",
             ]
             .into_iter()
             .map(String::from)
             .collect(),
             builtin_functions: vec![
-                "print", "push_error", "push_warning", "str", "int", "float",
-                "len", "abs", "min", "max", "clamp", "lerp", "range",
-                "randi", "randf", "randomize", "sqrt", "pow", "sin", "cos",
-                "deg_to_rad", "rad_to_deg", "is_instance_of",
-                "get_node", "get_parent", "get_children", "add_child",
-                "remove_child", "queue_free", "connect", "disconnect",
-                "emit_signal", "has_signal",
+                "print",
+                "push_error",
+                "push_warning",
+                "str",
+                "int",
+                "float",
+                "len",
+                "abs",
+                "min",
+                "max",
+                "clamp",
+                "lerp",
+                "range",
+                "randi",
+                "randf",
+                "randomize",
+                "sqrt",
+                "pow",
+                "sin",
+                "cos",
+                "deg_to_rad",
+                "rad_to_deg",
+                "is_instance_of",
+                "get_node",
+                "get_parent",
+                "get_children",
+                "add_child",
+                "remove_child",
+                "queue_free",
+                "connect",
+                "disconnect",
+                "emit_signal",
+                "has_signal",
             ]
             .into_iter()
             .map(String::from)
@@ -1081,7 +1215,10 @@ impl CompletionProvider {
                     && seen.insert(word.to_string())
                 {
                     // Detect kind from context.
-                    let kind = if line.trim_start().starts_with("func ") && line.contains(word) && line.contains('(') {
+                    let kind = if line.trim_start().starts_with("func ")
+                        && line.contains(word)
+                        && line.contains('(')
+                    {
                         CompletionKind::Function
                     } else if line.trim_start().starts_with("var ") {
                         CompletionKind::Variable
@@ -1317,7 +1454,12 @@ impl Selection {
         }
     }
 
-    pub fn range(anchor_line: usize, anchor_col: usize, caret_line: usize, caret_col: usize) -> Self {
+    pub fn range(
+        anchor_line: usize,
+        anchor_col: usize,
+        caret_line: usize,
+        caret_col: usize,
+    ) -> Self {
         Self {
             caret: Caret::new(caret_line, caret_col),
             anchor: Caret::new(anchor_line, anchor_col),
@@ -1404,7 +1546,12 @@ impl MultiCaret {
         caret_line: usize,
         caret_col: usize,
     ) {
-        self.selections = vec![Selection::range(anchor_line, anchor_col, caret_line, caret_col)];
+        self.selections = vec![Selection::range(
+            anchor_line,
+            anchor_col,
+            caret_line,
+            caret_col,
+        )];
     }
 
     /// Selects the entire document (line 1 to last line).
@@ -1664,55 +1811,91 @@ pub fn extract_outline(source: &str) -> Vec<OutlineEntry> {
         let depth = indent / 4; // GDScript uses 4-space (or tab) indentation
 
         if let Some(rest) = trimmed.strip_prefix("func ") {
-            let name = rest.split(|c: char| c == '(' || c == ':' || c.is_whitespace())
+            let name = rest
+                .split(|c: char| c == '(' || c == ':' || c.is_whitespace())
                 .next()
                 .unwrap_or("")
                 .to_string();
             if !name.is_empty() {
-                entries.push(OutlineEntry { name, kind: OutlineKind::Function, line: i + 1, depth });
+                entries.push(OutlineEntry {
+                    name,
+                    kind: OutlineKind::Function,
+                    line: i + 1,
+                    depth,
+                });
             }
         } else if let Some(rest) = trimmed.strip_prefix("class ") {
-            let name = rest.split(|c: char| c == ':' || c == '(' || c.is_whitespace())
+            let name = rest
+                .split(|c: char| c == ':' || c == '(' || c.is_whitespace())
                 .next()
                 .unwrap_or("")
                 .to_string();
             if !name.is_empty() {
-                entries.push(OutlineEntry { name, kind: OutlineKind::Class, line: i + 1, depth });
+                entries.push(OutlineEntry {
+                    name,
+                    kind: OutlineKind::Class,
+                    line: i + 1,
+                    depth,
+                });
             }
         } else if let Some(rest) = trimmed.strip_prefix("signal ") {
-            let name = rest.split(|c: char| c == '(' || c.is_whitespace())
+            let name = rest
+                .split(|c: char| c == '(' || c.is_whitespace())
                 .next()
                 .unwrap_or("")
                 .to_string();
             if !name.is_empty() {
-                entries.push(OutlineEntry { name, kind: OutlineKind::Signal, line: i + 1, depth });
+                entries.push(OutlineEntry {
+                    name,
+                    kind: OutlineKind::Signal,
+                    line: i + 1,
+                    depth,
+                });
             }
         } else if let Some(rest) = trimmed.strip_prefix("enum ") {
-            let name = rest.split(|c: char| c == '{' || c == ':' || c.is_whitespace())
+            let name = rest
+                .split(|c: char| c == '{' || c == ':' || c.is_whitespace())
                 .next()
                 .unwrap_or("")
                 .to_string();
             if !name.is_empty() {
-                entries.push(OutlineEntry { name, kind: OutlineKind::Enum, line: i + 1, depth });
+                entries.push(OutlineEntry {
+                    name,
+                    kind: OutlineKind::Enum,
+                    line: i + 1,
+                    depth,
+                });
             }
         } else if let Some(rest) = trimmed.strip_prefix("const ") {
-            let name = rest.split(|c: char| c == '=' || c == ':' || c.is_whitespace())
+            let name = rest
+                .split(|c: char| c == '=' || c == ':' || c.is_whitespace())
                 .next()
                 .unwrap_or("")
                 .to_string();
             if !name.is_empty() {
-                entries.push(OutlineEntry { name, kind: OutlineKind::Constant, line: i + 1, depth });
+                entries.push(OutlineEntry {
+                    name,
+                    kind: OutlineKind::Constant,
+                    line: i + 1,
+                    depth,
+                });
             }
         } else if trimmed.starts_with("@export") {
             // Look for the variable name after @export ... var
             if let Some(var_pos) = trimmed.find("var ") {
                 let after_var = &trimmed[var_pos + 4..];
-                let name = after_var.split(|c: char| c == '=' || c == ':' || c.is_whitespace())
+                let name = after_var
+                    .split(|c: char| c == '=' || c == ':' || c.is_whitespace())
                     .next()
                     .unwrap_or("")
                     .to_string();
                 if !name.is_empty() {
-                    entries.push(OutlineEntry { name, kind: OutlineKind::Export, line: i + 1, depth });
+                    entries.push(OutlineEntry {
+                        name,
+                        kind: OutlineKind::Export,
+                        line: i + 1,
+                        depth,
+                    });
                 }
             }
         }
@@ -1775,11 +1958,7 @@ pub struct ScriptStatusBar {
 
 impl ScriptStatusBar {
     /// Builds a status bar from the current editor state.
-    pub fn from_editor(
-        tab: &ScriptTab,
-        carets: &MultiCaret,
-        diagnostics: &DiagnosticList,
-    ) -> Self {
+    pub fn from_editor(tab: &ScriptTab, carets: &MultiCaret, diagnostics: &DiagnosticList) -> Self {
         Self {
             line: tab.cursor_line,
             col: tab.cursor_col,
@@ -1794,24 +1973,41 @@ impl ScriptStatusBar {
 
     /// Returns a formatted status string like "Ln 5, Col 12 | 100 lines | GDScript".
     pub fn display(&self) -> String {
-        let mut s = format!("Ln {}, Col {} | {} lines | {}", self.line, self.col, self.total_lines, self.language);
+        let mut s = format!(
+            "Ln {}, Col {} | {} lines | {}",
+            self.line, self.col, self.total_lines, self.language
+        );
         if self.selection_count > 1 {
             s.push_str(&format!(" | {} carets", self.selection_count));
         }
         if self.error_count > 0 || self.warning_count > 0 {
-            s.push_str(&format!(" | {} errors, {} warnings", self.error_count, self.warning_count));
+            s.push_str(&format!(
+                " | {} errors, {} warnings",
+                self.error_count, self.warning_count
+            ));
         }
         s
     }
 }
 
 fn is_whole_word(line: &str, col: usize, length: usize) -> bool {
-    let before = if col == 0 { true } else { line.as_bytes().get(col - 1).map_or(true, |&b| !is_word_char(b)) };
-    let after = line.as_bytes().get(col + length).map_or(true, |&b| !is_word_char(b));
+    let before = if col == 0 {
+        true
+    } else {
+        line.as_bytes()
+            .get(col - 1)
+            .map_or(true, |&b| !is_word_char(b))
+    };
+    let after = line
+        .as_bytes()
+        .get(col + length)
+        .map_or(true, |&b| !is_word_char(b));
     before && after
 }
 
-fn is_word_char(b: u8) -> bool { b.is_ascii_alphanumeric() || b == b'_' }
+fn is_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
 
 #[cfg(test)]
 mod tests {
@@ -1850,7 +2046,9 @@ func _process(delta):
     fn highlight_string_literal() {
         let h = SyntaxHighlighter::new();
         let spans = h.highlight("var s = \"hello\"").unwrap();
-        let string_span = spans.iter().find(|s| s.kind == HighlightKind::StringLiteral);
+        let string_span = spans
+            .iter()
+            .find(|s| s.kind == HighlightKind::StringLiteral);
         assert!(string_span.is_some());
         assert!(string_span.unwrap().text.contains("hello"));
     }
@@ -1859,7 +2057,9 @@ func _process(delta):
     fn highlight_number_literal() {
         let h = SyntaxHighlighter::new();
         let spans = h.highlight("var x = 42").unwrap();
-        let num_span = spans.iter().find(|s| s.kind == HighlightKind::NumberLiteral);
+        let num_span = spans
+            .iter()
+            .find(|s| s.kind == HighlightKind::NumberLiteral);
         assert!(num_span.is_some());
         assert_eq!(num_span.unwrap().text, "42");
     }
@@ -1868,7 +2068,9 @@ func _process(delta):
     fn highlight_float_literal() {
         let h = SyntaxHighlighter::new();
         let spans = h.highlight("var x = 3.14").unwrap();
-        let num_span = spans.iter().find(|s| s.kind == HighlightKind::NumberLiteral);
+        let num_span = spans
+            .iter()
+            .find(|s| s.kind == HighlightKind::NumberLiteral);
         assert!(num_span.is_some());
     }
 
@@ -2207,14 +2409,18 @@ func _process(delta):
     fn completion_keyword_prefix() {
         let cp = CompletionProvider::new();
         let items = cp.complete("va", "");
-        assert!(items.iter().any(|i| i.label == "var" && i.kind == CompletionKind::Keyword));
+        assert!(items
+            .iter()
+            .any(|i| i.label == "var" && i.kind == CompletionKind::Keyword));
     }
 
     #[test]
     fn completion_class_prefix() {
         let cp = CompletionProvider::new();
         let items = cp.complete("Nod", "");
-        assert!(items.iter().any(|i| i.label == "Node" && i.kind == CompletionKind::Class));
+        assert!(items
+            .iter()
+            .any(|i| i.label == "Node" && i.kind == CompletionKind::Class));
         assert!(items.iter().any(|i| i.label == "Node2D"));
         assert!(items.iter().any(|i| i.label == "Node3D"));
     }
@@ -2280,7 +2486,7 @@ func _process(delta):
     fn folding_toggle() {
         let mut cf = CodeFolding::new();
         assert!(!cf.is_folded(5));
-        assert!(cf.toggle(5));  // now folded
+        assert!(cf.toggle(5)); // now folded
         assert!(cf.is_folded(5));
         assert!(!cf.toggle(5)); // now unfolded
         assert!(!cf.is_folded(5));
@@ -2302,8 +2508,16 @@ func _process(delta):
     fn folding_fold_all_unfold_all() {
         let mut cf = CodeFolding::new();
         let regions = vec![
-            FoldRegion { start_line: 1, end_line: 5, kind: FoldKind::Function },
-            FoldRegion { start_line: 7, end_line: 12, kind: FoldKind::Class },
+            FoldRegion {
+                start_line: 1,
+                end_line: 5,
+                kind: FoldKind::Function,
+            },
+            FoldRegion {
+                start_line: 7,
+                end_line: 12,
+                kind: FoldKind::Class,
+            },
         ];
         cf.fold_all(&regions);
         assert_eq!(cf.folded_count(), 2);
@@ -2332,8 +2546,12 @@ func _process(delta):
     fn detect_fold_regions_conditional() {
         let source = "if x > 0:\n    print(x)\nelse:\n    print(0)\n";
         let regions = detect_fold_regions(source);
-        assert!(regions.iter().any(|r| r.kind == FoldKind::Conditional && r.start_line == 1));
-        assert!(regions.iter().any(|r| r.kind == FoldKind::Conditional && r.start_line == 3));
+        assert!(regions
+            .iter()
+            .any(|r| r.kind == FoldKind::Conditional && r.start_line == 1));
+        assert!(regions
+            .iter()
+            .any(|r| r.kind == FoldKind::Conditional && r.start_line == 3));
     }
 
     #[test]
@@ -2587,9 +2805,27 @@ func _process(delta):
     fn diagnostic_list_at_line() {
         let mut dl = DiagnosticList::new();
         dl.set(vec![
-            Diagnostic { severity: DiagnosticSeverity::Error, line: 5, col: 1, message: "a".into(), code: None },
-            Diagnostic { severity: DiagnosticSeverity::Warning, line: 5, col: 10, message: "b".into(), code: None },
-            Diagnostic { severity: DiagnosticSeverity::Error, line: 10, col: 1, message: "c".into(), code: None },
+            Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                line: 5,
+                col: 1,
+                message: "a".into(),
+                code: None,
+            },
+            Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                line: 5,
+                col: 10,
+                message: "b".into(),
+                code: None,
+            },
+            Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                line: 10,
+                col: 1,
+                message: "c".into(),
+                code: None,
+            },
         ]);
         assert_eq!(dl.at_line(5).len(), 2);
         assert_eq!(dl.at_line(10).len(), 1);
@@ -2600,8 +2836,20 @@ func _process(delta):
     fn diagnostic_list_errors_and_warnings() {
         let mut dl = DiagnosticList::new();
         dl.set(vec![
-            Diagnostic { severity: DiagnosticSeverity::Error, line: 1, col: 1, message: "err".into(), code: None },
-            Diagnostic { severity: DiagnosticSeverity::Warning, line: 2, col: 1, message: "warn".into(), code: None },
+            Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                line: 1,
+                col: 1,
+                message: "err".into(),
+                code: None,
+            },
+            Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                line: 2,
+                col: 1,
+                message: "warn".into(),
+                code: None,
+            },
         ]);
         assert_eq!(dl.errors().len(), 1);
         assert_eq!(dl.warnings().len(), 1);
@@ -2611,9 +2859,27 @@ func _process(delta):
     fn diagnostic_list_navigation() {
         let mut dl = DiagnosticList::new();
         dl.set(vec![
-            Diagnostic { severity: DiagnosticSeverity::Error, line: 5, col: 1, message: "a".into(), code: None },
-            Diagnostic { severity: DiagnosticSeverity::Warning, line: 15, col: 1, message: "b".into(), code: None },
-            Diagnostic { severity: DiagnosticSeverity::Error, line: 25, col: 1, message: "c".into(), code: None },
+            Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                line: 5,
+                col: 1,
+                message: "a".into(),
+                code: None,
+            },
+            Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                line: 15,
+                col: 1,
+                message: "b".into(),
+                code: None,
+            },
+            Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                line: 25,
+                col: 1,
+                message: "c".into(),
+                code: None,
+            },
         ]);
         // Next from line 1 → line 5.
         assert_eq!(dl.next_diagnostic(1).unwrap().line, 5);
@@ -2630,9 +2896,13 @@ func _process(delta):
     #[test]
     fn diagnostic_list_clear() {
         let mut dl = DiagnosticList::new();
-        dl.set(vec![
-            Diagnostic { severity: DiagnosticSeverity::Error, line: 1, col: 1, message: "err".into(), code: None },
-        ]);
+        dl.set(vec![Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            line: 1,
+            col: 1,
+            message: "err".into(),
+            code: None,
+        }]);
         assert_eq!(dl.count(), 1);
         dl.clear();
         assert_eq!(dl.count(), 0);
@@ -2657,7 +2927,9 @@ func _process(delta):
     fn outline_extracts_class() {
         let source = "class MyClass:\n    var x = 1";
         let outline = extract_outline(source);
-        assert!(outline.iter().any(|e| e.name == "MyClass" && e.kind == OutlineKind::Class));
+        assert!(outline
+            .iter()
+            .any(|e| e.name == "MyClass" && e.kind == OutlineKind::Class));
     }
 
     #[test]
@@ -2718,9 +2990,15 @@ func _process(delta):
     fn outline_sample_script() {
         let outline = extract_outline(SAMPLE_GD);
         // SAMPLE_GD has: var speed, @export var health, func _ready, func _process
-        assert!(outline.iter().any(|e| e.name == "_ready" && e.kind == OutlineKind::Function));
-        assert!(outline.iter().any(|e| e.name == "_process" && e.kind == OutlineKind::Function));
-        assert!(outline.iter().any(|e| e.name == "health" && e.kind == OutlineKind::Export));
+        assert!(outline
+            .iter()
+            .any(|e| e.name == "_ready" && e.kind == OutlineKind::Function));
+        assert!(outline
+            .iter()
+            .any(|e| e.name == "_process" && e.kind == OutlineKind::Function));
+        assert!(outline
+            .iter()
+            .any(|e| e.name == "health" && e.kind == OutlineKind::Export));
     }
 
     // ── Script List tests ─────────────────────────────────────────
@@ -2805,8 +3083,20 @@ func _process(delta):
         let carets = MultiCaret::new();
         let mut diag = DiagnosticList::new();
         diag.set(vec![
-            Diagnostic { severity: DiagnosticSeverity::Error, line: 1, col: 1, message: "err".into(), code: None },
-            Diagnostic { severity: DiagnosticSeverity::Warning, line: 1, col: 2, message: "warn".into(), code: None },
+            Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                line: 1,
+                col: 1,
+                message: "err".into(),
+                code: None,
+            },
+            Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                line: 1,
+                col: 2,
+                message: "warn".into(),
+                code: None,
+            },
         ]);
         let bar = ScriptStatusBar::from_editor(&tab, &carets, &diag);
         assert_eq!(bar.error_count, 1);

@@ -9,11 +9,11 @@
 //! for signals) — here we test the cross-type ordering guarantees.
 
 use gdcore::id::ObjectId;
+use gdobject::signal::Connection;
 use gdscene::node::Node;
 use gdscene::scene_tree::SceneTree;
 use gdscene::trace::{TraceEvent, TraceEventType};
 use gdscene::{LifecycleManager, MainLoop};
-use gdobject::signal::Connection;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
@@ -100,7 +100,10 @@ fn global_trace_interleaves_notifications_and_signals() {
     let summary = event_summary(tree.event_trace().events());
     assert_eq!(summary.len(), 3);
     assert_eq!(summary[0], ("notif", "ENTER_TREE", "/root/Parent"));
-    assert_eq!(summary[1], ("signal", "health_changed", "/root/Parent/Child1"));
+    assert_eq!(
+        summary[1],
+        ("signal", "health_changed", "/root/Parent/Child1")
+    );
     assert_eq!(summary[2], ("notif", "READY", "/root/Parent"));
 }
 
@@ -224,7 +227,11 @@ fn callback_fires_synchronously_within_global_trace() {
     tree.emit_signal(emitter_id, "hit", &[]);
     tree.trace_record(emitter_id, TraceEventType::Notification, "POST_PROCESS");
 
-    assert_eq!(fire_count.load(Ordering::SeqCst), 1, "callback must have fired");
+    assert_eq!(
+        fire_count.load(Ordering::SeqCst),
+        1,
+        "callback must have fired"
+    );
 
     let summary = event_summary(tree.event_trace().events());
     assert_eq!(
@@ -373,10 +380,7 @@ fn full_lifecycle_frame_signal_exit_global_ordering() {
     // Verify phase ordering: ENTER_TREE comes first, EXIT_TREE comes last.
     assert_eq!(player_events[0], ("notif", "ENTER_TREE"));
     assert_eq!(player_events[1], ("notif", "READY"));
-    assert_eq!(
-        *player_events.last().unwrap(),
-        ("notif", "EXIT_TREE")
-    );
+    assert_eq!(*player_events.last().unwrap(), ("notif", "EXIT_TREE"));
 
     // The signal must appear after process-phase notifications and before EXIT_TREE.
     let signal_idx = player_events
@@ -392,14 +396,8 @@ fn full_lifecycle_frame_signal_exit_global_ordering() {
         .position(|&(ty, detail)| ty == "notif" && detail == "READY")
         .unwrap();
 
-    assert!(
-        signal_idx > ready_idx,
-        "signal must appear after READY"
-    );
-    assert!(
-        signal_idx < exit_idx,
-        "signal must appear before EXIT_TREE"
-    );
+    assert!(signal_idx > ready_idx, "signal must appear after READY");
+    assert!(signal_idx < exit_idx, "signal must appear before EXIT_TREE");
 
     // Verify per-frame notification ordering (Godot 4-phase):
     // INTERNAL_PHYSICS_PROCESS < PHYSICS_PROCESS < INTERNAL_PROCESS < PROCESS
@@ -413,7 +411,10 @@ fn full_lifecycle_frame_signal_exit_global_ordering() {
     let has_pp = frame_notifs.contains(&"PHYSICS_PROCESS");
     let has_ip2 = frame_notifs.contains(&"INTERNAL_PROCESS");
     let has_p = frame_notifs.contains(&"PROCESS");
-    assert!(has_ip && has_pp && has_ip2 && has_p, "all 4 frame phases present");
+    assert!(
+        has_ip && has_pp && has_ip2 && has_p,
+        "all 4 frame phases present"
+    );
 }
 
 // ===========================================================================
@@ -489,10 +490,7 @@ fn cross_frame_global_trace_frame_counters() {
         .unwrap();
     assert_eq!(enter.frame, 0);
 
-    let ready = tracker_events
-        .iter()
-        .find(|e| e.detail == "READY")
-        .unwrap();
+    let ready = tracker_events.iter().find(|e| e.detail == "READY").unwrap();
     assert_eq!(ready.frame, 0);
 
     // Frame-phase events span frames 0, 1, 2.
@@ -695,14 +693,11 @@ fn multi_connection_signal_all_fire_before_next_event() {
     // Wire 3 connections.
     for i in 0..3 {
         let c = counter.clone();
-        let conn = Connection::with_callback(
-            ObjectId::next(),
-            &format!("handler_{i}"),
-            move |_| {
+        let conn =
+            Connection::with_callback(ObjectId::next(), &format!("handler_{i}"), move |_| {
                 c.fetch_add(1, Ordering::SeqCst);
                 gdvariant::Variant::Nil
-            },
-        );
+            });
         tree.connect_signal(emitter_id, "multi_sig", conn);
     }
 
@@ -751,7 +746,11 @@ fn one_shot_signal_appears_in_global_trace() {
 
     // Second emit: no callback (removed), but emission still traced.
     tree.emit_signal(emitter_id, "once_sig", &[]);
-    assert_eq!(count.load(Ordering::SeqCst), 1, "one-shot should not fire again");
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "one-shot should not fire again"
+    );
 
     let signals = filter_type(tree.event_trace().events(), TraceEventType::SignalEmit);
     assert_eq!(signals.len(), 2, "both emissions recorded in trace");

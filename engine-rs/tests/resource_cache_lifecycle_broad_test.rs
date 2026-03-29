@@ -12,10 +12,10 @@
 use std::sync::Arc;
 
 use gdcore::error::EngineResult;
+use gdcore::ResourceUid;
 use gdresource::cache::ResourceCache;
 use gdresource::loader::ResourceLoader;
 use gdresource::resource::Resource;
-use gdcore::ResourceUid;
 use gdresource::uid::UidRegistry;
 use gdresource::UnifiedLoader;
 use gdvariant::Variant;

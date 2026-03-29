@@ -75,14 +75,14 @@ fn move_and_slide_free_movement() {
 
 #[test]
 fn move_and_slide_lands_on_floor() {
-    let mut c = CharacterBody3D::new(
-        Vector3::new(0.0, 2.0, 0.0),
-        Shape3D::Sphere { radius: 1.0 },
-    );
+    let mut c = CharacterBody3D::new(Vector3::new(0.0, 2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
     let floor = make_floor(-1.0);
     let result = c.move_and_slide(Vector3::new(0.0, -2.5, 0.0), &[&floor]);
     assert!(c.is_on_floor(), "Should detect floor after landing");
-    assert!(result.y.abs() < 1e-2, "Y velocity should be zeroed by floor");
+    assert!(
+        result.y.abs() < 1e-2,
+        "Y velocity should be zeroed by floor"
+    );
 }
 
 #[test]
@@ -92,7 +92,10 @@ fn move_and_slide_slides_along_wall() {
     let result = c.move_and_slide(Vector3::new(5.0, 0.0, 3.0), &[&wall]);
     assert!(c.is_on_wall(), "Should detect wall");
     assert!(result.x.abs() < 1e-2, "X velocity should be zeroed by wall");
-    assert!((result.z - 3.0).abs() < 1e-2, "Z velocity should be preserved");
+    assert!(
+        (result.z - 3.0).abs() < 1e-2,
+        "Z velocity should be preserved"
+    );
 }
 
 #[test]
@@ -133,10 +136,7 @@ fn move_and_slide_collision_mask_filtering() {
 
 #[test]
 fn move_and_slide_floor_normal_points_up() {
-    let mut c = CharacterBody3D::new(
-        Vector3::new(0.0, 2.0, 0.0),
-        Shape3D::Sphere { radius: 1.0 },
-    );
+    let mut c = CharacterBody3D::new(Vector3::new(0.0, 2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
     let floor = make_floor(-1.0);
     c.move_and_slide(Vector3::new(0.0, -2.5, 0.0), &[&floor]);
     let normal = c.get_floor_normal();
@@ -223,12 +223,7 @@ fn collision_dispatch_box_box() {
     let b = Shape3D::BoxShape {
         half_extents: Vector3::new(1.0, 1.0, 1.0),
     };
-    let result = collision::test_collision(
-        Vector3::ZERO,
-        &a,
-        Vector3::new(1.0, 0.0, 0.0),
-        &b,
-    );
+    let result = collision::test_collision(Vector3::ZERO, &a, Vector3::new(1.0, 0.0, 0.0), &b);
     assert!(result.colliding);
 }
 
@@ -243,20 +238,23 @@ fn collision_detected_at_surface_boundary() {
         Vector3::new(0.0, -1.0, 0.0),
         Vector3::new(100.0, 1.0, 100.0),
     );
-    assert!(r.colliding, "Sphere at y=0 with radius 1 should collide with box top at y=0");
+    assert!(
+        r.colliding,
+        "Sphere at y=0 with radius 1 should collide with box top at y=0"
+    );
     assert!(r.depth > 0.0);
 }
 
 #[test]
 fn move_and_slide_moderate_velocity_hits_floor() {
     // Character at y=1.5 moves down by 2 — sphere enters floor box
-    let mut c = CharacterBody3D::new(
-        Vector3::new(0.0, 1.5, 0.0),
-        Shape3D::Sphere { radius: 1.0 },
-    );
+    let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.5, 0.0), Shape3D::Sphere { radius: 1.0 });
     let floor = make_floor(-1.0);
     c.move_and_slide(Vector3::new(0.0, -2.0, 0.0), &[&floor]);
-    assert!(c.is_on_floor(), "Should detect floor with moderate velocity");
+    assert!(
+        c.is_on_floor(),
+        "Should detect floor with moderate velocity"
+    );
 }
 
 #[test]
@@ -264,6 +262,9 @@ fn diagonal_large_velocity_hits_wall() {
     let mut c = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
     let wall = make_wall(5.0);
     let result = c.move_and_slide(Vector3::new(20.0, 0.0, 5.0), &[&wall]);
-    assert!(c.is_on_wall(), "Should detect wall even with large velocity");
+    assert!(
+        c.is_on_wall(),
+        "Should detect wall even with large velocity"
+    );
     assert!(result.x.abs() < 1e-2, "X should be zeroed by wall");
 }

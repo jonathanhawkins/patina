@@ -104,7 +104,10 @@ fn just_pressed_true_on_press_frame_only() {
     // Flush simulates end-of-frame.
     state.flush_frame();
 
-    assert!(!state.is_action_just_pressed("shoot"), "just_pressed must clear after flush");
+    assert!(
+        !state.is_action_just_pressed("shoot"),
+        "just_pressed must clear after flush"
+    );
     assert!(!state.is_action_just_pressed("jump"));
     // But action is still pressed (held down).
     assert!(state.is_action_pressed("shoot"));

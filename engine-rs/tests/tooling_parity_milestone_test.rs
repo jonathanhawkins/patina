@@ -72,8 +72,14 @@ fn milestone1_editor_crate_has_core_modules() {
 #[test]
 fn milestone1_editor_has_viewport_modules() {
     let editor_src = workspace_root().join("crates/gdeditor/src");
-    assert!(editor_src.join("viewport_2d.rs").exists(), "2D viewport module");
-    assert!(editor_src.join("viewport_3d.rs").exists(), "3D viewport module");
+    assert!(
+        editor_src.join("viewport_2d.rs").exists(),
+        "2D viewport module"
+    );
+    assert!(
+        editor_src.join("viewport_3d.rs").exists(),
+        "3D viewport module"
+    );
 }
 
 #[test]
@@ -104,14 +110,20 @@ fn milestone1_editor_has_advanced_panels() {
 #[test]
 fn milestone2_inspector_create_panel() {
     let panel = gdeditor::InspectorPanel::new();
-    assert!(panel.inspected_node().is_none(), "new panel has no inspected node");
+    assert!(
+        panel.inspected_node().is_none(),
+        "new panel has no inspected node"
+    );
 }
 
 #[test]
 fn milestone2_inspector_sectioned_inspector() {
     // SectionedInspector groups entries into sections by category
     let sectioned = gdeditor::SectionedInspector::from_entries(vec![]);
-    assert!(sectioned.sections().is_empty(), "no entries yields no sections");
+    assert!(
+        sectioned.sections().is_empty(),
+        "no entries yields no sections"
+    );
 }
 
 #[test]
@@ -124,14 +136,18 @@ fn milestone2_inspector_plugin_registry() {
 fn milestone2_property_hint_variants() {
     // PropertyHint enum must have key variants for the inspector.
     let _none = gdeditor::PropertyHint::None;
-    let _range = gdeditor::PropertyHint::Range { min: 0, max: 100, step: 1 };
+    let _range = gdeditor::PropertyHint::Range {
+        min: 0,
+        max: 100,
+        step: 1,
+    };
     let _enum_hint = gdeditor::PropertyHint::Enum(vec!["A".into(), "B".into()]);
 }
 
 #[test]
 fn milestone2_variant_coercion() {
-    use gdvariant::Variant;
     use gdvariant::variant::VariantType;
+    use gdvariant::Variant;
     let v = Variant::Int(42);
     let coerced = gdeditor::coerce_variant(&v, VariantType::Float);
     assert!(coerced.is_some(), "int to float coercion must work");
@@ -139,10 +155,13 @@ fn milestone2_variant_coercion() {
 
 #[test]
 fn milestone2_variant_validation() {
-    use gdvariant::Variant;
     use gdvariant::variant::VariantType;
+    use gdvariant::Variant;
     let v = Variant::Float(0.5);
-    assert!(gdeditor::validate_variant(&v, VariantType::Float).is_ok(), "float validates as float");
+    assert!(
+        gdeditor::validate_variant(&v, VariantType::Float).is_ok(),
+        "float validates as float"
+    );
 }
 
 // ===========================================================================
@@ -178,7 +197,10 @@ fn milestone4_scene_tree_dock() {
 fn milestone4_property_dock() {
     let dock = gdeditor::PropertyDock::new();
     // PropertyDock wraps InspectorPanel; check the inspector has no node
-    assert!(dock.inspector().inspected_node().is_none(), "empty dock has no inspected node");
+    assert!(
+        dock.inspector().inspected_node().is_none(),
+        "empty dock has no inspected node"
+    );
 }
 
 #[test]
@@ -210,9 +232,10 @@ fn milestone5_find_replace_basic() {
 #[test]
 fn milestone5_find_replace_regex() {
     let fr = gdeditor::find_replace::FindReplace::new();
-    let config = gdeditor::find_replace::FindReplaceConfig::new(r"func \w+")
-        .with_regex();
-    let matches = fr.find_all("func _ready(): func _process(delta):", &config).unwrap();
+    let config = gdeditor::find_replace::FindReplaceConfig::new(r"func \w+").with_regex();
+    let matches = fr
+        .find_all("func _ready(): func _process(delta):", &config)
+        .unwrap();
     assert!(matches.len() >= 2, "regex must match function declarations");
 }
 
@@ -242,7 +265,11 @@ fn milestone6_export_preset_create() {
 fn milestone7_editor_settings_defaults() {
     let settings = gdeditor::EditorSettings::default();
     // EditorSettings.theme is an EditorTheme enum (Dark or Light)
-    assert_eq!(settings.theme, gdeditor::EditorTheme::Dark, "default theme must be Dark");
+    assert_eq!(
+        settings.theme,
+        gdeditor::EditorTheme::Dark,
+        "default theme must be Dark"
+    );
 }
 
 #[test]
@@ -294,7 +321,10 @@ fn milestone9_shader_highlighter() {
     let result = highlighter.highlight("void fragment() { COLOR = vec4(1.0); }");
     assert!(result.is_ok(), "shader code must parse without error");
     let spans = result.unwrap();
-    assert!(!spans.is_empty(), "shader code must produce highlight spans");
+    assert!(
+        !spans.is_empty(),
+        "shader code must produce highlight spans"
+    );
 }
 
 // ===========================================================================
@@ -304,14 +334,21 @@ fn milestone9_shader_highlighter() {
 #[test]
 fn milestone10_theme_editor_create() {
     let editor = gdeditor::ThemeEditor::new();
-    assert_eq!(editor.total_override_count(), 0, "new theme editor has no overrides");
+    assert_eq!(
+        editor.total_override_count(),
+        0,
+        "new theme editor has no overrides"
+    );
 }
 
 #[test]
 fn milestone10_theme_resource_default() {
     let theme = gdeditor::ThemeResource::default();
     // ThemeResource has default_font, default_font_size, overrides (no name field)
-    assert!(theme.default_font.is_none(), "default theme has no font set");
+    assert!(
+        theme.default_font.is_none(),
+        "default theme has no font set"
+    );
     assert_eq!(theme.override_count(), 0, "default theme has no overrides");
 }
 
@@ -334,7 +371,11 @@ fn milestone11_command_palette_create() {
 #[test]
 fn milestone12_import_pipeline_create() {
     let pipeline = gdeditor::ImportPipeline::new();
-    assert_eq!(pipeline.importer_count(), 0, "new pipeline has no importers");
+    assert_eq!(
+        pipeline.importer_count(),
+        0,
+        "new pipeline has no importers"
+    );
 }
 
 #[test]
@@ -498,7 +539,9 @@ fn audit_sync_measured_families_have_test_evidence() {
     ];
 
     for (label, pattern) in &measured_families {
-        let has_test = test_files.iter().any(|f| f.contains(pattern) && f.ends_with("_test.rs"));
+        let has_test = test_files
+            .iter()
+            .any(|f| f.contains(pattern) && f.ends_with("_test.rs"));
         assert!(
             has_test,
             "measured tooling family '{label}' must have a test file matching '*{pattern}*_test.rs'"
@@ -513,9 +556,9 @@ fn audit_sync_milestone_count_matches_audit_claim() {
     // This file defines 16 milestones (1-16). The audit describes these as
     // "selected tooling parity milestones" covering the editor tooling slice.
     // If you add a milestone, update the audit. If you remove one, update both.
-    let source = fs::read_to_string(
-        workspace_root().join("tests/tooling_parity_milestone_test.rs")
-    ).unwrap();
+    let source =
+        fs::read_to_string(workspace_root().join("tests/tooling_parity_milestone_test.rs"))
+            .unwrap();
 
     // Count unique milestone test functions (pattern: fn milestoneN_)
     let milestone_count = source

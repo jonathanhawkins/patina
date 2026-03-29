@@ -12,8 +12,7 @@
 use std::path::PathBuf;
 
 use gdcore::dashboard::{
-    BenchmarkBaseline, BenchmarkEntry, BenchmarkGate, Dashboard, ParityMetric,
-    RuntimeDashboard,
+    BenchmarkBaseline, BenchmarkEntry, BenchmarkGate, Dashboard, ParityMetric, RuntimeDashboard,
 };
 
 fn repo_root() -> PathBuf {
@@ -136,7 +135,10 @@ fn dashboard_schema_represents_committed_baselines() {
         );
         dash.add_benchmark(entry);
     }
-    assert!(dash.is_green(), "all baselines loaded into dashboard should be green");
+    assert!(
+        dash.is_green(),
+        "all baselines loaded into dashboard should be green"
+    );
 }
 
 /// Parse baselines and load them into a BenchmarkGate to verify the gate
@@ -209,21 +211,24 @@ fn benchmark_evidence_files_exist() {
     ];
     for file in &expected_files {
         let path = tests_dir.join(file);
-        assert!(path.exists(), "evidence file must exist: {}", path.display());
+        assert!(
+            path.exists(),
+            "evidence file must exist: {}",
+            path.display()
+        );
     }
 }
 
 #[test]
 fn dashboard_module_exists() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/gdcore/src/dashboard.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates/gdcore/src/dashboard.rs");
     assert!(path.exists(), "gdcore::dashboard module must exist");
 }
 
 #[test]
 fn bench_regression_module_exists() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/gdcore/src/bench_regression.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates/gdcore/src/bench_regression.rs");
     assert!(path.exists(), "gdcore::bench_regression module must exist");
 }
 
@@ -249,7 +254,10 @@ fn parse_baseline_rows(doc: &str) -> Vec<(String, f64)> {
         if name.is_empty() || name.contains("Benchmark") {
             continue; // Skip header
         }
-        let avg_str: String = cols[3].chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+        let avg_str: String = cols[3]
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
         if let Ok(avg) = avg_str.parse::<f64>() {
             results.push((name, avg));
         }

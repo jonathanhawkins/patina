@@ -103,10 +103,7 @@ fn editor_settings_json_roundtrip() {
 fn external_editor_config_placeholder_expansion() {
     let cfg = gdeditor::settings::ExternalEditorConfig {
         exec_path: "code".to_string(),
-        exec_args: vec![
-            "--goto".to_string(),
-            "{file}:{line}:{col}".to_string(),
-        ],
+        exec_args: vec!["--goto".to_string(), "{file}:{line}:{col}".to_string()],
     };
     assert!(cfg.is_configured());
 
@@ -124,7 +121,7 @@ fn external_editor_config_unconfigured() {
 
 #[test]
 fn vcs_status_model_covers_godot_states() {
-    use gdeditor::vcs::{ChangeArea, VcsFileStatus, VcsStatus, FileChangeStatus};
+    use gdeditor::vcs::{ChangeArea, FileChangeStatus, VcsFileStatus, VcsStatus};
 
     let status = VcsStatus::default();
     assert!(status.files.is_empty());
@@ -216,10 +213,12 @@ fn export_dialog_platform_coverage() {
 
 #[test]
 fn export_preset_properties() {
-    use gdeditor::export_dialog::{ExportDialog, ExportPlatform, ExportPreset, ExportBuildProfile};
+    use gdeditor::export_dialog::{ExportBuildProfile, ExportDialog, ExportPlatform, ExportPreset};
 
     let mut dialog = ExportDialog::new();
-    dialog.add_preset(ExportPreset::new("Release Build", ExportPlatform::Linux)).unwrap();
+    dialog
+        .add_preset(ExportPreset::new("Release Build", ExportPlatform::Linux))
+        .unwrap();
 
     let preset = &dialog.presets()[0];
     assert_eq!(preset.name, "Release Build");
@@ -231,9 +230,9 @@ fn export_preset_properties() {
 
 #[test]
 fn variant_transform2d_roundtrip() {
-    use gdvariant::Variant;
     use gdcore::math::{Transform2D, Vector2};
     use gdvariant::serialize::{from_json, to_json};
+    use gdvariant::Variant;
 
     let t = Transform2D {
         x: Vector2::new(0.866, -0.5),
@@ -248,8 +247,8 @@ fn variant_transform2d_roundtrip() {
 
 #[test]
 fn variant_callable_method_roundtrip() {
-    use gdvariant::{CallableRef, Variant};
     use gdvariant::serialize::{from_json, to_json};
+    use gdvariant::{CallableRef, Variant};
 
     let v = Variant::Callable(Box::new(CallableRef::Method {
         target_id: 99,
@@ -262,10 +261,10 @@ fn variant_callable_method_roundtrip() {
 
 #[test]
 fn variant_all_types_serialize() {
-    use gdvariant::Variant;
-    use gdvariant::serialize::to_json;
     use gdcore::math::*;
     use gdcore::math3d::*;
+    use gdvariant::serialize::to_json;
+    use gdvariant::Variant;
 
     // Every variant type must produce valid JSON without panicking
     let variants = vec![
@@ -300,7 +299,11 @@ fn variant_all_types_serialize() {
 
     for v in &variants {
         let json = to_json(v);
-        assert!(json.is_object(), "variant {:?} didn't serialize to object", v);
+        assert!(
+            json.is_object(),
+            "variant {:?} didn't serialize to object",
+            v
+        );
     }
     assert_eq!(variants.len(), 20); // 20 variant types covered
 }

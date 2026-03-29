@@ -54,8 +54,8 @@ fn load_tscn_to_tree(filename: &str) -> SceneTree {
     let path = fixtures_dir().join("scenes").join(filename);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("should read {}: {}", filename, e));
-    let scene = PackedScene::from_tscn(&source)
-        .unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
+    let scene =
+        PackedScene::from_tscn(&source).unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene)
@@ -287,8 +287,8 @@ fn write_aggregate_report_artifact() {
     // Verify the aggregate covers all 10 fixtures
     assert_eq!(agg.fixture_count(), 10);
     let agg_json_str = agg.render_json();
-    let parsed: serde_json::Value = serde_json::from_str(&agg_json_str)
-        .expect("aggregate report JSON should be valid");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&agg_json_str).expect("aggregate report JSON should be valid");
     assert_eq!(parsed["fixture_count"], 10);
 
     // The enriched report artifact (with metadata, scene inventory, physics goldens,

@@ -4,8 +4,7 @@
 //! strict vs lenient mode, summary output, and Dashboard integration.
 
 use gdcore::dashboard::{
-    BenchmarkBaseline, BenchmarkEntry, BenchmarkGate, Dashboard, GateVerdict,
-    ParityMetric,
+    BenchmarkBaseline, BenchmarkEntry, BenchmarkGate, Dashboard, GateVerdict, ParityMetric,
 };
 
 // ── BenchmarkBaseline ────────────────────────────────────────────────────────

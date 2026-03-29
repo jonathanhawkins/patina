@@ -263,7 +263,10 @@ fn manager_clear_all_custom_cursors() {
 fn manager_replace_custom_cursor() {
     let mut mgr = CursorManager::new();
     mgr.set_custom_cursor(CursorShape::Arrow, CustomCursor::new(test_icon(8, 8), 2, 2));
-    mgr.set_custom_cursor(CursorShape::Arrow, CustomCursor::new(test_icon(32, 32), 16, 16));
+    mgr.set_custom_cursor(
+        CursorShape::Arrow,
+        CustomCursor::new(test_icon(32, 32), 16, 16),
+    );
 
     let cursor = mgr.get_custom_cursor(CursorShape::Arrow).unwrap();
     assert_eq!(cursor.size(), (32, 32));
@@ -324,8 +327,14 @@ fn full_cursor_lifecycle() {
     assert!(!mgr.is_confined());
 
     // Register custom cursors for text editing
-    mgr.set_custom_cursor(CursorShape::Ibeam, CustomCursor::new(test_icon(16, 32), 8, 16));
-    mgr.set_custom_cursor(CursorShape::PointingHand, CustomCursor::new(test_icon(24, 24), 6, 0));
+    mgr.set_custom_cursor(
+        CursorShape::Ibeam,
+        CustomCursor::new(test_icon(16, 32), 8, 16),
+    );
+    mgr.set_custom_cursor(
+        CursorShape::PointingHand,
+        CustomCursor::new(test_icon(24, 24), 6, 0),
+    );
 
     // User hovers over text — switch to I-beam
     mgr.set_cursor_shape(CursorShape::Ibeam);
@@ -408,7 +417,9 @@ fn clear_nonexistent_custom_cursor_is_noop() {
 fn get_custom_cursor_returns_none_when_unset() {
     let mgr = CursorManager::new();
     for i in 0..17u8 {
-        assert!(mgr.get_custom_cursor(CursorShape::from_u8(i).unwrap()).is_none());
+        assert!(mgr
+            .get_custom_cursor(CursorShape::from_u8(i).unwrap())
+            .is_none());
     }
 }
 

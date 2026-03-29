@@ -15,15 +15,15 @@
 //! Acceptance: additional fixtures cover important non-lifecycle notification
 //! cases and remaining exclusions are documented.
 
+use gdobject::notification::{
+    Notification, NOTIFICATION_ENTER_TREE, NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
+    NOTIFICATION_INTERNAL_PROCESS, NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_PROCESS,
+    NOTIFICATION_READY,
+};
 use gdscene::node::{Node, ProcessMode};
 use gdscene::scene_tree::SceneTree;
 use gdscene::trace::TraceEventType;
 use gdscene::{LifecycleManager, MainLoop};
-use gdobject::notification::{
-    Notification, NOTIFICATION_ENTER_TREE,
-    NOTIFICATION_INTERNAL_PHYSICS_PROCESS, NOTIFICATION_INTERNAL_PROCESS,
-    NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_PROCESS, NOTIFICATION_READY,
-};
 
 // ===========================================================================
 // Helpers
@@ -67,8 +67,12 @@ fn make_entered_ml() -> (MainLoop, gdscene::node::NodeId, gdscene::node::NodeId)
 fn disabled_node_skips_process_notifications() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child = tree.add_child(root, Node::new("Disabled", "Node2D")).unwrap();
-    tree.get_node_mut(child).unwrap().set_process_mode(ProcessMode::Disabled);
+    let child = tree
+        .add_child(root, Node::new("Disabled", "Node2D"))
+        .unwrap();
+    tree.get_node_mut(child)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -95,8 +99,12 @@ fn disabled_node_skips_process_notifications() {
 fn disabled_node_skips_internal_process() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child = tree.add_child(root, Node::new("Disabled", "Node2D")).unwrap();
-    tree.get_node_mut(child).unwrap().set_process_mode(ProcessMode::Disabled);
+    let child = tree
+        .add_child(root, Node::new("Disabled", "Node2D"))
+        .unwrap();
+    tree.get_node_mut(child)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -124,8 +132,12 @@ fn disabled_node_sibling_still_processes() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let _active = tree.add_child(root, Node::new("Active", "Node2D")).unwrap();
-    let disabled = tree.add_child(root, Node::new("Disabled", "Node2D")).unwrap();
-    tree.get_node_mut(disabled).unwrap().set_process_mode(ProcessMode::Disabled);
+    let disabled = tree
+        .add_child(root, Node::new("Disabled", "Node2D"))
+        .unwrap();
+    tree.get_node_mut(disabled)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -155,7 +167,9 @@ fn always_node_processes_when_paused() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let always = tree.add_child(root, Node::new("Always", "Node2D")).unwrap();
-    tree.get_node_mut(always).unwrap().set_process_mode(ProcessMode::Always);
+    tree.get_node_mut(always)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -178,7 +192,9 @@ fn always_node_processes_when_not_paused() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let always = tree.add_child(root, Node::new("Always", "Node2D")).unwrap();
-    tree.get_node_mut(always).unwrap().set_process_mode(ProcessMode::Always);
+    tree.get_node_mut(always)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -203,8 +219,12 @@ fn always_node_processes_when_not_paused() {
 fn when_paused_node_skips_when_not_paused() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let wp = tree.add_child(root, Node::new("WhenPaused", "Node2D")).unwrap();
-    tree.get_node_mut(wp).unwrap().set_process_mode(ProcessMode::WhenPaused);
+    let wp = tree
+        .add_child(root, Node::new("WhenPaused", "Node2D"))
+        .unwrap();
+    tree.get_node_mut(wp)
+        .unwrap()
+        .set_process_mode(ProcessMode::WhenPaused);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -225,8 +245,12 @@ fn when_paused_node_skips_when_not_paused() {
 fn when_paused_node_processes_when_paused() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let wp = tree.add_child(root, Node::new("WhenPaused", "Node2D")).unwrap();
-    tree.get_node_mut(wp).unwrap().set_process_mode(ProcessMode::WhenPaused);
+    let wp = tree
+        .add_child(root, Node::new("WhenPaused", "Node2D"))
+        .unwrap();
+    tree.get_node_mut(wp)
+        .unwrap()
+        .set_process_mode(ProcessMode::WhenPaused);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -253,10 +277,14 @@ fn inherit_node_disabled_when_parent_disabled() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
-    let _child = tree.add_child(parent, Node::new("Child", "Node2D")).unwrap();
+    let _child = tree
+        .add_child(parent, Node::new("Child", "Node2D"))
+        .unwrap();
 
     // Parent disabled, child inherits (default)
-    tree.get_node_mut(parent).unwrap().set_process_mode(ProcessMode::Disabled);
+    tree.get_node_mut(parent)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
     // Child defaults to Inherit
 
     LifecycleManager::enter_tree(&mut tree, root);
@@ -279,9 +307,13 @@ fn inherit_node_always_when_parent_always() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
-    let _child = tree.add_child(parent, Node::new("Child", "Node2D")).unwrap();
+    let _child = tree
+        .add_child(parent, Node::new("Child", "Node2D"))
+        .unwrap();
 
-    tree.get_node_mut(parent).unwrap().set_process_mode(ProcessMode::Always);
+    tree.get_node_mut(parent)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
 
     LifecycleManager::enter_tree(&mut tree, root);
 
@@ -308,8 +340,12 @@ fn process_priority_lower_value_fires_first() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let high = tree.add_child(root, Node::new("HighPrio", "Node2D")).unwrap();
-    let low = tree.add_child(root, Node::new("LowPrio", "Node2D")).unwrap();
+    let high = tree
+        .add_child(root, Node::new("HighPrio", "Node2D"))
+        .unwrap();
+    let low = tree
+        .add_child(root, Node::new("LowPrio", "Node2D"))
+        .unwrap();
     let _normal = tree.add_child(root, Node::new("Normal", "Node2D")).unwrap();
 
     // Lower priority value = earlier processing (Godot convention).
@@ -394,8 +430,14 @@ fn equal_priority_preserves_tree_order() {
     let process = notification_paths(tree, "PROCESS");
 
     let pos = |name: &str| process.iter().position(|p| p.contains(name)).unwrap();
-    assert!(pos("Alpha") < pos("Beta"), "same priority: Alpha before Beta (tree order)");
-    assert!(pos("Beta") < pos("Gamma"), "same priority: Beta before Gamma (tree order)");
+    assert!(
+        pos("Alpha") < pos("Beta"),
+        "same priority: Alpha before Beta (tree order)"
+    );
+    assert!(
+        pos("Beta") < pos("Gamma"),
+        "same priority: Beta before Gamma (tree order)"
+    );
 }
 
 // ===========================================================================
@@ -438,7 +480,9 @@ fn change_scene_fires_exit_on_old_scene() {
     // EXIT_TREE should fire for old scene nodes.
     let exits = notification_paths(&tree, "EXIT_TREE");
     assert!(
-        exits.iter().any(|p| p.contains("ChildA") || p.contains("SceneA")),
+        exits
+            .iter()
+            .any(|p| p.contains("ChildA") || p.contains("SceneA")),
         "EXIT_TREE should fire for old scene nodes: {:?}",
         exits
     );
@@ -548,23 +592,25 @@ fn dispatch_chain_walks_inheritance() {
         fn handle_notification(&mut self, what: Notification) {
             self.0.push(what);
         }
-        fn handler_class_name(&self) -> &str { "Player" }
+        fn handler_class_name(&self) -> &str {
+            "Player"
+        }
     }
 
     impl NotificationHandler for BaseHandler {
         fn handle_notification(&mut self, what: Notification) {
             self.0.push(what);
         }
-        fn handler_class_name(&self) -> &str { "Node2D" }
+        fn handler_class_name(&self) -> &str {
+            "Node2D"
+        }
     }
 
     let mut derived = DerivedHandler(vec![]);
     let mut base = BaseHandler(vec![]);
 
-    let records = dispatch_notification_chain(
-        &mut [&mut derived, &mut base],
-        NOTIFICATION_ENTER_TREE,
-    );
+    let records =
+        dispatch_notification_chain(&mut [&mut derived, &mut base], NOTIFICATION_ENTER_TREE);
 
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].class_name, "Player");
@@ -632,10 +678,16 @@ fn effective_process_mode_inherit_chain() {
     let c = tree.add_child(b, Node::new("C", "Node")).unwrap();
 
     // Set A to Always, B and C inherit.
-    tree.get_node_mut(a).unwrap().set_process_mode(ProcessMode::Always);
+    tree.get_node_mut(a)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
 
     let mode_c = tree.effective_process_mode(c);
-    assert_eq!(mode_c, ProcessMode::Always, "C should inherit Always from A");
+    assert_eq!(
+        mode_c,
+        ProcessMode::Always,
+        "C should inherit Always from A"
+    );
 }
 
 #[test]
@@ -662,19 +714,19 @@ fn effective_process_mode_root_defaults_to_pausable() {
 fn notification_coverage_inventory() {
     // Auto-dispatched by LifecycleManager / SceneTree / MainLoop:
     let auto_dispatched = [
-        (0, "POSTINITIALIZE"),   // Not auto-dispatched yet; placeholder
-        (1, "PREDELETE"),        // queue_free -> process_deletions
-        (10, "ENTER_TREE"),      // LifecycleManager::enter_tree
-        (11, "EXIT_TREE"),       // LifecycleManager::exit_tree / remove_node
-        (12, "MOVED_IN_PARENT"), // reparent / move_child / raise / lower
-        (13, "READY"),           // LifecycleManager::enter_tree (bottom-up)
-        (14, "PAUSED"),          // MainLoop::set_paused(true)
-        (15, "UNPAUSED"),        // MainLoop::set_paused(false)
-        (16, "CHILD_ORDER_CHANGED"), // add_child / move_child / reparent
-        (17, "PROCESS"),         // MainLoop::step (per-frame)
-        (18, "PHYSICS_PROCESS"), // MainLoop::step (physics tick)
-        (20, "PARENTED"),        // add_child
-        (21, "UNPARENTED"),      // remove_node / reparent
+        (0, "POSTINITIALIZE"),            // Not auto-dispatched yet; placeholder
+        (1, "PREDELETE"),                 // queue_free -> process_deletions
+        (10, "ENTER_TREE"),               // LifecycleManager::enter_tree
+        (11, "EXIT_TREE"),                // LifecycleManager::exit_tree / remove_node
+        (12, "MOVED_IN_PARENT"),          // reparent / move_child / raise / lower
+        (13, "READY"),                    // LifecycleManager::enter_tree (bottom-up)
+        (14, "PAUSED"),                   // MainLoop::set_paused(true)
+        (15, "UNPAUSED"),                 // MainLoop::set_paused(false)
+        (16, "CHILD_ORDER_CHANGED"),      // add_child / move_child / reparent
+        (17, "PROCESS"),                  // MainLoop::step (per-frame)
+        (18, "PHYSICS_PROCESS"),          // MainLoop::step (physics tick)
+        (20, "PARENTED"),                 // add_child
+        (21, "UNPARENTED"),               // remove_node / reparent
         (35, "INTERNAL_PROCESS"),         // MainLoop::step
         (36, "INTERNAL_PHYSICS_PROCESS"), // MainLoop::step
     ];

@@ -26,10 +26,7 @@ fn make_test_server() -> (EditorServerHandle, u16) {
     let root = tree.root_id();
 
     let mut player = Node::new("Player", "Node2D");
-    player.set_property(
-        "position",
-        Variant::Vector2(Vector2::new(10.0, 20.0)),
-    );
+    player.set_property("position", Variant::Vector2(Vector2::new(10.0, 20.0)));
     tree.add_child(root, player).unwrap();
 
     let state = EditorState::new(tree);
@@ -52,8 +49,7 @@ fn http_get(port: u16, path: &str) -> String {
 }
 
 fn http_request(port: u16, request: &str) -> String {
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.write_all(request.as_bytes()).unwrap();
     let mut response = Vec::new();
@@ -76,7 +72,11 @@ fn get_commands_returns_list() {
     let body = extract_body(&resp);
     let data: serde_json::Value = serde_json::from_str(body).unwrap();
     let commands = data["commands"].as_array().unwrap();
-    assert!(commands.len() >= 20, "Should have at least 20 commands, got {}", commands.len());
+    assert!(
+        commands.len() >= 20,
+        "Should have at least 20 commands, got {}",
+        commands.len()
+    );
 
     // Each command should have id, label, category
     for cmd in commands {
@@ -167,12 +167,11 @@ fn execute_redo_command() {
 fn execute_client_side_command() {
     let (handle, port) = make_test_server();
 
-    let resp = http_post(
-        port,
-        "/api/command/execute",
-        r#"{"command":"save_scene"}"#,
+    let resp = http_post(port, "/api/command/execute", r#"{"command":"save_scene"}"#);
+    assert!(
+        resp.contains("200 OK"),
+        "Execute client command should succeed"
     );
-    assert!(resp.contains("200 OK"), "Execute client command should succeed");
     let body = extract_body(&resp);
     let data: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(data["ok"], true);
@@ -229,15 +228,14 @@ fn execute_invalid_json_returns_400() {
 fn execute_delete_node_no_selection() {
     let (handle, port) = make_test_server();
 
-    let resp = http_post(
-        port,
-        "/api/command/execute",
-        r#"{"command":"delete_node"}"#,
-    );
+    let resp = http_post(port, "/api/command/execute", r#"{"command":"delete_node"}"#);
     assert!(resp.contains("200 OK"));
     let body = extract_body(&resp);
     let data: serde_json::Value = serde_json::from_str(body).unwrap();
-    assert_eq!(data["ok"], false, "Delete with no selection should return ok:false");
+    assert_eq!(
+        data["ok"], false,
+        "Delete with no selection should return ok:false"
+    );
 
     handle.stop();
 }
@@ -248,16 +246,23 @@ fn execute_multiple_client_commands() {
 
     // All these should return action:client
     let client_cmds = [
-        "zoom_in", "zoom_out", "toggle_grid", "open_help",
-        "search_nodes", "toggle_theme",
+        "zoom_in",
+        "zoom_out",
+        "toggle_grid",
+        "open_help",
+        "search_nodes",
+        "toggle_theme",
     ];
     for cmd in &client_cmds {
         let body = format!(r#"{{"command":"{}"}}"#, cmd);
         let resp = http_post(port, "/api/command/execute", &body);
         assert!(resp.contains("200 OK"), "Command {} should succeed", cmd);
-        let data: serde_json::Value =
-            serde_json::from_str(extract_body(&resp)).unwrap();
-        assert_eq!(data["action"], "client", "Command {} should be client-side", cmd);
+        let data: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(
+            data["action"], "client",
+            "Command {} should be client-side",
+            cmd
+        );
     }
 
     handle.stop();

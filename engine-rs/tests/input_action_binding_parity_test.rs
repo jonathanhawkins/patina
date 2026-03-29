@@ -87,9 +87,15 @@ fn snapshot_after_flush_has_no_just_pressed() {
 
     let snap = state.snapshot();
     assert!(snap.is_key_pressed(Key::Space), "key still held");
-    assert!(!snap.is_key_just_pressed(Key::Space), "just_pressed cleared by flush");
+    assert!(
+        !snap.is_key_just_pressed(Key::Space),
+        "just_pressed cleared by flush"
+    );
     assert!(snap.is_action_pressed("jump"), "action still held");
-    assert!(!snap.is_action_just_pressed("jump"), "action just_pressed cleared");
+    assert!(
+        !snap.is_action_just_pressed("jump"),
+        "action just_pressed cleared"
+    );
 }
 
 // ===========================================================================
@@ -462,7 +468,10 @@ fn gamepad_axis_value() {
 
     assert!((state.get_gamepad_axis_value(0, GamepadAxis::LeftStickX) - 0.75).abs() < 1e-6);
     // Unset axis should be 0.0
-    assert_eq!(state.get_gamepad_axis_value(0, GamepadAxis::LeftStickY), 0.0);
+    assert_eq!(
+        state.get_gamepad_axis_value(0, GamepadAxis::LeftStickY),
+        0.0
+    );
 }
 
 #[test]
@@ -474,9 +483,7 @@ fn gamepad_axis_different_pads() {
         gamepad_id: 1,
     });
 
-    assert!(
-        (state.get_gamepad_axis_value(1, GamepadAxis::RightStickY) + 0.5).abs() < 1e-6
-    );
+    assert!((state.get_gamepad_axis_value(1, GamepadAxis::RightStickY) + 0.5).abs() < 1e-6);
     assert_eq!(
         state.get_gamepad_axis_value(0, GamepadAxis::RightStickY),
         0.0,
@@ -617,9 +624,15 @@ fn flush_frame_preserves_held_keys() {
 
     assert!(state.is_key_pressed(Key::A), "held keys survive flush");
     assert!(state.is_key_pressed(Key::Right));
-    assert!(state.is_action_pressed("move_right"), "held action survives flush");
+    assert!(
+        state.is_action_pressed("move_right"),
+        "held action survives flush"
+    );
     assert!(!state.is_key_just_pressed(Key::A), "just_pressed cleared");
-    assert!(!state.is_action_just_pressed("move_right"), "action just_pressed cleared");
+    assert!(
+        !state.is_action_just_pressed("move_right"),
+        "action just_pressed cleared"
+    );
 }
 
 #[test]

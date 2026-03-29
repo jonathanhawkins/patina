@@ -242,7 +242,11 @@ fn validation_check_types_exhaustive() {
     let mut sorted = check_types.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), check_types.len(), "all check types must be unique");
+    assert_eq!(
+        sorted.len(),
+        check_types.len(),
+        "all check types must be unique"
+    );
 }
 
 // ===========================================================================
@@ -251,13 +255,12 @@ fn validation_check_types_exhaustive() {
 
 #[test]
 fn validation_storable_property_fields_complete() {
-    let required_fields = [
-        "name",
-        "type",
-        "is_nil",
-        "value_type",
-    ];
-    assert_eq!(required_fields.len(), 4, "storable property must have 4 fields");
+    let required_fields = ["name", "type", "is_nil", "value_type"];
+    assert_eq!(
+        required_fields.len(),
+        4,
+        "storable property must have 4 fields"
+    );
 }
 
 // ===========================================================================
@@ -297,13 +300,21 @@ fn validation_fixture_set_covers_probe_fixtures() {
         ("res://fixtures/test_animation.tres", "Animation"),
         ("res://scenes/smoke_probe.tscn", "PackedScene"),
     ];
-    assert_eq!(validation_fixtures.len(), 6, "should have 6 validation fixtures");
+    assert_eq!(
+        validation_fixtures.len(),
+        6,
+        "should have 6 validation fixtures"
+    );
 
     let paths: Vec<&str> = validation_fixtures.iter().map(|(p, _)| *p).collect();
     let mut sorted = paths.clone();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), validation_fixtures.len(), "all paths must be unique");
+    assert_eq!(
+        sorted.len(),
+        validation_fixtures.len(),
+        "all paths must be unique"
+    );
 }
 
 // ===========================================================================
@@ -398,8 +409,15 @@ loop_mode = 1
     let saved = saver.save_to_string(&res).unwrap();
     let reloaded = loader.parse_str(&saved, "res://anim.tres").unwrap();
 
-    assert_eq!(res.class_name, reloaded.class_name, "class must be preserved across reload");
-    assert_eq!(res.property_count(), reloaded.property_count(), "property count must be preserved");
+    assert_eq!(
+        res.class_name, reloaded.class_name,
+        "class must be preserved across reload"
+    );
+    assert_eq!(
+        res.property_count(),
+        reloaded.property_count(),
+        "property count must be preserved"
+    );
 }
 
 // ===========================================================================
@@ -636,7 +654,9 @@ fn engine_reload_consistency_ext_resources() {
 
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&original).unwrap();
-    let reloaded = loader.parse_str(&saved, "res://fixtures/with_ext_refs.tres").unwrap();
+    let reloaded = loader
+        .parse_str(&saved, "res://fixtures/with_ext_refs.tres")
+        .unwrap();
 
     // Reload consistency: class preserved
     assert_eq!(original.class_name, reloaded.class_name);

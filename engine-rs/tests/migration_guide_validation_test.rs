@@ -163,10 +163,7 @@ fn guide_references_match_workspace_members() {
     ];
 
     for name in &crate_names {
-        assert!(
-            guide.contains(name),
-            "guide must reference crate '{name}'"
-        );
+        assert!(guide.contains(name), "guide must reference crate '{name}'");
         assert!(
             crates_dir.join(name).exists(),
             "referenced crate '{name}' must exist on disk"
@@ -498,9 +495,17 @@ fn compatibility_table_covers_key_2d_node_types() {
     let guide = read_guide();
 
     let node_types = [
-        "Node2D", "Sprite2D", "AnimatedSprite2D", "Camera2D",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Line2D", "Polygon2D",
+        "Node2D",
+        "Sprite2D",
+        "AnimatedSprite2D",
+        "Camera2D",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Line2D",
+        "Polygon2D",
     ];
 
     for nt in &node_types {
@@ -516,9 +521,16 @@ fn compatibility_table_covers_key_3d_node_types() {
     let guide = read_guide();
 
     let node_types = [
-        "Node3D", "MeshInstance3D", "Camera3D", "Skeleton3D",
-        "RigidBody3D", "StaticBody3D", "CharacterBody3D",
-        "DirectionalLight3D", "OmniLight3D", "SpotLight3D",
+        "Node3D",
+        "MeshInstance3D",
+        "Camera3D",
+        "Skeleton3D",
+        "RigidBody3D",
+        "StaticBody3D",
+        "CharacterBody3D",
+        "DirectionalLight3D",
+        "OmniLight3D",
+        "SpotLight3D",
         "CollisionShape3D",
     ];
 
@@ -535,8 +547,14 @@ fn compatibility_table_covers_ui_node_types() {
     let guide = read_guide();
 
     let node_types = [
-        "Control", "Label", "Button", "Panel",
-        "VBoxContainer", "HBoxContainer", "TextEdit", "LineEdit",
+        "Control",
+        "Label",
+        "Button",
+        "Panel",
+        "VBoxContainer",
+        "HBoxContainer",
+        "TextEdit",
+        "LineEdit",
     ];
 
     for nt in &node_types {
@@ -652,15 +670,18 @@ fn each_limitation_has_workaround() {
     let guide = read_guide();
 
     // Find the limitations section
-    let section_start = guide.find("## Known Limitations and Workarounds")
+    let section_start = guide
+        .find("## Known Limitations and Workarounds")
         .expect("section must exist");
-    let section_end = guide[section_start..].find("## General Migration Advice")
+    let section_end = guide[section_start..]
+        .find("## General Migration Advice")
         .map(|i| section_start + i)
         .unwrap_or(guide.len());
     let section = &guide[section_start..section_end];
 
     // Every table must have a Workaround column
-    let table_headers: Vec<_> = section.lines()
+    let table_headers: Vec<_> = section
+        .lines()
         .filter(|l| l.contains("| Limitation |"))
         .collect();
 
@@ -691,10 +712,7 @@ fn limitations_mention_key_missing_features() {
     ];
 
     for lim in &key_limitations {
-        assert!(
-            guide.contains(lim),
-            "limitations must mention: {lim}"
-        );
+        assert!(guide.contains(lim), "limitations must mention: {lim}");
     }
 }
 
@@ -704,10 +722,10 @@ fn limitations_reference_workaround_tools() {
 
     // Workarounds should reference concrete Rust/Patina tools
     let tools = [
-        "AnimationPlayer",  // animation workaround
-        "NodePath",         // GDScript workaround
-        "Variant",          // GDScript workaround
-        "tracing",          // debugging workaround
+        "AnimationPlayer", // animation workaround
+        "NodePath",        // GDScript workaround
+        "Variant",         // GDScript workaround
+        "tracing",         // debugging workaround
     ];
 
     for tool in &tools {

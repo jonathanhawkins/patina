@@ -329,10 +329,7 @@ fn autoloads_registered() {
     let autoloads = registry.autoloads();
     assert_eq!(autoloads.len(), 1);
     assert_eq!(autoloads[0].1.name, "InventoryManager");
-    assert_eq!(
-        autoloads[0].1.path,
-        "res://addons/inventory/manager.gd"
-    );
+    assert_eq!(autoloads[0].1.path, "res://addons/inventory/manager.gd");
     assert!(autoloads[0].1.is_singleton);
 }
 

@@ -38,10 +38,7 @@ button_style = SubResource("StyleBoxFlat_def")
 
     // Nested property must be accessible.
     let bg = panel.get_property("bg_color");
-    assert!(
-        bg.is_some(),
-        "sub-resource must have bg_color property"
-    );
+    assert!(bg.is_some(), "sub-resource must have bg_color property");
 }
 
 #[test]

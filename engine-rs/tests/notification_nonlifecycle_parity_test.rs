@@ -12,16 +12,16 @@
 //! 7. Notification log accumulates across lifecycle phases
 //! 8. Documented exclusions: INSTANCED, DRAG_BEGIN/END, DRAW auto-dispatch
 
+use gdobject::notification::{
+    Notification, NOTIFICATION_ENTER_TREE, NOTIFICATION_INSTANCED,
+    NOTIFICATION_INTERNAL_PHYSICS_PROCESS, NOTIFICATION_INTERNAL_PROCESS,
+    NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_POSTINITIALIZE, NOTIFICATION_PROCESS,
+    NOTIFICATION_READY,
+};
 use gdscene::node::Node;
 use gdscene::scene_tree::SceneTree;
 use gdscene::trace::TraceEventType;
 use gdscene::{LifecycleManager, MainLoop};
-use gdobject::notification::{
-    Notification, NOTIFICATION_ENTER_TREE, NOTIFICATION_INSTANCED,
-    NOTIFICATION_INTERNAL_PHYSICS_PROCESS, NOTIFICATION_INTERNAL_PROCESS,
-    NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_POSTINITIALIZE,
-    NOTIFICATION_PROCESS, NOTIFICATION_READY,
-};
 
 // ===========================================================================
 // Helpers
@@ -50,7 +50,9 @@ fn make_entered_tree_with_subtree() -> (MainLoop, gdscene::node::NodeId, gdscene
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
-    let child = tree.add_child(parent, Node::new("Child", "Node2D")).unwrap();
+    let child = tree
+        .add_child(parent, Node::new("Child", "Node2D"))
+        .unwrap();
     LifecycleManager::enter_tree(&mut tree, root);
     tree.event_trace_mut().enable();
     tree.event_trace_mut().clear();
@@ -91,7 +93,11 @@ fn physics_process_fires_for_all_nodes() {
 
     let tree = ml.tree();
     let phys_paths = notification_paths(tree, "PHYSICS_PROCESS");
-    assert_eq!(phys_paths.len(), 3, "root + Parent + Child should all get PHYSICS_PROCESS");
+    assert_eq!(
+        phys_paths.len(),
+        3,
+        "root + Parent + Child should all get PHYSICS_PROCESS"
+    );
 }
 
 // ===========================================================================
@@ -171,9 +177,18 @@ fn godot_four_phase_order_in_trace() {
             .position(|&t| t == tag)
             .unwrap_or_else(|| panic!("{tag} missing"))
     };
-    assert!(first("IPHYS") < first("PHYS"), "INTERNAL_PHYSICS before PHYSICS");
-    assert!(first("PHYS") < first("IPROC"), "PHYSICS before INTERNAL_PROCESS");
-    assert!(first("IPROC") < first("PROC"), "INTERNAL_PROCESS before PROCESS");
+    assert!(
+        first("IPHYS") < first("PHYS"),
+        "INTERNAL_PHYSICS before PHYSICS"
+    );
+    assert!(
+        first("PHYS") < first("IPROC"),
+        "PHYSICS before INTERNAL_PROCESS"
+    );
+    assert!(
+        first("IPROC") < first("PROC"),
+        "INTERNAL_PROCESS before PROCESS"
+    );
 }
 
 // ===========================================================================
@@ -281,7 +296,9 @@ fn predelete_fires_bottom_up_on_subtree_free() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
-    let child = tree.add_child(parent, Node::new("Child", "Node2D")).unwrap();
+    let child = tree
+        .add_child(parent, Node::new("Child", "Node2D"))
+        .unwrap();
     let _grandchild = tree
         .add_child(child, Node::new("GrandChild", "Node2D"))
         .unwrap();
@@ -337,10 +354,7 @@ fn exit_tree_all_before_predelete_on_subtree() {
     let first_predel = events.iter().position(|(_, d)| d == "PREDELETE");
 
     if let (Some(le), Some(fp)) = (last_exit, first_predel) {
-        assert!(
-            le < fp,
-            "All EXIT_TREE must complete before any PREDELETE"
-        );
+        assert!(le < fp, "All EXIT_TREE must complete before any PREDELETE");
     }
 }
 
@@ -362,10 +376,7 @@ fn three_lifecycle_cycles_produce_consistent_notifications() {
 
         let enter_count = notification_paths(&tree, "ENTER_TREE").len();
         let ready_count = notification_paths(&tree, "READY").len();
-        assert_eq!(
-            enter_count, 2,
-            "cycle {cycle}: ENTER_TREE for root + child"
-        );
+        assert_eq!(enter_count, 2, "cycle {cycle}: ENTER_TREE for root + child");
         assert_eq!(ready_count, 2, "cycle {cycle}: READY for root + child");
 
         tree.event_trace_mut().clear();
@@ -399,7 +410,10 @@ fn notification_log_accumulates_across_phases() {
 
     let log = ml.tree().get_node(child_id).unwrap().notification_log();
     // Now should also have PROCESS and PHYSICS_PROCESS.
-    assert!(log.contains(&NOTIFICATION_PROCESS), "PROCESS in log after step");
+    assert!(
+        log.contains(&NOTIFICATION_PROCESS),
+        "PROCESS in log after step"
+    );
     assert!(
         log.contains(&NOTIFICATION_PHYSICS_PROCESS),
         "PHYSICS_PROCESS in log after step"
@@ -511,6 +525,12 @@ fn drag_notifications_defined_but_not_dispatched() {
     ml.run_frames(1, 1.0 / 60.0);
 
     let log = ml.tree().get_node(child).unwrap().notification_log();
-    assert!(!log.contains(&drag_begin), "DRAG_BEGIN should not fire without input");
-    assert!(!log.contains(&drag_end), "DRAG_END should not fire without input");
+    assert!(
+        !log.contains(&drag_begin),
+        "DRAG_BEGIN should not fire without input"
+    );
+    assert!(
+        !log.contains(&drag_end),
+        "DRAG_END should not fire without input"
+    );
 }

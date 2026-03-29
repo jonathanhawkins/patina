@@ -31,7 +31,9 @@ fn runner_binary() -> PathBuf {
 }
 
 fn run_patina_on_scene(scene_name: &str) -> Value {
-    let scene_path = fixtures_dir().join("scenes").join(format!("{scene_name}.tscn"));
+    let scene_path = fixtures_dir()
+        .join("scenes")
+        .join(format!("{scene_name}.tscn"));
     let binary = runner_binary();
     let output = Command::new(&binary)
         .arg(scene_path.to_str().expect("valid UTF-8"))
@@ -45,9 +47,8 @@ fn run_patina_on_scene(scene_name: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8");
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("invalid JSON from patina-runner for {scene_name}:\n{e}")
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("invalid JSON from patina-runner for {scene_name}:\n{e}"))
 }
 
 /// Collect all (node_path, property_name, value) triples from a Patina output tree,
@@ -93,15 +94,15 @@ fn extract_value(v: &Value) -> &Value {
 fn test_scripts_mover_has_speed_in_properties() {
     let output = run_patina_on_scene("test_scripts");
     let props = collect_patina_properties(&output);
-    let key = (
-        "/root/TestScene/Mover".to_string(),
-        "speed".to_string(),
-    );
+    let key = ("/root/TestScene/Mover".to_string(), "speed".to_string());
     assert!(
         props.contains_key(&key),
         "Mover node must export 'speed' script variable in properties. \
          Found properties: {:?}",
-        props.keys().filter(|(p, _)| p.contains("Mover")).collect::<Vec<_>>()
+        props
+            .keys()
+            .filter(|(p, _)| p.contains("Mover"))
+            .collect::<Vec<_>>()
     );
     let val = extract_value(&props[&key]);
     assert_eq!(val, &serde_json::json!(50.0), "Mover speed should be 50.0");
@@ -111,26 +112,24 @@ fn test_scripts_mover_has_speed_in_properties() {
 fn test_scripts_mover_has_direction_in_properties() {
     let output = run_patina_on_scene("test_scripts");
     let props = collect_patina_properties(&output);
-    let key = (
-        "/root/TestScene/Mover".to_string(),
-        "direction".to_string(),
-    );
+    let key = ("/root/TestScene/Mover".to_string(), "direction".to_string());
     assert!(
         props.contains_key(&key),
         "Mover node must export 'direction' script variable in properties"
     );
     let val = extract_value(&props[&key]);
-    assert_eq!(val, &serde_json::json!(1.0), "Mover direction should be 1.0");
+    assert_eq!(
+        val,
+        &serde_json::json!(1.0),
+        "Mover direction should be 1.0"
+    );
 }
 
 #[test]
 fn test_scripts_vartest_has_health_in_properties() {
     let output = run_patina_on_scene("test_scripts");
     let props = collect_patina_properties(&output);
-    let key = (
-        "/root/TestScene/VarTest".to_string(),
-        "health".to_string(),
-    );
+    let key = ("/root/TestScene/VarTest".to_string(), "health".to_string());
     assert!(
         props.contains_key(&key),
         "VarTest node must export 'health' script variable in properties"
@@ -152,7 +151,11 @@ fn test_scripts_vartest_has_is_alive_in_properties() {
         "VarTest node must export 'is_alive' script variable in properties"
     );
     let val = extract_value(&props[&key]);
-    assert_eq!(val, &serde_json::json!(true), "VarTest is_alive should be true");
+    assert_eq!(
+        val,
+        &serde_json::json!(true),
+        "VarTest is_alive should be true"
+    );
 }
 
 #[test]
@@ -197,10 +200,7 @@ fn test_scripts_vartest_has_velocity_in_properties() {
 fn space_shooter_player_has_speed_in_properties() {
     let output = run_patina_on_scene("space_shooter");
     let props = collect_patina_properties(&output);
-    let key = (
-        "/root/SpaceShooter/Player".to_string(),
-        "speed".to_string(),
-    );
+    let key = ("/root/SpaceShooter/Player".to_string(), "speed".to_string());
     assert!(
         props.contains_key(&key),
         "Player node must export 'speed' script variable in properties"
@@ -222,7 +222,11 @@ fn space_shooter_player_has_can_shoot_in_properties() {
         "Player node must export 'can_shoot' script variable in properties"
     );
     let val = extract_value(&props[&key]);
-    assert_eq!(val, &serde_json::json!(true), "Player can_shoot should be true");
+    assert_eq!(
+        val,
+        &serde_json::json!(true),
+        "Player can_shoot should be true"
+    );
 }
 
 #[test]
@@ -293,16 +297,10 @@ fn all_scripted_nodes_export_at_least_one_script_variable() {
 
         let props = collect_patina_properties(&output);
         for node_path in &scripted_nodes {
-            let node_props: Vec<_> = props
-                .keys()
-                .filter(|(p, _)| p == node_path)
-                .collect();
+            let node_props: Vec<_> = props.keys().filter(|(p, _)| p == node_path).collect();
             // Each scripted node should have at least one exported script var
             // (position doesn't count as it's a class property, not a script var)
-            let script_var_count = node_props
-                .iter()
-                .filter(|(_, k)| k != "position")
-                .count();
+            let script_var_count = node_props.iter().filter(|(_, k)| k != "position").count();
             assert!(
                 script_var_count > 0,
                 "{scene_name}: scripted node {node_path} has no script variables \

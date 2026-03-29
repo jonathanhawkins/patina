@@ -18,11 +18,11 @@
 //! 13. CI workflow jobs cover the expected domain lanes (headless, 2D, 3D,
 //!     platform, fuzz, meta, oracle)
 
-use gdplatform::platform_targets::{
-    ci_tested_targets, current_target, targets_for_platform, validate_current_target,
-    Architecture, PlatformCapability, DESKTOP_TARGETS,
-};
 use gdplatform::os::Platform;
+use gdplatform::platform_targets::{
+    ci_tested_targets, current_target, targets_for_platform, validate_current_target, Architecture,
+    PlatformCapability, DESKTOP_TARGETS,
+};
 
 // ── CI YAML validation ───────────────────────────────────────────────
 
@@ -48,21 +48,36 @@ fn ci_yaml_has_matrix_with_all_three_os() {
 #[test]
 fn ci_yaml_has_rust_build_job() {
     let yaml = read_ci_yaml();
-    assert!(yaml.contains("cargo build --workspace"), "CI must build workspace");
-    assert!(yaml.contains("cargo test --workspace"), "CI must test workspace");
-    assert!(yaml.contains("cargo clippy --workspace"), "CI must run clippy");
+    assert!(
+        yaml.contains("cargo build --workspace"),
+        "CI must build workspace"
+    );
+    assert!(
+        yaml.contains("cargo test --workspace"),
+        "CI must test workspace"
+    );
+    assert!(
+        yaml.contains("cargo clippy --workspace"),
+        "CI must run clippy"
+    );
 }
 
 #[test]
 fn ci_yaml_has_render_golden_job() {
     let yaml = read_ci_yaml();
-    assert!(yaml.contains("Render goldens"), "CI must have render golden job");
+    assert!(
+        yaml.contains("Render goldens"),
+        "CI must have render golden job"
+    );
 }
 
 #[test]
 fn ci_yaml_has_release_build_check() {
     let yaml = read_ci_yaml();
-    assert!(yaml.contains("cargo build --workspace --release"), "CI must check release build");
+    assert!(
+        yaml.contains("cargo build --workspace --release"),
+        "CI must check release build"
+    );
 }
 
 #[test]
@@ -74,27 +89,45 @@ fn ci_yaml_has_fmt_check() {
 #[test]
 fn ci_yaml_has_cargo_caching() {
     let yaml = read_ci_yaml();
-    assert!(yaml.contains("actions/cache@v4"), "CI must cache cargo artifacts");
-    assert!(yaml.contains("cargo-registry"), "CI must cache cargo registry");
-    assert!(yaml.contains("cargo-target"), "CI must cache target directory");
+    assert!(
+        yaml.contains("actions/cache@v4"),
+        "CI must cache cargo artifacts"
+    );
+    assert!(
+        yaml.contains("cargo-registry"),
+        "CI must cache cargo registry"
+    );
+    assert!(
+        yaml.contains("cargo-target"),
+        "CI must cache target directory"
+    );
 }
 
 #[test]
 fn ci_yaml_has_concurrency_cancellation() {
     let yaml = read_ci_yaml();
-    assert!(yaml.contains("cancel-in-progress: true"), "CI must cancel superseded runs");
+    assert!(
+        yaml.contains("cancel-in-progress: true"),
+        "CI must cancel superseded runs"
+    );
 }
 
 #[test]
 fn ci_yaml_has_fail_fast_disabled() {
     let yaml = read_ci_yaml();
-    assert!(yaml.contains("fail-fast: false"), "Matrix should not fail-fast so all platforms report");
+    assert!(
+        yaml.contains("fail-fast: false"),
+        "Matrix should not fail-fast so all platforms report"
+    );
 }
 
 #[test]
 fn ci_yaml_has_dependency_audit() {
     let yaml = read_ci_yaml();
-    assert!(yaml.contains("cargo audit") || yaml.contains("cargo-audit"), "CI should audit deps");
+    assert!(
+        yaml.contains("cargo audit") || yaml.contains("cargo-audit"),
+        "CI should audit deps"
+    );
 }
 
 // ── Platform targets ─────────────────────────────────────────────────
@@ -246,7 +279,10 @@ fn windows_triple_contains_windows() {
 
 #[test]
 fn current_target_is_detected() {
-    assert!(current_target().is_some(), "must detect current build target");
+    assert!(
+        current_target().is_some(),
+        "must detect current build target"
+    );
 }
 
 #[test]
@@ -258,7 +294,10 @@ fn current_target_validation_passes() {
 fn current_platform_is_desktop() {
     let target = current_target().unwrap();
     assert!(
-        matches!(target.platform, Platform::Linux | Platform::MacOS | Platform::Windows),
+        matches!(
+            target.platform,
+            Platform::Linux | Platform::MacOS | Platform::Windows
+        ),
         "test host must be a desktop platform"
     );
 }
@@ -307,7 +346,10 @@ fn web_target_has_limited_capabilities() {
     let web = targets_for_platform(Platform::Web);
     for target in &web {
         assert!(!target.gpu_supported, "Web should not claim GPU");
-        assert!(!target.windowing_supported, "Web should not claim windowing");
+        assert!(
+            !target.windowing_supported,
+            "Web should not claim windowing"
+        );
         assert!(!target.ci_tested, "Web is not yet CI-tested");
     }
 }
@@ -320,8 +362,7 @@ fn audit_path() -> std::path::PathBuf {
 }
 
 fn read_audit() -> String {
-    std::fs::read_to_string(audit_path())
-        .expect("prd/PHASE7_PLATFORM_PARITY_AUDIT.md must exist")
+    std::fs::read_to_string(audit_path()).expect("prd/PHASE7_PLATFORM_PARITY_AUDIT.md must exist")
 }
 
 #[test]
@@ -420,9 +461,7 @@ fn ci_yaml_matrix_matches_desktop_platforms() {
     ];
 
     for (platform, runner) in &platform_runners {
-        let has_target = targets_for_platform(*platform)
-            .iter()
-            .any(|t| t.ci_tested);
+        let has_target = targets_for_platform(*platform).iter().any(|t| t.ci_tested);
         if has_target {
             assert!(
                 yaml.contains(runner),

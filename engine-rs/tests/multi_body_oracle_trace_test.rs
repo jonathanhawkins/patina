@@ -26,18 +26,27 @@ fn three_body_cascade_is_deterministic() {
     let run = || -> Vec<(f32, f32)> {
         let mut world = PhysicsWorld2D::new();
         let mut a = PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid,
-            gdcore::math::Vector2::new(0.0, 0.0), shape, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            gdcore::math::Vector2::new(0.0, 0.0),
+            shape,
+            1.0,
         );
         a.linear_velocity = gdcore::math::Vector2::new(200.0, 0.0);
         let id_a = world.add_body(a);
         let id_b = world.add_body(PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid,
-            gdcore::math::Vector2::new(25.0, 0.0), shape, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            gdcore::math::Vector2::new(25.0, 0.0),
+            shape,
+            1.0,
         ));
         let id_c = world.add_body(PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid,
-            gdcore::math::Vector2::new(50.0, 0.0), shape, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            gdcore::math::Vector2::new(50.0, 0.0),
+            shape,
+            1.0,
         ));
 
         let mut positions = Vec::new();
@@ -58,7 +67,10 @@ fn three_body_cascade_is_deterministic() {
         assert!(
             (a.0 - b.0).abs() < 0.0001 && (a.1 - b.1).abs() < 0.0001,
             "determinism broken at entry {i}: ({}, {}) vs ({}, {})",
-            a.0, a.1, b.0, b.1
+            a.0,
+            a.1,
+            b.0,
+            b.1
         );
     }
 }
@@ -69,8 +81,11 @@ fn cascade_simulation_produces_movement() {
     let mut world = PhysicsWorld2D::new();
 
     let mut a = PhysicsBody2D::new(
-        BodyId(0), BodyType::Rigid,
-        gdcore::math::Vector2::new(0.0, 0.0), shape, 1.0,
+        BodyId(0),
+        BodyType::Rigid,
+        gdcore::math::Vector2::new(0.0, 0.0),
+        shape,
+        1.0,
     );
     a.linear_velocity = gdcore::math::Vector2::new(200.0, 0.0);
     let id_a = world.add_body(a);

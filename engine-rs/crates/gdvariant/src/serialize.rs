@@ -206,10 +206,9 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             if let Some(cb_obj) = v.as_object() {
                 let target_id = cb_obj.get("target_id")?.as_u64()?;
                 let method = cb_obj.get("method")?.as_str()?.to_owned();
-                Some(Variant::Callable(Box::new(crate::variant::CallableRef::Method {
-                    target_id,
-                    method,
-                })))
+                Some(Variant::Callable(Box::new(
+                    crate::variant::CallableRef::Method { target_id, method },
+                )))
             } else {
                 // Legacy debug-string format — can't reconstruct, return None
                 None
@@ -242,7 +241,11 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             let bz = parse_vec3(b.get("z")?)?;
             let origin = parse_vec3(v.get("origin")?)?;
             Some(Variant::Transform3D(Transform3D {
-                basis: Basis { x: bx, y: by, z: bz },
+                basis: Basis {
+                    x: bx,
+                    y: by,
+                    z: bz,
+                },
                 origin,
             }))
         }
@@ -655,7 +658,13 @@ mod tests {
         assert_eq!(origin.get("y").unwrap().as_f64().unwrap() as f32, 10.0);
         assert_eq!(origin.get("z").unwrap().as_f64().unwrap() as f32, 15.0);
         // Basis rows must be named-component
-        let bx = val.get("basis").unwrap().get("x").unwrap().as_object().unwrap();
+        let bx = val
+            .get("basis")
+            .unwrap()
+            .get("x")
+            .unwrap()
+            .as_object()
+            .unwrap();
         assert_eq!(bx.get("x").unwrap().as_f64().unwrap() as f32, 1.0);
     }
 
@@ -671,11 +680,14 @@ mod tests {
             }
         });
         let v = from_json(&j).unwrap();
-        assert_eq!(v, Variant::Basis(Basis {
-            x: Vector3::new(1.0, 0.0, 0.0),
-            y: Vector3::new(0.0, 1.0, 0.0),
-            z: Vector3::new(0.0, 0.0, 1.0),
-        }));
+        assert_eq!(
+            v,
+            Variant::Basis(Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            })
+        );
     }
 
     #[test]
@@ -693,14 +705,17 @@ mod tests {
             }
         });
         let v = from_json(&j).unwrap();
-        assert_eq!(v, Variant::Transform3D(Transform3D {
-            basis: Basis {
-                x: Vector3::new(1.0, 0.0, 0.0),
-                y: Vector3::new(0.0, 1.0, 0.0),
-                z: Vector3::new(0.0, 0.0, 1.0),
-            },
-            origin: Vector3::new(10.0, 20.0, 30.0),
-        }));
+        assert_eq!(
+            v,
+            Variant::Transform3D(Transform3D {
+                basis: Basis {
+                    x: Vector3::new(1.0, 0.0, 0.0),
+                    y: Vector3::new(0.0, 1.0, 0.0),
+                    z: Vector3::new(0.0, 0.0, 1.0),
+                },
+                origin: Vector3::new(10.0, 20.0, 30.0),
+            })
+        );
     }
 
     #[test]

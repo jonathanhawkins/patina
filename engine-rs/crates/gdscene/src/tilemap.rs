@@ -545,7 +545,12 @@ impl Default for TileBrush {
 /// Paints a line of tiles between two grid coordinates using Bresenham's algorithm.
 ///
 /// Returns the list of cells that were painted.
-pub fn paint_line(grid: &mut TileGrid, from: Vector2i, to: Vector2i, tile_id: i32) -> Vec<Vector2i> {
+pub fn paint_line(
+    grid: &mut TileGrid,
+    from: Vector2i,
+    to: Vector2i,
+    tile_id: i32,
+) -> Vec<Vector2i> {
     let mut painted = Vec::new();
     let mut x0 = from.x;
     let mut y0 = from.y;
@@ -867,10 +872,10 @@ const NEIGHBOR_OFFSETS_8: [(i32, i32); 8] = [
 
 /// Cardinal-only neighbor offsets (T, R, B, L) — bits 0..3.
 const NEIGHBOR_OFFSETS_4_SIDES: [(i32, i32); 4] = [
-    (0, -1),  // 0: top
-    (1, 0),   // 1: right
-    (0, 1),   // 2: bottom
-    (-1, 0),  // 3: left
+    (0, -1), // 0: top
+    (1, 0),  // 1: right
+    (0, 1),  // 2: bottom
+    (-1, 0), // 3: left
 ];
 
 /// Corner-only neighbor offsets (TL, TR, BR, BL) — bits 0..3.
@@ -907,7 +912,8 @@ impl TerrainType {
 
     /// Adds a bitmask → tile mapping.
     pub fn add_tile(&mut self, bitmask: u8, source_id: i32, atlas_coords: Vector2i) {
-        self.bitmask_tiles.insert(bitmask, (source_id, atlas_coords));
+        self.bitmask_tiles
+            .insert(bitmask, (source_id, atlas_coords));
     }
 }
 
@@ -954,11 +960,7 @@ pub type TerrainMap = HashMap<Vector2i, i32>;
 /// Computes the bitmask for a cell based on which neighbors share its terrain.
 ///
 /// Returns `None` if the cell has no terrain assigned.
-pub fn compute_bitmask(
-    terrain_map: &TerrainMap,
-    cell: Vector2i,
-    mode: TerrainMode,
-) -> Option<u8> {
+pub fn compute_bitmask(terrain_map: &TerrainMap, cell: Vector2i, mode: TerrainMode) -> Option<u8> {
     let terrain_id = *terrain_map.get(&cell)?;
     let offsets: &[(i32, i32)] = match mode {
         TerrainMode::MatchCornersAndSides => &NEIGHBOR_OFFSETS_8,
@@ -980,10 +982,7 @@ pub fn compute_bitmask(
 /// Exact match is preferred. If no exact match exists, finds the entry whose
 /// bitmask is a subset of the target (most bits in common wins). Returns `None`
 /// if no mapping exists at all.
-pub fn resolve_terrain_tile(
-    terrain: &TerrainType,
-    bitmask: u8,
-) -> Option<(i32, Vector2i)> {
+pub fn resolve_terrain_tile(terrain: &TerrainType, bitmask: u8) -> Option<(i32, Vector2i)> {
     // Exact match
     if let Some(&tile) = terrain.bitmask_tiles.get(&bitmask) {
         return Some(tile);
@@ -1589,7 +1588,10 @@ mod tests {
     #[test]
     fn compute_bitmask_no_terrain() {
         let map = TerrainMap::new();
-        assert_eq!(compute_bitmask(&map, Vector2i::ZERO, TerrainMode::MatchSides), None);
+        assert_eq!(
+            compute_bitmask(&map, Vector2i::ZERO, TerrainMode::MatchSides),
+            None
+        );
     }
 
     #[test]
@@ -1685,8 +1687,10 @@ mod tests {
         let results = paint_terrain(&mut map, &ts, 0, &[Vector2i::new(6, 5)]);
         // Should include updates for the middle cell (now has left+right neighbors)
         let updated_cells: Vec<Vector2i> = results.iter().map(|(c, _, _)| *c).collect();
-        assert!(updated_cells.contains(&Vector2i::new(5, 5)),
-            "Middle cell should be updated when neighbors change");
+        assert!(
+            updated_cells.contains(&Vector2i::new(5, 5)),
+            "Middle cell should be updated when neighbors change"
+        );
     }
 
     #[test]
@@ -1710,7 +1714,10 @@ mod tests {
         assert_eq!(map.len(), 4);
         // Neighbors should be updated
         let updated_cells: Vec<Vector2i> = results.iter().map(|(c, _, _)| *c).collect();
-        assert!(!updated_cells.is_empty(), "Neighbors should be re-resolved after erase");
+        assert!(
+            !updated_cells.is_empty(),
+            "Neighbors should be re-resolved after erase"
+        );
     }
 
     #[test]
@@ -1719,8 +1726,11 @@ mod tests {
         let ts = make_terrain_set_4side();
         let brush = TerrainBrush::new(0);
         let results = apply_terrain_brush(
-            &mut map, &ts, &brush,
-            Vector2i::new(3, 3), Vector2i::new(3, 3),
+            &mut map,
+            &ts,
+            &brush,
+            Vector2i::new(3, 3),
+            Vector2i::new(3, 3),
         );
         assert!(!results.is_empty());
         assert_eq!(map.get(&Vector2i::new(3, 3)), Some(&0));
@@ -1736,8 +1746,11 @@ mod tests {
             layer: 0,
         };
         let results = apply_terrain_brush(
-            &mut map, &ts, &brush,
-            Vector2i::new(0, 0), Vector2i::new(4, 0),
+            &mut map,
+            &ts,
+            &brush,
+            Vector2i::new(0, 0),
+            Vector2i::new(4, 0),
         );
         // Should have painted 5 cells in a horizontal line
         assert_eq!(map.len(), 5);
@@ -1757,8 +1770,11 @@ mod tests {
             layer: 0,
         };
         let results = apply_terrain_brush(
-            &mut map, &ts, &brush,
-            Vector2i::new(0, 0), Vector2i::new(2, 2),
+            &mut map,
+            &ts,
+            &brush,
+            Vector2i::new(0, 0),
+            Vector2i::new(2, 2),
         );
         // 3x3 rect = 9 cells
         assert_eq!(map.len(), 9);

@@ -494,9 +494,7 @@ impl OutputPanel {
 
     /// Returns the index of a message by ID within the filtered view, for scroll targeting.
     pub fn filtered_index_of(&self, id: u64) -> Option<usize> {
-        self.filtered_messages()
-            .iter()
-            .position(|m| m.id == id)
+        self.filtered_messages().iter().position(|m| m.id == id)
     }
 }
 

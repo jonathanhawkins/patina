@@ -10,9 +10,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use gdcore::error::EngineResult;
-use gdresource::{
-    parse_uid_string, Resource, ResourceLoader, UidRegistry, UnifiedLoader,
-};
+use gdresource::{parse_uid_string, Resource, ResourceLoader, UidRegistry, UnifiedLoader};
 use gdvariant::Variant;
 
 // ===========================================================================
@@ -31,7 +29,6 @@ impl SequenceLoader {
             counter: Cell::new(1),
         }
     }
-
 }
 
 impl ResourceLoader for SequenceLoader {
@@ -350,7 +347,11 @@ fn mixed_access_invokes_loader_exactly_once() {
 
     // The seq property should be the same on all — loaded exactly once.
     let seq = r1.get_property("seq").unwrap();
-    assert_eq!(seq, &Variant::Int(1), "loader should have been called exactly once");
+    assert_eq!(
+        seq,
+        &Variant::Int(1),
+        "loader should have been called exactly once"
+    );
     assert_eq!(ul.cache_len(), 1);
 }
 
@@ -423,7 +424,10 @@ fn invalidate_one_does_not_affect_others() {
 
     // B unchanged.
     let b2 = ul.load("uid://b").unwrap();
-    assert!(Arc::ptr_eq(&b1, &b2), "uninvalidated resource must be stable");
+    assert!(
+        Arc::ptr_eq(&b1, &b2),
+        "uninvalidated resource must be stable"
+    );
 
     // A reloaded.
     let a2 = ul.load("uid://a").unwrap();

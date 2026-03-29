@@ -125,7 +125,10 @@ fn test_smart_snap_center_alignment() {
     let (snapped, guides) = compute_smart_snap(&tree, drag_id, candidate, 5.0);
 
     assert_eq!(snapped.x, 100.0, "should snap X to anchor center");
-    assert_eq!(snapped.y, 50.0, "Y should remain unchanged (beyond threshold)");
+    assert_eq!(
+        snapped.y, 50.0,
+        "Y should remain unchanged (beyond threshold)"
+    );
     assert!(
         guides.iter().any(|g| g.axis == "x" && g.position == 100.0),
         "should have X guide at 100"
@@ -250,7 +253,10 @@ fn test_apply_snap_grid_only() {
     let (snapped, guides) = apply_snap(&tree, &settings, nid, candidate);
     assert_eq!(snapped.x, 16.0);
     assert_eq!(snapped.y, 32.0);
-    assert!(guides.is_empty(), "no smart guides when smart snap disabled");
+    assert!(
+        guides.is_empty(),
+        "no smart guides when smart snap disabled"
+    );
 }
 
 #[test]
@@ -327,7 +333,10 @@ fn test_apply_snap_grid_then_smart() {
     // Y=200 exactly matches anchor Y=200.
     let candidate = Vector2::new(103.0, 199.0);
     let (snapped, _) = apply_snap(&tree, &settings, nid, candidate);
-    assert_eq!(snapped.x, 100.0, "grid snap to 104, then smart snap to anchor at 100");
+    assert_eq!(
+        snapped.x, 100.0,
+        "grid snap to 104, then smart snap to anchor at 100"
+    );
     assert_eq!(snapped.y, 200.0, "grid snap to 200, matches anchor");
 }
 

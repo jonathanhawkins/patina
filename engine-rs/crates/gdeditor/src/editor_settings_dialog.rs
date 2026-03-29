@@ -189,7 +189,14 @@ impl KeybindingCategory {
     }
 
     pub fn all() -> &'static [KeybindingCategory] {
-        &[Self::Editing, Self::Navigation, Self::Scene, Self::Tools, Self::Playback, Self::Other]
+        &[
+            Self::Editing,
+            Self::Navigation,
+            Self::Scene,
+            Self::Tools,
+            Self::Playback,
+            Self::Other,
+        ]
     }
 }
 
@@ -435,37 +442,49 @@ impl EditorSettingsDialog {
 
     /// Sets the base theme ("dark" or "light").
     pub fn set_base_theme(&mut self, theme: &str) {
-        let t = self.pending_theme.get_or_insert_with(|| self.theme_config.clone());
+        let t = self
+            .pending_theme
+            .get_or_insert_with(|| self.theme_config.clone());
         t.base_theme = theme.to_string();
     }
 
     /// Sets the accent color.
     pub fn set_accent_color(&mut self, color: AccentColor) {
-        let t = self.pending_theme.get_or_insert_with(|| self.theme_config.clone());
+        let t = self
+            .pending_theme
+            .get_or_insert_with(|| self.theme_config.clone());
         t.accent_color = color;
     }
 
     /// Sets the font size (clamped).
     pub fn set_font_size(&mut self, size: u8) {
-        let t = self.pending_theme.get_or_insert_with(|| self.theme_config.clone());
+        let t = self
+            .pending_theme
+            .get_or_insert_with(|| self.theme_config.clone());
         t.set_font_size(size);
     }
 
     /// Sets the UI scale (clamped).
     pub fn set_ui_scale(&mut self, scale: u16) {
-        let t = self.pending_theme.get_or_insert_with(|| self.theme_config.clone());
+        let t = self
+            .pending_theme
+            .get_or_insert_with(|| self.theme_config.clone());
         t.set_ui_scale(scale);
     }
 
     /// Sets a custom theme color override.
     pub fn set_theme_custom_color(&mut self, role: &str, color: Color) {
-        let t = self.pending_theme.get_or_insert_with(|| self.theme_config.clone());
+        let t = self
+            .pending_theme
+            .get_or_insert_with(|| self.theme_config.clone());
         t.set_custom_color(role, color);
     }
 
     /// Removes a custom theme color override.
     pub fn remove_theme_custom_color(&mut self, role: &str) {
-        let t = self.pending_theme.get_or_insert_with(|| self.theme_config.clone());
+        let t = self
+            .pending_theme
+            .get_or_insert_with(|| self.theme_config.clone());
         t.remove_custom_color(role);
     }
 
@@ -572,12 +591,7 @@ impl EditorSettingsDialog {
         plugin
             .dependencies
             .iter()
-            .filter(|dep| {
-                !self
-                    .plugins
-                    .iter()
-                    .any(|p| p.name == **dep && p.enabled)
-            })
+            .filter(|dep| !self.plugins.iter().any(|p| p.name == **dep && p.enabled))
             .cloned()
             .collect()
     }
@@ -586,10 +600,7 @@ impl EditorSettingsDialog {
     pub fn would_break_dependents(&self, plugin_name: &str) -> Vec<String> {
         self.plugins
             .iter()
-            .filter(|p| {
-                p.enabled
-                    && p.dependencies.iter().any(|d| d == plugin_name)
-            })
+            .filter(|p| p.enabled && p.dependencies.iter().any(|d| d == plugin_name))
             .map(|p| p.name.clone())
             .collect()
     }
@@ -706,9 +717,7 @@ mod tests {
         let filtered = dialog.filtered_keybindings();
         assert!(filtered.len() >= 2);
         for kb in &filtered {
-            assert!(
-                kb.action.contains("zoom") || kb.description.to_lowercase().contains("zoom"),
-            );
+            assert!(kb.action.contains("zoom") || kb.description.to_lowercase().contains("zoom"),);
         }
     }
 
@@ -816,9 +825,15 @@ mod tests {
         let mut dialog = EditorSettingsDialog::new();
         dialog.open();
         dialog.set_font_size(2); // below min
-        assert_eq!(dialog.effective_theme().font_size, ThemeConfig::MIN_FONT_SIZE);
+        assert_eq!(
+            dialog.effective_theme().font_size,
+            ThemeConfig::MIN_FONT_SIZE
+        );
         dialog.set_font_size(200); // above max
-        assert_eq!(dialog.effective_theme().font_size, ThemeConfig::MAX_FONT_SIZE);
+        assert_eq!(
+            dialog.effective_theme().font_size,
+            ThemeConfig::MAX_FONT_SIZE
+        );
     }
 
     #[test]
@@ -885,7 +900,9 @@ mod tests {
     #[test]
     fn default_keybindings_have_categories() {
         let dialog = EditorSettingsDialog::new();
-        let editing = dialog.filtered_keybindings().iter()
+        let editing = dialog
+            .filtered_keybindings()
+            .iter()
             .filter(|kb| kb.category == KeybindingCategory::Editing)
             .count();
         assert!(editing >= 6); // delete, rename, duplicate, copy, paste, cut, undo, redo
@@ -1049,9 +1066,12 @@ mod tests {
     #[test]
     fn load_keybindings_replaces_defaults() {
         let mut dialog = EditorSettingsDialog::new();
-        dialog.load_keybindings(vec![
-            EditorSettingsDialog::kb("custom", "Custom action", "F12", KeybindingCategory::Other),
-        ]);
+        dialog.load_keybindings(vec![EditorSettingsDialog::kb(
+            "custom",
+            "Custom action",
+            "F12",
+            KeybindingCategory::Other,
+        )]);
         assert_eq!(dialog.keybinding_count(), 1);
         assert_eq!(dialog.effective_keys("custom"), Some("F12"));
         assert_eq!(dialog.effective_keys("undo"), None);

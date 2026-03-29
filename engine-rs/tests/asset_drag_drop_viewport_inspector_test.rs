@@ -31,10 +31,7 @@ fn make_test_server() -> (EditorServerHandle, u16) {
 
     let mut world = Node::new("World", "Node2D");
     world.set_property("name", Variant::String("World".into()));
-    world.set_property(
-        "position",
-        Variant::Vector2(Vector2::new(0.0, 0.0)),
-    );
+    world.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
     tree.add_child(root, world).unwrap();
 
     let state = EditorState::new(tree);
@@ -57,8 +54,7 @@ fn http_get(port: u16, path: &str) -> String {
 }
 
 fn http_request(port: u16, request: &str) -> String {
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.write_all(request.as_bytes()).unwrap();
     let mut response = Vec::new();
@@ -127,12 +123,8 @@ fn asset_drop_audio_creates_audio_player() {
     let resp = http_post(port, "/api/asset/drop_to_viewport", &body);
     assert!(resp.contains("200 OK"), "Should return 200");
 
-    let result: serde_json::Value =
-        serde_json::from_str(extract_body(&resp)).expect("valid JSON");
-    assert_eq!(
-        result["node_class"].as_str().unwrap(),
-        "AudioStreamPlayer"
-    );
+    let result: serde_json::Value = serde_json::from_str(extract_body(&resp)).expect("valid JSON");
+    assert_eq!(result["node_class"].as_str().unwrap(), "AudioStreamPlayer");
 
     handle.stop();
 }
@@ -149,8 +141,7 @@ fn asset_drop_script_creates_node_with_script() {
     let resp = http_post(port, "/api/asset/drop_to_viewport", &body);
     assert!(resp.contains("200 OK"), "Should return 200");
 
-    let result: serde_json::Value =
-        serde_json::from_str(extract_body(&resp)).expect("valid JSON");
+    let result: serde_json::Value = serde_json::from_str(extract_body(&resp)).expect("valid JSON");
     assert_eq!(result["node_class"].as_str().unwrap(), "Node");
     assert!(result["node_id"].is_number());
 
@@ -169,12 +160,8 @@ fn asset_drop_mesh_creates_meshinstance3d() {
     let resp = http_post(port, "/api/asset/drop_to_viewport", &body);
     assert!(resp.contains("200 OK"), "Should return 200");
 
-    let result: serde_json::Value =
-        serde_json::from_str(extract_body(&resp)).expect("valid JSON");
-    assert_eq!(
-        result["node_class"].as_str().unwrap(),
-        "MeshInstance3D"
-    );
+    let result: serde_json::Value = serde_json::from_str(extract_body(&resp)).expect("valid JSON");
+    assert_eq!(result["node_class"].as_str().unwrap(), "MeshInstance3D");
 
     handle.stop();
 }
@@ -231,8 +218,7 @@ fn inspector_set_property_with_resource_path() {
         world_id
     );
     let resp = http_post(port, "/api/asset/drop_to_viewport", &body);
-    let result: serde_json::Value =
-        serde_json::from_str(extract_body(&resp)).expect("valid JSON");
+    let result: serde_json::Value = serde_json::from_str(extract_body(&resp)).expect("valid JSON");
     let sprite_id = result["node_id"].as_u64().unwrap();
 
     // Now set a property via the property API (simulates inspector drag-drop)
@@ -284,8 +270,7 @@ fn asset_drop_unknown_type_creates_node2d() {
     let resp = http_post(port, "/api/asset/drop_to_viewport", &body);
     assert!(resp.contains("200 OK"));
 
-    let result: serde_json::Value =
-        serde_json::from_str(extract_body(&resp)).expect("valid JSON");
+    let result: serde_json::Value = serde_json::from_str(extract_body(&resp)).expect("valid JSON");
     assert_eq!(
         result["node_class"].as_str().unwrap(),
         "Node2D",

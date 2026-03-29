@@ -7,7 +7,7 @@
 use gdcore::math::Color;
 use gdrender2d::renderer::FrameBuffer;
 use gdresource::shader_tokenizer::{
-    tokenize_shader, tokenize_shader_no_comments, extract_uniforms as parse_uniforms,
+    extract_uniforms as parse_uniforms, tokenize_shader, tokenize_shader_no_comments,
     ShaderLexError, ShaderToken, ShaderUniform,
 };
 
@@ -59,20 +59,76 @@ pub struct ShaderHighlightSpan {
 
 /// Known GLSL/GDShader built-in functions for highlighting.
 const BUILTIN_FUNCTIONS: &[&str] = &[
-    "texture", "textureLod", "textureProj", "textureSize", "texelFetch",
-    "mix", "clamp", "step", "smoothstep", "fract", "floor", "ceil", "round",
-    "abs", "sign", "mod", "min", "max", "pow", "exp", "exp2", "log", "log2",
-    "sqrt", "inversesqrt",
-    "sin", "cos", "tan", "asin", "acos", "atan",
-    "dot", "cross", "length", "distance", "normalize", "reflect", "refract",
-    "transpose", "inverse", "determinant",
-    "radians", "degrees",
-    "lessThan", "greaterThan", "lessThanEqual", "greaterThanEqual", "equal",
-    "notEqual", "any", "all", "not",
-    "dFdx", "dFdy", "fwidth",
-    "COLOR", "VERTEX", "UV", "NORMAL", "FRAGCOORD", "TIME", "PI", "TAU",
-    "MODEL_MATRIX", "VIEW_MATRIX", "PROJECTION_MATRIX", "INV_VIEW_MATRIX",
-    "SCREEN_UV", "SCREEN_TEXTURE", "DEPTH_TEXTURE",
+    "texture",
+    "textureLod",
+    "textureProj",
+    "textureSize",
+    "texelFetch",
+    "mix",
+    "clamp",
+    "step",
+    "smoothstep",
+    "fract",
+    "floor",
+    "ceil",
+    "round",
+    "abs",
+    "sign",
+    "mod",
+    "min",
+    "max",
+    "pow",
+    "exp",
+    "exp2",
+    "log",
+    "log2",
+    "sqrt",
+    "inversesqrt",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "dot",
+    "cross",
+    "length",
+    "distance",
+    "normalize",
+    "reflect",
+    "refract",
+    "transpose",
+    "inverse",
+    "determinant",
+    "radians",
+    "degrees",
+    "lessThan",
+    "greaterThan",
+    "lessThanEqual",
+    "greaterThanEqual",
+    "equal",
+    "notEqual",
+    "any",
+    "all",
+    "not",
+    "dFdx",
+    "dFdy",
+    "fwidth",
+    "COLOR",
+    "VERTEX",
+    "UV",
+    "NORMAL",
+    "FRAGCOORD",
+    "TIME",
+    "PI",
+    "TAU",
+    "MODEL_MATRIX",
+    "VIEW_MATRIX",
+    "PROJECTION_MATRIX",
+    "INV_VIEW_MATRIX",
+    "SCREEN_UV",
+    "SCREEN_TEXTURE",
+    "DEPTH_TEXTURE",
 ];
 
 fn is_builtin_function(name: &str) -> bool {
@@ -152,9 +208,7 @@ fn classify_shader_token(token: &ShaderToken) -> ShaderHighlightKind {
         ShaderToken::BoolLit(_) => ShaderHighlightKind::BoolLiteral,
 
         // Comments
-        ShaderToken::LineComment(_) | ShaderToken::BlockComment(_) => {
-            ShaderHighlightKind::Comment
-        }
+        ShaderToken::LineComment(_) | ShaderToken::BlockComment(_) => ShaderHighlightKind::Comment,
 
         // Identifiers — check for built-in functions
         ShaderToken::Ident(name) => {
@@ -262,10 +316,7 @@ impl ShaderHighlighter {
     }
 
     /// Returns the set of highlight kinds used in the source.
-    pub fn used_kinds(
-        &self,
-        source: &str,
-    ) -> Result<Vec<ShaderHighlightKind>, ShaderLexError> {
+    pub fn used_kinds(&self, source: &str) -> Result<Vec<ShaderHighlightKind>, ShaderLexError> {
         let spans = self.highlight(source)?;
         let mut kinds: Vec<ShaderHighlightKind> = spans.iter().map(|s| s.kind).collect();
         kinds.sort_by_key(|k| format!("{k:?}"));
@@ -483,10 +534,9 @@ impl ShaderEditor {
     }
 
     /// Highlights the active tab's source.
-    pub fn highlight_active(
-        &self,
-    ) -> Option<Result<Vec<ShaderHighlightSpan>, ShaderLexError>> {
-        self.active().map(|tab| self.highlighter.highlight(&tab.source))
+    pub fn highlight_active(&self) -> Option<Result<Vec<ShaderHighlightSpan>, ShaderLexError>> {
+        self.active()
+            .map(|tab| self.highlighter.highlight(&tab.source))
     }
 
     /// Returns the highlighter.
@@ -667,7 +717,10 @@ impl MaterialPreview {
                 // Check if this is a color uniform.
                 let tokens = tokenize_shader_no_comments(source).unwrap_or_default();
                 let uniforms = parse_uniforms(&tokens);
-                if uniforms.iter().any(|u| u.name == *name && u.type_name == "vec4") {
+                if uniforms
+                    .iter()
+                    .any(|u| u.name == *name && u.type_name == "vec4")
+                {
                     return Color::new(*r as f32, *g as f32, *b as f32, *a as f32);
                 }
             }
@@ -681,7 +734,9 @@ impl MaterialPreview {
         let uniforms = parse_uniforms(&tokens);
         for u in &uniforms {
             if u.type_name == "vec4"
-                && (u.name.contains("color") || u.name.contains("albedo") || u.name.contains("tint"))
+                && (u.name.contains("color")
+                    || u.name.contains("albedo")
+                    || u.name.contains("tint"))
             {
                 // Try to find a default value — for now, use a distinctive placeholder.
                 return Color::new(1.0, 0.5, 0.0, 1.0);
@@ -786,7 +841,12 @@ impl MaterialPreview {
         let faces: [(Color, [(f32, f32); 4]); 3] = [
             // Left face.
             (
-                Color::new(base_color.r * 0.5, base_color.g * 0.5, base_color.b * 0.5, 1.0),
+                Color::new(
+                    base_color.r * 0.5,
+                    base_color.g * 0.5,
+                    base_color.b * 0.5,
+                    1.0,
+                ),
                 [
                     (cx - iso_x, cy),
                     (cx, cy + iso_y),
@@ -796,7 +856,12 @@ impl MaterialPreview {
             ),
             // Right face.
             (
-                Color::new(base_color.r * 0.7, base_color.g * 0.7, base_color.b * 0.7, 1.0),
+                Color::new(
+                    base_color.r * 0.7,
+                    base_color.g * 0.7,
+                    base_color.b * 0.7,
+                    1.0,
+                ),
                 [
                     (cx, cy + iso_y),
                     (cx + iso_x, cy),
@@ -876,7 +941,8 @@ fn fill_quad(fb: &mut FrameBuffer, verts: &[(f32, f32); 4], color: Color) {
         let mut i = 0;
         while i + 1 < xs.len() {
             let x_start = (xs[i].max(0.0) as u32).min(fb.width.saturating_sub(1));
-            let x_end = (xs[i + 1].min(fb.width as f32 - 1.0) as u32).min(fb.width.saturating_sub(1));
+            let x_end =
+                (xs[i + 1].min(fb.width as f32 - 1.0) as u32).min(fb.width.saturating_sub(1));
             for px in x_start..=x_end {
                 fb.set_pixel(px, py, color);
             }
@@ -936,7 +1002,9 @@ void fragment() {
     fn highlight_numeric_literals() {
         let h = ShaderHighlighter::new();
         let spans = h.highlight("float x = 3.14;").unwrap();
-        let num = spans.iter().find(|s| s.kind == ShaderHighlightKind::NumberLiteral);
+        let num = spans
+            .iter()
+            .find(|s| s.kind == ShaderHighlightKind::NumberLiteral);
         assert!(num.is_some());
     }
 
@@ -1091,7 +1159,10 @@ void fragment() {
     #[test]
     fn material_preview_uniform_overrides() {
         let mut preview = MaterialPreview::new(64, 64);
-        preview.set_uniform("my_color", UniformValue::Color(Color::new(1.0, 0.0, 0.0, 1.0)));
+        preview.set_uniform(
+            "my_color",
+            UniformValue::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
         assert_eq!(preview.overrides().len(), 1);
 
         // Render with the override — the sphere should be reddish.

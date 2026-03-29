@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use gdplatform::input::{ActionBinding, InputEvent, InputMap, Key};
 use gdresource::resource::Resource;
 use gdresource::saver::TresSaver;
 use gdresource::UnifiedLoader;
@@ -23,7 +24,6 @@ use gdscene::node::{Node, ProcessMode};
 use gdscene::packed_scene::PackedScene;
 use gdscene::scene_tree::SceneTree;
 use gdscene::tween::{Tween, TweenStep};
-use gdplatform::input::{ActionBinding, InputEvent, InputMap, Key};
 use gdvariant::Variant;
 
 // ===========================================================================
@@ -70,10 +70,7 @@ fn animation_player_advances_through_mainloop_step() {
         .get_property("modulate:a");
     // After 1.0s of a 1.0s animation, alpha should be ~1.0
     match alpha {
-        Variant::Float(v) => assert!(
-            (v - 1.0).abs() < 0.01,
-            "Expected alpha ~1.0, got {v}"
-        ),
+        Variant::Float(v) => assert!((v - 1.0).abs() < 0.01, "Expected alpha ~1.0, got {v}"),
         other => panic!("Expected Float, got {other:?}"),
     }
 }
@@ -154,11 +151,11 @@ fn animation_player_looping_wraps_position() {
         main_loop.step(0.05);
     }
 
-    let player = main_loop
-        .tree()
-        .get_animation_player(node_id)
-        .unwrap();
-    assert!(player.playing, "Looping animation should still be playing after 1s");
+    let player = main_loop.tree().get_animation_player(node_id).unwrap();
+    assert!(
+        player.playing,
+        "Looping animation should still be playing after 1s"
+    );
 }
 
 #[test]
@@ -187,11 +184,11 @@ fn animation_player_non_looping_stops_at_end() {
         main_loop.step(0.05);
     }
 
-    let player = main_loop
-        .tree()
-        .get_animation_player(node_id)
-        .unwrap();
-    assert!(!player.playing, "Non-looping animation should stop after completion");
+    let player = main_loop.tree().get_animation_player(node_id).unwrap();
+    assert!(
+        !player.playing,
+        "Non-looping animation should stop after completion"
+    );
 }
 
 // ===========================================================================
@@ -241,9 +238,15 @@ fn process_mode_when_paused_only_processes_while_paused() {
     node.set_process_mode(ProcessMode::WhenPaused);
     let node_id = tree.add_child(root, node).unwrap();
 
-    assert!(!tree.should_process_node(node_id), "Should NOT process when unpaused");
+    assert!(
+        !tree.should_process_node(node_id),
+        "Should NOT process when unpaused"
+    );
     tree.set_paused(true);
-    assert!(tree.should_process_node(node_id), "Should process when paused");
+    assert!(
+        tree.should_process_node(node_id),
+        "Should process when paused"
+    );
 }
 
 #[test]
@@ -254,9 +257,15 @@ fn process_mode_pausable_stops_when_paused() {
     node.set_process_mode(ProcessMode::Pausable);
     let node_id = tree.add_child(root, node).unwrap();
 
-    assert!(tree.should_process_node(node_id), "Should process when unpaused");
+    assert!(
+        tree.should_process_node(node_id),
+        "Should process when unpaused"
+    );
     tree.set_paused(true);
-    assert!(!tree.should_process_node(node_id), "Should NOT process when paused");
+    assert!(
+        !tree.should_process_node(node_id),
+        "Should NOT process when paused"
+    );
 }
 
 #[test]
@@ -276,7 +285,10 @@ fn process_mode_inherit_resolves_from_parent() {
     assert_eq!(mode, ProcessMode::Always);
 
     tree.set_paused(true);
-    assert!(tree.should_process_node(child_id), "Inherited Always should process when paused");
+    assert!(
+        tree.should_process_node(child_id),
+        "Inherited Always should process when paused"
+    );
 }
 
 #[test]
@@ -317,8 +329,14 @@ fn all_nodes_in_process_order_respects_priority() {
     let mid_pos = order.iter().position(|id| *id == mid_id).unwrap();
     let low_pos = order.iter().position(|id| *id == low_id).unwrap();
 
-    assert!(high_pos < mid_pos, "High priority (-5) should come before mid (0)");
-    assert!(mid_pos < low_pos, "Mid priority (0) should come before low (10)");
+    assert!(
+        high_pos < mid_pos,
+        "High priority (-5) should come before mid (0)"
+    );
+    assert!(
+        mid_pos < low_pos,
+        "Mid priority (0) should come before low (10)"
+    );
 }
 
 // ===========================================================================
@@ -440,8 +458,18 @@ fn tween_sequential_steps_execute_in_order() {
         .set_property("y", Variant::Float(0.0));
 
     let mut tween = Tween::new();
-    tween.steps.push(TweenStep::new("x", Variant::Float(0.0), Variant::Float(100.0), 1.0));
-    tween.steps.push(TweenStep::new("y", Variant::Float(0.0), Variant::Float(200.0), 1.0));
+    tween.steps.push(TweenStep::new(
+        "x",
+        Variant::Float(0.0),
+        Variant::Float(100.0),
+        1.0,
+    ));
+    tween.steps.push(TweenStep::new(
+        "y",
+        Variant::Float(0.0),
+        Variant::Float(200.0),
+        1.0,
+    ));
     tween.start();
 
     let _tween_id = tree.add_tween(node_id, tween);
@@ -484,11 +512,19 @@ fn tween_with_looping_resets_after_completion() {
 
     // Advance 0.5s — first loop done
     tree.process_tweens(0.5);
-    assert_eq!(tree.tween_count(), 1, "Tween should still exist (2 loops left)");
+    assert_eq!(
+        tree.tween_count(),
+        1,
+        "Tween should still exist (2 loops left)"
+    );
 
     // Advance another 1.0s — should complete remaining 2 loops
     tree.process_tweens(1.0);
-    assert_eq!(tree.tween_count(), 0, "Tween should be removed after 3 loops");
+    assert_eq!(
+        tree.tween_count(),
+        0,
+        "Tween should be removed after 3 loops"
+    );
 }
 
 #[test]
@@ -589,8 +625,10 @@ fn change_scene_to_packed_replaces_tree_children() {
     let root = tree.root_id();
 
     // Add some initial children
-    tree.add_child(root, Node::new("OldChild1", "Node")).unwrap();
-    tree.add_child(root, Node::new("OldChild2", "Node")).unwrap();
+    tree.add_child(root, Node::new("OldChild1", "Node"))
+        .unwrap();
+    tree.add_child(root, Node::new("OldChild2", "Node"))
+        .unwrap();
     assert_eq!(tree.node_count(), 3); // root + 2
 
     let packed = PackedScene::from_tscn(minimal_tscn()).unwrap();
@@ -598,7 +636,11 @@ fn change_scene_to_packed_replaces_tree_children() {
 
     // Old children should be gone, new scene instantiated
     let root_node = tree.get_node(root).unwrap();
-    assert_eq!(root_node.children().len(), 1, "Root should have exactly one child (scene root)");
+    assert_eq!(
+        root_node.children().len(),
+        1,
+        "Root should have exactly one child (scene root)"
+    );
 
     let scene = tree.get_node(scene_root).unwrap();
     assert_eq!(scene.name(), "Root");
@@ -627,7 +669,8 @@ fn reload_current_scene_restores_initial_state() {
     let scene_root = tree.change_scene_to_packed(&packed).unwrap();
 
     // Mutate the tree — add an extra node
-    tree.add_child(scene_root, Node::new("Extra", "Node")).unwrap();
+    tree.add_child(scene_root, Node::new("Extra", "Node"))
+        .unwrap();
     let scene = tree.get_node(scene_root).unwrap();
     let children_before = scene.children().len();
     assert!(children_before >= 2, "Should have Child + Extra");
@@ -635,7 +678,11 @@ fn reload_current_scene_restores_initial_state() {
     // Reload — should restore to original (just Child)
     let reloaded_root = tree.reload_current_scene().unwrap();
     let reloaded = tree.get_node(reloaded_root).unwrap();
-    assert_eq!(reloaded.children().len(), 1, "Reloaded scene should have only Child");
+    assert_eq!(
+        reloaded.children().len(),
+        1,
+        "Reloaded scene should have only Child"
+    );
 }
 
 #[test]
@@ -659,7 +706,10 @@ fn change_scene_to_node_clears_packed_source() {
 
     // Reload should fail (packed source was cleared)
     let result = tree.reload_current_scene();
-    assert!(result.is_err(), "Reload should fail after change_scene_to_node");
+    assert!(
+        result.is_err(),
+        "Reload should fail after change_scene_to_node"
+    );
 }
 
 #[test]
@@ -703,8 +753,12 @@ fn tres_saver_raw_preserves_original_ids() {
     let mut sub2 = Resource::new("SubResource");
     sub2.set_property("name", Variant::String("second".into()));
 
-    resource.subresources.insert("sub_99".into(), Arc::new(sub1));
-    resource.subresources.insert("sub_42".into(), Arc::new(sub2));
+    resource
+        .subresources
+        .insert("sub_99".into(), Arc::new(sub1));
+    resource
+        .subresources
+        .insert("sub_42".into(), Arc::new(sub2));
 
     let saver = TresSaver::new();
     let raw_output = saver.save_to_string_raw(&resource).unwrap();
@@ -728,8 +782,12 @@ fn tres_saver_renumbered_produces_sequential_ids() {
     let mut sub2 = Resource::new("SubResource");
     sub2.set_property("value", Variant::Int(2));
 
-    resource.subresources.insert("sub_99".into(), Arc::new(sub1));
-    resource.subresources.insert("sub_42".into(), Arc::new(sub2));
+    resource
+        .subresources
+        .insert("sub_99".into(), Arc::new(sub1));
+    resource
+        .subresources
+        .insert("sub_42".into(), Arc::new(sub2));
 
     let saver = TresSaver::new();
     let renumbered = saver.save_to_string(&resource).unwrap();
@@ -812,10 +870,11 @@ fn deferred_call_executes_during_step() {
     let node = Node::new("Target", "Node");
     let node_id = tree.add_child(root, node).unwrap();
 
-    tree.call_deferred(node_id, "set_property", &[
-        Variant::String("custom_flag".into()),
-        Variant::Bool(true),
-    ]);
+    tree.call_deferred(
+        node_id,
+        "set_property",
+        &[Variant::String("custom_flag".into()), Variant::Bool(true)],
+    );
 
     let mut main_loop = MainLoop::new(tree);
     main_loop.step(1.0 / 60.0);
@@ -963,7 +1022,10 @@ fn frame_trace_deterministic_same_input_same_output() {
     assert_eq!(trace1.len(), trace2.len());
     for (i, (f1, f2)) in trace1.frames.iter().zip(trace2.frames.iter()).enumerate() {
         assert_eq!(f1.frame_number, f2.frame_number, "Frame {i} numbers differ");
-        assert_eq!(f1.physics_ticks, f2.physics_ticks, "Frame {i} physics ticks differ");
+        assert_eq!(
+            f1.physics_ticks, f2.physics_ticks,
+            "Frame {i} physics ticks differ"
+        );
         assert!(
             (f1.delta - f2.delta).abs() < 1e-15,
             "Frame {i} delta differs"

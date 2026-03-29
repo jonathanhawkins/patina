@@ -21,14 +21,8 @@ use gdcore::math3d::{Basis, Quaternion, Transform3D};
 #[test]
 fn server3d_mesh_construction() {
     let mesh = gdserver3d::Mesh3D::cube(1.0);
-    assert!(
-        !mesh.vertices.is_empty(),
-        "cube mesh should have vertices"
-    );
-    assert!(
-        !mesh.indices.is_empty(),
-        "cube mesh should have indices"
-    );
+    assert!(!mesh.vertices.is_empty(), "cube mesh should have vertices");
+    assert!(!mesh.indices.is_empty(), "cube mesh should have indices");
 }
 
 #[test]
@@ -47,10 +41,7 @@ fn server3d_light_types() {
     let directional = gdserver3d::Light3D::directional(gdserver3d::Light3DId(1));
     assert!(matches!(directional.light_type, LightType::Directional));
 
-    let point = gdserver3d::Light3D::point(
-        gdserver3d::Light3DId(2),
-        Vector3::new(1.0, 2.0, 3.0),
-    );
+    let point = gdserver3d::Light3D::point(gdserver3d::Light3DId(2), Vector3::new(1.0, 2.0, 3.0));
     assert!(matches!(point.light_type, LightType::Point));
 
     let spot = gdserver3d::Light3D::spot(
@@ -73,8 +64,8 @@ fn server3d_perspective_projection() {
     let proj = gdserver3d::perspective_projection_matrix(
         std::f32::consts::FRAC_PI_4, // 45 degrees
         16.0 / 9.0,                  // aspect
-        0.1,                          // near
-        100.0,                        // far
+        0.1,                         // near
+        100.0,                       // far
     );
     // Projection matrix should be non-zero
     assert!(proj[0][0] != 0.0, "projection[0][0] should be non-zero");
@@ -141,10 +132,7 @@ fn render3d_framebuffer_creation_and_pixel_access() {
     assert_eq!(fb.width, 64);
     assert_eq!(fb.height, 64);
     let pixel = fb.get_pixel(32, 32);
-    assert!(
-        (pixel.r - 0.5).abs() < 0.01,
-        "pixel should be gray"
-    );
+    assert!((pixel.r - 0.5).abs() < 0.01, "pixel should be gray");
     fb.set_pixel(0, 0, Color::WHITE);
     assert_eq!(fb.get_pixel(0, 0), Color::WHITE);
 }
@@ -289,10 +277,13 @@ fn server3d_render3d_pipeline_deterministic() {
     let id = renderer.create_instance();
     renderer.set_mesh(id, gdserver3d::Mesh3D::cube(1.0));
     renderer.set_material(id, gdserver3d::Material3D::default());
-    renderer.set_transform(id, Transform3D {
-        basis: Basis::IDENTITY,
-        origin: Vector3::new(0.0, 0.0, -5.0),
-    });
+    renderer.set_transform(
+        id,
+        Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 0.0, -5.0),
+        },
+    );
 
     let vp = gdserver3d::Viewport3D::new(32, 32);
     let f1 = renderer.render_frame(&vp);
@@ -321,10 +312,7 @@ fn math3d_quaternion_rotation_preserves_length() {
     let v = Vector3::new(1.0, 0.0, 0.0);
     let rotated = q.xform(v);
     let len = rotated.length();
-    assert!(
-        (len - 1.0).abs() < 0.001,
-        "rotation should preserve length"
-    );
+    assert!((len - 1.0).abs() < 0.001, "rotation should preserve length");
 }
 
 #[test]
@@ -359,10 +347,8 @@ fn math3d_transform_inverse_identity() {
 
 #[test]
 fn all_3d_crates_are_workspace_members() {
-    let cargo_toml = std::fs::read_to_string(
-        format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR")),
-    )
-    .unwrap();
+    let cargo_toml =
+        std::fs::read_to_string(format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"))).unwrap();
     assert!(
         cargo_toml.contains("crates/gdserver3d"),
         "gdserver3d should be a workspace member"

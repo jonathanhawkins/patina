@@ -521,10 +521,7 @@ mod tests {
     fn apply_force_at_position_generates_torque() {
         let mut body = make_rigid(Vector3::ZERO);
         // Force at offset should generate torque via cross product.
-        body.apply_force_at_position(
-            Vector3::new(0.0, 10.0, 0.0),
-            Vector3::new(1.0, 0.0, 0.0),
-        );
+        body.apply_force_at_position(Vector3::new(0.0, 10.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
         body.integrate(1.0, Vector3::ZERO);
         // Cross(1,0,0) x (0,10,0) = (0,0,10) => angular_velocity.z should be nonzero
         assert!(body.angular_velocity.z.abs() > 0.1);
@@ -583,10 +580,7 @@ mod tests {
     #[test]
     fn apply_impulse_at_position_changes_angular() {
         let mut body = make_rigid(Vector3::ZERO);
-        body.apply_impulse_at_position(
-            Vector3::new(0.0, 0.0, 10.0),
-            Vector3::new(1.0, 0.0, 0.0),
-        );
+        body.apply_impulse_at_position(Vector3::new(0.0, 0.0, 10.0), Vector3::new(1.0, 0.0, 0.0));
         // Cross (1,0,0) x (0,0,10) = (0,-10,0)? No: offset.cross(impulse)
         // (1,0,0).cross(0,0,10) = (0*10-0*0, 0*0-1*10, 1*0-0*0) = (0,-10,0)
         assert!(body.angular_velocity.y.abs() > 1.0);

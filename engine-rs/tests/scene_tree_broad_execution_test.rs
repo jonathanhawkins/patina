@@ -244,7 +244,10 @@ fn queue_free_removes_children_too() {
     tree.process_deletions();
 
     assert!(tree.get_node(parent_id).is_none());
-    assert!(tree.get_node(child_id).is_none(), "child should also be freed");
+    assert!(
+        tree.get_node(child_id).is_none(),
+        "child should also be freed"
+    );
 }
 
 // ===========================================================================
@@ -271,7 +274,11 @@ fn duplicate_subtree_produces_new_nodes() {
         "duplicated nodes should have new IDs"
     );
     assert_eq!(duplicated[0].name(), "A", "names should be preserved");
-    assert_eq!(duplicated[0].class_name(), "Node2D", "class should be preserved");
+    assert_eq!(
+        duplicated[0].class_name(),
+        "Node2D",
+        "class should be preserved"
+    );
 }
 
 #[test]

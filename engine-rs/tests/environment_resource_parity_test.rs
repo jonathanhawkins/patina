@@ -8,9 +8,7 @@
 use gdresource::loader::TresLoader;
 use gdresource::resource::Resource;
 use gdresource::saver::TresSaver;
-use gdserver3d::environment::{
-    AmbientSource, BackgroundMode, Environment3D, ToneMapper,
-};
+use gdserver3d::environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
 use gdserver3d::sky::{Sky, SkyMaterial};
 use gdvariant::Variant;
 use std::sync::Arc;
@@ -89,10 +87,7 @@ fog_density = 0.05
 "#,
     );
     assert_eq!(res.get_property("fog_enabled"), Some(&Variant::Bool(true)));
-    assert_eq!(
-        res.get_property("fog_density"),
-        Some(&Variant::Float(0.05))
-    );
+    assert_eq!(res.get_property("fog_density"), Some(&Variant::Float(0.05)));
     match res.get_property("fog_light_color") {
         Some(Variant::Color(c)) => {
             assert!((c.r - 0.518).abs() < 1e-3);
@@ -110,10 +105,7 @@ fn parse_environment_with_tonemap() {
 tonemap_mode = 3
 "#,
     );
-    assert_eq!(
-        res.get_property("tonemap_mode"),
-        Some(&Variant::Int(3))
-    );
+    assert_eq!(res.get_property("tonemap_mode"), Some(&Variant::Int(3)));
 }
 
 #[test]
@@ -149,23 +141,44 @@ fog_density = 0.02
 fn roundtrip_environment_all_fields() {
     let mut r = Resource::new("Environment");
     r.set_property("background_mode", Variant::Int(2));
-    r.set_property("background_color", Variant::Color(gdcore::math::Color::new(0.1, 0.2, 0.3, 1.0)));
+    r.set_property(
+        "background_color",
+        Variant::Color(gdcore::math::Color::new(0.1, 0.2, 0.3, 1.0)),
+    );
     r.set_property("background_energy_multiplier", Variant::Float(1.5));
     r.set_property("sky_custom_fov", Variant::Float(45.0));
     r.set_property("ambient_light_source", Variant::Int(2));
-    r.set_property("ambient_light_color", Variant::Color(gdcore::math::Color::new(0.5, 0.5, 0.5, 1.0)));
+    r.set_property(
+        "ambient_light_color",
+        Variant::Color(gdcore::math::Color::new(0.5, 0.5, 0.5, 1.0)),
+    );
     r.set_property("ambient_light_energy", Variant::Float(0.8));
     r.set_property("tonemap_mode", Variant::Int(3));
     r.set_property("fog_enabled", Variant::Bool(true));
-    r.set_property("fog_light_color", Variant::Color(gdcore::math::Color::new(0.9, 0.9, 0.9, 1.0)));
+    r.set_property(
+        "fog_light_color",
+        Variant::Color(gdcore::math::Color::new(0.9, 0.9, 0.9, 1.0)),
+    );
     r.set_property("fog_density", Variant::Float(0.03));
 
     let reloaded = roundtrip(&r);
     assert_eq!(reloaded.class_name, "Environment");
-    assert_eq!(reloaded.get_property("background_mode"), Some(&Variant::Int(2)));
-    assert_eq!(reloaded.get_property("tonemap_mode"), Some(&Variant::Int(3)));
-    assert_eq!(reloaded.get_property("fog_enabled"), Some(&Variant::Bool(true)));
-    assert_eq!(reloaded.get_property("ambient_light_source"), Some(&Variant::Int(2)));
+    assert_eq!(
+        reloaded.get_property("background_mode"),
+        Some(&Variant::Int(2))
+    );
+    assert_eq!(
+        reloaded.get_property("tonemap_mode"),
+        Some(&Variant::Int(3))
+    );
+    assert_eq!(
+        reloaded.get_property("fog_enabled"),
+        Some(&Variant::Bool(true))
+    );
+    assert_eq!(
+        reloaded.get_property("ambient_light_source"),
+        Some(&Variant::Int(2))
+    );
 }
 
 #[test]
@@ -174,7 +187,10 @@ fn roundtrip_environment_minimal() {
     r.set_property("background_mode", Variant::Int(0));
     let reloaded = roundtrip(&r);
     assert_eq!(reloaded.class_name, "Environment");
-    assert_eq!(reloaded.get_property("background_mode"), Some(&Variant::Int(0)));
+    assert_eq!(
+        reloaded.get_property("background_mode"),
+        Some(&Variant::Int(0))
+    );
 }
 
 // ===========================================================================
@@ -265,7 +281,10 @@ fn from_properties_sky_background() {
 fn to_properties_default_is_empty() {
     let env = Environment3D::default();
     let props = env.to_properties();
-    assert!(props.is_empty(), "default environment should emit no properties");
+    assert!(
+        props.is_empty(),
+        "default environment should emit no properties"
+    );
 }
 
 #[test]
@@ -283,9 +302,7 @@ fn to_properties_roundtrip_full() {
         ..Default::default()
     };
     let props = env.to_properties();
-    let reconstructed = Environment3D::from_properties(
-        props.iter().map(|(k, v)| (k.as_str(), v)),
-    );
+    let reconstructed = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
     assert_eq!(reconstructed.background_mode, env.background_mode);
     assert_eq!(reconstructed.ambient_source, env.ambient_source);
     assert_eq!(reconstructed.ambient_color, env.ambient_color);
@@ -387,9 +404,18 @@ fn tone_mapper_all_variants_roundtrip() {
 
 #[test]
 fn unknown_enum_values_fallback() {
-    assert_eq!(BackgroundMode::from_godot_int(99), BackgroundMode::ClearColor);
-    assert_eq!(BackgroundMode::from_godot_int(-1), BackgroundMode::ClearColor);
-    assert_eq!(AmbientSource::from_godot_int(100), AmbientSource::Background);
+    assert_eq!(
+        BackgroundMode::from_godot_int(99),
+        BackgroundMode::ClearColor
+    );
+    assert_eq!(
+        BackgroundMode::from_godot_int(-1),
+        BackgroundMode::ClearColor
+    );
+    assert_eq!(
+        AmbientSource::from_godot_int(100),
+        AmbientSource::Background
+    );
     assert_eq!(ToneMapper::from_godot_int(42), ToneMapper::Linear);
 }
 

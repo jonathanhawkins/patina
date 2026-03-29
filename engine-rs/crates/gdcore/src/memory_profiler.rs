@@ -338,8 +338,14 @@ impl MemoryProfiler {
         out.push_str(&format!("Current: {} bytes\n", self.current_bytes()));
         out.push_str(&format!("Peak:    {} bytes\n", self.peak_bytes));
         out.push_str(&format!("Live:    {} allocations\n", self.live_count()));
-        out.push_str(&format!("Total allocated: {} bytes\n", self.total_alloc_bytes));
-        out.push_str(&format!("Total freed:     {} bytes\n", self.total_free_bytes));
+        out.push_str(&format!(
+            "Total allocated: {} bytes\n",
+            self.total_alloc_bytes
+        ));
+        out.push_str(&format!(
+            "Total freed:     {} bytes\n",
+            self.total_free_bytes
+        ));
 
         let by_tag = self.bytes_by_tag();
         if !by_tag.is_empty() {
@@ -627,7 +633,10 @@ impl CiMemoryGate {
                     .iter()
                     .map(|r| format!("    \"{}\"", r.replace('\\', "\\\\").replace('"', "\\\"")))
                     .collect();
-                ("fail".to_string(), format!("[\n{}\n  ]", entries.join(",\n")))
+                (
+                    "fail".to_string(),
+                    format!("[\n{}\n  ]", entries.join(",\n")),
+                )
             }
         };
 
@@ -1028,7 +1037,9 @@ mod tests {
         // Actually we need it live for budget check
         let _ = id;
         let budget = MemoryBudget::unlimited().with_total_limit(1000);
-        let gate = CiMemoryGate::new("budget").with_budget(budget).with_zero_leaks(false);
+        let gate = CiMemoryGate::new("budget")
+            .with_budget(budget)
+            .with_zero_leaks(false);
         let result = gate.check(&p);
         assert!(!result.passed());
         assert!(result.reasons()[0].contains("total_bytes"));
@@ -1041,7 +1052,9 @@ mod tests {
         p.record_alloc(AllocationTag::General, 10, "b");
         p.record_alloc(AllocationTag::General, 10, "c");
         let budget = MemoryBudget::unlimited().with_count_limit(2);
-        let gate = CiMemoryGate::new("count").with_budget(budget).with_zero_leaks(false);
+        let gate = CiMemoryGate::new("count")
+            .with_budget(budget)
+            .with_zero_leaks(false);
         assert!(!gate.check(&p).passed());
     }
 
@@ -1050,7 +1063,9 @@ mod tests {
         let mut p = MemoryProfiler::new();
         p.record_alloc(AllocationTag::Render, 5000, "gpu buffer");
         let budget = MemoryBudget::unlimited().with_tag_limit(AllocationTag::Render, 1000);
-        let gate = CiMemoryGate::new("tag").with_budget(budget).with_zero_leaks(false);
+        let gate = CiMemoryGate::new("tag")
+            .with_budget(budget)
+            .with_zero_leaks(false);
         let result = gate.check(&p);
         assert!(!result.passed());
         assert!(result.reasons()[0].contains("tag_render"));
@@ -1087,9 +1102,8 @@ mod tests {
 
     #[test]
     fn gate_from_env_defaults() {
-        let gate = CiMemoryGate::from_env_reader("defaults", |_| {
-            Err(std::env::VarError::NotPresent)
-        });
+        let gate =
+            CiMemoryGate::from_env_reader("defaults", |_| Err(std::env::VarError::NotPresent));
         assert!(gate.budget().max_total_bytes.is_none());
         assert!(gate.requires_zero_leaks());
     }
@@ -1376,7 +1390,9 @@ mod tests {
     #[test]
     fn profiled_test_fail_budget() {
         let budget = MemoryBudget::unlimited().with_total_limit(100);
-        let gate = CiMemoryGate::new("budget").with_budget(budget).with_zero_leaks(false);
+        let gate = CiMemoryGate::new("budget")
+            .with_budget(budget)
+            .with_zero_leaks(false);
         let (result, _) = run_profiled_test(gate, |p| {
             p.record_alloc(AllocationTag::General, 500, "over");
         });

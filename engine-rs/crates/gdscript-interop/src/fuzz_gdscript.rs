@@ -75,21 +75,44 @@ impl FuzzRng {
 // ---------------------------------------------------------------------------
 
 const KEYWORDS: &[&str] = &[
-    "var", "func", "if", "else", "elif", "while", "for", "in", "return",
-    "class", "extends", "signal", "enum", "match", "pass", "break",
-    "continue", "const", "static", "self", "super", "class_name",
-    "@onready", "@export", "await", "true", "false", "null", "and", "or",
+    "var",
+    "func",
+    "if",
+    "else",
+    "elif",
+    "while",
+    "for",
+    "in",
+    "return",
+    "class",
+    "extends",
+    "signal",
+    "enum",
+    "match",
+    "pass",
+    "break",
+    "continue",
+    "const",
+    "static",
+    "self",
+    "super",
+    "class_name",
+    "@onready",
+    "@export",
+    "await",
+    "true",
+    "false",
+    "null",
+    "and",
+    "or",
     "not",
 ];
 
 const OPERATORS: &[&str] = &[
-    "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=",
-    "=", "+=", "-=", "->", "@", "$",
+    "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "=", "+=", "-=", "->", "@", "$",
 ];
 
-const PUNCTUATION: &[&str] = &[
-    "(", ")", "[", "]", "{", "}", ":", ",", ".", ";", "\n",
-];
+const PUNCTUATION: &[&str] = &["(", ")", "[", "]", "{", "}", ":", ",", ".", ";", "\n"];
 
 const VALID_SCRIPTS: &[&str] = &[
     "var x = 42\n",
@@ -435,9 +458,7 @@ mod tests {
                     source.push_str("0x");
                     let digits = rng.range(0, 16);
                     for _ in 0..digits {
-                        source.push(
-                            b"0123456789abcdefABCDEFghijxyz"[rng.range(0, 28)] as char,
-                        );
+                        source.push(b"0123456789abcdefABCDEFghijxyz"[rng.range(0, 28)] as char);
                     }
                 }
                 3 => {
@@ -555,7 +576,13 @@ mod tests {
     #[test]
     fn fuzz_only_whitespace() {
         let cases = [
-            " ", "  ", "\t", "\t\t", "\n", "\n\n", " \t \n",
+            " ",
+            "  ",
+            "\t",
+            "\t\t",
+            "\n",
+            "\n\n",
+            " \t \n",
             "   \n\t  \n  \t\n",
         ];
         for case in &cases {
@@ -695,9 +722,9 @@ mod tests {
             "var \u{00f1} = 1\n",
             "var \u{00fc}ber = 2\n",
             "var \u{65e5}\u{672c}\u{8a9e} = 3\n",
-            "var \u{200B} = 4\n",        // zero-width space
-            "var \u{FEFF}x = 5\n",       // BOM
-            "var emoji\u{1F600} = 6\n",  // emoji
+            "var \u{200B} = 4\n",       // zero-width space
+            "var \u{FEFF}x = 5\n",      // BOM
+            "var emoji\u{1F600} = 6\n", // emoji
         ];
         for source in &sources {
             feed_lexer_parser(source);
@@ -1080,15 +1107,19 @@ mod interpreter_tests {
     #[test]
     fn edge_undefined_variable_error() {
         let err = run_err("return nonexistent_var\n");
-        assert!(err.contains("undefined") || err.contains("variable"),
-            "expected undefined variable error, got: {err}");
+        assert!(
+            err.contains("undefined") || err.contains("variable"),
+            "expected undefined variable error, got: {err}"
+        );
     }
 
     #[test]
     fn edge_undefined_function_error() {
         let err = run_err("return no_such_func()\n");
-        assert!(err.contains("undefined") || err.contains("function"),
-            "expected undefined function error, got: {err}");
+        assert!(
+            err.contains("undefined") || err.contains("function"),
+            "expected undefined function error, got: {err}"
+        );
     }
 
     #[test]

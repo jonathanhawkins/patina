@@ -237,11 +237,7 @@ impl SceneTab {
     /// Create a new scene tab from a file path.
     pub fn new(path: impl Into<String>) -> Self {
         let path = path.into();
-        let title = path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&path)
-            .to_string();
+        let title = path.rsplit('/').next().unwrap_or(&path).to_string();
         Self {
             path,
             title,
@@ -415,11 +411,7 @@ impl SceneTabBar {
     pub fn set_active_path(&mut self, path: &str) {
         if let Some(tab) = self.active_tab_mut() {
             tab.path = path.to_string();
-            tab.title = path
-                .rsplit('/')
-                .next()
-                .unwrap_or(path)
-                .to_string();
+            tab.title = path.rsplit('/').next().unwrap_or(path).to_string();
         }
     }
 
@@ -695,7 +687,7 @@ mod tests {
         // Active is c (index 2).
 
         bar.close_tab(0); // close a
-        // Active should shift from 2 to 1.
+                          // Active should shift from 2 to 1.
         assert_eq!(bar.active_index(), Some(1));
         assert_eq!(bar.active_tab().unwrap().path, "res://c.tscn");
     }

@@ -9,11 +9,11 @@
 //! 5. Body type mapping matches Godot conventions
 //! 6. CollisionShape3D child nodes feed correct shapes into the physics world
 
-use gdscene::physics_server_3d::PhysicsServer3D;
+use gdcore::math::Vector3;
 use gdscene::node::Node;
 use gdscene::node3d;
+use gdscene::physics_server_3d::PhysicsServer3D;
 use gdscene::SceneTree;
-use gdcore::math::Vector3;
 use gdvariant::Variant;
 
 const DT: f32 = 1.0 / 60.0;
@@ -77,7 +77,8 @@ fn s4x_rigid_body_registers() {
 fn s4x_static_body_registers() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    tree.add_child(root, Node::new("Floor", "StaticBody3D")).unwrap();
+    tree.add_child(root, Node::new("Floor", "StaticBody3D"))
+        .unwrap();
 
     let mut server = PhysicsServer3D::new();
     server.sync_to_physics(&tree);
@@ -92,7 +93,8 @@ fn s4x_static_body_registers() {
 fn s4x_character_body_registers() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    tree.add_child(root, Node::new("Player", "CharacterBody3D")).unwrap();
+    tree.add_child(root, Node::new("Player", "CharacterBody3D"))
+        .unwrap();
 
     let mut server = PhysicsServer3D::new();
     server.sync_to_physics(&tree);
@@ -108,12 +110,18 @@ fn s4x_non_physics_nodes_ignored() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     tree.add_child(root, Node::new("Cam", "Camera3D")).unwrap();
-    tree.add_child(root, Node::new("Mesh", "MeshInstance3D")).unwrap();
-    tree.add_child(root, Node::new("Light", "DirectionalLight3D")).unwrap();
+    tree.add_child(root, Node::new("Mesh", "MeshInstance3D"))
+        .unwrap();
+    tree.add_child(root, Node::new("Light", "DirectionalLight3D"))
+        .unwrap();
 
     let mut server = PhysicsServer3D::new();
     server.sync_to_physics(&tree);
-    assert_eq!(server.body_count(), 0, "non-physics nodes should not register");
+    assert_eq!(
+        server.body_count(),
+        0,
+        "non-physics nodes should not register"
+    );
 }
 
 // ===========================================================================
@@ -126,7 +134,11 @@ fn s4x_sync_idempotent() {
     let mut server = PhysicsServer3D::new();
     server.sync_to_physics(&tree);
     server.sync_to_physics(&tree);
-    assert_eq!(server.body_count(), 1, "second sync should not duplicate body");
+    assert_eq!(
+        server.body_count(),
+        1,
+        "second sync should not duplicate body"
+    );
 }
 
 // ===========================================================================

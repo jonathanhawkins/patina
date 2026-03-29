@@ -221,8 +221,12 @@ fn fuzz_empty_and_edge_inputs() {
         "[sub_resource type=\"\" id=\"\"]",
         "a = b\nc = d\n",
         &"x".repeat(10000),
-        &format!("[gd_resource type=\"Resource\" format=3]\n\n[resource]\n{}",
-            (0..100).map(|i| format!("key_{i} = {i}\n")).collect::<String>()),
+        &format!(
+            "[gd_resource type=\"Resource\" format=3]\n\n[resource]\n{}",
+            (0..100)
+                .map(|i| format!("key_{i} = {i}\n"))
+                .collect::<String>()
+        ),
     ];
 
     for input in &edge_cases {
@@ -265,7 +269,8 @@ fn fuzz_property_value_edge_cases() {
     ];
 
     for val in &property_values {
-        let tres = format!("[gd_resource type=\"Resource\" format=3]\n\n[resource]\nprop = {val}\n");
+        let tres =
+            format!("[gd_resource type=\"Resource\" format=3]\n\n[resource]\nprop = {val}\n");
         parse_does_not_panic(&tres);
     }
 }
@@ -367,5 +372,8 @@ fn parsed_resource_has_correct_properties() {
         .expect("valid resource should parse");
 
     // Verify properties are populated.
-    assert!(res.properties().next().is_some(), "Expected properties to be parsed");
+    assert!(
+        res.properties().next().is_some(),
+        "Expected properties to be parsed"
+    );
 }

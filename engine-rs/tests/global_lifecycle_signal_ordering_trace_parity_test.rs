@@ -158,7 +158,8 @@ fn internal_process_before_process_all_nodes() {
 
     let trace = full_trace(ml.tree());
 
-    let internal_indices = find_event_indices(&trace, "INTERNAL_PROCESS", &TraceEventType::Notification);
+    let internal_indices =
+        find_event_indices(&trace, "INTERNAL_PROCESS", &TraceEventType::Notification);
     let process_indices = find_event_indices(&trace, "PROCESS", &TraceEventType::Notification);
 
     if !internal_indices.is_empty() && !process_indices.is_empty() {
@@ -183,7 +184,11 @@ fn internal_physics_before_physics_process() {
 
     let trace = full_trace(ml.tree());
 
-    let internal_phys = find_event_indices(&trace, "INTERNAL_PHYSICS_PROCESS", &TraceEventType::Notification);
+    let internal_phys = find_event_indices(
+        &trace,
+        "INTERNAL_PHYSICS_PROCESS",
+        &TraceEventType::Notification,
+    );
     let phys = find_event_indices(&trace, "PHYSICS_PROCESS", &TraceEventType::Notification);
 
     if !internal_phys.is_empty() && !phys.is_empty() {
@@ -273,16 +278,12 @@ func _process(delta):
     let trace = full_trace(ml.tree());
 
     // Find ScriptCall _process and ScriptReturn _process for Emitter.
-    let script_call_idx = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::ScriptCall && d == "_process" && p.contains("Emitter")
-        });
-    let script_return_idx = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::ScriptReturn && d == "_process" && p.contains("Emitter")
-        });
+    let script_call_idx = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::ScriptCall && d == "_process" && p.contains("Emitter")
+    });
+    let script_return_idx = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::ScriptReturn && d == "_process" && p.contains("Emitter")
+    });
 
     let signal_idx = trace
         .iter()
@@ -376,9 +377,9 @@ fn deferred_signals_not_auto_flushed_in_step() {
 
     // Check if deferred callback was traced during the step.
     let trace = full_trace(ml.tree());
-    let deferred_call = trace
-        .iter()
-        .any(|(et, _, p, d)| *et == TraceEventType::ScriptCall && d == "on_poke" && p.contains("Target"));
+    let deferred_call = trace.iter().any(|(et, _, p, d)| {
+        *et == TraceEventType::ScriptCall && d == "on_poke" && p.contains("Target")
+    });
 
     // Deferred signals are NOT automatically flushed by MainLoop::step.
     // The deferred connection was registered but the dispatch mechanism
@@ -460,11 +461,9 @@ fn deletion_events_after_process_in_global_trace() {
     let last_process = trace
         .iter()
         .rposition(|(et, _, _, d)| *et == TraceEventType::Notification && d == "PROCESS");
-    let first_exit = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::Notification && d == "EXIT_TREE" && p.contains("Ephemeral")
-        });
+    let first_exit = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::Notification && d == "EXIT_TREE" && p.contains("Ephemeral")
+    });
 
     if let (Some(lp), Some(fe)) = (last_process, first_exit) {
         assert!(
@@ -474,11 +473,9 @@ fn deletion_events_after_process_in_global_trace() {
     }
 
     // PREDELETE should come after EXIT_TREE.
-    let predelete = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::Notification && d == "PREDELETE" && p.contains("Ephemeral")
-        });
+    let predelete = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::Notification && d == "PREDELETE" && p.contains("Ephemeral")
+    });
     if let (Some(fe), Some(pd)) = (first_exit, predelete) {
         assert!(
             fe < pd,
@@ -574,11 +571,9 @@ func on_hit():
     let signal_idx = trace
         .iter()
         .position(|(et, _, _, d)| *et == TraceEventType::SignalEmit && d == "hit");
-    let script_call_idx = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::ScriptCall && d == "on_hit" && p.contains("Receiver")
-        });
+    let script_call_idx = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::ScriptCall && d == "on_hit" && p.contains("Receiver")
+    });
 
     if let (Some(si), Some(sc)) = (signal_idx, script_call_idx) {
         assert!(
@@ -587,11 +582,9 @@ func on_hit():
         );
 
         // ScriptReturn should come after ScriptCall.
-        let script_return_idx = trace
-            .iter()
-            .position(|(et, _, p, d)| {
-                *et == TraceEventType::ScriptReturn && d == "on_hit" && p.contains("Receiver")
-            });
+        let script_return_idx = trace.iter().position(|(et, _, p, d)| {
+            *et == TraceEventType::ScriptReturn && d == "on_hit" && p.contains("Receiver")
+        });
         if let Some(sr) = script_return_idx {
             assert!(
                 sc < sr,
@@ -738,16 +731,12 @@ func _enter_tree():
 
     let trace = full_trace(&tree);
 
-    let notif_idx = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::Notification && d == "ENTER_TREE" && p.contains("Scripted")
-        });
-    let script_idx = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::ScriptCall && d == "_enter_tree" && p.contains("Scripted")
-        });
+    let notif_idx = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::Notification && d == "ENTER_TREE" && p.contains("Scripted")
+    });
+    let script_idx = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::ScriptCall && d == "_enter_tree" && p.contains("Scripted")
+    });
 
     if let (Some(ni), Some(si)) = (notif_idx, script_idx) {
         assert!(
@@ -783,16 +772,12 @@ func _ready():
 
     let trace = full_trace(&tree);
 
-    let notif_idx = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::Notification && d == "READY" && p.contains("ReadyNode")
-        });
-    let script_idx = trace
-        .iter()
-        .position(|(et, _, p, d)| {
-            *et == TraceEventType::ScriptCall && d == "_ready" && p.contains("ReadyNode")
-        });
+    let notif_idx = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::Notification && d == "READY" && p.contains("ReadyNode")
+    });
+    let script_idx = trace.iter().position(|(et, _, p, d)| {
+        *et == TraceEventType::ScriptCall && d == "_ready" && p.contains("ReadyNode")
+    });
 
     if let (Some(ni), Some(si)) = (notif_idx, script_idx) {
         assert!(
@@ -825,10 +810,7 @@ fn global_trace_is_deterministic() {
     );
 
     for (i, (a, b)) in trace1.iter().zip(trace2.iter()).enumerate() {
-        assert_eq!(
-            a, b,
-            "Trace event {i} differs between runs: {a:?} vs {b:?}"
-        );
+        assert_eq!(a, b, "Trace event {i} differs between runs: {a:?} vs {b:?}");
     }
 }
 

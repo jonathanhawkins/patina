@@ -130,7 +130,10 @@ fn spot_has_angle_property() {
 #[test]
 fn directional_has_shadow_mode_property() {
     let _g = setup();
-    assert!(class_has_property("DirectionalLight3D", "directional_shadow_mode"));
+    assert!(class_has_property(
+        "DirectionalLight3D",
+        "directional_shadow_mode"
+    ));
 }
 
 // -- Light3D is a Node3D (inherits transform) --

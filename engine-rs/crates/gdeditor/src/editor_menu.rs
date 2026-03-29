@@ -132,10 +132,7 @@ pub enum MenuItem {
     /// A visual separator line.
     Separator,
     /// A submenu group.
-    Submenu {
-        label: String,
-        items: Vec<MenuItem>,
-    },
+    Submenu { label: String, items: Vec<MenuItem> },
 }
 
 impl MenuItem {
@@ -228,12 +225,16 @@ impl TopMenu {
 
     /// Finds an item by action ID.
     pub fn find_action(&self, action: MenuAction) -> Option<&MenuItem> {
-        self.items.iter().find(|item| item.action_id() == Some(action))
+        self.items
+            .iter()
+            .find(|item| item.action_id() == Some(action))
     }
 
     /// Finds a mutable reference to an item by action ID.
     pub fn find_action_mut(&mut self, action: MenuAction) -> Option<&mut MenuItem> {
-        self.items.iter_mut().find(|item| item.action_id() == Some(action))
+        self.items
+            .iter_mut()
+            .find(|item| item.action_id() == Some(action))
     }
 }
 
@@ -385,7 +386,10 @@ impl EditorMenuBar {
     pub fn set_action_enabled(&mut self, action: MenuAction, enabled: bool) {
         for menu in &mut self.menus {
             if let Some(item) = menu.find_action_mut(action) {
-                if let MenuItem::Action { enabled: ref mut e, .. } = item {
+                if let MenuItem::Action {
+                    enabled: ref mut e, ..
+                } = item
+                {
                     *e = enabled;
                 }
             }
@@ -396,7 +400,10 @@ impl EditorMenuBar {
     pub fn set_action_checked(&mut self, action: MenuAction, checked: bool) {
         for menu in &mut self.menus {
             if let Some(item) = menu.find_action_mut(action) {
-                if let MenuItem::Action { checked: ref mut c, .. } = item {
+                if let MenuItem::Action {
+                    checked: ref mut c, ..
+                } = item
+                {
                     *c = Some(checked);
                 }
             }
@@ -516,7 +523,10 @@ impl EditorMenuBar {
     /// Returns the checked state of a checkable action.
     pub fn is_action_checked(&self, action: MenuAction) -> bool {
         for menu in &self.menus {
-            if let Some(MenuItem::Action { checked: Some(c), .. }) = menu.find_action(action) {
+            if let Some(MenuItem::Action {
+                checked: Some(c), ..
+            }) = menu.find_action(action)
+            {
                 return *c;
             }
         }
@@ -526,87 +536,176 @@ impl EditorMenuBar {
     // -- Standard menu builders ---------------------------------------------
 
     fn build_scene_menu() -> TopMenu {
-        TopMenu::new("Scene", vec![
-            MenuItem::action_with_shortcut(MenuAction::SceneNew, "New Scene", Shortcut::ctrl("N")),
-            MenuItem::action_with_shortcut(MenuAction::SceneOpen, "Open Scene...", Shortcut::ctrl("O")),
-            MenuItem::action(MenuAction::SceneOpenRecent, "Open Recent"),
-            MenuItem::Separator,
-            MenuItem::action_with_shortcut(MenuAction::SceneSave, "Save Scene", Shortcut::ctrl("S")),
-            MenuItem::action_with_shortcut(MenuAction::SceneSaveAs, "Save Scene As...", Shortcut::ctrl_shift("S")),
-            MenuItem::action(MenuAction::SceneSaveAll, "Save All Scenes"),
-            MenuItem::Separator,
-            MenuItem::action_with_shortcut(MenuAction::SceneClose, "Close Scene", Shortcut::ctrl("W")),
-            MenuItem::action(MenuAction::SceneCloseAll, "Close All Scenes"),
-            MenuItem::Separator,
-            MenuItem::action_with_shortcut(MenuAction::SceneRun, "Run Scene", Shortcut::fkey("F5")),
-            MenuItem::action_with_shortcut(MenuAction::SceneRunCustom, "Run Custom Scene...", Shortcut::ctrl_shift("F5")),
-            MenuItem::action_with_shortcut(MenuAction::SceneStop, "Stop Scene", Shortcut::fkey("F8")),
-            MenuItem::Separator,
-            MenuItem::action_with_shortcut(MenuAction::SceneQuit, "Quit", Shortcut::ctrl("Q")),
-        ])
+        TopMenu::new(
+            "Scene",
+            vec![
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneNew,
+                    "New Scene",
+                    Shortcut::ctrl("N"),
+                ),
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneOpen,
+                    "Open Scene...",
+                    Shortcut::ctrl("O"),
+                ),
+                MenuItem::action(MenuAction::SceneOpenRecent, "Open Recent"),
+                MenuItem::Separator,
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneSave,
+                    "Save Scene",
+                    Shortcut::ctrl("S"),
+                ),
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneSaveAs,
+                    "Save Scene As...",
+                    Shortcut::ctrl_shift("S"),
+                ),
+                MenuItem::action(MenuAction::SceneSaveAll, "Save All Scenes"),
+                MenuItem::Separator,
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneClose,
+                    "Close Scene",
+                    Shortcut::ctrl("W"),
+                ),
+                MenuItem::action(MenuAction::SceneCloseAll, "Close All Scenes"),
+                MenuItem::Separator,
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneRun,
+                    "Run Scene",
+                    Shortcut::fkey("F5"),
+                ),
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneRunCustom,
+                    "Run Custom Scene...",
+                    Shortcut::ctrl_shift("F5"),
+                ),
+                MenuItem::action_with_shortcut(
+                    MenuAction::SceneStop,
+                    "Stop Scene",
+                    Shortcut::fkey("F8"),
+                ),
+                MenuItem::Separator,
+                MenuItem::action_with_shortcut(MenuAction::SceneQuit, "Quit", Shortcut::ctrl("Q")),
+            ],
+        )
     }
 
     fn build_edit_menu() -> TopMenu {
-        TopMenu::new("Edit", vec![
-            MenuItem::action_with_shortcut(MenuAction::EditUndo, "Undo", Shortcut::ctrl("Z")),
-            MenuItem::action_with_shortcut(MenuAction::EditRedo, "Redo", Shortcut::ctrl_shift("Z")),
-            MenuItem::Separator,
-            MenuItem::action_with_shortcut(MenuAction::EditCut, "Cut", Shortcut::ctrl("X")),
-            MenuItem::action_with_shortcut(MenuAction::EditCopy, "Copy", Shortcut::ctrl("C")),
-            MenuItem::action_with_shortcut(MenuAction::EditPaste, "Paste", Shortcut::ctrl("V")),
-            MenuItem::Separator,
-            MenuItem::action_with_shortcut(MenuAction::EditSelectAll, "Select All", Shortcut::ctrl("A")),
-            MenuItem::action_with_shortcut(MenuAction::EditDelete, "Delete", Shortcut::fkey("Delete")),
-            MenuItem::action_with_shortcut(MenuAction::EditDuplicate, "Duplicate", Shortcut::ctrl("D")),
-        ])
+        TopMenu::new(
+            "Edit",
+            vec![
+                MenuItem::action_with_shortcut(MenuAction::EditUndo, "Undo", Shortcut::ctrl("Z")),
+                MenuItem::action_with_shortcut(
+                    MenuAction::EditRedo,
+                    "Redo",
+                    Shortcut::ctrl_shift("Z"),
+                ),
+                MenuItem::Separator,
+                MenuItem::action_with_shortcut(MenuAction::EditCut, "Cut", Shortcut::ctrl("X")),
+                MenuItem::action_with_shortcut(MenuAction::EditCopy, "Copy", Shortcut::ctrl("C")),
+                MenuItem::action_with_shortcut(MenuAction::EditPaste, "Paste", Shortcut::ctrl("V")),
+                MenuItem::Separator,
+                MenuItem::action_with_shortcut(
+                    MenuAction::EditSelectAll,
+                    "Select All",
+                    Shortcut::ctrl("A"),
+                ),
+                MenuItem::action_with_shortcut(
+                    MenuAction::EditDelete,
+                    "Delete",
+                    Shortcut::fkey("Delete"),
+                ),
+                MenuItem::action_with_shortcut(
+                    MenuAction::EditDuplicate,
+                    "Duplicate",
+                    Shortcut::ctrl("D"),
+                ),
+            ],
+        )
     }
 
     fn build_project_menu() -> TopMenu {
-        TopMenu::new("Project", vec![
-            MenuItem::action(MenuAction::ProjectSettings, "Project Settings..."),
-            MenuItem::Separator,
-            MenuItem::action(MenuAction::ProjectExport, "Export..."),
-            MenuItem::action(MenuAction::ProjectInstallAndroidBuildTemplate, "Install Android Build Template..."),
-            MenuItem::Separator,
-            MenuItem::action(MenuAction::ProjectOpenDataFolder, "Open Project Data Folder"),
-            MenuItem::action(MenuAction::ProjectOpenUserFolder, "Open User Data Folder"),
-            MenuItem::Separator,
-            MenuItem::action(MenuAction::ProjectReloadCurrentProject, "Reload Current Project"),
-        ])
+        TopMenu::new(
+            "Project",
+            vec![
+                MenuItem::action(MenuAction::ProjectSettings, "Project Settings..."),
+                MenuItem::Separator,
+                MenuItem::action(MenuAction::ProjectExport, "Export..."),
+                MenuItem::action(
+                    MenuAction::ProjectInstallAndroidBuildTemplate,
+                    "Install Android Build Template...",
+                ),
+                MenuItem::Separator,
+                MenuItem::action(
+                    MenuAction::ProjectOpenDataFolder,
+                    "Open Project Data Folder",
+                ),
+                MenuItem::action(MenuAction::ProjectOpenUserFolder, "Open User Data Folder"),
+                MenuItem::Separator,
+                MenuItem::action(
+                    MenuAction::ProjectReloadCurrentProject,
+                    "Reload Current Project",
+                ),
+            ],
+        )
     }
 
     fn build_debug_menu() -> TopMenu {
-        TopMenu::new("Debug", vec![
-            MenuItem::action_with_shortcut(MenuAction::DebugRunFile, "Run Current Scene", Shortcut::fkey("F6")),
-            MenuItem::action(MenuAction::DebugRunSpecific, "Run Specific Scene..."),
-            MenuItem::action(MenuAction::DebugDeployRemote, "Deploy with Remote Debug"),
-            MenuItem::Separator,
-            MenuItem::checkable(MenuAction::DebugVisible, "Visible Collision Shapes", false),
-            MenuItem::checkable(MenuAction::DebugCollisionShapes, "Visible Collision Shapes (3D)", false),
-            MenuItem::checkable(MenuAction::DebugNavigation, "Visible Navigation", false),
-            MenuItem::checkable(MenuAction::DebugShaderOverdraw, "Shader Overdraw", false),
-        ])
+        TopMenu::new(
+            "Debug",
+            vec![
+                MenuItem::action_with_shortcut(
+                    MenuAction::DebugRunFile,
+                    "Run Current Scene",
+                    Shortcut::fkey("F6"),
+                ),
+                MenuItem::action(MenuAction::DebugRunSpecific, "Run Specific Scene..."),
+                MenuItem::action(MenuAction::DebugDeployRemote, "Deploy with Remote Debug"),
+                MenuItem::Separator,
+                MenuItem::checkable(MenuAction::DebugVisible, "Visible Collision Shapes", false),
+                MenuItem::checkable(
+                    MenuAction::DebugCollisionShapes,
+                    "Visible Collision Shapes (3D)",
+                    false,
+                ),
+                MenuItem::checkable(MenuAction::DebugNavigation, "Visible Navigation", false),
+                MenuItem::checkable(MenuAction::DebugShaderOverdraw, "Shader Overdraw", false),
+            ],
+        )
     }
 
     fn build_editor_menu() -> TopMenu {
-        TopMenu::new("Editor", vec![
-            MenuItem::action(MenuAction::EditorSettings, "Editor Settings..."),
-            MenuItem::action(MenuAction::EditorLayout, "Editor Layout"),
-            MenuItem::action(MenuAction::EditorFeatureProfile, "Manage Feature Profiles..."),
-            MenuItem::Separator,
-            MenuItem::action(MenuAction::EditorManageExportTemplates, "Manage Export Templates..."),
-        ])
+        TopMenu::new(
+            "Editor",
+            vec![
+                MenuItem::action(MenuAction::EditorSettings, "Editor Settings..."),
+                MenuItem::action(MenuAction::EditorLayout, "Editor Layout"),
+                MenuItem::action(
+                    MenuAction::EditorFeatureProfile,
+                    "Manage Feature Profiles...",
+                ),
+                MenuItem::Separator,
+                MenuItem::action(
+                    MenuAction::EditorManageExportTemplates,
+                    "Manage Export Templates...",
+                ),
+            ],
+        )
     }
 
     fn build_help_menu() -> TopMenu {
-        TopMenu::new("Help", vec![
-            MenuItem::action(MenuAction::HelpDocs, "Online Documentation"),
-            MenuItem::action(MenuAction::HelpQA, "Questions & Answers"),
-            MenuItem::action(MenuAction::HelpBugTracker, "Report a Bug"),
-            MenuItem::action(MenuAction::HelpCommunity, "Community"),
-            MenuItem::Separator,
-            MenuItem::action(MenuAction::HelpAbout, "About Patina Engine"),
-        ])
+        TopMenu::new(
+            "Help",
+            vec![
+                MenuItem::action(MenuAction::HelpDocs, "Online Documentation"),
+                MenuItem::action(MenuAction::HelpQA, "Questions & Answers"),
+                MenuItem::action(MenuAction::HelpBugTracker, "Report a Bug"),
+                MenuItem::action(MenuAction::HelpCommunity, "Community"),
+                MenuItem::Separator,
+                MenuItem::action(MenuAction::HelpAbout, "About Patina Engine"),
+            ],
+        )
     }
 }
 
@@ -615,11 +714,7 @@ impl EditorMenuBar {
 // ---------------------------------------------------------------------------
 
 /// Updates undo/redo menu items based on editor state.
-pub fn sync_undo_redo_state(
-    menu_bar: &mut EditorMenuBar,
-    can_undo: bool,
-    can_redo: bool,
-) {
+pub fn sync_undo_redo_state(menu_bar: &mut EditorMenuBar, can_undo: bool, can_redo: bool) {
     menu_bar.set_action_enabled(MenuAction::EditUndo, can_undo);
     menu_bar.set_action_enabled(MenuAction::EditRedo, can_redo);
 }
@@ -642,7 +737,10 @@ mod tests {
     fn menu_titles_match_godot_order() {
         let bar = EditorMenuBar::new();
         let titles: Vec<&str> = bar.menus().iter().map(|m| m.title.as_str()).collect();
-        assert_eq!(titles, vec!["Scene", "Edit", "Project", "Debug", "Editor", "Help"]);
+        assert_eq!(
+            titles,
+            vec!["Scene", "Edit", "Project", "Debug", "Editor", "Help"]
+        );
     }
 
     #[test]
@@ -676,7 +774,9 @@ mod tests {
     fn debug_menu_has_checkable_items() {
         let bar = EditorMenuBar::new();
         let debug = bar.get_menu_by_title("Debug").unwrap();
-        if let Some(MenuItem::Action { checked, .. }) = debug.find_action(MenuAction::DebugNavigation) {
+        if let Some(MenuItem::Action { checked, .. }) =
+            debug.find_action(MenuAction::DebugNavigation)
+        {
             assert_eq!(*checked, Some(false));
         } else {
             panic!("DebugNavigation not found");
@@ -701,7 +801,11 @@ mod tests {
     fn total_action_count() {
         let bar = EditorMenuBar::new();
         // Scene: 12, Project: 6, Debug: 6, Editor: 4, Help: 5 = 33
-        assert!(bar.total_action_count() >= 30, "expected >=30 actions, got {}", bar.total_action_count());
+        assert!(
+            bar.total_action_count() >= 30,
+            "expected >=30 actions, got {}",
+            bar.total_action_count()
+        );
     }
 
     #[test]
@@ -721,11 +825,17 @@ mod tests {
     fn set_action_enabled() {
         let mut bar = EditorMenuBar::new();
         let scene = bar.get_menu_by_title("Scene").unwrap();
-        assert!(scene.find_action(MenuAction::SceneSave).unwrap().is_enabled());
+        assert!(scene
+            .find_action(MenuAction::SceneSave)
+            .unwrap()
+            .is_enabled());
 
         bar.set_action_enabled(MenuAction::SceneSave, false);
         let scene = bar.get_menu_by_title("Scene").unwrap();
-        assert!(!scene.find_action(MenuAction::SceneSave).unwrap().is_enabled());
+        assert!(!scene
+            .find_action(MenuAction::SceneSave)
+            .unwrap()
+            .is_enabled());
     }
 
     #[test]
@@ -733,7 +843,9 @@ mod tests {
         let mut bar = EditorMenuBar::new();
         bar.set_action_checked(MenuAction::DebugNavigation, true);
         let debug = bar.get_menu_by_title("Debug").unwrap();
-        if let Some(MenuItem::Action { checked, .. }) = debug.find_action(MenuAction::DebugNavigation) {
+        if let Some(MenuItem::Action { checked, .. }) =
+            debug.find_action(MenuAction::DebugNavigation)
+        {
             assert_eq!(*checked, Some(true));
         } else {
             panic!("not found");
@@ -743,9 +855,10 @@ mod tests {
     #[test]
     fn custom_menu_can_be_added() {
         let mut bar = EditorMenuBar::new();
-        let custom = TopMenu::new("Custom", vec![
-            MenuItem::action(MenuAction::HelpDocs, "Custom Action"),
-        ]);
+        let custom = TopMenu::new(
+            "Custom",
+            vec![MenuItem::action(MenuAction::HelpDocs, "Custom Action")],
+        );
         bar.add_menu(custom);
         assert_eq!(bar.menu_count(), 7);
         assert!(bar.get_menu_by_title("Custom").is_some());
@@ -819,29 +932,65 @@ mod tests {
         let mut bar = EditorMenuBar::new();
         assert!(!bar.is_action_checked(MenuAction::DebugNavigation));
         let result = bar.handle_action(MenuAction::DebugNavigation);
-        assert_eq!(result, MenuActionResult::ToggleDebugFlag(MenuAction::DebugNavigation, true));
+        assert_eq!(
+            result,
+            MenuActionResult::ToggleDebugFlag(MenuAction::DebugNavigation, true)
+        );
         assert!(bar.is_action_checked(MenuAction::DebugNavigation));
     }
 
     #[test]
     fn handle_action_scene_operations() {
         let mut bar = EditorMenuBar::new();
-        assert_eq!(bar.handle_action(MenuAction::SceneNew), MenuActionResult::NewScene);
-        assert_eq!(bar.handle_action(MenuAction::SceneSave), MenuActionResult::SaveScene);
-        assert_eq!(bar.handle_action(MenuAction::SceneRun), MenuActionResult::RunScene);
-        assert_eq!(bar.handle_action(MenuAction::SceneStop), MenuActionResult::StopScene);
-        assert_eq!(bar.handle_action(MenuAction::SceneQuit), MenuActionResult::QuitEditor);
+        assert_eq!(
+            bar.handle_action(MenuAction::SceneNew),
+            MenuActionResult::NewScene
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::SceneSave),
+            MenuActionResult::SaveScene
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::SceneRun),
+            MenuActionResult::RunScene
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::SceneStop),
+            MenuActionResult::StopScene
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::SceneQuit),
+            MenuActionResult::QuitEditor
+        );
     }
 
     #[test]
     fn handle_action_edit_clipboard() {
         let mut bar = EditorMenuBar::new();
-        assert_eq!(bar.handle_action(MenuAction::EditCut), MenuActionResult::Cut);
-        assert_eq!(bar.handle_action(MenuAction::EditCopy), MenuActionResult::Copy);
-        assert_eq!(bar.handle_action(MenuAction::EditPaste), MenuActionResult::Paste);
-        assert_eq!(bar.handle_action(MenuAction::EditSelectAll), MenuActionResult::SelectAll);
-        assert_eq!(bar.handle_action(MenuAction::EditDelete), MenuActionResult::DeleteSelected);
-        assert_eq!(bar.handle_action(MenuAction::EditDuplicate), MenuActionResult::DuplicateSelected);
+        assert_eq!(
+            bar.handle_action(MenuAction::EditCut),
+            MenuActionResult::Cut
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::EditCopy),
+            MenuActionResult::Copy
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::EditPaste),
+            MenuActionResult::Paste
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::EditSelectAll),
+            MenuActionResult::SelectAll
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::EditDelete),
+            MenuActionResult::DeleteSelected
+        );
+        assert_eq!(
+            bar.handle_action(MenuAction::EditDuplicate),
+            MenuActionResult::DuplicateSelected
+        );
     }
 
     #[test]

@@ -142,7 +142,11 @@ impl DropFilter {
 
     /// Filters a list of paths, returning only those that pass.
     pub fn filter_paths<'a>(&self, paths: &'a [String]) -> Vec<&'a str> {
-        paths.iter().filter(|p| self.accepts(p)).map(|p| p.as_str()).collect()
+        paths
+            .iter()
+            .filter(|p| self.accepts(p))
+            .map(|p| p.as_str())
+            .collect()
     }
 }
 
@@ -237,9 +241,7 @@ impl HeadlessDrop {
     fn position_in_zone(&self, pos: (f32, f32)) -> bool {
         match self.drop_zone {
             None => true,
-            Some((x, y, w, h)) => {
-                pos.0 >= x && pos.0 <= x + w && pos.1 >= y && pos.1 <= y + h
-            }
+            Some((x, y, w, h)) => pos.0 >= x && pos.0 <= x + w && pos.1 >= y && pos.1 <= y + h,
         }
     }
 }
@@ -401,10 +403,8 @@ mod tests {
         h.drop_context_mut().drag_enter();
         assert!(h.drop_context().is_hovering());
 
-        h.drop_context_mut().drop_files(vec![
-            "/tmp/scene.tscn".into(),
-            "/tmp/script.gd".into(),
-        ]);
+        h.drop_context_mut()
+            .drop_files(vec!["/tmp/scene.tscn".into(), "/tmp/script.gd".into()]);
         assert!(!h.drop_context().is_hovering());
         assert!(h.drop_context().has_pending_files());
         assert_eq!(h.drop_context().pending_count(), 2);

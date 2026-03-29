@@ -38,9 +38,7 @@ fn make_tree() -> SceneTree {
 }
 
 fn simple_packed(name: &str) -> PackedScene {
-    let tscn = format!(
-        "[gd_scene format=3]\n\n[node name=\"{name}\" type=\"Node2D\"]\n"
-    );
+    let tscn = format!("[gd_scene format=3]\n\n[node name=\"{name}\" type=\"Node2D\"]\n");
     PackedScene::from_tscn(&tscn).expect("valid tscn")
 }
 
@@ -97,7 +95,11 @@ fn return_value_is_root_not_child() {
     let returned_id = tree.change_scene_to_packed(&packed).unwrap();
 
     let node = tree.get_node(returned_id).unwrap();
-    assert_eq!(node.name(), "Level", "returned ID should be the scene root node");
+    assert_eq!(
+        node.name(),
+        "Level",
+        "returned ID should be the scene root node"
+    );
     assert_eq!(node.children().len(), 2, "Level should have 2 children");
 }
 
@@ -132,7 +134,8 @@ fn class_names_preserved_after_change() {
     ];
 
     for (path, expected_class) in &cases {
-        let id = tree.get_node_by_path(path)
+        let id = tree
+            .get_node_by_path(path)
             .unwrap_or_else(|| panic!("node at '{path}' must exist"));
         let node = tree.get_node(id).unwrap();
         assert_eq!(
@@ -166,7 +169,11 @@ texture = ExtResource("1")
     assert_eq!(node.class_name(), "Sprite2D");
     // The texture property should be set (as a Variant, possibly an ext_resource ref).
     let tex = node.get_property("texture");
-    assert_ne!(tex, gdvariant::Variant::Nil, "texture property should be set");
+    assert_ne!(
+        tex,
+        gdvariant::Variant::Nil,
+        "texture property should be set"
+    );
 }
 
 // ===========================================================================
@@ -193,7 +200,11 @@ shape = SubResource("RectangleShape2D_abc")
     let shape = tree.get_node(shape_id).unwrap();
     assert_eq!(shape.class_name(), "CollisionShape2D");
     let shape_prop = shape.get_property("shape");
-    assert_ne!(shape_prop, gdvariant::Variant::Nil, "shape property should be set");
+    assert_ne!(
+        shape_prop,
+        gdvariant::Variant::Nil,
+        "shape property should be set"
+    );
 }
 
 // ===========================================================================
@@ -216,10 +227,7 @@ speed = 200.0
 
     let node = tree.get_node(id).unwrap();
     assert_eq!(node.name(), "Player");
-    assert_eq!(
-        node.get_property("speed"),
-        gdvariant::Variant::Float(200.0)
-    );
+    assert_eq!(node.get_property("speed"), gdvariant::Variant::Float(200.0));
 }
 
 // ===========================================================================
@@ -286,7 +294,12 @@ fn all_instanced_nodes_inside_tree() {
     let mut tree = make_tree();
     tree.change_scene_to_packed(&packed).unwrap();
 
-    let paths = ["/root/Root", "/root/Root/A", "/root/Root/A/B", "/root/Root/C"];
+    let paths = [
+        "/root/Root",
+        "/root/Root/A",
+        "/root/Root/A/B",
+        "/root/Root/C",
+    ];
     for path in &paths {
         let id = tree.get_node_by_path(path).unwrap();
         let node = tree.get_node(id).unwrap();
@@ -375,10 +388,7 @@ fn malformed_tscn_truncated_errors() {
     let tscn = "[gd_scene format=3]\n\n[node name=\"Broken\" type=";
     let result = PackedScene::from_tscn(tscn);
     // Should error at parse time.
-    assert!(
-        result.is_err(),
-        "truncated tscn should fail to parse"
-    );
+    assert!(result.is_err(), "truncated tscn should fail to parse");
 }
 
 // ===========================================================================
@@ -426,7 +436,11 @@ z_index = 5
     assert_ne!(rot, gdvariant::Variant::Nil, "rotation should be set");
 
     let vis = node.get_property("visible");
-    assert_eq!(vis, gdvariant::Variant::Bool(false), "visible should be false");
+    assert_eq!(
+        vis,
+        gdvariant::Variant::Bool(false),
+        "visible should be false"
+    );
 
     let z = node.get_property("z_index");
     assert_eq!(z, gdvariant::Variant::Int(5), "z_index should be 5");
@@ -519,7 +533,8 @@ fn old_node_ids_cleaned_after_transition() {
     let old_child = tree.get_node_by_path("/root/OldScene/OldChild").unwrap();
 
     // Now change to a new scene.
-    tree.change_scene_to_packed(&simple_packed("NewScene")).unwrap();
+    tree.change_scene_to_packed(&simple_packed("NewScene"))
+        .unwrap();
 
     // Old node IDs should no longer resolve.
     assert!(
@@ -632,7 +647,9 @@ fn node_then_packed_full_cleanup() {
 
     // Start with a node-based scene with children.
     let root = tree.root_id();
-    let scene = tree.add_child(root, Node::new("NodeScene", "Node2D")).unwrap();
+    let scene = tree
+        .add_child(root, Node::new("NodeScene", "Node2D"))
+        .unwrap();
     tree.add_child(scene, Node::new("A", "Node")).unwrap();
     tree.add_child(scene, Node::new("B", "Node")).unwrap();
     assert_eq!(tree.node_count(), 4);

@@ -7,9 +7,8 @@ use std::fs;
 use std::process::Command;
 
 use gdeditor::vcs::{
-    query_git_status, get_file_diff, get_file_diff_staged, get_commit_log,
-    stage_file, unstage_file, discard_changes,
-    FileChangeStatus, ChangeArea,
+    discard_changes, get_commit_log, get_file_diff, get_file_diff_staged, query_git_status,
+    stage_file, unstage_file, ChangeArea, FileChangeStatus,
 };
 
 /// Helper to create a temporary git repo.
@@ -31,7 +30,12 @@ fn run_git(dir: &std::path::Path, args: &[&str]) {
         .current_dir(dir)
         .output()
         .expect("git command");
-    assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -50,10 +54,16 @@ fn vcs_status_clean_repo() {
 #[test]
 fn vcs_status_modified_files_detected() {
     let repo = make_repo();
-    fs::write(repo.path().join("main.gd"), "extends Node2D\nfunc _ready(): pass\n").unwrap();
+    fs::write(
+        repo.path().join("main.gd"),
+        "extends Node2D\nfunc _ready(): pass\n",
+    )
+    .unwrap();
 
     let status = query_git_status(repo.path());
-    let modified: Vec<_> = status.files.iter()
+    let modified: Vec<_> = status
+        .files
+        .iter()
         .filter(|f| f.status == FileChangeStatus::Modified)
         .collect();
     assert!(!modified.is_empty(), "should detect modified main.gd");
@@ -67,10 +77,16 @@ fn vcs_status_untracked_files_detected() {
     fs::write(repo.path().join("player.gd"), "extends CharacterBody2D\n").unwrap();
 
     let status = query_git_status(repo.path());
-    let untracked: Vec<_> = status.files.iter()
+    let untracked: Vec<_> = status
+        .files
+        .iter()
         .filter(|f| f.status == FileChangeStatus::Untracked)
         .collect();
-    assert!(untracked.len() >= 2, "should detect at least 2 untracked files, got {}", untracked.len());
+    assert!(
+        untracked.len() >= 2,
+        "should detect at least 2 untracked files, got {}",
+        untracked.len()
+    );
 }
 
 #[test]
@@ -79,7 +95,9 @@ fn vcs_status_deleted_file_detected() {
     fs::remove_file(repo.path().join("main.gd")).unwrap();
 
     let status = query_git_status(repo.path());
-    let deleted: Vec<_> = status.files.iter()
+    let deleted: Vec<_> = status
+        .files
+        .iter()
         .filter(|f| f.status == FileChangeStatus::Deleted)
         .collect();
     assert!(!deleted.is_empty(), "should detect deleted main.gd");
@@ -98,12 +116,14 @@ fn vcs_status_staged_vs_unstaged() {
 
     let status = query_git_status(repo.path());
 
-    let has_staged = status.files.iter().any(|f|
-        f.path == "staged.gd" && f.area == ChangeArea::Staged
-    );
-    let has_unstaged = status.files.iter().any(|f|
-        f.path == "main.gd" && f.area == ChangeArea::Unstaged
-    );
+    let has_staged = status
+        .files
+        .iter()
+        .any(|f| f.path == "staged.gd" && f.area == ChangeArea::Staged);
+    let has_unstaged = status
+        .files
+        .iter()
+        .any(|f| f.path == "main.gd" && f.area == ChangeArea::Unstaged);
 
     assert!(has_staged, "staged.gd should be staged");
     assert!(has_unstaged, "main.gd should be unstaged");
@@ -131,7 +151,11 @@ fn vcs_branch_info_available() {
 #[test]
 fn vcs_diff_shows_changes() {
     let repo = make_repo();
-    fs::write(repo.path().join("main.gd"), "extends Node2D\nvar speed = 100\n").unwrap();
+    fs::write(
+        repo.path().join("main.gd"),
+        "extends Node2D\nvar speed = 100\n",
+    )
+    .unwrap();
 
     let diff = get_file_diff(repo.path(), "main.gd");
     assert!(diff.contains("Node2D"), "diff should show new content");
@@ -180,16 +204,18 @@ fn vcs_stage_unstage_roundtrip() {
     // Stage.
     stage_file(repo.path(), "new.gd").expect("stage");
     let status = query_git_status(repo.path());
-    assert!(status.files.iter().any(|f|
-        f.path == "new.gd" && f.area == ChangeArea::Staged
-    ));
+    assert!(status
+        .files
+        .iter()
+        .any(|f| f.path == "new.gd" && f.area == ChangeArea::Staged));
 
     // Unstage.
     unstage_file(repo.path(), "new.gd").expect("unstage");
     let status = query_git_status(repo.path());
-    assert!(!status.files.iter().any(|f|
-        f.path == "new.gd" && f.area == ChangeArea::Staged
-    ));
+    assert!(!status
+        .files
+        .iter()
+        .any(|f| f.path == "new.gd" && f.area == ChangeArea::Staged));
 }
 
 #[test]

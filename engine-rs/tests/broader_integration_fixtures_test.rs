@@ -31,16 +31,11 @@ const DT: f64 = 1.0 / 60.0;
 // Fixture sources
 // ---------------------------------------------------------------------------
 
-const TIMER_ANIMATION_TSCN: &str =
-    include_str!("../../fixtures/scenes/timer_animation.tscn");
-const PARTICLES_MULTI_TSCN: &str =
-    include_str!("../../fixtures/scenes/particles_multi.tscn");
-const CSG_COMPOSITION_TSCN: &str =
-    include_str!("../../fixtures/scenes/csg_composition.tscn");
-const NESTED_UI_TSCN: &str =
-    include_str!("../../fixtures/scenes/nested_ui.tscn");
-const MULTI_LAYER_2D_TSCN: &str =
-    include_str!("../../fixtures/scenes/multi_layer_2d.tscn");
+const TIMER_ANIMATION_TSCN: &str = include_str!("../../fixtures/scenes/timer_animation.tscn");
+const PARTICLES_MULTI_TSCN: &str = include_str!("../../fixtures/scenes/particles_multi.tscn");
+const CSG_COMPOSITION_TSCN: &str = include_str!("../../fixtures/scenes/csg_composition.tscn");
+const NESTED_UI_TSCN: &str = include_str!("../../fixtures/scenes/nested_ui.tscn");
+const MULTI_LAYER_2D_TSCN: &str = include_str!("../../fixtures/scenes/multi_layer_2d.tscn");
 
 const TIMER_ANIMATION_GOLDEN: &str =
     include_str!("../../fixtures/golden/scenes/timer_animation.json");
@@ -48,8 +43,7 @@ const PARTICLES_MULTI_GOLDEN: &str =
     include_str!("../../fixtures/golden/scenes/particles_multi.json");
 const CSG_COMPOSITION_GOLDEN: &str =
     include_str!("../../fixtures/golden/scenes/csg_composition.json");
-const NESTED_UI_GOLDEN: &str =
-    include_str!("../../fixtures/golden/scenes/nested_ui.json");
+const NESTED_UI_GOLDEN: &str = include_str!("../../fixtures/golden/scenes/nested_ui.json");
 const MULTI_LAYER_2D_GOLDEN: &str =
     include_str!("../../fixtures/golden/scenes/multi_layer_2d.json");
 
@@ -161,13 +155,7 @@ fn xbxi4_particles_multi_scene_loads_all_particle_nodes() {
     let node = tree.get_node(scene_root).unwrap();
     assert_eq!(node.name(), "ParticleWorld");
 
-    let expected_children = [
-        "Sparks2D",
-        "Dust2D",
-        "Fire3D",
-        "Smoke3D",
-        "Rain2D",
-    ];
+    let expected_children = ["Sparks2D", "Dust2D", "Fire3D", "Smoke3D", "Rain2D"];
     for name in &expected_children {
         let path = format!("/root/ParticleWorld/{name}");
         assert!(
@@ -436,11 +424,7 @@ fn xbxi4_golden_parity_nested_ui() {
 
 #[test]
 fn xbxi4_golden_parity_multi_layer_2d() {
-    assert_golden_paths_match(
-        "multi_layer_2d",
-        MULTI_LAYER_2D_TSCN,
-        MULTI_LAYER_2D_GOLDEN,
-    );
+    assert_golden_paths_match("multi_layer_2d", MULTI_LAYER_2D_TSCN, MULTI_LAYER_2D_GOLDEN);
 }
 
 // ===========================================================================
@@ -460,6 +444,9 @@ fn xbxi4_determinism_new_fixtures_load_identically() {
     for tscn in &fixtures {
         let paths_a = collect_paths(&load_scene(tscn).0);
         let paths_b = collect_paths(&load_scene(tscn).0);
-        assert_eq!(paths_a, paths_b, "two loads of the same fixture should produce identical trees");
+        assert_eq!(
+            paths_a, paths_b,
+            "two loads of the same fixture should produce identical trees"
+        );
     }
 }

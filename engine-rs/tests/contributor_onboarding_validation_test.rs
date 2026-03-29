@@ -11,8 +11,10 @@
 use std::fs;
 use std::path::Path;
 
-const ONBOARDING_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/contributor-onboarding.md");
+const ONBOARDING_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs/contributor-onboarding.md"
+);
 
 fn read_onboarding() -> String {
     fs::read_to_string(ONBOARDING_PATH)
@@ -195,10 +197,7 @@ fn ci_section_covers_main_gates() {
     let doc = read_onboarding();
     let gates = ["rust-fmt", "rust-render-goldens", "rust-oracle-parity"];
     for gate in &gates {
-        assert!(
-            doc.contains(gate),
-            "CI section must document gate '{gate}'"
-        );
+        assert!(doc.contains(gate), "CI section must document gate '{gate}'");
     }
 }
 
@@ -284,19 +283,13 @@ fn repin_section_covers_manual_dispatch() {
 #[test]
 fn onboarding_references_agents_md() {
     let doc = read_onboarding();
-    assert!(
-        doc.contains("AGENTS.md"),
-        "doc must reference AGENTS.md"
-    );
+    assert!(doc.contains("AGENTS.md"), "doc must reference AGENTS.md");
 }
 
 #[test]
 fn onboarding_references_ci_workflow() {
     let doc = read_onboarding();
-    assert!(
-        doc.contains("ci.yml"),
-        "doc must reference ci.yml"
-    );
+    assert!(doc.contains("ci.yml"), "doc must reference ci.yml");
 }
 
 #[test]

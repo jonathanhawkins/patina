@@ -23,7 +23,7 @@ use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
 use gdplatform::export::{
     BuildProfile, ExportConfig, ExportTemplate, PackageError, PackageExecutor,
 };
-use gdplatform::platform_targets::{current_target, ci_tested_targets};
+use gdplatform::platform_targets::{ci_tested_targets, current_target};
 use gdplatform::window::WindowConfig;
 use gdscene::main_loop::MainLoop;
 use gdscene::node::Node;
@@ -149,8 +149,7 @@ fn package_executor_collects_fixture_resources() {
         return;
     }
 
-    let config = ExportConfig::new("linux", "PatinaTest")
-        .with_resource("res://scenes/");
+    let config = ExportConfig::new("linux", "PatinaTest").with_resource("res://scenes/");
 
     let mut executor = PackageExecutor::new(config, &project_dir, "/tmp/patina-test-export");
     executor.validate_platform().unwrap();
@@ -186,12 +185,22 @@ fn package_executor_full_run_writes_artifacts() {
     let mut executor = PackageExecutor::new(config, &project_dir, &tmp);
     let result = executor.run();
 
-    assert!(result.success, "packaging should succeed: {:?}", result.messages);
+    assert!(
+        result.success,
+        "packaging should succeed: {:?}",
+        result.messages
+    );
     assert!(result.size_bytes > 0, "should have nonzero output size");
 
     // Verify output files exist.
-    assert!(tmp.join("export_manifest.txt").exists(), "manifest should exist");
-    assert!(tmp.join("resource_list.txt").exists(), "resource listing should exist");
+    assert!(
+        tmp.join("export_manifest.txt").exists(),
+        "manifest should exist"
+    );
+    assert!(
+        tmp.join("resource_list.txt").exists(),
+        "resource listing should exist"
+    );
     assert!(
         tmp.join("PatinaFlowTest.linux.release.x86_64").exists(),
         "output binary marker should exist"
@@ -199,10 +208,22 @@ fn package_executor_full_run_writes_artifacts() {
 
     // Verify manifest content.
     let manifest = std::fs::read_to_string(tmp.join("export_manifest.txt")).unwrap();
-    assert!(manifest.contains("PatinaFlowTest"), "manifest should contain app name");
-    assert!(manifest.contains("linux"), "manifest should contain platform");
-    assert!(manifest.contains("Release"), "manifest should contain profile");
-    assert!(manifest.contains("hierarchy.tscn"), "manifest should list resources");
+    assert!(
+        manifest.contains("PatinaFlowTest"),
+        "manifest should contain app name"
+    );
+    assert!(
+        manifest.contains("linux"),
+        "manifest should contain platform"
+    );
+    assert!(
+        manifest.contains("Release"),
+        "manifest should contain profile"
+    );
+    assert!(
+        manifest.contains("hierarchy.tscn"),
+        "manifest should list resources"
+    );
 
     // Clean up.
     let _ = std::fs::remove_dir_all(&tmp);
@@ -242,8 +263,8 @@ fn export_templates_generate_correct_filenames_all_platforms() {
     ];
 
     for (platform, expected_ext) in &platforms {
-        let config = ExportConfig::new(*platform, "TestApp")
-            .with_build_profile(BuildProfile::Release);
+        let config =
+            ExportConfig::new(*platform, "TestApp").with_build_profile(BuildProfile::Release);
         let template = ExportTemplate::from_config(config);
         let filename = template.output_filename();
 
@@ -307,8 +328,8 @@ fn end_to_end_bootstrap_run_package() {
     let _ = std::fs::remove_dir_all(&tmp);
 
     for platform in &["linux", "macos", "windows"] {
-        let config = ExportConfig::new(*platform, "PatinaE2E")
-            .with_build_profile(BuildProfile::Release);
+        let config =
+            ExportConfig::new(*platform, "PatinaE2E").with_build_profile(BuildProfile::Release);
         let out_dir = tmp.join(platform);
         let mut executor = PackageExecutor::new(config, &project_dir, &out_dir);
         let result = executor.run();
@@ -497,8 +518,7 @@ fn integrated_bootstrap_run_package_all_platforms() {
     }
 
     // Phase 1: Bootstrap with project_dir set.
-    let config = BootConfig::headless()
-        .project_dir(&project_dir);
+    let config = BootConfig::headless().project_dir(&project_dir);
     let mut boot = EngineBootstrap::new(config);
     boot.run_all().unwrap();
     assert!(boot.is_running());
@@ -627,7 +647,10 @@ fn audited_artifact_path_bootstrap_run_package_verify() {
     let resources = executor.collected_resources();
     assert_eq!(resources.len(), 1, "should collect exactly one scene file");
     assert_eq!(resources[0].package_path, "scenes/hierarchy.tscn");
-    assert!(resources[0].size_bytes > 0, "resource must have nonzero size");
+    assert!(
+        resources[0].size_bytes > 0,
+        "resource must have nonzero size"
+    );
 
     // Step 3c: Full staging run — produces manifest + resource listing + output marker.
     let mut executor2 = PackageExecutor::new(
@@ -638,7 +661,11 @@ fn audited_artifact_path_bootstrap_run_package_verify() {
         &tmp,
     );
     let result = executor2.run();
-    assert!(result.success, "packaging must succeed: {:?}", result.messages);
+    assert!(
+        result.success,
+        "packaging must succeed: {:?}",
+        result.messages
+    );
     assert!(result.size_bytes > 0);
 
     // --- Phase 4: Verify the staging artifacts ---
@@ -653,23 +680,41 @@ fn audited_artifact_path_bootstrap_run_package_verify() {
 
     // Manifest must describe the scoped packaging claim.
     let manifest = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(manifest.contains("AuditedFlowApp"), "manifest cites app name");
+    assert!(
+        manifest.contains("AuditedFlowApp"),
+        "manifest cites app name"
+    );
     assert!(manifest.contains("linux"), "manifest cites platform");
     assert!(manifest.contains("Release"), "manifest cites profile");
-    assert!(manifest.contains("hierarchy.tscn"), "manifest lists collected resource");
-    assert!(manifest.contains("total_resources: 1"), "manifest includes resource count");
-    assert!(manifest.contains("total_size_bytes:"), "manifest includes total size");
+    assert!(
+        manifest.contains("hierarchy.tscn"),
+        "manifest lists collected resource"
+    );
+    assert!(
+        manifest.contains("total_resources: 1"),
+        "manifest includes resource count"
+    );
+    assert!(
+        manifest.contains("total_size_bytes:"),
+        "manifest includes total size"
+    );
 
     // Resource listing is tab-separated: package_path \t source_path \t size.
     let listing = std::fs::read_to_string(&listing_path).unwrap();
     let fields: Vec<&str> = listing.trim().split('\t').collect();
-    assert!(fields.len() >= 3, "listing must have package_path, source_path, size");
+    assert!(
+        fields.len() >= 3,
+        "listing must have package_path, source_path, size"
+    );
     assert_eq!(fields[0], "scenes/hierarchy.tscn");
 
     // Output marker is a placeholder — Patina does not yet produce native binaries
     // through this path. This is the correct scope per the audit.
     let marker = std::fs::read_to_string(&marker_path).unwrap();
-    assert!(marker.contains("Patina export placeholder"), "marker is a staging placeholder");
+    assert!(
+        marker.contains("Patina export placeholder"),
+        "marker is a staging placeholder"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -682,7 +727,10 @@ fn audited_packaging_rejects_out_of_scope_platforms() {
         let config = ExportConfig::new(*platform, "ScopeTest");
         let executor = PackageExecutor::new(config, ".", "/tmp/unused");
         assert!(
-            matches!(executor.validate_platform(), Err(PackageError::UnsupportedPlatform(_))),
+            matches!(
+                executor.validate_platform(),
+                Err(PackageError::UnsupportedPlatform(_))
+            ),
             "{platform} must be rejected — outside audited desktop target set"
         );
     }
@@ -716,8 +764,8 @@ fn package_manifest_includes_resource_count() {
     let tmp = std::env::temp_dir().join("patina-manifest-count-test");
     let _ = std::fs::remove_dir_all(&tmp);
 
-    let config = ExportConfig::new("linux", "ManifestCheck")
-        .with_resource("res://scenes/hierarchy.tscn");
+    let config =
+        ExportConfig::new("linux", "ManifestCheck").with_resource("res://scenes/hierarchy.tscn");
 
     let mut executor = PackageExecutor::new(config, &project_dir, &tmp);
     let result = executor.run();

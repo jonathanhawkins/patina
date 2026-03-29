@@ -1183,9 +1183,14 @@ fn external_position_write_rigid_overwritten_by_sync_from() {
     let root = tree.root_id();
 
     let rigid_id = add_body_with_velocity(
-        &mut tree, root, "Ball", "RigidBody2D",
-        Vector2::new(100.0, 0.0), 8.0,
-        Vector2::new(60.0, 0.0), 0.0,
+        &mut tree,
+        root,
+        "Ball",
+        "RigidBody2D",
+        Vector2::new(100.0, 0.0),
+        8.0,
+        Vector2::new(60.0, 0.0),
+        0.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -1198,7 +1203,8 @@ fn external_position_write_rigid_overwritten_by_sync_from() {
     let pos_after_first = get_vec2(&tree, rigid_id, "position");
 
     // External write: teleport to far-away position.
-    tree.get_node_mut(rigid_id).unwrap()
+    tree.get_node_mut(rigid_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(9999.0, 9999.0)));
 
     // Next tick — physics engine is source of truth for rigid bodies.
@@ -1227,15 +1233,20 @@ fn external_position_write_kinematic_synced_to_physics() {
     let root = tree.root_id();
 
     let kin_id = add_body_node(
-        &mut tree, root, "Player", "CharacterBody2D",
-        Vector2::new(0.0, 0.0), 8.0,
+        &mut tree,
+        root,
+        "Player",
+        "CharacterBody2D",
+        Vector2::new(0.0, 0.0),
+        8.0,
     );
 
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
 
     // External write: teleport kinematic body.
-    tree.get_node_mut(kin_id).unwrap()
+    tree.get_node_mut(kin_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(500.0, 300.0)));
 
     // Next tick — sync_to_physics reads the node state.
@@ -1261,8 +1272,12 @@ fn external_position_write_static_persists_across_ticks() {
     let root = tree.root_id();
 
     let static_id = add_body_node(
-        &mut tree, root, "Wall", "StaticBody2D",
-        Vector2::new(0.0, 200.0), 16.0,
+        &mut tree,
+        root,
+        "Wall",
+        "StaticBody2D",
+        Vector2::new(0.0, 200.0),
+        16.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -1273,7 +1288,8 @@ fn external_position_write_static_persists_across_ticks() {
     server.sync_from_physics(&mut tree);
 
     // External write after first tick.
-    tree.get_node_mut(static_id).unwrap()
+    tree.get_node_mut(static_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(777.0, 888.0)));
 
     // Multiple ticks — static bodies never get writeback.
@@ -1300,8 +1316,12 @@ fn external_rotation_write_rigid_overwritten() {
     let root = tree.root_id();
 
     let rigid_id = add_body_node(
-        &mut tree, root, "Spinner", "RigidBody2D",
-        Vector2::new(100.0, 100.0), 8.0,
+        &mut tree,
+        root,
+        "Spinner",
+        "RigidBody2D",
+        Vector2::new(100.0, 100.0),
+        8.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -1312,7 +1332,8 @@ fn external_rotation_write_rigid_overwritten() {
     server.sync_from_physics(&mut tree);
 
     // External rotation write.
-    tree.get_node_mut(rigid_id).unwrap()
+    tree.get_node_mut(rigid_id)
+        .unwrap()
         .set_property("rotation", Variant::Float(99.0));
 
     server.sync_to_physics(&tree);
@@ -1336,15 +1357,20 @@ fn external_rotation_write_kinematic_synced() {
     let root = tree.root_id();
 
     let kin_id = add_body_node(
-        &mut tree, root, "Player", "CharacterBody2D",
-        Vector2::new(0.0, 0.0), 8.0,
+        &mut tree,
+        root,
+        "Player",
+        "CharacterBody2D",
+        Vector2::new(0.0, 0.0),
+        8.0,
     );
 
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
 
     let target_rot = std::f64::consts::FRAC_PI_4;
-    tree.get_node_mut(kin_id).unwrap()
+    tree.get_node_mut(kin_id)
+        .unwrap()
         .set_property("rotation", Variant::Float(target_rot));
 
     server.sync_to_physics(&tree);
@@ -1369,9 +1395,14 @@ fn external_velocity_write_rigid_overwritten() {
     let root = tree.root_id();
 
     let rigid_id = add_body_with_velocity(
-        &mut tree, root, "Ball", "RigidBody2D",
-        Vector2::new(100.0, 0.0), 8.0,
-        Vector2::new(60.0, 0.0), 0.0,
+        &mut tree,
+        root,
+        "Ball",
+        "RigidBody2D",
+        Vector2::new(100.0, 0.0),
+        8.0,
+        Vector2::new(60.0, 0.0),
+        0.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -1382,8 +1413,10 @@ fn external_velocity_write_rigid_overwritten() {
     server.sync_from_physics(&mut tree);
 
     // External write: set huge velocity.
-    tree.get_node_mut(rigid_id).unwrap()
-        .set_property("linear_velocity", Variant::Vector2(Vector2::new(99999.0, 99999.0)));
+    tree.get_node_mut(rigid_id).unwrap().set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(99999.0, 99999.0)),
+    );
 
     server.sync_to_physics(&tree);
     server.step_physics(1.0 / 60.0);
@@ -1406,19 +1439,26 @@ fn multiple_external_writes_last_wins_kinematic() {
     let root = tree.root_id();
 
     let kin_id = add_body_node(
-        &mut tree, root, "Mover", "CharacterBody2D",
-        Vector2::new(0.0, 0.0), 8.0,
+        &mut tree,
+        root,
+        "Mover",
+        "CharacterBody2D",
+        Vector2::new(0.0, 0.0),
+        8.0,
     );
 
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
 
     // Multiple writes before the next tick.
-    tree.get_node_mut(kin_id).unwrap()
+    tree.get_node_mut(kin_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(100.0, 0.0)));
-    tree.get_node_mut(kin_id).unwrap()
+    tree.get_node_mut(kin_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(200.0, 0.0)));
-    tree.get_node_mut(kin_id).unwrap()
+    tree.get_node_mut(kin_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(300.0, 0.0)));
 
     server.sync_to_physics(&tree);
@@ -1443,17 +1483,30 @@ fn simultaneous_external_writes_mixed_body_types() {
     let root = tree.root_id();
 
     let rigid_id = add_body_with_velocity(
-        &mut tree, root, "Ball", "RigidBody2D",
-        Vector2::new(100.0, 0.0), 8.0,
-        Vector2::new(60.0, 0.0), 0.0,
+        &mut tree,
+        root,
+        "Ball",
+        "RigidBody2D",
+        Vector2::new(100.0, 0.0),
+        8.0,
+        Vector2::new(60.0, 0.0),
+        0.0,
     );
     let static_id = add_body_node(
-        &mut tree, root, "Wall", "StaticBody2D",
-        Vector2::new(0.0, 200.0), 16.0,
+        &mut tree,
+        root,
+        "Wall",
+        "StaticBody2D",
+        Vector2::new(0.0, 200.0),
+        16.0,
     );
     let kin_id = add_body_node(
-        &mut tree, root, "Player", "CharacterBody2D",
-        Vector2::new(0.0, 0.0), 8.0,
+        &mut tree,
+        root,
+        "Player",
+        "CharacterBody2D",
+        Vector2::new(0.0, 0.0),
+        8.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -1464,11 +1517,14 @@ fn simultaneous_external_writes_mixed_body_types() {
     server.sync_from_physics(&mut tree);
 
     // External writes on all three body types.
-    tree.get_node_mut(rigid_id).unwrap()
+    tree.get_node_mut(rigid_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(5000.0, 5000.0)));
-    tree.get_node_mut(static_id).unwrap()
+    tree.get_node_mut(static_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(400.0, 500.0)));
-    tree.get_node_mut(kin_id).unwrap()
+    tree.get_node_mut(kin_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(600.0, 700.0)));
 
     server.sync_to_physics(&tree);
@@ -1477,7 +1533,10 @@ fn simultaneous_external_writes_mixed_body_types() {
 
     // Rigid: overwritten.
     let rigid_pos = get_vec2(&tree, rigid_id, "position");
-    assert!(rigid_pos.x < 300.0, "rigid external write overwritten: got {rigid_pos:?}");
+    assert!(
+        rigid_pos.x < 300.0,
+        "rigid external write overwritten: got {rigid_pos:?}"
+    );
 
     // Static: persists.
     let static_pos = get_vec2(&tree, static_id, "position");
@@ -1506,13 +1565,22 @@ fn deterministic_state_with_external_writes() {
         let root = tree.root_id();
 
         let rigid_id = add_body_with_velocity(
-            &mut tree, root, "Ball", "RigidBody2D",
-            Vector2::new(100.0, 0.0), 8.0,
-            Vector2::new(60.0, 0.0), 0.0,
+            &mut tree,
+            root,
+            "Ball",
+            "RigidBody2D",
+            Vector2::new(100.0, 0.0),
+            8.0,
+            Vector2::new(60.0, 0.0),
+            0.0,
         );
         let kin_id = add_body_node(
-            &mut tree, root, "Player", "CharacterBody2D",
-            Vector2::new(0.0, 0.0), 8.0,
+            &mut tree,
+            root,
+            "Player",
+            "CharacterBody2D",
+            Vector2::new(0.0, 0.0),
+            8.0,
         );
 
         let mut server = PhysicsServer::new();
@@ -1522,12 +1590,15 @@ fn deterministic_state_with_external_writes() {
         for i in 0..10 {
             // Externally write kinematic position every 3rd tick.
             if i % 3 == 0 {
-                tree.get_node_mut(kin_id).unwrap()
-                    .set_property("position", Variant::Vector2(Vector2::new(50.0 * i as f32, 0.0)));
+                tree.get_node_mut(kin_id).unwrap().set_property(
+                    "position",
+                    Variant::Vector2(Vector2::new(50.0 * i as f32, 0.0)),
+                );
             }
             // Externally write rigid position on tick 5 (should be ignored).
             if i == 5 {
-                tree.get_node_mut(rigid_id).unwrap()
+                tree.get_node_mut(rigid_id)
+                    .unwrap()
                     .set_property("position", Variant::Vector2(Vector2::new(9999.0, 9999.0)));
             }
 
@@ -1562,9 +1633,14 @@ fn kinematic_pinned_by_external_write_does_not_accumulate() {
     let root = tree.root_id();
 
     let kin_id = add_body_with_velocity(
-        &mut tree, root, "Mover", "CharacterBody2D",
-        Vector2::new(50.0, 50.0), 4.0,
-        Vector2::new(1000.0, 0.0), 0.0,
+        &mut tree,
+        root,
+        "Mover",
+        "CharacterBody2D",
+        Vector2::new(50.0, 50.0),
+        4.0,
+        Vector2::new(1000.0, 0.0),
+        0.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -1572,7 +1648,8 @@ fn kinematic_pinned_by_external_write_does_not_accumulate() {
 
     for _ in 0..10 {
         // Pin position before each tick.
-        tree.get_node_mut(kin_id).unwrap()
+        tree.get_node_mut(kin_id)
+            .unwrap()
             .set_property("position", Variant::Vector2(Vector2::new(50.0, 50.0)));
         server.sync_to_physics(&tree);
         server.step_physics(1.0 / 60.0);
@@ -1597,15 +1674,20 @@ fn static_body_velocity_property_preserved_across_ticks() {
     let root = tree.root_id();
 
     let static_id = add_body_node(
-        &mut tree, root, "Wall", "StaticBody2D",
-        Vector2::new(0.0, 200.0), 16.0,
+        &mut tree,
+        root,
+        "Wall",
+        "StaticBody2D",
+        Vector2::new(0.0, 200.0),
+        16.0,
     );
 
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
 
     // Set a velocity property on the static body node.
-    tree.get_node_mut(static_id).unwrap()
+    tree.get_node_mut(static_id)
+        .unwrap()
         .set_property("linear_velocity", Variant::Vector2(Vector2::new(42.0, 0.0)));
 
     for _ in 0..5 {
@@ -1633,17 +1715,30 @@ fn external_transform_write_parity_report() {
     let root = tree.root_id();
 
     let rigid_id = add_body_with_velocity(
-        &mut tree, root, "Rigid", "RigidBody2D",
-        Vector2::new(100.0, 0.0), 8.0,
-        Vector2::new(60.0, 0.0), 0.0,
+        &mut tree,
+        root,
+        "Rigid",
+        "RigidBody2D",
+        Vector2::new(100.0, 0.0),
+        8.0,
+        Vector2::new(60.0, 0.0),
+        0.0,
     );
     let static_id = add_body_node(
-        &mut tree, root, "Static", "StaticBody2D",
-        Vector2::new(0.0, 200.0), 16.0,
+        &mut tree,
+        root,
+        "Static",
+        "StaticBody2D",
+        Vector2::new(0.0, 200.0),
+        16.0,
     );
     let kin_id = add_body_node(
-        &mut tree, root, "Kinematic", "CharacterBody2D",
-        Vector2::new(0.0, 0.0), 8.0,
+        &mut tree,
+        root,
+        "Kinematic",
+        "CharacterBody2D",
+        Vector2::new(0.0, 0.0),
+        8.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -1655,11 +1750,14 @@ fn external_transform_write_parity_report() {
     server.sync_from_physics(&mut tree);
 
     // 2. External writes on all three body types.
-    tree.get_node_mut(rigid_id).unwrap()
+    tree.get_node_mut(rigid_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(5000.0, 5000.0)));
-    tree.get_node_mut(static_id).unwrap()
+    tree.get_node_mut(static_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(400.0, 500.0)));
-    tree.get_node_mut(kin_id).unwrap()
+    tree.get_node_mut(kin_id)
+        .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(600.0, 700.0)));
 
     // 3. Second tick.
@@ -1675,19 +1773,42 @@ fn external_transform_write_parity_report() {
     let total_checks = 3;
 
     // Rigid: overwritten by physics (not at 5000).
-    if rigid_pos.x < 300.0 { checks_passed += 1; }
+    if rigid_pos.x < 300.0 {
+        checks_passed += 1;
+    }
     // Static: persists.
-    if (static_pos.x - 400.0).abs() < 0.01 { checks_passed += 1; }
+    if (static_pos.x - 400.0).abs() < 0.01 {
+        checks_passed += 1;
+    }
     // Kinematic: synced (near 600).
     let kin_body_id = server.body_for_node(kin_id).unwrap();
     let kin_phys = server.world().get_body(kin_body_id).unwrap().position;
-    if (kin_phys.x - 600.0).abs() < 1.0 { checks_passed += 1; }
+    if (kin_phys.x - 600.0).abs() < 1.0 {
+        checks_passed += 1;
+    }
 
     eprintln!("\n=== External Transform Write Parity Report (4.6.1) ===");
     eprintln!("  Contract: physics.fixedstep.body_sync_external_transform_writes");
-    eprintln!("  Rigid body external write overwritten:  {}", if rigid_pos.x < 300.0 { "PASS" } else { "FAIL" });
-    eprintln!("  Static body external write persists:    {}", if (static_pos.x - 400.0).abs() < 0.01 { "PASS" } else { "FAIL" });
-    eprintln!("  Kinematic body external write synced:   {}", if (kin_phys.x - 600.0).abs() < 1.0 { "PASS" } else { "FAIL" });
+    eprintln!(
+        "  Rigid body external write overwritten:  {}",
+        if rigid_pos.x < 300.0 { "PASS" } else { "FAIL" }
+    );
+    eprintln!(
+        "  Static body external write persists:    {}",
+        if (static_pos.x - 400.0).abs() < 0.01 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
+    eprintln!(
+        "  Kinematic body external write synced:   {}",
+        if (kin_phys.x - 600.0).abs() < 1.0 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
     eprintln!("  Result: {}/{} checks passed", checks_passed, total_checks);
     eprintln!("  Oracle: Godot 4.6.1-stable PhysicsServer2D sync contract");
     eprintln!("========================================================\n");

@@ -37,7 +37,10 @@ pub mod winit_backend;
 // Re-export key types at the crate root.
 pub use backend::{HeadlessPlatform, PlatformBackend};
 pub use display::{DisplayServer, VsyncMode};
-pub use export::{BuildProfile, ExportConfig, ExportTemplate, PackageError, PackageExecutor, PackageResult, ResourceEntry};
+pub use export::{
+    BuildProfile, ExportConfig, ExportTemplate, PackageError, PackageExecutor, PackageResult,
+    ResourceEntry,
+};
 pub use input::{ActionBinding, InputEvent, InputMap, InputSnapshot, InputState, Key, MouseButton};
 pub use network::{
     ConnectionStatus, MockNetwork, MockNetworkPeer, MultiplayerAPI, MultiplayerSpawner,
@@ -49,9 +52,8 @@ pub use platform_targets::{
     current_target, find_target_by_triple, Architecture, DesktopTarget, PlatformCapability,
     DESKTOP_TARGETS,
 };
-pub use time::Timer;
 pub use signing::{
-    sign_macos, sign_windows, MacOsSigningConfig, SigningError, SigningResult,
-    WindowsSigningConfig,
+    sign_macos, sign_windows, MacOsSigningConfig, SigningError, SigningResult, WindowsSigningConfig,
 };
+pub use time::Timer;
 pub use window::{HeadlessWindow, WindowConfig, WindowEvent, WindowId, WindowManager};

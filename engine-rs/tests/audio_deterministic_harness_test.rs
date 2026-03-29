@@ -38,7 +38,11 @@ fn stereo_dc_buffer(left: f32, right: f32, frames: usize) -> AudioBuffer {
 
 /// Mixes N frames from the server and feeds them through a NullAudioOutput,
 /// returning the raw mixed sample buffer for inspection.
-fn mix_and_output(server: &mut AudioServer, frames: usize, output: &mut NullAudioOutput) -> Vec<f32> {
+fn mix_and_output(
+    server: &mut AudioServer,
+    frames: usize,
+    output: &mut NullAudioOutput,
+) -> Vec<f32> {
     let mixed = server.mix(frames);
     let buf = AudioSampleBuffer {
         sample_rate: server.output_sample_rate(),
@@ -113,7 +117,10 @@ fn harness_multi_stream_additive_mixing() {
     // 0.2 + 0.3 + 0.1 = 0.6
     for frame in 0..64 {
         let l = mixed[frame * 2];
-        assert!((l - 0.6).abs() < 1e-4, "frame {frame}: expected 0.6, got {l}");
+        assert!(
+            (l - 0.6).abs() < 1e-4,
+            "frame {frame}: expected 0.6, got {l}"
+        );
     }
 }
 
@@ -476,8 +483,14 @@ fn harness_sample_buffer_duration_precision() {
 
 #[test]
 fn harness_channel_layout_variants() {
-    assert_eq!(AudioSampleBuffer::new(44100, 1).channel_layout, ChannelLayout::Mono);
-    assert_eq!(AudioSampleBuffer::new(44100, 2).channel_layout, ChannelLayout::Stereo);
+    assert_eq!(
+        AudioSampleBuffer::new(44100, 1).channel_layout,
+        ChannelLayout::Mono
+    );
+    assert_eq!(
+        AudioSampleBuffer::new(44100, 2).channel_layout,
+        ChannelLayout::Stereo
+    );
     assert_eq!(
         AudioSampleBuffer::new(44100, 4).channel_layout,
         ChannelLayout::Custom(4)

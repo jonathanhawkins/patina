@@ -143,7 +143,11 @@ fn load_platformer() -> SceneTree {
 }
 
 fn count_oracle_nodes(node: &OracleNode) -> usize {
-    1 + node.children.iter().map(|c| count_oracle_nodes(c)).sum::<usize>()
+    1 + node
+        .children
+        .iter()
+        .map(|c| count_oracle_nodes(c))
+        .sum::<usize>()
 }
 
 // ===========================================================================
@@ -154,7 +158,11 @@ fn count_oracle_nodes(node: &OracleNode) -> usize {
 fn layer1_fixture_parses() {
     let tscn = include_str!("../../fixtures/scenes/platformer.tscn");
     let packed = PackedScene::from_tscn(tscn);
-    assert!(packed.is_ok(), "platformer.tscn should parse: {:?}", packed.err());
+    assert!(
+        packed.is_ok(),
+        "platformer.tscn should parse: {:?}",
+        packed.err()
+    );
 }
 
 // ===========================================================================
@@ -232,7 +240,14 @@ fn layer2_tree_child_order_matches_oracle() {
     let world = tree.get_node(world_id).unwrap();
     let child_ids = world.children();
 
-    let expected_names = ["Player", "Platform1", "Platform2", "Platform3", "Camera", "Collectible"];
+    let expected_names = [
+        "Player",
+        "Platform1",
+        "Platform2",
+        "Platform3",
+        "Camera",
+        "Collectible",
+    ];
     assert_eq!(
         child_ids.len(),
         expected_names.len(),
@@ -285,9 +300,7 @@ fn layer3_properties_match_oracle() {
 
     let pct = (matched as f64 / total as f64 * 100.0).round() as u32;
     eprintln!();
-    eprintln!(
-        "  Layer 3 — Property parity: {matched}/{total} ({pct}%)"
-    );
+    eprintln!("  Layer 3 — Property parity: {matched}/{total} ({pct}%)");
 
     assert_eq!(matched, total, "all oracle properties should match");
 }
@@ -426,7 +439,9 @@ fn layer5_render_positions_match_scene_tree() {
         assert!(
             pixel.r > 0.5,
             "pixel at player position ({}, {}) should be red, got {:?}",
-            px, py, pixel
+            px,
+            py,
+            pixel
         );
     }
 }
@@ -452,7 +467,10 @@ fn layer6_full_vertical_slice() {
     let collectible_id = tree.get_node_by_path("/root/World/Collectible").unwrap();
     assert_eq!(tree.get_node(player_id).unwrap().class_name(), "Node2D");
     assert_eq!(tree.get_node(camera_id).unwrap().class_name(), "Camera2D");
-    assert_eq!(tree.get_node(collectible_id).unwrap().class_name(), "Node2D");
+    assert_eq!(
+        tree.get_node(collectible_id).unwrap().class_name(),
+        "Node2D"
+    );
 
     // VERIFY PROPERTIES (oracle comparison)
     let player_pos = get_position(&tree, player_id);
@@ -526,9 +544,15 @@ fn layer6_full_vertical_slice() {
     eprintln!();
     eprintln!("  === Full 2D Vertical Slice Summary ===");
     eprintln!("  Scene:       platformer.tscn");
-    eprintln!("  Nodes:       {} (oracle: 8)", main_loop.tree().node_count());
+    eprintln!(
+        "  Nodes:       {} (oracle: 8)",
+        main_loop.tree().node_count()
+    );
     eprintln!("  Frames run:  {}", main_loop.frame_count());
-    eprintln!("  Render:      {}x{} ({} non-bg pixels)", WIDTH, HEIGHT, non_bg);
+    eprintln!(
+        "  Render:      {}x{} ({} non-bg pixels)",
+        WIDTH, HEIGHT, non_bg
+    );
     eprintln!("  Status:      PASS");
     eprintln!();
 }
@@ -577,13 +601,19 @@ fn layer7_parity_measurement() {
             class_matched += 1;
         }
     }
-    let class_parity =
-        (class_matched as f64 / class_checks.len() as f64 * 100.0).round() as u32;
+    let class_parity = (class_matched as f64 / class_checks.len() as f64 * 100.0).round() as u32;
 
     // Child order parity
     let world_id = tree.get_node_by_path("/root/World").unwrap();
     let world = tree.get_node(world_id).unwrap();
-    let expected_order = ["Player", "Platform1", "Platform2", "Platform3", "Camera", "Collectible"];
+    let expected_order = [
+        "Player",
+        "Platform1",
+        "Platform2",
+        "Platform3",
+        "Camera",
+        "Collectible",
+    ];
     let mut order_matched = 0usize;
     for (i, &cid) in world.children().iter().enumerate() {
         let child = tree.get_node(cid).unwrap();
@@ -591,8 +621,7 @@ fn layer7_parity_measurement() {
             order_matched += 1;
         }
     }
-    let order_parity =
-        (order_matched as f64 / expected_order.len() as f64 * 100.0).round() as u32;
+    let order_parity = (order_matched as f64 / expected_order.len() as f64 * 100.0).round() as u32;
 
     // Combined
     let combined = (tree_parity + prop_parity + class_parity + order_parity) / 4;

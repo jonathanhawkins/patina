@@ -29,10 +29,7 @@ fn make_test_server() -> (EditorServerHandle, u16) {
     let root = tree.root_id();
 
     let mut player = Node::new("Player", "Node2D");
-    player.set_property(
-        "position",
-        Variant::Vector2(Vector2::new(0.0, 0.0)),
-    );
+    player.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
     tree.add_child(root, player).unwrap();
 
     let state = EditorState::new(tree);
@@ -55,8 +52,7 @@ fn http_get(port: u16, path: &str) -> String {
 }
 
 fn http_request(port: u16, request: &str) -> String {
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.write_all(request.as_bytes()).unwrap();
     let mut response = Vec::new();
@@ -77,7 +73,11 @@ fn test_create_property_track() {
     let (_handle, port) = make_test_server();
 
     // Create animation first
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"walk","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"walk","length":1.0}"#,
+    );
     assert!(response_ok(&resp), "failed to create animation: {resp}");
 
     // Add a property track
@@ -89,22 +89,41 @@ fn test_create_property_track() {
     assert!(response_ok(&resp), "failed to add property track: {resp}");
     let body = extract_body(&resp);
     assert!(body.contains(r#""ok":true"#), "expected ok: {body}");
-    assert!(body.contains(r#""track_type":"property""#), "expected property type: {body}");
-    assert!(body.contains(r#""track_index":0"#), "expected index 0: {body}");
+    assert!(
+        body.contains(r#""track_type":"property""#),
+        "expected property type: {body}"
+    );
+    assert!(
+        body.contains(r#""track_index":0"#),
+        "expected index 0: {body}"
+    );
 
     // Verify track appears in animation data
     let resp = http_get(port, "/api/animation?name=walk");
     let body = extract_body(&resp);
-    assert!(body.contains(r#""track_type":"property""#), "track_type not in animation data: {body}");
-    assert!(body.contains(r#""node_path":"Player""#), "node_path not in animation data: {body}");
-    assert!(body.contains(r#""property":"position""#), "property not in animation data: {body}");
+    assert!(
+        body.contains(r#""track_type":"property""#),
+        "track_type not in animation data: {body}"
+    );
+    assert!(
+        body.contains(r#""node_path":"Player""#),
+        "node_path not in animation data: {body}"
+    );
+    assert!(
+        body.contains(r#""property":"position""#),
+        "property not in animation data: {body}"
+    );
 }
 
 #[test]
 fn test_create_method_track() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"attack","length":0.5}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"attack","length":0.5}"#,
+    );
     assert!(response_ok(&resp));
 
     let resp = http_post(
@@ -114,19 +133,29 @@ fn test_create_method_track() {
     );
     assert!(response_ok(&resp), "failed to add method track: {resp}");
     let body = extract_body(&resp);
-    assert!(body.contains(r#""track_type":"method""#), "expected method type: {body}");
+    assert!(
+        body.contains(r#""track_type":"method""#),
+        "expected method type: {body}"
+    );
 
     // Verify in animation data
     let resp = http_get(port, "/api/animation?name=attack");
     let body = extract_body(&resp);
-    assert!(body.contains(r#""track_type":"method""#), "method track not stored: {body}");
+    assert!(
+        body.contains(r#""track_type":"method""#),
+        "method track not stored: {body}"
+    );
 }
 
 #[test]
 fn test_create_audio_track() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"sfx","length":2.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"sfx","length":2.0}"#,
+    );
     assert!(response_ok(&resp));
 
     let resp = http_post(
@@ -136,19 +165,29 @@ fn test_create_audio_track() {
     );
     assert!(response_ok(&resp), "failed to add audio track: {resp}");
     let body = extract_body(&resp);
-    assert!(body.contains(r#""track_type":"audio""#), "expected audio type: {body}");
+    assert!(
+        body.contains(r#""track_type":"audio""#),
+        "expected audio type: {body}"
+    );
 
     // Verify in animation data
     let resp = http_get(port, "/api/animation?name=sfx");
     let body = extract_body(&resp);
-    assert!(body.contains(r#""track_type":"audio""#), "audio track not stored: {body}");
+    assert!(
+        body.contains(r#""track_type":"audio""#),
+        "audio track not stored: {body}"
+    );
 }
 
 #[test]
 fn test_duplicate_track_rejected() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"idle","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"idle","length":1.0}"#,
+    );
     assert!(response_ok(&resp));
 
     // Add track once
@@ -165,15 +204,25 @@ fn test_duplicate_track_rejected() {
         "/api/animation/track/add",
         r#"{"animation":"idle","node_path":"Player","property":"position","track_type":"property"}"#,
     );
-    assert!(resp.contains("400"), "duplicate track should be rejected: {resp}");
-    assert!(extract_body(&resp).contains("already exists"), "should say already exists: {resp}");
+    assert!(
+        resp.contains("400"),
+        "duplicate track should be rejected: {resp}"
+    );
+    assert!(
+        extract_body(&resp).contains("already exists"),
+        "should say already exists: {resp}"
+    );
 }
 
 #[test]
 fn test_same_node_different_track_types() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"multi","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"multi","length":1.0}"#,
+    );
     assert!(response_ok(&resp));
 
     // Property track
@@ -190,7 +239,10 @@ fn test_same_node_different_track_types() {
         "/api/animation/track/add",
         r#"{"animation":"multi","node_path":"Player","property":"position","track_type":"method"}"#,
     );
-    assert!(response_ok(&resp), "different track type should be allowed: {resp}");
+    assert!(
+        response_ok(&resp),
+        "different track type should be allowed: {resp}"
+    );
 
     // Audio track with same node — should also succeed
     let resp = http_post(
@@ -212,7 +264,11 @@ fn test_same_node_different_track_types() {
 fn test_delete_track() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"del","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"del","length":1.0}"#,
+    );
     assert!(response_ok(&resp));
 
     // Add two tracks
@@ -244,15 +300,25 @@ fn test_delete_track() {
     // Verify only rotation track remains
     let resp = http_get(port, "/api/animation?name=del");
     let body = extract_body(&resp);
-    assert!(!body.contains(r#""property":"position""#), "position track should be gone");
-    assert!(body.contains(r#""property":"rotation""#), "rotation track should remain");
+    assert!(
+        !body.contains(r#""property":"position""#),
+        "position track should be gone"
+    );
+    assert!(
+        body.contains(r#""property":"rotation""#),
+        "rotation track should remain"
+    );
 }
 
 #[test]
 fn test_delete_track_invalid_index() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"err","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"err","length":1.0}"#,
+    );
     assert!(response_ok(&resp));
 
     // Delete with out-of-range index
@@ -261,7 +327,10 @@ fn test_delete_track_invalid_index() {
         "/api/animation/track/delete",
         r#"{"animation":"err","track_index":99}"#,
     );
-    assert!(resp.contains("400"), "out-of-range index should fail: {resp}");
+    assert!(
+        resp.contains("400"),
+        "out-of-range index should fail: {resp}"
+    );
 }
 
 #[test]
@@ -273,14 +342,21 @@ fn test_delete_track_missing_animation() {
         "/api/animation/track/delete",
         r#"{"animation":"nonexistent","track_index":0}"#,
     );
-    assert!(resp.contains("404"), "missing animation should be 404: {resp}");
+    assert!(
+        resp.contains("404"),
+        "missing animation should be 404: {resp}"
+    );
 }
 
 #[test]
 fn test_add_keyframe_to_method_track() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"meth","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"meth","length":1.0}"#,
+    );
     assert!(response_ok(&resp));
 
     // Create method track
@@ -297,19 +373,29 @@ fn test_add_keyframe_to_method_track() {
         "/api/animation/keyframe/add",
         r#"{"animation":"meth","track_node":"Player","track_property":"jump","time":0.5,"value":{"type":"Array","value":[{"type":"String","value":"jump"},{"type":"Float","value":100}]}}"#,
     );
-    assert!(response_ok(&resp), "failed to add keyframe to method track: {resp}");
+    assert!(
+        response_ok(&resp),
+        "failed to add keyframe to method track: {resp}"
+    );
 
     // Verify keyframe in animation data
     let resp = http_get(port, "/api/animation?name=meth");
     let body = extract_body(&resp);
-    assert!(body.contains("0.5"), "keyframe time should be in data: {body}");
+    assert!(
+        body.contains("0.5"),
+        "keyframe time should be in data: {body}"
+    );
 }
 
 #[test]
 fn test_add_keyframe_to_audio_track() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"aud","length":2.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"aud","length":2.0}"#,
+    );
     assert!(response_ok(&resp));
 
     // Create audio track
@@ -326,14 +412,21 @@ fn test_add_keyframe_to_audio_track() {
         "/api/animation/keyframe/add",
         r#"{"animation":"aud","track_node":"Player","track_property":"sfx","time":0.0,"value":{"type":"String","value":"res://sounds/step.wav"}}"#,
     );
-    assert!(response_ok(&resp), "failed to add keyframe to audio track: {resp}");
+    assert!(
+        response_ok(&resp),
+        "failed to add keyframe to audio track: {resp}"
+    );
 }
 
 #[test]
 fn test_default_track_type_is_property() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"def","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"def","length":1.0}"#,
+    );
     assert!(response_ok(&resp));
 
     // Omit track_type — should default to property
@@ -344,14 +437,21 @@ fn test_default_track_type_is_property() {
     );
     assert!(response_ok(&resp), "default track type should work: {resp}");
     let body = extract_body(&resp);
-    assert!(body.contains(r#""track_type":"property""#), "default should be property: {body}");
+    assert!(
+        body.contains(r#""track_type":"property""#),
+        "default should be property: {body}"
+    );
 }
 
 #[test]
 fn test_invalid_track_type_rejected() {
     let (_handle, port) = make_test_server();
 
-    let resp = http_post(port, "/api/animation/create", r#"{"name":"inv","length":1.0}"#);
+    let resp = http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"inv","length":1.0}"#,
+    );
     assert!(response_ok(&resp));
 
     let resp = http_post(
@@ -359,5 +459,8 @@ fn test_invalid_track_type_rejected() {
         "/api/animation/track/add",
         r#"{"animation":"inv","node_path":"Player","property":"x","track_type":"bezier"}"#,
     );
-    assert!(resp.contains("400"), "invalid track type should fail: {resp}");
+    assert!(
+        resp.contains("400"),
+        "invalid track type should fail: {resp}"
+    );
 }

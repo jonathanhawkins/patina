@@ -37,8 +37,14 @@ fn class_has_own_method() {
 #[test]
 fn class_has_inherited_method() {
     let _g = setup();
-    assert!(class_has_method("Node2D", "get_name"), "inherited from Node");
-    assert!(class_has_method("Node2D", "set_name"), "inherited from Node");
+    assert!(
+        class_has_method("Node2D", "get_name"),
+        "inherited from Node"
+    );
+    assert!(
+        class_has_method("Node2D", "set_name"),
+        "inherited from Node"
+    );
 }
 
 #[test]
@@ -51,7 +57,10 @@ fn class_has_own_and_inherited() {
 #[test]
 fn class_does_not_have_child_method() {
     let _g = setup();
-    assert!(!class_has_method("Node", "get_position"), "Node2D method not on Node");
+    assert!(
+        !class_has_method("Node", "get_position"),
+        "Node2D method not on Node"
+    );
 }
 
 #[test]

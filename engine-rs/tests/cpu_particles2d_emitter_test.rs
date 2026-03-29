@@ -222,11 +222,15 @@ fn initial_velocity_range_properties() {
         .set_property("initial_velocity_max", Variant::Float(100.0));
 
     assert_eq!(
-        tree.get_node(id).unwrap().get_property("initial_velocity_min"),
+        tree.get_node(id)
+            .unwrap()
+            .get_property("initial_velocity_min"),
         Variant::Float(50.0)
     );
     assert_eq!(
-        tree.get_node(id).unwrap().get_property("initial_velocity_max"),
+        tree.get_node(id)
+            .unwrap()
+            .get_property("initial_velocity_max"),
         Variant::Float(100.0)
     );
 }
@@ -279,10 +283,7 @@ fn cpu_particles2d_under_character() {
     let trail_id = tree.add_child(player_id, trail).unwrap();
 
     // Verify hierarchy
-    assert_eq!(
-        tree.get_node(trail_id).unwrap().parent(),
-        Some(player_id)
-    );
+    assert_eq!(tree.get_node(trail_id).unwrap().parent(), Some(player_id));
     assert_eq!(
         tree.get_node(trail_id).unwrap().class_name(),
         "CPUParticles2D"

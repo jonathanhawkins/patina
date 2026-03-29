@@ -77,7 +77,11 @@ fn higher_z_renders_on_top() {
     vp.add_canvas_item(fg);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 10, 10), green(), "z=1 should render on top of z=0");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        green(),
+        "z=1 should render on top of z=0"
+    );
 }
 
 /// Lower z_index items render behind higher z_index items regardless of insertion order.
@@ -118,7 +122,11 @@ fn negative_z_renders_behind() {
     vp.add_canvas_item(behind);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 10, 10), blue(), "z=0 should be on top of z=-10");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        blue(),
+        "z=0 should be on top of z=-10"
+    );
 }
 
 /// Items at same z_index: last inserted renders on top (Godot's stable sort behavior).
@@ -164,9 +172,21 @@ fn z_ordering_partial_overlap() {
     vp.add_canvas_item(center);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 2, 10), red(), "left area should be red (z=0)");
-    assert_eq!(pixel_at(&frame, 17, 10), green(), "right area should be green (z=1)");
-    assert_eq!(pixel_at(&frame, 10, 10), blue(), "center overlap should be blue (z=2)");
+    assert_eq!(
+        pixel_at(&frame, 2, 10),
+        red(),
+        "left area should be red (z=0)"
+    );
+    assert_eq!(
+        pixel_at(&frame, 17, 10),
+        green(),
+        "right area should be green (z=1)"
+    );
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        blue(),
+        "center overlap should be blue (z=2)"
+    );
 }
 
 /// Many z-levels — items at z=-5 through z=5 layer correctly.
@@ -184,7 +204,11 @@ fn many_z_levels_order_correctly() {
 
     let frame = renderer.render_frame(&vp);
     // Highest z (2) = cyan should be visible
-    assert_eq!(pixel_at(&frame, 5, 5), cyan(), "highest z-index should be on top");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        cyan(),
+        "highest z-index should be on top"
+    );
 }
 
 // ===========================================================================
@@ -202,7 +226,11 @@ fn self_hidden_item_does_not_render() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "hidden item must not render");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "hidden item must not render"
+    );
 }
 
 /// Toggling visibility: item renders when visible, not when hidden.
@@ -246,7 +274,11 @@ fn hidden_item_does_not_block_lower_z() {
     vp.add_canvas_item(hidden_fg);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), red(), "lower z item should render when higher z is hidden");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        red(),
+        "lower z item should render when higher z is hidden"
+    );
 }
 
 /// Visibility is per-item — hiding one does not affect siblings.
@@ -265,8 +297,16 @@ fn sibling_visibility_independent() {
     vp.add_canvas_item(right);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), red(), "visible sibling should render");
-    assert_eq!(pixel_at(&frame, 15, 5), Color::BLACK, "hidden sibling should not render");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        red(),
+        "visible sibling should render"
+    );
+    assert_eq!(
+        pixel_at(&frame, 15, 5),
+        Color::BLACK,
+        "hidden sibling should not render"
+    );
 }
 
 // ===========================================================================
@@ -365,7 +405,11 @@ fn items_within_layer_sorted_by_z_index() {
     vp.add_canvas_item(item2);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 10, 10), blue(), "higher z_index in same layer should render on top");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        blue(),
+        "higher z_index in same layer should render on top"
+    );
 }
 
 // ===========================================================================
@@ -408,7 +452,11 @@ fn visible_layer_renders_items() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 10, 10), green(), "items in visible layer should render");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        green(),
+        "items in visible layer should render"
+    );
 }
 
 /// Hidden layer does not affect items in other layers.
@@ -435,8 +483,16 @@ fn hidden_layer_does_not_affect_other_layers() {
     vp.add_canvas_item(item2);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 10), Color::BLACK, "hidden layer item should not render");
-    assert_eq!(pixel_at(&frame, 15, 10), green(), "visible layer item should render");
+    assert_eq!(
+        pixel_at(&frame, 5, 10),
+        Color::BLACK,
+        "hidden layer item should not render"
+    );
+    assert_eq!(
+        pixel_at(&frame, 15, 10),
+        green(),
+        "visible layer item should render"
+    );
 }
 
 // ===========================================================================
@@ -460,9 +516,21 @@ fn layer_transform_offsets_items() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "left of layer offset should be clear");
-    assert_eq!(pixel_at(&frame, 15, 5), red(), "item should be rendered at layer-offset position");
-    assert_eq!(pixel_at(&frame, 25, 5), Color::BLACK, "right of item should be clear");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "left of layer offset should be clear"
+    );
+    assert_eq!(
+        pixel_at(&frame, 15, 5),
+        red(),
+        "item should be rendered at layer-offset position"
+    );
+    assert_eq!(
+        pixel_at(&frame, 25, 5),
+        Color::BLACK,
+        "right of item should be clear"
+    );
 }
 
 /// Layer transform applies to all items within the layer.
@@ -486,9 +554,21 @@ fn layer_transform_applies_to_multiple_items() {
     vp.add_canvas_item(item_b);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 7, 7), red(), "item A offset by layer transform");
-    assert_eq!(pixel_at(&frame, 17, 7), green(), "item B offset by layer transform");
-    assert_eq!(pixel_at(&frame, 0, 0), Color::BLACK, "origin should be clear (offset by +5,+5)");
+    assert_eq!(
+        pixel_at(&frame, 7, 7),
+        red(),
+        "item A offset by layer transform"
+    );
+    assert_eq!(
+        pixel_at(&frame, 17, 7),
+        green(),
+        "item B offset by layer transform"
+    );
+    assert_eq!(
+        pixel_at(&frame, 0, 0),
+        Color::BLACK,
+        "origin should be clear (offset by +5,+5)"
+    );
 }
 
 // ===========================================================================
@@ -576,7 +656,11 @@ fn layer_with_only_unlayered_items() {
     vp.add_canvas_item(fg);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), green(), "without layers, z_index still works");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        green(),
+        "without layers, z_index still works"
+    );
 }
 
 // ===========================================================================
@@ -590,7 +674,11 @@ fn empty_viewport_renders_clear_color() {
     let vp = Viewport::new(10, 10, cyan());
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), cyan(), "empty viewport should show clear color");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        cyan(),
+        "empty viewport should show clear color"
+    );
 }
 
 /// Empty layer does not crash or affect rendering.
@@ -607,7 +695,11 @@ fn empty_layer_no_crash() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), red(), "empty layers should not affect unlayered items");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        red(),
+        "empty layers should not affect unlayered items"
+    );
 }
 
 /// Item visible=false within a visible layer does not render.
@@ -625,7 +717,11 @@ fn hidden_item_in_visible_layer() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "hidden item in visible layer should not render");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "hidden item in visible layer should not render"
+    );
 }
 
 /// Many items across multiple layers render correctly.
@@ -635,7 +731,18 @@ fn stress_multiple_layers_many_items() {
     let mut vp = Viewport::new(100, 10, Color::BLACK);
 
     // 10 layers, each with 1 item drawing a 10px-wide column
-    let colors = [red(), green(), blue(), yellow(), cyan(), magenta(), red(), green(), blue(), yellow()];
+    let colors = [
+        red(),
+        green(),
+        blue(),
+        yellow(),
+        cyan(),
+        magenta(),
+        red(),
+        green(),
+        blue(),
+        yellow(),
+    ];
 
     for i in 0..10u64 {
         let mut layer = CanvasLayer::new(i + 1);
@@ -682,7 +789,11 @@ fn extreme_z_index_values() {
     vp.add_canvas_item(top);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), green(), "i32::MAX z should be on top of i32::MIN");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        green(),
+        "i32::MAX z should be on top of i32::MIN"
+    );
 }
 
 // ===========================================================================
@@ -731,9 +842,17 @@ fn child_inherits_parent_translation() {
 
     let frame = renderer.render_frame(&vp);
     // (2,2) should be black (outside child's transformed rect)
-    assert_eq!(pixel_at(&frame, 2, 2), Color::BLACK, "outside parent transform should be black");
+    assert_eq!(
+        pixel_at(&frame, 2, 2),
+        Color::BLACK,
+        "outside parent transform should be black"
+    );
     // (7,7) should be red (inside child's transformed rect)
-    assert_eq!(pixel_at(&frame, 7, 7), red(), "inside parent+child transform should be red");
+    assert_eq!(
+        pixel_at(&frame, 7, 7),
+        red(),
+        "inside parent+child transform should be red"
+    );
 }
 
 /// Parent's scale transform scales child's draw commands.
@@ -760,10 +879,22 @@ fn child_inherits_parent_scale() {
 
     let frame = renderer.render_frame(&vp);
     // At 2x scale, child's 5x5 rect becomes 10x10.
-    assert_eq!(pixel_at(&frame, 1, 1), green(), "(1,1) should be green (inside scaled rect)");
-    assert_eq!(pixel_at(&frame, 9, 9), green(), "(9,9) should be green (inside 10x10 scaled rect)");
+    assert_eq!(
+        pixel_at(&frame, 1, 1),
+        green(),
+        "(1,1) should be green (inside scaled rect)"
+    );
+    assert_eq!(
+        pixel_at(&frame, 9, 9),
+        green(),
+        "(9,9) should be green (inside 10x10 scaled rect)"
+    );
     // Just outside the scaled rect
-    assert_eq!(pixel_at(&frame, 11, 11), Color::BLACK, "(11,11) outside scaled rect");
+    assert_eq!(
+        pixel_at(&frame, 11, 11),
+        Color::BLACK,
+        "(11,11) outside scaled rect"
+    );
 }
 
 /// Chained parent transforms: grandparent -> parent -> child.
@@ -796,10 +927,22 @@ fn grandparent_parent_child_transform_chain() {
 
     let frame = renderer.render_frame(&vp);
     // Translated by (5+3, 5+3) = (8,8).
-    assert_eq!(pixel_at(&frame, 7, 7), Color::BLACK, "just outside transformed rect");
-    assert_eq!(pixel_at(&frame, 9, 9), blue(), "inside transformed rect (8,8)-(12,12)");
+    assert_eq!(
+        pixel_at(&frame, 7, 7),
+        Color::BLACK,
+        "just outside transformed rect"
+    );
+    assert_eq!(
+        pixel_at(&frame, 9, 9),
+        blue(),
+        "inside transformed rect (8,8)-(12,12)"
+    );
     assert_eq!(pixel_at(&frame, 11, 11), blue(), "still inside");
-    assert_eq!(pixel_at(&frame, 13, 13), Color::BLACK, "outside transformed rect");
+    assert_eq!(
+        pixel_at(&frame, 13, 13),
+        Color::BLACK,
+        "outside transformed rect"
+    );
 }
 
 /// Parent with no draw commands but with transform still affects child rendering.
@@ -824,8 +967,16 @@ fn invisible_parent_transform_still_applies_to_child() {
     vp.add_canvas_item(child);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "before parent offset should be black");
-    assert_eq!(pixel_at(&frame, 12, 12), yellow(), "child should render at parent offset");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "before parent offset should be black"
+    );
+    assert_eq!(
+        pixel_at(&frame, 12, 12),
+        yellow(),
+        "child should render at parent offset"
+    );
 }
 
 // ===========================================================================
@@ -848,7 +999,11 @@ fn child_z_index_orders_among_siblings() {
     vp.add_canvas_item(child_green);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 10, 10), green(), "higher z child should render on top");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        green(),
+        "higher z child should render on top"
+    );
 }
 
 /// Parent transform + child z-index: transform applies but z-order still correct.
@@ -880,8 +1035,16 @@ fn parent_transform_with_child_z_ordering() {
 
     let frame = renderer.render_frame(&vp);
     // Green child at z=2 should be on top of red bg at z=0, offset by parent transform.
-    assert_eq!(pixel_at(&frame, 2, 2), red(), "outside child's transformed area should be bg");
-    assert_eq!(pixel_at(&frame, 10, 10), green(), "child should render at parent offset, on top of bg");
+    assert_eq!(
+        pixel_at(&frame, 2, 2),
+        red(),
+        "outside child's transformed area should be bg"
+    );
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        green(),
+        "child should render at parent offset, on top of bg"
+    );
 }
 
 /// Hidden parent hides its child (inherited visibility).
@@ -937,8 +1100,16 @@ fn multiple_children_z_and_transform_combined() {
     vp.add_canvas_item(child_b);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), red(), "non-overlapping area should be red");
-    assert_eq!(pixel_at(&frame, 15, 15), green(), "overlap area should show higher-z green");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        red(),
+        "non-overlapping area should be red"
+    );
+    assert_eq!(
+        pixel_at(&frame, 15, 15),
+        green(),
+        "overlap area should show higher-z green"
+    );
     assert_eq!(pixel_at(&frame, 25, 25), green(), "green-only area");
 }
 
@@ -969,6 +1140,10 @@ fn parent_scale_child_translate_compose() {
 
     let frame = renderer.render_frame(&vp);
     assert_eq!(pixel_at(&frame, 4, 4), Color::BLACK, "before rect");
-    assert_eq!(pixel_at(&frame, 7, 7), cyan(), "inside scaled+translated rect");
+    assert_eq!(
+        pixel_at(&frame, 7, 7),
+        cyan(),
+        "inside scaled+translated rect"
+    );
     assert_eq!(pixel_at(&frame, 11, 11), Color::BLACK, "after rect");
 }

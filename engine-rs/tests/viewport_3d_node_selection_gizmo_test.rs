@@ -4,9 +4,7 @@
 //! detection, selection state management, and drag lifecycle.
 
 use gdcore::math::Vector3;
-use gdeditor::viewport_3d::{
-    GizmoAxis, GizmoMode3D, Ray3D, Selection3D, Viewport3D,
-};
+use gdeditor::viewport_3d::{GizmoAxis, GizmoMode3D, Ray3D, Selection3D, Viewport3D};
 
 fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
     (a - b).abs() < eps
@@ -22,10 +20,7 @@ fn vec3_approx_eq(a: Vector3, b: Vector3, eps: f32) -> bool {
 
 #[test]
 fn ray_at_parameter() {
-    let ray = Ray3D::new(
-        Vector3::new(1.0, 2.0, 3.0),
-        Vector3::new(0.0, 0.0, -1.0),
-    );
+    let ray = Ray3D::new(Vector3::new(1.0, 2.0, 3.0), Vector3::new(0.0, 0.0, -1.0));
     let p = ray.at(4.0);
     assert!(approx_eq(p.x, 1.0, 1e-6));
     assert!(approx_eq(p.y, 2.0, 1e-6));
@@ -36,7 +31,10 @@ fn ray_at_parameter() {
 fn ray_direction_is_normalized() {
     let ray = Ray3D::new(Vector3::ZERO, Vector3::new(3.0, 4.0, 0.0));
     let len = ray.direction.length();
-    assert!(approx_eq(len, 1.0, 1e-5), "Direction should be normalized, len={len}");
+    assert!(
+        approx_eq(len, 1.0, 1e-5),
+        "Direction should be normalized, len={len}"
+    );
 }
 
 #[test]
@@ -51,10 +49,7 @@ fn ray_sphere_head_on_hit() {
 #[test]
 fn ray_sphere_tangent_miss() {
     // Ray passes just outside the sphere
-    let ray = Ray3D::new(
-        Vector3::new(2.01, 0.0, 10.0),
-        Vector3::new(0.0, 0.0, -1.0),
-    );
+    let ray = Ray3D::new(Vector3::new(2.01, 0.0, 10.0), Vector3::new(0.0, 0.0, -1.0));
     let t = ray.intersect_sphere(Vector3::ZERO, 2.0);
     assert!(t.is_none(), "Ray tangent to sphere should miss");
 }
@@ -73,7 +68,10 @@ fn ray_sphere_inside_returns_exit_point() {
     let t = ray.intersect_sphere(Vector3::ZERO, 5.0);
     assert!(t.is_some(), "Ray inside sphere should hit the exit");
     let t = t.unwrap();
-    assert!(approx_eq(t, 5.0, 0.01), "Exit should be at t=radius, got {t}");
+    assert!(
+        approx_eq(t, 5.0, 0.01),
+        "Exit should be at t=radius, got {t}"
+    );
 }
 
 // ===========================================================================
@@ -191,7 +189,11 @@ fn drag_begin_sets_state() {
     sel.begin_drag(GizmoAxis::Y, Vector3::new(0.0, 5.0, 0.0));
     assert!(sel.dragging);
     assert_eq!(sel.active_axis, GizmoAxis::Y);
-    assert!(vec3_approx_eq(sel.drag_start, Vector3::new(0.0, 5.0, 0.0), 1e-6));
+    assert!(vec3_approx_eq(
+        sel.drag_start,
+        Vector3::new(0.0, 5.0, 0.0),
+        1e-6
+    ));
 }
 
 #[test]
@@ -199,9 +201,17 @@ fn drag_update_accumulates() {
     let mut sel = Selection3D::default();
     sel.begin_drag(GizmoAxis::Z, Vector3::ZERO);
     sel.update_drag(Vector3::new(0.0, 0.0, 3.0));
-    assert!(vec3_approx_eq(sel.drag_delta, Vector3::new(0.0, 0.0, 3.0), 1e-6));
+    assert!(vec3_approx_eq(
+        sel.drag_delta,
+        Vector3::new(0.0, 0.0, 3.0),
+        1e-6
+    ));
     sel.update_drag(Vector3::new(0.0, 0.0, 7.0));
-    assert!(vec3_approx_eq(sel.drag_delta, Vector3::new(0.0, 0.0, 7.0), 1e-6));
+    assert!(vec3_approx_eq(
+        sel.drag_delta,
+        Vector3::new(0.0, 0.0, 7.0),
+        1e-6
+    ));
 }
 
 #[test]
@@ -242,11 +252,23 @@ fn drag_cancel_zeroes_everything() {
 fn axis_direction_for_each_axis() {
     let mut sel = Selection3D::default();
     sel.active_axis = GizmoAxis::X;
-    assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(1.0, 0.0, 0.0), 1e-6));
+    assert!(vec3_approx_eq(
+        sel.axis_direction(),
+        Vector3::new(1.0, 0.0, 0.0),
+        1e-6
+    ));
     sel.active_axis = GizmoAxis::Y;
-    assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(0.0, 1.0, 0.0), 1e-6));
+    assert!(vec3_approx_eq(
+        sel.axis_direction(),
+        Vector3::new(0.0, 1.0, 0.0),
+        1e-6
+    ));
     sel.active_axis = GizmoAxis::Z;
-    assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(0.0, 0.0, 1.0), 1e-6));
+    assert!(vec3_approx_eq(
+        sel.axis_direction(),
+        Vector3::new(0.0, 0.0, 1.0),
+        1e-6
+    ));
     sel.active_axis = GizmoAxis::None;
     assert!(vec3_approx_eq(sel.axis_direction(), Vector3::ZERO, 1e-6));
 }
@@ -261,7 +283,10 @@ fn screen_to_ray_center_is_forward() {
     let ray = vp.screen_to_ray(400.0, 300.0);
     let fwd = vp.camera.orbit_direction();
     let dot = ray.direction.dot(fwd);
-    assert!(dot > 0.99, "Center pixel ray should align with camera forward, dot={dot}");
+    assert!(
+        dot > 0.99,
+        "Center pixel ray should align with camera forward, dot={dot}"
+    );
 }
 
 #[test]
@@ -316,7 +341,7 @@ fn pick_node_closest_wins() {
 
     let nodes = vec![
         (100, Vector3::new(0.0, 0.0, -5.0)), // far from camera
-        (200, Vector3::new(0.0, 0.0, 0.0)),   // closer to camera
+        (200, Vector3::new(0.0, 0.0, 0.0)),  // closer to camera
     ];
 
     let result = vp.pick_node(400.0, 300.0, &nodes, 1.5);

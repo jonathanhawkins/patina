@@ -142,12 +142,46 @@ impl CompletionContext {
 
 /// Built-in GDScript keywords for completion.
 const GDSCRIPT_KEYWORDS: &[&str] = &[
-    "var", "const", "func", "class", "extends", "class_name",
-    "if", "elif", "else", "for", "while", "match", "break", "continue",
-    "pass", "return", "signal", "enum", "static", "onready",
-    "export", "preload", "await", "yield", "self", "super",
-    "true", "false", "null", "not", "and", "or", "in", "is", "as",
-    "void", "int", "float", "bool", "String",
+    "var",
+    "const",
+    "func",
+    "class",
+    "extends",
+    "class_name",
+    "if",
+    "elif",
+    "else",
+    "for",
+    "while",
+    "match",
+    "break",
+    "continue",
+    "pass",
+    "return",
+    "signal",
+    "enum",
+    "static",
+    "onready",
+    "export",
+    "preload",
+    "await",
+    "yield",
+    "self",
+    "super",
+    "true",
+    "false",
+    "null",
+    "not",
+    "and",
+    "or",
+    "in",
+    "is",
+    "as",
+    "void",
+    "int",
+    "float",
+    "bool",
+    "String",
 ];
 
 // ---------------------------------------------------------------------------
@@ -212,12 +246,7 @@ impl CompletionEngine {
     }
 
     /// Adds methods and properties from a class (and optionally its ancestors).
-    fn add_class_members(
-        &self,
-        class_name: &str,
-        prefix: &str,
-        items: &mut Vec<CompletionItem>,
-    ) {
+    fn add_class_members(&self, class_name: &str, prefix: &str, items: &mut Vec<CompletionItem>) {
         let classes_to_check = if self.include_inherited {
             Self::inheritance_chain(class_name)
         } else {
@@ -258,9 +287,7 @@ impl CompletionEngine {
     fn add_keywords(&self, prefix: &str, items: &mut Vec<CompletionItem>) {
         for &kw in GDSCRIPT_KEYWORDS {
             if prefix.is_empty() || kw.starts_with(prefix) {
-                items.push(
-                    CompletionItem::new(kw, CompletionKind::Keyword).with_score(30),
-                );
+                items.push(CompletionItem::new(kw, CompletionKind::Keyword).with_score(30));
             }
         }
     }
@@ -291,9 +318,7 @@ impl CompletionEngine {
     ) {
         for var in locals {
             if prefix.is_empty() || var.to_lowercase().starts_with(prefix) {
-                items.push(
-                    CompletionItem::new(var, CompletionKind::Variable).with_score(110),
-                );
+                items.push(CompletionItem::new(var, CompletionKind::Variable).with_score(110));
             }
         }
     }
@@ -328,7 +353,7 @@ impl CompletionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gdobject::class_db::{register_class, ClassRegistration, get_class_info};
+    use gdobject::class_db::{get_class_info, register_class, ClassRegistration};
 
     // Helper: register a small class hierarchy for testing.
     // NOTE: ClassDB is global+static, so tests share state.
@@ -339,7 +364,10 @@ mod tests {
 
         register_class(
             ClassRegistration::new(&base)
-                .property(gdobject::class_db::PropertyInfo::new("visible", gdvariant::Variant::Bool(true)))
+                .property(gdobject::class_db::PropertyInfo::new(
+                    "visible",
+                    gdvariant::Variant::Bool(true),
+                ))
                 .method(gdobject::class_db::MethodInfo::new("_ready", 0))
                 .method(gdobject::class_db::MethodInfo::new("_process", 1))
                 .method(gdobject::class_db::MethodInfo::new("queue_free", 0)),
@@ -348,7 +376,10 @@ mod tests {
         register_class(
             ClassRegistration::new(&child)
                 .parent(&base)
-                .property(gdobject::class_db::PropertyInfo::new("speed", gdvariant::Variant::Float(100.0)))
+                .property(gdobject::class_db::PropertyInfo::new(
+                    "speed",
+                    gdvariant::Variant::Float(100.0),
+                ))
                 .method(gdobject::class_db::MethodInfo::new("move_and_slide", 0))
                 .method(gdobject::class_db::MethodInfo::new("get_velocity", 0)),
         );
@@ -376,8 +407,7 @@ mod tests {
 
     #[test]
     fn item_with_docs() {
-        let item = CompletionItem::new("x", CompletionKind::Class)
-            .with_docs("A class.");
+        let item = CompletionItem::new("x", CompletionKind::Class).with_docs("A class.");
         assert_eq!(item.documentation.as_deref(), Some("A class."));
     }
 
@@ -400,8 +430,8 @@ mod tests {
 
     #[test]
     fn context_with_locals() {
-        let ctx = CompletionContext::bare("Node", "")
-            .with_locals(vec!["player".into(), "enemy".into()]);
+        let ctx =
+            CompletionContext::bare("Node", "").with_locals(vec!["player".into(), "enemy".into()]);
         assert_eq!(ctx.local_variables.len(), 2);
     }
 
@@ -428,9 +458,18 @@ mod tests {
         let engine = CompletionEngine::new();
         let ctx = CompletionContext::bare("UnknownClass_KW", "va");
         let items = engine.complete(&ctx);
-        let kw_items: Vec<_> = items.iter().filter(|i| i.kind == CompletionKind::Keyword).collect();
-        assert!(kw_items.iter().any(|i| i.label == "var"), "should suggest 'var'");
-        assert!(!kw_items.iter().any(|i| i.label == "func"), "'func' doesn't start with 'va'");
+        let kw_items: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == CompletionKind::Keyword)
+            .collect();
+        assert!(
+            kw_items.iter().any(|i| i.label == "var"),
+            "should suggest 'var'"
+        );
+        assert!(
+            !kw_items.iter().any(|i| i.label == "func"),
+            "'func' doesn't start with 'va'"
+        );
     }
 
     #[test]
@@ -438,7 +477,9 @@ mod tests {
         let engine = CompletionEngine::new();
         let ctx = CompletionContext::bare("X_KW2", "re");
         let items = engine.complete(&ctx);
-        assert!(items.iter().any(|i| i.label == "return" && i.kind == CompletionKind::Keyword));
+        assert!(items
+            .iter()
+            .any(|i| i.label == "return" && i.kind == CompletionKind::Keyword));
     }
 
     #[test]
@@ -446,8 +487,14 @@ mod tests {
         let engine = CompletionEngine::new();
         let ctx = CompletionContext::dot_access("X_DOT", "X_DOT", "va");
         let items = engine.complete(&ctx);
-        let kw_items: Vec<_> = items.iter().filter(|i| i.kind == CompletionKind::Keyword).collect();
-        assert!(kw_items.is_empty(), "dot completion should not include keywords");
+        let kw_items: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == CompletionKind::Keyword)
+            .collect();
+        assert!(
+            kw_items.is_empty(),
+            "dot completion should not include keywords"
+        );
     }
 
     // -- Class member completion --
@@ -459,7 +506,9 @@ mod tests {
         let ctx = CompletionContext::bare("MC_Child", "mov");
         let items = engine.complete(&ctx);
         assert!(
-            items.iter().any(|i| i.label == "move_and_slide" && i.kind == CompletionKind::Method),
+            items
+                .iter()
+                .any(|i| i.label == "move_and_slide" && i.kind == CompletionKind::Method),
             "should suggest move_and_slide"
         );
     }
@@ -496,7 +545,9 @@ mod tests {
         let ctx = CompletionContext::bare("PROP_Child", "sp");
         let items = engine.complete(&ctx);
         assert!(
-            items.iter().any(|i| i.label == "speed" && i.kind == CompletionKind::Property),
+            items
+                .iter()
+                .any(|i| i.label == "speed" && i.kind == CompletionKind::Property),
             "should suggest 'speed' property"
         );
     }
@@ -508,7 +559,9 @@ mod tests {
         let ctx = CompletionContext::bare("IP_Child", "vis");
         let items = engine.complete(&ctx);
         assert!(
-            items.iter().any(|i| i.label == "visible" && i.kind == CompletionKind::Property),
+            items
+                .iter()
+                .any(|i| i.label == "visible" && i.kind == CompletionKind::Property),
             "should suggest inherited 'visible'"
         );
     }
@@ -541,10 +594,16 @@ mod tests {
     #[test]
     fn local_variables_appear() {
         let engine = CompletionEngine::new();
-        let ctx = CompletionContext::bare("X_LOC", "pl")
-            .with_locals(vec!["player".into(), "platform".into(), "enemy".into()]);
+        let ctx = CompletionContext::bare("X_LOC", "pl").with_locals(vec![
+            "player".into(),
+            "platform".into(),
+            "enemy".into(),
+        ]);
         let items = engine.complete(&ctx);
-        let var_items: Vec<_> = items.iter().filter(|i| i.kind == CompletionKind::Variable).collect();
+        let var_items: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == CompletionKind::Variable)
+            .collect();
         assert_eq!(var_items.len(), 2);
         assert!(var_items.iter().any(|i| i.label == "player"));
         assert!(var_items.iter().any(|i| i.label == "platform"));
@@ -553,8 +612,7 @@ mod tests {
     #[test]
     fn local_variables_have_highest_score() {
         let engine = CompletionEngine::new();
-        let ctx = CompletionContext::bare("X_SCORE", "p")
-            .with_locals(vec!["player".into()]);
+        let ctx = CompletionContext::bare("X_SCORE", "p").with_locals(vec!["player".into()]);
         let items = engine.complete(&ctx);
         // Locals should score 110, above methods (100) and keywords (30).
         let local = items.iter().find(|i| i.label == "player").unwrap();
@@ -566,12 +624,14 @@ mod tests {
     #[test]
     fn results_sorted_by_score_then_alpha() {
         let engine = CompletionEngine::new();
-        let ctx = CompletionContext::bare("X_SORT", "")
-            .with_locals(vec!["alpha".into(), "beta".into()]);
+        let ctx =
+            CompletionContext::bare("X_SORT", "").with_locals(vec!["alpha".into(), "beta".into()]);
         let items = engine.complete(&ctx);
         // All locals (score 110) should come before keywords (score 30).
         let first_keyword_idx = items.iter().position(|i| i.kind == CompletionKind::Keyword);
-        let last_local_idx = items.iter().rposition(|i| i.kind == CompletionKind::Variable);
+        let last_local_idx = items
+            .iter()
+            .rposition(|i| i.kind == CompletionKind::Variable);
         if let (Some(kw), Some(loc)) = (first_keyword_idx, last_local_idx) {
             assert!(loc < kw, "locals should appear before keywords");
         }
@@ -593,8 +653,14 @@ mod tests {
         let engine = CompletionEngine::new();
         let ctx = CompletionContext::bare("X_CN", "cn_");
         let items = engine.complete(&ctx);
-        let class_items: Vec<_> = items.iter().filter(|i| i.kind == CompletionKind::Class).collect();
-        assert!(class_items.len() >= 2, "should suggest CN_Base and CN_Child");
+        let class_items: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == CompletionKind::Class)
+            .collect();
+        assert!(
+            class_items.len() >= 2,
+            "should suggest CN_Base and CN_Child"
+        );
     }
 
     #[test]
@@ -603,7 +669,10 @@ mod tests {
         let ctx = CompletionContext::bare("X_NOCLSS", "");
         let items = engine.complete(&ctx);
         // With empty prefix, class names are suppressed to avoid noise.
-        let class_items: Vec<_> = items.iter().filter(|i| i.kind == CompletionKind::Class).collect();
+        let class_items: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == CompletionKind::Class)
+            .collect();
         assert!(class_items.is_empty());
     }
 

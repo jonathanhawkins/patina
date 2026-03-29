@@ -14,10 +14,7 @@ const FUZZ_MODULES: &[(&str, &str)] = &[
         "gdcore proptest (external)",
         "crates/gdcore/tests/property_based_math_test.rs",
     ),
-    (
-        "gdresource fuzz_res",
-        "crates/gdresource/src/fuzz_res.rs",
-    ),
+    ("gdresource fuzz_res", "crates/gdresource/src/fuzz_res.rs"),
     (
         "gdscript-interop fuzz_gdscript",
         "crates/gdscript-interop/src/fuzz_gdscript.rs",
@@ -34,11 +31,11 @@ const FUZZ_MODULES: &[(&str, &str)] = &[
 
 /// Minimum expected test count per module (conservative lower bound).
 const MIN_TESTS_PER_MODULE: &[(&str, usize)] = &[
-    ("gdcore property_testing", 30),     // 39+ inline tests
-    ("gdcore proptest (external)", 25),   // 30+ proptest cases
-    ("gdresource fuzz_res", 20),          // 28+ fuzz tests
-    ("gdscript-interop fuzz_gdscript", 25), // 30+ fuzz tests
-    ("gdvariant fuzz_variant", 15),       // 20+ fuzz tests
+    ("gdcore property_testing", 30),            // 39+ inline tests
+    ("gdcore proptest (external)", 25),         // 30+ proptest cases
+    ("gdresource fuzz_res", 20),                // 28+ fuzz tests
+    ("gdscript-interop fuzz_gdscript", 25),     // 30+ fuzz tests
+    ("gdvariant fuzz_variant", 15),             // 20+ fuzz tests
     ("gdobject+gdplatform property tests", 15), // 20+ proptest cases
 ];
 
@@ -142,7 +139,13 @@ fn subsystem_coverage_breadth() {
         })
         .collect();
 
-    for expected in &["math", "resource-loader", "scripting", "variant", "object-system"] {
+    for expected in &[
+        "math",
+        "resource-loader",
+        "scripting",
+        "variant",
+        "object-system",
+    ] {
         assert!(
             subsystems.contains(expected),
             "Missing fuzz/property coverage for subsystem: {}",

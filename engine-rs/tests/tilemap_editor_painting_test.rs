@@ -316,8 +316,11 @@ fn paint_line_store_horizontal() {
     let (mut store, nid) = make_store_with_layers();
     let td = TileData::new(1);
     let painted = paint_line_store(
-        &mut store, nid, 0,
-        Vector2i::new(0, 0), Vector2i::new(3, 0),
+        &mut store,
+        nid,
+        0,
+        Vector2i::new(0, 0),
+        Vector2i::new(3, 0),
         td,
     );
     assert_eq!(painted.len(), 4);
@@ -331,8 +334,11 @@ fn paint_rect_store_basic() {
     let (mut store, nid) = make_store_with_layers();
     let td = TileData::new(2);
     let painted = paint_rect_store(
-        &mut store, nid, 0,
-        Vector2i::new(0, 0), Vector2i::new(2, 2),
+        &mut store,
+        nid,
+        0,
+        Vector2i::new(0, 0),
+        Vector2i::new(2, 2),
         td,
     );
     assert_eq!(painted.len(), 9);
@@ -344,7 +350,14 @@ fn paint_rect_store_basic() {
 fn erase_line_store_removes_cells() {
     let (mut store, nid) = make_store_with_layers();
     let td = TileData::new(1);
-    paint_line_store(&mut store, nid, 0, Vector2i::new(0, 0), Vector2i::new(4, 0), td);
+    paint_line_store(
+        &mut store,
+        nid,
+        0,
+        Vector2i::new(0, 0),
+        Vector2i::new(4, 0),
+        td,
+    );
     let erased = erase_line_store(&mut store, nid, 0, Vector2i::new(1, 0), Vector2i::new(3, 0));
     assert_eq!(erased.len(), 3);
     assert!(get_cell(&store, nid, 0, Vector2i::new(0, 0)).is_some());
@@ -356,7 +369,14 @@ fn erase_line_store_removes_cells() {
 fn erase_rect_store_removes_cells() {
     let (mut store, nid) = make_store_with_layers();
     let td = TileData::new(3);
-    paint_rect_store(&mut store, nid, 0, Vector2i::new(0, 0), Vector2i::new(4, 4), td);
+    paint_rect_store(
+        &mut store,
+        nid,
+        0,
+        Vector2i::new(0, 0),
+        Vector2i::new(4, 4),
+        td,
+    );
     assert_eq!(get_used_cells(&store, nid, 0).len(), 25);
     let erased = erase_rect_store(&mut store, nid, 0, Vector2i::new(1, 1), Vector2i::new(3, 3));
     assert_eq!(erased.len(), 9);
@@ -366,11 +386,35 @@ fn erase_rect_store_removes_cells() {
 #[test]
 fn paint_store_different_layers_independent() {
     let (mut store, nid) = make_store_with_layers();
-    paint_line_store(&mut store, nid, 0, Vector2i::new(0, 0), Vector2i::new(2, 0), TileData::new(1));
-    paint_line_store(&mut store, nid, 1, Vector2i::new(0, 0), Vector2i::new(2, 0), TileData::new(2));
+    paint_line_store(
+        &mut store,
+        nid,
+        0,
+        Vector2i::new(0, 0),
+        Vector2i::new(2, 0),
+        TileData::new(1),
+    );
+    paint_line_store(
+        &mut store,
+        nid,
+        1,
+        Vector2i::new(0, 0),
+        Vector2i::new(2, 0),
+        TileData::new(2),
+    );
 
-    assert_eq!(get_cell(&store, nid, 0, Vector2i::new(0, 0)).unwrap().source_id, 1);
-    assert_eq!(get_cell(&store, nid, 1, Vector2i::new(0, 0)).unwrap().source_id, 2);
+    assert_eq!(
+        get_cell(&store, nid, 0, Vector2i::new(0, 0))
+            .unwrap()
+            .source_id,
+        1
+    );
+    assert_eq!(
+        get_cell(&store, nid, 1, Vector2i::new(0, 0))
+            .unwrap()
+            .source_id,
+        2
+    );
 
     erase_line_store(&mut store, nid, 0, Vector2i::new(0, 0), Vector2i::new(2, 0));
     assert!(get_cell(&store, nid, 0, Vector2i::new(0, 0)).is_none());
@@ -385,8 +429,11 @@ fn paint_store_different_layers_independent() {
 fn paint_line_store_invalid_layer() {
     let (mut store, nid) = make_store_with_layers();
     let painted = paint_line_store(
-        &mut store, nid, 99,
-        Vector2i::new(0, 0), Vector2i::new(3, 0),
+        &mut store,
+        nid,
+        99,
+        Vector2i::new(0, 0),
+        Vector2i::new(3, 0),
         TileData::new(1),
     );
     assert!(painted.is_empty());

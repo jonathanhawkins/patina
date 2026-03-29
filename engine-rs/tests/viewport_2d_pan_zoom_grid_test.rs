@@ -109,14 +109,20 @@ fn viewport_zoom_clamps_to_valid_range() {
     let resp = http_get(port, "/api/viewport/zoom_pan");
     let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
     let zoom = v["zoom"].as_f64().unwrap();
-    assert!(zoom >= 0.1, "Zoom should be clamped to at least 0.1, got {zoom}");
+    assert!(
+        zoom >= 0.1,
+        "Zoom should be clamped to at least 0.1, got {zoom}"
+    );
 
     // Set zoom above maximum (16.0)
     http_post(port, "/api/viewport/zoom", r#"{"zoom":100.0}"#);
     let resp = http_get(port, "/api/viewport/zoom_pan");
     let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
     let zoom = v["zoom"].as_f64().unwrap();
-    assert!(zoom <= 16.0, "Zoom should be clamped to at most 16.0, got {zoom}");
+    assert!(
+        zoom <= 16.0,
+        "Zoom should be clamped to at most 16.0, got {zoom}"
+    );
 
     handle.stop();
 }
@@ -167,7 +173,10 @@ fn viewport_grid_settings_default() {
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(v["grid_visible"], true, "Grid should be visible by default");
-    assert_eq!(v["grid_snap_enabled"], false, "Snap should be off by default");
+    assert_eq!(
+        v["grid_snap_enabled"], false,
+        "Snap should be off by default"
+    );
     assert_eq!(v["grid_snap_size"], 8, "Default snap size should be 8");
     handle.stop();
 }
@@ -185,9 +194,18 @@ fn viewport_grid_settings_update() {
 
     let resp = http_get(port, "/api/settings");
     let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
-    assert_eq!(v["grid_visible"], false, "Grid should be hidden after update");
-    assert_eq!(v["grid_snap_enabled"], true, "Snap should be enabled after update");
-    assert_eq!(v["grid_snap_size"], 16, "Snap size should be 16 after update");
+    assert_eq!(
+        v["grid_visible"], false,
+        "Grid should be hidden after update"
+    );
+    assert_eq!(
+        v["grid_snap_enabled"], true,
+        "Snap should be enabled after update"
+    );
+    assert_eq!(
+        v["grid_snap_size"], 16,
+        "Snap size should be 16 after update"
+    );
     handle.stop();
 }
 
@@ -210,7 +228,10 @@ fn render_scene_default_produces_nonblank_framebuffer() {
     // Grid lines and nodes should make it non-uniform.
     let first_pixel = fb.pixels[0];
     let has_variation = fb.pixels.iter().any(|&px| px != first_pixel);
-    assert!(has_variation, "Rendered scene should not be uniform — grid and nodes expected");
+    assert!(
+        has_variation,
+        "Rendered scene should not be uniform — grid and nodes expected"
+    );
 }
 
 #[test]
@@ -225,7 +246,10 @@ fn render_scene_with_zoom_changes_output() {
     let fb_4x = scene_renderer::render_scene_with_zoom_pan(&tree, None, 200, 200, 4.0, (0.0, 0.0));
 
     // Different zoom levels should produce different pixel output.
-    assert_ne!(fb_1x.pixels, fb_4x.pixels, "Zoom 1x and 4x should produce different output");
+    assert_ne!(
+        fb_1x.pixels, fb_4x.pixels,
+        "Zoom 1x and 4x should produce different output"
+    );
 }
 
 #[test]
@@ -236,10 +260,15 @@ fn render_scene_with_pan_changes_output() {
     node.set_property("position", Variant::Vector2(Vector2::new(50.0, 50.0)));
     tree.add_child(root, node).unwrap();
 
-    let fb_origin = scene_renderer::render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
-    let fb_panned = scene_renderer::render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (100.0, 100.0));
+    let fb_origin =
+        scene_renderer::render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
+    let fb_panned =
+        scene_renderer::render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (100.0, 100.0));
 
-    assert_ne!(fb_origin.pixels, fb_panned.pixels, "Pan should shift the rendered output");
+    assert_ne!(
+        fb_origin.pixels, fb_panned.pixels,
+        "Pan should shift the rendered output"
+    );
 }
 
 #[test]
@@ -251,8 +280,10 @@ fn pixel_to_scene_with_zoom_pan_round_trip() {
     let pan = (50.0, -30.0);
 
     // Convert pixel to scene, then verify the inverse relationship holds.
-    let scene_a = scene_renderer::pixel_to_scene_with_zoom_pan(&tree, w, h, zoom, pan, 200.0, 200.0);
-    let scene_b = scene_renderer::pixel_to_scene_with_zoom_pan(&tree, w, h, zoom, pan, 210.0, 200.0);
+    let scene_a =
+        scene_renderer::pixel_to_scene_with_zoom_pan(&tree, w, h, zoom, pan, 200.0, 200.0);
+    let scene_b =
+        scene_renderer::pixel_to_scene_with_zoom_pan(&tree, w, h, zoom, pan, 210.0, 200.0);
 
     // 10 pixels at zoom=2 should be 5 scene units.
     let dx = (scene_b.x - scene_a.x).abs();
@@ -271,11 +302,20 @@ fn hit_test_with_zoom_pan_finds_node_at_zoom() {
     tree.add_child(root, node).unwrap();
 
     // At default zoom, node should be hittable.
-    let result = scene_renderer::hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
+    let result =
+        scene_renderer::hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
     assert!(result.is_some(), "Should hit the node at default zoom");
 
     // After large pan, the same click position should miss.
-    let result = scene_renderer::hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (1000.0, 1000.0), 100.0, 100.0);
+    let result = scene_renderer::hit_test_with_zoom_pan(
+        &tree,
+        200,
+        200,
+        1.0,
+        (1000.0, 1000.0),
+        100.0,
+        100.0,
+    );
     assert!(result.is_none(), "Should miss after large pan offset");
 }
 
@@ -293,8 +333,14 @@ fn compute_scene_bounds_covers_all_nodes() {
     tree.add_child(root, b).unwrap();
 
     let bounds = scene_renderer::compute_scene_bounds(&tree);
-    assert!(bounds.position.x <= -100.0, "Bounds should include leftmost node");
-    assert!(bounds.position.y <= -50.0, "Bounds should include topmost node");
+    assert!(
+        bounds.position.x <= -100.0,
+        "Bounds should include leftmost node"
+    );
+    assert!(
+        bounds.position.y <= -50.0,
+        "Bounds should include topmost node"
+    );
     let right = bounds.position.x + bounds.size.x;
     let bottom = bounds.position.y + bounds.size.y;
     assert!(right >= 200.0, "Bounds should include rightmost node");
@@ -322,7 +368,10 @@ fn viewport_click_selects_node_through_api() {
         .iter()
         .find(|c| c["name"] == "Player")
         .and_then(|c| c["id"].as_u64());
-    assert!(player_id.is_some(), "Player node should exist in scene tree");
+    assert!(
+        player_id.is_some(),
+        "Player node should exist in scene tree"
+    );
 
     // Select the player via API.
     let select_body = format!(r#"{{"node_id":{}}}"#, player_id.unwrap());

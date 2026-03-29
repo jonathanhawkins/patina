@@ -12,12 +12,12 @@
 //! 9. High-DPI workflow — DPI changes update scale factor
 //! 10. Full lifecycle — create, configure, run frames, quit
 
+use gdplatform::os::Platform;
+use gdplatform::platform_targets::{self, Architecture};
+use gdplatform::window::{WindowConfig, WindowEvent};
 use gdplatform::windows::{
     DpiAwarenessMode, TaskbarProgressState, WindowsDisplayInfo, WindowsPlatformLayer, WindowsTheme,
 };
-use gdplatform::window::{WindowConfig, WindowEvent};
-use gdplatform::platform_targets::{self, Architecture};
-use gdplatform::os::Platform;
 
 // ===========================================================================
 // 1. Creation
@@ -90,7 +90,10 @@ fn dpi_awareness_mode_names() {
 
 #[test]
 fn recommended_dpi_awareness() {
-    assert_eq!(DpiAwarenessMode::recommended(), DpiAwarenessMode::PerMonitorV2);
+    assert_eq!(
+        DpiAwarenessMode::recommended(),
+        DpiAwarenessMode::PerMonitorV2
+    );
 }
 
 // ===========================================================================
@@ -228,7 +231,10 @@ fn taskbar_progress_paused_state() {
 fn taskbar_progress_indeterminate() {
     let mut layer = WindowsPlatformLayer::headless("App");
     layer.set_taskbar_progress(TaskbarProgressState::Indeterminate, 0);
-    assert_eq!(layer.taskbar_progress_state(), TaskbarProgressState::Indeterminate);
+    assert_eq!(
+        layer.taskbar_progress_state(),
+        TaskbarProgressState::Indeterminate
+    );
 }
 
 #[test]
@@ -346,15 +352,16 @@ fn backend_frame_counting() {
 #[test]
 fn windows_targets_exist_in_desktop_targets() {
     let windows = platform_targets::targets_for_platform(Platform::Windows);
-    assert!(!windows.is_empty(), "must define at least one Windows target");
+    assert!(
+        !windows.is_empty(),
+        "must define at least one Windows target"
+    );
 }
 
 #[test]
 fn windows_x86_64_target_exists() {
     let windows = platform_targets::targets_for_platform(Platform::Windows);
-    let x64 = windows
-        .iter()
-        .find(|t| t.arch == Architecture::X86_64);
+    let x64 = windows.iter().find(|t| t.arch == Architecture::X86_64);
     assert!(x64.is_some(), "Windows x86_64 target must exist");
     let t = x64.unwrap();
     assert_eq!(t.rust_triple, "x86_64-pc-windows-msvc");
@@ -366,9 +373,7 @@ fn windows_x86_64_target_exists() {
 #[test]
 fn windows_aarch64_target_exists() {
     let windows = platform_targets::targets_for_platform(Platform::Windows);
-    let arm = windows
-        .iter()
-        .find(|t| t.arch == Architecture::Aarch64);
+    let arm = windows.iter().find(|t| t.arch == Architecture::Aarch64);
     assert!(arm.is_some(), "Windows aarch64 target must exist");
     assert_eq!(arm.unwrap().rust_triple, "aarch64-pc-windows-msvc");
 }

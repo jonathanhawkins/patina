@@ -235,8 +235,12 @@ fn build_deep_hierarchy_scene() -> SceneTree {
 /// Since gdeditor::scene_renderer may not be directly accessible from integration
 /// tests (it's a private module), we use a software-rendering approach that
 /// exercises the same code paths.
-fn render_test_scene(tree: &SceneTree, selected: Option<gdscene::node::NodeId>,
-                     width: u32, height: u32) -> FrameBuffer {
+fn render_test_scene(
+    tree: &SceneTree,
+    selected: Option<gdscene::node::NodeId>,
+    width: u32,
+    height: u32,
+) -> FrameBuffer {
     render_test_scene_with_zoom_pan(tree, selected, width, height, 1.0, (0.0, 0.0))
 }
 
@@ -346,7 +350,12 @@ fn render_test_scene_with_zoom_pan(
 
         // Selection highlight
         if is_selected {
-            draw::fill_circle(&mut fb, Vector2::new(pos.x, pos.y - 12.0), 4.0, color_selected);
+            draw::fill_circle(
+                &mut fb,
+                Vector2::new(pos.x, pos.y - 12.0),
+                4.0,
+                color_selected,
+            );
         }
     }
 
@@ -365,7 +374,10 @@ fn deterministic_empty_scene() {
 
     let snap1 = GoldenSnapshot::from_framebuffer(&fb1);
     let snap2 = GoldenSnapshot::from_framebuffer(&fb2);
-    assert!(snap1.matches(&snap2), "empty scene should render identically each time");
+    assert!(
+        snap1.matches(&snap2),
+        "empty scene should render identically each time"
+    );
     assert_eq!(error_rate(&fb1, &fb2), 0.0);
 }
 
@@ -441,8 +453,16 @@ fn node2d_scene_has_amber_pixels() {
     let (tree, _) = build_single_node2d_scene();
     let fb = render_test_scene(&tree, None, VP_WIDTH, VP_HEIGHT);
 
-    let amber_count = fb.pixels.iter().filter(|p| p.r > 0.9 && p.g > 0.6 && p.b < 0.2).count();
-    assert!(amber_count > 10, "Node2D should render amber pixels, got {}", amber_count);
+    let amber_count = fb
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.9 && p.g > 0.6 && p.b < 0.2)
+        .count();
+    assert!(
+        amber_count > 10,
+        "Node2D should render amber pixels, got {}",
+        amber_count
+    );
 }
 
 #[test]
@@ -451,7 +471,11 @@ fn multi_node_scene_has_distinct_colors() {
     let fb = render_test_scene(&tree, None, VP_WIDTH, VP_HEIGHT);
 
     // Node2D → amber
-    let amber = fb.pixels.iter().filter(|p| p.r > 0.9 && p.g > 0.6 && p.b < 0.2).count();
+    let amber = fb
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.9 && p.g > 0.6 && p.b < 0.2)
+        .count();
     // Sprite2D → blue
     let blue = fb.pixels.iter().filter(|p| p.b > 0.8 && p.r < 0.5).count();
     // Camera2D → green
@@ -467,8 +491,16 @@ fn ui_scene_has_purple_control_rects() {
     let tree = build_ui_scene();
     let fb = render_test_scene(&tree, None, VP_WIDTH, VP_HEIGHT);
 
-    let purple = fb.pixels.iter().filter(|p| p.r > 0.5 && p.b > 0.7 && p.g < 0.5).count();
-    assert!(purple > 50, "UI scene should have substantial purple control pixels, got {}", purple);
+    let purple = fb
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.5 && p.b > 0.7 && p.g < 0.5)
+        .count();
+    assert!(
+        purple > 50,
+        "UI scene should have substantial purple control pixels, got {}",
+        purple
+    );
 }
 
 #[test]
@@ -485,7 +517,9 @@ fn physics_scene_has_body_representations() {
     );
 
     // Should have multiple distinct color buckets (different body types)
-    let significant_buckets = snap.color_histogram.iter()
+    let significant_buckets = snap
+        .color_histogram
+        .iter()
         .filter(|(_, &count)| count > 5)
         .count();
     assert!(
@@ -514,12 +548,21 @@ fn selection_changes_render_output() {
     );
 
     // Selected version should have more amber/yellow pixels (selection dot)
-    let amber_none = fb_none.pixels.iter().filter(|p| p.r > 0.9 && p.g > 0.7).count();
-    let amber_sel = fb_sel.pixels.iter().filter(|p| p.r > 0.9 && p.g > 0.7).count();
+    let amber_none = fb_none
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.9 && p.g > 0.7)
+        .count();
+    let amber_sel = fb_sel
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.9 && p.g > 0.7)
+        .count();
     assert!(
         amber_sel > amber_none,
         "selected render should have more highlight pixels: {} vs {}",
-        amber_sel, amber_none
+        amber_sel,
+        amber_none
     );
 }
 
@@ -545,18 +588,22 @@ fn zoom_changes_render_output() {
     assert!(
         snap_2x.non_bg_pixels > snap_1x.non_bg_pixels,
         "2x zoom should have more non-bg pixels: {} vs {}",
-        snap_2x.non_bg_pixels, snap_1x.non_bg_pixels
+        snap_2x.non_bg_pixels,
+        snap_1x.non_bg_pixels
     );
 }
 
 #[test]
 fn pan_changes_render_output() {
     let tree = build_multi_node_scene();
-    let fb_origin = render_test_scene_with_zoom_pan(&tree, None, VP_WIDTH, VP_HEIGHT, 1.0, (0.0, 0.0));
-    let fb_panned = render_test_scene_with_zoom_pan(&tree, None, VP_WIDTH, VP_HEIGHT, 1.0, (50.0, 50.0));
+    let fb_origin =
+        render_test_scene_with_zoom_pan(&tree, None, VP_WIDTH, VP_HEIGHT, 1.0, (0.0, 0.0));
+    let fb_panned =
+        render_test_scene_with_zoom_pan(&tree, None, VP_WIDTH, VP_HEIGHT, 1.0, (50.0, 50.0));
 
     assert!(
-        !GoldenSnapshot::from_framebuffer(&fb_origin).matches(&GoldenSnapshot::from_framebuffer(&fb_panned)),
+        !GoldenSnapshot::from_framebuffer(&fb_origin)
+            .matches(&GoldenSnapshot::from_framebuffer(&fb_panned)),
         "pan should change rendered output"
     );
 }
@@ -565,7 +612,8 @@ fn pan_changes_render_output() {
 fn zoom_out_shows_smaller_nodes() {
     let tree = build_multi_node_scene();
     let fb_1x = render_test_scene_with_zoom_pan(&tree, None, VP_WIDTH, VP_HEIGHT, 1.0, (0.0, 0.0));
-    let fb_half = render_test_scene_with_zoom_pan(&tree, None, VP_WIDTH, VP_HEIGHT, 0.5, (0.0, 0.0));
+    let fb_half =
+        render_test_scene_with_zoom_pan(&tree, None, VP_WIDTH, VP_HEIGHT, 0.5, (0.0, 0.0));
 
     let snap_1x = GoldenSnapshot::from_framebuffer(&fb_1x);
     let snap_half = GoldenSnapshot::from_framebuffer(&fb_half);
@@ -574,7 +622,8 @@ fn zoom_out_shows_smaller_nodes() {
     assert!(
         snap_half.non_bg_pixels < snap_1x.non_bg_pixels,
         "0.5x zoom should have fewer non-bg pixels: {} vs {}",
-        snap_half.non_bg_pixels, snap_1x.non_bg_pixels
+        snap_half.non_bg_pixels,
+        snap_1x.non_bg_pixels
     );
 }
 
@@ -626,7 +675,11 @@ fn deep_hierarchy_renders_all_nodes() {
     let fb = render_test_scene(&tree, None, VP_WIDTH, VP_HEIGHT);
 
     // Should have amber (Node2D), blue (Sprite2D), green (Camera2D)
-    let amber = fb.pixels.iter().filter(|p| p.r > 0.9 && p.g > 0.6 && p.b < 0.2).count();
+    let amber = fb
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.9 && p.g > 0.6 && p.b < 0.2)
+        .count();
     let blue = fb.pixels.iter().filter(|p| p.b > 0.8 && p.r < 0.5).count();
     let green = fb.pixels.iter().filter(|p| p.g > 0.8 && p.r < 0.3).count();
 
@@ -652,12 +705,24 @@ fn different_scenes_produce_different_output() {
     let snap_physics = GoldenSnapshot::from_framebuffer(&fb_physics);
 
     // Each scene should produce a unique hash
-    assert!(!snap_empty.matches(&snap_multi), "empty vs multi should differ");
+    assert!(
+        !snap_empty.matches(&snap_multi),
+        "empty vs multi should differ"
+    );
     assert!(!snap_empty.matches(&snap_ui), "empty vs ui should differ");
-    assert!(!snap_empty.matches(&snap_physics), "empty vs physics should differ");
+    assert!(
+        !snap_empty.matches(&snap_physics),
+        "empty vs physics should differ"
+    );
     assert!(!snap_multi.matches(&snap_ui), "multi vs ui should differ");
-    assert!(!snap_multi.matches(&snap_physics), "multi vs physics should differ");
-    assert!(!snap_ui.matches(&snap_physics), "ui vs physics should differ");
+    assert!(
+        !snap_multi.matches(&snap_physics),
+        "multi vs physics should differ"
+    );
+    assert!(
+        !snap_ui.matches(&snap_physics),
+        "ui vs physics should differ"
+    );
 }
 
 #[test]
@@ -707,7 +772,10 @@ fn diff_image_identical_is_all_grayscale() {
         assert!(
             max_diff < 0.01,
             "diff pixel {} should be grayscale: ({:.3}, {:.3}, {:.3})",
-            i, pixel.r, pixel.g, pixel.b
+            i,
+            pixel.r,
+            pixel.g,
+            pixel.b
         );
     }
 }
@@ -720,7 +788,11 @@ fn diff_image_different_has_red_highlights() {
     let diff = diff_image(&fb_none, &fb_sel);
 
     // Should have some red pixels where selection differs
-    let red_pixels = diff.pixels.iter().filter(|p| p.r > 0.5 && p.g < 0.1 && p.b < 0.1).count();
+    let red_pixels = diff
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.5 && p.g < 0.1 && p.b < 0.1)
+        .count();
     assert!(
         red_pixels > 0,
         "diff between unselected and selected should show red highlights"
@@ -736,7 +808,10 @@ fn error_rate_identical_is_zero() {
     let tree = build_multi_node_scene();
     let fb = render_test_scene(&tree, None, VP_WIDTH, VP_HEIGHT);
     let rate = error_rate(&fb, &fb);
-    assert_eq!(rate, 0.0, "identical framebuffers should have 0% error rate");
+    assert_eq!(
+        rate, 0.0,
+        "identical framebuffers should have 0% error rate"
+    );
 }
 
 #[test]
@@ -801,10 +876,15 @@ fn regression_node2d_renders_at_correct_position() {
                 }
             }
         }
-        if found_amber { break; }
+        if found_amber {
+            break;
+        }
     }
 
-    assert!(found_amber, "Node2D at (50,50) should render amber near viewport center");
+    assert!(
+        found_amber,
+        "Node2D at (50,50) should render amber near viewport center"
+    );
 }
 
 #[test]
@@ -839,7 +919,11 @@ fn regression_button_renders_sized_rect() {
     let fb = render_test_scene(&tree, None, VP_WIDTH, VP_HEIGHT);
 
     // Button renders as a purple control rect
-    let purple = fb.pixels.iter().filter(|p| p.r > 0.5 && p.b > 0.7 && p.g < 0.5).count();
+    let purple = fb
+        .pixels
+        .iter()
+        .filter(|p| p.r > 0.5 && p.b > 0.7 && p.g < 0.5)
+        .count();
     // 80x30 = 2400 pixels
     assert!(
         purple > 500,
@@ -860,6 +944,12 @@ fn regression_scene_content_invariant_across_sizes() {
     let snap_large = GoldenSnapshot::from_framebuffer(&fb_large);
 
     // Both should have non-trivial content
-    assert!(snap_small.non_bg_pixels > 10, "small viewport should have content");
-    assert!(snap_large.non_bg_pixels > 10, "large viewport should have content");
+    assert!(
+        snap_small.non_bg_pixels > 10,
+        "small viewport should have content"
+    );
+    assert!(
+        snap_large.non_bg_pixels > 10,
+        "large viewport should have content"
+    );
 }

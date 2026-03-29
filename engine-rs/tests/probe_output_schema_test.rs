@@ -152,7 +152,10 @@ fn signal_probe_schema() {
     validate_envelope(&probe_output);
     let data = &probe_output["data"];
     let events = data["ordering_events"].as_array().unwrap();
-    assert!(events.len() >= 3, "should have at least before_connect, after_connect, after_emit");
+    assert!(
+        events.len() >= 3,
+        "should have at least before_connect, after_connect, after_emit"
+    );
     let signals = data["signals"].as_array().unwrap();
     for sig in signals {
         assert!(sig["name"].is_string());
@@ -285,8 +288,14 @@ fn node_defaults_probe_schema() {
         assert!(def["name"].is_string(), "default must have string name");
         assert!(def["type"].is_number(), "default must have numeric type");
         assert!(def["usage"].is_number(), "default must have numeric usage");
-        assert!(def["value_string"].is_string(), "default must have value_string");
-        assert!(def["value_type"].is_number(), "default must have numeric value_type");
+        assert!(
+            def["value_string"].is_string(),
+            "default must have value_string"
+        );
+        assert!(
+            def["value_type"].is_number(),
+            "default must have numeric value_type"
+        );
     }
 }
 
@@ -350,8 +359,14 @@ fn resource_validation_probe_schema() {
 
     let checks = data["checks"].as_array().unwrap();
     for check in checks {
-        assert!(check["check"].is_string(), "each check must have a 'check' field");
-        assert!(check["pass"].is_boolean(), "each check must have a 'pass' field");
+        assert!(
+            check["check"].is_string(),
+            "each check must have a 'check' field"
+        );
+        assert!(
+            check["pass"].is_boolean(),
+            "each check must have a 'pass' field"
+        );
     }
 
     let props = data["properties"].as_array().unwrap();
@@ -391,13 +406,34 @@ fn resource_validation_probe_error_schema() {
 fn classdb_probe_covers_28_classes() {
     // The expanded classdb probe should cover these 28 classes.
     let expected_classes = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
     assert_eq!(expected_classes.len(), 28);
 
@@ -405,10 +441,7 @@ fn classdb_probe_covers_28_classes() {
     let mut sorted = expected_classes.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(
-        sorted.len(), 28,
-        "all 28 class names must be unique"
-    );
+    assert_eq!(sorted.len(), 28, "all 28 class names must be unique");
 }
 
 // ===========================================================================
@@ -419,13 +452,34 @@ fn classdb_probe_covers_28_classes() {
 fn node_defaults_probe_class_list_matches_classdb() {
     // Node defaults probe should cover the same expanded set.
     let defaults_classes = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "CPUParticles2D",
-        "AnimatedSprite2D", "AudioStreamPlayer", "CanvasLayer",
-        "ColorRect", "HBoxContainer", "VBoxContainer", "LineEdit",
-        "Panel", "RayCast2D", "TextureRect", "TileMapLayer",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "LineEdit",
+        "Panel",
+        "RayCast2D",
+        "TextureRect",
+        "TileMapLayer",
     ];
     assert_eq!(defaults_classes.len(), 28);
 }
@@ -457,7 +511,11 @@ fn resource_fixture_set_covers_diverse_types() {
         ("res://fixtures/test_animation.tres", "Animation"),
         ("res://scenes/smoke_probe.tscn", "PackedScene"),
     ];
-    assert_eq!(fixtures.len(), 6, "should have 6 resource fixtures for validation");
+    assert_eq!(
+        fixtures.len(),
+        6,
+        "should have 6 resource fixtures for validation"
+    );
 
     // All paths should be unique.
     let paths: Vec<&str> = fixtures.iter().map(|(p, _)| *p).collect();
@@ -468,7 +526,10 @@ fn resource_fixture_set_covers_diverse_types() {
 
     // All expected classes should be non-empty.
     for (path, class) in &fixtures {
-        assert!(!class.is_empty(), "fixture {path} should have an expected class");
+        assert!(
+            !class.is_empty(),
+            "fixture {path} should have an expected class"
+        );
     }
 }
 
@@ -558,7 +619,11 @@ fn probe_capture_types_enumerated() {
         "resource_subtype",
         "api_surface",
     ];
-    assert_eq!(capture_types.len(), 15, "should have 15 distinct probe capture types");
+    assert_eq!(
+        capture_types.len(),
+        15,
+        "should have 15 distinct probe capture types"
+    );
 }
 
 // ===========================================================================
@@ -685,8 +750,14 @@ fn enum_constants_probe_schema() {
 
     let constants = data["constants"].as_array().unwrap();
     for constant in constants {
-        assert!(constant["name"].is_string(), "constant must have string name");
-        assert!(constant["value"].is_number(), "constant must have numeric value");
+        assert!(
+            constant["name"].is_string(),
+            "constant must have string name"
+        );
+        assert!(
+            constant["value"].is_number(),
+            "constant must have numeric value"
+        );
         // enum field can be null or string
     }
 
@@ -705,13 +776,34 @@ fn enum_constants_probe_schema() {
 fn enum_constants_probe_covers_28_classes() {
     // Enum constants probe should cover the same 28-class set.
     let expected_classes = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
     assert_eq!(expected_classes.len(), 28);
 }
@@ -749,10 +841,22 @@ fn classdb_method_flags_schema() {
 
     validate_envelope(&probe_output);
     let method = &probe_output["data"]["methods"][0];
-    assert!(method["flags"].is_number(), "method must have numeric flags");
-    assert!(method["is_virtual"].is_boolean(), "method must have is_virtual bool");
-    assert!(method["is_const"].is_boolean(), "method must have is_const bool");
-    assert!(method["is_vararg"].is_boolean(), "method must have is_vararg bool");
+    assert!(
+        method["flags"].is_number(),
+        "method must have numeric flags"
+    );
+    assert!(
+        method["is_virtual"].is_boolean(),
+        "method must have is_virtual bool"
+    );
+    assert!(
+        method["is_const"].is_boolean(),
+        "method must have is_const bool"
+    );
+    assert!(
+        method["is_vararg"].is_boolean(),
+        "method must have is_vararg bool"
+    );
 }
 
 // ===========================================================================
@@ -804,7 +908,10 @@ fn inheritance_chain_probe_schema() {
 
     let chain = data["chain"].as_array().unwrap();
     assert!(chain.len() >= 2, "chain must have at least class + Object");
-    assert_eq!(chain[0], "Sprite2D", "chain must start with the class itself");
+    assert_eq!(
+        chain[0], "Sprite2D",
+        "chain must start with the class itself"
+    );
     assert_eq!(
         chain.last().unwrap(),
         "Object",
@@ -819,13 +926,34 @@ fn inheritance_chain_probe_schema() {
 #[test]
 fn inheritance_chain_probe_covers_28_classes() {
     let expected_classes = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
     assert_eq!(expected_classes.len(), 28);
 }
@@ -856,11 +984,21 @@ fn inheritance_chain_probe_error_schema() {
 #[test]
 fn inheritance_chain_control_hierarchy() {
     // Verify expected hierarchy for a Control-derived class.
-    let chain = vec!["Button", "BaseButton", "Control", "CanvasItem", "Node", "Object"];
+    let chain = vec![
+        "Button",
+        "BaseButton",
+        "Control",
+        "CanvasItem",
+        "Node",
+        "Object",
+    ];
     assert!(chain.contains(&"Control"));
     assert!(chain.contains(&"CanvasItem"));
     assert!(chain.contains(&"Node"));
-    assert!(!chain.contains(&"Node2D"), "Control is not a Node2D subclass");
+    assert!(
+        !chain.contains(&"Node2D"),
+        "Control is not a Node2D subclass"
+    );
 }
 
 // ===========================================================================
@@ -871,16 +1009,31 @@ fn inheritance_chain_control_hierarchy() {
 fn inheritance_chain_physics_hierarchy() {
     // Verify expected hierarchy for physics body classes.
     let rigid_chain = vec![
-        "RigidBody2D", "PhysicsBody2D", "CollisionObject2D",
-        "Node2D", "CanvasItem", "Node", "Object"
+        "RigidBody2D",
+        "PhysicsBody2D",
+        "CollisionObject2D",
+        "Node2D",
+        "CanvasItem",
+        "Node",
+        "Object",
     ];
     let static_chain = vec![
-        "StaticBody2D", "PhysicsBody2D", "CollisionObject2D",
-        "Node2D", "CanvasItem", "Node", "Object"
+        "StaticBody2D",
+        "PhysicsBody2D",
+        "CollisionObject2D",
+        "Node2D",
+        "CanvasItem",
+        "Node",
+        "Object",
     ];
     let char_chain = vec![
-        "CharacterBody2D", "PhysicsBody2D", "CollisionObject2D",
-        "Node2D", "CanvasItem", "Node", "Object"
+        "CharacterBody2D",
+        "PhysicsBody2D",
+        "CollisionObject2D",
+        "Node2D",
+        "CanvasItem",
+        "Node",
+        "Object",
     ];
 
     // All physics bodies should share PhysicsBody2D ancestor.
@@ -912,7 +1065,11 @@ fn probe_capture_types_includes_inheritance() {
         "resource_subtype",
         "api_surface",
     ];
-    assert_eq!(capture_types.len(), 15, "should have 15 distinct probe capture types");
+    assert_eq!(
+        capture_types.len(),
+        15,
+        "should have 15 distinct probe capture types"
+    );
 }
 
 // ===========================================================================
@@ -961,7 +1118,10 @@ fn classdb_probe_method_flags_present_for_28_classes() {
     validate_envelope(&probe_output);
     let methods = probe_output["data"]["methods"].as_array().unwrap();
     for method in methods {
-        assert!(method["flags"].is_number(), "expanded classdb must include flags");
+        assert!(
+            method["flags"].is_number(),
+            "expanded classdb must include flags"
+        );
         assert!(method["is_virtual"].is_boolean());
         assert!(method["is_const"].is_boolean());
         assert!(method["is_vararg"].is_boolean());
@@ -1081,15 +1241,27 @@ fn method_defaults_probe_schema() {
     let methods = data["methods_with_defaults"].as_array().unwrap();
     for method in methods {
         assert!(method["name"].is_string(), "method must have string name");
-        assert!(method["arg_count"].is_number(), "method must have arg_count");
-        assert!(method["default_count"].is_number(), "method must have default_count");
+        assert!(
+            method["arg_count"].is_number(),
+            "method must have arg_count"
+        );
+        assert!(
+            method["default_count"].is_number(),
+            "method must have default_count"
+        );
         assert!(method["flags"].is_number(), "method must have flags");
 
         let defaults = method["defaults"].as_array().unwrap();
         for d in defaults {
             assert!(d["index"].is_number(), "default must have numeric index");
-            assert!(d["value_string"].is_string(), "default must have value_string");
-            assert!(d["value_type"].is_number(), "default must have numeric value_type");
+            assert!(
+                d["value_string"].is_string(),
+                "default must have value_string"
+            );
+            assert!(
+                d["value_type"].is_number(),
+                "default must have numeric value_type"
+            );
         }
     }
 }
@@ -1120,13 +1292,34 @@ fn method_defaults_probe_error_schema() {
 #[test]
 fn method_defaults_probe_covers_28_classes() {
     let expected_classes = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
     assert_eq!(expected_classes.len(), 28);
 }
@@ -1193,17 +1386,35 @@ fn virtual_methods_probe_schema() {
 
     let methods = data["virtual_methods"].as_array().unwrap();
     for method in methods {
-        assert!(method["name"].is_string(), "virtual method must have string name");
-        assert!(method["arg_count"].is_number(), "virtual method must have arg_count");
-        assert!(method["return_type"].is_number(), "virtual method must have return_type");
-        assert!(method["is_const"].is_boolean(), "virtual method must have is_const bool");
-        assert!(method["flags"].is_number(), "virtual method must have flags");
+        assert!(
+            method["name"].is_string(),
+            "virtual method must have string name"
+        );
+        assert!(
+            method["arg_count"].is_number(),
+            "virtual method must have arg_count"
+        );
+        assert!(
+            method["return_type"].is_number(),
+            "virtual method must have return_type"
+        );
+        assert!(
+            method["is_const"].is_boolean(),
+            "virtual method must have is_const bool"
+        );
+        assert!(
+            method["flags"].is_number(),
+            "virtual method must have flags"
+        );
 
         let args = method["args"].as_array().unwrap();
         for arg in args {
             assert!(arg["name"].is_string(), "arg must have string name");
             assert!(arg["type"].is_number(), "arg must have numeric type");
-            assert!(arg["class_name"].is_string(), "arg must have string class_name");
+            assert!(
+                arg["class_name"].is_string(),
+                "arg must have string class_name"
+            );
         }
     }
 }
@@ -1234,13 +1445,34 @@ fn virtual_methods_probe_error_schema() {
 #[test]
 fn virtual_methods_probe_covers_28_classes() {
     let expected_classes = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
     assert_eq!(expected_classes.len(), 28);
 }
@@ -1253,14 +1485,22 @@ fn virtual_methods_probe_covers_28_classes() {
 fn virtual_methods_known_contracts() {
     // These virtual methods MUST exist on the Node class in any valid probe output.
     let node_virtuals = [
-        "_ready", "_process", "_physics_process", "_input",
-        "_unhandled_input", "_enter_tree", "_exit_tree",
+        "_ready",
+        "_process",
+        "_physics_process",
+        "_input",
+        "_unhandled_input",
+        "_enter_tree",
+        "_exit_tree",
     ];
     // All names must start with underscore (Godot convention for virtuals).
     for name in &node_virtuals {
         assert!(name.starts_with('_'), "virtual methods should start with _");
     }
-    assert!(node_virtuals.len() >= 7, "Node should have at least 7 virtuals");
+    assert!(
+        node_virtuals.len() >= 7,
+        "Node should have at least 7 virtuals"
+    );
 }
 
 // ===========================================================================
@@ -1654,13 +1894,34 @@ fn api_surface_probe_covers_28_classes() {
     let content = std::fs::read_to_string(&probe_src).unwrap();
 
     let core_classes = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
 
     for class in &core_classes {
@@ -1712,7 +1973,9 @@ fn api_surface_probe_captures_accessor_pairs() {
     });
 
     validate_envelope(&probe_output);
-    let accessors = probe_output["data"]["property_accessors"].as_array().unwrap();
+    let accessors = probe_output["data"]["property_accessors"]
+        .as_array()
+        .unwrap();
     for acc in accessors {
         assert!(
             acc["has_getter"].is_boolean() && acc["has_setter"].is_boolean(),
@@ -1729,7 +1992,14 @@ fn api_surface_probe_captures_accessor_pairs() {
 fn api_surface_method_signature_schema_complete() {
     // Each method must carry enough type information for parity checking:
     // name, arg_count, args with types, return_type, flags, default_arg_count.
-    let required_fields = ["name", "arg_count", "return_type", "flags", "default_arg_count", "args"];
+    let required_fields = [
+        "name",
+        "arg_count",
+        "return_type",
+        "flags",
+        "default_arg_count",
+        "args",
+    ];
 
     let method = json!({
         "name": "move_and_slide",

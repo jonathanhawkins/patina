@@ -38,17 +38,59 @@ impl BoxMesh {
         // Face definitions: (normal, u_axis, v_axis, half-extents along u/v, offset along normal)
         let faces: [(Vector3, Vector3, Vector3, f32, f32, f32); 6] = [
             // +X
-            (Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, -1.0), Vector3::new(0.0, 1.0, 0.0), hz, hy, hx),
+            (
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                hz,
+                hy,
+                hx,
+            ),
             // -X
-            (Vector3::new(-1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0), hz, hy, hx),
+            (
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                hz,
+                hy,
+                hx,
+            ),
             // +Y
-            (Vector3::new(0.0, 1.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0), hx, hz, hy),
+            (
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                hx,
+                hz,
+                hy,
+            ),
             // -Y
-            (Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, -1.0), hx, hz, hy),
+            (
+                Vector3::new(0.0, -1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                hx,
+                hz,
+                hy,
+            ),
             // +Z
-            (Vector3::new(0.0, 0.0, 1.0), Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0), hx, hy, hz),
+            (
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                hx,
+                hy,
+                hz,
+            ),
             // -Z
-            (Vector3::new(0.0, 0.0, -1.0), Vector3::new(-1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0), hx, hy, hz),
+            (
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                hx,
+                hy,
+                hz,
+            ),
         ];
 
         for (normal, u_dir, v_dir, hu, hv, offset) in &faces {
@@ -164,7 +206,12 @@ impl Default for CapsuleMesh {
 impl CapsuleMesh {
     /// Generates the [`Mesh3D`] geometry for this capsule.
     pub fn generate(&self) -> Mesh3D {
-        Mesh3D::capsule(self.radius, self.height, self.radial_segments.max(3), self.rings.max(1))
+        Mesh3D::capsule(
+            self.radius,
+            self.height,
+            self.radial_segments.max(3),
+            self.rings.max(1),
+        )
     }
 }
 
@@ -448,10 +495,7 @@ mod tests {
         let mesh = CapsuleMesh::default().generate();
         for n in &mesh.normals {
             let len = n.length();
-            assert!(
-                (len - 1.0).abs() < 0.02,
-                "normal length {len} not unit"
-            );
+            assert!((len - 1.0).abs() < 0.02, "normal length {len} not unit");
         }
     }
 
@@ -489,7 +533,12 @@ mod tests {
             .vertices
             .iter()
             .zip(mesh.normals.iter())
-            .filter(|(v, n)| (v.y - 0.5).abs() < 1e-4 && (n.y - 1.0).abs() < 1e-4 && v.x.abs() < 1e-4 && v.z.abs() < 1e-4)
+            .filter(|(v, n)| {
+                (v.y - 0.5).abs() < 1e-4
+                    && (n.y - 1.0).abs() < 1e-4
+                    && v.x.abs() < 1e-4
+                    && v.z.abs() < 1e-4
+            })
             .count();
         assert_eq!(top_cap_centers, 0, "cone should have no top cap center");
     }
@@ -526,10 +575,7 @@ mod tests {
 
     #[test]
     fn plane_mesh_custom_size() {
-        let mesh = PlaneMesh {
-            size: [4.0, 6.0],
-        }
-        .generate();
+        let mesh = PlaneMesh { size: [4.0, 6.0] }.generate();
         for v in &mesh.vertices {
             assert!(v.x.abs() <= 2.0 + 1e-6);
             assert!(v.z.abs() <= 3.0 + 1e-6);
@@ -540,11 +586,26 @@ mod tests {
 
     #[test]
     fn primitive_type_class_names() {
-        assert_eq!(PrimitiveMeshType::Box(BoxMesh::default()).class_name(), "BoxMesh");
-        assert_eq!(PrimitiveMeshType::Sphere(SphereMesh::default()).class_name(), "SphereMesh");
-        assert_eq!(PrimitiveMeshType::Capsule(CapsuleMesh::default()).class_name(), "CapsuleMesh");
-        assert_eq!(PrimitiveMeshType::Cylinder(CylinderMesh::default()).class_name(), "CylinderMesh");
-        assert_eq!(PrimitiveMeshType::Plane(PlaneMesh::default()).class_name(), "PlaneMesh");
+        assert_eq!(
+            PrimitiveMeshType::Box(BoxMesh::default()).class_name(),
+            "BoxMesh"
+        );
+        assert_eq!(
+            PrimitiveMeshType::Sphere(SphereMesh::default()).class_name(),
+            "SphereMesh"
+        );
+        assert_eq!(
+            PrimitiveMeshType::Capsule(CapsuleMesh::default()).class_name(),
+            "CapsuleMesh"
+        );
+        assert_eq!(
+            PrimitiveMeshType::Cylinder(CylinderMesh::default()).class_name(),
+            "CylinderMesh"
+        );
+        assert_eq!(
+            PrimitiveMeshType::Plane(PlaneMesh::default()).class_name(),
+            "PlaneMesh"
+        );
     }
 
     #[test]
@@ -558,7 +619,11 @@ mod tests {
         ];
         for t in types {
             let mesh = t.generate();
-            assert!(!mesh.vertices.is_empty(), "empty mesh for {}", t.class_name());
+            assert!(
+                !mesh.vertices.is_empty(),
+                "empty mesh for {}",
+                t.class_name()
+            );
         }
     }
 
@@ -576,7 +641,11 @@ mod tests {
         let mut am = ArrayMesh::new();
         am.add_surface_from_arrays(
             PrimitiveType::Triangles,
-            vec![Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0)],
+            vec![
+                Vector3::ZERO,
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ],
             vec![Vector3::UP; 3],
             vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             vec![0, 1, 2],
@@ -590,7 +659,11 @@ mod tests {
         let mut am = ArrayMesh::new();
         am.add_surface_from_arrays(
             PrimitiveType::Triangles,
-            vec![Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0)],
+            vec![
+                Vector3::ZERO,
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ],
             vec![Vector3::UP; 3],
             vec![[0.0, 0.0]; 3],
             vec![0, 1, 2],

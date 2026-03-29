@@ -187,12 +187,27 @@ fn test_tier_table_consistent() {
     let content = std::fs::read_to_string(&doc).unwrap();
 
     // Verify the three tiers are documented
-    assert!(content.contains("Tier 1") || content.contains("| 1 |"), "Tier 1 must be documented");
-    assert!(content.contains("Tier 2") || content.contains("| 2 |"), "Tier 2 must be documented");
-    assert!(content.contains("Tier 3") || content.contains("| 3 |"), "Tier 3 must be documented");
+    assert!(
+        content.contains("Tier 1") || content.contains("| 1 |"),
+        "Tier 1 must be documented"
+    );
+    assert!(
+        content.contains("Tier 2") || content.contains("| 2 |"),
+        "Tier 2 must be documented"
+    );
+    assert!(
+        content.contains("Tier 3") || content.contains("| 3 |"),
+        "Tier 3 must be documented"
+    );
 
     // Verify Makefile has matching targets
     let makefile = std::fs::read_to_string(repo_root().join("engine-rs/Makefile")).unwrap();
-    assert!(makefile.contains("test-fast"), "Makefile must have test-fast target");
-    assert!(makefile.contains("test-golden"), "Makefile must have test-golden target");
+    assert!(
+        makefile.contains("test-fast"),
+        "Makefile must have test-fast target"
+    );
+    assert!(
+        makefile.contains("test-golden"),
+        "Makefile must have test-golden target"
+    );
 }

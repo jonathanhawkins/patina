@@ -202,10 +202,7 @@ fn fixture_with_ext_refs_has_both_resource_types() {
     assert_eq!(style.class_name, "StyleBoxFlat");
 
     // Verify typed property on the sub-resource.
-    assert_eq!(
-        style.get_property("border_width"),
-        Some(&Variant::Int(3))
-    );
+    assert_eq!(style.get_property("border_width"), Some(&Variant::Int(3)));
 
     // Verify bg_color is a Color variant.
     match style.get_property("bg_color") {
@@ -520,7 +517,10 @@ fn overlapping_subresource_ids_resolve_correct_type_across_cache() {
         }
         other => panic!("expected Vector2, got {:?}", other),
     }
-    assert_eq!(circle_sub.get_property("radius"), Some(&Variant::Float(42.0)));
+    assert_eq!(
+        circle_sub.get_property("radius"),
+        Some(&Variant::Float(42.0))
+    );
 
     // Cross-check: rect has no radius, circle has no size.
     assert!(rect_sub.get_property("radius").is_none());
@@ -533,9 +533,7 @@ fn overlapping_subresource_ids_resolve_correct_type_across_cache() {
 
 #[test]
 fn cache_contains_tracks_top_level_paths_not_subresource_ids() {
-    let loader = InlineTresLoader::new(vec![
-        ("res://alpha.tres", TRES_ALPHA),
-    ]);
+    let loader = InlineTresLoader::new(vec![("res://alpha.tres", TRES_ALPHA)]);
     let mut cache = ResourceCache::new(loader);
 
     assert!(cache.is_empty());
@@ -621,9 +619,7 @@ fn resolved_subresources_are_send_and_sync() {
 
 #[test]
 fn invalidate_reload_subresource_semantic_equality_structural_independence() {
-    let loader = InlineTresLoader::new(vec![
-        ("res://multi.tres", TRES_SAME_CLASS_MULTI),
-    ]);
+    let loader = InlineTresLoader::new(vec![("res://multi.tres", TRES_SAME_CLASS_MULTI)]);
     let mut cache = ResourceCache::new(loader);
 
     let original = cache.load("res://multi.tres").unwrap();
@@ -643,8 +639,14 @@ fn invalidate_reload_subresource_semantic_equality_structural_independence() {
     // Semantically equal (same class + properties).
     assert_eq!(old_first.class_name, new_first.class_name);
     assert_eq!(old_second.class_name, new_second.class_name);
-    assert_eq!(old_first.get_property("size"), new_first.get_property("size"));
-    assert_eq!(old_second.get_property("size"), new_second.get_property("size"));
+    assert_eq!(
+        old_first.get_property("size"),
+        new_first.get_property("size")
+    );
+    assert_eq!(
+        old_second.get_property("size"),
+        new_second.get_property("size")
+    );
 
     // The two sub-resources within the reloaded resource are still distinct.
     assert!(!Arc::ptr_eq(new_first, new_second));
@@ -656,9 +658,7 @@ fn invalidate_reload_subresource_semantic_equality_structural_independence() {
 
 #[test]
 fn multiple_invalidation_cycles_produce_unique_subresource_arcs() {
-    let loader = InlineTresLoader::new(vec![
-        ("res://alpha.tres", TRES_ALPHA),
-    ]);
+    let loader = InlineTresLoader::new(vec![("res://alpha.tres", TRES_ALPHA)]);
     let mut cache = ResourceCache::new(loader);
 
     let mut seen_arcs: Vec<Arc<Resource>> = Vec::new();

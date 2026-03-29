@@ -29,7 +29,10 @@ fn camera_offset_shifts_content() {
     let mut renderer = SoftwareRenderer::new();
     let vp = make_viewport(Vector2::new(10.0, 10.0), Vector2::ONE);
     let f = renderer.render_frame(&vp);
-    assert!(px(&f, 0, 0).r > 0.9, "world origin should map to screen(0,0)");
+    assert!(
+        px(&f, 0, 0).r > 0.9,
+        "world origin should map to screen(0,0)"
+    );
     assert!(px(&f, 10, 10).r < 0.1, "screen center should be empty");
 }
 

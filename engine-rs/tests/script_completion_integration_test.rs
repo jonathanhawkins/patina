@@ -118,8 +118,11 @@ fn context_dot_access_construction() {
 
 #[test]
 fn context_with_locals() {
-    let ctx = CompletionContext::bare("Node", "pl")
-        .with_locals(vec!["player".into(), "platform".into(), "score".into()]);
+    let ctx = CompletionContext::bare("Node", "pl").with_locals(vec![
+        "player".into(),
+        "platform".into(),
+        "score".into(),
+    ]);
     assert_eq!(ctx.local_variables.len(), 3);
     assert!(ctx.local_variables.contains(&"player".to_string()));
 }
@@ -157,7 +160,9 @@ fn keywords_var_prefix() {
     let engine = CompletionEngine::new();
     let ctx = CompletionContext::bare("Unregistered_KW1", "va");
     let items = engine.complete(&ctx);
-    assert!(items.iter().any(|i| i.label == "var" && i.kind == CompletionKind::Keyword));
+    assert!(items
+        .iter()
+        .any(|i| i.label == "var" && i.kind == CompletionKind::Keyword));
 }
 
 #[test]
@@ -165,7 +170,9 @@ fn keywords_func_prefix() {
     let engine = CompletionEngine::new();
     let ctx = CompletionContext::bare("Unregistered_KW2", "fu");
     let items = engine.complete(&ctx);
-    assert!(items.iter().any(|i| i.label == "func" && i.kind == CompletionKind::Keyword));
+    assert!(items
+        .iter()
+        .any(|i| i.label == "func" && i.kind == CompletionKind::Keyword));
 }
 
 #[test]
@@ -173,7 +180,9 @@ fn keywords_return_prefix() {
     let engine = CompletionEngine::new();
     let ctx = CompletionContext::bare("Unregistered_KW3", "ret");
     let items = engine.complete(&ctx);
-    assert!(items.iter().any(|i| i.label == "return" && i.kind == CompletionKind::Keyword));
+    assert!(items
+        .iter()
+        .any(|i| i.label == "return" && i.kind == CompletionKind::Keyword));
 }
 
 #[test]
@@ -218,7 +227,9 @@ fn methods_from_own_class() {
     let engine = CompletionEngine::new();
     let ctx = CompletionContext::bare("IT_OWN_Sprite", "set");
     let items = engine.complete(&ctx);
-    assert!(items.iter().any(|i| i.label == "set_texture" && i.kind == CompletionKind::Method));
+    assert!(items
+        .iter()
+        .any(|i| i.label == "set_texture" && i.kind == CompletionKind::Method));
 }
 
 #[test]
@@ -227,7 +238,9 @@ fn properties_from_own_class() {
     let engine = CompletionEngine::new();
     let ctx = CompletionContext::bare("IT_PROP_Sprite", "tex");
     let items = engine.complete(&ctx);
-    assert!(items.iter().any(|i| i.label == "texture" && i.kind == CompletionKind::Property));
+    assert!(items
+        .iter()
+        .any(|i| i.label == "texture" && i.kind == CompletionKind::Property));
 }
 
 #[test]
@@ -248,7 +261,9 @@ fn inherited_properties_included() {
     let engine = CompletionEngine::new();
     let ctx = CompletionContext::bare("IT_INHP_Sprite", "vis");
     let items = engine.complete(&ctx);
-    assert!(items.iter().any(|i| i.label == "visible" && i.kind == CompletionKind::Property));
+    assert!(items
+        .iter()
+        .any(|i| i.label == "visible" && i.kind == CompletionKind::Property));
 }
 
 #[test]
@@ -273,7 +288,10 @@ fn own_methods_score_higher_than_inherited() {
     let own = items.iter().find(|i| i.label == "set_texture");
     let inherited = items.iter().find(|i| i.label == "queue_free");
     if let (Some(o), Some(i)) = (own, inherited) {
-        assert!(o.score > i.score, "own methods should score higher than inherited");
+        assert!(
+            o.score > i.score,
+            "own methods should score higher than inherited"
+        );
     }
 }
 
@@ -323,8 +341,11 @@ fn dot_access_empty_prefix_shows_all() {
 #[test]
 fn local_variables_match_prefix() {
     let engine = CompletionEngine::new();
-    let ctx = CompletionContext::bare("Unregistered_LOC", "pl")
-        .with_locals(vec!["player".into(), "platform".into(), "enemy".into()]);
+    let ctx = CompletionContext::bare("Unregistered_LOC", "pl").with_locals(vec![
+        "player".into(),
+        "platform".into(),
+        "enemy".into(),
+    ]);
     let items = engine.complete(&ctx);
     let vars: Vec<_> = items
         .iter()
@@ -338,8 +359,7 @@ fn local_variables_match_prefix() {
 #[test]
 fn local_variables_score_highest() {
     let engine = CompletionEngine::new();
-    let ctx = CompletionContext::bare("Unregistered_LOCS", "p")
-        .with_locals(vec!["player".into()]);
+    let ctx = CompletionContext::bare("Unregistered_LOCS", "p").with_locals(vec!["player".into()]);
     let items = engine.complete(&ctx);
     let local = items.iter().find(|i| i.label == "player").unwrap();
     assert_eq!(local.score, 110);
@@ -398,8 +418,7 @@ fn class_names_suppressed_with_empty_prefix() {
 fn results_sorted_score_descending() {
     register_hierarchy("IT_SORT_");
     let engine = CompletionEngine::new();
-    let ctx = CompletionContext::bare("IT_SORT_Sprite", "")
-        .with_locals(vec!["alpha".into()]);
+    let ctx = CompletionContext::bare("IT_SORT_Sprite", "").with_locals(vec!["alpha".into()]);
     let items = engine.complete(&ctx);
     for window in items.windows(2) {
         assert!(
@@ -415,14 +434,13 @@ fn results_sorted_score_descending() {
 #[test]
 fn max_results_truncation() {
     let engine = CompletionEngine::new().with_max_results(3);
-    let ctx = CompletionContext::bare("Unregistered_TRUNC", "")
-        .with_locals(vec![
-            "a".into(),
-            "b".into(),
-            "c".into(),
-            "d".into(),
-            "e".into(),
-        ]);
+    let ctx = CompletionContext::bare("Unregistered_TRUNC", "").with_locals(vec![
+        "a".into(),
+        "b".into(),
+        "c".into(),
+        "d".into(),
+        "e".into(),
+    ]);
     let items = engine.complete(&ctx);
     assert!(items.len() <= 3);
 }
@@ -463,7 +481,10 @@ fn empty_prefix_returns_keywords_at_minimum() {
     let engine = CompletionEngine::new();
     let ctx = CompletionContext::bare("Unregistered_EMPTY", "");
     let items = engine.complete(&ctx);
-    assert!(!items.is_empty(), "empty prefix should still return keywords");
+    assert!(
+        !items.is_empty(),
+        "empty prefix should still return keywords"
+    );
 }
 
 #[test]

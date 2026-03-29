@@ -15,8 +15,8 @@
 //! 12. Resource-to-audio pipeline (WAV decode + playback)
 
 use gdaudio::{
-    AudioBuffer, AudioBus, AudioMixer, AudioOutputStream, AudioSampleBuffer, AudioServer, LoopMode,
-    NullAudioOutput, PlaybackId, AudioStreamPlayback, PlaybackState,
+    AudioBuffer, AudioBus, AudioMixer, AudioOutputStream, AudioSampleBuffer, AudioServer,
+    AudioStreamPlayback, LoopMode, NullAudioOutput, PlaybackId, PlaybackState,
 };
 use gdscene::node::Node;
 use gdscene::SceneTree;
@@ -296,7 +296,10 @@ fn mix_empty_server_produces_silence() {
     let mut server = AudioServer::new();
     let output = server.mix(1024);
     assert_eq!(output.len(), 2048); // 1024 frames * 2 channels
-    assert!(output.iter().all(|&s| s == 0.0), "empty server must produce silence");
+    assert!(
+        output.iter().all(|&s| s == 0.0),
+        "empty server must produce silence"
+    );
 }
 
 #[test]
@@ -452,10 +455,7 @@ fn db_to_linear_minus_20db() {
 #[test]
 fn db_to_linear_minus_infinity() {
     let linear = AudioBus::db_to_linear(-80.0);
-    assert!(
-        linear < 0.001,
-        "-80 dB must be near zero: got {linear}"
-    );
+    assert!(linear < 0.001, "-80 dB must be near zero: got {linear}");
 }
 
 #[test]
@@ -483,10 +483,7 @@ fn forward_loop_wraps_position() {
 
     // Position should wrap
     let pos = pb.get_playback_position();
-    assert!(
-        pos < 2.0,
-        "forward loop must wrap position: got {pos}"
-    );
+    assert!(pos < 2.0, "forward loop must wrap position: got {pos}");
     assert_eq!(pb.state(), PlaybackState::Playing, "must keep playing");
 }
 
@@ -584,10 +581,7 @@ fn audio_node_in_scene_tree_with_properties() {
     let node = tree.get_node(id).unwrap();
 
     assert_eq!(node.get_property("volume_db"), Variant::Float(-6.0));
-    assert_eq!(
-        node.get_property("bus"),
-        Variant::String("Music".into())
-    );
+    assert_eq!(node.get_property("bus"), Variant::String("Music".into()));
     assert_eq!(node.get_property("autoplay"), Variant::Bool(true));
 }
 
@@ -596,7 +590,11 @@ fn multiple_audio_nodes_in_tree() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let types = ["AudioStreamPlayer", "AudioStreamPlayer2D", "AudioStreamPlayer3D"];
+    let types = [
+        "AudioStreamPlayer",
+        "AudioStreamPlayer2D",
+        "AudioStreamPlayer3D",
+    ];
 
     for (i, typ) in types.iter().enumerate() {
         let node = Node::new(&format!("Audio_{i}"), *typ);
@@ -741,5 +739,8 @@ fn wav_decode_silence_produces_silence() {
     let output = server.mix(500);
 
     let max = output.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
-    assert!(max < 1e-6, "silence WAV must produce silence output: max={max}");
+    assert!(
+        max < 1e-6,
+        "silence WAV must produce silence output: max={max}"
+    );
 }

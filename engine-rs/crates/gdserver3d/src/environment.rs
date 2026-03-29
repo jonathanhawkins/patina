@@ -272,9 +272,13 @@ impl Environment3D {
             ));
         }
         if self.background_color != def.background_color {
-            props.push(("background_color".into(), Variant::Color(self.background_color)));
+            props.push((
+                "background_color".into(),
+                Variant::Color(self.background_color),
+            ));
         }
-        if (self.background_energy_multiplier - def.background_energy_multiplier).abs() > f32::EPSILON
+        if (self.background_energy_multiplier - def.background_energy_multiplier).abs()
+            > f32::EPSILON
         {
             props.push((
                 "background_energy_multiplier".into(),
@@ -315,7 +319,10 @@ impl Environment3D {
             props.push(("fog_enabled".into(), Variant::Bool(self.fog_enabled)));
         }
         if self.fog_light_color != def.fog_light_color {
-            props.push(("fog_light_color".into(), Variant::Color(self.fog_light_color)));
+            props.push((
+                "fog_light_color".into(),
+                Variant::Color(self.fog_light_color),
+            ));
         }
         if (self.fog_density - def.fog_density).abs() > f32::EPSILON {
             props.push((
@@ -373,7 +380,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(env.ambient_source, AmbientSource::Sky);
-        assert_eq!(env.sky.as_ref().unwrap().process_mode, SkyProcessMode::RealTime);
+        assert_eq!(
+            env.sky.as_ref().unwrap().process_mode,
+            SkyProcessMode::RealTime
+        );
     }
 
     #[test]
@@ -446,7 +456,10 @@ mod tests {
 
     #[test]
     fn unknown_enum_values_default() {
-        assert_eq!(BackgroundMode::from_godot_int(99), BackgroundMode::ClearColor);
+        assert_eq!(
+            BackgroundMode::from_godot_int(99),
+            BackgroundMode::ClearColor
+        );
         assert_eq!(AmbientSource::from_godot_int(-1), AmbientSource::Background);
         assert_eq!(ToneMapper::from_godot_int(100), ToneMapper::Linear);
     }
@@ -465,8 +478,7 @@ mod tests {
             ("ambient_light_color", Variant::Color(cyan)),
             ("ambient_light_energy", Variant::Float(0.75)),
         ];
-        let env =
-            Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
+        let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
         assert_eq!(env.ambient_source, AmbientSource::Color);
         assert_eq!(env.ambient_color, cyan);
         assert!((env.ambient_energy - 0.75).abs() < 1e-5);
@@ -480,8 +492,7 @@ mod tests {
             ("fog_light_color", Variant::Color(fog_color)),
             ("fog_density", Variant::Float(0.05)),
         ];
-        let env =
-            Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
+        let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
         assert!(env.fog_enabled);
         assert_eq!(env.fog_light_color, fog_color);
         assert!((env.fog_density - 0.05).abs() < 1e-5);
@@ -490,8 +501,7 @@ mod tests {
     #[test]
     fn from_properties_tonemap() {
         let props: Vec<(&str, Variant)> = vec![("tonemap_mode", Variant::Int(3))];
-        let env =
-            Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
+        let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
         assert_eq!(env.tone_mapper, ToneMapper::Aces);
     }
 
@@ -503,8 +513,7 @@ mod tests {
             ("background_color", Variant::Color(bg)),
             ("background_energy_multiplier", Variant::Float(1.5)),
         ];
-        let env =
-            Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
+        let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
         assert_eq!(env.background_mode, BackgroundMode::CustomColor);
         assert_eq!(env.background_color, bg);
         assert!((env.background_energy_multiplier - 1.5).abs() < 1e-5);
@@ -514,7 +523,10 @@ mod tests {
     fn to_properties_default_is_empty() {
         let env = Environment3D::default();
         let props = env.to_properties();
-        assert!(props.is_empty(), "default environment should emit no properties");
+        assert!(
+            props.is_empty(),
+            "default environment should emit no properties"
+        );
     }
 
     #[test]
@@ -532,9 +544,8 @@ mod tests {
             ..Default::default()
         };
         let props = env.to_properties();
-        let reconstructed = Environment3D::from_properties(
-            props.iter().map(|(k, v)| (k.as_str(), v)),
-        );
+        let reconstructed =
+            Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
         assert_eq!(reconstructed.background_mode, env.background_mode);
         assert_eq!(reconstructed.ambient_source, env.ambient_source);
         assert_eq!(reconstructed.ambient_color, env.ambient_color);
@@ -551,8 +562,7 @@ mod tests {
             ("unknown_prop", Variant::Int(42)),
             ("fog_enabled", Variant::Bool(true)),
         ];
-        let env =
-            Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
+        let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
         assert!(env.fog_enabled);
         // everything else stays default
         assert_eq!(env.background_mode, BackgroundMode::ClearColor);

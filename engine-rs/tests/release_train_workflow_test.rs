@@ -79,7 +79,11 @@ fn workspace_version_is_valid_semver() {
         .expect("workspace version must exist");
 
     let parts: Vec<&str> = version.split('.').collect();
-    assert_eq!(parts.len(), 3, "version must be major.minor.patch, got {version}");
+    assert_eq!(
+        parts.len(),
+        3,
+        "version must be major.minor.patch, got {version}"
+    );
     for (i, part) in parts.iter().enumerate() {
         part.parse::<u32>().unwrap_or_else(|_| {
             panic!("version component {i} ({part}) must be a number in {version}")
@@ -152,7 +156,10 @@ fn all_crate_dirs_are_workspace_members() {
 #[test]
 fn ci_yaml_exists() {
     let ci_path = repo_root().join(".github/workflows/ci.yml");
-    assert!(ci_path.exists(), "CI workflow must exist at .github/workflows/ci.yml");
+    assert!(
+        ci_path.exists(),
+        "CI workflow must exist at .github/workflows/ci.yml"
+    );
 }
 
 #[test]
@@ -161,17 +168,14 @@ fn ci_has_required_gates() {
     let ci_content = fs::read_to_string(&ci_path).unwrap();
 
     let required_gates = [
-        "cargo fmt",        // format check
-        "cargo build",      // build step
-        "cargo test",       // test step
-        "cargo clippy",     // lint step
+        "cargo fmt",    // format check
+        "cargo build",  // build step
+        "cargo test",   // test step
+        "cargo clippy", // lint step
     ];
 
     for gate in &required_gates {
-        assert!(
-            ci_content.contains(gate),
-            "CI must include gate: {gate}"
-        );
+        assert!(ci_content.contains(gate), "CI must include gate: {gate}");
     }
 }
 
@@ -299,7 +303,10 @@ fn golden_physics_traces_are_json() {
             json_count += 1;
         }
     }
-    assert!(json_count > 0, "golden/physics/ must contain at least one .json trace");
+    assert!(
+        json_count > 0,
+        "golden/physics/ must contain at least one .json trace"
+    );
 }
 
 // ===========================================================================
@@ -312,8 +319,15 @@ fn gdcore_has_no_internal_dependencies() {
 
     // gdcore should not depend on any other gd* crate (it's the leaf)
     let gd_crates = [
-        "gdvariant", "gdobject", "gdscene", "gdresource", "gdserver2d",
-        "gdrender2d", "gdphysics2d", "gdplatform", "gdeditor",
+        "gdvariant",
+        "gdobject",
+        "gdscene",
+        "gdresource",
+        "gdserver2d",
+        "gdrender2d",
+        "gdphysics2d",
+        "gdplatform",
+        "gdeditor",
     ];
     for dep in &gd_crates {
         assert!(
@@ -419,11 +433,7 @@ fn integration_test_directory_has_tests() {
     let test_count = fs::read_dir(&tests_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map_or(false, |ext| ext == "rs")
-        })
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
         .count();
 
     assert!(
@@ -437,12 +447,12 @@ fn parity_tests_cover_key_subsystems() {
     let tests_dir = workspace_root().join("tests");
 
     let subsystem_patterns = [
-        "physics",   // physics parity
-        "scene",     // scene tree
-        "resource",  // resource loading
-        "signal",    // signal dispatch
-        "render",    // rendering
-        "node",      // node system
+        "physics",  // physics parity
+        "scene",    // scene tree
+        "resource", // resource loading
+        "signal",   // signal dispatch
+        "render",   // rendering
+        "node",     // node system
     ];
 
     for pattern in &subsystem_patterns {
@@ -467,7 +477,10 @@ fn parity_tests_cover_key_subsystems() {
 #[test]
 fn agents_md_exists() {
     let agents = repo_root().join("AGENTS.md");
-    assert!(agents.exists(), "AGENTS.md must exist for contributor guidance");
+    assert!(
+        agents.exists(),
+        "AGENTS.md must exist for contributor guidance"
+    );
 }
 
 #[test]
@@ -517,14 +530,17 @@ fn release_train_readiness_report() {
     checks.push(("Makefile test tiers", makefile_exists));
 
     // Fixtures structured
-    let fixtures_exist = repo.join("fixtures/scenes").exists() && repo.join("fixtures/golden").exists();
+    let fixtures_exist =
+        repo.join("fixtures/scenes").exists() && repo.join("fixtures/golden").exists();
     checks.push(("fixture directories", fixtures_exist));
 
     // Integration tests
     let test_count = fs::read_dir(ws_root.join("tests"))
-        .map(|d| d.filter_map(|e| e.ok()).filter(|e| {
-            e.path().extension().map_or(false, |ext| ext == "rs")
-        }).count())
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+                .count()
+        })
         .unwrap_or(0);
     checks.push(("integration tests (>=10)", test_count >= 10));
 
@@ -541,7 +557,9 @@ fn release_train_readiness_report() {
     let mut pass_count = 0;
     for (name, ok) in &checks {
         let status = if *ok { "PASS" } else { "FAIL" };
-        if *ok { pass_count += 1; }
+        if *ok {
+            pass_count += 1;
+        }
         println!("  [{status}] {name}");
     }
     let total = checks.len();
@@ -582,7 +600,10 @@ fn all_crates_share_workspace_edition() {
         );
         checked += 1;
     }
-    assert!(checked >= 10, "expected at least 10 crates, found {checked}");
+    assert!(
+        checked >= 10,
+        "expected at least 10 crates, found {checked}"
+    );
 }
 
 /// Every workspace crate must use the same license.
@@ -608,7 +629,10 @@ fn all_crates_share_workspace_license() {
         );
         checked += 1;
     }
-    assert!(checked >= 10, "expected at least 10 crates, found {checked}");
+    assert!(
+        checked >= 10,
+        "expected at least 10 crates, found {checked}"
+    );
 }
 
 /// CI must include parity domain gates for each active test domain.
@@ -664,8 +688,14 @@ fn fixture_resources_and_scenes_present() {
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "tscn"))
         .count();
 
-    assert!(tres_count >= 3, "must have at least 3 .tres fixture resources, found {tres_count}");
-    assert!(tscn_count >= 5, "must have at least 5 .tscn fixture scenes, found {tscn_count}");
+    assert!(
+        tres_count >= 3,
+        "must have at least 3 .tres fixture resources, found {tres_count}"
+    );
+    assert!(
+        tscn_count >= 5,
+        "must have at least 5 .tscn fixture scenes, found {tscn_count}"
+    );
 }
 
 /// Test file count keeps growing — prevent regression below a floor.

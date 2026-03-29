@@ -124,11 +124,7 @@ fn simulate_gravity_fall_3d(frames: u64, dt: f32, gravity: f32) -> Vec<PhysicsTr
 
     for frame in 0..frames {
         trace.push(PhysicsTraceEntry3D::new(
-            "Ball",
-            frame,
-            position,
-            velocity,
-            0.0,
+            "Ball", frame, position, velocity, 0.0,
         ));
         velocity.y -= gravity * dt;
         position = position + velocity * dt;
@@ -283,7 +279,13 @@ fn multi_body_trace_comparison() {
     let expected = vec![
         PhysicsTraceEntry3D::new("Ball", 0, Vector3::new(0.0, 5.0, 0.0), Vector3::ZERO, 0.0),
         PhysicsTraceEntry3D::new("Cube", 0, Vector3::new(3.0, 0.0, 0.0), Vector3::ZERO, 0.0),
-        PhysicsTraceEntry3D::new("Ball", 1, Vector3::new(0.0, 4.5, 0.0), Vector3::new(0.0, -10.0, 0.0), 0.0),
+        PhysicsTraceEntry3D::new(
+            "Ball",
+            1,
+            Vector3::new(0.0, 4.5, 0.0),
+            Vector3::new(0.0, -10.0, 0.0),
+            0.0,
+        ),
         PhysicsTraceEntry3D::new("Cube", 1, Vector3::new(3.0, 0.0, 0.0), Vector3::ZERO, 0.0),
     ];
 
@@ -314,13 +316,7 @@ fn single_entry_comparison() {
 
 #[test]
 fn angular_velocity_stored_correctly() {
-    let entry = PhysicsTraceEntry3D::new(
-        "Spinner",
-        0,
-        Vector3::ZERO,
-        Vector3::ZERO,
-        3.14,
-    );
+    let entry = PhysicsTraceEntry3D::new("Spinner", 0, Vector3::ZERO, Vector3::ZERO, 3.14);
     assert!((entry.angular_velocity - 3.14).abs() < 1e-6);
 }
 
@@ -691,7 +687,12 @@ fn q6i_engine_trace_json_roundtrip_preserves_golden_match() {
 
     // Round-tripped trace should still match golden
     let golden = load_golden_3d_trace("minimal_3d_10frames");
-    let result = compare_physics_traces(&golden, &roundtripped, POSITION_TOLERANCE, VELOCITY_TOLERANCE);
+    let result = compare_physics_traces(
+        &golden,
+        &roundtripped,
+        POSITION_TOLERANCE,
+        VELOCITY_TOLERANCE,
+    );
     assert!(
         result.is_exact_match(),
         "JSON round-trip should preserve golden match:\n{}",
@@ -741,7 +742,8 @@ fn q6i_zero_tolerance_catches_rounding() {
         result.match_ratio() * 100.0
     );
     // But with standard tolerance, all frames match.
-    let result_tol = compare_physics_traces(&golden, &actual, POSITION_TOLERANCE, VELOCITY_TOLERANCE);
+    let result_tol =
+        compare_physics_traces(&golden, &actual, POSITION_TOLERANCE, VELOCITY_TOLERANCE);
     assert!(result_tol.is_exact_match());
 }
 
@@ -761,7 +763,10 @@ fn q6i_multi_body_golden_structure() {
         for (j, expected_name) in expected_names.iter().enumerate() {
             let idx = (frame as usize) * 3 + j;
             assert_eq!(golden[idx].name, *expected_name, "frame {frame} body {j}");
-            assert_eq!(golden[idx].frame, frame, "frame number mismatch at idx {idx}");
+            assert_eq!(
+                golden[idx].frame, frame,
+                "frame number mismatch at idx {idx}"
+            );
         }
     }
 }

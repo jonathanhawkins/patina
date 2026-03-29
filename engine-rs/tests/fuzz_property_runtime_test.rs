@@ -9,9 +9,9 @@ use gdcore::id::ObjectId;
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
 use gdcore::math3d::{Basis, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
-use gdvariant::Variant;
 use gdobject::signal::{Connection, Signal};
 use gdresource::loader::{parse_variant_value, TresLoader};
+use gdvariant::Variant;
 
 // ===========================================================================
 // Pseudo-random input generation (no external deps)
@@ -70,13 +70,21 @@ impl Rng {
     }
 
     fn next_vec3(&mut self) -> Vector3 {
-        Vector3::new(self.next_fuzz_f32(), self.next_fuzz_f32(), self.next_fuzz_f32())
+        Vector3::new(
+            self.next_fuzz_f32(),
+            self.next_fuzz_f32(),
+            self.next_fuzz_f32(),
+        )
     }
 
     /// Generates a finite float (no NaN/Inf).
     fn next_finite_f32(&mut self) -> f32 {
         let v = self.next_f32_range(-100.0, 100.0);
-        if v.is_finite() { v } else { 0.0 }
+        if v.is_finite() {
+            v
+        } else {
+            0.0
+        }
     }
 
     fn next_finite_vec2(&mut self) -> Vector2 {
@@ -84,7 +92,11 @@ impl Rng {
     }
 
     fn next_finite_vec3(&mut self) -> Vector3 {
-        Vector3::new(self.next_finite_f32(), self.next_finite_f32(), self.next_finite_f32())
+        Vector3::new(
+            self.next_finite_f32(),
+            self.next_finite_f32(),
+            self.next_finite_f32(),
+        )
     }
 
     fn next_nonzero_finite_f32(&mut self) -> f32 {
@@ -258,7 +270,11 @@ fn prop_quaternion_slerp_self_is_identity() {
 
 fn quat_dist(a: Quaternion, b: Quaternion) -> f32 {
     let dot = (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w).abs();
-    if dot > 1.0 { 0.0 } else { (1.0 - dot).abs() }
+    if dot > 1.0 {
+        0.0
+    } else {
+        (1.0 - dot).abs()
+    }
 }
 
 // ===========================================================================
@@ -300,10 +316,7 @@ fn prop_transform2d_inverse_roundtrip() {
         let angle = rng.next_finite_f32() * 0.5;
         let origin = rng.next_finite_vec2();
         let t = Transform2D::rotated(angle);
-        let t = Transform2D {
-            origin,
-            ..t
-        };
+        let t = Transform2D { origin, ..t };
 
         let inv = t.affine_inverse();
         let point = rng.next_finite_vec2();
@@ -345,10 +358,7 @@ fn prop_transform3d_inverse_roundtrip() {
         let point = rng.next_finite_vec3();
         let roundtrip = inv.xform(t.xform(point));
         let diff = (roundtrip - point).length();
-        assert!(
-            diff < 1e-1,
-            "T.inv(T.xform(p)) must equal p: diff={diff}"
-        );
+        assert!(diff < 1e-1, "T.inv(T.xform(p)) must equal p: diff={diff}");
     }
 }
 
@@ -436,7 +446,11 @@ fn prop_collision_no_panic_random_rects() {
         // Must not panic — result correctness tested by shape.
         if let Some(r) = result {
             if r.colliding {
-                assert!(r.depth >= -1e-3, "rect depth must be non-negative: {}", r.depth);
+                assert!(
+                    r.depth >= -1e-3,
+                    "rect depth must be non-negative: {}",
+                    r.depth
+                );
             }
         }
     }
@@ -458,7 +472,9 @@ fn prop_collision_no_panic_circle_rect() {
         let pos_b = rng.next_finite_vec2();
 
         let shape_a = Shape2D::Circle { radius };
-        let shape_b = Shape2D::Rectangle { half_extents: half_ext };
+        let shape_b = Shape2D::Rectangle {
+            half_extents: half_ext,
+        };
         let t_a = Transform2D::translated(pos_a);
         let t_b = Transform2D::translated(pos_b);
 
@@ -607,21 +623,13 @@ fn prop_nodepath_absolute_starts_with_slash() {
     let absolute_paths = ["/root", "/root/child", "/a/b/c"];
     for path in &absolute_paths {
         let np = NodePath::new(path);
-        assert!(
-            np.is_absolute(),
-            "path '{}' must be absolute",
-            path
-        );
+        assert!(np.is_absolute(), "path '{}' must be absolute", path);
     }
 
     let relative_paths = ["node", "a/b", ".", ".."];
     for path in &relative_paths {
         let np = NodePath::new(path);
-        assert!(
-            !np.is_absolute(),
-            "path '{}' must be relative",
-            path
-        );
+        assert!(!np.is_absolute(), "path '{}' must be relative", path);
     }
 }
 
@@ -684,7 +692,7 @@ fn prop_quaternion_ops_no_panic_with_extreme_values() {
 
 #[test]
 fn prop_physics3d_simulation_no_panic() {
-    use gdphysics3d::body::{BodyType3D, PhysicsBody3D, BodyId3D};
+    use gdphysics3d::body::{BodyId3D, BodyType3D, PhysicsBody3D};
     use gdphysics3d::shape::Shape3D;
     use gdphysics3d::world::PhysicsWorld3D;
 
@@ -713,7 +721,7 @@ fn prop_physics3d_simulation_no_panic() {
 
 #[test]
 fn prop_physics3d_raycast_no_panic_random_rays() {
-    use gdphysics3d::body::{BodyType3D, PhysicsBody3D, BodyId3D};
+    use gdphysics3d::body::{BodyId3D, BodyType3D, PhysicsBody3D};
     use gdphysics3d::shape::Shape3D;
     use gdphysics3d::world::PhysicsWorld3D;
 
@@ -782,7 +790,10 @@ fn prop_shape3d_capsule_origin_always_inside() {
     for _ in 0..ITERATIONS {
         let r = rng.next_finite_f32().abs().max(0.01);
         let h = rng.next_finite_f32().abs().max(r * 2.0 + 0.01);
-        let shape = Shape3D::CapsuleShape { radius: r, height: h };
+        let shape = Shape3D::CapsuleShape {
+            radius: r,
+            height: h,
+        };
         assert!(
             shape.contains_point(Vector3::ZERO),
             "capsule r={r} h={h} must contain origin"
@@ -957,7 +968,11 @@ fn prop_variant_div_by_zero_yields_nil() {
     for v in &values {
         for z in &zeros {
             let result = v.clone() / z.clone();
-            assert_eq!(result, Variant::Nil, "division by zero must yield Nil: {v:?} / {z:?}");
+            assert_eq!(
+                result,
+                Variant::Nil,
+                "division by zero must yield Nil: {v:?} / {z:?}"
+            );
         }
     }
 }
@@ -969,7 +984,11 @@ fn prop_variant_mod_by_zero_yields_nil() {
     for v in &values {
         for z in &zeros {
             let result = v.clone() % z.clone();
-            assert_eq!(result, Variant::Nil, "mod by zero must yield Nil: {v:?} % {z:?}");
+            assert_eq!(
+                result,
+                Variant::Nil,
+                "mod by zero must yield Nil: {v:?} % {z:?}"
+            );
         }
     }
 }
@@ -988,10 +1007,18 @@ fn prop_variant_neg_double_is_identity() {
 fn prop_variant_int_overflow_wraps() {
     // Godot-style: Int arithmetic uses wrapping.
     let result = Variant::Int(i64::MAX) + Variant::Int(1);
-    assert_eq!(result, Variant::Int(i64::MIN), "i64::MAX + 1 must wrap to MIN");
+    assert_eq!(
+        result,
+        Variant::Int(i64::MIN),
+        "i64::MAX + 1 must wrap to MIN"
+    );
 
     let result = Variant::Int(i64::MIN) - Variant::Int(1);
-    assert_eq!(result, Variant::Int(i64::MAX), "i64::MIN - 1 must wrap to MAX");
+    assert_eq!(
+        result,
+        Variant::Int(i64::MAX),
+        "i64::MIN - 1 must wrap to MAX"
+    );
 }
 
 #[test]
@@ -1063,11 +1090,7 @@ fn prop_variant_bool_coercion_matches_truthiness() {
         (Variant::Array(vec![Variant::Nil]), true),
     ];
     for (v, expected) in &test_cases {
-        assert_eq!(
-            v.to_bool(),
-            *expected,
-            "truthiness mismatch for {v:?}"
-        );
+        assert_eq!(v.to_bool(), *expected, "truthiness mismatch for {v:?}");
     }
 }
 
@@ -1085,7 +1108,10 @@ fn prop_variant_string_parse_coercion() {
     for (s, expected_int, expected_float) in &cases {
         let v = Variant::String((*s).to_string());
         assert_eq!(v.to_int(), *expected_int, "to_int for \"{s}\"");
-        assert!((v.to_float() - expected_float).abs() < 1e-10, "to_float for \"{s}\"");
+        assert!(
+            (v.to_float() - expected_float).abs() < 1e-10,
+            "to_float for \"{s}\""
+        );
     }
 }
 
@@ -1120,7 +1146,11 @@ fn prop_variant_comparison_antisymmetric() {
         let a = random_numeric_variant(&mut rng);
         let b = random_numeric_variant(&mut rng);
         if let (Some(ab), Some(ba)) = (a.partial_cmp(&b), b.partial_cmp(&a)) {
-            assert_eq!(ab, ba.reverse(), "comparison must be antisymmetric: {a:?} vs {b:?}");
+            assert_eq!(
+                ab,
+                ba.reverse(),
+                "comparison must be antisymmetric: {a:?} vs {b:?}"
+            );
         }
     }
 }
@@ -1144,31 +1174,73 @@ fn prop_variant_comparison_cross_type_none() {
 #[test]
 fn fuzz_parse_variant_value_no_panic() {
     let inputs = [
-        "", "   ", "null", "nil", "Nil", "true", "false",
-        "42", "-7", "3.14", "-0.0", "1e30", "-1e-10",
-        "\"hello\"", "\"\"", "\"escaped\\\"quote\"",
-        "Vector2(1, 2)", "Vector2()", "Vector2(1)", "Vector2(1,2,3)",
-        "Vector3(1, 2, 3)", "Vector3()", "Vector3(1,2)",
-        "Color(1,0,0,1)", "Color(1,0,0)", "Color()", "Color(1)",
-        "Rect2(0,0,10,10)", "Rect2()", "Rect2(1,2,3)",
-        "Transform2D(1,0,0,1,0,0)", "Transform2D()", "Transform2D(1)",
-        "Quaternion(0,0,0,1)", "Quaternion()", "Quaternion(1,2)",
-        "Basis(1,0,0,0,1,0,0,0,1)", "Basis()",
-        "AABB(0,0,0,1,1,1)", "AABB()",
-        "Plane(0,1,0,0)", "Plane()",
-        "StringName(\"hello\")", "StringName(&\"hello\")", "StringName()",
-        "NodePath(\"a/b/c\")", "NodePath()",
-        "ExtResource(\"1\")", "SubResource(\"2\")",
-        "PackedByteArray(1, 2, 3)", "PackedByteArray()",
-        "PackedInt32Array(1, 2)", "PackedFloat32Array(1.0, 2.0)",
+        "",
+        "   ",
+        "null",
+        "nil",
+        "Nil",
+        "true",
+        "false",
+        "42",
+        "-7",
+        "3.14",
+        "-0.0",
+        "1e30",
+        "-1e-10",
+        "\"hello\"",
+        "\"\"",
+        "\"escaped\\\"quote\"",
+        "Vector2(1, 2)",
+        "Vector2()",
+        "Vector2(1)",
+        "Vector2(1,2,3)",
+        "Vector3(1, 2, 3)",
+        "Vector3()",
+        "Vector3(1,2)",
+        "Color(1,0,0,1)",
+        "Color(1,0,0)",
+        "Color()",
+        "Color(1)",
+        "Rect2(0,0,10,10)",
+        "Rect2()",
+        "Rect2(1,2,3)",
+        "Transform2D(1,0,0,1,0,0)",
+        "Transform2D()",
+        "Transform2D(1)",
+        "Quaternion(0,0,0,1)",
+        "Quaternion()",
+        "Quaternion(1,2)",
+        "Basis(1,0,0,0,1,0,0,0,1)",
+        "Basis()",
+        "AABB(0,0,0,1,1,1)",
+        "AABB()",
+        "Plane(0,1,0,0)",
+        "Plane()",
+        "StringName(\"hello\")",
+        "StringName(&\"hello\")",
+        "StringName()",
+        "NodePath(\"a/b/c\")",
+        "NodePath()",
+        "ExtResource(\"1\")",
+        "SubResource(\"2\")",
+        "PackedByteArray(1, 2, 3)",
+        "PackedByteArray()",
+        "PackedInt32Array(1, 2)",
+        "PackedFloat32Array(1.0, 2.0)",
         "PackedStringArray(\"a\", \"b\")",
         "PackedVector2Array(Vector2(1,2))",
-        "[1, 2, 3]", "[]",
-        "{\"a\": 1, \"b\": 2}", "{}",
+        "[1, 2, 3]",
+        "[]",
+        "{\"a\": 1, \"b\": 2}",
+        "{}",
         // Deliberately malformed
-        "Vector2(nan, inf)", "Vector2(-inf, 0)",
-        "NotAType(1,2,3)", "Vector2(", "Vector3(1,2,",
-        "[[[", "{{{}}}",
+        "Vector2(nan, inf)",
+        "Vector2(-inf, 0)",
+        "NotAType(1,2,3)",
+        "Vector2(",
+        "Vector3(1,2,",
+        "[[[",
+        "{{{}}}",
         "\"unterminated string",
         "999999999999999999999999999999",
         "-999999999999999999999999999999",
@@ -1193,7 +1265,10 @@ fn fuzz_parse_variant_value_valid_roundtrip() {
         ("true", |v| matches!(v, Variant::Bool(true))),
         ("false", |v| matches!(v, Variant::Bool(false))),
         ("null", |v| matches!(v, Variant::Nil)),
-        ("\"hello\"", |v| matches!(v, Variant::String(s) if s == "hello")),
+        (
+            "\"hello\"",
+            |v| matches!(v, Variant::String(s) if s == "hello"),
+        ),
         ("Vector2(1, 2)", |v| matches!(v, Variant::Vector2(_))),
         ("Vector3(1, 2, 3)", |v| matches!(v, Variant::Vector3(_))),
         ("Color(1, 0, 0, 1)", |v| matches!(v, Variant::Color(_))),
@@ -1201,7 +1276,10 @@ fn fuzz_parse_variant_value_valid_roundtrip() {
     for (input, check) in cases {
         let result = parse_variant_value(input)
             .unwrap_or_else(|e| panic!("parse_variant_value({input:?}) failed: {e}"));
-        assert!(check(&result), "type check failed for input: {input:?}, got: {result:?}");
+        assert!(
+            check(&result),
+            "type check failed for input: {input:?}, got: {result:?}"
+        );
     }
 }
 
@@ -1235,7 +1313,10 @@ fn fuzz_tres_loader_no_panic_malformed() {
         // Very long line
         &format!("[resource]\nlong = \"{}\"", "x".repeat(10000)),
         // Many sections
-        &(0..100).map(|i| format!("[sub_resource type=\"T\" id=\"{i}\"]\nval = {i}")).collect::<Vec<_>>().join("\n"),
+        &(0..100)
+            .map(|i| format!("[sub_resource type=\"T\" id=\"{i}\"]\nval = {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         // Binary-ish junk
         "\x00\x01\x02\x03",
         // Comments and blank lines
@@ -1273,7 +1354,10 @@ fn prop_signal_resolve_args_no_binds_is_identity() {
     let conn = Connection::new(ObjectId::next(), "method");
     let args = vec![Variant::Int(1), Variant::String("hello".into())];
     let resolved = conn.resolve_args(&args);
-    assert_eq!(resolved, args, "no binds/unbinds must pass through unchanged");
+    assert_eq!(
+        resolved, args,
+        "no binds/unbinds must pass through unchanged"
+    );
 }
 
 #[test]
@@ -1291,9 +1375,13 @@ fn prop_signal_resolve_args_binds_append() {
 
 #[test]
 fn prop_signal_resolve_args_unbinds_truncate() {
-    let conn = Connection::new(ObjectId::next(), "method")
-        .with_unbinds(2);
-    let args = vec![Variant::Int(1), Variant::Int(2), Variant::Int(3), Variant::Int(4)];
+    let conn = Connection::new(ObjectId::next(), "method").with_unbinds(2);
+    let args = vec![
+        Variant::Int(1),
+        Variant::Int(2),
+        Variant::Int(3),
+        Variant::Int(4),
+    ];
     let resolved = conn.resolve_args(&args);
     assert_eq!(resolved.len(), 2);
     assert_eq!(resolved[0], Variant::Int(1));
@@ -1303,11 +1391,14 @@ fn prop_signal_resolve_args_unbinds_truncate() {
 #[test]
 fn prop_signal_resolve_args_unbind_more_than_available() {
     // Unbinding more args than provided must not panic (saturating_sub).
-    let conn = Connection::new(ObjectId::next(), "method")
-        .with_unbinds(10);
+    let conn = Connection::new(ObjectId::next(), "method").with_unbinds(10);
     let args = vec![Variant::Int(1), Variant::Int(2)];
     let resolved = conn.resolve_args(&args);
-    assert_eq!(resolved.len(), 0, "unbinding more than available must yield empty");
+    assert_eq!(
+        resolved.len(),
+        0,
+        "unbinding more than available must yield empty"
+    );
 }
 
 #[test]
@@ -1327,11 +1418,14 @@ fn prop_signal_resolve_args_unbind_then_bind() {
 
 #[test]
 fn prop_signal_resolve_args_empty_signal_with_binds() {
-    let conn = Connection::new(ObjectId::next(), "method")
-        .with_binds(vec![Variant::Int(42)]);
+    let conn = Connection::new(ObjectId::next(), "method").with_binds(vec![Variant::Int(42)]);
     let args: Vec<Variant> = vec![];
     let resolved = conn.resolve_args(&args);
-    assert_eq!(resolved, vec![Variant::Int(42)], "empty signal args + bind must work");
+    assert_eq!(
+        resolved,
+        vec![Variant::Int(42)],
+        "empty signal args + bind must work"
+    );
 }
 
 #[test]
@@ -1367,8 +1461,7 @@ fn prop_signal_resolve_args_fuzz() {
 fn prop_signal_emit_oneshot_removes_connection() {
     let mut signal = Signal::new("test_signal");
     let id = ObjectId::next();
-    let conn = Connection::with_callback(id, "on_test", |_| Variant::Int(1))
-        .as_one_shot();
+    let conn = Connection::with_callback(id, "on_test", |_| Variant::Int(1)).as_one_shot();
     signal.connect(conn);
     assert_eq!(signal.connection_count(), 1);
 
@@ -1388,17 +1481,14 @@ fn prop_signal_emit_oneshot_removes_connection() {
 fn prop_signal_emit_many_connections_no_panic() {
     let mut signal = Signal::new("stress_signal");
     for i in 0..100 {
-        let conn = Connection::with_callback(
-            ObjectId::next(),
-            format!("method_{i}"),
-            move |args| {
+        let conn =
+            Connection::with_callback(ObjectId::next(), format!("method_{i}"), move |args| {
                 if args.is_empty() {
                     Variant::Int(i as i64)
                 } else {
                     args[0].clone()
                 }
-            },
-        );
+            });
         signal.connect(conn);
     }
 
@@ -1502,8 +1592,8 @@ fn prop_callable_ref_inner_callable_unwraps() {
 
 #[test]
 fn prop_scene_tree_add_remove_stress() {
-    use gdscene::scene_tree::SceneTree;
     use gdscene::node::Node;
+    use gdscene::scene_tree::SceneTree;
 
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();
@@ -1535,8 +1625,8 @@ fn prop_scene_tree_add_remove_stress() {
 
 #[test]
 fn prop_scene_tree_get_node_by_path_no_panic() {
-    use gdscene::scene_tree::SceneTree;
     use gdscene::node::Node;
+    use gdscene::scene_tree::SceneTree;
 
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();

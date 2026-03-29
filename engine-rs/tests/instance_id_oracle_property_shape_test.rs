@@ -65,8 +65,7 @@ fn count_oracle_nodes(json: &serde_json::Value) -> usize {
 // --- Original 5 scenes ---
 const SIGNAL_INSTANTIATION_TSCN: &str =
     include_str!("../../fixtures/scenes/signal_instantiation.tscn");
-const PHYSICS_PLAYGROUND_TSCN: &str =
-    include_str!("../../fixtures/scenes/physics_playground.tscn");
+const PHYSICS_PLAYGROUND_TSCN: &str = include_str!("../../fixtures/scenes/physics_playground.tscn");
 const PLATFORMER_TSCN: &str = include_str!("../../fixtures/scenes/platformer.tscn");
 const HIERARCHY_TSCN: &str = include_str!("../../fixtures/scenes/hierarchy.tscn");
 const MINIMAL_TSCN: &str = include_str!("../../fixtures/scenes/minimal.tscn");
@@ -74,17 +73,13 @@ const MINIMAL_TSCN: &str = include_str!("../../fixtures/scenes/minimal.tscn");
 // --- Additional scenes with oracle property fixtures ---
 const CHARACTER_BODY_TEST_TSCN: &str =
     include_str!("../../fixtures/scenes/character_body_test.tscn");
-const SIGNALS_COMPLEX_TSCN: &str =
-    include_str!("../../fixtures/scenes/signals_complex.tscn");
-const SPACE_SHOOTER_TSCN: &str =
-    include_str!("../../fixtures/scenes/space_shooter.tscn");
+const SIGNALS_COMPLEX_TSCN: &str = include_str!("../../fixtures/scenes/signals_complex.tscn");
+const SPACE_SHOOTER_TSCN: &str = include_str!("../../fixtures/scenes/space_shooter.tscn");
 const UI_MENU_TSCN: &str = include_str!("../../fixtures/scenes/ui_menu.tscn");
 const UNIQUE_NAME_RESOLUTION_TSCN: &str =
     include_str!("../../fixtures/scenes/unique_name_resolution.tscn");
-const WITH_PROPERTIES_TSCN: &str =
-    include_str!("../../fixtures/scenes/with_properties.tscn");
-const TEST_SCRIPTS_TSCN: &str =
-    include_str!("../../fixtures/scenes/test_scripts.tscn");
+const WITH_PROPERTIES_TSCN: &str = include_str!("../../fixtures/scenes/with_properties.tscn");
+const TEST_SCRIPTS_TSCN: &str = include_str!("../../fixtures/scenes/test_scripts.tscn");
 
 // --- Oracle property fixtures (JSON) ---
 const SIGNAL_INSTANTIATION_PROPS: &str =
@@ -95,16 +90,14 @@ const PLATFORMER_PROPS: &str =
     include_str!("../../fixtures/oracle_outputs/platformer_properties.json");
 const HIERARCHY_PROPS: &str =
     include_str!("../../fixtures/oracle_outputs/hierarchy_properties.json");
-const MINIMAL_PROPS: &str =
-    include_str!("../../fixtures/oracle_outputs/minimal_properties.json");
+const MINIMAL_PROPS: &str = include_str!("../../fixtures/oracle_outputs/minimal_properties.json");
 const CHARACTER_BODY_TEST_PROPS: &str =
     include_str!("../../fixtures/oracle_outputs/character_body_test_properties.json");
 const SIGNALS_COMPLEX_PROPS: &str =
     include_str!("../../fixtures/oracle_outputs/signals_complex_properties.json");
 const SPACE_SHOOTER_PROPS: &str =
     include_str!("../../fixtures/oracle_outputs/space_shooter_properties.json");
-const UI_MENU_PROPS: &str =
-    include_str!("../../fixtures/oracle_outputs/ui_menu_properties.json");
+const UI_MENU_PROPS: &str = include_str!("../../fixtures/oracle_outputs/ui_menu_properties.json");
 const UNIQUE_NAME_RESOLUTION_PROPS: &str =
     include_str!("../../fixtures/oracle_outputs/unique_name_resolution_properties.json");
 const WITH_PROPERTIES_PROPS: &str =
@@ -218,10 +211,7 @@ fn assert_instance_id_variant_type(tree: &SceneTree, scene_label: &str) {
                 v, raw,
                 "[{scene_label}] Variant Int value must match raw ID"
             );
-            assert!(
-                v > 0,
-                "[{scene_label}] Variant Int value must be positive"
-            );
+            assert!(v > 0, "[{scene_label}] Variant Int value must be positive");
         }
     }
 }
@@ -289,12 +279,7 @@ scene_instance_id_tests!(
     5 // root + World + Player + Platforms + Camera + Collectible
 );
 
-scene_instance_id_tests!(
-    hierarchy,
-    HIERARCHY_TSCN,
-    "hierarchy",
-    3
-);
+scene_instance_id_tests!(hierarchy, HIERARCHY_TSCN, "hierarchy", 3);
 
 scene_instance_id_tests!(
     minimal,
@@ -554,9 +539,8 @@ fn all_contract_scenes_satisfy_shape_invariants() {
 
 #[test]
 fn instance_id_shape_contract_fixture_is_valid() {
-    let contract_json = include_str!(
-        "../../fixtures/golden/scenes/instance_id_shape_contract.json"
-    );
+    let contract_json =
+        include_str!("../../fixtures/golden/scenes/instance_id_shape_contract.json");
     let parsed: serde_json::Value =
         serde_json::from_str(contract_json).expect("contract fixture must be valid JSON");
 

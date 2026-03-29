@@ -21,7 +21,10 @@ fn non_trivial_scene_has_oracle_golden() {
     let tree = fixtures_dir().join("oracle_outputs/platformer_tree.json");
     let props = fixtures_dir().join("oracle_outputs/platformer_properties.json");
     assert!(tree.exists(), "platformer_tree.json oracle must exist");
-    assert!(props.exists(), "platformer_properties.json oracle must exist");
+    assert!(
+        props.exists(),
+        "platformer_properties.json oracle must exist"
+    );
 }
 
 #[test]
@@ -46,7 +49,10 @@ fn patina_runner_produces_matching_node_count() {
     }
 
     let oracle_count = count_nodes(&tree);
-    assert!(oracle_count >= 3, "non-trivial scene should have >= 3 nodes, got {oracle_count}");
+    assert!(
+        oracle_count >= 3,
+        "non-trivial scene should have >= 3 nodes, got {oracle_count}"
+    );
 
     // Load the corresponding patina golden
     let golden_path = fixtures_dir().join("golden/scenes/platformer.json");

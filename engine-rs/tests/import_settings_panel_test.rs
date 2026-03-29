@@ -162,11 +162,7 @@ fn set_import_settings_missing_path_returns_400() {
 #[test]
 fn set_import_settings_missing_params_returns_400() {
     let (handle, port) = make_server();
-    let resp = http_post(
-        port,
-        "/api/import_settings",
-        r#"{"path":"res://icon.png"}"#,
-    );
+    let resp = http_post(port, "/api/import_settings", r#"{"path":"res://icon.png"}"#);
     assert!(resp.contains("400"));
     handle.stop();
 }

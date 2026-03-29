@@ -534,7 +534,9 @@ pub fn create_commit(project_dir: &Path, message: &str) -> Result<String, String
             .current_dir(project_dir)
             .output()
             .map_err(|e| e.to_string())?;
-        Ok(String::from_utf8_lossy(&hash_output.stdout).trim().to_string())
+        Ok(String::from_utf8_lossy(&hash_output.stdout)
+            .trim()
+            .to_string())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
@@ -902,8 +904,16 @@ mod tests {
         // Should have at least 1 modified + 2 untracked.
         let untracked_count = status.summary.get("untracked").copied().unwrap_or(0);
         let modified_count = status.summary.get("modified").copied().unwrap_or(0);
-        assert!(untracked_count >= 2, "expected >= 2 untracked, got {}", untracked_count);
-        assert!(modified_count >= 1, "expected >= 1 modified, got {}", modified_count);
+        assert!(
+            untracked_count >= 2,
+            "expected >= 2 untracked, got {}",
+            untracked_count
+        );
+        assert!(
+            modified_count >= 1,
+            "expected >= 1 modified, got {}",
+            modified_count
+        );
     }
 
     #[test]
@@ -912,7 +922,10 @@ mod tests {
         fs::write(repo.path().join("README.md"), "# Modified Content\n").expect("modify");
 
         let diff = get_file_diff(repo.path(), "README.md");
-        assert!(diff.contains("Modified Content"), "diff should contain the change");
+        assert!(
+            diff.contains("Modified Content"),
+            "diff should contain the change"
+        );
     }
 
     #[test]
@@ -1297,7 +1310,11 @@ mod tests {
             .expect("git add");
 
         // Modify README again (unstaged change on top of staged).
-        fs::write(repo.path().join("README.md"), "# Both staged and unstaged\n").expect("write");
+        fs::write(
+            repo.path().join("README.md"),
+            "# Both staged and unstaged\n",
+        )
+        .expect("write");
 
         let status = query_git_status(repo.path());
         let staged = status

@@ -50,12 +50,16 @@ fn oracle_tree_structure_unique_nodes_461() {
     assert_eq!(tree.get_node(hb).unwrap().class_name(), "ProgressBar");
 
     // ScoreLabel is under Panel
-    let sl = tree.get_node_relative(scene_root, "Panel/ScoreLabel").unwrap();
+    let sl = tree
+        .get_node_relative(scene_root, "Panel/ScoreLabel")
+        .unwrap();
     assert!(tree.get_node(sl).unwrap().is_unique_name());
     assert_eq!(tree.get_node(sl).unwrap().class_name(), "Label");
 
     // StatusIcon is under Container
-    let si = tree.get_node_relative(scene_root, "Container/StatusIcon").unwrap();
+    let si = tree
+        .get_node_relative(scene_root, "Container/StatusIcon")
+        .unwrap();
     assert!(tree.get_node(si).unwrap().is_unique_name());
     assert_eq!(tree.get_node(si).unwrap().class_name(), "TextureRect");
 }
@@ -105,10 +109,16 @@ fn nonunique_not_resolved_via_percent_461() {
     let (tree, scene_root) = build_unique_name_scene();
 
     let panel = tree.get_node_relative(scene_root, "%Panel");
-    assert!(panel.is_none(), "Panel is not unique — %Panel must return None");
+    assert!(
+        panel.is_none(),
+        "Panel is not unique — %Panel must return None"
+    );
 
     let container = tree.get_node_relative(scene_root, "%Container");
-    assert!(container.is_none(), "Container is not unique — %Container must return None");
+    assert!(
+        container.is_none(),
+        "Container is not unique — %Container must return None"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -123,12 +133,20 @@ fn absolute_paths_match_oracle_461() {
     // Oracle: /root/Root, /root/Root/Panel, etc.
     let _root_path = tree.node_path(root).unwrap();
     let scene_path = tree.node_path(scene_root).unwrap();
-    assert!(scene_path.ends_with("/Root"), "scene root path: {}", scene_path);
+    assert!(
+        scene_path.ends_with("/Root"),
+        "scene root path: {}",
+        scene_path
+    );
 
     // All children reachable by absolute path
     let panel = tree.get_node_relative(scene_root, "Panel").unwrap();
     let panel_path = tree.node_path(panel).unwrap();
-    assert!(panel_path.ends_with("/Root/Panel"), "panel path: {}", panel_path);
+    assert!(
+        panel_path.ends_with("/Root/Panel"),
+        "panel path: {}",
+        panel_path
+    );
 
     let hb = tree.get_node_relative(scene_root, "%HealthBar").unwrap();
     let hb_path = tree.node_path(hb).unwrap();
@@ -150,12 +168,20 @@ fn node_path_omits_percent_prefix_461() {
 
     let hb = tree.get_node_relative(scene_root, "%HealthBar").unwrap();
     let path = tree.node_path(hb).unwrap();
-    assert!(!path.contains('%'), "node_path must not contain %: {}", path);
+    assert!(
+        !path.contains('%'),
+        "node_path must not contain %: {}",
+        path
+    );
     assert!(path.ends_with("HealthBar"));
 
     let sl = tree.get_node_relative(scene_root, "%ScoreLabel").unwrap();
     let path = tree.node_path(sl).unwrap();
-    assert!(!path.contains('%'), "node_path must not contain %: {}", path);
+    assert!(
+        !path.contains('%'),
+        "node_path must not contain %: {}",
+        path
+    );
     assert!(path.contains("Panel/ScoreLabel"));
 }
 
@@ -168,7 +194,9 @@ fn relative_dot_dotdot_traversal_461() {
     let (tree, scene_root) = build_unique_name_scene();
 
     let panel = tree.get_node_relative(scene_root, "Panel").unwrap();
-    let score_label = tree.get_node_relative(scene_root, "Panel/ScoreLabel").unwrap();
+    let score_label = tree
+        .get_node_relative(scene_root, "Panel/ScoreLabel")
+        .unwrap();
 
     // "." from Panel returns Panel
     assert_eq!(tree.get_node_relative(panel, "."), Some(panel));
@@ -177,7 +205,10 @@ fn relative_dot_dotdot_traversal_461() {
     assert_eq!(tree.get_node_relative(score_label, ".."), Some(panel));
 
     // "../.." from ScoreLabel returns scene_root
-    assert_eq!(tree.get_node_relative(score_label, "../.."), Some(scene_root));
+    assert_eq!(
+        tree.get_node_relative(score_label, "../.."),
+        Some(scene_root)
+    );
 
     // "../Container/StatusIcon" from Panel goes up to Root, then down
     let si = tree.get_node_relative(panel, "../Container/StatusIcon");
@@ -253,7 +284,10 @@ fn unique_name_owner_boundary_461() {
     // The outer_button should NOT be the one inside SubScene
     let sub_button = tree.get_node_relative(sub_root, "Button").unwrap();
     // They should be different nodes
-    assert_ne!(outer_button, sub_button, "Owner boundary must prevent leakage");
+    assert_ne!(
+        outer_button, sub_button,
+        "Owner boundary must prevent leakage"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -272,12 +306,19 @@ fn unique_name_survives_reparent_461() {
 
     // %HealthBar should still resolve (unique_name flag preserved)
     let resolved = tree.get_node_relative(scene_root, "%HealthBar");
-    assert!(resolved.is_some(), "%HealthBar must still resolve after reparent");
+    assert!(
+        resolved.is_some(),
+        "%HealthBar must still resolve after reparent"
+    );
     assert_eq!(resolved.unwrap(), hb);
 
     // Path should update to reflect new parent
     let path = tree.node_path(hb).unwrap();
-    assert!(path.contains("Container/HealthBar"), "reparented path: {}", path);
+    assert!(
+        path.contains("Container/HealthBar"),
+        "reparented path: {}",
+        path
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -384,8 +425,7 @@ fn oracle_node_names_parity_461() {
     ))
     .expect("read oracle tree json");
 
-    let oracle: serde_json::Value =
-        serde_json::from_str(&oracle_json).expect("parse oracle json");
+    let oracle: serde_json::Value = serde_json::from_str(&oracle_json).expect("parse oracle json");
 
     // Oracle has root → Root → [%HealthBar, Panel → [%ScoreLabel], Container → [%StatusIcon]]
     let root_children = oracle["children"].as_array().unwrap();
@@ -422,7 +462,10 @@ fn duplicate_preserves_unique_names_461() {
 
     // Check that duplicate nodes include unique-name flagged nodes
     let unique_count = dup_nodes.iter().filter(|n| n.is_unique_name()).count();
-    assert_eq!(unique_count, 3, "Duplicate must preserve all 3 unique names");
+    assert_eq!(
+        unique_count, 3,
+        "Duplicate must preserve all 3 unique names"
+    );
 }
 
 // ---------------------------------------------------------------------------

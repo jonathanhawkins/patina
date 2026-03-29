@@ -365,9 +365,7 @@ impl std::ops::Add for Variant {
             (Variant::Float(a), Variant::Float(b)) => Variant::Float(a + b),
             (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 + b),
             (Variant::Float(a), Variant::Int(b)) => Variant::Float(a + *b as f64),
-            (Variant::String(a), Variant::String(b)) => {
-                Variant::String(format!("{a}{b}"))
-            }
+            (Variant::String(a), Variant::String(b)) => Variant::String(format!("{a}{b}")),
             _ => Variant::Nil,
         }
     }

@@ -25,7 +25,9 @@ fn visual_script_stub_implements_script_instance() {
     let err = stub.call_method("_ready", &[]).unwrap_err();
     assert!(matches!(err, ScriptError::MethodNotFound(_)));
 
-    let err = stub.call_method("_process", &[gdvariant::Variant::Float(0.016)]).unwrap_err();
+    let err = stub
+        .call_method("_process", &[gdvariant::Variant::Float(0.016)])
+        .unwrap_err();
     assert!(matches!(err, ScriptError::MethodNotFound(_)));
 
     // Properties are inert

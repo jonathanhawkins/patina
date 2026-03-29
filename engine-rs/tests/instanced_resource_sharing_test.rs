@@ -152,13 +152,20 @@ fn ext_resource_refs_independent_across_instances() {
 
     // Both reference the same ExtResource string.
     let expected = Variant::String("ExtResource(\"t1\")".into());
-    assert_eq!(tree.get_node(sprite1).unwrap().get_property("texture"), expected);
-    assert_eq!(tree.get_node(sprite2).unwrap().get_property("texture"), expected);
+    assert_eq!(
+        tree.get_node(sprite1).unwrap().get_property("texture"),
+        expected
+    );
+    assert_eq!(
+        tree.get_node(sprite2).unwrap().get_property("texture"),
+        expected
+    );
 
     // Swap texture on instance 1.
-    tree.get_node_mut(sprite1)
-        .unwrap()
-        .set_property("texture", Variant::String("ExtResource(\"t_replaced\")".into()));
+    tree.get_node_mut(sprite1).unwrap().set_property(
+        "texture",
+        Variant::String("ExtResource(\"t_replaced\")".into()),
+    );
 
     // Instance 2 unchanged.
     assert_eq!(
@@ -204,7 +211,10 @@ fn array_properties_independent_across_instances() {
             assert_eq!(a.len(), 2, "instance 2 array length must be unchanged");
             assert_eq!(a[0], Variant::String("enemy".into()));
         }
-        _ => panic!("expected Array variant after mutation, got {:?}", tags2_after),
+        _ => panic!(
+            "expected Array variant after mutation, got {:?}",
+            tags2_after
+        ),
     }
 }
 
@@ -269,14 +279,24 @@ fn three_instances_middle_mutation_isolated() {
     let original = Variant::String("SubResource:shape_1".into());
 
     // All three start with the same shape reference.
-    assert_eq!(tree.get_node(collider1).unwrap().get_property("shape"), original);
-    assert_eq!(tree.get_node(collider2).unwrap().get_property("shape"), original);
-    assert_eq!(tree.get_node(collider3).unwrap().get_property("shape"), original);
+    assert_eq!(
+        tree.get_node(collider1).unwrap().get_property("shape"),
+        original
+    );
+    assert_eq!(
+        tree.get_node(collider2).unwrap().get_property("shape"),
+        original
+    );
+    assert_eq!(
+        tree.get_node(collider3).unwrap().get_property("shape"),
+        original
+    );
 
     // Mutate only the middle instance.
-    tree.get_node_mut(collider2)
-        .unwrap()
-        .set_property("shape", Variant::String("SubResource:shape_replaced".into()));
+    tree.get_node_mut(collider2).unwrap().set_property(
+        "shape",
+        Variant::String("SubResource:shape_replaced".into()),
+    );
 
     // First and third must be unaffected (4.6.1 resource sharing fix).
     assert_eq!(
@@ -422,18 +442,24 @@ fn subscene_instancing_resource_refs_independent() {
     let root = tree.root_id();
 
     // Instance the parent scene twice — each embeds the child sub-scene.
-    let inst1 = add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve)
-        .unwrap();
-    let inst2 = add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve)
-        .unwrap();
+    let inst1 =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve).unwrap();
+    let inst2 =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve).unwrap();
 
     // Locate the sub-scene collider in each instance.
     let collider1 = tree.get_node_relative(inst1, "Enemy1/Collider").unwrap();
     let collider2 = tree.get_node_relative(inst2, "Enemy1/Collider").unwrap();
 
     let original = Variant::String("SubResource:child_shape".into());
-    assert_eq!(tree.get_node(collider1).unwrap().get_property("shape"), original);
-    assert_eq!(tree.get_node(collider2).unwrap().get_property("shape"), original);
+    assert_eq!(
+        tree.get_node(collider1).unwrap().get_property("shape"),
+        original
+    );
+    assert_eq!(
+        tree.get_node(collider2).unwrap().get_property("shape"),
+        original
+    );
 
     // Mutate sub-scene resource on instance 1.
     tree.get_node_mut(collider1)
@@ -496,16 +522,28 @@ fn group_membership_independent_across_instances() {
 
     // Both instances should appear in the "players" group.
     let players = tree.get_nodes_in_group("players");
-    assert_eq!(players.len(), 2, "both instances should be in 'players' group");
+    assert_eq!(
+        players.len(),
+        2,
+        "both instances should be in 'players' group"
+    );
 
     // Both weapon children should appear in "weapons".
     let weapons = tree.get_nodes_in_group("weapons");
-    assert_eq!(weapons.len(), 2, "both weapon instances should be in 'weapons' group");
+    assert_eq!(
+        weapons.len(),
+        2,
+        "both weapon instances should be in 'weapons' group"
+    );
 
     // Removing inst1 from the group should leave inst2 in it.
     tree.remove_from_group(inst1, "players").unwrap();
     let players_after = tree.get_nodes_in_group("players");
-    assert_eq!(players_after.len(), 1, "only instance 2 should remain in 'players' after removal");
+    assert_eq!(
+        players_after.len(),
+        1,
+        "only instance 2 should remain in 'players' after removal"
+    );
     assert!(
         players_after.contains(&inst2),
         "instance 2 must still be in 'players' group"
@@ -541,9 +579,10 @@ fn many_instances_resource_isolation_stress() {
     // Mutate every other instance's collider shape.
     for (i, &cid) in colliders.iter().enumerate() {
         if i % 2 == 0 {
-            tree.get_node_mut(cid)
-                .unwrap()
-                .set_property("shape", Variant::String(format!("SubResource:custom_{i}").into()));
+            tree.get_node_mut(cid).unwrap().set_property(
+                "shape",
+                Variant::String(format!("SubResource:custom_{i}").into()),
+            );
         }
     }
 
@@ -685,18 +724,43 @@ fn varied_type_mutation_isolated_across_instances() {
     let inst2 = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
 
     // Mutate every property on instance 1.
-    tree.get_node_mut(inst1).unwrap().set_property("health", Variant::Int(0));
-    tree.get_node_mut(inst1).unwrap().set_property("speed", Variant::Float(99.9));
-    tree.get_node_mut(inst1).unwrap().set_property("is_alive", Variant::Bool(false));
-    tree.get_node_mut(inst1).unwrap().set_property("name_tag", Variant::String("dead".into()));
-    tree.get_node_mut(inst1).unwrap().set_property("tags", Variant::Array(vec![]));
+    tree.get_node_mut(inst1)
+        .unwrap()
+        .set_property("health", Variant::Int(0));
+    tree.get_node_mut(inst1)
+        .unwrap()
+        .set_property("speed", Variant::Float(99.9));
+    tree.get_node_mut(inst1)
+        .unwrap()
+        .set_property("is_alive", Variant::Bool(false));
+    tree.get_node_mut(inst1)
+        .unwrap()
+        .set_property("name_tag", Variant::String("dead".into()));
+    tree.get_node_mut(inst1)
+        .unwrap()
+        .set_property("tags", Variant::Array(vec![]));
 
     // Instance 2 must retain all original values.
     let node2 = tree.get_node(inst2).unwrap();
-    assert_eq!(node2.get_property("health"), Variant::Int(100), "health isolated");
-    assert!(matches!(node2.get_property("speed"), Variant::Float(v) if (v - 3.5).abs() < 0.01), "speed isolated");
-    assert_eq!(node2.get_property("is_alive"), Variant::Bool(true), "is_alive isolated");
-    assert_eq!(node2.get_property("name_tag"), Variant::String("hero".into()), "name_tag isolated");
+    assert_eq!(
+        node2.get_property("health"),
+        Variant::Int(100),
+        "health isolated"
+    );
+    assert!(
+        matches!(node2.get_property("speed"), Variant::Float(v) if (v - 3.5).abs() < 0.01),
+        "speed isolated"
+    );
+    assert_eq!(
+        node2.get_property("is_alive"),
+        Variant::Bool(true),
+        "is_alive isolated"
+    );
+    assert_eq!(
+        node2.get_property("name_tag"),
+        Variant::String("hero".into()),
+        "name_tag isolated"
+    );
     match node2.get_property("tags") {
         Variant::Array(ref a) => assert_eq!(a.len(), 2, "tags array isolated"),
         other => panic!("tags must be Array, got {:?}", other),
@@ -758,10 +822,10 @@ fn ownership_boundaries_correct_per_instance() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let inst1 = add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve)
-        .unwrap();
-    let inst2 = add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve)
-        .unwrap();
+    let inst1 =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve).unwrap();
+    let inst2 =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve).unwrap();
 
     // Sub-scene roots should be owned by their respective parent instance roots.
     let enemy1 = tree.get_node_relative(inst1, "Enemy1").unwrap();
@@ -868,8 +932,8 @@ fn multi_ext_resource_subscene_instances_independent() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let wave = add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve)
-        .unwrap();
+    let wave =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve).unwrap();
 
     let sprite_a = tree.get_node_relative(wave, "EnemyA/Sprite").unwrap();
     let sprite_b = tree.get_node_relative(wave, "EnemyB/Sprite").unwrap();
@@ -878,8 +942,14 @@ fn multi_ext_resource_subscene_instances_independent() {
 
     // Both sprites start with the same texture ref.
     let tex_ref = Variant::String("ExtResource(\"tex\")".into());
-    assert_eq!(tree.get_node(sprite_a).unwrap().get_property("texture"), tex_ref);
-    assert_eq!(tree.get_node(sprite_b).unwrap().get_property("texture"), tex_ref);
+    assert_eq!(
+        tree.get_node(sprite_a).unwrap().get_property("texture"),
+        tex_ref
+    );
+    assert_eq!(
+        tree.get_node(sprite_b).unwrap().get_property("texture"),
+        tex_ref
+    );
 
     // Mutate EnemyA's sprite texture and hitbox shape.
     tree.get_node_mut(sprite_a)
@@ -937,19 +1007,23 @@ fn rvb1_transform3d_properties_independent_across_instances() {
     let t2 = tree.get_node(inst2).unwrap().get_property("transform");
     match (&t1, &t2) {
         (Variant::Transform3D(a), Variant::Transform3D(b)) => {
-            assert_eq!(a.origin, b.origin, "both instances should start with same origin");
+            assert_eq!(
+                a.origin, b.origin,
+                "both instances should start with same origin"
+            );
             assert_eq!(a.origin, Vector3::new(10.0, 20.0, 30.0));
         }
         _ => panic!("expected Transform3D variants, got {:?} / {:?}", t1, t2),
     }
 
     // Mutate instance 1's transform.
-    tree.get_node_mut(inst1)
-        .unwrap()
-        .set_property("transform", Variant::Transform3D(gdcore::math3d::Transform3D {
+    tree.get_node_mut(inst1).unwrap().set_property(
+        "transform",
+        Variant::Transform3D(gdcore::math3d::Transform3D {
             basis: gdcore::math3d::Basis::IDENTITY,
             origin: Vector3::new(99.0, 99.0, 99.0),
-        }));
+        }),
+    );
 
     // Instance 2 must be unaffected.
     match tree.get_node(inst2).unwrap().get_property("transform") {
@@ -991,12 +1065,13 @@ fn rvb1_child_transform3d_isolated_across_instances() {
     }
 
     // Mutate child1's transform.
-    tree.get_node_mut(child1)
-        .unwrap()
-        .set_property("transform", Variant::Transform3D(gdcore::math3d::Transform3D {
+    tree.get_node_mut(child1).unwrap().set_property(
+        "transform",
+        Variant::Transform3D(gdcore::math3d::Transform3D {
             basis: gdcore::math3d::Basis::IDENTITY,
             origin: Vector3::ZERO,
-        }));
+        }),
+    );
 
     // Child2 must retain its original transform.
     match tree.get_node(child2).unwrap().get_property("transform") {
@@ -1040,8 +1115,8 @@ damage = 75
 
 #[test]
 fn rvb1_nested_subscene_3d_resource_sharing_isolated() {
-    use gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes;
     use gdcore::math::Vector3;
+    use gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes;
 
     let parent_scene = PackedScene::from_tscn(PARENT_3D_SCENE).unwrap();
 
@@ -1056,8 +1131,8 @@ fn rvb1_nested_subscene_3d_resource_sharing_isolated() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let base = add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve)
-        .unwrap();
+    let base =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &parent_scene, &resolve).unwrap();
 
     let turret_left = tree.get_node_relative(base, "TurretLeft").unwrap();
     let turret_right = tree.get_node_relative(base, "TurretRight").unwrap();
@@ -1077,7 +1152,11 @@ fn rvb1_nested_subscene_3d_resource_sharing_isolated() {
     );
 
     // Barrels should both have the same initial transform from the sub-scene.
-    match tree.get_node(barrel_left).unwrap().get_property("transform") {
+    match tree
+        .get_node(barrel_left)
+        .unwrap()
+        .get_property("transform")
+    {
         Variant::Transform3D(t) => {
             assert_eq!(t.origin, Vector3::new(0.0, 0.0, 2.0), "barrel_left origin");
         }
@@ -1085,12 +1164,13 @@ fn rvb1_nested_subscene_3d_resource_sharing_isolated() {
     }
 
     // Mutate barrel_left transform and turret_left damage.
-    tree.get_node_mut(barrel_left)
-        .unwrap()
-        .set_property("transform", Variant::Transform3D(gdcore::math3d::Transform3D {
+    tree.get_node_mut(barrel_left).unwrap().set_property(
+        "transform",
+        Variant::Transform3D(gdcore::math3d::Transform3D {
             basis: gdcore::math3d::Basis::IDENTITY,
             origin: Vector3::new(0.0, 0.0, 10.0),
-        }));
+        }),
+    );
     tree.get_node_mut(turret_left)
         .unwrap()
         .set_property("damage", Variant::Int(0));
@@ -1101,7 +1181,11 @@ fn rvb1_nested_subscene_3d_resource_sharing_isolated() {
         Variant::Int(75),
         "TurretRight damage must be unaffected (4.6.1 repin)"
     );
-    match tree.get_node(barrel_right).unwrap().get_property("transform") {
+    match tree
+        .get_node(barrel_right)
+        .unwrap()
+        .get_property("transform")
+    {
         Variant::Transform3D(t) => {
             assert_eq!(
                 t.origin,
@@ -1115,8 +1199,14 @@ fn rvb1_nested_subscene_3d_resource_sharing_isolated() {
     // Ownership boundaries: turrets owned by base, barrels owned by turrets.
     assert_eq!(tree.get_node(turret_left).unwrap().owner(), Some(base));
     assert_eq!(tree.get_node(turret_right).unwrap().owner(), Some(base));
-    assert_eq!(tree.get_node(barrel_left).unwrap().owner(), Some(turret_left));
-    assert_eq!(tree.get_node(barrel_right).unwrap().owner(), Some(turret_right));
+    assert_eq!(
+        tree.get_node(barrel_left).unwrap().owner(),
+        Some(turret_left)
+    );
+    assert_eq!(
+        tree.get_node(barrel_right).unwrap().owner(),
+        Some(turret_right)
+    );
 }
 
 // ===========================================================================
@@ -1156,7 +1246,9 @@ fn signal_connections_independent_across_instances() {
     // Instance 1 should have the signal connection.
     let store1 = tree.signal_store(inst1);
     assert!(
-        store1.is_some_and(|s| s.get_signal("pressed").is_some_and(|sig| sig.connection_count() == 1)),
+        store1.is_some_and(|s| s
+            .get_signal("pressed")
+            .is_some_and(|sig| sig.connection_count() == 1)),
         "instance 1 should have 1 connection on 'pressed'"
     );
 
@@ -1204,9 +1296,10 @@ fn unique_name_nodes_independent_across_instances() {
     }
 
     // Mutate marker1.
-    tree.get_node_mut(marker1)
-        .unwrap()
-        .set_property("position", Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)));
+    tree.get_node_mut(marker1).unwrap().set_property(
+        "position",
+        Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+    );
 
     // Marker2 must be unaffected.
     match tree.get_node(marker2).unwrap().get_property("position") {
@@ -1240,7 +1333,10 @@ fn dynamic_child_ownership_after_instancing() {
 
     let inst1_child_count = tree.get_node(inst1).unwrap().children().len();
     let inst2_child_count = tree.get_node(inst2).unwrap().children().len();
-    assert_eq!(inst1_child_count, inst2_child_count, "same initial children");
+    assert_eq!(
+        inst1_child_count, inst2_child_count,
+        "same initial children"
+    );
 
     // Dynamically add a child to instance 1.
     let extra = Node::new("Extra", "Node2D");
@@ -1284,9 +1380,10 @@ fn reinstancing_produces_clean_state_after_mutation() {
 
     // First instance — mutate a property.
     let inst1 = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
-    tree.get_node_mut(inst1)
-        .unwrap()
-        .set_property("position", Variant::Vector2(gdcore::math::Vector2::new(999.0, 999.0)));
+    tree.get_node_mut(inst1).unwrap().set_property(
+        "position",
+        Variant::Vector2(gdcore::math::Vector2::new(999.0, 999.0)),
+    );
 
     // Remove instance 1.
     tree.remove_node(inst1);

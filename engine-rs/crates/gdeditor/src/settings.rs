@@ -184,16 +184,36 @@ pub struct ProjectSettings {
     pub input_map: HashMap<String, Vec<String>>,
 }
 
-fn default_resolution_w() -> u32 { 1152 }
-fn default_resolution_h() -> u32 { 648 }
-fn default_stretch_mode() -> String { "disabled".to_string() }
-fn default_stretch_aspect() -> String { "keep".to_string() }
-fn default_true() -> bool { true }
-fn default_linear_damp() -> f64 { 0.1 }
-fn default_angular_damp() -> f64 { 1.0 }
-fn default_bus_layout() -> String { "res://default_bus_layout.tres".to_string() }
-fn default_renderer() -> String { "forward_plus".to_string() }
-fn default_aa() -> String { "disabled".to_string() }
+fn default_resolution_w() -> u32 {
+    1152
+}
+fn default_resolution_h() -> u32 {
+    648
+}
+fn default_stretch_mode() -> String {
+    "disabled".to_string()
+}
+fn default_stretch_aspect() -> String {
+    "keep".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_linear_damp() -> f64 {
+    0.1
+}
+fn default_angular_damp() -> f64 {
+    1.0
+}
+fn default_bus_layout() -> String {
+    "res://default_bus_layout.tres".to_string()
+}
+fn default_renderer() -> String {
+    "forward_plus".to_string()
+}
+fn default_aa() -> String {
+    "disabled".to_string()
+}
 
 impl Default for ProjectSettings {
     fn default() -> Self {

@@ -156,7 +156,10 @@ fn revalidate_runtime_step_advances_frame() {
     // Step again
     let step2 = parse_json(&http_post(port, "/api/runtime/step", ""));
     let frame2 = step2["frame_count"].as_u64().unwrap();
-    assert!(frame2 > frame1, "Frame count should increase on second step");
+    assert!(
+        frame2 > frame1,
+        "Frame count should increase on second step"
+    );
 
     http_post(port, "/api/runtime/stop", "");
     handle.stop();
@@ -208,7 +211,10 @@ fn revalidate_scene_tree_preserves_461_class_names() {
         .iter()
         .map(|c| c["class"].as_str().unwrap())
         .collect();
-    assert!(classes.contains(&"CharacterBody2D"), "Should have CharacterBody2D");
+    assert!(
+        classes.contains(&"CharacterBody2D"),
+        "Should have CharacterBody2D"
+    );
     assert!(classes.contains(&"Sprite2D"), "Should have Sprite2D");
 
     handle.stop();
@@ -223,15 +229,19 @@ fn revalidate_add_node_with_461_class() {
     let world_id = scene["nodes"]["children"][0]["id"].as_u64().unwrap();
 
     // Add a StaticBody2D (4.6.1 physics node class)
-    let add_body = format!(
-        r#"{{"parent_id":{world_id},"name":"Wall","class_name":"StaticBody2D"}}"#
-    );
+    let add_body =
+        format!(r#"{{"parent_id":{world_id},"name":"Wall","class_name":"StaticBody2D"}}"#);
     let add_resp = parse_json(&http_post(port, "/api/node/add", &add_body));
-    assert!(add_resp["id"].as_u64().is_some(), "Should return new node ID");
+    assert!(
+        add_resp["id"].as_u64().is_some(),
+        "Should return new node ID"
+    );
 
     // Verify the class survives round-trip
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
     let wall = world_children.iter().find(|c| c["name"] == "Wall");
     assert!(wall.is_some(), "Wall node should exist");
     assert_eq!(wall.unwrap()["class"], "StaticBody2D");
@@ -252,7 +262,11 @@ fn revalidate_vector2_property_round_trip() {
     let world_id = scene["nodes"]["children"][0]["id"].as_u64().unwrap();
 
     // Select the World node
-    http_post(port, "/api/node/select", &format!(r#"{{"node_id":{world_id}}}"#));
+    http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{world_id}}}"#),
+    );
 
     // Set position property using the correct from_json format: {"type":"Vector2","value":[x,y]}
     let set_body = format!(
@@ -264,8 +278,11 @@ fn revalidate_vector2_property_round_trip() {
     // Verify via selected node
     let selected = parse_json(&http_get(port, "/api/selected"));
     let selected_str = selected.to_string();
-    assert!(selected_str.contains("42.5"),
-        "Position should reflect the set value, got: {}", selected_str);
+    assert!(
+        selected_str.contains("42.5"),
+        "Position should reflect the set value, got: {}",
+        selected_str
+    );
 
     handle.stop();
 }
@@ -288,7 +305,10 @@ fn revalidate_save_load_preserves_461_node_types() {
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("[gd_scene"), "Should be .tscn format");
     assert!(contents.contains("Node2D"), "Should contain Node2D class");
-    assert!(contents.contains("CharacterBody2D"), "Should contain CharacterBody2D");
+    assert!(
+        contents.contains("CharacterBody2D"),
+        "Should contain CharacterBody2D"
+    );
     assert!(contents.contains("Sprite2D"), "Should contain Sprite2D");
 
     // Load
@@ -304,7 +324,10 @@ fn revalidate_save_load_preserves_461_node_types() {
     let world = &children[0];
     assert_eq!(world["class"], "Node2D");
     let world_children = world["children"].as_array().unwrap();
-    assert!(world_children.len() >= 2, "World should have Player and Sprite children");
+    assert!(
+        world_children.len() >= 2,
+        "World should have Player and Sprite children"
+    );
 
     handle.stop();
 }
@@ -323,7 +346,10 @@ fn revalidate_editor_html_contains_runtime_controls() {
 
     let body = extract_body(&resp);
     // The editor shell should contain play/stop/pause UI elements
-    assert!(body.contains("Patina"), "Shell should contain Patina branding");
+    assert!(
+        body.contains("Patina"),
+        "Shell should contain Patina branding"
+    );
     // Verify key UI components are present
     assert!(
         body.contains("scene-tree") || body.contains("SceneTree") || body.contains("scene_tree"),
@@ -362,7 +388,10 @@ fn revalidate_undo_redo_across_play_stop() {
 
     // Undo the add — should still work after play/stop cycle
     let undo_resp = http_post(port, "/api/undo", "");
-    assert!(undo_resp.contains("200 OK"), "Undo should work after play/stop");
+    assert!(
+        undo_resp.contains("200 OK"),
+        "Undo should work after play/stop"
+    );
     assert!(
         !http_get(port, "/api/scene").contains("BeforePlay"),
         "Node should be undone"
@@ -370,7 +399,10 @@ fn revalidate_undo_redo_across_play_stop() {
 
     // Redo
     let redo_resp = http_post(port, "/api/redo", "");
-    assert!(redo_resp.contains("200 OK"), "Redo should work after play/stop");
+    assert!(
+        redo_resp.contains("200 OK"),
+        "Redo should work after play/stop"
+    );
     assert!(
         http_get(port, "/api/scene").contains("BeforePlay"),
         "Node should be redone"
@@ -397,14 +429,17 @@ fn revalidate_reparent_preserves_properties() {
 
     // Get Player ID
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let player = world_children.iter().find(|c| c["name"] == "Player").unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let player = world_children
+        .iter()
+        .find(|c| c["name"] == "Player")
+        .unwrap();
     let player_id = player["id"].as_u64().unwrap();
 
     // Reparent Player under Container
-    let reparent_body = format!(
-        r#"{{"node_id":{player_id},"new_parent_id":{container_id}}}"#
-    );
+    let reparent_body = format!(r#"{{"node_id":{player_id},"new_parent_id":{container_id}}}"#);
     let reparent_resp = http_post(port, "/api/node/reparent", &reparent_body);
     assert!(reparent_resp.contains("200 OK"), "Reparent should succeed");
 
@@ -413,7 +448,10 @@ fn revalidate_reparent_preserves_properties() {
     let scene_str = scene.to_string();
     // Player should still exist with its class
     assert!(scene_str.contains("Player"), "Player should still exist");
-    assert!(scene_str.contains("CharacterBody2D"), "Player class should be preserved");
+    assert!(
+        scene_str.contains("CharacterBody2D"),
+        "Player class should be preserved"
+    );
 
     handle.stop();
 }
@@ -423,8 +461,13 @@ fn revalidate_duplicate_node_preserves_class() {
     let (handle, port) = make_461_server();
 
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let sprite = world_children.iter().find(|c| c["name"] == "Sprite").unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let sprite = world_children
+        .iter()
+        .find(|c| c["name"] == "Sprite")
+        .unwrap();
     let sprite_id = sprite["id"].as_u64().unwrap();
 
     let dup_body = format!(r#"{{"node_id":{sprite_id}}}"#);
@@ -436,7 +479,10 @@ fn revalidate_duplicate_node_preserves_class() {
     let scene_str = scene.to_string();
     // Should have two Sprite2D nodes now
     let sprite2d_count = scene_str.matches("Sprite2D").count();
-    assert!(sprite2d_count >= 2, "Should have original + duplicate Sprite2D nodes");
+    assert!(
+        sprite2d_count >= 2,
+        "Should have original + duplicate Sprite2D nodes"
+    );
 
     handle.stop();
 }
@@ -450,19 +496,31 @@ fn revalidate_signals_for_461_node_types() {
     let (handle, port) = make_461_server();
 
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let player = world_children.iter().find(|c| c["name"] == "Player").unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let player = world_children
+        .iter()
+        .find(|c| c["name"] == "Player")
+        .unwrap();
     let player_id = player["id"].as_u64().unwrap();
 
     // Get signals for CharacterBody2D
     let signals_resp = http_get(port, &format!("/api/node/signals?node_id={player_id}"));
-    assert!(signals_resp.contains("200 OK"), "Signals query should succeed");
+    assert!(
+        signals_resp.contains("200 OK"),
+        "Signals query should succeed"
+    );
 
-    let signals = parse_json(&http_get(port, &format!("/api/node/signals?node_id={player_id}")));
+    let signals = parse_json(&http_get(
+        port,
+        &format!("/api/node/signals?node_id={player_id}"),
+    ));
     // CharacterBody2D inherits from Node which has at least "ready", "tree_entered" etc.
     assert!(
         signals["signals"].is_array(),
-        "Should have signals list, got: {}", signals
+        "Should have signals list, got: {}",
+        signals
     );
 
     handle.stop();
@@ -535,8 +593,13 @@ fn revalidate_node_delete_removes_from_tree() {
     let (handle, port) = make_461_server();
 
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let sprite = world_children.iter().find(|c| c["name"] == "Sprite").unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let sprite = world_children
+        .iter()
+        .find(|c| c["name"] == "Sprite")
+        .unwrap();
     let sprite_id = sprite["id"].as_u64().unwrap();
 
     // Delete the Sprite node
@@ -548,7 +611,9 @@ fn revalidate_node_delete_removes_from_tree() {
     let scene = parse_json(&http_get(port, "/api/scene"));
     let scene_str = scene.to_string();
     // World children should only have Player now
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
     assert_eq!(world_children.len(), 1, "Should have 1 child after delete");
     assert_eq!(world_children[0]["name"], "Player");
 
@@ -564,8 +629,13 @@ fn revalidate_node_rename() {
     let (handle, port) = make_461_server();
 
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let sprite = world_children.iter().find(|c| c["name"] == "Sprite").unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let sprite = world_children
+        .iter()
+        .find(|c| c["name"] == "Sprite")
+        .unwrap();
     let sprite_id = sprite["id"].as_u64().unwrap();
 
     // Rename Sprite to Background
@@ -577,7 +647,9 @@ fn revalidate_node_rename() {
     let scene = parse_json(&http_get(port, "/api/scene"));
     let _scene_str = scene.to_string();
     // Old name should not be present (as a node name)
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
     let names: Vec<&str> = world_children
         .iter()
         .map(|c| c["name"].as_str().unwrap())
@@ -600,10 +672,7 @@ fn revalidate_scene_info_endpoint() {
 
     let info = parse_json(&http_get(port, "/api/scene/info"));
     // Should contain node_count or similar metadata
-    assert!(
-        info.is_object(),
-        "Scene info should return a JSON object"
-    );
+    assert!(info.is_object(), "Scene info should return a JSON object");
 
     handle.stop();
 }
@@ -653,12 +722,15 @@ fn revalidate_add_multiple_461_node_types() {
     ];
 
     for (name, class) in &node_types {
-        let add_body = format!(
-            r#"{{"parent_id":{world_id},"name":"{name}","class_name":"{class}"}}"#
-        );
+        let add_body =
+            format!(r#"{{"parent_id":{world_id},"name":"{name}","class_name":"{class}"}}"#);
         let resp = http_post(port, "/api/node/add", &add_body);
-        assert!(resp.contains("200 OK") || resp.contains(r#""id""#),
-            "Adding {} ({}) should succeed", name, class);
+        assert!(
+            resp.contains("200 OK") || resp.contains(r#""id""#),
+            "Adding {} ({}) should succeed",
+            name,
+            class
+        );
     }
 
     // Verify all nodes are in the tree
@@ -709,7 +781,10 @@ fn revalidate_logs_endpoint() {
     assert!(resp.contains("200 OK"), "Logs endpoint should succeed");
 
     let logs = parse_json(&http_get(port, "/api/logs"));
-    assert!(logs.is_object() || logs.is_array(), "Logs should return valid JSON");
+    assert!(
+        logs.is_object() || logs.is_array(),
+        "Logs should return valid JSON"
+    );
 
     handle.stop();
 }
@@ -814,10 +889,19 @@ fn revalidate_node_reorder_changes_sibling_position() {
 
     // Verify Alpha moved up in the sibling list
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let names: Vec<&str> = children.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    let children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let names: Vec<&str> = children
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
     // Alpha was last (index 2), should now be at index 1 (swapped with Sprite)
-    assert_eq!(names[1], "Alpha", "Alpha should move up, got order: {:?}", names);
+    assert_eq!(
+        names[1], "Alpha",
+        "Alpha should move up, got order: {:?}",
+        names
+    );
 
     handle.stop();
 }
@@ -832,8 +916,13 @@ fn revalidate_copy_paste_preserves_node() {
 
     let scene = parse_json(&http_get(port, "/api/scene"));
     let world_id = scene["nodes"]["children"][0]["id"].as_u64().unwrap();
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let sprite = world_children.iter().find(|c| c["name"] == "Sprite").unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let sprite = world_children
+        .iter()
+        .find(|c| c["name"] == "Sprite")
+        .unwrap();
     let sprite_id = sprite["id"].as_u64().unwrap();
 
     // Copy
@@ -850,7 +939,10 @@ fn revalidate_copy_paste_preserves_node() {
     let scene = parse_json(&http_get(port, "/api/scene"));
     let scene_str = scene.to_string();
     let sprite2d_count = scene_str.matches("Sprite2D").count();
-    assert!(sprite2d_count >= 2, "Paste should create a copy of Sprite2D node");
+    assert!(
+        sprite2d_count >= 2,
+        "Paste should create a copy of Sprite2D node"
+    );
 
     handle.stop();
 }
@@ -865,8 +957,13 @@ fn revalidate_cut_removes_original() {
 
     let scene = parse_json(&http_get(port, "/api/scene"));
     let world_id = scene["nodes"]["children"][0]["id"].as_u64().unwrap();
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let sprite = world_children.iter().find(|c| c["name"] == "Sprite").unwrap();
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let sprite = world_children
+        .iter()
+        .find(|c| c["name"] == "Sprite")
+        .unwrap();
     let sprite_id = sprite["id"].as_u64().unwrap();
 
     // Cut
@@ -876,19 +973,33 @@ fn revalidate_cut_removes_original() {
 
     // Sprite should be gone
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let names: Vec<&str> = world_children.iter().map(|c| c["name"].as_str().unwrap()).collect();
-    assert!(!names.contains(&"Sprite"), "Sprite should be removed after cut");
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let names: Vec<&str> = world_children
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.contains(&"Sprite"),
+        "Sprite should be removed after cut"
+    );
 
     // Paste it back
     let paste_body = format!(r#"{{"parent_id":{world_id}}}"#);
     let paste_resp = http_post(port, "/api/node/paste", &paste_body);
-    assert!(paste_resp.contains("200 OK"), "Paste after cut should succeed");
+    assert!(
+        paste_resp.contains("200 OK"),
+        "Paste after cut should succeed"
+    );
 
     // Should be back
     let scene = parse_json(&http_get(port, "/api/scene"));
     let scene_str = scene.to_string();
-    assert!(scene_str.contains("Sprite2D"), "Pasted node should restore Sprite2D class");
+    assert!(
+        scene_str.contains("Sprite2D"),
+        "Pasted node should restore Sprite2D class"
+    );
 
     handle.stop();
 }
@@ -970,12 +1081,18 @@ fn revalidate_runtime_input_key_routing() {
 
     // Send key down
     let resp = http_post(port, "/api/runtime/input/key_down", r#"{"key":"w"}"#);
-    assert!(resp.contains("200 OK"), "Key down should succeed during play");
+    assert!(
+        resp.contains("200 OK"),
+        "Key down should succeed during play"
+    );
 
     // Check input state
     let state = parse_json(&http_get(port, "/api/runtime/input/state"));
     let state_str = state.to_string();
-    assert!(state_str.contains("w"), "Input state should reflect pressed key");
+    assert!(
+        state_str.contains("w"),
+        "Input state should reflect pressed key"
+    );
 
     // Key up
     let resp = http_post(port, "/api/runtime/input/key_up", r#"{"key":"w"}"#);
@@ -1000,7 +1117,10 @@ fn revalidate_runtime_input_mouse_routing() {
         "/api/runtime/input/mouse_move",
         r#"{"x":150.0,"y":200.0}"#,
     );
-    assert!(resp.contains("200 OK"), "Mouse move should succeed during play");
+    assert!(
+        resp.contains("200 OK"),
+        "Mouse move should succeed during play"
+    );
 
     // Mouse button down
     let resp = http_post(port, "/api/runtime/input/mouse_down", r#"{"button":0}"#);
@@ -1027,8 +1147,14 @@ fn revalidate_project_settings_round_trip() {
 
     // Read defaults
     let settings = parse_json(&http_get(port, "/api/project_settings"));
-    assert!(settings.is_object(), "Project settings should be a JSON object");
-    assert!(settings["project_name"].is_string(), "Should have project_name");
+    assert!(
+        settings.is_object(),
+        "Project settings should be a JSON object"
+    );
+    assert!(
+        settings["project_name"].is_string(),
+        "Should have project_name"
+    );
 
     // Update project name
     let resp = http_post(
@@ -1036,7 +1162,10 @@ fn revalidate_project_settings_round_trip() {
         "/api/project_settings",
         r#"{"project_name":"TestProject461"}"#,
     );
-    assert!(resp.contains("200 OK"), "Setting project settings should succeed");
+    assert!(
+        resp.contains("200 OK"),
+        "Setting project settings should succeed"
+    );
 
     // Verify round-trip
     let settings = parse_json(&http_get(port, "/api/project_settings"));
@@ -1057,11 +1186,19 @@ fn revalidate_multi_selection() {
     let (handle, port) = make_461_server();
 
     let scene = parse_json(&http_get(port, "/api/scene"));
-    let world_children = scene["nodes"]["children"][0]["children"].as_array().unwrap();
-    let player_id = world_children.iter().find(|c| c["name"] == "Player").unwrap()["id"]
+    let world_children = scene["nodes"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
+    let player_id = world_children
+        .iter()
+        .find(|c| c["name"] == "Player")
+        .unwrap()["id"]
         .as_u64()
         .unwrap();
-    let sprite_id = world_children.iter().find(|c| c["name"] == "Sprite").unwrap()["id"]
+    let sprite_id = world_children
+        .iter()
+        .find(|c| c["name"] == "Sprite")
+        .unwrap()["id"]
         .as_u64()
         .unwrap();
 
@@ -1072,7 +1209,9 @@ fn revalidate_multi_selection() {
 
     // Verify selected_nodes returns both
     let selected = parse_json(&http_get(port, "/api/selected_nodes"));
-    let node_ids = selected["selected_nodes"].as_array().expect("Should have selected_nodes array");
+    let node_ids = selected["selected_nodes"]
+        .as_array()
+        .expect("Should have selected_nodes array");
     assert_eq!(node_ids.len(), 2, "Should have 2 selected nodes");
 
     handle.stop();
@@ -1113,7 +1252,10 @@ fn revalidate_viewport_zoom_pan_round_trip() {
     // Get initial zoom/pan
     let zp = parse_json(&http_get(port, "/api/viewport/zoom_pan"));
     assert!(zp["zoom"].is_number(), "Should have zoom value");
-    assert!(zp["pan_x"].is_number() || zp["x"].is_number(), "Should have pan x value");
+    assert!(
+        zp["pan_x"].is_number() || zp["x"].is_number(),
+        "Should have pan x value"
+    );
 
     // Set zoom
     let resp = http_post(port, "/api/viewport/zoom", r#"{"zoom":2.5}"#);
@@ -1151,7 +1293,10 @@ fn revalidate_input_state_resets_on_stop() {
     // After stop, pressed keys should be empty
     let pressed = state["pressed_keys"].as_array();
     if let Some(keys) = pressed {
-        assert!(keys.is_empty(), "Pressed keys should be empty after stop, got: {state_str}");
+        assert!(
+            keys.is_empty(),
+            "Pressed keys should be empty after stop, got: {state_str}"
+        );
     }
 
     handle.stop();

@@ -91,9 +91,15 @@ fn load_probe_signatures() -> Vec<ProbeClassData> {
                         name: m.get("name")?.as_str()?.to_string(),
                         arg_count: m.get("args")?.as_array()?.len(),
                         flags: m.get("flags").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                        is_virtual: m.get("is_virtual").and_then(|v| v.as_bool()).unwrap_or(false),
+                        is_virtual: m
+                            .get("is_virtual")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                         is_const: m.get("is_const").and_then(|v| v.as_bool()).unwrap_or(false),
-                        is_vararg: m.get("is_vararg").and_then(|v| v.as_bool()).unwrap_or(false),
+                        is_vararg: m
+                            .get("is_vararg")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                     })
                 })
                 .collect();
@@ -157,7 +163,10 @@ fn register_patina_surfaces() {
                 "editor_description",
                 Variant::String(String::new()),
             ))
-            .property(PropertyInfo::new("unique_name_in_owner", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "unique_name_in_owner",
+                Variant::Bool(false),
+            ))
             .method(MethodInfo::new("_ready", 0))
             .method(MethodInfo::new("_process", 1))
             .method(MethodInfo::new("_physics_process", 1))
@@ -280,7 +289,10 @@ fn register_patina_surfaces() {
                 "animation",
                 Variant::String("default".into()),
             ))
-            .property(PropertyInfo::new("autoplay", Variant::String(String::new())))
+            .property(PropertyInfo::new(
+                "autoplay",
+                Variant::String(String::new()),
+            ))
             .property(PropertyInfo::new("frame", Variant::Int(0)))
             .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
             .property(PropertyInfo::new("playing", Variant::Bool(false)))
@@ -631,10 +643,7 @@ fn register_patina_surfaces() {
     );
 
     // Panel
-    register_class(
-        ClassRegistration::new("Panel")
-            .parent("Control"),
-    );
+    register_class(ClassRegistration::new("Panel").parent("Control"));
 
     // TextureRect
     register_class(
@@ -708,9 +717,15 @@ fn register_patina_surfaces() {
             .property(PropertyInfo::new("one_shot", Variant::Bool(false)))
             .property(PropertyInfo::new("explosiveness", Variant::Float(0.0)))
             .property(PropertyInfo::new("randomness", Variant::Float(0.0)))
-            .property(PropertyInfo::new("direction", Variant::Vector2(Vector2::new(1.0, 0.0))))
+            .property(PropertyInfo::new(
+                "direction",
+                Variant::Vector2(Vector2::new(1.0, 0.0)),
+            ))
             .property(PropertyInfo::new("spread", Variant::Float(45.0)))
-            .property(PropertyInfo::new("gravity", Variant::Vector2(Vector2::new(0.0, 980.0))))
+            .property(PropertyInfo::new(
+                "gravity",
+                Variant::Vector2(Vector2::new(0.0, 980.0)),
+            ))
             .method(MethodInfo::new("set_emitting", 1))
             .method(MethodInfo::new("is_emitting", 0))
             .method(MethodInfo::new("set_amount", 1))
@@ -729,7 +744,10 @@ fn register_patina_surfaces() {
             .property(PropertyInfo::new("layer", Variant::Int(1)))
             .property(PropertyInfo::new("visible", Variant::Bool(true)))
             .property(PropertyInfo::new("offset", Variant::Vector2(Vector2::ZERO)))
-            .property(PropertyInfo::new("follow_viewport_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "follow_viewport_enabled",
+                Variant::Bool(false),
+            ))
             .method(MethodInfo::new("set_layer", 1))
             .method(MethodInfo::new("get_layer", 0))
             .method(MethodInfo::new("set_visible", 1))
@@ -743,10 +761,19 @@ fn register_patina_surfaces() {
         ClassRegistration::new("RayCast2D")
             .parent("Node2D")
             .property(PropertyInfo::new("enabled", Variant::Bool(true)))
-            .property(PropertyInfo::new("target_position", Variant::Vector2(Vector2::new(0.0, 50.0))))
+            .property(PropertyInfo::new(
+                "target_position",
+                Variant::Vector2(Vector2::new(0.0, 50.0)),
+            ))
             .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
-            .property(PropertyInfo::new("collide_with_areas", Variant::Bool(false)))
-            .property(PropertyInfo::new("collide_with_bodies", Variant::Bool(true)))
+            .property(PropertyInfo::new(
+                "collide_with_areas",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "collide_with_bodies",
+                Variant::Bool(true),
+            ))
             .method(MethodInfo::new("is_colliding", 0))
             .method(MethodInfo::new("get_collider", 0))
             .method(MethodInfo::new("get_collision_point", 0))
@@ -776,10 +803,23 @@ fn probe_fixture_loads_all_classes() {
 
     let class_names: Vec<&str> = probes.iter().map(|p| p.class.as_str()).collect();
     for expected in &[
-        "Node", "Node2D", "Sprite2D", "Camera2D", "AnimatedSprite2D",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Control", "Label", "Button", "Timer",
-        "AudioStreamPlayer", "TileMap", "AnimationPlayer",
+        "Node",
+        "Node2D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimatedSprite2D",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Control",
+        "Label",
+        "Button",
+        "Timer",
+        "AudioStreamPlayer",
+        "TileMap",
+        "AnimationPlayer",
     ] {
         assert!(
             class_names.contains(expected),
@@ -842,11 +882,12 @@ fn probe_method_names_in_patina() {
     };
 
     eprintln!();
-    eprintln!(
-        "  Probe→Patina method name overlap: {matched}/{total_probe_methods} ({pct}%)"
-    );
+    eprintln!("  Probe→Patina method name overlap: {matched}/{total_probe_methods} ({pct}%)");
     if !missing.is_empty() && missing.len() <= 20 {
-        eprintln!("  Missing (first 20): {:?}", &missing[..missing.len().min(20)]);
+        eprintln!(
+            "  Missing (first 20): {:?}",
+            &missing[..missing.len().min(20)]
+        );
     }
 
     // We should match at least 40% of probe methods
@@ -898,18 +939,16 @@ fn probe_method_arg_counts_agree() {
         100
     };
 
-    eprintln!(
-        "  Arg count agreement: {agreed}/{checked} ({pct}%)"
-    );
+    eprintln!("  Arg count agreement: {agreed}/{checked} ({pct}%)");
     if !mismatches.is_empty() {
-        eprintln!("  Mismatches: {:?}", &mismatches[..mismatches.len().min(10)]);
+        eprintln!(
+            "  Mismatches: {:?}",
+            &mismatches[..mismatches.len().min(10)]
+        );
     }
 
     // Where methods overlap, arg counts should agree at least 90%
-    assert!(
-        pct >= 90,
-        "arg count agreement {pct}% below 90% threshold"
-    );
+    assert!(pct >= 90, "arg count agreement {pct}% below 90% threshold");
 }
 
 // ===========================================================================
@@ -943,9 +982,7 @@ fn probe_property_names_in_patina() {
         0
     };
 
-    eprintln!(
-        "  Probe→Patina property name overlap: {matched}/{total} ({pct}%)"
-    );
+    eprintln!("  Probe→Patina property name overlap: {matched}/{total} ({pct}%)");
 
     assert!(
         pct >= 40,
@@ -1042,8 +1079,7 @@ fn combined_probe_parity_summary() {
         let patina_props = get_property_list(&probe.class);
         let patina_method_names: Vec<&str> =
             patina_methods.iter().map(|m| m.name.as_str()).collect();
-        let patina_prop_names: Vec<&str> =
-            patina_props.iter().map(|p| p.name.as_str()).collect();
+        let patina_prop_names: Vec<&str> = patina_props.iter().map(|p| p.name.as_str()).collect();
 
         let m_overlap: usize = probe
             .methods
@@ -1098,12 +1134,8 @@ fn combined_probe_parity_summary() {
     );
     eprintln!("└─────────────────────┴──────────────────┴──────────────────┴──────────────────┘");
     eprintln!();
-    eprintln!(
-        "  Method name overlap: {method_name_matches}/{total_godot_methods} ({m_pct}%)"
-    );
-    eprintln!(
-        "  Property name overlap: {prop_name_matches}/{total_godot_props} ({p_pct}%)"
-    );
+    eprintln!("  Method name overlap: {method_name_matches}/{total_godot_methods} ({m_pct}%)");
+    eprintln!("  Property name overlap: {prop_name_matches}/{total_godot_props} ({p_pct}%)");
     eprintln!();
 
     // Combined threshold
@@ -1316,8 +1348,7 @@ fn patina_methods_in_probe() {
 
     for probe in &probes {
         let patina_methods = get_method_list(&probe.class);
-        let probe_method_names: Vec<&str> =
-            probe.methods.iter().map(|m| m.name.as_str()).collect();
+        let probe_method_names: Vec<&str> = probe.methods.iter().map(|m| m.name.as_str()).collect();
 
         for pm in &patina_methods {
             total += 1;
@@ -1333,9 +1364,7 @@ fn patina_methods_in_probe() {
         0
     };
 
-    eprintln!(
-        "  Patina→Probe method coverage: {found}/{total} ({pct}%)"
-    );
+    eprintln!("  Patina→Probe method coverage: {found}/{total} ({pct}%)");
 
     // Most Patina methods should exist in probe (we only register real Godot methods)
     assert!(
@@ -1376,9 +1405,7 @@ fn patina_properties_in_probe() {
         0
     };
 
-    eprintln!(
-        "  Patina→Probe property coverage: {found}/{total} ({pct}%)"
-    );
+    eprintln!("  Patina→Probe property coverage: {found}/{total} ({pct}%)");
 
     assert!(
         pct >= 70,
@@ -1446,8 +1473,7 @@ fn per_class_probe_comparison() {
 
         let patina_method_names: Vec<&str> =
             patina_methods.iter().map(|m| m.name.as_str()).collect();
-        let patina_prop_names: Vec<&str> =
-            patina_props.iter().map(|p| p.name.as_str()).collect();
+        let patina_prop_names: Vec<&str> = patina_props.iter().map(|p| p.name.as_str()).collect();
 
         let m_overlap: usize = probe
             .methods
@@ -1479,8 +1505,13 @@ fn per_class_probe_comparison() {
 
         eprintln!(
             "  [{status}] {:<20} methods: {:>2}/{:<2} ({:>5.1}%)  props: {:>2}/{:<2} ({:>5.1}%)",
-            probe.class, m_overlap, probe.godot_method_count, m_pct,
-            p_overlap, probe.godot_property_count, p_pct
+            probe.class,
+            m_overlap,
+            probe.godot_method_count,
+            m_pct,
+            p_overlap,
+            probe.godot_property_count,
+            p_pct
         );
     }
 
@@ -1498,13 +1529,34 @@ fn all_28_core_classes_registered() {
     register_patina_surfaces();
 
     let expected = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
 
     for cls in &expected {
@@ -1530,7 +1582,14 @@ fn expanded_class_inheritance_correct() {
     assert_eq!(node3d.parent_class, "Node");
 
     // UI controls inherit from Control
-    for cls in &["LineEdit", "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer"] {
+    for cls in &[
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+    ] {
         let info = get_class_info(cls).unwrap();
         assert_eq!(
             info.parent_class, "Control",
@@ -1564,9 +1623,17 @@ fn expanded_classes_inherit_node_methods() {
     register_patina_surfaces();
 
     let expanded_classes = [
-        "Node3D", "LineEdit", "Panel", "TextureRect", "ColorRect",
-        "HBoxContainer", "VBoxContainer", "TileMapLayer", "CPUParticles2D",
-        "CanvasLayer", "RayCast2D",
+        "Node3D",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "CanvasLayer",
+        "RayCast2D",
     ];
 
     for cls in &expanded_classes {
@@ -1595,9 +1662,17 @@ fn expanded_classes_instantiation() {
     register_patina_surfaces();
 
     let expanded_classes = [
-        "Node3D", "LineEdit", "Panel", "TextureRect", "ColorRect",
-        "HBoxContainer", "VBoxContainer", "TileMapLayer", "CPUParticles2D",
-        "CanvasLayer", "RayCast2D",
+        "Node3D",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "CanvasLayer",
+        "RayCast2D",
     ];
 
     for cls in &expanded_classes {
@@ -1636,7 +1711,14 @@ fn control_descendants_inherit_ui_methods() {
     let _g = setup();
     register_patina_surfaces();
 
-    for cls in &["LineEdit", "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer"] {
+    for cls in &[
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+    ] {
         assert!(
             class_has_method(cls, "set_size"),
             "{cls} should inherit set_size from Control"
@@ -1713,7 +1795,13 @@ fn probe_virtual_methods_identified() {
 
     if has_flags {
         // Node's _ready, _process, _physics_process should be virtual
-        for virt_name in &["_ready", "_process", "_physics_process", "_enter_tree", "_exit_tree"] {
+        for virt_name in &[
+            "_ready",
+            "_process",
+            "_physics_process",
+            "_enter_tree",
+            "_exit_tree",
+        ] {
             if let Some(m) = node.methods.iter().find(|m| m.name == *virt_name) {
                 assert!(
                     m.is_virtual,
@@ -1744,8 +1832,10 @@ fn probe_method_flags_agree_with_patina() {
 
     for probe in &probes {
         let patina_methods = get_method_list(&probe.class);
-        let patina_map: HashMap<&str, &MethodInfo> =
-            patina_methods.iter().map(|m| (m.name.as_str(), m)).collect();
+        let patina_map: HashMap<&str, &MethodInfo> = patina_methods
+            .iter()
+            .map(|m| (m.name.as_str(), m))
+            .collect();
 
         for pm in &probe.methods {
             if patina_map.get(pm.name.as_str()).is_some() {
@@ -1757,9 +1847,7 @@ fn probe_method_flags_agree_with_patina() {
     }
 
     eprintln!();
-    eprintln!(
-        "  Method name agreement: checked={checked} methods matched by name"
-    );
+    eprintln!("  Method name agreement: checked={checked} methods matched by name");
 
     // Patina's MethodInfo doesn't yet have is_virtual / is_const fields,
     // so this test currently validates name-level agreement only.
@@ -1780,10 +1868,23 @@ fn probe_fixture_covers_core_classes() {
 
     // The 17-class set present in the current fixture.
     let core_17 = [
-        "Node", "Node2D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "AnimatedSprite2D", "Control", "Label", "Button",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "AudioStreamPlayer",
+        "Node",
+        "Node2D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "AnimatedSprite2D",
+        "Control",
+        "Label",
+        "Button",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "AudioStreamPlayer",
     ];
 
     for cls in &core_17 {
@@ -1801,9 +1902,17 @@ fn probe_fixture_covers_core_classes() {
 
     // The expanded 28-class set will be present after fixture regeneration.
     let expanded_11 = [
-        "Node3D", "LineEdit", "Panel", "TextureRect", "ColorRect",
-        "HBoxContainer", "VBoxContainer", "TileMapLayer",
-        "CPUParticles2D", "CanvasLayer", "RayCast2D",
+        "Node3D",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "CanvasLayer",
+        "RayCast2D",
     ];
     let expanded_present: usize = expanded_11
         .iter()
@@ -1846,13 +1955,34 @@ fn api_surface_probe_source_exists() {
 
     // Must have the 28-class CORE_CLASSES array
     for cls in &[
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ] {
         assert!(
             content.contains(cls),
@@ -1876,10 +2006,16 @@ fn api_surface_probe_captures_typed_args() {
     // Must capture arg name, type, class_name for each argument
     assert!(content.contains("\"name\""), "must capture arg name");
     assert!(content.contains("\"type\""), "must capture arg type");
-    assert!(content.contains("\"class_name\""), "must capture arg class_name");
+    assert!(
+        content.contains("\"class_name\""),
+        "must capture arg class_name"
+    );
     // Must capture return type and flags
     assert!(content.contains("return_type"), "must capture return_type");
-    assert!(content.contains("default_arg_count"), "must capture default_arg_count");
+    assert!(
+        content.contains("default_arg_count"),
+        "must capture default_arg_count"
+    );
 }
 
 // ===========================================================================
@@ -1895,7 +2031,15 @@ fn api_surface_probe_filters_internals() {
     let content = std::fs::read_to_string(&probe_src).unwrap();
 
     // Must preserve key virtual methods while filtering other underscore-prefixed ones
-    for kept in &["_ready", "_process", "_physics_process", "_input", "_enter_tree", "_exit_tree", "_draw"] {
+    for kept in &[
+        "_ready",
+        "_process",
+        "_physics_process",
+        "_input",
+        "_enter_tree",
+        "_exit_tree",
+        "_draw",
+    ] {
         assert!(
             content.contains(kept),
             "api_surface_probe must preserve virtual method '{kept}'"
@@ -1920,8 +2064,14 @@ fn api_surface_probe_has_accessor_pair_detection() {
         .join("apps/godot/src/api_surface_probe.rs");
     let content = std::fs::read_to_string(&probe_src).unwrap();
 
-    assert!(content.contains("has_getter"), "must detect getter existence");
-    assert!(content.contains("has_setter"), "must detect setter existence");
+    assert!(
+        content.contains("has_getter"),
+        "must detect getter existence"
+    );
+    assert!(
+        content.contains("has_setter"),
+        "must detect setter existence"
+    );
     assert!(
         content.contains("property_accessors"),
         "must emit property_accessors array"
@@ -1995,13 +2145,34 @@ fn classdb_and_api_surface_probes_share_class_set() {
     let api_src = std::fs::read_to_string(probes_dir.join("api_surface_probe.rs")).unwrap();
 
     let expected = [
-        "Node", "Node2D", "Node3D", "Sprite2D", "Camera2D",
-        "AnimationPlayer", "Control", "Label", "Button", "LineEdit",
-        "Panel", "TextureRect", "ColorRect", "HBoxContainer", "VBoxContainer",
-        "RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D",
-        "CollisionShape2D", "Timer", "TileMap", "TileMapLayer",
-        "CPUParticles2D", "AnimatedSprite2D", "AudioStreamPlayer",
-        "CanvasLayer", "RayCast2D",
+        "Node",
+        "Node2D",
+        "Node3D",
+        "Sprite2D",
+        "Camera2D",
+        "AnimationPlayer",
+        "Control",
+        "Label",
+        "Button",
+        "LineEdit",
+        "Panel",
+        "TextureRect",
+        "ColorRect",
+        "HBoxContainer",
+        "VBoxContainer",
+        "RigidBody2D",
+        "StaticBody2D",
+        "CharacterBody2D",
+        "Area2D",
+        "CollisionShape2D",
+        "Timer",
+        "TileMap",
+        "TileMapLayer",
+        "CPUParticles2D",
+        "AnimatedSprite2D",
+        "AudioStreamPlayer",
+        "CanvasLayer",
+        "RayCast2D",
     ];
 
     for cls in &expected {

@@ -66,15 +66,7 @@ fn rect_item(id: u64, x: f32, y: f32, w: f32, h: f32, color: Color) -> CanvasIte
     item
 }
 
-fn layered_rect(
-    id: u64,
-    layer: u64,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: Color,
-) -> CanvasItem {
+fn layered_rect(id: u64, layer: u64, x: f32, y: f32, w: f32, h: f32, color: Color) -> CanvasItem {
     let mut item = rect_item(id, x, y, w, h, color);
     item.layer_id = Some(layer);
     item
@@ -779,7 +771,10 @@ fn render_golden_scene_selection_node2d() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
     let selected = scene_child_id(&tree, 0);
-    assert!(selected.is_some(), "scene must have at least one child node");
+    assert!(
+        selected.is_some(),
+        "scene must have at least one child node"
+    );
 
     let fb = scene_renderer::render_scene(&tree, selected, SR_W, SR_H);
     assert_scene_golden(&fb, "scene_selection_node2d");
@@ -792,12 +787,7 @@ fn render_golden_scene_selection_differs_from_unselected() {
     let tree = load_scene(&source);
 
     let fb_unselected = scene_renderer::render_scene(&tree, None, SR_W, SR_H);
-    let fb_selected = scene_renderer::render_scene(
-        &tree,
-        scene_child_id(&tree, 0),
-        SR_W,
-        SR_H,
-    );
+    let fb_selected = scene_renderer::render_scene(&tree, scene_child_id(&tree, 0), SR_W, SR_H);
 
     let result = compare_framebuffers(&fb_unselected, &fb_selected, 0.0);
     assert!(
@@ -825,18 +815,8 @@ fn render_golden_scene_selection_second_node() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
 
-    let fb_first = scene_renderer::render_scene(
-        &tree,
-        scene_child_id(&tree, 0),
-        SR_W,
-        SR_H,
-    );
-    let fb_second = scene_renderer::render_scene(
-        &tree,
-        scene_child_id(&tree, 1),
-        SR_W,
-        SR_H,
-    );
+    let fb_first = scene_renderer::render_scene(&tree, scene_child_id(&tree, 0), SR_W, SR_H);
+    let fb_second = scene_renderer::render_scene(&tree, scene_child_id(&tree, 1), SR_W, SR_H);
 
     let result = compare_framebuffers(&fb_first, &fb_second, 0.0);
     assert!(
@@ -856,9 +836,7 @@ fn render_golden_scene_zoom_half() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
 
-    let fb = scene_renderer::render_scene_with_zoom_pan(
-        &tree, None, SR_W, SR_H, 0.5, (0.0, 0.0),
-    );
+    let fb = scene_renderer::render_scene_with_zoom_pan(&tree, None, SR_W, SR_H, 0.5, (0.0, 0.0));
     assert_scene_golden(&fb, "scene_zoom_0_5x");
 }
 
@@ -868,9 +846,7 @@ fn render_golden_scene_zoom_2x() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
 
-    let fb = scene_renderer::render_scene_with_zoom_pan(
-        &tree, None, SR_W, SR_H, 2.0, (0.0, 0.0),
-    );
+    let fb = scene_renderer::render_scene_with_zoom_pan(&tree, None, SR_W, SR_H, 2.0, (0.0, 0.0));
     assert_scene_golden(&fb, "scene_zoom_2x");
 }
 
@@ -880,9 +856,7 @@ fn render_golden_scene_zoom_4x() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
 
-    let fb = scene_renderer::render_scene_with_zoom_pan(
-        &tree, None, SR_W, SR_H, 4.0, (0.0, 0.0),
-    );
+    let fb = scene_renderer::render_scene_with_zoom_pan(&tree, None, SR_W, SR_H, 4.0, (0.0, 0.0));
     assert_scene_golden(&fb, "scene_zoom_4x");
 }
 
@@ -893,9 +867,8 @@ fn render_golden_scene_zoom_with_selection() {
     let tree = load_scene(&source);
     let selected = scene_child_id(&tree, 0);
 
-    let fb = scene_renderer::render_scene_with_zoom_pan(
-        &tree, selected, SR_W, SR_H, 2.0, (0.0, 0.0),
-    );
+    let fb =
+        scene_renderer::render_scene_with_zoom_pan(&tree, selected, SR_W, SR_H, 2.0, (0.0, 0.0));
     assert_scene_golden(&fb, "scene_zoom_2x_selected");
 }
 
@@ -909,9 +882,7 @@ fn render_golden_scene_pan_right() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
 
-    let fb = scene_renderer::render_scene_with_zoom_pan(
-        &tree, None, SR_W, SR_H, 1.0, (100.0, 0.0),
-    );
+    let fb = scene_renderer::render_scene_with_zoom_pan(&tree, None, SR_W, SR_H, 1.0, (100.0, 0.0));
     assert_scene_golden(&fb, "scene_pan_right_100");
 }
 
@@ -921,9 +892,7 @@ fn render_golden_scene_pan_down() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
 
-    let fb = scene_renderer::render_scene_with_zoom_pan(
-        &tree, None, SR_W, SR_H, 1.0, (0.0, 100.0),
-    );
+    let fb = scene_renderer::render_scene_with_zoom_pan(&tree, None, SR_W, SR_H, 1.0, (0.0, 100.0));
     assert_scene_golden(&fb, "scene_pan_down_100");
 }
 
@@ -933,9 +902,7 @@ fn render_golden_scene_pan_and_zoom_combined() {
     let source = read_scene_fixture("render_test_simple.tscn");
     let tree = load_scene(&source);
 
-    let fb = scene_renderer::render_scene_with_zoom_pan(
-        &tree, None, SR_W, SR_H, 2.0, (50.0, 50.0),
-    );
+    let fb = scene_renderer::render_scene_with_zoom_pan(&tree, None, SR_W, SR_H, 2.0, (50.0, 50.0));
     assert_scene_golden(&fb, "scene_zoom_2x_pan_50_50");
 }
 
@@ -996,20 +963,10 @@ fn render_golden_scene_selection_determinism() {
     let source = read_scene_fixture("render_test_simple.tscn");
 
     let tree1 = load_scene(&source);
-    let fb1 = scene_renderer::render_scene(
-        &tree1,
-        scene_child_id(&tree1, 0),
-        SR_W,
-        SR_H,
-    );
+    let fb1 = scene_renderer::render_scene(&tree1, scene_child_id(&tree1, 0), SR_W, SR_H);
 
     let tree2 = load_scene(&source);
-    let fb2 = scene_renderer::render_scene(
-        &tree2,
-        scene_child_id(&tree2, 0),
-        SR_W,
-        SR_H,
-    );
+    let fb2 = scene_renderer::render_scene(&tree2, scene_child_id(&tree2, 0), SR_W, SR_H);
 
     let result = compare_framebuffers(&fb1, &fb2, 0.0);
     assert!(
@@ -1026,14 +983,12 @@ fn render_golden_scene_zoom_determinism() {
     let source = read_scene_fixture("render_test_simple.tscn");
 
     let tree1 = load_scene(&source);
-    let fb1 = scene_renderer::render_scene_with_zoom_pan(
-        &tree1, None, SR_W, SR_H, 2.5, (30.0, 40.0),
-    );
+    let fb1 =
+        scene_renderer::render_scene_with_zoom_pan(&tree1, None, SR_W, SR_H, 2.5, (30.0, 40.0));
 
     let tree2 = load_scene(&source);
-    let fb2 = scene_renderer::render_scene_with_zoom_pan(
-        &tree2, None, SR_W, SR_H, 2.5, (30.0, 40.0),
-    );
+    let fb2 =
+        scene_renderer::render_scene_with_zoom_pan(&tree2, None, SR_W, SR_H, 2.5, (30.0, 40.0));
 
     let result = compare_framebuffers(&fb1, &fb2, 0.0);
     assert!(
@@ -1054,12 +1009,7 @@ fn render_golden_scene_gizmo_has_colored_pixels() {
     let tree = load_scene(&source);
 
     let fb_unselected = scene_renderer::render_scene(&tree, None, SR_W, SR_H);
-    let fb_selected = scene_renderer::render_scene(
-        &tree,
-        scene_child_id(&tree, 0),
-        SR_W,
-        SR_H,
-    );
+    let fb_selected = scene_renderer::render_scene(&tree, scene_child_id(&tree, 0), SR_W, SR_H);
 
     let mut red_diff_count = 0u64;
     let mut green_diff_count = 0u64;
@@ -1091,12 +1041,7 @@ fn render_golden_scene_selection_has_amber_highlight() {
     let tree = load_scene(&source);
 
     let fb_unselected = scene_renderer::render_scene(&tree, None, SR_W, SR_H);
-    let fb_selected = scene_renderer::render_scene(
-        &tree,
-        scene_child_id(&tree, 0),
-        SR_W,
-        SR_H,
-    );
+    let fb_selected = scene_renderer::render_scene(&tree, scene_child_id(&tree, 0), SR_W, SR_H);
 
     let mut amber_count = 0u64;
     for (sel, unsel) in fb_selected.pixels.iter().zip(fb_unselected.pixels.iter()) {

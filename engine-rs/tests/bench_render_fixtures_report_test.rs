@@ -39,7 +39,12 @@ const RESOLUTIONS: [(u32, u32, &str); 3] = [
 // ---------------------------------------------------------------------------
 
 /// Measure `iterations` runs of `f`, returning (total_ms, per_iter_ms, MP/s).
-fn measure_render<F: FnMut()>(width: u32, height: u32, iterations: u32, mut f: F) -> (f64, f64, f64) {
+fn measure_render<F: FnMut()>(
+    width: u32,
+    height: u32,
+    iterations: u32,
+    mut f: F,
+) -> (f64, f64, f64) {
     let start = Instant::now();
     for _ in 0..iterations {
         f();
@@ -67,10 +72,7 @@ fn build_stress_viewport(n: u64, width: u32, height: u32) -> Viewport {
         let x = (i % cols) as f32 * cell_w;
         let y = (i / cols) as f32 * cell_h;
         item.commands.push(DrawCommand::DrawRect {
-            rect: Rect2::new(
-                Vector2::new(x, y),
-                Vector2::new(cell_w * 0.8, cell_h * 0.8),
-            ),
+            rect: Rect2::new(Vector2::new(x, y), Vector2::new(cell_w * 0.8, cell_h * 0.8)),
             color: Color::rgb(
                 (i % 5) as f32 / 4.0,
                 ((i + 1) % 5) as f32 / 4.0,
@@ -234,8 +236,9 @@ fn bench_render_layered_5x20() {
             let _ = capture_frame(&mut renderer, &viewport);
         }
 
-        let (total_ms, per_frame_ms, mp_per_sec) =
-            measure_render(w, h, ITERATIONS, || { let _ = capture_frame(&mut renderer, &viewport); });
+        let (total_ms, per_frame_ms, mp_per_sec) = measure_render(w, h, ITERATIONS, || {
+            let _ = capture_frame(&mut renderer, &viewport);
+        });
 
         eprintln!("  {label}: {ITERATIONS}x in {total_ms:.2}ms ({per_frame_ms:.3}ms/frame, {mp_per_sec:.1} MP/s)");
 
@@ -277,8 +280,9 @@ fn bench_render_layered_10x50() {
             let _ = capture_frame(&mut renderer, &viewport);
         }
 
-        let (total_ms, per_frame_ms, mp_per_sec) =
-            measure_render(w, h, ITERATIONS, || { let _ = capture_frame(&mut renderer, &viewport); });
+        let (total_ms, per_frame_ms, mp_per_sec) = measure_render(w, h, ITERATIONS, || {
+            let _ = capture_frame(&mut renderer, &viewport);
+        });
 
         eprintln!("  {label}: {ITERATIONS}x in {total_ms:.2}ms ({per_frame_ms:.3}ms/frame, {mp_per_sec:.1} MP/s)");
 
@@ -324,8 +328,9 @@ fn bench_render_camera_50_items() {
             let _ = capture_frame(&mut renderer, &viewport);
         }
 
-        let (total_ms, per_frame_ms, mp_per_sec) =
-            measure_render(w, h, ITERATIONS, || { let _ = capture_frame(&mut renderer, &viewport); });
+        let (total_ms, per_frame_ms, mp_per_sec) = measure_render(w, h, ITERATIONS, || {
+            let _ = capture_frame(&mut renderer, &viewport);
+        });
 
         eprintln!("  {label}: {ITERATIONS}x in {total_ms:.2}ms ({per_frame_ms:.3}ms/frame, {mp_per_sec:.1} MP/s)");
 
@@ -375,8 +380,9 @@ fn bench_render_scaling_analysis() {
             let _ = capture_frame(&mut renderer, &viewport);
         }
 
-        let (_total_ms, per_frame_ms, mp_per_sec) =
-            measure_render(w, h, ITERATIONS, || { let _ = capture_frame(&mut renderer, &viewport); });
+        let (_total_ms, per_frame_ms, mp_per_sec) = measure_render(w, h, ITERATIONS, || {
+            let _ = capture_frame(&mut renderer, &viewport);
+        });
 
         eprintln!("  {n:>5} items: {per_frame_ms:.3}ms/frame ({mp_per_sec:.1} MP/s)");
 
@@ -447,8 +453,9 @@ fn bench_render_summary_report() {
         let deterministic = fb1.pixels == fb2.pixels;
 
         // Timing
-        let (_total_ms, per_frame_ms, mp_per_sec) =
-            measure_render(w, h, ITERATIONS, || { let _ = capture_frame(&mut renderer, viewport); });
+        let (_total_ms, per_frame_ms, mp_per_sec) = measure_render(w, h, ITERATIONS, || {
+            let _ = capture_frame(&mut renderer, viewport);
+        });
 
         entries.push(json!({
             "fixture": name,

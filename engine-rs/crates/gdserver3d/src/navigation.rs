@@ -104,7 +104,10 @@ impl NavigationMesh3D {
             max.y = max.y.max(v.y);
             max.z = max.z.max(v.z);
         }
-        Aabb::new(min, Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z))
+        Aabb::new(
+            min,
+            Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z),
+        )
     }
 
     /// Returns the center of a polygon (average of its vertices).
@@ -350,13 +353,41 @@ impl NavigationRegion3D {
 fn transform_aabb(aabb: &Aabb, t: &Transform3D) -> Aabb {
     let corners = [
         Vector3::new(aabb.position.x, aabb.position.y, aabb.position.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y, aabb.position.z),
-        Vector3::new(aabb.position.x, aabb.position.y + aabb.size.y, aabb.position.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y + aabb.size.y, aabb.position.z),
-        Vector3::new(aabb.position.x, aabb.position.y, aabb.position.z + aabb.size.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y, aabb.position.z + aabb.size.z),
-        Vector3::new(aabb.position.x, aabb.position.y + aabb.size.y, aabb.position.z + aabb.size.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y + aabb.size.y, aabb.position.z + aabb.size.z),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y,
+            aabb.position.z,
+        ),
+        Vector3::new(
+            aabb.position.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z,
+        ),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z,
+        ),
+        Vector3::new(
+            aabb.position.x,
+            aabb.position.y,
+            aabb.position.z + aabb.size.z,
+        ),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y,
+            aabb.position.z + aabb.size.z,
+        ),
+        Vector3::new(
+            aabb.position.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z + aabb.size.z,
+        ),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z + aabb.size.z,
+        ),
     ];
     let first = t.xform(corners[0]);
     let mut min = first;
@@ -370,7 +401,10 @@ fn transform_aabb(aabb: &Aabb, t: &Transform3D) -> Aabb {
         max.y = max.y.max(w.y);
         max.z = max.z.max(w.z);
     }
-    Aabb::new(min, Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z))
+    Aabb::new(
+        min,
+        Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -475,14 +509,24 @@ mod tests {
         mesh.add_polygon(&[0, 1, 2]);
         mesh.add_polygon(&[3, 4, 5]);
 
-        assert_eq!(mesh.find_closest_polygon(Vector3::new(0.0, 0.0, 0.0)), Some(0));
-        assert_eq!(mesh.find_closest_polygon(Vector3::new(10.0, 0.0, 0.0)), Some(1));
+        assert_eq!(
+            mesh.find_closest_polygon(Vector3::new(0.0, 0.0, 0.0)),
+            Some(0)
+        );
+        assert_eq!(
+            mesh.find_closest_polygon(Vector3::new(10.0, 0.0, 0.0)),
+            Some(1)
+        );
     }
 
     #[test]
     fn nav_mesh_clear() {
         let mut mesh = NavigationMesh3D::new();
-        mesh.vertices = vec![Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)];
+        mesh.vertices = vec![
+            Vector3::ZERO,
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        ];
         mesh.add_polygon(&[0, 1, 2]);
         mesh.clear();
         assert_eq!(mesh.vertex_count(), 0);
@@ -531,7 +575,11 @@ mod tests {
             Vector3::new(0.0, 0.0, 10.0),
         );
         let result = bake_navigation_mesh(&params, &src);
-        assert_eq!(result.polygon_count(), 0, "Vertical wall should be excluded");
+        assert_eq!(
+            result.polygon_count(),
+            0,
+            "Vertical wall should be excluded"
+        );
     }
 
     #[test]

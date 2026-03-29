@@ -267,18 +267,22 @@ impl RenderServer3DAdapter {
             .filter(|c| **c != Color::BLACK)
             .count() as u64;
 
-        let depth_written = frame_data
-            .depth
-            .iter()
-            .filter(|d| **d < 1.0)
-            .count() as u64;
+        let depth_written = frame_data.depth.iter().filter(|d| **d < 1.0).count() as u64;
 
         let ct = camera_transform;
         let camera_arr = [
-            ct.basis.x.x, ct.basis.x.y, ct.basis.x.z,
-            ct.basis.y.x, ct.basis.y.y, ct.basis.y.z,
-            ct.basis.z.x, ct.basis.z.y, ct.basis.z.z,
-            ct.origin.x, ct.origin.y, ct.origin.z,
+            ct.basis.x.x,
+            ct.basis.x.y,
+            ct.basis.x.z,
+            ct.basis.y.x,
+            ct.basis.y.y,
+            ct.basis.y.z,
+            ct.basis.z.x,
+            ct.basis.z.y,
+            ct.basis.z.z,
+            ct.origin.x,
+            ct.origin.y,
+            ct.origin.z,
         ];
 
         let snapshot = RenderFrame3DSnapshot {
@@ -397,17 +401,18 @@ impl RenderServer3DAdapter {
                     let transform = node3d::get_global_transform(tree, nid);
                     let visible = node3d::is_visible(tree, nid);
 
-                    let inst_id = if let Some(&existing) = self.instance_map.node_to_instance.get(&nid) {
-                        existing
-                    } else {
-                        let new_id = self.renderer.create_instance();
-                        // Resolve mesh type from the node's properties.
-                        let mesh = Self::resolve_mesh(tree, nid);
-                        self.renderer.set_mesh(new_id, mesh);
-                        self.renderer.set_material(new_id, Material3D::default());
-                        self.instance_map.node_to_instance.insert(nid, new_id);
-                        new_id
-                    };
+                    let inst_id =
+                        if let Some(&existing) = self.instance_map.node_to_instance.get(&nid) {
+                            existing
+                        } else {
+                            let new_id = self.renderer.create_instance();
+                            // Resolve mesh type from the node's properties.
+                            let mesh = Self::resolve_mesh(tree, nid);
+                            self.renderer.set_mesh(new_id, mesh);
+                            self.renderer.set_material(new_id, Material3D::default());
+                            self.instance_map.node_to_instance.insert(nid, new_id);
+                            new_id
+                        };
 
                     self.renderer.set_transform(inst_id, transform);
                     self.renderer.set_visible(inst_id, visible);
@@ -469,16 +474,14 @@ impl RenderServer3DAdapter {
 
                 let node_transform = node3d::get_global_transform(tree, nid);
                 let node_visible = node3d::is_visible(tree, nid);
-                let instance_count =
-                    node3d::get_multimesh_instance_count(tree, nid) as usize;
+                let instance_count = node3d::get_multimesh_instance_count(tree, nid) as usize;
 
                 // Resolve shared mesh from multimesh_mesh_type or mesh_type.
                 let mesh = Self::resolve_multimesh_mesh(tree, nid);
 
                 // Get or create the expanded instance list for this node.
                 let existing = self.multimesh_map.node_to_instances.remove(&nid);
-                let mut inst_ids: Vec<Instance3DId> =
-                    existing.unwrap_or_default();
+                let mut inst_ids: Vec<Instance3DId> = existing.unwrap_or_default();
 
                 // Free excess instances if count shrunk.
                 while inst_ids.len() > instance_count {
@@ -502,16 +505,14 @@ impl RenderServer3DAdapter {
                     self.renderer.set_mesh(inst_id, mesh.clone());
 
                     // Compose: node global transform * per-instance transform.
-                    let per_inst =
-                        node3d::get_multimesh_instance_transform(tree, nid, i);
+                    let per_inst = node3d::get_multimesh_instance_transform(tree, nid, i);
                     let composed = node_transform * per_inst;
 
                     self.renderer.set_transform(inst_id, composed);
                     self.renderer.set_visible(inst_id, node_visible);
 
                     // Per-instance color → material albedo.
-                    let color =
-                        node3d::get_multimesh_instance_color(tree, nid, i);
+                    let color = node3d::get_multimesh_instance_color(tree, nid, i);
                     let mat = Material3D {
                         albedo: color,
                         ..Material3D::default()
@@ -523,9 +524,7 @@ impl RenderServer3DAdapter {
                     }
                 }
 
-                self.multimesh_map
-                    .node_to_instances
-                    .insert(nid, inst_ids);
+                self.multimesh_map.node_to_instances.insert(nid, inst_ids);
             }
         }
 
@@ -538,9 +537,7 @@ impl RenderServer3DAdapter {
             .copied()
             .collect();
         for nid in stale {
-            if let Some(ids) =
-                self.multimesh_map.node_to_instances.remove(&nid)
-            {
+            if let Some(ids) = self.multimesh_map.node_to_instances.remove(&nid) {
                 for id in ids {
                     self.renderer.free_instance(id);
                 }
@@ -552,17 +549,13 @@ impl RenderServer3DAdapter {
 
     /// Resolves the shared mesh for a MultiMeshInstance3D.
     fn resolve_multimesh_mesh(tree: &SceneTree, nid: NodeId) -> Mesh3D {
-        if let Some(mesh_type) =
-            node3d::get_multimesh_mesh_type(tree, nid)
-        {
+        if let Some(mesh_type) = node3d::get_multimesh_mesh_type(tree, nid) {
             if let Some(m) = Self::mesh_from_type_name(&mesh_type) {
                 return m;
             }
         }
         if let Some(node) = tree.get_node(nid) {
-            if let gdvariant::Variant::String(s) =
-                node.get_property("mesh_type")
-            {
+            if let gdvariant::Variant::String(s) = node.get_property("mesh_type") {
                 if let Some(m) = Self::mesh_from_type_name(&s) {
                     return m;
                 }
@@ -854,8 +847,7 @@ impl RenderServer3DAdapter {
                                 light.spot_angle =
                                     (node3d::get_spot_angle(tree, nid) as f32).to_radians();
                                 light.range = node3d::get_spot_range(tree, nid) as f32;
-                                light.attenuation =
-                                    node3d::get_spot_attenuation(tree, nid) as f32;
+                                light.attenuation = node3d::get_spot_attenuation(tree, nid) as f32;
                                 light.spot_angle_attenuation =
                                     node3d::get_spot_angle_attenuation(tree, nid) as f32;
                             }
@@ -951,10 +943,19 @@ impl std::fmt::Debug for RenderServer3DAdapter {
             .field("viewport_width", &self.viewport_width)
             .field("viewport_height", &self.viewport_height)
             .field("frame_counter", &self.frame_counter)
-            .field("tracked_instances", &self.instance_map.node_to_instance.len())
-            .field("tracked_multimesh_nodes", &self.multimesh_map.node_to_instances.len())
+            .field(
+                "tracked_instances",
+                &self.instance_map.node_to_instance.len(),
+            )
+            .field(
+                "tracked_multimesh_nodes",
+                &self.multimesh_map.node_to_instances.len(),
+            )
             .field("tracked_lights", &self.light_map.node_to_light.len())
-            .field("tracked_probes", &self.reflection_probe_map.node_to_probe.len())
+            .field(
+                "tracked_probes",
+                &self.reflection_probe_map.node_to_probe.len(),
+            )
             .finish()
     }
 }
@@ -983,12 +984,9 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         return None;
     }
 
-    let normals = extract_vector3_array(first_sub.get_property("normals")?)
-        .unwrap_or_default();
-    let uvs = extract_uv_array(first_sub.get_property("uvs")?)
-        .unwrap_or_default();
-    let indices = extract_index_array(first_sub.get_property("indices")?)
-        .unwrap_or_default();
+    let normals = extract_vector3_array(first_sub.get_property("normals")?).unwrap_or_default();
+    let uvs = extract_uv_array(first_sub.get_property("uvs")?).unwrap_or_default();
+    let indices = extract_index_array(first_sub.get_property("indices")?).unwrap_or_default();
 
     let mut mesh = Mesh3D {
         vertices,
@@ -1292,7 +1290,10 @@ mod tests {
         let mut adapter = RenderServer3DAdapter::new(32, 32);
         let (snapshot, _) = adapter.render_frame(&tree);
 
-        assert_eq!(snapshot.light_count, 1, "should detect one directional light");
+        assert_eq!(
+            snapshot.light_count, 1,
+            "should detect one directional light"
+        );
     }
 
     #[test]
@@ -1342,7 +1343,10 @@ mod tests {
         node3d::set_position(&mut tree, cam_id, Vector3::new(0.0, 0.0, 10.0));
 
         let mut mesh = Node::new("Ball", "MeshInstance3D");
-        mesh.set_property("mesh_type", gdvariant::Variant::String("SphereMesh".to_owned()));
+        mesh.set_property(
+            "mesh_type",
+            gdvariant::Variant::String("SphereMesh".to_owned()),
+        );
         let mesh_id = tree.add_child(root, mesh).unwrap();
         node3d::set_position(&mut tree, mesh_id, Vector3::new(0.0, 0.0, 0.0));
 
@@ -1350,7 +1354,10 @@ mod tests {
         let (snapshot, _) = adapter.render_frame(&tree);
 
         assert_eq!(snapshot.visible_mesh_count, 1);
-        assert!(snapshot.nonblack_pixel_count > 0, "sphere should produce pixels");
+        assert!(
+            snapshot.nonblack_pixel_count > 0,
+            "sphere should produce pixels"
+        );
     }
 
     #[test]
@@ -1395,7 +1402,10 @@ mod tests {
         let (snapshot, _) = adapter.render_frame(&tree);
 
         let report = snapshot.parity_report();
-        assert!(report.is_functional(), "scene with camera+mesh should be functional");
+        assert!(
+            report.is_functional(),
+            "scene with camera+mesh should be functional"
+        );
         assert_eq!(report.mesh_count, 1);
         assert_eq!(report.light_count, 1);
         assert!(report.has_camera);
@@ -1412,7 +1422,10 @@ mod tests {
         let (snapshot, _) = adapter.render_frame(&tree);
 
         let report = snapshot.parity_report();
-        assert!(!report.is_functional(), "empty scene should not be functional");
+        assert!(
+            !report.is_functional(),
+            "empty scene should not be functional"
+        );
         assert_eq!(report.mesh_count, 0);
         assert_eq!(report.light_count, 0);
     }
@@ -1499,16 +1512,8 @@ mod tests {
 
     /// Builds a minimal valid GLB (glTF Binary) with a single triangle.
     fn make_test_glb() -> Vec<u8> {
-        let positions: [[f32; 3]; 3] = [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ];
-        let normals: [[f32; 3]; 3] = [
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0],
-        ];
+        let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let normals: [[f32; 3]; 3] = [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]];
         let indices: [u16; 3] = [0, 1, 2];
 
         let mut bin = Vec::new();
@@ -1582,16 +1587,8 @@ mod tests {
 
     /// Builds a GLB with a PBR material (red, metallic=0.8, roughness=0.3).
     fn make_test_glb_with_material() -> Vec<u8> {
-        let positions: [[f32; 3]; 3] = [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ];
-        let normals: [[f32; 3]; 3] = [
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0],
-        ];
+        let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let normals: [[f32; 3]; 3] = [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]];
         let indices: [u16; 3] = [0, 1, 2];
 
         let mut bin = Vec::new();
@@ -1719,8 +1716,16 @@ mod tests {
         let resolved = RenderServer3DAdapter::resolve_mesh(&tree, mesh_id);
         // glTF import is not yet implemented, so resolve_mesh falls back to
         // the default cube (24 vertices, 36 indices).
-        assert_eq!(resolved.vertices.len(), 24, "should fall back to default cube");
-        assert_eq!(resolved.indices.len(), 36, "should fall back to default cube");
+        assert_eq!(
+            resolved.vertices.len(),
+            24,
+            "should fall back to default cube"
+        );
+        assert_eq!(
+            resolved.indices.len(),
+            36,
+            "should fall back to default cube"
+        );
     }
 
     #[test]
@@ -1734,7 +1739,10 @@ mod tests {
 
         // Should fall back to default cube instead of panicking.
         let resolved = RenderServer3DAdapter::resolve_mesh(&tree, mesh_id);
-        assert!(!resolved.vertices.is_empty(), "should fall back to default cube");
+        assert!(
+            !resolved.vertices.is_empty(),
+            "should fall back to default cube"
+        );
     }
 
     #[test]
@@ -1793,6 +1801,9 @@ mod tests {
         let (snapshot, _frame) = adapter.render_frame(&tree);
 
         assert_eq!(snapshot.visible_mesh_count, 1);
-        assert!(snapshot.nonblack_pixel_count > 0, "fallback cube should produce visible pixels");
+        assert!(
+            snapshot.nonblack_pixel_count > 0,
+            "fallback cube should produce visible pixels"
+        );
     }
 }

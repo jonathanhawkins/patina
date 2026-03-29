@@ -77,10 +77,22 @@ mod gpu_tests {
     fn wgsl_shader_source_is_nonempty() {
         // The WGSL shader source should be substantial.
         assert!(SHADER_3D_WGSL.len() > 500, "WGSL shader source too short");
-        assert!(SHADER_3D_WGSL.contains("vs_main"), "Missing vertex entry point");
-        assert!(SHADER_3D_WGSL.contains("fs_main"), "Missing fragment entry point");
-        assert!(SHADER_3D_WGSL.contains("model_matrix"), "Missing model matrix uniform");
-        assert!(SHADER_3D_WGSL.contains("shading_mode"), "Missing shading mode");
+        assert!(
+            SHADER_3D_WGSL.contains("vs_main"),
+            "Missing vertex entry point"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("fs_main"),
+            "Missing fragment entry point"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("model_matrix"),
+            "Missing model matrix uniform"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("shading_mode"),
+            "Missing shading mode"
+        );
     }
 
     // ── Data structure sizes (GPU alignment) ────────────────────────
@@ -225,8 +237,8 @@ mod gpu_tests {
             Material3D {
                 albedo: Color::new(0.5, 0.5, 0.5, 1.0),
                 shading_mode: ShadingMode::Phong,
-                roughness: 0.1,  // Low roughness = sharp specular.
-                metallic: 1.0,   // High metallic = strong specular.
+                roughness: 0.1, // Low roughness = sharp specular.
+                metallic: 1.0,  // High metallic = strong specular.
                 ..Default::default()
             },
         );
@@ -242,9 +254,8 @@ mod gpu_tests {
 
         // Some center pixels should be brighter than edge pixels (specular).
         let center_idx = 32 * 64 + 32;
-        let center_brightness = frame.pixels[center_idx].r
-            + frame.pixels[center_idx].g
-            + frame.pixels[center_idx].b;
+        let center_brightness =
+            frame.pixels[center_idx].r + frame.pixels[center_idx].g + frame.pixels[center_idx].b;
 
         // Just verify the center area has some illumination.
         let lit_count = frame.pixels.iter().filter(|p| p.r > 0.1).count();
@@ -278,12 +289,7 @@ mod gpu_tests {
 
         // Background pixels should have depth = 1.0 (clear value).
         // Triangle pixels should have depth < 1.0.
-        let fg_depths: Vec<f32> = frame
-            .depth
-            .iter()
-            .copied()
-            .filter(|d| *d < 0.999)
-            .collect();
+        let fg_depths: Vec<f32> = frame.depth.iter().copied().filter(|d| *d < 0.999).collect();
         assert!(
             !fg_depths.is_empty(),
             "Expected some foreground depth values < 1.0"
@@ -324,11 +330,7 @@ mod gpu_tests {
         let frame = renderer.render_frame(&vp);
 
         // No red pixels — instance is invisible.
-        let red_count = frame
-            .pixels
-            .iter()
-            .filter(|p| p.r > 0.5)
-            .count();
+        let red_count = frame.pixels.iter().filter(|p| p.r > 0.5).count();
         assert_eq!(red_count, 0, "Invisible instance should produce no pixels");
     }
 

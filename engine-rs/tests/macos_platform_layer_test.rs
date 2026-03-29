@@ -82,12 +82,8 @@ fn add_custom_menus_with_shortcuts() {
     let save_id = layer.menu_bar.alloc_item_id();
     {
         let file = layer.menu_bar.get_menu_mut(file_id).unwrap();
-        file.add_item(
-            MenuItem::action(new_id, "New").with_shortcut(MenuShortcut::cmd("N")),
-        );
-        file.add_item(
-            MenuItem::action(save_id, "Save").with_shortcut(MenuShortcut::cmd("S")),
-        );
+        file.add_item(MenuItem::action(new_id, "New").with_shortcut(MenuShortcut::cmd("N")));
+        file.add_item(MenuItem::action(save_id, "Save").with_shortcut(MenuShortcut::cmd("S")));
     }
 
     assert_eq!(layer.menu_bar.menu_count(), 2); // App + File
@@ -250,12 +246,10 @@ fn dock_badge_clear() {
 fn backend_event_polling() {
     let mut layer = MacOsPlatformLayer::headless("App");
     layer.backend_mut().push_event(WindowEvent::FocusGained);
-    layer
-        .backend_mut()
-        .push_event(WindowEvent::Resized {
-            width: 1920,
-            height: 1080,
-        });
+    layer.backend_mut().push_event(WindowEvent::Resized {
+        width: 1920,
+        height: 1080,
+    });
 
     let events = layer.poll_window_events();
     assert_eq!(events.len(), 2);
@@ -297,7 +291,8 @@ fn complete_macos_editor_workflow() {
         .with_title("Patina Editor");
     let mut layer = MacOsPlatformLayer::new("Patina Editor", &config);
     // Force headless for testing.
-    layer.menu_bar = gdplatform::native_menu::NativeMenuBar::with_platform(MenuBarPlatform::Headless);
+    layer.menu_bar =
+        gdplatform::native_menu::NativeMenuBar::with_platform(MenuBarPlatform::Headless);
 
     // 1. Create standard app menu.
     layer.create_app_menu();
@@ -313,12 +308,10 @@ fn complete_macos_editor_workflow() {
     {
         let file = layer.menu_bar.get_menu_mut(file_id).unwrap();
         file.add_item(
-            MenuItem::action(new_scene, "New Scene")
-                .with_shortcut(MenuShortcut::cmd("N")),
+            MenuItem::action(new_scene, "New Scene").with_shortcut(MenuShortcut::cmd("N")),
         );
         file.add_item(
-            MenuItem::action(save_scene, "Save Scene")
-                .with_shortcut(MenuShortcut::cmd("S")),
+            MenuItem::action(save_scene, "Save Scene").with_shortcut(MenuShortcut::cmd("S")),
         );
     }
 
@@ -326,14 +319,8 @@ fn complete_macos_editor_workflow() {
     let redo = layer.menu_bar.alloc_item_id();
     {
         let edit = layer.menu_bar.get_menu_mut(edit_id).unwrap();
-        edit.add_item(
-            MenuItem::action(undo, "Undo")
-                .with_shortcut(MenuShortcut::cmd("Z")),
-        );
-        edit.add_item(
-            MenuItem::action(redo, "Redo")
-                .with_shortcut(MenuShortcut::cmd_shift("Z")),
-        );
+        edit.add_item(MenuItem::action(undo, "Undo").with_shortcut(MenuShortcut::cmd("Z")));
+        edit.add_item(MenuItem::action(redo, "Redo").with_shortcut(MenuShortcut::cmd_shift("Z")));
     }
 
     let show_grid = layer.menu_bar.alloc_item_id();

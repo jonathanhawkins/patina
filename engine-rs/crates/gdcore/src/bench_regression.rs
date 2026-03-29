@@ -210,10 +210,7 @@ impl Baseline {
 
     /// Gets the threshold for a benchmark (per-benchmark or default).
     pub fn threshold(&self, name: &str) -> Threshold {
-        self.thresholds
-            .get(name)
-            .cloned()
-            .unwrap_or_default()
+        self.thresholds.get(name).cloned().unwrap_or_default()
     }
 
     /// Returns the number of baseline entries.
@@ -327,14 +324,18 @@ impl RegressionDetector {
 
     /// Checks all results and returns a full regression report.
     pub fn check_all(&self, results: &[BenchmarkResult]) -> RegressionReport {
-        let comparisons: Vec<ComparisonResult> = results
-            .iter()
-            .filter_map(|r| self.check(r))
-            .collect();
+        let comparisons: Vec<ComparisonResult> =
+            results.iter().filter_map(|r| self.check(r)).collect();
 
-        let overall = if comparisons.iter().any(|c| c.verdict == RegressionVerdict::Fail) {
+        let overall = if comparisons
+            .iter()
+            .any(|c| c.verdict == RegressionVerdict::Fail)
+        {
             RegressionVerdict::Fail
-        } else if comparisons.iter().any(|c| c.verdict == RegressionVerdict::Warn) {
+        } else if comparisons
+            .iter()
+            .any(|c| c.verdict == RegressionVerdict::Warn)
+        {
             RegressionVerdict::Warn
         } else {
             RegressionVerdict::Pass
@@ -374,7 +375,9 @@ impl RegressionReport {
     pub fn pass_count(&self) -> usize {
         self.comparisons
             .iter()
-            .filter(|c| c.verdict == RegressionVerdict::Pass || c.verdict == RegressionVerdict::Improved)
+            .filter(|c| {
+                c.verdict == RegressionVerdict::Pass || c.verdict == RegressionVerdict::Improved
+            })
             .count()
     }
 
@@ -710,8 +713,8 @@ mod tests {
     fn report_with_failure() {
         let detector = RegressionDetector::with_baseline(make_baseline());
         let results = vec![
-            BenchmarkResult::lower_is_better("latency", 10.1, "ms"),   // pass
-            BenchmarkResult::lower_is_better("memory", 60.0, "MB"),    // fail (20% increase)
+            BenchmarkResult::lower_is_better("latency", 10.1, "ms"), // pass
+            BenchmarkResult::lower_is_better("memory", 60.0, "MB"),  // fail (20% increase)
         ];
 
         let report = detector.check_all(&results);
@@ -764,9 +767,7 @@ mod tests {
     #[test]
     fn report_to_json() {
         let detector = RegressionDetector::with_baseline(make_baseline());
-        let results = vec![
-            BenchmarkResult::lower_is_better("latency", 10.1, "ms"),
-        ];
+        let results = vec![BenchmarkResult::lower_is_better("latency", 10.1, "ms")];
 
         let report = detector.check_all(&results);
         let json = report.to_json();
@@ -778,8 +779,8 @@ mod tests {
     fn report_failures_and_warnings() {
         let detector = RegressionDetector::with_baseline(make_baseline());
         let results = vec![
-            BenchmarkResult::lower_is_better("latency", 12.0, "ms"),  // fail
-            BenchmarkResult::lower_is_better("memory", 53.5, "MB"),   // warn (7%)
+            BenchmarkResult::lower_is_better("latency", 12.0, "ms"), // fail
+            BenchmarkResult::lower_is_better("memory", 53.5, "MB"),  // warn (7%)
         ];
 
         let report = detector.check_all(&results);
@@ -793,8 +794,8 @@ mod tests {
     fn report_improved_count() {
         let detector = RegressionDetector::with_baseline(make_baseline());
         let results = vec![
-            BenchmarkResult::lower_is_better("latency", 8.0, "ms"),  // improved
-            BenchmarkResult::lower_is_better("memory", 50.0, "MB"),  // pass
+            BenchmarkResult::lower_is_better("latency", 8.0, "ms"), // improved
+            BenchmarkResult::lower_is_better("memory", 50.0, "MB"), // pass
         ];
 
         let report = detector.check_all(&results);

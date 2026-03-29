@@ -150,9 +150,9 @@ fn gate_summary_shows_pass_fail_skip_counts() {
     gate.add_baseline(BenchmarkBaseline::new("fail_bench", 10.0, 2.0));
 
     let results = gate.evaluate(&[
-        ("pass_bench", 12.0),  // pass
-        ("fail_bench", 25.0),  // fail
-        ("skip_bench", 5.0),   // skip (no baseline)
+        ("pass_bench", 12.0), // pass
+        ("fail_bench", 25.0), // fail
+        ("skip_bench", 5.0),  // skip (no baseline)
     ]);
 
     let summary = BenchmarkGate::summary(&results);
@@ -191,8 +191,7 @@ fn gate_summary_includes_ratio_and_threshold() {
 
 #[test]
 fn golden_baselines_file_exists_and_is_valid_json() {
-    let baselines_path = fixtures_dir()
-        .join("golden/render/benchmark_baselines.json");
+    let baselines_path = fixtures_dir().join("golden/render/benchmark_baselines.json");
 
     assert!(
         baselines_path.exists(),
@@ -201,19 +200,21 @@ fn golden_baselines_file_exists_and_is_valid_json() {
     );
 
     let content = std::fs::read_to_string(&baselines_path).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .expect("Golden baselines is not valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(&content).expect("Golden baselines is not valid JSON");
 
     // Validate structure
     assert!(json["fixtures"].is_object(), "Missing 'fixtures' object");
-    assert!(json["regression_threshold"].is_number(), "Missing 'regression_threshold'");
+    assert!(
+        json["regression_threshold"].is_number(),
+        "Missing 'regression_threshold'"
+    );
     assert!(json["version"].is_number(), "Missing 'version'");
 }
 
 #[test]
 fn golden_baselines_load_into_gate() {
-    let baselines_path = fixtures_dir()
-        .join("golden/render/benchmark_baselines.json");
+    let baselines_path = fixtures_dir().join("golden/render/benchmark_baselines.json");
     let content = std::fs::read_to_string(&baselines_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
@@ -253,8 +254,7 @@ fn golden_baselines_load_into_gate() {
 
 #[test]
 fn golden_baselines_detect_simulated_regression() {
-    let baselines_path = fixtures_dir()
-        .join("golden/render/benchmark_baselines.json");
+    let baselines_path = fixtures_dir().join("golden/render/benchmark_baselines.json");
     let content = std::fs::read_to_string(&baselines_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
@@ -296,13 +296,15 @@ fn golden_baselines_detect_simulated_regression() {
     assert_eq!(failures.len(), 1, "Expected exactly 1 failure");
 
     let summary = BenchmarkGate::summary(&results);
-    assert!(summary.contains("GATE: FAILED"), "Summary should show failure");
+    assert!(
+        summary.contains("GATE: FAILED"),
+        "Summary should show failure"
+    );
 }
 
 #[test]
 fn golden_baselines_all_have_positive_values() {
-    let baselines_path = fixtures_dir()
-        .join("golden/render/benchmark_baselines.json");
+    let baselines_path = fixtures_dir().join("golden/render/benchmark_baselines.json");
     let content = std::fs::read_to_string(&baselines_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
     let fixtures = json["fixtures"].as_object().unwrap();
@@ -312,6 +314,11 @@ fn golden_baselines_all_have_positive_values() {
         assert!(ms > 0.0, "Baseline '{}' has non-positive ms: {}", name, ms);
 
         let mp = entry["mp_per_sec"].as_f64().unwrap();
-        assert!(mp > 0.0, "Baseline '{}' has non-positive mp/s: {}", name, mp);
+        assert!(
+            mp > 0.0,
+            "Baseline '{}' has non-positive mp/s: {}",
+            name,
+            mp
+        );
     }
 }

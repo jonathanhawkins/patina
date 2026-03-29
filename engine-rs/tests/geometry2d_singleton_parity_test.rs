@@ -50,9 +50,7 @@ fn singleton_build_arc_returns_array() {
 
 #[test]
 fn singleton_build_arc_points_are_vector2() {
-    let result = run_val(
-        "return Geometry2D.build_arc(Vector2(0, 0), 5.0, 0.0, 1.5708, 4)\n",
-    );
+    let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 5.0, 0.0, 1.5708, 4)\n");
     if let Variant::Array(arr) = &result {
         for (i, v) in arr.iter().enumerate() {
             assert!(
@@ -68,9 +66,7 @@ fn singleton_build_arc_points_are_vector2() {
 #[test]
 fn singleton_build_arc_first_last_angles() {
     // Quarter-circle: start at 0, end at PI/2, radius 1, center origin.
-    let result = run_val(
-        "return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 1.5707963, 10)\n",
-    );
+    let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 1.5707963, 10)\n");
     if let Variant::Array(arr) = result {
         let first = match &arr[0] {
             Variant::Vector2(v) => *v,
@@ -198,9 +194,7 @@ fn singleton_build_arc_even_angular_spacing() {
     // Quarter-circle with 5 points → 4 gaps of PI/8 each.
     // We return the points and compute angles in Rust since atan2 is not a
     // GDScript global builtin in Patina's interpreter.
-    let result = run_val(
-        "return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 1.5707963, 5)\n",
-    );
+    let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 1.5707963, 5)\n");
     if let Variant::Array(arr) = result {
         assert_eq!(arr.len(), 5);
         let expected_step: f32 = std::f32::consts::FRAC_PI_2 / 4.0;
@@ -253,9 +247,8 @@ fn singleton_build_arc_radius_invariant() {
 #[test]
 fn singleton_build_arc_offset_center() {
     // Center at (100, 200), radius 10, two points from 0 to PI/2.
-    let result = run_val(
-        "return Geometry2D.build_arc(Vector2(100, 200), 10.0, 0.0, 1.5707963, 2)\n",
-    );
+    let result =
+        run_val("return Geometry2D.build_arc(Vector2(100, 200), 10.0, 0.0, 1.5707963, 2)\n");
     if let Variant::Array(arr) = result {
         assert_eq!(arr.len(), 2);
         let p0 = match &arr[0] {
@@ -280,9 +273,7 @@ fn singleton_build_arc_offset_center() {
 #[test]
 fn singleton_build_arc_reverse_sweep() {
     // Sweep from PI to 0 (clockwise). 3 points: PI, PI/2, 0.
-    let result = run_val(
-        "return Geometry2D.build_arc(Vector2(0, 0), 1.0, 3.14159265, 0.0, 3)\n",
-    );
+    let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 1.0, 3.14159265, 0.0, 3)\n");
     if let Variant::Array(arr) = result {
         assert_eq!(arr.len(), 3);
         let first = match &arr[0] {
@@ -305,9 +296,7 @@ fn singleton_build_arc_reverse_sweep() {
 #[test]
 fn singleton_build_arc_full_circle_wraps() {
     // Full circle (0 to TAU): first and last points should coincide.
-    let result = run_val(
-        "return Geometry2D.build_arc(Vector2(0, 0), 5.0, 0.0, 6.2831853, 64)\n",
-    );
+    let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 5.0, 0.0, 6.2831853, 64)\n");
     if let Variant::Array(arr) = result {
         assert_eq!(arr.len(), 64);
         let first = match &arr[0] {
@@ -327,9 +316,7 @@ fn singleton_build_arc_full_circle_wraps() {
 
 #[test]
 fn singleton_build_arc_count_zero_returns_empty() {
-    let result = run_val(
-        "return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 3.14, 0)\n",
-    );
+    let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 3.14, 0)\n");
     match &result {
         Variant::Array(arr) => assert!(arr.is_empty(), "point_count=0 should return empty"),
         other => panic!("expected Array, got {other:?}"),
@@ -361,9 +348,8 @@ fn singleton_build_arc_wrong_arity_errors() {
 #[test]
 fn singleton_segment_intersects_wrong_arity_errors() {
     let mut interp = Interpreter::new();
-    let result = interp.run(
-        "return Geometry2D.segment_intersects_segment(Vector2(0, 0), Vector2(1, 1))\n",
-    );
+    let result =
+        interp.run("return Geometry2D.segment_intersects_segment(Vector2(0, 0), Vector2(1, 1))\n");
     assert!(
         result.is_err(),
         "segment_intersects_segment with 2 args should error"

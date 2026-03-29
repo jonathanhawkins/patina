@@ -50,7 +50,9 @@ pub use uid::UidRegistry;
 pub use unified::UnifiedLoader;
 
 /// Stub glTF importer — returns an error since glTF import is not yet implemented.
-pub fn import_gltf(_path: &std::path::Path) -> gdcore::error::EngineResult<std::sync::Arc<Resource>> {
+pub fn import_gltf(
+    _path: &std::path::Path,
+) -> gdcore::error::EngineResult<std::sync::Arc<Resource>> {
     Err(gdcore::error::EngineError::NotFound(
         "glTF import not yet implemented".to_string(),
     ))

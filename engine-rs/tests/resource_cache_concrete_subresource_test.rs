@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use gdresource::{Resource, ResourceCache, ResourceLoader};
 use gdcore::error::EngineResult;
 use gdcore::math::Vector2;
+use gdresource::{Resource, ResourceCache, ResourceLoader};
 use gdvariant::Variant;
 
 // ===========================================================================
@@ -35,10 +35,7 @@ impl SubResourceLoader {
         style1.path = String::new();
         style1.set_property("bg_color", Variant::String("Color(1, 0, 0, 1)".into()));
         style1.set_property("corner_radius", Variant::Int(8));
-        style1.set_property(
-            "size",
-            Variant::Vector2(Vector2::new(100.0, 50.0)),
-        );
+        style1.set_property("size", Variant::Vector2(Vector2::new(100.0, 50.0)));
 
         let style2 = Resource::new("StyleBoxEmpty");
 
@@ -54,18 +51,9 @@ impl SubResourceLoader {
             .insert("style2".into(), Arc::new(style2));
 
         // Properties that reference sub-resources
-        parent.set_property(
-            "normal_style",
-            Variant::String("SubResource:style1".into()),
-        );
-        parent.set_property(
-            "hover_style",
-            Variant::String("SubResource:style1".into()),
-        );
-        parent.set_property(
-            "focus_style",
-            Variant::String("SubResource:style2".into()),
-        );
+        parent.set_property("normal_style", Variant::String("SubResource:style1".into()));
+        parent.set_property("hover_style", Variant::String("SubResource:style1".into()));
+        parent.set_property("focus_style", Variant::String("SubResource:style2".into()));
         // Non-SubResource properties
         parent.set_property("name", Variant::String("MyTheme".into()));
         parent.set_property("version", Variant::Int(2));
@@ -97,21 +85,13 @@ impl ResourceLoader for NestedSubResourceLoader {
         texture
             .subresources
             .insert("grad1".into(), Arc::new(gradient));
-        texture.set_property(
-            "gradient",
-            Variant::String("SubResource:grad1".into()),
-        );
+        texture.set_property("gradient", Variant::String("SubResource:grad1".into()));
 
         // Top-level resource
         let mut parent = Resource::new("Material");
         parent.path = path.to_string();
-        parent
-            .subresources
-            .insert("tex1".into(), Arc::new(texture));
-        parent.set_property(
-            "albedo_texture",
-            Variant::String("SubResource:tex1".into()),
-        );
+        parent.subresources.insert("tex1".into(), Arc::new(texture));
+        parent.set_property("albedo_texture", Variant::String("SubResource:tex1".into()));
 
         Ok(Arc::new(parent))
     }
@@ -201,10 +181,7 @@ fn resolved_subresource_has_typed_properties() {
     let parent = SubResourceLoader::make_parent();
     let style = parent.resolve_subresource("normal_style").unwrap();
 
-    assert_eq!(
-        style.get_property("corner_radius"),
-        Some(&Variant::Int(8))
-    );
+    assert_eq!(style.get_property("corner_radius"), Some(&Variant::Int(8)));
     assert_eq!(
         style.get_property("size"),
         Some(&Variant::Vector2(Vector2::new(100.0, 50.0)))

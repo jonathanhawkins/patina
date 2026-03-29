@@ -555,14 +555,15 @@ mod tests {
         let item = MenuItem::submenu(MenuItemId(1), "Recent Files", MenuId(10));
         assert!(matches!(
             item.kind,
-            MenuItemKind::Submenu { menu_id: MenuId(10) }
+            MenuItemKind::Submenu {
+                menu_id: MenuId(10)
+            }
         ));
     }
 
     #[test]
     fn menu_item_with_shortcut() {
-        let item = MenuItem::action(MenuItemId(1), "Quit")
-            .with_shortcut(MenuShortcut::cmd("Q"));
+        let item = MenuItem::action(MenuItemId(1), "Quit").with_shortcut(MenuShortcut::cmd("Q"));
         let shortcut = item.shortcut.as_ref().unwrap();
         assert_eq!(shortcut.key, "Q");
         assert!(shortcut.command);
@@ -798,8 +799,7 @@ mod tests {
         {
             let edit = bar.get_menu_mut(edit_id).unwrap();
             edit.add_item(
-                MenuItem::action(MenuItemId(undo_id), "Undo")
-                    .with_shortcut(MenuShortcut::cmd("Z")),
+                MenuItem::action(MenuItemId(undo_id), "Undo").with_shortcut(MenuShortcut::cmd("Z")),
             );
         }
 

@@ -17,13 +17,13 @@
 //! 14. Platform targets: web has limited capabilities
 //! 15. ClassDB registration for JavaScriptBridge
 
+use gdplatform::export::{BuildProfile, ExportConfig, ExportTemplate};
+use gdplatform::os::Platform;
+use gdplatform::platform_targets::targets_for_platform;
 use gdplatform::web::{
     AudioContextState, CanvasConfig, FullscreenState, JsBridge, JsError, JsObjectHandle, JsValue,
     PageVisibility, WebExportConfig, WebPlatformLayer, WebStorageBackend,
 };
-use gdplatform::export::{BuildProfile, ExportConfig, ExportTemplate};
-use gdplatform::platform_targets::targets_for_platform;
-use gdplatform::os::Platform;
 
 // ── JsBridge ────────────────────────────────────────────────────────
 
@@ -31,7 +31,10 @@ use gdplatform::os::Platform;
 fn js_bridge_unavailable_rejects_all_calls() {
     let mut bridge = JsBridge::new();
     assert!(!bridge.is_available());
-    assert_eq!(bridge.call("window", "alert", &[]), Err(JsError::NotAvailable));
+    assert_eq!(
+        bridge.call("window", "alert", &[]),
+        Err(JsError::NotAvailable)
+    );
     assert_eq!(bridge.eval("1+1"), Err(JsError::NotAvailable));
 }
 
@@ -93,7 +96,10 @@ fn js_value_display_all_variants() {
     assert_eq!(JsValue::Bool(false).to_string(), "false");
     assert_eq!(JsValue::Number(2.5).to_string(), "2.5");
     assert_eq!(JsValue::String("test".into()).to_string(), "\"test\"");
-    assert_eq!(JsValue::ArrayBuffer(vec![0; 8]).to_string(), "ArrayBuffer(8)");
+    assert_eq!(
+        JsValue::ArrayBuffer(vec![0; 8]).to_string(),
+        "ArrayBuffer(8)"
+    );
     let handle = JsObjectHandle::new(99, "Element");
     assert_eq!(JsValue::Object(handle).to_string(), "JsObject(99, Element)");
 }
@@ -109,11 +115,26 @@ fn js_value_clone_and_eq() {
 
 #[test]
 fn js_error_display_all_variants() {
-    assert_eq!(JsError::NotAvailable.to_string(), "WASM environment not available");
-    assert_eq!(JsError::Exception("oops".into()).to_string(), "JS exception: oops");
-    assert_eq!(JsError::PropertyNotFound("foo".into()).to_string(), "property 'foo' not found");
-    let err = JsError::TypeMismatch { expected: "number".into(), got: "string".into() };
-    assert_eq!(err.to_string(), "type mismatch: expected number, got string");
+    assert_eq!(
+        JsError::NotAvailable.to_string(),
+        "WASM environment not available"
+    );
+    assert_eq!(
+        JsError::Exception("oops".into()).to_string(),
+        "JS exception: oops"
+    );
+    assert_eq!(
+        JsError::PropertyNotFound("foo".into()).to_string(),
+        "property 'foo' not found"
+    );
+    let err = JsError::TypeMismatch {
+        expected: "number".into(),
+        got: "string".into(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "type mismatch: expected number, got string"
+    );
 }
 
 // ── CanvasConfig ────────────────────────────────────────────────────
@@ -195,7 +216,10 @@ fn audio_state_machine_closed_errors() {
 
 #[test]
 fn audio_context_state_display() {
-    assert_eq!(AudioContextState::Uninitialized.to_string(), "uninitialized");
+    assert_eq!(
+        AudioContextState::Uninitialized.to_string(),
+        "uninitialized"
+    );
     assert_eq!(AudioContextState::Suspended.to_string(), "suspended");
     assert_eq!(AudioContextState::Running.to_string(), "running");
     assert_eq!(AudioContextState::Closed.to_string(), "closed");
@@ -263,10 +287,14 @@ fn shared_array_buffer_requires_threads() {
 fn download_file_calls_js_bridge() {
     let mut layer = WebPlatformLayer::new();
     layer.js.set_available(true);
-    layer.js.stub_method("URL", "createObjectURL", JsValue::String("blob:...".into()));
-    layer.js.stub_method("document", "createElement", JsValue::Object(
-        JsObjectHandle::new(1, "HTMLAnchorElement"),
-    ));
+    layer
+        .js
+        .stub_method("URL", "createObjectURL", JsValue::String("blob:...".into()));
+    layer.js.stub_method(
+        "document",
+        "createElement",
+        JsValue::Object(JsObjectHandle::new(1, "HTMLAnchorElement")),
+    );
     assert!(layer.download_file("save.dat", &[1, 2, 3]).is_ok());
     assert_eq!(layer.js.call_log().len(), 2);
 }
@@ -305,8 +333,11 @@ fn export_template_web_wasm_filename() {
     let config = ExportConfig::new("web", "MyGame").with_build_profile(BuildProfile::Release);
     let template = ExportTemplate::from_config(config);
     let filename = template.output_filename();
-    assert!(filename.contains("wasm") || filename.contains("web"),
-        "web export should produce wasm-related output, got: {}", filename);
+    assert!(
+        filename.contains("wasm") || filename.contains("web"),
+        "web export should produce wasm-related output, got: {}",
+        filename
+    );
 }
 
 #[test]
@@ -322,8 +353,14 @@ fn export_template_web_manifest() {
     let config = ExportConfig::new("web", "PatinaGame").with_build_profile(BuildProfile::Release);
     let template = ExportTemplate::from_config(config);
     let manifest = template.generate_manifest();
-    assert!(manifest.contains("PatinaGame"), "manifest should contain app name");
-    assert!(manifest.contains("web"), "manifest should reference web platform");
+    assert!(
+        manifest.contains("PatinaGame"),
+        "manifest should contain app name"
+    );
+    assert!(
+        manifest.contains("web"),
+        "manifest should reference web platform"
+    );
 }
 
 // ── Platform targets: web constraints ───────────────────────────────
@@ -339,7 +376,10 @@ fn web_targets_have_limited_capabilities() {
     let web = targets_for_platform(Platform::Web);
     for target in &web {
         assert!(!target.gpu_supported, "Web should not claim GPU");
-        assert!(!target.windowing_supported, "Web should not claim windowing");
+        assert!(
+            !target.windowing_supported,
+            "Web should not claim windowing"
+        );
         assert!(!target.ci_tested, "Web is not yet CI-tested");
     }
 }
@@ -367,10 +407,28 @@ fn classdb_javascript_bridge_exists() {
 #[test]
 fn classdb_javascript_bridge_has_methods() {
     gdobject::class_db::register_3d_classes();
-    assert!(gdobject::class_db::class_has_method("JavaScriptBridge", "eval"));
-    assert!(gdobject::class_db::class_has_method("JavaScriptBridge", "get_interface"));
-    assert!(gdobject::class_db::class_has_method("JavaScriptBridge", "create_object"));
-    assert!(gdobject::class_db::class_has_method("JavaScriptBridge", "create_callback"));
-    assert!(gdobject::class_db::class_has_method("JavaScriptBridge", "download_buffer"));
-    assert!(gdobject::class_db::class_has_method("JavaScriptBridge", "force_fs_sync"));
+    assert!(gdobject::class_db::class_has_method(
+        "JavaScriptBridge",
+        "eval"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "JavaScriptBridge",
+        "get_interface"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "JavaScriptBridge",
+        "create_object"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "JavaScriptBridge",
+        "create_callback"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "JavaScriptBridge",
+        "download_buffer"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "JavaScriptBridge",
+        "force_fs_sync"
+    ));
 }

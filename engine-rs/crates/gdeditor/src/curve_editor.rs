@@ -29,19 +29,97 @@ impl CurvePreset {
 
 /// Built-in curve presets matching common easing functions.
 pub const CURVE_PRESETS: &[CurvePreset] = &[
-    CurvePreset { name: "Linear", x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 },
-    CurvePreset { name: "Ease In", x1: 0.42, y1: 0.0, x2: 1.0, y2: 1.0 },
-    CurvePreset { name: "Ease Out", x1: 0.0, y1: 0.0, x2: 0.58, y2: 1.0 },
-    CurvePreset { name: "Ease In-Out", x1: 0.42, y1: 0.0, x2: 0.58, y2: 1.0 },
-    CurvePreset { name: "Ease In Quad", x1: 0.55, y1: 0.085, x2: 0.68, y2: 0.53 },
-    CurvePreset { name: "Ease Out Quad", x1: 0.25, y1: 0.46, x2: 0.45, y2: 0.94 },
-    CurvePreset { name: "Ease In-Out Quad", x1: 0.455, y1: 0.03, x2: 0.515, y2: 0.955 },
-    CurvePreset { name: "Ease In Cubic", x1: 0.55, y1: 0.055, x2: 0.675, y2: 0.19 },
-    CurvePreset { name: "Ease Out Cubic", x1: 0.215, y1: 0.61, x2: 0.355, y2: 1.0 },
-    CurvePreset { name: "Ease In-Out Cubic", x1: 0.645, y1: 0.045, x2: 0.355, y2: 1.0 },
-    CurvePreset { name: "Ease In Back", x1: 0.6, y1: -0.28, x2: 0.735, y2: 0.045 },
-    CurvePreset { name: "Ease Out Back", x1: 0.175, y1: 0.885, x2: 0.32, y2: 1.275 },
-    CurvePreset { name: "Ease Out Bounce", x1: 0.0, y1: 0.0, x2: 0.2, y2: 1.0 },
+    CurvePreset {
+        name: "Linear",
+        x1: 0.0,
+        y1: 0.0,
+        x2: 1.0,
+        y2: 1.0,
+    },
+    CurvePreset {
+        name: "Ease In",
+        x1: 0.42,
+        y1: 0.0,
+        x2: 1.0,
+        y2: 1.0,
+    },
+    CurvePreset {
+        name: "Ease Out",
+        x1: 0.0,
+        y1: 0.0,
+        x2: 0.58,
+        y2: 1.0,
+    },
+    CurvePreset {
+        name: "Ease In-Out",
+        x1: 0.42,
+        y1: 0.0,
+        x2: 0.58,
+        y2: 1.0,
+    },
+    CurvePreset {
+        name: "Ease In Quad",
+        x1: 0.55,
+        y1: 0.085,
+        x2: 0.68,
+        y2: 0.53,
+    },
+    CurvePreset {
+        name: "Ease Out Quad",
+        x1: 0.25,
+        y1: 0.46,
+        x2: 0.45,
+        y2: 0.94,
+    },
+    CurvePreset {
+        name: "Ease In-Out Quad",
+        x1: 0.455,
+        y1: 0.03,
+        x2: 0.515,
+        y2: 0.955,
+    },
+    CurvePreset {
+        name: "Ease In Cubic",
+        x1: 0.55,
+        y1: 0.055,
+        x2: 0.675,
+        y2: 0.19,
+    },
+    CurvePreset {
+        name: "Ease Out Cubic",
+        x1: 0.215,
+        y1: 0.61,
+        x2: 0.355,
+        y2: 1.0,
+    },
+    CurvePreset {
+        name: "Ease In-Out Cubic",
+        x1: 0.645,
+        y1: 0.045,
+        x2: 0.355,
+        y2: 1.0,
+    },
+    CurvePreset {
+        name: "Ease In Back",
+        x1: 0.6,
+        y1: -0.28,
+        x2: 0.735,
+        y2: 0.045,
+    },
+    CurvePreset {
+        name: "Ease Out Back",
+        x1: 0.175,
+        y1: 0.885,
+        x2: 0.32,
+        y2: 1.275,
+    },
+    CurvePreset {
+        name: "Ease Out Bounce",
+        x1: 0.0,
+        y1: 0.0,
+        x2: 0.2,
+        y2: 1.0,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -75,7 +153,15 @@ impl CurveEditor {
         x2: f32,
         y2: f32,
     ) -> Self {
-        Self { animation_name, track_index, keyframe_index, x1, y1, x2, y2 }
+        Self {
+            animation_name,
+            track_index,
+            keyframe_index,
+            x1,
+            y1,
+            x2,
+            y2,
+        }
     }
 
     /// Apply a preset to this editor.
@@ -362,14 +448,23 @@ pub struct ControlPointHit {
 impl CurveEditor {
     /// Hit-tests a point in normalized [0,1] canvas space against the control points.
     /// `threshold` is the hit radius in normalized space.
-    pub fn hit_test_control_point(&self, x: f32, y: f32, threshold: f32) -> Option<ControlPointHit> {
+    pub fn hit_test_control_point(
+        &self,
+        x: f32,
+        y: f32,
+        threshold: f32,
+    ) -> Option<ControlPointHit> {
         let d1 = ((x - self.x1).powi(2) + (y - self.y1).powi(2)).sqrt();
         let d2 = ((x - self.x2).powi(2) + (y - self.y2).powi(2)).sqrt();
 
         if d1 <= threshold && d1 <= d2 {
-            Some(ControlPointHit { point: ControlPoint::CP1 })
+            Some(ControlPointHit {
+                point: ControlPoint::CP1,
+            })
         } else if d2 <= threshold {
-            Some(ControlPointHit { point: ControlPoint::CP2 })
+            Some(ControlPointHit {
+                point: ControlPoint::CP2,
+            })
         } else {
             None
         }
@@ -468,9 +563,7 @@ impl CurveEditor {
     /// Returns the derivative dx/dt of the bezier x-component at parameter t.
     fn sample_dx(&self, t: f32) -> f32 {
         let mt = 1.0 - t;
-        3.0 * mt * mt * self.x1
-            + 6.0 * mt * t * (self.x2 - self.x1)
-            + 3.0 * t * t * (1.0 - self.x2)
+        3.0 * mt * mt * self.x1 + 6.0 * mt * t * (self.x2 - self.x1) + 3.0 * t * t * (1.0 - self.x2)
     }
 
     /// Generates a series of sample points for rendering the curve.

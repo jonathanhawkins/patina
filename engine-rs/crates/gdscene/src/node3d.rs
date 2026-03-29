@@ -356,11 +356,7 @@ pub fn get_multimesh_instance_transform(
 }
 
 /// Returns the per-instance color for the given instance index.
-pub fn get_multimesh_instance_color(
-    tree: &SceneTree,
-    node_id: NodeId,
-    _index: usize,
-) -> Color {
+pub fn get_multimesh_instance_color(tree: &SceneTree, node_id: NodeId, _index: usize) -> Color {
     tree.get_node(node_id)
         .and_then(|n| match n.get_property("instance_color") {
             Variant::Color(c) => Some(c),
@@ -371,10 +367,11 @@ pub fn get_multimesh_instance_color(
 
 /// Returns the mesh type name for a MultiMeshInstance3D, if set.
 pub fn get_multimesh_mesh_type(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("multimesh_mesh_type") {
-        Variant::String(s) => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("multimesh_mesh_type") {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -383,10 +380,11 @@ pub fn get_multimesh_mesh_type(tree: &SceneTree, node_id: NodeId) -> Option<Stri
 
 /// Returns the `material_override` path on a MeshInstance3D, if set.
 pub fn get_material_override(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("material_override") {
-        Variant::String(s) => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("material_override") {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
 }
 
 /// Returns the per-surface material override path for the given surface index.
@@ -396,10 +394,11 @@ pub fn get_surface_override_material(
     surface: usize,
 ) -> Option<String> {
     let key = format!("surface_material_override/{surface}");
-    tree.get_node(node_id).and_then(|n| match n.get_property(&key) {
-        Variant::String(s) => Some(s),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property(&key) {
+            Variant::String(s) => Some(s),
+            _ => None,
+        })
 }
 
 // ---------------------------------------------------------------------------

@@ -612,8 +612,16 @@ pub fn tokenize_shader(source: &str) -> Result<Vec<ShaderTokenSpan>, ShaderLexEr
         }
 
         // ── Multi-character operators ─────────────────────────────────
-        let next = if pos + 1 < len { Some(chars[pos + 1]) } else { None };
-        let next2 = if pos + 2 < len { Some(chars[pos + 2]) } else { None };
+        let next = if pos + 1 < len {
+            Some(chars[pos + 1])
+        } else {
+            None
+        };
+        let next2 = if pos + 2 < len {
+            Some(chars[pos + 2])
+        } else {
+            None
+        };
 
         let (tok, advance) = match ch {
             '+' => match next {
@@ -753,13 +761,12 @@ fn lex_number(
                 if unsigned {
                     pos += 1;
                 }
-                let val = u64::from_str_radix(&text, 16).map_err(|e| {
-                    ShaderLexError::InvalidNumber {
+                let val =
+                    u64::from_str_radix(&text, 16).map_err(|e| ShaderLexError::InvalidNumber {
                         detail: e.to_string(),
                         line,
                         col,
-                    }
-                })?;
+                    })?;
                 return if unsigned {
                     Ok((ShaderToken::UintLit(val), pos))
                 } else {
@@ -784,13 +791,12 @@ fn lex_number(
                 if unsigned {
                     pos += 1;
                 }
-                let val = u64::from_str_radix(&text, 8).map_err(|e| {
-                    ShaderLexError::InvalidNumber {
+                let val =
+                    u64::from_str_radix(&text, 8).map_err(|e| ShaderLexError::InvalidNumber {
                         detail: e.to_string(),
                         line,
                         col,
-                    }
-                })?;
+                    })?;
                 return if unsigned {
                     Ok((ShaderToken::UintLit(val), pos))
                 } else {
@@ -815,13 +821,12 @@ fn lex_number(
                 if unsigned {
                     pos += 1;
                 }
-                let val = u64::from_str_radix(&text, 2).map_err(|e| {
-                    ShaderLexError::InvalidNumber {
+                let val =
+                    u64::from_str_radix(&text, 2).map_err(|e| ShaderLexError::InvalidNumber {
                         detail: e.to_string(),
                         line,
                         col,
-                    }
-                })?;
+                    })?;
                 return if unsigned {
                     Ok((ShaderToken::UintLit(val), pos))
                 } else {
@@ -843,7 +848,9 @@ fn lex_number(
     // Fractional part
     if pos < len && chars[pos] == '.' {
         // Make sure this is a decimal point, not a method call like `1.method()`
-        if pos + 1 < len && (chars[pos + 1].is_ascii_digit() || chars[pos + 1] == 'e' || chars[pos + 1] == 'E') {
+        if pos + 1 < len
+            && (chars[pos + 1].is_ascii_digit() || chars[pos + 1] == 'e' || chars[pos + 1] == 'E')
+        {
             is_float = true;
             pos += 1; // skip '.'
             while pos < len && chars[pos].is_ascii_digit() {
@@ -921,7 +928,12 @@ fn lex_number(
 /// Convenience: tokenize and strip all comment tokens.
 pub fn tokenize_shader_no_comments(source: &str) -> Result<Vec<ShaderTokenSpan>, ShaderLexError> {
     let mut tokens = tokenize_shader(source)?;
-    tokens.retain(|t| !matches!(t.token, ShaderToken::LineComment(_) | ShaderToken::BlockComment(_)));
+    tokens.retain(|t| {
+        !matches!(
+            t.token,
+            ShaderToken::LineComment(_) | ShaderToken::BlockComment(_)
+        )
+    });
     Ok(tokens)
 }
 
@@ -1085,7 +1097,10 @@ mod tests {
         assert_eq!(tokens[0].token, ShaderToken::RenderMode);
         assert_eq!(tokens[1].token, ShaderToken::Ident("unshaded".into()));
         assert_eq!(tokens[2].token, ShaderToken::Comma);
-        assert_eq!(tokens[3].token, ShaderToken::Ident("skip_vertex_transform".into()));
+        assert_eq!(
+            tokens[3].token,
+            ShaderToken::Ident("skip_vertex_transform".into())
+        );
         assert_eq!(tokens[4].token, ShaderToken::Semicolon);
     }
 
@@ -1132,7 +1147,9 @@ mod tests {
     #[test]
     fn tokenize_line_comment() {
         let tokens = tokenize_shader("// this is a comment\nshader_type spatial;").unwrap();
-        assert!(matches!(&tokens[0].token, ShaderToken::LineComment(s) if s.contains("this is a comment")));
+        assert!(
+            matches!(&tokens[0].token, ShaderToken::LineComment(s) if s.contains("this is a comment"))
+        );
         assert_eq!(tokens[1].token, ShaderToken::ShaderType);
     }
 
@@ -1146,7 +1163,10 @@ mod tests {
     #[test]
     fn unterminated_block_comment() {
         let err = tokenize_shader("/* never closed").unwrap_err();
-        assert!(matches!(err, ShaderLexError::UnterminatedBlockComment { .. }));
+        assert!(matches!(
+            err,
+            ShaderLexError::UnterminatedBlockComment { .. }
+        ));
     }
 
     #[test]
@@ -1319,7 +1339,10 @@ mod tests {
         assert_eq!(tokens[0].line, 1);
         assert_eq!(tokens[0].col, 1);
         // "void" is at line 2, col 1
-        let void_tok = tokens.iter().find(|t| t.token == ShaderToken::Void).unwrap();
+        let void_tok = tokens
+            .iter()
+            .find(|t| t.token == ShaderToken::Void)
+            .unwrap();
         assert_eq!(void_tok.line, 2);
         assert_eq!(void_tok.col, 1);
     }
@@ -1417,7 +1440,10 @@ void fragment() {
 
         // Verify shader_type extraction
         let no_comments = tokenize_shader_no_comments(src).unwrap();
-        assert_eq!(extract_shader_type(&no_comments), Some("canvas_item".into()));
+        assert_eq!(
+            extract_shader_type(&no_comments),
+            Some("canvas_item".into())
+        );
 
         // Verify uniform extraction
         let unis = extract_uniforms(&no_comments);
@@ -1469,7 +1495,10 @@ uniform LightData main_light;
 "#;
         let tokens = tokenize_shader_no_comments(src).unwrap();
         // struct keyword
-        let struct_count = tokens.iter().filter(|t| t.token == ShaderToken::Struct).count();
+        let struct_count = tokens
+            .iter()
+            .filter(|t| t.token == ShaderToken::Struct)
+            .count();
         assert_eq!(struct_count, 1);
 
         let unis = extract_uniforms(&tokens);
@@ -1482,7 +1511,10 @@ uniform LightData main_light;
     #[test]
     fn unexpected_character_error() {
         let err = tokenize_shader("shader_type spatial; #invalid").unwrap_err();
-        assert!(matches!(err, ShaderLexError::UnexpectedChar { ch: '#', .. }));
+        assert!(matches!(
+            err,
+            ShaderLexError::UnexpectedChar { ch: '#', .. }
+        ));
     }
 
     #[test]

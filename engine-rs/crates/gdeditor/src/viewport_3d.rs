@@ -11,9 +11,9 @@ use gdcore::math::{Color, Vector3};
 use gdcore::math3d::{Basis, Transform3D};
 use gdscene::SceneTree;
 use gdserver3d::environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
-use gdserver3d::fog_volume::{FogVolume, FogVolumeShape};
 #[cfg(test)]
 use gdserver3d::fog_volume::FogMaterial;
+use gdserver3d::fog_volume::{FogVolume, FogVolumeShape};
 use gdserver3d::sky::{ProceduralSkyMaterial, Sky, SkyMaterial, SkyProcessMode};
 
 // ---------------------------------------------------------------------------
@@ -89,8 +89,8 @@ impl Default for ViewportCamera3D {
         Self {
             focus_point: Vector3::ZERO,
             distance: 5.0,
-            yaw: std::f32::consts::FRAC_PI_4,    // 45°
-            pitch: -0.5,                           // ~-28.6° (looking slightly down)
+            yaw: std::f32::consts::FRAC_PI_4, // 45°
+            pitch: -0.5,                      // ~-28.6° (looking slightly down)
             fov_degrees: 70.0,
             ortho_size: 5.0,
             projection: Projection::Perspective,
@@ -167,10 +167,7 @@ impl ViewportCamera3D {
             z: Vector3::new(-fwd.x, -fwd.y, -fwd.z),
         };
 
-        Transform3D {
-            basis,
-            origin: pos,
-        }
+        Transform3D { basis, origin: pos }
     }
 
     // -----------------------------------------------------------------------
@@ -631,7 +628,9 @@ impl EnvironmentPreview3D {
             match node.class_name() {
                 "WorldEnvironment" => {
                     if !found_env {
-                        let env = Environment3D::from_properties(node.properties().map(|(k, v)| (k.as_str(), v)));
+                        let env = Environment3D::from_properties(
+                            node.properties().map(|(k, v)| (k.as_str(), v)),
+                        );
                         self.load_from_environment(env);
                         found_env = true;
                     }
@@ -651,7 +650,9 @@ impl EnvironmentPreview3D {
 /// Reads `shape`, `size`, and fog material properties (`density`, `albedo`,
 /// `emission`, `height_falloff`, `edge_fade`). Unrecognised properties are
 /// ignored; missing ones keep their defaults.
-fn fog_volume_from_node_properties<'a>(props: impl Iterator<Item = (&'a String, &'a gdvariant::Variant)>) -> FogVolume {
+fn fog_volume_from_node_properties<'a>(
+    props: impl Iterator<Item = (&'a String, &'a gdvariant::Variant)>,
+) -> FogVolume {
     use gdvariant::Variant;
 
     let mut volume = FogVolume::default();
@@ -963,7 +964,11 @@ impl Ray3D {
         } else {
             // Try the far intersection
             let t2 = (-b + discriminant.sqrt()) / (2.0 * a);
-            if t2 >= 0.0 { Some(t2) } else { None }
+            if t2 >= 0.0 {
+                Some(t2)
+            } else {
+                None
+            }
         }
     }
 }
@@ -1180,9 +1185,30 @@ impl Viewport3D {
         let tip_radius = gizmo_length * 0.15;
 
         let tips = [
-            (GizmoAxis::X, Vector3::new(gizmo_center.x + gizmo_length, gizmo_center.y, gizmo_center.z)),
-            (GizmoAxis::Y, Vector3::new(gizmo_center.x, gizmo_center.y + gizmo_length, gizmo_center.z)),
-            (GizmoAxis::Z, Vector3::new(gizmo_center.x, gizmo_center.y, gizmo_center.z + gizmo_length)),
+            (
+                GizmoAxis::X,
+                Vector3::new(
+                    gizmo_center.x + gizmo_length,
+                    gizmo_center.y,
+                    gizmo_center.z,
+                ),
+            ),
+            (
+                GizmoAxis::Y,
+                Vector3::new(
+                    gizmo_center.x,
+                    gizmo_center.y + gizmo_length,
+                    gizmo_center.z,
+                ),
+            ),
+            (
+                GizmoAxis::Z,
+                Vector3::new(
+                    gizmo_center.x,
+                    gizmo_center.y,
+                    gizmo_center.z + gizmo_length,
+                ),
+            ),
         ];
 
         let mut best_axis = GizmoAxis::None;
@@ -1303,9 +1329,18 @@ impl Viewport3D {
         let view = self.camera.view_transform();
 
         // Transform to view space
-        let vx = view.basis.x.x * world_pos.x + view.basis.y.x * world_pos.y + view.basis.z.x * world_pos.z + view.origin.x;
-        let vy = view.basis.x.y * world_pos.x + view.basis.y.y * world_pos.y + view.basis.z.y * world_pos.z + view.origin.y;
-        let vz = view.basis.x.z * world_pos.x + view.basis.y.z * world_pos.y + view.basis.z.z * world_pos.z + view.origin.z;
+        let vx = view.basis.x.x * world_pos.x
+            + view.basis.y.x * world_pos.y
+            + view.basis.z.x * world_pos.z
+            + view.origin.x;
+        let vy = view.basis.x.y * world_pos.x
+            + view.basis.y.y * world_pos.y
+            + view.basis.z.y * world_pos.z
+            + view.origin.y;
+        let vz = view.basis.x.z * world_pos.x
+            + view.basis.y.z * world_pos.y
+            + view.basis.z.z * world_pos.z
+            + view.origin.z;
 
         let aspect = self.aspect_ratio();
         let half_fov = (self.camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
@@ -1496,9 +1531,30 @@ impl Viewport3D {
                 // Test arrow tips (single axes)
                 let tip_radius = config.arrow_length * 0.15;
                 let tips = [
-                    (GizmoAxis::X, Vector3::new(gizmo_center.x + config.arrow_length, gizmo_center.y, gizmo_center.z)),
-                    (GizmoAxis::Y, Vector3::new(gizmo_center.x, gizmo_center.y + config.arrow_length, gizmo_center.z)),
-                    (GizmoAxis::Z, Vector3::new(gizmo_center.x, gizmo_center.y, gizmo_center.z + config.arrow_length)),
+                    (
+                        GizmoAxis::X,
+                        Vector3::new(
+                            gizmo_center.x + config.arrow_length,
+                            gizmo_center.y,
+                            gizmo_center.z,
+                        ),
+                    ),
+                    (
+                        GizmoAxis::Y,
+                        Vector3::new(
+                            gizmo_center.x,
+                            gizmo_center.y + config.arrow_length,
+                            gizmo_center.z,
+                        ),
+                    ),
+                    (
+                        GizmoAxis::Z,
+                        Vector3::new(
+                            gizmo_center.x,
+                            gizmo_center.y,
+                            gizmo_center.z + config.arrow_length,
+                        ),
+                    ),
                 ];
 
                 let mut best_axis = GizmoAxis::None;
@@ -1517,9 +1573,18 @@ impl Viewport3D {
                 if best_axis == GizmoAxis::None {
                     let pf = config.arrow_length * config.plane_handle_fraction;
                     let plane_centers = [
-                        (GizmoAxis::XY, Vector3::new(gizmo_center.x + pf, gizmo_center.y + pf, gizmo_center.z)),
-                        (GizmoAxis::XZ, Vector3::new(gizmo_center.x + pf, gizmo_center.y, gizmo_center.z + pf)),
-                        (GizmoAxis::YZ, Vector3::new(gizmo_center.x, gizmo_center.y + pf, gizmo_center.z + pf)),
+                        (
+                            GizmoAxis::XY,
+                            Vector3::new(gizmo_center.x + pf, gizmo_center.y + pf, gizmo_center.z),
+                        ),
+                        (
+                            GizmoAxis::XZ,
+                            Vector3::new(gizmo_center.x + pf, gizmo_center.y, gizmo_center.z + pf),
+                        ),
+                        (
+                            GizmoAxis::YZ,
+                            Vector3::new(gizmo_center.x, gizmo_center.y + pf, gizmo_center.z + pf),
+                        ),
                     ];
                     let plane_radius = pf * 0.5;
 
@@ -1584,9 +1649,30 @@ impl Viewport3D {
                 // Scale handles are cubes at axis tips — approximate as spheres
                 let tip_radius = config.scale_handle_length * 0.15;
                 let tips = [
-                    (GizmoAxis::X, Vector3::new(gizmo_center.x + config.scale_handle_length, gizmo_center.y, gizmo_center.z)),
-                    (GizmoAxis::Y, Vector3::new(gizmo_center.x, gizmo_center.y + config.scale_handle_length, gizmo_center.z)),
-                    (GizmoAxis::Z, Vector3::new(gizmo_center.x, gizmo_center.y, gizmo_center.z + config.scale_handle_length)),
+                    (
+                        GizmoAxis::X,
+                        Vector3::new(
+                            gizmo_center.x + config.scale_handle_length,
+                            gizmo_center.y,
+                            gizmo_center.z,
+                        ),
+                    ),
+                    (
+                        GizmoAxis::Y,
+                        Vector3::new(
+                            gizmo_center.x,
+                            gizmo_center.y + config.scale_handle_length,
+                            gizmo_center.z,
+                        ),
+                    ),
+                    (
+                        GizmoAxis::Z,
+                        Vector3::new(
+                            gizmo_center.x,
+                            gizmo_center.y,
+                            gizmo_center.z + config.scale_handle_length,
+                        ),
+                    ),
                 ];
 
                 let mut best_axis = GizmoAxis::None;
@@ -1657,8 +1743,11 @@ impl Viewport3D {
                 let raw_delta = if drag.axis.is_plane() {
                     // For plane movement, cast rays onto the plane
                     let ray_start = screen_to_ray_static(
-                        drag.start_px, drag.start_py,
-                        vp_w, vp_h, &self.camera,
+                        drag.start_px,
+                        drag.start_py,
+                        vp_w,
+                        vp_h,
+                        &self.camera,
                     );
                     let ray_now = screen_to_ray_static(px, py, vp_w, vp_h, &self.camera);
 
@@ -1681,8 +1770,11 @@ impl Viewport3D {
                     // Single-axis: use the existing ray-to-line projection
                     let axis_dir = drag.axis.direction();
                     let ray_start = screen_to_ray_static(
-                        drag.start_px, drag.start_py,
-                        vp_w, vp_h, &self.camera,
+                        drag.start_px,
+                        drag.start_py,
+                        vp_w,
+                        vp_h,
+                        &self.camera,
                     );
                     let ray_now = screen_to_ray_static(px, py, vp_w, vp_h, &self.camera);
 
@@ -1700,43 +1792,58 @@ impl Viewport3D {
             }
 
             GizmoMode3D::Rotate => {
-                let center_screen = world_to_screen_static(
-                    drag.gizmo_center, vp_w, vp_h, &self.camera,
-                );
+                let center_screen =
+                    world_to_screen_static(drag.gizmo_center, vp_w, vp_h, &self.camera);
                 let (cx, cy) = center_screen;
                 let angle_start = (drag.start_py - cy).atan2(drag.start_px - cx);
                 let angle_now = (py - cy).atan2(px - cx);
                 let raw_angle = angle_now - angle_start;
                 let snapped = snap.snap_rotate(raw_angle);
 
-                drag.current_transform = GizmoTransform3D::Rotate { axis: drag.axis, angle: snapped };
+                drag.current_transform = GizmoTransform3D::Rotate {
+                    axis: drag.axis,
+                    angle: snapped,
+                };
                 let axis_dir = drag.axis.direction();
                 self.selection.update_drag(Vector3::new(
                     axis_dir.x * snapped,
                     axis_dir.y * snapped,
                     axis_dir.z * snapped,
                 ));
-                Some(GizmoTransform3D::Rotate { axis: drag.axis, angle: snapped })
+                Some(GizmoTransform3D::Rotate {
+                    axis: drag.axis,
+                    angle: snapped,
+                })
             }
 
             GizmoMode3D::Scale => {
-                let center_screen = world_to_screen_static(
-                    drag.gizmo_center, vp_w, vp_h, &self.camera,
-                );
+                let center_screen =
+                    world_to_screen_static(drag.gizmo_center, vp_w, vp_h, &self.camera);
                 let (cx, cy) = center_screen;
-                let dist_start = ((drag.start_px - cx).powi(2) + (drag.start_py - cy).powi(2)).sqrt();
+                let dist_start =
+                    ((drag.start_px - cx).powi(2) + (drag.start_py - cy).powi(2)).sqrt();
                 let dist_now = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
-                let raw_factor = if dist_start < 1.0 { 1.0 } else { dist_now / dist_start };
+                let raw_factor = if dist_start < 1.0 {
+                    1.0
+                } else {
+                    dist_now / dist_start
+                };
                 let snapped = snap.snap_scale(raw_factor);
 
-                drag.current_transform = GizmoTransform3D::Scale { axis: drag.axis, factor: snapped };
+                drag.current_transform = GizmoTransform3D::Scale {
+                    axis: drag.axis,
+                    factor: snapped,
+                };
                 let axis_dir = drag.axis.direction();
                 self.selection.update_drag(Vector3::new(
                     axis_dir.x * snapped,
                     axis_dir.y * snapped,
                     axis_dir.z * snapped,
                 ));
-                Some(GizmoTransform3D::Scale { axis: drag.axis, factor: snapped })
+                Some(GizmoTransform3D::Scale {
+                    axis: drag.axis,
+                    factor: snapped,
+                })
             }
 
             GizmoMode3D::Select => None,
@@ -1769,11 +1876,17 @@ impl Viewport3D {
 
 /// Static helper: unproject screen pixel to world ray without borrowing Viewport3D.
 fn screen_to_ray_static(
-    px: f32, py: f32,
-    width: u32, height: u32,
+    px: f32,
+    py: f32,
+    width: u32,
+    height: u32,
     camera: &ViewportCamera3D,
 ) -> Ray3D {
-    let aspect = if height == 0 { 1.0 } else { width as f32 / height as f32 };
+    let aspect = if height == 0 {
+        1.0
+    } else {
+        width as f32 / height as f32
+    };
     let ndc_x = (2.0 * px / width as f32) - 1.0;
     let ndc_y = 1.0 - (2.0 * py / height as f32);
     let half_fov = (camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
@@ -1790,14 +1903,28 @@ fn screen_to_ray_static(
 /// Static helper: project world point to screen without borrowing Viewport3D.
 fn world_to_screen_static(
     world_pos: Vector3,
-    width: u32, height: u32,
+    width: u32,
+    height: u32,
     camera: &ViewportCamera3D,
 ) -> (f32, f32) {
     let view = camera.view_transform();
-    let vx = view.basis.x.x * world_pos.x + view.basis.y.x * world_pos.y + view.basis.z.x * world_pos.z + view.origin.x;
-    let vy = view.basis.x.y * world_pos.x + view.basis.y.y * world_pos.y + view.basis.z.y * world_pos.z + view.origin.y;
-    let vz = view.basis.x.z * world_pos.x + view.basis.y.z * world_pos.y + view.basis.z.z * world_pos.z + view.origin.z;
-    let aspect = if height == 0 { 1.0 } else { width as f32 / height as f32 };
+    let vx = view.basis.x.x * world_pos.x
+        + view.basis.y.x * world_pos.y
+        + view.basis.z.x * world_pos.z
+        + view.origin.x;
+    let vy = view.basis.x.y * world_pos.x
+        + view.basis.y.y * world_pos.y
+        + view.basis.z.y * world_pos.z
+        + view.origin.y;
+    let vz = view.basis.x.z * world_pos.x
+        + view.basis.y.z * world_pos.y
+        + view.basis.z.z * world_pos.z
+        + view.origin.z;
+    let aspect = if height == 0 {
+        1.0
+    } else {
+        width as f32 / height as f32
+    };
     let half_fov = (camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
     let inv_z = if vz.abs() < 1e-6 { -1e6 } else { -1.0 / vz };
     let ndc_x = (vx * inv_z) / (half_fov * aspect);
@@ -1820,7 +1947,11 @@ fn ray_plane_intersect(ray: &Ray3D, plane_point: Vector3, plane_normal: Vector3)
         plane_point.z - ray.origin.z,
     );
     let t = diff.dot(plane_normal) / denom;
-    if t >= 0.0 { Some(t) } else { None }
+    if t >= 0.0 {
+        Some(t)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -2106,7 +2237,10 @@ mod tests {
         let t = ray.intersect_sphere(Vector3::ZERO, 1.0);
         assert!(t.is_some());
         let t = t.unwrap();
-        assert!(approx_eq(t, 9.0, 0.01), "Should hit near sphere at t=9, got {t}");
+        assert!(
+            approx_eq(t, 9.0, 0.01),
+            "Should hit near sphere at t=9, got {t}"
+        );
     }
 
     #[test]
@@ -2121,7 +2255,10 @@ mod tests {
         // Ray starts inside the sphere
         let ray = Ray3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, -1.0));
         let t = ray.intersect_sphere(Vector3::ZERO, 5.0);
-        assert!(t.is_some(), "Ray starting inside sphere should still intersect (exit)");
+        assert!(
+            t.is_some(),
+            "Ray starting inside sphere should still intersect (exit)"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2203,7 +2340,11 @@ mod tests {
         assert_eq!(sel.active_axis, GizmoAxis::Y);
 
         sel.update_drag(Vector3::new(0.0, 3.5, 0.0));
-        assert!(vec3_approx_eq(sel.drag_delta, Vector3::new(0.0, 3.5, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.drag_delta,
+            Vector3::new(0.0, 3.5, 0.0),
+            1e-6
+        ));
 
         let delta = sel.end_drag();
         assert!(vec3_approx_eq(delta, Vector3::new(0.0, 3.5, 0.0), 1e-6));
@@ -2225,11 +2366,23 @@ mod tests {
     fn test_axis_direction() {
         let mut sel = Selection3D::default();
         sel.active_axis = GizmoAxis::X;
-        assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(1.0, 0.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.axis_direction(),
+            Vector3::new(1.0, 0.0, 0.0),
+            1e-6
+        ));
         sel.active_axis = GizmoAxis::Y;
-        assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(0.0, 1.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.axis_direction(),
+            Vector3::new(0.0, 1.0, 0.0),
+            1e-6
+        ));
         sel.active_axis = GizmoAxis::Z;
-        assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(0.0, 0.0, 1.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.axis_direction(),
+            Vector3::new(0.0, 0.0, 1.0),
+            1e-6
+        ));
         sel.active_axis = GizmoAxis::None;
         assert!(vec3_approx_eq(sel.axis_direction(), Vector3::ZERO, 1e-6));
     }
@@ -2245,7 +2398,10 @@ mod tests {
         // Center of screen should produce a ray along the camera's forward direction.
         let fwd = vp.camera.orbit_direction();
         let dot = ray.direction.dot(fwd);
-        assert!(dot > 0.99, "Center ray should be approximately forward, dot={dot}");
+        assert!(
+            dot > 0.99,
+            "Center ray should be approximately forward, dot={dot}"
+        );
     }
 
     #[test]
@@ -2268,8 +2424,8 @@ mod tests {
         vp.camera.pitch = 0.0;
 
         let nodes = vec![
-            (1, Vector3::new(0.0, 0.0, -2.0)),  // farther
-            (2, Vector3::new(0.0, 0.0, 0.0)),    // at origin (closer)
+            (1, Vector3::new(0.0, 0.0, -2.0)), // farther
+            (2, Vector3::new(0.0, 0.0, 0.0)),  // at origin (closer)
         ];
 
         // Pick at the center of the screen
@@ -2283,9 +2439,7 @@ mod tests {
     #[test]
     fn test_pick_node_misses_when_nothing_there() {
         let vp = Viewport3D::new(800, 600);
-        let nodes = vec![
-            (1, Vector3::new(1000.0, 1000.0, 1000.0)),
-        ];
+        let nodes = vec![(1, Vector3::new(1000.0, 1000.0, 1000.0))];
         let result = vp.pick_node(400.0, 300.0, &nodes, 0.5);
         assert!(result.is_none(), "Should not hit a node far from center");
     }
@@ -2342,7 +2496,11 @@ mod tests {
 
         // Update drag
         sel.update_drag(Vector3::new(3.0, 0.0, 0.0));
-        assert!(vec3_approx_eq(sel.drag_delta, Vector3::new(3.0, 0.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.drag_delta,
+            Vector3::new(3.0, 0.0, 0.0),
+            1e-6
+        ));
 
         // End drag returns final delta
         let delta = sel.end_drag();
@@ -2396,13 +2554,25 @@ mod tests {
         let mut sel = Selection3D::default();
 
         sel.active_axis = GizmoAxis::X;
-        assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(1.0, 0.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.axis_direction(),
+            Vector3::new(1.0, 0.0, 0.0),
+            1e-6
+        ));
 
         sel.active_axis = GizmoAxis::Y;
-        assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(0.0, 1.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.axis_direction(),
+            Vector3::new(0.0, 1.0, 0.0),
+            1e-6
+        ));
 
         sel.active_axis = GizmoAxis::Z;
-        assert!(vec3_approx_eq(sel.axis_direction(), Vector3::new(0.0, 0.0, 1.0), 1e-6));
+        assert!(vec3_approx_eq(
+            sel.axis_direction(),
+            Vector3::new(0.0, 0.0, 1.0),
+            1e-6
+        ));
 
         sel.active_axis = GizmoAxis::None;
         assert!(vec3_approx_eq(sel.axis_direction(), Vector3::ZERO, 1e-6));
@@ -2423,26 +2593,33 @@ mod tests {
 
         // Dragging from center to the right along X
         let delta = vp.gizmo_move_delta(
-            500.0, 300.0,   // current mouse
-            Vector3::ZERO,  // gizmo center
+            500.0,
+            300.0,         // current mouse
+            Vector3::ZERO, // gizmo center
             GizmoAxis::X,
-            400.0, 300.0,   // drag start
+            400.0,
+            300.0, // drag start
         );
         // Should produce a positive X delta
-        assert!(delta.x > 0.0, "Moving mouse right should produce positive X delta, got {}", delta.x);
-        assert!(approx_eq(delta.y, 0.0, 1e-4), "Y should be zero for X-axis drag");
-        assert!(approx_eq(delta.z, 0.0, 1e-4), "Z should be zero for X-axis drag");
+        assert!(
+            delta.x > 0.0,
+            "Moving mouse right should produce positive X delta, got {}",
+            delta.x
+        );
+        assert!(
+            approx_eq(delta.y, 0.0, 1e-4),
+            "Y should be zero for X-axis drag"
+        );
+        assert!(
+            approx_eq(delta.z, 0.0, 1e-4),
+            "Z should be zero for X-axis drag"
+        );
     }
 
     #[test]
     fn test_gizmo_move_delta_none_returns_zero() {
         let vp = Viewport3D::new(800, 600);
-        let delta = vp.gizmo_move_delta(
-            500.0, 300.0,
-            Vector3::ZERO,
-            GizmoAxis::None,
-            400.0, 300.0,
-        );
+        let delta = vp.gizmo_move_delta(500.0, 300.0, Vector3::ZERO, GizmoAxis::None, 400.0, 300.0);
         assert!(vec3_approx_eq(delta, Vector3::ZERO, 1e-6));
     }
 
@@ -2450,23 +2627,33 @@ mod tests {
     fn test_gizmo_move_delta_no_motion_is_zero() {
         let vp = Viewport3D::new(800, 600);
         let delta = vp.gizmo_move_delta(
-            400.0, 300.0,   // same as start
+            400.0,
+            300.0, // same as start
             Vector3::ZERO,
             GizmoAxis::X,
-            400.0, 300.0,
+            400.0,
+            300.0,
         );
-        assert!(approx_eq(delta.x, 0.0, 1e-4), "No mouse motion should produce zero delta");
+        assert!(
+            approx_eq(delta.x, 0.0, 1e-4),
+            "No mouse motion should produce zero delta"
+        );
     }
 
     #[test]
     fn test_gizmo_rotate_angle_zero_when_stationary() {
         let vp = Viewport3D::new(800, 600);
         let angle = vp.gizmo_rotate_angle(
-            400.0, 300.0,   // same position
+            400.0,
+            300.0, // same position
             Vector3::ZERO,
-            400.0, 300.0,
+            400.0,
+            300.0,
         );
-        assert!(approx_eq(angle, 0.0, 1e-4), "No motion should produce zero rotation");
+        assert!(
+            approx_eq(angle, 0.0, 1e-4),
+            "No motion should produce zero rotation"
+        );
     }
 
     #[test]
@@ -2484,24 +2671,28 @@ mod tests {
         let cy = center_screen.1;
 
         let angle = vp.gizmo_rotate_angle(
-            cx, cy - 100.0,           // above center
+            cx,
+            cy - 100.0, // above center
             Vector3::ZERO,
-            cx + 100.0, cy,           // right of center
+            cx + 100.0,
+            cy, // right of center
         );
         // Should be approximately PI/2 (90 degrees)
-        assert!(approx_eq(angle.abs(), std::f32::consts::FRAC_PI_2, 0.1),
-            "Expected ~90° rotation, got {} radians", angle);
+        assert!(
+            approx_eq(angle.abs(), std::f32::consts::FRAC_PI_2, 0.1),
+            "Expected ~90° rotation, got {} radians",
+            angle
+        );
     }
 
     #[test]
     fn test_gizmo_scale_factor_unity_when_stationary() {
         let vp = Viewport3D::new(800, 600);
-        let factor = vp.gizmo_scale_factor(
-            400.0, 300.0,
-            Vector3::ZERO,
-            400.0, 300.0,
+        let factor = vp.gizmo_scale_factor(400.0, 300.0, Vector3::ZERO, 400.0, 300.0);
+        assert!(
+            approx_eq(factor, 1.0, 1e-4),
+            "No motion should produce scale factor 1.0"
         );
-        assert!(approx_eq(factor, 1.0, 1e-4), "No motion should produce scale factor 1.0");
     }
 
     #[test]
@@ -2517,11 +2708,17 @@ mod tests {
         let cy = center_screen.1;
 
         let factor = vp.gizmo_scale_factor(
-            cx + 200.0, cy,         // further from center
+            cx + 200.0,
+            cy, // further from center
             Vector3::ZERO,
-            cx + 100.0, cy,         // closer to center (start)
+            cx + 100.0,
+            cy, // closer to center (start)
         );
-        assert!(factor > 1.0, "Moving away from center should scale up, got {}", factor);
+        assert!(
+            factor > 1.0,
+            "Moving away from center should scale up, got {}",
+            factor
+        );
     }
 
     #[test]
@@ -2537,11 +2734,17 @@ mod tests {
         let cy = center_screen.1;
 
         let factor = vp.gizmo_scale_factor(
-            cx + 50.0, cy,          // closer to center
+            cx + 50.0,
+            cy, // closer to center
             Vector3::ZERO,
-            cx + 100.0, cy,         // further from center (start)
+            cx + 100.0,
+            cy, // further from center (start)
         );
-        assert!(factor < 1.0, "Moving toward center should scale down, got {}", factor);
+        assert!(
+            factor < 1.0,
+            "Moving toward center should scale down, got {}",
+            factor
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2558,8 +2761,16 @@ mod tests {
 
         let (px, py) = vp.world_to_screen(Vector3::ZERO);
         // Origin should project near the center of the viewport
-        assert!(approx_eq(px, 400.0, 50.0), "Origin X should be near center, got {}", px);
-        assert!(approx_eq(py, 300.0, 50.0), "Origin Y should be near center, got {}", py);
+        assert!(
+            approx_eq(px, 400.0, 50.0),
+            "Origin X should be near center, got {}",
+            px
+        );
+        assert!(
+            approx_eq(py, 300.0, 50.0),
+            "Origin Y should be near center, got {}",
+            py
+        );
     }
 
     #[test]
@@ -2579,7 +2790,11 @@ mod tests {
         let t = -ray.origin.dot(ray.direction); // project origin onto ray
         let closest = ray.at(if t > 0.0 { t } else { 0.0 });
         let dist = Vector3::new(closest.x, closest.y, closest.z).length();
-        assert!(dist < 1.0, "Roundtrip ray should pass near origin, distance was {}", dist);
+        assert!(
+            dist < 1.0,
+            "Roundtrip ray should pass near origin, distance was {}",
+            dist
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2589,25 +2804,27 @@ mod tests {
     #[test]
     fn test_ray_closest_to_line_perpendicular() {
         // Ray along Z, line along X through origin
-        let ray = Ray3D::new(
-            Vector3::new(0.0, 0.0, 10.0),
-            Vector3::new(0.0, 0.0, -1.0),
-        );
+        let ray = Ray3D::new(Vector3::new(0.0, 0.0, 10.0), Vector3::new(0.0, 0.0, -1.0));
         let t = ray_closest_to_line(&ray, Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
         // Closest point on X axis to the ray (which passes through origin) should be at t=0
-        assert!(approx_eq(t, 0.0, 1e-4), "Expected t=0 for perpendicular intersection, got {}", t);
+        assert!(
+            approx_eq(t, 0.0, 1e-4),
+            "Expected t=0 for perpendicular intersection, got {}",
+            t
+        );
     }
 
     #[test]
     fn test_ray_closest_to_line_offset() {
         // Ray along Z from (3, 0, 10), line along X through origin
-        let ray = Ray3D::new(
-            Vector3::new(3.0, 0.0, 10.0),
-            Vector3::new(0.0, 0.0, -1.0),
-        );
+        let ray = Ray3D::new(Vector3::new(3.0, 0.0, 10.0), Vector3::new(0.0, 0.0, -1.0));
         let t = ray_closest_to_line(&ray, Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
         // Closest point on X axis should be at x=3 (t=3)
-        assert!(approx_eq(t, 3.0, 1e-4), "Expected t=3 for offset ray, got {}", t);
+        assert!(
+            approx_eq(t, 3.0, 1e-4),
+            "Expected t=3 for offset ray, got {}",
+            t
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2642,12 +2859,7 @@ mod tests {
         assert!(vp.selection.dragging);
 
         // Compute move delta
-        let delta = vp.gizmo_move_delta(
-            500.0, 300.0,
-            Vector3::ZERO,
-            GizmoAxis::X,
-            400.0, 300.0,
-        );
+        let delta = vp.gizmo_move_delta(500.0, 300.0, Vector3::ZERO, GizmoAxis::X, 400.0, 300.0);
         vp.selection.update_drag(delta);
 
         // End drag
@@ -2688,7 +2900,10 @@ mod tests {
         preview.toggle_sky();
         assert!(!preview.sky_visible);
         // With sky hidden, effective background should fall back to ClearColor
-        assert_eq!(preview.effective_background_mode(), BackgroundMode::ClearColor);
+        assert_eq!(
+            preview.effective_background_mode(),
+            BackgroundMode::ClearColor
+        );
     }
 
     #[test]
@@ -2713,7 +2928,10 @@ mod tests {
         let mut preview = EnvironmentPreview3D::default();
         preview.toggle();
         // When disabled, always ClearColor
-        assert_eq!(preview.effective_background_mode(), BackgroundMode::ClearColor);
+        assert_eq!(
+            preview.effective_background_mode(),
+            BackgroundMode::ClearColor
+        );
     }
 
     #[test]
@@ -2741,7 +2959,10 @@ mod tests {
         env.background_mode = BackgroundMode::CustomColor;
         env.background_color = Color::new(1.0, 0.0, 0.0, 1.0);
         preview.load_from_environment(env);
-        assert_eq!(preview.environment.background_mode, BackgroundMode::CustomColor);
+        assert_eq!(
+            preview.environment.background_mode,
+            BackgroundMode::CustomColor
+        );
         assert!(approx_eq(preview.environment.background_color.r, 1.0, 1e-6));
     }
 
@@ -2774,8 +2995,11 @@ mod tests {
         let mut preview = EnvironmentPreview3D::default();
         // Straight down (elevation = PI/2)
         preview.set_sun_angles(0.0, std::f32::consts::FRAC_PI_2);
-        assert!(approx_eq(preview.sun_direction.y, -1.0, 0.01),
-            "Sun should point straight down, got y={}", preview.sun_direction.y);
+        assert!(
+            approx_eq(preview.sun_direction.y, -1.0, 0.01),
+            "Sun should point straight down, got y={}",
+            preview.sun_direction.y
+        );
     }
 
     #[test]
@@ -2910,7 +3134,10 @@ mod tests {
         let mut preview = EnvironmentPreview3D::default();
         preview.sync_from_scene(&tree);
 
-        assert_eq!(preview.environment.background_mode, BackgroundMode::CustomColor);
+        assert_eq!(
+            preview.environment.background_mode,
+            BackgroundMode::CustomColor
+        );
         assert!(approx_eq(preview.environment.background_color.r, 0.9, 1e-4));
         assert!(preview.environment.fog_enabled);
         assert!(approx_eq(preview.environment.fog_density, 0.08, 1e-4));
@@ -2938,7 +3165,11 @@ mod tests {
         assert_eq!(preview.fog_volumes.len(), 1);
         assert_eq!(preview.fog_volumes[0].shape, FogVolumeShape::Box);
         assert!(approx_eq(preview.fog_volumes[0].size.x, 10.0, 1e-4));
-        assert!(approx_eq(preview.fog_volumes[0].material.density, 0.5, 1e-4));
+        assert!(approx_eq(
+            preview.fog_volumes[0].material.density,
+            0.5,
+            1e-4
+        ));
     }
 
     #[test]
@@ -2977,7 +3208,10 @@ mod tests {
         let mut preview = EnvironmentPreview3D::default();
         preview.sync_from_scene(&tree);
         // First WorldEnvironment wins (Godot behavior)
-        assert_eq!(preview.environment.background_mode, BackgroundMode::CustomColor);
+        assert_eq!(
+            preview.environment.background_mode,
+            BackgroundMode::CustomColor
+        );
     }
 
     #[test]
@@ -3014,7 +3248,11 @@ mod tests {
         vp.sync_environment_from_scene(&tree);
 
         assert!(vp.environment.environment.fog_enabled);
-        assert!(approx_eq(vp.environment.environment.fog_density, 0.03, 1e-4));
+        assert!(approx_eq(
+            vp.environment.environment.fog_density,
+            0.03,
+            1e-4
+        ));
         assert_eq!(vp.environment.fog_volumes.len(), 1);
     }
 
@@ -3064,10 +3302,19 @@ mod tests {
     fn test_fog_volume_from_node_properties_all_fields() {
         let props: Vec<(String, gdvariant::Variant)> = vec![
             ("shape".into(), gdvariant::Variant::Int(3)),
-            ("size".into(), gdvariant::Variant::Vector3(Vector3::new(4.0, 6.0, 8.0))),
+            (
+                "size".into(),
+                gdvariant::Variant::Vector3(Vector3::new(4.0, 6.0, 8.0)),
+            ),
             ("density".into(), gdvariant::Variant::Float(0.7)),
-            ("albedo".into(), gdvariant::Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0))),
-            ("emission".into(), gdvariant::Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0))),
+            (
+                "albedo".into(),
+                gdvariant::Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+            ),
+            (
+                "emission".into(),
+                gdvariant::Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)),
+            ),
             ("height_falloff".into(), gdvariant::Variant::Float(2.5)),
             ("edge_fade".into(), gdvariant::Variant::Float(0.3)),
         ];
@@ -3088,20 +3335,48 @@ mod tests {
 
     #[test]
     fn test_gizmo_axis_direction_single() {
-        assert!(vec3_approx_eq(GizmoAxis::X.direction(), Vector3::new(1.0, 0.0, 0.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::Y.direction(), Vector3::new(0.0, 1.0, 0.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::Z.direction(), Vector3::new(0.0, 0.0, 1.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::None.direction(), Vector3::ZERO, 1e-6));
+        assert!(vec3_approx_eq(
+            GizmoAxis::X.direction(),
+            Vector3::new(1.0, 0.0, 0.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::Y.direction(),
+            Vector3::new(0.0, 1.0, 0.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::Z.direction(),
+            Vector3::new(0.0, 0.0, 1.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::None.direction(),
+            Vector3::ZERO,
+            1e-6
+        ));
     }
 
     #[test]
     fn test_gizmo_axis_direction_plane() {
         // XY plane normal is Z
-        assert!(vec3_approx_eq(GizmoAxis::XY.direction(), Vector3::new(0.0, 0.0, 1.0), 1e-6));
+        assert!(vec3_approx_eq(
+            GizmoAxis::XY.direction(),
+            Vector3::new(0.0, 0.0, 1.0),
+            1e-6
+        ));
         // XZ plane normal is Y
-        assert!(vec3_approx_eq(GizmoAxis::XZ.direction(), Vector3::new(0.0, 1.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            GizmoAxis::XZ.direction(),
+            Vector3::new(0.0, 1.0, 0.0),
+            1e-6
+        ));
         // YZ plane normal is X
-        assert!(vec3_approx_eq(GizmoAxis::YZ.direction(), Vector3::new(1.0, 0.0, 0.0), 1e-6));
+        assert!(vec3_approx_eq(
+            GizmoAxis::YZ.direction(),
+            Vector3::new(1.0, 0.0, 0.0),
+            1e-6
+        ));
     }
 
     #[test]
@@ -3117,12 +3392,36 @@ mod tests {
     #[test]
     fn test_gizmo_axis_mask() {
         let v = Vector3::new(3.0, 4.0, 5.0);
-        assert!(vec3_approx_eq(GizmoAxis::X.mask(v), Vector3::new(3.0, 0.0, 0.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::Y.mask(v), Vector3::new(0.0, 4.0, 0.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::Z.mask(v), Vector3::new(0.0, 0.0, 5.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::XY.mask(v), Vector3::new(3.0, 4.0, 0.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::XZ.mask(v), Vector3::new(3.0, 0.0, 5.0), 1e-6));
-        assert!(vec3_approx_eq(GizmoAxis::YZ.mask(v), Vector3::new(0.0, 4.0, 5.0), 1e-6));
+        assert!(vec3_approx_eq(
+            GizmoAxis::X.mask(v),
+            Vector3::new(3.0, 0.0, 0.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::Y.mask(v),
+            Vector3::new(0.0, 4.0, 0.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::Z.mask(v),
+            Vector3::new(0.0, 0.0, 5.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::XY.mask(v),
+            Vector3::new(3.0, 4.0, 0.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::XZ.mask(v),
+            Vector3::new(3.0, 0.0, 5.0),
+            1e-6
+        ));
+        assert!(vec3_approx_eq(
+            GizmoAxis::YZ.mask(v),
+            Vector3::new(0.0, 4.0, 5.0),
+            1e-6
+        ));
         assert!(vec3_approx_eq(GizmoAxis::None.mask(v), Vector3::ZERO, 1e-6));
     }
 
@@ -3159,7 +3458,10 @@ mod tests {
 
     #[test]
     fn test_snap_translate() {
-        let snap = GizmoSnap3D { translate_step: 0.5, ..Default::default() };
+        let snap = GizmoSnap3D {
+            translate_step: 0.5,
+            ..Default::default()
+        };
         let v = Vector3::new(1.3, 2.7, -0.1);
         let snapped = snap.snap_translate(v);
         assert!(approx_eq(snapped.x, 1.5, 1e-6));
@@ -3182,14 +3484,20 @@ mod tests {
             ..Default::default()
         };
         let snapped = snap.snap_rotate(0.3);
-        assert!(approx_eq(snapped, 0.0, 0.1), "0.3 should snap to 0 with PI/4 step");
+        assert!(
+            approx_eq(snapped, 0.0, 0.1),
+            "0.3 should snap to 0 with PI/4 step"
+        );
         let snapped2 = snap.snap_rotate(0.9);
         assert!(approx_eq(snapped2, std::f32::consts::FRAC_PI_4, 0.1));
     }
 
     #[test]
     fn test_snap_scale() {
-        let snap = GizmoSnap3D { scale_step: 0.1, ..Default::default() };
+        let snap = GizmoSnap3D {
+            scale_step: 0.1,
+            ..Default::default()
+        };
         assert!(approx_eq(snap.snap_scale(1.34), 1.3, 0.05));
         assert!(approx_eq(snap.snap_scale(1.06), 1.1, 0.05));
     }
@@ -3238,7 +3546,10 @@ mod tests {
         assert!(transform.is_some());
         match transform.unwrap() {
             GizmoTransform3D::Move(delta) => {
-                assert!(delta.x > 0.0, "Moving right should produce positive X delta");
+                assert!(
+                    delta.x > 0.0,
+                    "Moving right should produce positive X delta"
+                );
                 assert!(approx_eq(delta.y, 0.0, 1e-4));
                 assert!(approx_eq(delta.z, 0.0, 1e-4));
             }
@@ -3306,7 +3617,11 @@ mod tests {
         match transform.unwrap() {
             GizmoTransform3D::Scale { axis, factor } => {
                 assert_eq!(axis, GizmoAxis::X);
-                assert!(factor > 1.0, "Moving outward should scale up, got {}", factor);
+                assert!(
+                    factor > 1.0,
+                    "Moving outward should scale up, got {}",
+                    factor
+                );
             }
             _ => panic!("Expected Scale transform"),
         }
@@ -3340,14 +3655,20 @@ mod tests {
         vp.selection.set_gizmo_mode(GizmoMode3D::Move);
         vp.begin_gizmo_drag(400.0, 300.0, Vector3::ZERO, GizmoAxis::X);
 
-        let snap = GizmoSnap3D { translate_step: 1.0, ..Default::default() };
+        let snap = GizmoSnap3D {
+            translate_step: 1.0,
+            ..Default::default()
+        };
         let transform = vp.update_gizmo_drag(500.0, 300.0, &snap);
         match transform.unwrap() {
             GizmoTransform3D::Move(delta) => {
                 // Delta should be snapped to nearest integer
                 let remainder = delta.x % 1.0;
-                assert!(approx_eq(remainder, 0.0, 0.01) || approx_eq(remainder.abs(), 1.0, 0.01),
-                    "Delta X should be snapped to nearest 1.0, got {}", delta.x);
+                assert!(
+                    approx_eq(remainder, 0.0, 0.01) || approx_eq(remainder.abs(), 1.0, 0.01),
+                    "Delta X should be snapped to nearest 1.0, got {}",
+                    delta.x
+                );
             }
             _ => panic!("Expected Move transform"),
         }
@@ -3360,7 +3681,11 @@ mod tests {
         let vp = Viewport3D::new(800, 600);
         let config = GizmoConfig3D::default();
         let axis = vp.hit_test_gizmo_full(400.0, 300.0, Vector3::ZERO, &config);
-        assert_eq!(axis, GizmoAxis::None, "Select mode should never hit a gizmo");
+        assert_eq!(
+            axis,
+            GizmoAxis::None,
+            "Select mode should never hit a gizmo"
+        );
     }
 
     #[test]
@@ -3400,7 +3725,10 @@ mod tests {
         match transform.unwrap() {
             GizmoTransform3D::Move(delta) => {
                 // Z should be zero for XY plane
-                assert!(approx_eq(delta.z, 0.0, 1e-4), "Z should be zero for XY plane drag");
+                assert!(
+                    approx_eq(delta.z, 0.0, 1e-4),
+                    "Z should be zero for XY plane drag"
+                );
             }
             _ => panic!("Expected Move transform"),
         }

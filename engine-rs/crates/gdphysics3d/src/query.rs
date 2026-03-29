@@ -117,9 +117,7 @@ impl PhysicsRayQuery3D {
 /// Tests a ray against a single body. Returns a hit if the ray intersects.
 fn ray_test_body(origin: Vector3, dir: Vector3, body: &PhysicsBody3D) -> Option<RaycastHit3D> {
     match body.shape {
-        Shape3D::Sphere { radius } => {
-            ray_sphere(origin, dir, body.position, radius, body.id)
-        }
+        Shape3D::Sphere { radius } => ray_sphere(origin, dir, body.position, radius, body.id),
         Shape3D::BoxShape { half_extents } => {
             ray_aabb(origin, dir, body.position, half_extents, body.id)
         }
@@ -338,12 +336,8 @@ impl PhysicsShapeQuery3D {
                 continue;
             }
 
-            let cr = collision::test_collision(
-                self.position,
-                &self.shape,
-                body.position,
-                &body.shape,
-            );
+            let cr =
+                collision::test_collision(self.position, &self.shape, body.position, &body.shape);
 
             if cr.colliding {
                 results.push(ShapeQueryResult3D {
@@ -376,12 +370,8 @@ impl PhysicsShapeQuery3D {
                 continue;
             }
 
-            let cr = collision::test_collision(
-                self.position,
-                &self.shape,
-                body.position,
-                &body.shape,
-            );
+            let cr =
+                collision::test_collision(self.position, &self.shape, body.position, &body.shape);
 
             if cr.colliding {
                 match &closest {
@@ -498,10 +488,7 @@ mod tests {
 
     #[test]
     fn ray_query_direction_and_max_distance() {
-        let query = PhysicsRayQuery3D::new(
-            Vector3::ZERO,
-            Vector3::new(3.0, 4.0, 0.0),
-        );
+        let query = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(3.0, 4.0, 0.0));
         assert!((query.max_distance() - 5.0).abs() < 0.01);
         let dir = query.direction();
         assert!((dir.x - 0.6).abs() < 0.01);
@@ -535,13 +522,10 @@ mod tests {
     #[test]
     fn shape_query_finds_overlapping() {
         let bodies = vec![
-            sphere_body(1, Vector3::new(1.0, 0.0, 0.0)),  // overlapping
+            sphere_body(1, Vector3::new(1.0, 0.0, 0.0)), // overlapping
             sphere_body(2, Vector3::new(100.0, 0.0, 0.0)), // far away
         ];
-        let query = PhysicsShapeQuery3D::new(
-            Shape3D::Sphere { radius: 2.0 },
-            Vector3::ZERO,
-        );
+        let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
         let results = query.intersect(bodies.iter());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].body_id, BodyId3D(1));
@@ -550,10 +534,7 @@ mod tests {
     #[test]
     fn shape_query_no_overlap() {
         let bodies = vec![sphere_body(1, Vector3::new(100.0, 0.0, 0.0))];
-        let query = PhysicsShapeQuery3D::new(
-            Shape3D::Sphere { radius: 1.0 },
-            Vector3::ZERO,
-        );
+        let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 1.0 }, Vector3::ZERO);
         let results = query.intersect(bodies.iter());
         assert!(results.is_empty());
     }
@@ -561,10 +542,7 @@ mod tests {
     #[test]
     fn shape_query_excludes_bodies() {
         let bodies = vec![sphere_body(1, Vector3::new(1.0, 0.0, 0.0))];
-        let mut query = PhysicsShapeQuery3D::new(
-            Shape3D::Sphere { radius: 5.0 },
-            Vector3::ZERO,
-        );
+        let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 5.0 }, Vector3::ZERO);
         query.exclude.insert(BodyId3D(1));
         let results = query.intersect(bodies.iter());
         assert!(results.is_empty());
@@ -576,10 +554,7 @@ mod tests {
         body.collision_layer = 0b0100;
         let bodies = vec![body];
 
-        let mut query = PhysicsShapeQuery3D::new(
-            Shape3D::Sphere { radius: 5.0 },
-            Vector3::ZERO,
-        );
+        let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 5.0 }, Vector3::ZERO);
         query.collision_mask = 0b0001;
         assert!(query.intersect(bodies.iter()).is_empty());
 
@@ -594,10 +569,7 @@ mod tests {
             sphere_body(2, Vector3::new(0.0, 1.0, 0.0)),
             sphere_body(3, Vector3::new(0.0, 0.0, 1.0)),
         ];
-        let mut query = PhysicsShapeQuery3D::new(
-            Shape3D::Sphere { radius: 5.0 },
-            Vector3::ZERO,
-        );
+        let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 5.0 }, Vector3::ZERO);
         query.max_results = 2;
         let results = query.intersect(bodies.iter());
         assert_eq!(results.len(), 2);
@@ -609,10 +581,7 @@ mod tests {
             sphere_body(1, Vector3::new(1.0, 0.0, 0.0)),
             sphere_body(2, Vector3::new(0.5, 0.0, 0.0)),
         ];
-        let query = PhysicsShapeQuery3D::new(
-            Shape3D::Sphere { radius: 5.0 },
-            Vector3::ZERO,
-        );
+        let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 5.0 }, Vector3::ZERO);
         let closest = query.intersect_closest(bodies.iter());
         assert!(closest.is_some());
         // Body 2 is closer → more penetration depth
@@ -621,10 +590,7 @@ mod tests {
 
     #[test]
     fn shape_query_defaults() {
-        let query = PhysicsShapeQuery3D::new(
-            Shape3D::Sphere { radius: 1.0 },
-            Vector3::ZERO,
-        );
+        let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 1.0 }, Vector3::ZERO);
         assert_eq!(query.collision_mask, 0xFFFFFFFF);
         assert!(query.exclude.is_empty());
         assert_eq!(query.max_results, 32);

@@ -333,9 +333,10 @@ impl SignalStore {
         signal_name: &str,
         args: &[Variant],
     ) -> (Vec<Variant>, Vec<DeferredCall>) {
-        self.signals
-            .get_mut(signal_name)
-            .map_or_else(|| (Vec::new(), Vec::new()), |s| s.emit_collecting_deferred(args))
+        self.signals.get_mut(signal_name).map_or_else(
+            || (Vec::new(), Vec::new()),
+            |s| s.emit_collecting_deferred(args),
+        )
     }
 
     /// Returns `true` if the named signal exists.

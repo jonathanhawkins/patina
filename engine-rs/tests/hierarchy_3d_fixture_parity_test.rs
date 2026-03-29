@@ -62,10 +62,7 @@ fn load_tscn_to_tree(filename: &str) -> SceneTree {
     tree
 }
 
-fn find_node_by_name<'a>(
-    tree: &'a SceneTree,
-    name: &str,
-) -> gdscene::node::NodeId {
+fn find_node_by_name<'a>(tree: &'a SceneTree, name: &str) -> gdscene::node::NodeId {
     tree.all_nodes_in_tree_order()
         .into_iter()
         .find(|id| tree.get_node(*id).map(|n| n.name()) == Some(name))
@@ -94,10 +91,7 @@ fn hierarchy_3d_golden_exists_and_valid() {
     );
     let data = std::fs::read_to_string(&path).unwrap();
     let golden: serde_json::Value = serde_json::from_str(&data).unwrap();
-    assert_eq!(
-        golden["fixture_id"].as_str().unwrap(),
-        "scene_hierarchy_3d"
-    );
+    assert_eq!(golden["fixture_id"].as_str().unwrap(), "scene_hierarchy_3d");
     let nodes = golden["data"]["nodes"].as_array().unwrap();
     assert_eq!(nodes.len(), 6, "golden should have 6 nodes");
 }
@@ -307,11 +301,7 @@ fn hierarchy_3d_camera_properties() {
     let cam = tree.get_node(cam_id).unwrap();
 
     if let Variant::Float(fov) = cam.get_property("fov") {
-        assert!(
-            (fov - 70.0).abs() < 0.1,
-            "fov should be 70.0, got {}",
-            fov
-        );
+        assert!((fov - 70.0).abs() < 0.1, "fov should be 70.0, got {}", fov);
     }
     if let Variant::Float(far) = cam.get_property("far") {
         assert!(

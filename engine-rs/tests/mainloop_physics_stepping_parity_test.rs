@@ -157,7 +157,10 @@ fn large_delta_multiple_physics_ticks() {
     // At 60 TPS, delta=2/60 means 2 physics ticks.
     let output = ml.step(2.0 / 60.0);
 
-    assert_eq!(output.physics_steps, 2, "expected 2 physics ticks for 2x delta");
+    assert_eq!(
+        output.physics_steps, 2,
+        "expected 2 physics ticks for 2x delta"
+    );
     assert_eq!(output.frame_count, 1);
 }
 
@@ -178,7 +181,10 @@ fn accumulator_carries_remainder_across_frames() {
 
     // Second frame: delta = 0.2 * physics_dt → 1 tick (accumulated: 1.1 * dt)
     let out2 = ml.step(physics_dt * 0.2);
-    assert_eq!(out2.physics_steps, 1, "accumulated 1.1x dt should produce 1 tick");
+    assert_eq!(
+        out2.physics_steps, 1,
+        "accumulated 1.1x dt should produce 1 tick"
+    );
 }
 
 // ===========================================================================
@@ -266,7 +272,12 @@ fn rigid_body_position_advances_per_tick() {
     let (mut ml, rigid_id) = make_physics_mainloop();
     let physics_dt = 1.0 / 60.0;
 
-    let initial_pos = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let initial_pos = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };
@@ -276,7 +287,12 @@ fn rigid_body_position_advances_per_tick() {
     // Run 1 frame (1 physics tick).
     ml.step(physics_dt);
 
-    let new_pos = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let new_pos = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };
@@ -305,7 +321,12 @@ fn rigid_body_position_accumulates_over_frames() {
     let (mut ml, rigid_id) = make_physics_mainloop();
     let physics_dt = 1.0 / 60.0;
 
-    let initial_y = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let initial_y = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v.y,
         _ => panic!("expected Vector2"),
     };
@@ -313,7 +334,12 @@ fn rigid_body_position_accumulates_over_frames() {
     // Run 10 frames.
     ml.run_frames(10, physics_dt);
 
-    let final_y = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let final_y = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v.y,
         _ => panic!("expected Vector2"),
     };
@@ -413,7 +439,10 @@ fn configurable_physics_tps() {
 
     // Next frame with delta=1/60 should fire (accumulated full tick).
     let output3 = ml.step(1.0 / 60.0);
-    assert_eq!(output3.physics_steps, 1, "accumulated full tick should fire");
+    assert_eq!(
+        output3.physics_steps, 1,
+        "accumulated full tick should fire"
+    );
 }
 
 // ===========================================================================
@@ -432,7 +461,12 @@ fn static_body_does_not_move() {
     ml.register_physics_bodies();
     ml.run_frames(10, 1.0 / 60.0);
 
-    let final_pos = match ml.tree().get_node(floor_id).unwrap().get_property("position") {
+    let final_pos = match ml
+        .tree()
+        .get_node(floor_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };
@@ -490,7 +524,12 @@ fn sync_from_physics_updates_scene_node() {
     let (mut ml, rigid_id) = make_physics_mainloop();
 
     // Record initial position.
-    let initial = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let initial = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };
@@ -498,7 +537,12 @@ fn sync_from_physics_updates_scene_node() {
     ml.step(1.0 / 60.0);
 
     // Position should be updated in the scene tree.
-    let after = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let after = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };
@@ -536,7 +580,12 @@ fn deterministic_physics_across_runs() {
     fn run_and_capture() -> (Vector2, Vector2) {
         let (mut ml, rigid_id) = make_physics_mainloop();
         ml.run_frames(20, 1.0 / 60.0);
-        let pos = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+        let pos = match ml
+            .tree()
+            .get_node(rigid_id)
+            .unwrap()
+            .get_property("position")
+        {
             Variant::Vector2(v) => v,
             _ => panic!("expected Vector2"),
         };
@@ -608,7 +657,12 @@ fn paused_skips_physics_notifications_but_world_steps() {
 
     // Run 5 frames normally.
     ml.run_frames(5, 1.0 / 60.0);
-    let pos_after_5 = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let pos_after_5 = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };
@@ -643,7 +697,12 @@ fn paused_skips_physics_notifications_but_world_steps() {
     // (sync_to/step/sync_from still run in the MainLoop step).
     // This is the current behavior — the paused gate is at the
     // notification/script level, not the physics server level.
-    let pos_after_pause = match ml.tree().get_node(rigid_id).unwrap().get_property("position") {
+    let pos_after_pause = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };

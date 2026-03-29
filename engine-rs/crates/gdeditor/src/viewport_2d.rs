@@ -429,7 +429,14 @@ impl OverlaySettings {
     /// Enables all overlays.
     pub fn enable_all(&mut self) {
         use CanvasOverlay::*;
-        for ov in [CollisionShapes, NavigationRegions, YSortIndicators, OriginCross, LockGroupIcons, VisibilityIndicators] {
+        for ov in [
+            CollisionShapes,
+            NavigationRegions,
+            YSortIndicators,
+            OriginCross,
+            LockGroupIcons,
+            VisibilityIndicators,
+        ] {
             self.active.insert(ov);
         }
     }
@@ -591,10 +598,7 @@ impl ViewportCamera2D {
 
         // Anchor zoom at cursor position.
         let center = Vector2::new(viewport_size.x / 2.0, viewport_size.y / 2.0);
-        let screen_offset = Vector2::new(
-            screen_point.x - center.x,
-            screen_point.y - center.y,
-        );
+        let screen_offset = Vector2::new(screen_point.x - center.x, screen_point.y - center.y);
 
         // Adjust offset so the world point under the cursor stays fixed.
         self.offset.x += screen_offset.x * (1.0 / old_zoom - 1.0 / self.zoom);
@@ -788,11 +792,7 @@ impl Selection2D {
 
     /// Selects all nodes whose bounds overlap the given rectangle.
     /// Locked nodes are excluded. `candidates` provides (node_id, bounds) pairs.
-    pub fn select_overlap(
-        &mut self,
-        rect: &SelectionRect,
-        candidates: &[(u64, SelectionRect)],
-    ) {
+    pub fn select_overlap(&mut self, rect: &SelectionRect, candidates: &[(u64, SelectionRect)]) {
         self.selected.clear();
         for &(id, ref bounds) in candidates {
             if !self.is_locked(id) && rect.overlaps(bounds) {
@@ -1082,14 +1082,9 @@ impl Gizmo2D {
         drag_current: Vector2,
         axis: GizmoAxis,
     ) -> (f32, f32) {
-        let start_offset = Vector2::new(
-            drag_start.x - self.pivot.x,
-            drag_start.y - self.pivot.y,
-        );
-        let current_offset = Vector2::new(
-            drag_current.x - self.pivot.x,
-            drag_current.y - self.pivot.y,
-        );
+        let start_offset = Vector2::new(drag_start.x - self.pivot.x, drag_start.y - self.pivot.y);
+        let current_offset =
+            Vector2::new(drag_current.x - self.pivot.x, drag_current.y - self.pivot.y);
 
         let sx = if start_offset.x.abs() > 0.001 {
             current_offset.x / start_offset.x
@@ -1107,8 +1102,11 @@ impl Gizmo2D {
             GizmoAxis::Y => (1.0, sy),
             GizmoAxis::XY => {
                 // Uniform scale: use the average magnitude change.
-                let start_dist = (start_offset.x * start_offset.x + start_offset.y * start_offset.y).sqrt();
-                let current_dist = (current_offset.x * current_offset.x + current_offset.y * current_offset.y).sqrt();
+                let start_dist =
+                    (start_offset.x * start_offset.x + start_offset.y * start_offset.y).sqrt();
+                let current_dist = (current_offset.x * current_offset.x
+                    + current_offset.y * current_offset.y)
+                    .sqrt();
                 let uniform = if start_dist > 0.001 {
                     current_dist / start_dist
                 } else {
@@ -1293,11 +1291,7 @@ impl BoundingBoxHandles {
 
     /// Computes a new bounding rect after dragging a handle by a world-space delta.
     /// The opposite handle stays anchored.
-    pub fn resize_by_handle(
-        &self,
-        handle: HandlePosition,
-        world_delta: Vector2,
-    ) -> SelectionRect {
+    pub fn resize_by_handle(&self, handle: HandlePosition, world_delta: Vector2) -> SelectionRect {
         let (resize_x, resize_y) = handle.resize_axes();
         let mut new_min = self.bounds.min;
         let mut new_max = self.bounds.max;
@@ -1520,22 +1514,13 @@ impl Viewport2D {
     // -- Gizmo operations ---------------------------------------------------
 
     /// Hit-tests a screen point against the gizmo for a node at the given pivot.
-    pub fn hit_test_gizmo(
-        &self,
-        screen_point: Vector2,
-        pivot: Vector2,
-    ) -> Option<GizmoHit> {
+    pub fn hit_test_gizmo(&self, screen_point: Vector2, pivot: Vector2) -> Option<GizmoHit> {
         let gizmo = Gizmo2D::new(pivot);
         gizmo.hit_test(screen_point, self.tool_mode, &self.camera, self.size())
     }
 
     /// Begins a gizmo drag on the given hit at the given screen point.
-    pub fn begin_gizmo_drag(
-        &mut self,
-        hit: GizmoHit,
-        pivot: Vector2,
-        screen_point: Vector2,
-    ) {
+    pub fn begin_gizmo_drag(&mut self, hit: GizmoHit, pivot: Vector2, screen_point: Vector2) {
         let world = self.screen_to_world(screen_point);
         self.gizmo_drag = Some(GizmoDragState {
             hit,
@@ -1810,9 +1795,18 @@ mod tests {
         let mut sel = Selection2D::new();
         sel.lock(2);
         let candidates = vec![
-            (1, SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(5.0, 5.0))),
-            (2, SelectionRect::new(Vector2::new(3.0, 3.0), Vector2::new(8.0, 8.0))),
-            (3, SelectionRect::new(Vector2::new(6.0, 6.0), Vector2::new(11.0, 11.0))),
+            (
+                1,
+                SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(5.0, 5.0)),
+            ),
+            (
+                2,
+                SelectionRect::new(Vector2::new(3.0, 3.0), Vector2::new(8.0, 8.0)),
+            ),
+            (
+                3,
+                SelectionRect::new(Vector2::new(6.0, 6.0), Vector2::new(11.0, 11.0)),
+            ),
         ];
         let rect = SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0));
         sel.select_overlap(&rect, &candidates);
@@ -1927,8 +1921,12 @@ mod tests {
 
     #[test]
     fn handle_resize_axes_corners_are_both() {
-        for hp in [HandlePosition::TopLeft, HandlePosition::TopRight,
-                    HandlePosition::BottomLeft, HandlePosition::BottomRight] {
+        for hp in [
+            HandlePosition::TopLeft,
+            HandlePosition::TopRight,
+            HandlePosition::BottomLeft,
+            HandlePosition::BottomRight,
+        ] {
             assert_eq!(hp.resize_axes(), (true, true));
         }
     }
@@ -1945,10 +1943,7 @@ mod tests {
 
     #[test]
     fn handle_world_positions_match_bounds() {
-        let bounds = SelectionRect::new(
-            Vector2::new(10.0, 20.0),
-            Vector2::new(110.0, 80.0),
-        );
+        let bounds = SelectionRect::new(Vector2::new(10.0, 20.0), Vector2::new(110.0, 80.0));
         let handles = BoundingBoxHandles::new(bounds);
         let tl = handles.handle_world_position(HandlePosition::TopLeft);
         assert!((tl.x - 10.0).abs() < 0.01);
@@ -2000,10 +1995,8 @@ mod tests {
     fn resize_bottom_right_expands_max() {
         let bounds = SelectionRect::new(Vector2::new(10.0, 10.0), Vector2::new(50.0, 50.0));
         let handles = BoundingBoxHandles::new(bounds);
-        let new_bounds = handles.resize_by_handle(
-            HandlePosition::BottomRight,
-            Vector2::new(20.0, 10.0),
-        );
+        let new_bounds =
+            handles.resize_by_handle(HandlePosition::BottomRight, Vector2::new(20.0, 10.0));
         assert!((new_bounds.min.x - 10.0).abs() < 0.01);
         assert!((new_bounds.min.y - 10.0).abs() < 0.01);
         assert!((new_bounds.max.x - 70.0).abs() < 0.01);
@@ -2014,10 +2007,8 @@ mod tests {
     fn resize_top_left_moves_min() {
         let bounds = SelectionRect::new(Vector2::new(10.0, 10.0), Vector2::new(50.0, 50.0));
         let handles = BoundingBoxHandles::new(bounds);
-        let new_bounds = handles.resize_by_handle(
-            HandlePosition::TopLeft,
-            Vector2::new(-5.0, -5.0),
-        );
+        let new_bounds =
+            handles.resize_by_handle(HandlePosition::TopLeft, Vector2::new(-5.0, -5.0));
         assert!((new_bounds.min.x - 5.0).abs() < 0.01);
         assert!((new_bounds.min.y - 5.0).abs() < 0.01);
         assert!((new_bounds.max.x - 50.0).abs() < 0.01);
@@ -2055,10 +2046,8 @@ mod tests {
         let bounds = SelectionRect::new(Vector2::new(10.0, 10.0), Vector2::new(50.0, 50.0));
         let handles = BoundingBoxHandles::new(bounds);
         // Drag bottom-right up and left past top-left
-        let new_bounds = handles.resize_by_handle(
-            HandlePosition::BottomRight,
-            Vector2::new(-60.0, -60.0),
-        );
+        let new_bounds =
+            handles.resize_by_handle(HandlePosition::BottomRight, Vector2::new(-60.0, -60.0));
         // SelectionRect::new normalizes, so min should still be < max
         assert!(new_bounds.min.x <= new_bounds.max.x);
         assert!(new_bounds.min.y <= new_bounds.max.y);
@@ -2134,7 +2123,9 @@ mod tests {
         let cam = ViewportCamera2D::new();
         let vp = Vector2::new(800.0, 600.0);
         let center = cam.world_to_screen(Vector2::ZERO, vp);
-        assert!(gizmo.hit_test(center, ToolMode2D::Select, &cam, vp).is_none());
+        assert!(gizmo
+            .hit_test(center, ToolMode2D::Select, &cam, vp)
+            .is_none());
     }
 
     #[test]
@@ -2484,7 +2475,10 @@ mod tests {
     #[test]
     fn smart_snap_disabled_returns_none() {
         let mut ss = SmartSnap::new();
-        ss.register_node(1, SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)));
+        ss.register_node(
+            1,
+            SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)),
+        );
         let drag = SelectionRect::new(Vector2::new(101.0, 50.0), Vector2::new(201.0, 150.0));
         let (dx, dy) = ss.snap_rect(&drag);
         assert!(dx.is_none());
@@ -2497,7 +2491,10 @@ mod tests {
         ss.enabled = true;
         ss.threshold = 5.0;
         // Target node at x=100..200
-        ss.register_node(1, SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)));
+        ss.register_node(
+            1,
+            SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)),
+        );
         // Dragging node at x=102..150 — left edge 102, should snap to 100
         let drag = SelectionRect::new(Vector2::new(102.0, 300.0), Vector2::new(150.0, 350.0));
         let (dx, _) = ss.snap_rect(&drag);
@@ -2511,7 +2508,10 @@ mod tests {
         ss.enabled = true;
         ss.threshold = 5.0;
         // Target centered at (150, 150)
-        ss.register_node(1, SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)));
+        ss.register_node(
+            1,
+            SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)),
+        );
         // Dragging centered at (152, 300)
         let drag = SelectionRect::new(Vector2::new(102.0, 250.0), Vector2::new(202.0, 350.0));
         let (dx, _) = ss.snap_rect(&drag);
@@ -2524,7 +2524,10 @@ mod tests {
         let mut ss = SmartSnap::new();
         ss.enabled = true;
         ss.threshold = 2.0;
-        ss.register_node(1, SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)));
+        ss.register_node(
+            1,
+            SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(200.0, 200.0)),
+        );
         let drag = SelectionRect::new(Vector2::new(110.0, 300.0), Vector2::new(190.0, 350.0));
         let (dx, _dy) = ss.snap_rect(&drag);
         // Left diff = 10, right diff = 10, center diff = 0 — center should match!
@@ -2536,7 +2539,10 @@ mod tests {
     #[test]
     fn smart_snap_clear_removes_anchors() {
         let mut ss = SmartSnap::new();
-        ss.register_node(1, SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0)));
+        ss.register_node(
+            1,
+            SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0)),
+        );
         assert_eq!(ss.anchor_count(), 1);
         ss.clear();
         assert_eq!(ss.anchor_count(), 0);

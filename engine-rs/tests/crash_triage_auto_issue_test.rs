@@ -100,21 +100,13 @@ fn minor_issue_is_p3() {
 
 #[test]
 fn classify_matches_fixed_pattern_as_regression() {
-    let c = classify_crash(
-        "assertion failed: node count == 0",
-        &["node count"],
-        &[],
-    );
+    let c = classify_crash("assertion failed: node count == 0", &["node count"], &[]);
     assert_eq!(c, CrashClassification::Regression);
 }
 
 #[test]
 fn classify_matches_open_pattern_as_known() {
-    let c = classify_crash(
-        "TODO: not yet implemented",
-        &[],
-        &["not yet implemented"],
-    );
+    let c = classify_crash("TODO: not yet implemented", &[], &["not yet implemented"]);
     assert_eq!(c, CrashClassification::KnownIssue);
 }
 

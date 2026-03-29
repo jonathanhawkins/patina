@@ -67,7 +67,10 @@ fn shader_material_overrides_standard_material_color() {
         "shader_type spatial;\nrender_mode unshaded;\nuniform vec4 albedo_color : source_color;",
     );
     shader_mat.shader = Some(shader);
-    shader_mat.set_shader_parameter("albedo_color", Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)));
+    shader_mat.set_shader_parameter(
+        "albedo_color",
+        Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)),
+    );
     renderer.set_shader_material(id, shader_mat);
 
     // Render with shader material — should be green.
@@ -164,7 +167,10 @@ fn shader_material_without_shader_does_not_crash() {
     // Should not panic — graceful fallback.
     let fb = capture_frame_3d(&mut renderer, &vp);
     let visible = count_visible_pixels(&fb);
-    assert!(visible > 0, "should render something even with empty shader material");
+    assert!(
+        visible > 0,
+        "should render something even with empty shader material"
+    );
 }
 
 // ── 4. Vertex shader correctly transforms geometry ──
@@ -319,10 +325,7 @@ fn shader_pipeline_writes_correct_depth() {
 
     // Depth values should be in valid NDC range.
     for d in &fb.depth {
-        assert!(
-            *d >= 0.0 && *d <= 1.0,
-            "depth {d} should be in [0, 1]"
-        );
+        assert!(*d >= 0.0 && *d <= 1.0, "depth {d} should be in [0, 1]");
     }
 }
 

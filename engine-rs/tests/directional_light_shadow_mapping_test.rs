@@ -9,9 +9,7 @@
 use gdcore::math::{Color, Vector3};
 use gdcore::math3d::{Basis, Transform3D};
 use gdrender3d::renderer::{RenderMode, SoftwareRenderer3D};
-use gdrender3d::shadow_map::{
-    generate_shadow_maps, ShadowMap, SHADOW_MAP_SIZE,
-};
+use gdrender3d::shadow_map::{generate_shadow_maps, ShadowMap, SHADOW_MAP_SIZE};
 use gdserver3d::instance::{Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::{Material3D, ShadingMode};
@@ -28,7 +26,11 @@ fn directional_shadow_map_generated_for_enabled_light() {
     light.direction = Vector3::new(0.0, -1.0, 0.0);
 
     let maps = generate_shadow_maps(&[light], &[]);
-    assert_eq!(maps.len(), 1, "one shadow map for one enabled directional light");
+    assert_eq!(
+        maps.len(),
+        1,
+        "one shadow map for one enabled directional light"
+    );
     assert_eq!(maps[0].size, SHADOW_MAP_SIZE);
 }
 
@@ -45,7 +47,11 @@ fn no_shadow_map_for_point_light() {
     let mut light = Light3D::point(Light3DId(1), Vector3::new(0.0, 5.0, 0.0));
     light.shadow_enabled = true;
     let maps = generate_shadow_maps(&[light], &[]);
-    assert_eq!(maps.len(), 0, "point lights use cubemaps, not directional shadow maps");
+    assert_eq!(
+        maps.len(),
+        0,
+        "point lights use cubemaps, not directional shadow maps"
+    );
 }
 
 #[test]
@@ -96,7 +102,10 @@ fn point_below_occluder_is_shadowed() {
     assert_eq!(maps.len(), 1);
 
     let shadow = maps[0].sample(Vector3::new(0.0, 0.0, 0.0));
-    assert!(shadow > 0.5, "point below occluder should be shadowed, got {shadow}");
+    assert!(
+        shadow > 0.5,
+        "point below occluder should be shadowed, got {shadow}"
+    );
 }
 
 #[test]
@@ -113,7 +122,10 @@ fn point_beside_occluder_is_lit() {
     let maps = generate_shadow_maps(&[light], &[inst]);
 
     let shadow = maps[0].sample(Vector3::new(10.0, 0.0, 10.0));
-    assert!(shadow < 0.5, "point beside occluder should be lit, got factor={shadow}");
+    assert!(
+        shadow < 0.5,
+        "point beside occluder should be lit, got factor={shadow}"
+    );
 }
 
 // ── Solid render pipeline integration ────────────────────────────────
@@ -182,7 +194,10 @@ fn shadow_darkens_fragments_in_solid_render() {
 
     // Check that we have non-black pixels (scene rendered).
     let nonblack = frame.pixels.iter().filter(|c| **c != Color::BLACK).count();
-    assert!(nonblack > 10, "scene should have visible pixels, got {nonblack}");
+    assert!(
+        nonblack > 10,
+        "scene should have visible pixels, got {nonblack}"
+    );
 }
 
 #[test]
@@ -213,7 +228,10 @@ fn shadow_deterministic_across_frames() {
     let f1 = renderer.render_frame(&vp);
     let f2 = renderer.render_frame(&vp);
 
-    assert_eq!(f1.pixels, f2.pixels, "shadow rendering must be deterministic");
+    assert_eq!(
+        f1.pixels, f2.pixels,
+        "shadow rendering must be deterministic"
+    );
 }
 
 #[test]
@@ -286,5 +304,8 @@ fn phong_shadow_integration() {
     let frame = renderer.render_frame(&vp);
 
     let nonblack = frame.pixels.iter().filter(|c| **c != Color::BLACK).count();
-    assert!(nonblack > 0, "phong with shadow should render visible pixels");
+    assert!(
+        nonblack > 0,
+        "phong with shadow should render visible pixels"
+    );
 }

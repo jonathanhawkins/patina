@@ -44,12 +44,18 @@ impl LinuxDisplayProtocol {
     /// Wayland deliberately does not allow clients to position their own
     /// windows; the compositor controls placement.
     pub fn supports_window_positioning(&self) -> bool {
-        matches!(self, LinuxDisplayProtocol::X11 | LinuxDisplayProtocol::XWayland)
+        matches!(
+            self,
+            LinuxDisplayProtocol::X11 | LinuxDisplayProtocol::XWayland
+        )
     }
 
     /// Returns `true` if the protocol supports global keyboard shortcuts.
     pub fn supports_global_shortcuts(&self) -> bool {
-        matches!(self, LinuxDisplayProtocol::X11 | LinuxDisplayProtocol::XWayland)
+        matches!(
+            self,
+            LinuxDisplayProtocol::X11 | LinuxDisplayProtocol::XWayland
+        )
     }
 
     /// Returns `true` if the protocol is Wayland-based.
@@ -494,7 +500,10 @@ mod tests {
     #[test]
     fn headless_desktop_is_unknown() {
         let layer = LinuxPlatformLayer::headless("App");
-        assert_eq!(layer.desktop_environment(), LinuxDesktopEnvironment::Unknown);
+        assert_eq!(
+            layer.desktop_environment(),
+            LinuxDesktopEnvironment::Unknown
+        );
         assert!(!layer.has_system_tray());
     }
 

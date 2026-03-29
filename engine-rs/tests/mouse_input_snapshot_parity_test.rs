@@ -52,7 +52,10 @@ fn mouse_motion(position: Vector2, relative: Vector2) -> InputEvent {
 fn mouse_motion_position_in_snapshot() {
     let mut state = InputState::new();
 
-    state.process_event(mouse_motion(Vector2::new(320.0, 240.0), Vector2::new(5.0, 3.0)));
+    state.process_event(mouse_motion(
+        Vector2::new(320.0, 240.0),
+        Vector2::new(5.0, 3.0),
+    ));
 
     let snap = state.snapshot();
     assert_eq!(snap.get_mouse_position(), Vector2::new(320.0, 240.0));
@@ -62,10 +65,16 @@ fn mouse_motion_position_in_snapshot() {
 fn mouse_motion_updates_position_sequentially() {
     let mut state = InputState::new();
 
-    state.process_event(mouse_motion(Vector2::new(100.0, 100.0), Vector2::new(10.0, 0.0)));
+    state.process_event(mouse_motion(
+        Vector2::new(100.0, 100.0),
+        Vector2::new(10.0, 0.0),
+    ));
     assert_eq!(state.get_mouse_position(), Vector2::new(100.0, 100.0));
 
-    state.process_event(mouse_motion(Vector2::new(200.0, 150.0), Vector2::new(100.0, 50.0)));
+    state.process_event(mouse_motion(
+        Vector2::new(200.0, 150.0),
+        Vector2::new(100.0, 50.0),
+    ));
     assert_eq!(state.get_mouse_position(), Vector2::new(200.0, 150.0));
 
     let snap = state.snapshot();
@@ -230,15 +239,13 @@ fn script_snapshot_uses_godot_button_indices() {
         just_pressed_keys: Default::default(),
         input_map: Default::default(),
         mouse_position: Vector2::new(100.0, 200.0),
-        mouse_buttons_pressed: ["1".to_string(), "3".to_string()]
-            .into_iter()
-            .collect(),
+        mouse_buttons_pressed: ["1".to_string(), "3".to_string()].into_iter().collect(),
     };
 
     // Godot indices: 1=Left, 2=Right, 3=Middle
-    assert!(script_snap.is_mouse_button_pressed(1));  // Left
+    assert!(script_snap.is_mouse_button_pressed(1)); // Left
     assert!(!script_snap.is_mouse_button_pressed(2)); // Right (not pressed)
-    assert!(script_snap.is_mouse_button_pressed(3));  // Middle
+    assert!(script_snap.is_mouse_button_pressed(3)); // Middle
     assert_eq!(script_snap.get_mouse_position(), Vector2::new(100.0, 200.0));
 
     // Unused index returns false
@@ -278,7 +285,10 @@ fn mainloop_bridges_mouse_to_script_snapshot() {
     }
     // Note: snapshot may be cleared at end of frame, so we also verify via engine state
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
-    assert_eq!(ml.input_state().get_mouse_position(), Vector2::new(150.0, 250.0));
+    assert_eq!(
+        ml.input_state().get_mouse_position(),
+        Vector2::new(150.0, 250.0)
+    );
 }
 
 #[test]
@@ -293,11 +303,17 @@ fn mainloop_bridges_mouse_motion_to_script_snapshot() {
 
     let mut ml = MainLoop::new(tree);
 
-    ml.push_event(mouse_motion(Vector2::new(640.0, 480.0), Vector2::new(10.0, -5.0)));
+    ml.push_event(mouse_motion(
+        Vector2::new(640.0, 480.0),
+        Vector2::new(10.0, -5.0),
+    ));
     ml.step(1.0 / 60.0);
 
     // Engine state has the position
-    assert_eq!(ml.input_state().get_mouse_position(), Vector2::new(640.0, 480.0));
+    assert_eq!(
+        ml.input_state().get_mouse_position(),
+        Vector2::new(640.0, 480.0)
+    );
 }
 
 #[test]
@@ -318,7 +334,9 @@ fn mainloop_bridges_multiple_buttons() {
     // Engine state tracks both
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Right));
-    assert!(!ml.input_state().is_mouse_button_pressed(MouseButton::Middle));
+    assert!(!ml
+        .input_state()
+        .is_mouse_button_pressed(MouseButton::Middle));
 }
 
 // ===========================================================================
@@ -490,17 +508,25 @@ fn mouse_button_held_across_multiple_steps() {
     ml.step(1.0 / 60.0);
 
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
-    assert_eq!(ml.input_state().get_mouse_position(), Vector2::new(100.0, 200.0));
+    assert_eq!(
+        ml.input_state().get_mouse_position(),
+        Vector2::new(100.0, 200.0)
+    );
 
     // Step again without new events — button should still be held
     ml.step(1.0 / 60.0);
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
-    assert!(!ml.input_state().is_mouse_button_just_pressed(MouseButton::Left));
+    assert!(!ml
+        .input_state()
+        .is_mouse_button_just_pressed(MouseButton::Left));
 
     // Step a third time
     ml.step(1.0 / 60.0);
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
-    assert_eq!(ml.input_state().get_mouse_position(), Vector2::new(100.0, 200.0));
+    assert_eq!(
+        ml.input_state().get_mouse_position(),
+        Vector2::new(100.0, 200.0)
+    );
 }
 
 #[test]
@@ -515,13 +541,25 @@ fn mouse_position_updates_between_steps() {
 
     let mut ml = MainLoop::new(tree);
 
-    ml.push_event(mouse_motion(Vector2::new(100.0, 100.0), Vector2::new(10.0, 10.0)));
+    ml.push_event(mouse_motion(
+        Vector2::new(100.0, 100.0),
+        Vector2::new(10.0, 10.0),
+    ));
     ml.step(1.0 / 60.0);
-    assert_eq!(ml.input_state().get_mouse_position(), Vector2::new(100.0, 100.0));
+    assert_eq!(
+        ml.input_state().get_mouse_position(),
+        Vector2::new(100.0, 100.0)
+    );
 
-    ml.push_event(mouse_motion(Vector2::new(200.0, 300.0), Vector2::new(100.0, 200.0)));
+    ml.push_event(mouse_motion(
+        Vector2::new(200.0, 300.0),
+        Vector2::new(100.0, 200.0),
+    ));
     ml.step(1.0 / 60.0);
-    assert_eq!(ml.input_state().get_mouse_position(), Vector2::new(200.0, 300.0));
+    assert_eq!(
+        ml.input_state().get_mouse_position(),
+        Vector2::new(200.0, 300.0)
+    );
 }
 
 // ===========================================================================

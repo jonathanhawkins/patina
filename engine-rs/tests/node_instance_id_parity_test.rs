@@ -120,7 +120,11 @@ fn node_id_stable_across_tree_add() {
     );
 
     let in_tree = tree.get_node(actual_id).unwrap();
-    assert_eq!(in_tree.id(), expected_id, "ID must match after tree insertion");
+    assert_eq!(
+        in_tree.id(),
+        expected_id,
+        "ID must match after tree insertion"
+    );
 }
 
 #[test]

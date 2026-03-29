@@ -108,7 +108,10 @@ impl ExportTemplate {
 
     /// Returns `true` if this template uses a release or release-debug build profile.
     pub fn is_release(&self) -> bool {
-        matches!(self.config.build_profile, BuildProfile::Release | BuildProfile::ReleaseDebug)
+        matches!(
+            self.config.build_profile,
+            BuildProfile::Release | BuildProfile::ReleaseDebug
+        )
     }
 
     /// Generates a debug/release template pair from a base config.
@@ -117,7 +120,14 @@ impl ExportTemplate {
         debug_config.build_profile = BuildProfile::Debug;
         let mut release_config = base;
         release_config.build_profile = BuildProfile::Release;
-        (Self { config: debug_config }, Self { config: release_config })
+        (
+            Self {
+                config: debug_config,
+            },
+            Self {
+                config: release_config,
+            },
+        )
     }
 
     /// Returns the output filename including platform and build profile
@@ -381,18 +391,14 @@ impl PackageExecutor {
     /// and writes `resource_list.txt` with one line per collected resource.
     pub fn write_output(&mut self) -> Result<PathBuf, PackageError> {
         std::fs::create_dir_all(&self.output_dir).map_err(|e| {
-            PackageError::OutputDirCreationFailed(format!(
-                "{}: {e}",
-                self.output_dir.display()
-            ))
+            PackageError::OutputDirCreationFailed(format!("{}: {e}", self.output_dir.display()))
         })?;
 
         // Write manifest.
         let manifest_path = self.output_dir.join("export_manifest.txt");
         let manifest = self.generate_manifest();
-        std::fs::write(&manifest_path, &manifest).map_err(|e| {
-            PackageError::WriteFailed(format!("{}: {e}", manifest_path.display()))
-        })?;
+        std::fs::write(&manifest_path, &manifest)
+            .map_err(|e| PackageError::WriteFailed(format!("{}: {e}", manifest_path.display())))?;
         self.messages
             .push(format!("wrote manifest: {}", manifest_path.display()));
 
@@ -407,9 +413,8 @@ impl PackageExecutor {
                 entry.size_bytes,
             ));
         }
-        std::fs::write(&listing_path, &listing).map_err(|e| {
-            PackageError::WriteFailed(format!("{}: {e}", listing_path.display()))
-        })?;
+        std::fs::write(&listing_path, &listing)
+            .map_err(|e| PackageError::WriteFailed(format!("{}: {e}", listing_path.display())))?;
         self.messages
             .push(format!("wrote resource list: {}", listing_path.display()));
 
@@ -417,10 +422,14 @@ impl PackageExecutor {
         let template = ExportTemplate::from_config(self.config.clone());
         let output_name = template.output_filename();
         let marker_path = self.output_dir.join(&output_name);
-        std::fs::write(&marker_path, format!("# Patina export placeholder\n# Platform: {}\n# Profile: {:?}\n",
-            self.config.target_platform, self.config.build_profile)).map_err(|e| {
-            PackageError::WriteFailed(format!("{}: {e}", marker_path.display()))
-        })?;
+        std::fs::write(
+            &marker_path,
+            format!(
+                "# Patina export placeholder\n# Platform: {}\n# Profile: {:?}\n",
+                self.config.target_platform, self.config.build_profile
+            ),
+        )
+        .map_err(|e| PackageError::WriteFailed(format!("{}: {e}", marker_path.display())))?;
         self.messages
             .push(format!("wrote output marker: {}", marker_path.display()));
 
@@ -459,14 +468,12 @@ impl PackageExecutor {
     // -- Internal helpers ----------------------------------------------------
 
     fn collect_directory(&mut self, dir: &Path, base_res: &str) -> Result<(), PackageError> {
-        let entries = std::fs::read_dir(dir).map_err(|e| {
-            PackageError::ResourceNotFound(format!("{}: {e}", dir.display()))
-        })?;
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| PackageError::ResourceNotFound(format!("{}: {e}", dir.display())))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                PackageError::ResourceNotFound(format!("read_dir entry: {e}"))
-            })?;
+            let entry = entry
+                .map_err(|e| PackageError::ResourceNotFound(format!("read_dir entry: {e}")))?;
             let path = entry.path();
             if path.is_dir() {
                 // Recurse into subdirectories.
@@ -644,7 +651,10 @@ mod tests {
 
     #[test]
     fn strip_res_prefix_with_prefix() {
-        assert_eq!(strip_res_prefix("res://scenes/main.tscn"), "scenes/main.tscn");
+        assert_eq!(
+            strip_res_prefix("res://scenes/main.tscn"),
+            "scenes/main.tscn"
+        );
     }
 
     #[test]
@@ -659,7 +669,10 @@ mod tests {
         for platform in &["linux", "windows", "macos", "web"] {
             let cfg = ExportConfig::new(*platform, "Game");
             let exec = PackageExecutor::new(cfg, "/tmp", "/tmp/out");
-            assert!(exec.validate_platform().is_ok(), "platform {platform} should be valid");
+            assert!(
+                exec.validate_platform().is_ok(),
+                "platform {platform} should be valid"
+            );
         }
     }
 
@@ -700,8 +713,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(tmp.join("main.tscn"), "test scene").unwrap();
 
-        let cfg = ExportConfig::new("linux", "Game")
-            .with_resource("main.tscn");
+        let cfg = ExportConfig::new("linux", "Game").with_resource("main.tscn");
         let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
         exec.validate_and_collect().unwrap();
         assert_eq!(exec.collected_resources().len(), 1);
@@ -719,8 +731,7 @@ mod tests {
         std::fs::write(scenes_dir.join("a.tscn"), "scene a").unwrap();
         std::fs::write(scenes_dir.join("b.tscn"), "scene b").unwrap();
 
-        let cfg = ExportConfig::new("linux", "Game")
-            .with_resource("scenes/");
+        let cfg = ExportConfig::new("linux", "Game").with_resource("scenes/");
         let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
         exec.validate_and_collect().unwrap();
         assert_eq!(exec.collected_resources().len(), 2);
@@ -742,8 +753,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(tmp.join("icon.png"), "png data").unwrap();
 
-        let cfg = ExportConfig::new("linux", "Game")
-            .with_resource("res://icon.png");
+        let cfg = ExportConfig::new("linux", "Game").with_resource("res://icon.png");
         let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
         exec.validate_and_collect().unwrap();
         assert_eq!(exec.collected_resources().len(), 1);
@@ -757,8 +767,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("patina_test_missing_res");
         let _ = std::fs::create_dir_all(&tmp);
 
-        let cfg = ExportConfig::new("linux", "Game")
-            .with_resource("nonexistent.tscn");
+        let cfg = ExportConfig::new("linux", "Game").with_resource("nonexistent.tscn");
         let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
         assert!(matches!(
             exec.validate_and_collect(),
@@ -774,8 +783,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(tmp.join("main.tscn"), "test data").unwrap();
 
-        let cfg = ExportConfig::new("linux", "TestApp")
-            .with_resource("main.tscn");
+        let cfg = ExportConfig::new("linux", "TestApp").with_resource("main.tscn");
         let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
         exec.validate_and_collect().unwrap();
 
@@ -796,8 +804,7 @@ mod tests {
         std::fs::write(tmp.join("scene.tscn"), "scene data here").unwrap();
 
         let out_dir = tmp.join("export_out");
-        let cfg = ExportConfig::new("linux", "MyGame")
-            .with_resource("scene.tscn");
+        let cfg = ExportConfig::new("linux", "MyGame").with_resource("scene.tscn");
         let mut exec = PackageExecutor::new(cfg, &tmp, &out_dir);
         exec.validate_and_collect().unwrap();
         let output_path = exec.write_output().unwrap();
@@ -805,7 +812,9 @@ mod tests {
         assert!(out_dir.join("export_manifest.txt").exists());
         assert!(out_dir.join("resource_list.txt").exists());
         assert!(output_path.exists());
-        assert!(output_path.to_string_lossy().contains("MyGame.linux.release"));
+        assert!(output_path
+            .to_string_lossy()
+            .contains("MyGame.linux.release"));
 
         let manifest = std::fs::read_to_string(out_dir.join("export_manifest.txt")).unwrap();
         assert!(manifest.contains("MyGame"));
@@ -870,8 +879,7 @@ mod tests {
         std::fs::write(sub.join("mesh.obj"), "mesh data").unwrap();
         std::fs::write(tmp.join("assets").join("texture.png"), "tex").unwrap();
 
-        let cfg = ExportConfig::new("linux", "Game")
-            .with_resource("assets/");
+        let cfg = ExportConfig::new("linux", "Game").with_resource("assets/");
         let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
         exec.validate_and_collect().unwrap();
 
@@ -896,8 +904,7 @@ mod tests {
 
         for platform in &["linux", "windows", "macos", "web"] {
             let out = tmp.join(format!("out_{platform}"));
-            let cfg = ExportConfig::new(*platform, "Game")
-                .with_resource("game.tscn");
+            let cfg = ExportConfig::new(*platform, "Game").with_resource("game.tscn");
             let mut exec = PackageExecutor::new(cfg, &tmp, &out);
             let result = exec.run();
             assert!(result.success, "packaging failed for {platform}");

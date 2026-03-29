@@ -3,12 +3,12 @@
 //! Covers ClassDB registration, ray queries (hit/miss/distance/exclusion/mask/box),
 //! shape queries (overlap/closest/exclusion/mask/max_results), and world integration.
 
+use gdcore::math::Vector3;
 use gdobject::class_db;
 use gdphysics3d::body::{BodyId3D, BodyType3D, PhysicsBody3D};
 use gdphysics3d::query::{PhysicsRayQuery3D, PhysicsShapeQuery3D};
 use gdphysics3d::shape::Shape3D;
 use gdphysics3d::world::PhysicsWorld3D;
-use gdcore::math::Vector3;
 use gdscene::node::Node;
 use gdscene::scene_tree::SceneTree;
 
@@ -69,17 +69,35 @@ fn classdb_ray_query_has_properties() {
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"from"), "missing 'from' property");
     assert!(names.contains(&"to"), "missing 'to' property");
-    assert!(names.contains(&"collision_mask"), "missing 'collision_mask'");
-    assert!(names.contains(&"collide_with_bodies"), "missing 'collide_with_bodies'");
-    assert!(names.contains(&"collide_with_areas"), "missing 'collide_with_areas'");
-    assert!(names.contains(&"hit_back_faces"), "missing 'hit_back_faces'");
-    assert!(names.contains(&"hit_from_inside"), "missing 'hit_from_inside'");
+    assert!(
+        names.contains(&"collision_mask"),
+        "missing 'collision_mask'"
+    );
+    assert!(
+        names.contains(&"collide_with_bodies"),
+        "missing 'collide_with_bodies'"
+    );
+    assert!(
+        names.contains(&"collide_with_areas"),
+        "missing 'collide_with_areas'"
+    );
+    assert!(
+        names.contains(&"hit_back_faces"),
+        "missing 'hit_back_faces'"
+    );
+    assert!(
+        names.contains(&"hit_from_inside"),
+        "missing 'hit_from_inside'"
+    );
 }
 
 #[test]
 fn classdb_ray_query_has_create_method() {
     class_db::register_3d_classes();
-    assert!(class_db::class_has_method("PhysicsRayQueryParameters3D", "create"));
+    assert!(class_db::class_has_method(
+        "PhysicsRayQueryParameters3D",
+        "create"
+    ));
 }
 
 #[test]
@@ -105,9 +123,18 @@ fn classdb_shape_query_has_properties() {
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"shape"), "missing 'shape'");
     assert!(names.contains(&"position"), "missing 'position'");
-    assert!(names.contains(&"collision_mask"), "missing 'collision_mask'");
-    assert!(names.contains(&"collide_with_bodies"), "missing 'collide_with_bodies'");
-    assert!(names.contains(&"collide_with_areas"), "missing 'collide_with_areas'");
+    assert!(
+        names.contains(&"collision_mask"),
+        "missing 'collision_mask'"
+    );
+    assert!(
+        names.contains(&"collide_with_bodies"),
+        "missing 'collide_with_bodies'"
+    );
+    assert!(
+        names.contains(&"collide_with_areas"),
+        "missing 'collide_with_areas'"
+    );
     assert!(names.contains(&"motion"), "missing 'motion'");
     assert!(names.contains(&"margin"), "missing 'margin'");
     assert!(names.contains(&"max_results"), "missing 'max_results'");
@@ -161,7 +188,10 @@ fn ray_hits_sphere_at_correct_distance() {
     let q = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 20.0));
     let hit = q.intersect(bodies.iter()).unwrap();
     assert_eq!(hit.body_id, BodyId3D(1));
-    assert!((hit.distance - 9.0).abs() < 0.01, "should hit at z=9 (sphere surface)");
+    assert!(
+        (hit.distance - 9.0).abs() < 0.01,
+        "should hit at z=9 (sphere surface)"
+    );
 }
 
 #[test]
@@ -175,7 +205,10 @@ fn ray_misses_sphere_off_axis() {
 fn ray_respects_max_distance() {
     let bodies = vec![sphere(1, Vector3::new(0.0, 0.0, 10.0), 1.0)];
     let q = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 5.0));
-    assert!(q.intersect(bodies.iter()).is_none(), "ray too short to reach sphere");
+    assert!(
+        q.intersect(bodies.iter()).is_none(),
+        "ray too short to reach sphere"
+    );
 }
 
 #[test]
@@ -194,7 +227,10 @@ fn ray_filters_by_collision_mask() {
 
     let mut q = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 20.0));
     q.collision_mask = 0b0001;
-    assert!(q.intersect(bodies.iter()).is_none(), "mask doesn't match layer");
+    assert!(
+        q.intersect(bodies.iter()).is_none(),
+        "mask doesn't match layer"
+    );
 
     q.collision_mask = 0b0010;
     assert!(q.intersect(bodies.iter()).is_some(), "mask matches layer");
@@ -220,8 +256,14 @@ fn ray_hits_box_face() {
     )];
     let q = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 20.0));
     let hit = q.intersect(bodies.iter()).unwrap();
-    assert!((hit.point.z - 8.0).abs() < 0.01, "should hit box face at z=8");
-    assert!((hit.normal.z - (-1.0)).abs() < 0.01, "normal points toward ray origin");
+    assert!(
+        (hit.point.z - 8.0).abs() < 0.01,
+        "should hit box face at z=8"
+    );
+    assert!(
+        (hit.normal.z - (-1.0)).abs() < 0.01,
+        "normal points toward ray origin"
+    );
 }
 
 #[test]
@@ -242,7 +284,10 @@ fn ray_behind_origin_no_hit() {
 fn ray_diagonal_hit() {
     let bodies = vec![sphere(1, Vector3::new(10.0, 10.0, 0.0), 2.0)];
     let q = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(20.0, 20.0, 0.0));
-    assert!(q.intersect(bodies.iter()).is_some(), "diagonal ray should hit offset sphere");
+    assert!(
+        q.intersect(bodies.iter()).is_some(),
+        "diagonal ray should hit offset sphere"
+    );
 }
 
 #[test]
@@ -329,7 +374,11 @@ fn shape_closest_finds_deepest_overlap() {
     ];
     let q = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 5.0 }, Vector3::ZERO);
     let closest = q.intersect_closest(bodies.iter()).unwrap();
-    assert_eq!(closest.body_id, BodyId3D(2), "body 2 is closer → deeper overlap");
+    assert_eq!(
+        closest.body_id,
+        BodyId3D(2),
+        "body 2 is closer → deeper overlap"
+    );
 }
 
 #[test]
@@ -349,7 +398,11 @@ fn shape_multiple_overlaps() {
     ];
     let q = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 3.0 }, Vector3::ZERO);
     let results = q.intersect(bodies.iter());
-    assert_eq!(results.len(), 3, "should find 3 overlapping, skip 1 far body");
+    assert_eq!(
+        results.len(),
+        3,
+        "should find 3 overlapping, skip 1 far body"
+    );
 }
 
 #[test]
@@ -375,7 +428,10 @@ fn shape_query_reports_depth_and_normal() {
     let q = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
     let results = q.intersect(bodies.iter());
     assert_eq!(results.len(), 1);
-    assert!(results[0].depth > 0.0, "depth should be positive for overlap");
+    assert!(
+        results[0].depth > 0.0,
+        "depth should be positive for overlap"
+    );
     assert!(results[0].normal.x > 0.0, "normal should point toward body");
 }
 
@@ -451,7 +507,7 @@ fn ray_query_through_multiple_aligned_spheres() {
 fn shape_query_at_offset_position() {
     let bodies = vec![
         sphere(1, Vector3::new(51.0, 50.0, 0.0), 1.0), // 1 unit away from query
-        sphere(2, Vector3::ZERO, 1.0),                   // far from query
+        sphere(2, Vector3::ZERO, 1.0),                 // far from query
     ];
     let q = PhysicsShapeQuery3D::new(
         Shape3D::Sphere { radius: 3.0 },

@@ -106,7 +106,10 @@ fn fz8r_snapshot_after_flush_loses_just_pressed() {
 
     let snap = state.snapshot();
     assert!(snap.is_action_pressed("jump"), "held key stays pressed");
-    assert!(!snap.is_action_just_pressed("jump"), "just_pressed cleared by flush");
+    assert!(
+        !snap.is_action_just_pressed("jump"),
+        "just_pressed cleared by flush"
+    );
     assert_eq!(snap.get_action_strength("jump"), 1.0);
 }
 

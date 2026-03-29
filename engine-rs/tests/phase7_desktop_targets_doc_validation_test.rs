@@ -250,9 +250,7 @@ fn ci_tested_count_matches_doc_tier1() {
 
     // Every CI-tested target name should appear in the Tier 1 section.
     // Find the Tier 1 block.
-    let tier1_start = doc
-        .find("Tier 1")
-        .expect("doc must have a Tier 1 section");
+    let tier1_start = doc.find("Tier 1").expect("doc must have a Tier 1 section");
     let tier2_start = doc.find("Tier 2").unwrap_or(doc.len());
     let tier1_block = &doc[tier1_start..tier2_start];
 

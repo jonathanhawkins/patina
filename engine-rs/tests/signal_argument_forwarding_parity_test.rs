@@ -217,7 +217,11 @@ fn unbind_saturates_to_zero_args() {
     signal.emit(&[Variant::Int(1)]);
 
     let recorded = recorder.lock().unwrap();
-    assert_eq!(recorded[0], Vec::<Variant>::new(), "over-unbind yields empty args");
+    assert_eq!(
+        recorded[0],
+        Vec::<Variant>::new(),
+        "over-unbind yields empty args"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -239,10 +243,12 @@ fn deferred_connection_resolves_binds() {
 
     signal.connect(conn);
 
-    let (immediate, deferred) =
-        signal.emit_collecting_deferred(&[Variant::Int(42)]);
+    let (immediate, deferred) = signal.emit_collecting_deferred(&[Variant::Int(42)]);
 
-    assert!(immediate.is_empty(), "deferred connections produce no immediate results");
+    assert!(
+        immediate.is_empty(),
+        "deferred connections produce no immediate results"
+    );
     assert_eq!(deferred.len(), 1);
 
     // The captured args should already have binds applied
@@ -255,10 +261,7 @@ fn deferred_connection_resolves_binds() {
     // Calling the deferred callback should also work
     deferred[0].call();
     let recorded = recorder.lock().unwrap();
-    assert_eq!(
-        recorded[0],
-        vec![Variant::Int(42), Variant::Bool(true)],
-    );
+    assert_eq!(recorded[0], vec![Variant::Int(42), Variant::Bool(true)],);
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +455,11 @@ fn one_shot_with_binds_fires_once() {
         recorded[0],
         vec![Variant::Int(1), Variant::String("tag".into())],
     );
-    assert_eq!(signal.connection_count(), 0, "one-shot removed after firing");
+    assert_eq!(
+        signal.connection_count(),
+        0,
+        "one-shot removed after firing"
+    );
 }
 
 // ===========================================================================
@@ -472,7 +479,10 @@ fn lambda_callable_resolve_args_passthrough() {
 
     let args = vec![Variant::Int(10), Variant::String("hello".into())];
     let resolved = lambda.resolve_args(&args);
-    assert_eq!(resolved, args, "Lambda resolve_args should pass through unchanged");
+    assert_eq!(
+        resolved, args,
+        "Lambda resolve_args should pass through unchanged"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -601,7 +611,11 @@ fn method_and_lambda_forward_identically() {
         body: std::sync::Arc::new(()),
     };
 
-    let args = vec![Variant::Int(42), Variant::String("test".into()), Variant::Bool(false)];
+    let args = vec![
+        Variant::Int(42),
+        Variant::String("test".into()),
+        Variant::Bool(false),
+    ];
 
     let method_resolved = method.resolve_args(&args);
     let lambda_resolved = lambda.resolve_args(&args);
@@ -657,10 +671,7 @@ fn variant_types_preserved_through_bind_unbind() {
     };
     let bound = CallableRef::Bound {
         inner: Box::new(method),
-        bound_args: vec![
-            Variant::Vector2(Vector2::new(1.0, 2.0)),
-            Variant::Nil,
-        ],
+        bound_args: vec![Variant::Vector2(Vector2::new(1.0, 2.0)), Variant::Nil],
     };
 
     let call_args = vec![

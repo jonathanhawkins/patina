@@ -87,7 +87,9 @@ impl ImportResourceType {
     /// File extension patterns for this resource type.
     pub fn extensions(&self) -> &'static [&'static str] {
         match self {
-            Self::Texture => &["png", "jpg", "jpeg", "bmp", "tga", "webp", "svg", "exr", "hdr"],
+            Self::Texture => &[
+                "png", "jpg", "jpeg", "bmp", "tga", "webp", "svg", "exr", "hdr",
+            ],
             Self::Audio => &["wav", "ogg", "mp3", "flac"],
             Self::Scene => &["tscn", "scn", "glb", "gltf"],
             Self::Mesh => &["mesh", "obj"],
@@ -663,7 +665,9 @@ mod tests {
         assert!(!panel.is_visible());
         assert!(panel.selected_path().is_none());
         // Should have defaults for 5 types (Texture, Audio, Scene, Mesh, Font)
-        assert!(panel.default_settings(ImportResourceType::Texture).is_some());
+        assert!(panel
+            .default_settings(ImportResourceType::Texture)
+            .is_some());
         assert!(panel.default_settings(ImportResourceType::Audio).is_some());
     }
 
@@ -799,10 +803,7 @@ mod tests {
             compression: TextureCompression::Lossy,
             ..Default::default()
         });
-        let count = panel.batch_apply(
-            &["res://a.png", "res://b.png", "res://c.png"],
-            &tex,
-        );
+        let count = panel.batch_apply(&["res://a.png", "res://b.png", "res://c.png"], &tex);
         assert_eq!(count, 3);
         assert_eq!(panel.override_count(), 3);
         assert!(panel.has_override("res://b.png"));

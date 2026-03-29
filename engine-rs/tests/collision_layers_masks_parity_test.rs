@@ -102,18 +102,12 @@ fn zero_mask_collides_with_nothing() {
     // mask=0 means (A.mask & B.layer) == 0 for any B.layer
     let a_mask: u32 = 0;
     let b_layer: u32 = 0xFFFFFFFF;
-    assert_eq!(
-        a_mask & b_layer, 0,
-        "mask=0 should never match any layer"
-    );
+    assert_eq!(a_mask & b_layer, 0, "mask=0 should never match any layer");
 
     // And mask=1 with layer=1 should match
     let a_mask2: u32 = 1;
     let b_layer2: u32 = 1;
-    assert_ne!(
-        a_mask2 & b_layer2, 0,
-        "mask=1 & layer=1 should match"
-    );
+    assert_ne!(a_mask2 & b_layer2, 0, "mask=1 & layer=1 should match");
 }
 
 // ===========================================================================
@@ -127,8 +121,11 @@ fn character_body_respects_collision_mask() {
     character.collision_mask = 2; // Only scan layer 2
 
     let mut wall = PhysicsBody2D::new(
-        BodyId(99), BodyType::Static, Vector2::new(12.0, 0.0),
-        Shape2D::Circle { radius: 10.0 }, 1.0,
+        BodyId(99),
+        BodyType::Static,
+        Vector2::new(12.0, 0.0),
+        Shape2D::Circle { radius: 10.0 },
+        1.0,
     );
     wall.collision_layer = 1; // Wall is on layer 1
 
@@ -155,10 +152,18 @@ fn character_mask_matching_logic() {
     assert_eq!(2u32 & 1u32, 0, "mask=2 & layer=1 should not match");
 
     // Multi-bit overlap
-    assert_ne!(0b1010u32 & 0b0010u32, 0, "mask=0b1010 & layer=0b0010 should match");
+    assert_ne!(
+        0b1010u32 & 0b0010u32,
+        0,
+        "mask=0b1010 & layer=0b0010 should match"
+    );
 
     // No overlap
-    assert_eq!(0b1010u32 & 0b0101u32, 0, "mask=0b1010 & layer=0b0101 should not match");
+    assert_eq!(
+        0b1010u32 & 0b0101u32,
+        0,
+        "mask=0b1010 & layer=0b0101 should not match"
+    );
 
     // All-bits mask matches everything
     assert_ne!(0xFFFFFFFFu32 & 1u32, 0, "all-bits mask matches any layer");
@@ -167,9 +172,16 @@ fn character_mask_matching_logic() {
 #[test]
 fn default_layer_mask_is_one() {
     let body = PhysicsBody2D::new(
-        BodyId(1), BodyType::Rigid, Vector2::ZERO, Shape2D::Circle { radius: 5.0 }, 1.0,
+        BodyId(1),
+        BodyType::Rigid,
+        Vector2::ZERO,
+        Shape2D::Circle { radius: 5.0 },
+        1.0,
     );
-    assert_eq!(body.collision_layer, 1, "default collision_layer should be 1");
+    assert_eq!(
+        body.collision_layer, 1,
+        "default collision_layer should be 1"
+    );
     assert_eq!(body.collision_mask, 1, "default collision_mask should be 1");
 }
 

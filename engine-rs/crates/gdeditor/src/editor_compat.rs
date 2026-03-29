@@ -14,15 +14,15 @@
 //! This module does NOT duplicate logic — it is purely a naming/adapter layer.
 
 use crate::inspector::{
-    self, CustomPropertyEditor, EditorInspectorPlugin, InspectorPanel,
-    InspectorPluginRegistry, PropertyCategory, PropertyEditor, PropertyHint,
-    PropertyDefaults, DragAdjust, LinkedValues,
+    self, CustomPropertyEditor, DragAdjust, EditorInspectorPlugin, InspectorPanel,
+    InspectorPluginRegistry, LinkedValues, PropertyCategory, PropertyDefaults, PropertyEditor,
+    PropertyHint,
 };
 use crate::{Editor, EditorCommand, EditorError};
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
-use gdvariant::Variant;
 use gdvariant::variant::VariantType;
+use gdvariant::Variant;
 
 // ===========================================================================
 // Type aliases — Godot names → Patina types
@@ -124,7 +124,10 @@ impl EditorPropertyInfo {
         if !self.hint_string.is_empty() {
             editor = editor.with_tooltip(&self.hint_string);
         }
-        if matches!(self.usage, PropertyUsageFlags::ReadOnly | PropertyUsageFlags::NoEditor) {
+        if matches!(
+            self.usage,
+            PropertyUsageFlags::ReadOnly | PropertyUsageFlags::NoEditor
+        ) {
             editor = editor.read_only();
         }
         editor
@@ -192,7 +195,11 @@ impl<'a> EditorSelection<'a> {
 
     /// Returns the number of selected nodes (0 or 1).
     pub fn get_selected_node_count(&self) -> usize {
-        if self.editor.selected_node().is_some() { 1 } else { 0 }
+        if self.editor.selected_node().is_some() {
+            1
+        } else {
+            0
+        }
     }
 
     /// Returns whether a specific node is selected.
@@ -349,11 +356,14 @@ mod tests {
 
     #[test]
     fn editor_property_info_with_hint() {
-        let info = EditorPropertyInfo::new("speed", VariantType::Float)
-            .with_hint(
-                PropertyHint::Range { min: 0, max: 100, step: 1 },
-                "0,100,1",
-            );
+        let info = EditorPropertyInfo::new("speed", VariantType::Float).with_hint(
+            PropertyHint::Range {
+                min: 0,
+                max: 100,
+                step: 1,
+            },
+            "0,100,1",
+        );
         assert!(matches!(info.hint, PropertyHint::Range { .. }));
         assert_eq!(info.hint_string, "0,100,1");
     }
@@ -362,7 +372,11 @@ mod tests {
     fn editor_property_info_to_custom_editor() {
         let info = EditorPropertyInfo::new("health", VariantType::Int)
             .with_hint(
-                PropertyHint::Range { min: 0, max: 100, step: 1 },
+                PropertyHint::Range {
+                    min: 0,
+                    max: 100,
+                    step: 1,
+                },
                 "Health points",
             )
             .with_usage(PropertyUsageFlags::Default);
@@ -395,10 +409,7 @@ mod tests {
 
     #[test]
     fn validate_property_value_incompatible() {
-        let result = validate_property_value(
-            &Variant::String("hello".into()),
-            VariantType::Int,
-        );
+        let result = validate_property_value(&Variant::String("hello".into()), VariantType::Int);
         assert!(result.is_err());
     }
 

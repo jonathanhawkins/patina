@@ -35,10 +35,7 @@ pub enum ImportError {
     },
     /// Audio decoding failed.
     #[error("decode error for {path}: {source}")]
-    Decode {
-        path: PathBuf,
-        source: DecodeError,
-    },
+    Decode { path: PathBuf, source: DecodeError },
     /// File extension is not a recognized audio format.
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),

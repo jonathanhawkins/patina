@@ -27,9 +27,7 @@
 
 use gdaudio::{AudioBuffer, AudioMixer, AudioServer, AudioStreamPlayback, LoopMode, PlaybackState};
 use gdcore::math::Vector2;
-use gdscene::control::{
-    self, AnchorPreset, FocusMode, SizeFlags, TextAlign,
-};
+use gdscene::control::{self, AnchorPreset, FocusMode, SizeFlags, TextAlign};
 use gdscene::main_loop::MainLoop;
 use gdscene::navigation::{
     NavMesh2D, NavMesh3D, NavPolygon, NavPolygon3D, NavigationAgent2D, NavigationObstacle2D,
@@ -38,7 +36,6 @@ use gdscene::navigation::{
 use gdscene::node::NodeId;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::{Node, SceneTree};
-
 
 const DT: f64 = 1.0 / 60.0;
 const EPSILON: f32 = 1e-4;
@@ -179,16 +176,8 @@ fn r6sku_audio_stereo_bus_rerouting() {
 
     let output = server.mix(2);
     // Channel 0 (L) and channel 1 (R) from stereo source.
-    assert!(
-        (output[0] - 0.8).abs() < 1e-3,
-        "L channel: {}",
-        output[0]
-    );
-    assert!(
-        (output[1] - 0.2).abs() < 1e-3,
-        "R channel: {}",
-        output[1]
-    );
+    assert!((output[0] - 0.8).abs() < 1e-3, "L channel: {}", output[0]);
+    assert!((output[1] - 0.2).abs() < 1e-3, "R channel: {}", output[1]);
 }
 
 // ===========================================================================
@@ -634,7 +623,10 @@ fn r6sku_cross_domain_audio_nav_ui_coexistence() {
         .tree()
         .get_node_by_path("/root/UI/ScoreLabel")
         .expect("ScoreLabel should exist");
-    assert_eq!(control::get_label_text(main_loop.tree(), label_id), "Score: 0");
+    assert_eq!(
+        control::get_label_text(main_loop.tree(), label_id),
+        "Score: 0"
+    );
 }
 
 // ===========================================================================
@@ -669,10 +661,7 @@ fn r6sku_audio_deterministic_output() {
 
     assert_eq!(run_a.len(), run_b.len());
     for (i, (a, b)) in run_a.iter().zip(run_b.iter()).enumerate() {
-        assert!(
-            (a - b).abs() < 1e-10,
-            "sample {i} differs: {a} vs {b}"
-        );
+        assert!((a - b).abs() < 1e-10, "sample {i} differs: {a} vs {b}");
     }
 }
 
@@ -756,10 +745,7 @@ fn r6sku_ui_vbox_container_children_properties() {
 
     // Verify all labels have correct text and flags.
     for (i, &lbl) in labels.iter().enumerate() {
-        assert_eq!(
-            control::get_label_text(&tree, lbl),
-            format!("Item {i}")
-        );
+        assert_eq!(control::get_label_text(&tree, lbl), format!("Item {i}"));
         assert_eq!(control::get_h_size_flags(&tree, lbl), SizeFlags::Expand);
     }
 
@@ -798,10 +784,22 @@ fn r6sku_ui_focus_neighbor_chain() {
     control::set_focus_previous(&mut tree, btn1, "/root/Btn3");
 
     // Verify chain.
-    assert_eq!(control::get_focus_next(&tree, btn1), Some("/root/Btn2".to_string()));
-    assert_eq!(control::get_focus_next(&tree, btn2), Some("/root/Btn3".to_string()));
-    assert_eq!(control::get_focus_next(&tree, btn3), Some("/root/Btn1".to_string()));
-    assert_eq!(control::get_focus_previous(&tree, btn2), Some("/root/Btn1".to_string()));
+    assert_eq!(
+        control::get_focus_next(&tree, btn1),
+        Some("/root/Btn2".to_string())
+    );
+    assert_eq!(
+        control::get_focus_next(&tree, btn2),
+        Some("/root/Btn3".to_string())
+    );
+    assert_eq!(
+        control::get_focus_next(&tree, btn3),
+        Some("/root/Btn1".to_string())
+    );
+    assert_eq!(
+        control::get_focus_previous(&tree, btn2),
+        Some("/root/Btn1".to_string())
+    );
 }
 
 // ===========================================================================

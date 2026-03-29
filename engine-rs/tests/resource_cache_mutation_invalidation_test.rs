@@ -64,10 +64,7 @@ impl ResourceLoader for FakeLoader {
 fn clone_mutate_replace_basic_workflow() {
     let mut cache = ResourceCache::new(CountingLoader::new());
     let original = cache.load("res://player.tres").unwrap();
-    assert_eq!(
-        original.get_property("load_index"),
-        Some(&Variant::Int(1))
-    );
+    assert_eq!(original.get_property("load_index"), Some(&Variant::Int(1)));
 
     // Clone the inner Resource (not Arc::clone), mutate, replace.
     let mut mutated = (*original).clone();
@@ -139,10 +136,7 @@ fn multiple_replace_cycles_produce_correct_state() {
 
     // Final load returns the last replacement.
     let final_res = cache.load("res://counter.tres").unwrap();
-    assert_eq!(
-        final_res.get_property("version"),
-        Some(&Variant::Int(5))
-    );
+    assert_eq!(final_res.get_property("version"), Some(&Variant::Int(5)));
 
     // All intermediate Arcs are distinct.
     for i in 0..arcs.len() {
@@ -334,10 +328,7 @@ fn replace_can_remove_properties() {
 
     let fetched = cache.load("res://item.tres").unwrap();
     assert!(fetched.get_property("load_index").is_none());
-    assert_eq!(
-        fetched.get_property("custom"),
-        Some(&Variant::Bool(true))
-    );
+    assert_eq!(fetched.get_property("custom"), Some(&Variant::Bool(true)));
 }
 
 // ===========================================================================
@@ -356,7 +347,7 @@ fn strong_count_consistent_through_replace() {
 
     // Old Arcs lost the cache ref.
     assert_eq!(Arc::strong_count(&r1), 2); // r1 + r2
-    // Replacement has: cache + our local clone.
+                                           // Replacement has: cache + our local clone.
     assert_eq!(Arc::strong_count(&replacement), 2);
 
     let r3 = cache.load("res://counted.tres").unwrap();

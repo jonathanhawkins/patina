@@ -1435,12 +1435,9 @@ impl SceneTree {
     /// Returns an error if no packed scene source is stored (e.g. scene was
     /// set via `change_scene_to_node`).
     pub fn reload_current_scene(&mut self) -> EngineResult<NodeId> {
-        let packed = self
-            .current_packed_scene
-            .clone()
-            .ok_or_else(|| EngineError::InvalidOperation(
-                "No packed scene source to reload from".into(),
-            ))?;
+        let packed = self.current_packed_scene.clone().ok_or_else(|| {
+            EngineError::InvalidOperation("No packed scene source to reload from".into())
+        })?;
         self.change_scene_to_packed(&packed)
     }
 

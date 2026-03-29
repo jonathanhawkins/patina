@@ -180,10 +180,7 @@ fn parity_closure_beads_annotated() {
 fn no_unannotated_451_parity_numbers() {
     // Scan key docs for lines that contain both "4.5.1" and a percentage
     // without historical annotation.
-    let docs_to_check = [
-        "COMPAT_MATRIX.md",
-        "docs/BENCHMARK_BASELINES.md",
-    ];
+    let docs_to_check = ["COMPAT_MATRIX.md", "docs/BENCHMARK_BASELINES.md"];
 
     for doc_name in &docs_to_check {
         let path = repo_root().join(doc_name);
@@ -232,8 +229,7 @@ fn benchmark_baselines_historical_section() {
 
     // The live baseline must reference 4.6.1
     assert!(
-        content.contains("Baseline: Godot 4.6.1")
-            || content.contains("4.6.1-stable"),
+        content.contains("Baseline: Godot 4.6.1") || content.contains("4.6.1-stable"),
         "BENCHMARK_BASELINES.md must have a live 4.6.1 baseline section"
     );
 }
@@ -251,8 +247,14 @@ fn repin_diff_exists_and_references_both_versions() {
     );
     let content = std::fs::read_to_string(&path).unwrap();
 
-    assert!(content.contains("4.5.1"), "repin diff must reference old pin 4.5.1");
-    assert!(content.contains("4.6.1"), "repin diff must reference new pin 4.6.1");
+    assert!(
+        content.contains("4.5.1"),
+        "repin diff must reference old pin 4.5.1"
+    );
+    assert!(
+        content.contains("4.6.1"),
+        "repin diff must reference new pin 4.6.1"
+    );
     assert!(
         content.contains("Previous pin") || content.contains("previous pin"),
         "repin diff must label 4.5.1 as previous pin"
@@ -322,7 +324,12 @@ fn migration_guide_version_table_complete() {
     let path = repo_root().join("docs/migration-guide.md");
     let content = std::fs::read_to_string(&path).unwrap();
 
-    let required_items = ["Upstream oracle pin", "GDExtension lab", "Scene format", "Minimum Rust"];
+    let required_items = [
+        "Upstream oracle pin",
+        "GDExtension lab",
+        "Scene format",
+        "Minimum Rust",
+    ];
     for item in &required_items {
         assert!(
             content.contains(item),

@@ -29,7 +29,12 @@ use gdvariant::Variant;
 
 /// Creates a MainLoop with a physics scene containing one body of each type.
 /// Returns (main_loop, rigid_id, static_id, kinematic_id).
-fn setup_mixed_body_scene() -> (MainLoop, gdscene::node::NodeId, gdscene::node::NodeId, gdscene::node::NodeId) {
+fn setup_mixed_body_scene() -> (
+    MainLoop,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+) {
     let mut ml = MainLoop::new(SceneTree::new());
     let root = ml.tree().root_id();
 
@@ -64,7 +69,12 @@ fn setup_mixed_body_scene() -> (MainLoop, gdscene::node::NodeId, gdscene::node::
 }
 
 fn get_node_position(ml: &MainLoop, node_id: gdscene::node::NodeId) -> Vector2 {
-    match ml.tree().get_node(node_id).unwrap().get_property("position") {
+    match ml
+        .tree()
+        .get_node(node_id)
+        .unwrap()
+        .get_property("position")
+    {
         Variant::Vector2(v) => v,
         _ => Vector2::ZERO,
     }
@@ -97,7 +107,12 @@ fn kinematic_external_position_write_synced_to_physics() {
     // reflect it back. Since kinematic bodies get their position from
     // sync_to_physics (not from integration), the external write persists.
     let body_id = ml.physics_server().body_for_node(kinematic_id).unwrap();
-    let phys_pos = ml.physics_server().world().get_body(body_id).unwrap().position;
+    let phys_pos = ml
+        .physics_server()
+        .world()
+        .get_body(body_id)
+        .unwrap()
+        .position;
 
     assert!(
         (phys_pos.x - 500.0).abs() < 1.0,
@@ -181,7 +196,12 @@ fn frame_ordering_sync_to_step_sync_from() {
 
     // Kinematic body should be at the externally written position in physics.
     let kin_body_id = ml.physics_server().body_for_node(kinematic_id).unwrap();
-    let kin_phys_pos = ml.physics_server().world().get_body(kin_body_id).unwrap().position;
+    let kin_phys_pos = ml
+        .physics_server()
+        .world()
+        .get_body(kin_body_id)
+        .unwrap()
+        .position;
     assert!(
         (kin_phys_pos.x - 42.0).abs() < 1.0,
         "sync_to_physics must precede step: kinematic at {kin_phys_pos:?}, expected ~42"
@@ -284,7 +304,10 @@ fn kinematic_external_write_overrides_integration_each_tick() {
     // Kinematic body with non-zero linear_velocity.
     let mut kin = Node::new("Mover", "CharacterBody2D");
     kin.set_property("position", Variant::Vector2(Vector2::new(50.0, 50.0)));
-    kin.set_property("linear_velocity", Variant::Vector2(Vector2::new(1000.0, 0.0)));
+    kin.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(1000.0, 0.0)),
+    );
     let kin_id = ml.tree_mut().add_child(root, kin).unwrap();
     let mut s = Node::new("Shape", "CollisionShape2D");
     s.set_property("radius", Variant::Float(4.0));
@@ -360,20 +383,30 @@ fn rigid_external_velocity_write_ignored_by_physics() {
 
     // Step once.
     ml.step(1.0 / 60.0);
-    let vel_after_first = match ml.tree().get_node(rigid_id).unwrap().get_property("linear_velocity") {
+    let vel_after_first = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("linear_velocity")
+    {
         Variant::Vector2(v) => v,
         _ => Vector2::ZERO,
     };
 
     // Externally write a huge velocity on the node.
-    ml.tree_mut()
-        .get_node_mut(rigid_id)
-        .unwrap()
-        .set_property("linear_velocity", Variant::Vector2(Vector2::new(99999.0, 99999.0)));
+    ml.tree_mut().get_node_mut(rigid_id).unwrap().set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(99999.0, 99999.0)),
+    );
 
     // Step again — sync_from_physics overwrites velocity from physics engine.
     ml.step(1.0 / 60.0);
-    let vel_after_second = match ml.tree().get_node(rigid_id).unwrap().get_property("linear_velocity") {
+    let vel_after_second = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("linear_velocity")
+    {
         Variant::Vector2(v) => v,
         _ => Vector2::ZERO,
     };
@@ -408,7 +441,12 @@ fn static_body_no_velocity_writeback() {
 
     // Check the velocity property on the node — it should remain 42 since
     // sync_from_physics skips static bodies entirely.
-    let vel = match ml.tree().get_node(static_id).unwrap().get_property("linear_velocity") {
+    let vel = match ml
+        .tree()
+        .get_node(static_id)
+        .unwrap()
+        .get_property("linear_velocity")
+    {
         Variant::Vector2(v) => v,
         _ => Vector2::new(42.0, 0.0), // default if not found means it wasn't overwritten
     };
@@ -434,7 +472,12 @@ fn kinematic_last_write_wins_between_ticks() {
     ml.step(1.0 / 60.0);
 
     let body_id = ml.physics_server().body_for_node(kinematic_id).unwrap();
-    let phys_pos = ml.physics_server().world().get_body(body_id).unwrap().position;
+    let phys_pos = ml
+        .physics_server()
+        .world()
+        .get_body(body_id)
+        .unwrap()
+        .position;
     assert!(
         (phys_pos.x - 300.0).abs() < 1.0,
         "last external write should win for kinematic: got {phys_pos:?}"
@@ -483,7 +526,12 @@ fn kinematic_external_rotation_write_synced() {
     ml.step(1.0 / 60.0);
 
     let body_id = ml.physics_server().body_for_node(kinematic_id).unwrap();
-    let phys_rot = ml.physics_server().world().get_body(body_id).unwrap().rotation;
+    let phys_rot = ml
+        .physics_server()
+        .world()
+        .get_body(body_id)
+        .unwrap()
+        .rotation;
 
     assert!(
         (phys_rot as f64 - std::f64::consts::FRAC_PI_4).abs() < 0.01,
@@ -510,7 +558,12 @@ fn rigid_body_external_rotation_write_overwritten() {
     ml.step(1.0 / 60.0);
 
     // Physics should overwrite with its own state.
-    let rot = match ml.tree().get_node(rigid_id).unwrap().get_property("rotation") {
+    let rot = match ml
+        .tree()
+        .get_node(rigid_id)
+        .unwrap()
+        .get_property("rotation")
+    {
         Variant::Float(f) => f,
         _ => 0.0,
     };
@@ -553,7 +606,12 @@ fn simultaneous_external_writes_on_all_body_types() {
 
     // Kinematic: external write synced to physics.
     let kin_body_id = ml.physics_server().body_for_node(kinematic_id).unwrap();
-    let kin_phys_pos = ml.physics_server().world().get_body(kin_body_id).unwrap().position;
+    let kin_phys_pos = ml
+        .physics_server()
+        .world()
+        .get_body(kin_body_id)
+        .unwrap()
+        .position;
     assert!(
         (kin_phys_pos.x - 600.0).abs() < 1.0,
         "kinematic external write must be synced: got {kin_phys_pos:?}"

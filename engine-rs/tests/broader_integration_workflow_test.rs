@@ -39,14 +39,11 @@ const HIERARCHY_TSCN: &str = include_str!("../../fixtures/scenes/hierarchy.tscn"
 const PLATFORMER_TSCN: &str = include_str!("../../fixtures/scenes/platformer.tscn");
 const PHYSICS_TSCN: &str = include_str!("../../fixtures/scenes/physics_playground.tscn");
 const UI_MENU_TSCN: &str = include_str!("../../fixtures/scenes/ui_menu.tscn");
-const SIGNALS_COMPLEX_TSCN: &str =
-    include_str!("../../fixtures/scenes/signals_complex.tscn");
+const SIGNALS_COMPLEX_TSCN: &str = include_str!("../../fixtures/scenes/signals_complex.tscn");
 const SPACE_SHOOTER_TSCN: &str = include_str!("../../fixtures/scenes/space_shooter.tscn");
 const PROPERTIES_TSCN: &str = include_str!("../../fixtures/scenes/with_properties.tscn");
-const CHARACTER_BODY_TSCN: &str =
-    include_str!("../../fixtures/scenes/character_body_test.tscn");
-const UNIQUE_NAME_TSCN: &str =
-    include_str!("../../fixtures/scenes/unique_name_resolution.tscn");
+const CHARACTER_BODY_TSCN: &str = include_str!("../../fixtures/scenes/character_body_test.tscn");
+const UNIQUE_NAME_TSCN: &str = include_str!("../../fixtures/scenes/unique_name_resolution.tscn");
 const SIGNAL_INSTANTIATION_TSCN: &str =
     include_str!("../../fixtures/scenes/signal_instantiation.tscn");
 const PHYSICS_EXTENDED_TSCN: &str =
@@ -389,18 +386,14 @@ fn s6w_extended_300_frame_multi_scene_stability() {
     );
 
     // Verify final scene is intact.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/Root/Player")
-            .is_some()
-    );
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/Root/Enemy")
-            .is_some()
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/Root/Player")
+        .is_some());
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/Root/Enemy")
+        .is_some());
 }
 
 // ===========================================================================
@@ -478,12 +471,10 @@ fn s6w_headless_backend_multi_scene_workflow() {
     assert_eq!(backend.frames_run(), 60);
 
     // Verify final scene nodes.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/Root/HUD")
-            .is_some()
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/Root/HUD")
+        .is_some());
 }
 
 // ===========================================================================
@@ -544,18 +535,14 @@ fn s6w_three_scene_additive_composition() {
     assert_eq!(main_loop.frame_count(), 60);
 
     // All scenes should still have their nodes after stepping.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/Player")
-            .is_some()
-    );
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/Root/Player/Sprite")
-            .is_some()
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/Player")
+        .is_some());
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/Root/Player/Sprite")
+        .is_some());
 }
 
 // ===========================================================================
@@ -604,24 +591,18 @@ fn s6w_character_body_physics_workflow() {
     main_loop.register_physics_bodies();
 
     // Verify initial structure.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/Player")
-            .is_some()
-    );
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/Platform")
-            .is_some()
-    );
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/Wall")
-            .is_some()
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/Player")
+        .is_some());
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/Platform")
+        .is_some());
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/Wall")
+        .is_some());
 
     // Step with physics.
     main_loop.run_frames(60, DT);
@@ -937,14 +918,8 @@ fn s6w_step_vs_run_frame_deterministic_across_transition() {
     assert_eq!(ml_a.physics_time(), ml_b.physics_time());
 
     // Ball position should match.
-    let ball_a = ml_a
-        .tree()
-        .get_node_by_path("/root/World/Ball")
-        .unwrap();
-    let ball_b = ml_b
-        .tree()
-        .get_node_by_path("/root/World/Ball")
-        .unwrap();
+    let ball_a = ml_a.tree().get_node_by_path("/root/World/Ball").unwrap();
+    let ball_b = ml_b.tree().get_node_by_path("/root/World/Ball").unwrap();
     assert_eq!(
         get_position(ml_a.tree(), ball_a),
         get_position(ml_b.tree(), ball_b),
@@ -968,11 +943,12 @@ fn s6w_rapid_scene_transitions_100_cycles() {
 
     // Rapidly alternate between two scenes, 1 frame each.
     for i in 0..100u32 {
-        let packed = if i % 2 == 0 { &packed_hier } else { &packed_min };
-        main_loop
-            .tree_mut()
-            .change_scene_to_packed(packed)
-            .unwrap();
+        let packed = if i % 2 == 0 {
+            &packed_hier
+        } else {
+            &packed_min
+        };
+        main_loop.tree_mut().change_scene_to_packed(packed).unwrap();
         main_loop.step(DT);
     }
 
@@ -1062,24 +1038,18 @@ fn s6w_extended_physics_multi_body_workflow() {
     main_loop.register_physics_bodies();
 
     // Verify multi-body structure.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/BallA")
-            .is_some()
-    );
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/BallB")
-            .is_some()
-    );
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/Player")
-            .is_some()
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/BallA")
+        .is_some());
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/BallB")
+        .is_some());
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/Player")
+        .is_some());
 
     // Run 120 frames with physics.
     main_loop.run_frames(120, DT);

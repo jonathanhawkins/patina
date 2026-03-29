@@ -9,8 +9,8 @@ use gdcore::math3d::{Basis, Transform3D};
 use gdrender3d::compare::{compare_framebuffers_3d, diff_image_3d};
 use gdrender3d::renderer::FrameBuffer3D;
 use gdrender3d::test_adapter::{
-    assert_depth_3d, assert_pixel_color_3d, capture_frame_3d,
-    count_depth_written, count_visible_pixels, frame_data_to_buffer_3d, save_ppm_3d,
+    assert_depth_3d, assert_pixel_color_3d, capture_frame_3d, count_depth_written,
+    count_visible_pixels, frame_data_to_buffer_3d, save_ppm_3d,
 };
 use gdrender3d::SoftwareRenderer3D;
 use gdserver3d::material::{Material3D, ShadingMode};
@@ -56,7 +56,10 @@ fn single_cube_visible() {
     let vp = Viewport3D::new(W, H);
     let fb = capture_frame_3d(&mut renderer, &vp);
     let visible = count_visible_pixels(&fb);
-    assert!(visible > 10, "cube wireframe should produce >10 pixels, got {visible}");
+    assert!(
+        visible > 10,
+        "cube wireframe should produce >10 pixels, got {visible}"
+    );
 }
 
 // 3. Deterministic rendering — identical input produces identical output.
@@ -107,15 +110,26 @@ fn material_albedo_controls_color() {
         .iter()
         .filter(|c| c.r > 0.9 && c.g < 0.1 && c.b < 0.1)
         .count();
-    assert!(red_pixels > 0, "red material should produce red wireframe pixels");
+    assert!(
+        red_pixels > 0,
+        "red material should produce red wireframe pixels"
+    );
 }
 
 // 6. Two cubes at different depths — both visible in wireframe.
 #[test]
 fn two_cubes_at_different_depths() {
     let mut renderer = SoftwareRenderer3D::new();
-    cube_at(&mut renderer, Vector3::new(-1.0, 0.0, -4.0), Color::rgb(1.0, 0.0, 0.0));
-    cube_at(&mut renderer, Vector3::new(1.0, 0.0, -8.0), Color::rgb(0.0, 1.0, 0.0));
+    cube_at(
+        &mut renderer,
+        Vector3::new(-1.0, 0.0, -4.0),
+        Color::rgb(1.0, 0.0, 0.0),
+    );
+    cube_at(
+        &mut renderer,
+        Vector3::new(1.0, 0.0, -8.0),
+        Color::rgb(0.0, 1.0, 0.0),
+    );
     let vp = Viewport3D::new(W, H);
     let fb = capture_frame_3d(&mut renderer, &vp);
 
@@ -140,12 +154,20 @@ fn compare_identical_frames() {
 #[test]
 fn compare_detects_differences() {
     let mut renderer1 = SoftwareRenderer3D::new();
-    cube_at(&mut renderer1, Vector3::new(0.0, 0.0, -5.0), Color::rgb(1.0, 0.0, 0.0));
+    cube_at(
+        &mut renderer1,
+        Vector3::new(0.0, 0.0, -5.0),
+        Color::rgb(1.0, 0.0, 0.0),
+    );
     let vp = Viewport3D::new(W, H);
     let fb1 = capture_frame_3d(&mut renderer1, &vp);
 
     let mut renderer2 = SoftwareRenderer3D::new();
-    cube_at(&mut renderer2, Vector3::new(0.0, 0.0, -5.0), Color::rgb(0.0, 1.0, 0.0));
+    cube_at(
+        &mut renderer2,
+        Vector3::new(0.0, 0.0, -5.0),
+        Color::rgb(0.0, 1.0, 0.0),
+    );
     let fb2 = capture_frame_3d(&mut renderer2, &vp);
 
     let result = compare_framebuffers_3d(&fb1, &fb2, 0.0, DEPTH_TOL);

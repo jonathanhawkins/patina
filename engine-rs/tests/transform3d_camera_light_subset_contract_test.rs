@@ -97,10 +97,7 @@ fn plane_ray_intersection_downward_onto_floor() {
 fn plane_ray_misses_when_parallel() {
     let floor = Plane::new(Vector3::UP, 0.0);
     // Horizontal ray — parallel to floor
-    let hit = floor.intersects_ray(
-        Vector3::new(0.0, 5.0, 0.0),
-        Vector3::new(1.0, 0.0, 0.0),
-    );
+    let hit = floor.intersects_ray(Vector3::new(0.0, 5.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
     assert!(hit.is_none(), "parallel ray should miss");
 }
 
@@ -108,20 +105,14 @@ fn plane_ray_misses_when_parallel() {
 fn plane_ray_misses_when_pointing_away() {
     let floor = Plane::new(Vector3::UP, 0.0);
     // Upward ray from above floor
-    let hit = floor.intersects_ray(
-        Vector3::new(0.0, 5.0, 0.0),
-        Vector3::new(0.0, 1.0, 0.0),
-    );
+    let hit = floor.intersects_ray(Vector3::new(0.0, 5.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
     assert!(hit.is_none(), "ray pointing away should miss");
 }
 
 #[test]
 fn plane_segment_intersection_crosses_plane() {
     let wall = Plane::new(Vector3::new(1.0, 0.0, 0.0), 5.0); // X=5 wall
-    let hit = wall.intersects_segment(
-        Vector3::new(0.0, 0.0, 0.0),
-        Vector3::new(10.0, 0.0, 0.0),
-    );
+    let hit = wall.intersects_segment(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
     assert!(hit.is_some());
     let pt = hit.unwrap();
     assert!(approx(pt.x, 5.0), "segment hits at X=5");
@@ -131,17 +122,17 @@ fn plane_segment_intersection_crosses_plane() {
 fn plane_segment_misses_when_both_sides_same() {
     let wall = Plane::new(Vector3::new(1.0, 0.0, 0.0), 5.0);
     // Both endpoints on the negative side
-    let hit = wall.intersects_segment(
-        Vector3::new(0.0, 0.0, 0.0),
-        Vector3::new(3.0, 0.0, 0.0),
-    );
+    let hit = wall.intersects_segment(Vector3::new(0.0, 0.0, 0.0), Vector3::new(3.0, 0.0, 0.0));
     assert!(hit.is_none(), "segment entirely before plane should miss");
 }
 
 #[test]
 fn plane_normalized_scales_normal_and_distance() {
     let p = Plane::new(Vector3::new(0.0, 3.0, 0.0), 6.0).normalized();
-    assert!(approx_vec3(p.normal, Vector3::UP), "normal should be unit Y");
+    assert!(
+        approx_vec3(p.normal, Vector3::UP),
+        "normal should be unit Y"
+    );
     assert!(approx(p.d, 2.0), "distance scaled by 1/3");
 }
 
@@ -171,12 +162,7 @@ fn perspective_maps_near_plane_center_to_ndc_origin() {
 
 #[test]
 fn perspective_w_negative_for_camera_space_negative_z() {
-    let mat = perspective_projection_matrix(
-        std::f32::consts::FRAC_PI_2,
-        16.0 / 9.0,
-        0.05,
-        4000.0,
-    );
+    let mat = perspective_projection_matrix(std::f32::consts::FRAC_PI_2, 16.0 / 9.0, 0.05, 4000.0);
     // m[2][3] = -1.0 for standard OpenGL-style perspective
     assert!(
         approx(mat[2][3], -1.0),
@@ -223,10 +209,7 @@ fn orthographic_edge_maps_to_ndc_boundary() {
 
     // Right edge (10, 0, -1) should map to NDC x=1
     let x = mat[0][0] * 10.0 + mat[3][0];
-    assert!(
-        approx(x, 1.0),
-        "right edge should map to NDC x=1: got {x}"
-    );
+    assert!(approx(x, 1.0), "right edge should map to NDC x=1: got {x}");
 
     // Top edge (0, 5, -1) should map to NDC y=1
     let y = mat[1][1] * 5.0 + mat[3][1];
@@ -255,8 +238,15 @@ fn point_light_factory_defaults() {
     assert_eq!(light.light_type, LightType::Point);
     assert_eq!(light.position, pos);
     assert!(approx(light.range, 10.0));
-    assert_eq!(light.direction, Vector3::ZERO, "point light has no direction");
-    assert!(approx(light.spot_angle, 0.0), "point light has no spot angle");
+    assert_eq!(
+        light.direction,
+        Vector3::ZERO,
+        "point light has no direction"
+    );
+    assert!(
+        approx(light.spot_angle, 0.0),
+        "point light has no spot angle"
+    );
 }
 
 #[test]
@@ -288,11 +278,7 @@ fn light_mutation_energy_and_color() {
 
 #[test]
 fn spot_light_angle_mutation() {
-    let mut light = Light3D::spot(
-        Light3DId(4),
-        Vector3::ZERO,
-        Vector3::new(0.0, -1.0, 0.0),
-    );
+    let mut light = Light3D::spot(Light3DId(4), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0));
     light.spot_angle = std::f32::consts::FRAC_PI_6; // 30°
     assert!(approx(light.spot_angle, std::f32::consts::FRAC_PI_6));
 }
@@ -429,8 +415,14 @@ fn aabb_has_volume_false_for_flat() {
 fn aabb_expand_to_include_point() {
     let a = Aabb::new(Vector3::ZERO, Vector3::ONE);
     let expanded = a.expand(Vector3::new(5.0, 5.0, 5.0));
-    assert!(expanded.contains_point(Vector3::new(0.5, 0.5, 0.5)), "still contains original");
-    assert!(expanded.contains_point(Vector3::new(4.0, 4.0, 4.0)), "contains new region");
+    assert!(
+        expanded.contains_point(Vector3::new(0.5, 0.5, 0.5)),
+        "still contains original"
+    );
+    assert!(
+        expanded.contains_point(Vector3::new(4.0, 4.0, 4.0)),
+        "contains new region"
+    );
     assert!(approx_vec3(expanded.position, Vector3::ZERO));
     assert!(approx_vec3(expanded.size, Vector3::new(5.0, 5.0, 5.0)));
 }
@@ -568,7 +560,10 @@ fn camera_and_lights_under_common_parent() {
     // Verify camera
     assert!(approx(node3d::get_fov(&tree, cam_id) as f32, 75.0));
     let cam_node = tree.get_node(cam_id).unwrap();
-    assert_eq!(cam_node.get_property("current"), gdvariant::Variant::Bool(true));
+    assert_eq!(
+        cam_node.get_property("current"),
+        gdvariant::Variant::Bool(true)
+    );
 
     // Verify sun
     assert!(approx(node3d::get_light_energy(&tree, sun_id) as f32, 1.2));
@@ -660,18 +655,9 @@ fn looking_at_produces_orthonormal_basis() {
     );
 
     // Check orthogonality: dot products of basis vectors should be ~0
-    assert!(
-        approx(t.basis.x.dot(t.basis.y), 0.0),
-        "x·y should be 0"
-    );
-    assert!(
-        approx(t.basis.y.dot(t.basis.z), 0.0),
-        "y·z should be 0"
-    );
-    assert!(
-        approx(t.basis.x.dot(t.basis.z), 0.0),
-        "x·z should be 0"
-    );
+    assert!(approx(t.basis.x.dot(t.basis.y), 0.0), "x·y should be 0");
+    assert!(approx(t.basis.y.dot(t.basis.z), 0.0), "y·z should be 0");
+    assert!(approx(t.basis.x.dot(t.basis.z), 0.0), "x·z should be 0");
 }
 
 #[test]
@@ -743,7 +729,10 @@ fn basis_from_quaternion_matches_from_euler() {
 #[test]
 fn viewport_aspect_square_is_one() {
     let vp = Viewport3D::new(256, 256);
-    assert!(approx(vp.aspect(), 1.0), "square viewport aspect should be 1.0");
+    assert!(
+        approx(vp.aspect(), 1.0),
+        "square viewport aspect should be 1.0"
+    );
 }
 
 #[test]
@@ -875,7 +864,10 @@ fn parity_report_is_functional_requires_camera_mesh_coverage() {
     let (snapshot, _) = adapter.render_frame(&tree);
     let report = snapshot.parity_report();
 
-    assert!(report.is_functional(), "camera+visible mesh should be functional");
+    assert!(
+        report.is_functional(),
+        "camera+visible mesh should be functional"
+    );
     assert!(report.has_camera);
     assert!(report.mesh_count > 0);
     assert!(report.coverage > 0.0);
@@ -894,7 +886,10 @@ fn parity_report_not_functional_without_mesh() {
     let (snapshot, _) = adapter.render_frame(&tree);
     let report = snapshot.parity_report();
 
-    assert!(!report.is_functional(), "camera-only scene should not be functional");
+    assert!(
+        !report.is_functional(),
+        "camera-only scene should not be functional"
+    );
 }
 
 #[test]
@@ -906,7 +901,8 @@ fn parity_report_json_contains_all_fields() {
     let cam_id = tree.add_child(root, cam).unwrap();
     node3d::set_camera_current(&mut tree, cam_id, true);
 
-    tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+    tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
 
     let mesh = Node::new("Cube", "MeshInstance3D");
     tree.add_child(root, mesh).unwrap();
@@ -1011,7 +1007,8 @@ fn snapshot_json_contains_all_fields() {
     let mesh = Node::new("Cube", "MeshInstance3D");
     tree.add_child(root, mesh).unwrap();
 
-    tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+    tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+        .unwrap();
 
     let mut adapter = RenderServer3DAdapter::new(32, 32);
     let (snapshot, _) = adapter.render_frame(&tree);
@@ -1030,9 +1027,15 @@ fn snapshot_json_contains_all_fields() {
         "\"camera_fov\":",
     ];
     for field in &required_fields {
-        assert!(json.contains(field), "snapshot JSON missing {field}: {json}");
+        assert!(
+            json.contains(field),
+            "snapshot JSON missing {field}: {json}"
+        );
     }
-    assert!(json.starts_with('{') && json.ends_with('}'), "must be valid JSON object");
+    assert!(
+        json.starts_with('{') && json.ends_with('}'),
+        "must be valid JSON object"
+    );
 }
 
 // ===========================================================================
@@ -1087,7 +1090,10 @@ fn adapter_default_mesh_is_cube() {
     let (snapshot, _) = adapter.render_frame(&tree);
 
     assert_eq!(snapshot.visible_mesh_count, 1);
-    assert!(snapshot.nonblack_pixel_count > 0, "default cube should produce pixels");
+    assert!(
+        snapshot.nonblack_pixel_count > 0,
+        "default cube should produce pixels"
+    );
 }
 
 #[test]
@@ -1109,7 +1115,10 @@ fn adapter_sphere_mesh_type_dispatch() {
     let (snapshot, _) = adapter.render_frame(&tree);
 
     assert_eq!(snapshot.visible_mesh_count, 1);
-    assert!(snapshot.nonblack_pixel_count > 0, "sphere should produce pixels");
+    assert!(
+        snapshot.nonblack_pixel_count > 0,
+        "sphere should produce pixels"
+    );
 }
 
 // ===========================================================================
@@ -1119,7 +1128,11 @@ fn adapter_sphere_mesh_type_dispatch() {
 #[test]
 fn adapter_frame_counter_starts_at_zero() {
     let adapter = RenderServer3DAdapter::new(32, 32);
-    assert_eq!(adapter.frame_counter(), 0, "initial frame counter should be 0");
+    assert_eq!(
+        adapter.frame_counter(),
+        0,
+        "initial frame counter should be 0"
+    );
 }
 
 #[test]
@@ -1137,7 +1150,10 @@ fn adapter_frame_counter_increments_each_render() {
 #[test]
 fn adapter_last_frame_none_before_render() {
     let adapter = RenderServer3DAdapter::new(32, 32);
-    assert!(adapter.last_frame().is_none(), "no frame before first render");
+    assert!(
+        adapter.last_frame().is_none(),
+        "no frame before first render"
+    );
 }
 
 #[test]
@@ -1145,7 +1161,10 @@ fn adapter_last_frame_some_after_render() {
     let tree = SceneTree::new();
     let mut adapter = RenderServer3DAdapter::new(32, 32);
     adapter.render_frame(&tree);
-    assert!(adapter.last_frame().is_some(), "should have frame after render");
+    assert!(
+        adapter.last_frame().is_some(),
+        "should have frame after render"
+    );
 }
 
 // ===========================================================================
@@ -1166,7 +1185,10 @@ fn light3d_point_defaults_and_range() {
     let pos = Vector3::new(5.0, 10.0, 3.0);
     let light = Light3D::point(Light3DId(2), pos);
     assert_eq!(light.light_type, LightType::Point);
-    assert!(approx(light.range, 10.0), "default point range should be 10.0");
+    assert!(
+        approx(light.range, 10.0),
+        "default point range should be 10.0"
+    );
     assert!(
         approx_vec3(light.position, pos),
         "point light position should match"

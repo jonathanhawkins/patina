@@ -21,8 +21,7 @@ fn repo_root() -> PathBuf {
 
 fn read_doc(rel_path: &str) -> String {
     let path = repo_root().join(rel_path);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {rel_path}: {e}"))
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {rel_path}: {e}"))
 }
 
 // ===========================================================================

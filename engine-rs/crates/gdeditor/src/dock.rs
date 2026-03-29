@@ -193,10 +193,7 @@ fn classify_node_color(class_name: &str) -> IconColorCategory {
 }
 
 /// Generate configuration warnings for a node based on its type and children.
-pub fn compute_node_warnings(
-    tree: &SceneTree,
-    node_id: NodeId,
-) -> Vec<NodeWarning> {
+pub fn compute_node_warnings(tree: &SceneTree, node_id: NodeId) -> Vec<NodeWarning> {
     let mut warnings = Vec::new();
     let node = match tree.get_node(node_id) {
         Some(n) => n,
@@ -215,9 +212,7 @@ pub fn compute_node_warnings(
                 if !is_body {
                     warnings.push(NodeWarning {
                         severity: WarningSeverity::Warning,
-                        message: format!(
-                            "{class} must be a child of a physics body or area node."
-                        ),
+                        message: format!("{class} must be a child of a physics body or area node."),
                     });
                 }
             }
@@ -225,10 +220,7 @@ pub fn compute_node_warnings(
     }
 
     // RigidBody/CharacterBody/StaticBody without CollisionShape child
-    if class.contains("Body2D")
-        || class.contains("Body3D")
-        || class.starts_with("Area")
-    {
+    if class.contains("Body2D") || class.contains("Body3D") || class.starts_with("Area") {
         let has_shape = children.iter().any(|&cid| {
             tree.get_node(cid)
                 .map(|n| n.class_name().starts_with("CollisionShape"))
@@ -237,9 +229,7 @@ pub fn compute_node_warnings(
         if !has_shape {
             warnings.push(NodeWarning {
                 severity: WarningSeverity::Warning,
-                message: format!(
-                    "{class} has no CollisionShape child — collisions will not work."
-                ),
+                message: format!("{class} has no CollisionShape child — collisions will not work."),
             });
         }
     }
@@ -428,10 +418,7 @@ impl SceneTreeDock {
             gdvariant::Variant::Bool(true)
         );
 
-        let locked = matches!(
-            node.get_property("_locked"),
-            gdvariant::Variant::Bool(true)
-        );
+        let locked = matches!(node.get_property("_locked"), gdvariant::Variant::Bool(true));
 
         let instance_source = match node.get_property("_instance_source") {
             gdvariant::Variant::String(s) if !s.is_empty() => Some(s.clone()),
@@ -518,7 +505,14 @@ impl DockPanel for SceneTreeDock {
 
     fn refresh(&mut self, tree: &SceneTree) {
         self.entries.clear();
-        Self::collect_entries(tree, tree.root_id(), 0, &self.script_paths, &self.signal_counts, &mut self.entries);
+        Self::collect_entries(
+            tree,
+            tree.root_id(),
+            0,
+            &self.script_paths,
+            &self.signal_counts,
+            &mut self.entries,
+        );
         tracing::debug!("SceneTreeDock refreshed: {} entries", self.entries.len());
     }
 }
@@ -602,9 +596,7 @@ pub struct PluginDockManager {
 impl PluginDockManager {
     /// Creates a new empty dock manager.
     pub fn new() -> Self {
-        Self {
-            panels: Vec::new(),
-        }
+        Self { panels: Vec::new() }
     }
 
     /// Registers a new dock panel from a plugin.
@@ -612,9 +604,10 @@ impl PluginDockManager {
     /// If a panel with the same plugin_id and title already exists, it is
     /// not duplicated.
     pub fn add_dock(&mut self, plugin_id: &str, slot: DockSlot, title: &str) {
-        let already_exists = self.panels.iter().any(|p| {
-            p.plugin_id == plugin_id && p.title == title
-        });
+        let already_exists = self
+            .panels
+            .iter()
+            .any(|p| p.plugin_id == plugin_id && p.title == title);
         if !already_exists {
             self.panels.push(PluginDockPanel {
                 plugin_id: plugin_id.to_string(),
@@ -632,7 +625,8 @@ impl PluginDockManager {
 
     /// Removes a specific dock panel by plugin ID and title.
     pub fn remove_dock(&mut self, plugin_id: &str, title: &str) {
-        self.panels.retain(|p| !(p.plugin_id == plugin_id && p.title == title));
+        self.panels
+            .retain(|p| !(p.plugin_id == plugin_id && p.title == title));
     }
 
     /// Returns all registered dock panels.
@@ -655,9 +649,11 @@ impl PluginDockManager {
 
     /// Sets the visibility of a dock panel.
     pub fn set_visible(&mut self, plugin_id: &str, title: &str, visible: bool) {
-        if let Some(panel) = self.panels.iter_mut().find(|p| {
-            p.plugin_id == plugin_id && p.title == title
-        }) {
+        if let Some(panel) = self
+            .panels
+            .iter_mut()
+            .find(|p| p.plugin_id == plugin_id && p.title == title)
+        {
             panel.visible = visible;
         }
     }
@@ -669,7 +665,10 @@ impl PluginDockManager {
 
     /// Returns panels registered by a specific plugin.
     pub fn panels_for_plugin(&self, plugin_id: &str) -> Vec<&PluginDockPanel> {
-        self.panels.iter().filter(|p| p.plugin_id == plugin_id).collect()
+        self.panels
+            .iter()
+            .filter(|p| p.plugin_id == plugin_id)
+            .collect()
     }
 }
 
@@ -883,7 +882,10 @@ mod tests {
         assert_eq!(classify_node_color("Camera3D"), IconColorCategory::Node3D);
         assert_eq!(classify_node_color("Skeleton3D"), IconColorCategory::Node3D);
         assert_eq!(classify_node_color("Light3D"), IconColorCategory::Node3D);
-        assert_eq!(classify_node_color("StaticBody3D"), IconColorCategory::Node3D);
+        assert_eq!(
+            classify_node_color("StaticBody3D"),
+            IconColorCategory::Node3D
+        );
     }
 
     #[test]
@@ -897,8 +899,14 @@ mod tests {
     fn classify_control_types() {
         assert_eq!(classify_node_color("CheckBox"), IconColorCategory::Control);
         assert_eq!(classify_node_color("TextEdit"), IconColorCategory::Control);
-        assert_eq!(classify_node_color("RichTextLabel"), IconColorCategory::Control);
-        assert_eq!(classify_node_color("ProgressBar"), IconColorCategory::Control);
+        assert_eq!(
+            classify_node_color("RichTextLabel"),
+            IconColorCategory::Control
+        );
+        assert_eq!(
+            classify_node_color("ProgressBar"),
+            IconColorCategory::Control
+        );
     }
 
     // -- SceneTreeEntry indicator tests --
@@ -910,13 +918,25 @@ mod tests {
         dock.refresh(&tree);
 
         // root is "Node" → Default
-        assert_eq!(dock.entries()[0].icon.color_category, IconColorCategory::Default);
+        assert_eq!(
+            dock.entries()[0].icon.color_category,
+            IconColorCategory::Default
+        );
         // Main is "Node" → Default
-        assert_eq!(dock.entries()[1].icon.color_category, IconColorCategory::Default);
+        assert_eq!(
+            dock.entries()[1].icon.color_category,
+            IconColorCategory::Default
+        );
         // Player is "Node2D" → Node2D
-        assert_eq!(dock.entries()[2].icon.color_category, IconColorCategory::Node2D);
+        assert_eq!(
+            dock.entries()[2].icon.color_category,
+            IconColorCategory::Node2D
+        );
         // Enemy is "Sprite2D" → Node2D
-        assert_eq!(dock.entries()[3].icon.color_category, IconColorCategory::Node2D);
+        assert_eq!(
+            dock.entries()[3].icon.color_category,
+            IconColorCategory::Node2D
+        );
     }
 
     #[test]

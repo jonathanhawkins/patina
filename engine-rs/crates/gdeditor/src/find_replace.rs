@@ -366,7 +366,8 @@ mod tests {
         FindReplace::new()
     }
 
-    const SAMPLE: &str = "func _ready():\n    var speed = 10\n    var speed_max = 100\n    print(speed)\n";
+    const SAMPLE: &str =
+        "func _ready():\n    var speed = 10\n    var speed_max = 100\n    print(speed)\n";
 
     // -- SearchMatch --
 
@@ -415,7 +416,10 @@ mod tests {
     fn empty_pattern_error() {
         let fr = engine();
         let cfg = FindReplaceConfig::new("");
-        assert_eq!(fr.find_all("text", &cfg).unwrap_err(), FindReplaceError::EmptyPattern);
+        assert_eq!(
+            fr.find_all("text", &cfg).unwrap_err(),
+            FindReplaceError::EmptyPattern
+        );
     }
 
     // -- Plain text find --
@@ -617,8 +621,7 @@ mod tests {
     #[test]
     fn replace_at_first() {
         let fr = engine();
-        let cfg = FindReplaceConfig::new("speed")
-            .with_replacement("vel");
+        let cfg = FindReplaceConfig::new("speed").with_replacement("vel");
         let result = fr.replace_at(SAMPLE, &cfg, 0).unwrap();
         assert_eq!(result.count, 1);
         // Only first "speed" replaced.
@@ -630,8 +633,7 @@ mod tests {
     #[test]
     fn replace_at_last() {
         let fr = engine();
-        let cfg = FindReplaceConfig::new("speed")
-            .with_replacement("vel");
+        let cfg = FindReplaceConfig::new("speed").with_replacement("vel");
         let result = fr.replace_at(SAMPLE, &cfg, 2).unwrap();
         assert_eq!(result.count, 1);
     }
@@ -641,7 +643,10 @@ mod tests {
         let fr = engine();
         let cfg = FindReplaceConfig::new("speed").with_replacement("x");
         let result = fr.replace_at(SAMPLE, &cfg, 99);
-        assert!(matches!(result, Err(FindReplaceError::MatchIndexOutOfBounds(99))));
+        assert!(matches!(
+            result,
+            Err(FindReplaceError::MatchIndexOutOfBounds(99))
+        ));
     }
 
     // -- Error display --

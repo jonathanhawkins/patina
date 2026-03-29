@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use gdeditor::inspector::{PropertyCategory, PropertyEntry};
 use gdeditor::{
-    coerce_variant, validate_variant, EditorHint, InspectorPanel, InspectorSection,
-    PropertyEditor, ResourceSubEditor, SectionedInspector,
+    coerce_variant, validate_variant, EditorHint, InspectorPanel, InspectorSection, PropertyEditor,
+    ResourceSubEditor, SectionedInspector,
 };
 use gdresource::Resource;
 use gdscene::node::{Node, NodeId};
@@ -158,7 +158,14 @@ fn inspector_specific_property_callback_only_fires_for_match() {
 
 #[test]
 fn category_transform_properties() {
-    for name in &["position", "rotation", "scale", "transform", "global_position", "skew"] {
+    for name in &[
+        "position",
+        "rotation",
+        "scale",
+        "transform",
+        "global_position",
+        "skew",
+    ] {
         assert_eq!(
             PropertyCategory::categorize(name),
             PropertyCategory::Transform,
@@ -169,7 +176,9 @@ fn category_transform_properties() {
 
 #[test]
 fn category_rendering_properties() {
-    for name in &["visible", "modulate", "texture", "color", "z_index", "material"] {
+    for name in &[
+        "visible", "modulate", "texture", "color", "z_index", "material",
+    ] {
         assert_eq!(
             PropertyCategory::categorize(name),
             PropertyCategory::Rendering,
@@ -191,13 +200,22 @@ fn category_physics_properties() {
 
 #[test]
 fn category_script_properties() {
-    assert_eq!(PropertyCategory::categorize("script_var"), PropertyCategory::Script);
-    assert_eq!(PropertyCategory::categorize("metadata/foo"), PropertyCategory::Script);
+    assert_eq!(
+        PropertyCategory::categorize("script_var"),
+        PropertyCategory::Script
+    );
+    assert_eq!(
+        PropertyCategory::categorize("metadata/foo"),
+        PropertyCategory::Script
+    );
 }
 
 #[test]
 fn category_misc_fallback() {
-    assert_eq!(PropertyCategory::categorize("some_custom_thing"), PropertyCategory::Misc);
+    assert_eq!(
+        PropertyCategory::categorize("some_custom_thing"),
+        PropertyCategory::Misc
+    );
     assert_eq!(PropertyCategory::categorize(""), PropertyCategory::Misc);
 }
 
@@ -295,7 +313,7 @@ fn all_editors_returns_full_list() {
 
     let editors = panel.all_editors(&tree);
     assert_eq!(editors.len(), 7); // 7 properties set in make_tree_with_props
-    // All should have non-empty display names
+                                  // All should have non-empty display names
     for (name, editor) in &editors {
         assert!(!name.is_empty());
         assert!(!editor.display_name().is_empty());
@@ -432,15 +450,30 @@ fn coerce_float_to_int() {
 
 #[test]
 fn coerce_int_to_bool() {
-    assert_eq!(coerce_variant(&Variant::Int(0), VariantType::Bool), Some(Variant::Bool(false)));
-    assert_eq!(coerce_variant(&Variant::Int(1), VariantType::Bool), Some(Variant::Bool(true)));
-    assert_eq!(coerce_variant(&Variant::Int(-5), VariantType::Bool), Some(Variant::Bool(true)));
+    assert_eq!(
+        coerce_variant(&Variant::Int(0), VariantType::Bool),
+        Some(Variant::Bool(false))
+    );
+    assert_eq!(
+        coerce_variant(&Variant::Int(1), VariantType::Bool),
+        Some(Variant::Bool(true))
+    );
+    assert_eq!(
+        coerce_variant(&Variant::Int(-5), VariantType::Bool),
+        Some(Variant::Bool(true))
+    );
 }
 
 #[test]
 fn coerce_bool_to_int() {
-    assert_eq!(coerce_variant(&Variant::Bool(true), VariantType::Int), Some(Variant::Int(1)));
-    assert_eq!(coerce_variant(&Variant::Bool(false), VariantType::Int), Some(Variant::Int(0)));
+    assert_eq!(
+        coerce_variant(&Variant::Bool(true), VariantType::Int),
+        Some(Variant::Int(1))
+    );
+    assert_eq!(
+        coerce_variant(&Variant::Bool(false), VariantType::Int),
+        Some(Variant::Int(0))
+    );
 }
 
 #[test]
@@ -551,7 +584,9 @@ fn sectioned_inspector_toggle_section() {
     assert_eq!(si.visible_property_count(), 3);
 
     // Collapse Transform section
-    let transform = si.section_by_category_mut(&PropertyCategory::Transform).unwrap();
+    let transform = si
+        .section_by_category_mut(&PropertyCategory::Transform)
+        .unwrap();
     assert!(transform.is_expanded());
     transform.toggle();
     assert!(!transform.is_expanded());
@@ -561,17 +596,17 @@ fn sectioned_inspector_toggle_section() {
 
 #[test]
 fn sectioned_inspector_find_by_category() {
-    let entries = vec![
-        PropertyEntry {
-            name: "mass".into(),
-            value: Variant::Float(10.0),
-            category: PropertyCategory::Physics,
-        },
-    ];
+    let entries = vec![PropertyEntry {
+        name: "mass".into(),
+        value: Variant::Float(10.0),
+        category: PropertyCategory::Physics,
+    }];
 
     let si = SectionedInspector::from_entries(entries);
     assert!(si.section_by_category(&PropertyCategory::Physics).is_some());
-    assert!(si.section_by_category(&PropertyCategory::Transform).is_none());
+    assert!(si
+        .section_by_category(&PropertyCategory::Transform)
+        .is_none());
 }
 
 #[test]
@@ -602,11 +637,14 @@ fn inspector_section_properties() {
 
 #[test]
 fn resource_sub_editor_list_properties() {
-    let res = make_resource("Texture2D", vec![
-        ("width", Variant::Int(256)),
-        ("height", Variant::Int(256)),
-        ("filter", Variant::Bool(true)),
-    ]);
+    let res = make_resource(
+        "Texture2D",
+        vec![
+            ("width", Variant::Int(256)),
+            ("height", Variant::Int(256)),
+            ("filter", Variant::Bool(true)),
+        ],
+    );
     let sub = ResourceSubEditor::new(res);
 
     let props = sub.list_properties();
@@ -619,21 +657,23 @@ fn resource_sub_editor_list_properties() {
 
 #[test]
 fn resource_sub_editor_get_set() {
-    let res = make_resource("Material", vec![
-        ("albedo", Variant::String("red".into())),
-    ]);
+    let res = make_resource("Material", vec![("albedo", Variant::String("red".into()))]);
     let mut sub = ResourceSubEditor::new(res);
 
-    assert_eq!(sub.get_property("albedo"), Some(&Variant::String("red".into())));
+    assert_eq!(
+        sub.get_property("albedo"),
+        Some(&Variant::String("red".into()))
+    );
     sub.set_property("albedo", Variant::String("blue".into()));
-    assert_eq!(sub.get_property("albedo"), Some(&Variant::String("blue".into())));
+    assert_eq!(
+        sub.get_property("albedo"),
+        Some(&Variant::String("blue".into()))
+    );
 }
 
 #[test]
 fn resource_sub_editor_change_log() {
-    let res = make_resource("Material", vec![
-        ("color", Variant::String("white".into())),
-    ]);
+    let res = make_resource("Material", vec![("color", Variant::String("white".into()))]);
     let mut sub = ResourceSubEditor::new(res);
     assert_eq!(sub.change_count(), 0);
 
@@ -648,9 +688,7 @@ fn resource_sub_editor_change_log() {
 
 #[test]
 fn resource_sub_editor_undo() {
-    let res = make_resource("Material", vec![
-        ("alpha", Variant::Float(1.0)),
-    ]);
+    let res = make_resource("Material", vec![("alpha", Variant::Float(1.0))]);
     let mut sub = ResourceSubEditor::new(res);
 
     sub.set_property("alpha", Variant::Float(0.5));
@@ -732,11 +770,7 @@ fn validated_set_rejects_incompatible() {
     panel.inspect(node_id);
 
     // visible is Bool, setting Array should fail
-    let result = panel.set_property_validated(
-        &mut tree,
-        "visible",
-        Variant::Array(vec![]),
-    );
+    let result = panel.set_property_validated(&mut tree, "visible", Variant::Array(vec![]));
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("expected"));
 }
@@ -748,11 +782,8 @@ fn validated_set_nil_property_accepts_anything() {
     panel.inspect(node_id);
 
     // custom_data is Nil — should accept any type
-    let result = panel.set_property_validated(
-        &mut tree,
-        "custom_data",
-        Variant::String("hello".into()),
-    );
+    let result =
+        panel.set_property_validated(&mut tree, "custom_data", Variant::String("hello".into()));
     assert!(result.is_ok());
 }
 
@@ -807,16 +838,34 @@ fn coerce_string_to_node_path() {
 #[test]
 fn display_names_all_nonempty() {
     let all_types = [
-        VariantType::Nil, VariantType::Bool, VariantType::Int, VariantType::Float,
-        VariantType::String, VariantType::StringName, VariantType::NodePath,
-        VariantType::Vector2, VariantType::Vector3, VariantType::Rect2,
-        VariantType::Transform2D, VariantType::Color, VariantType::Basis,
-        VariantType::Transform3D, VariantType::Quaternion, VariantType::Aabb,
-        VariantType::Plane, VariantType::ObjectId, VariantType::Array,
-        VariantType::Dictionary, VariantType::Callable, VariantType::Resource,
+        VariantType::Nil,
+        VariantType::Bool,
+        VariantType::Int,
+        VariantType::Float,
+        VariantType::String,
+        VariantType::StringName,
+        VariantType::NodePath,
+        VariantType::Vector2,
+        VariantType::Vector3,
+        VariantType::Rect2,
+        VariantType::Transform2D,
+        VariantType::Color,
+        VariantType::Basis,
+        VariantType::Transform3D,
+        VariantType::Quaternion,
+        VariantType::Aabb,
+        VariantType::Plane,
+        VariantType::ObjectId,
+        VariantType::Array,
+        VariantType::Dictionary,
+        VariantType::Callable,
+        VariantType::Resource,
     ];
     for vtype in &all_types {
         let editor = PropertyEditor::for_variant_type(*vtype);
-        assert!(!editor.display_name().is_empty(), "{vtype:?} has empty display name");
+        assert!(
+            !editor.display_name().is_empty(),
+            "{vtype:?} has empty display name"
+        );
     }
 }

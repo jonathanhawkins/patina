@@ -11,8 +11,10 @@
 use std::fs;
 use std::path::Path;
 
-const REPIN_CI_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/repin-validation.yml");
+const REPIN_CI_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../.github/workflows/repin-validation.yml"
+);
 
 fn read_repin_ci() -> String {
     fs::read_to_string(REPIN_CI_PATH)
@@ -47,10 +49,7 @@ fn repin_workflow_has_dispatch_trigger() {
 #[test]
 fn repin_workflow_has_push_trigger() {
     let ci = read_repin_ci();
-    assert!(
-        ci.contains("push:"),
-        "repin workflow must trigger on push"
-    );
+    assert!(ci.contains("push:"), "repin workflow must trigger on push");
     assert!(
         ci.contains("upstream/godot"),
         "push trigger must watch upstream/godot submodule"
@@ -95,10 +94,7 @@ fn repin_has_detect_version_job() {
 #[test]
 fn repin_has_oracle_parity_job() {
     let ci = read_repin_ci();
-    assert!(
-        ci.contains("oracle-parity:"),
-        "must have oracle-parity job"
-    );
+    assert!(ci.contains("oracle-parity:"), "must have oracle-parity job");
 }
 
 #[test]
@@ -361,10 +357,7 @@ fn repin_workflow_has_at_least_7_jobs() {
 
 #[test]
 fn ci_has_all_compat_domain_jobs() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).expect("ci.yml must exist");
 
     let required_jobs = [
@@ -390,10 +383,7 @@ fn ci_has_all_compat_domain_jobs() {
 
 #[test]
 fn ci_rust_job_has_multi_platform_matrix() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).unwrap();
 
     assert!(ci.contains("ubuntu-latest"), "must test on ubuntu");
@@ -408,10 +398,7 @@ fn ci_rust_job_has_multi_platform_matrix() {
 
 #[test]
 fn ci_rust_audit_has_continue_on_error() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).unwrap();
 
     assert!(ci.contains("rust-audit:"), "must have rust-audit job");
@@ -427,10 +414,7 @@ fn ci_rust_audit_has_continue_on_error() {
 
 #[test]
 fn ci_job_dependency_chain() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).unwrap();
 
     // rust job needs rust-fmt
@@ -451,13 +435,13 @@ fn ci_job_dependency_chain() {
 
 #[test]
 fn ci_oracle_parity_uses_submodules() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).unwrap();
 
-    assert!(ci.contains("rust-oracle-parity:"), "must have rust-oracle-parity job");
+    assert!(
+        ci.contains("rust-oracle-parity:"),
+        "must have rust-oracle-parity job"
+    );
     // The oracle parity job and render goldens job both checkout with submodules
     assert!(
         ci.contains("submodules: true"),
@@ -471,10 +455,7 @@ fn ci_oracle_parity_uses_submodules() {
 
 #[test]
 fn ci_render_goldens_uploads_artifacts_on_failure() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).unwrap();
 
     assert!(
@@ -497,10 +478,7 @@ fn ci_render_goldens_uploads_artifacts_on_failure() {
 
 #[test]
 fn ci_has_web_job_with_pnpm() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).unwrap();
 
     assert!(ci.contains("web:"), "ci.yml must have web job");
@@ -515,10 +493,7 @@ fn ci_has_web_job_with_pnpm() {
 
 #[test]
 fn ci_render_lane_sets_patina_ci_env() {
-    let ci_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let ci_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     let ci = fs::read_to_string(ci_path).unwrap();
 
     assert!(
@@ -537,21 +512,19 @@ fn extract_repin_section(ci: &str, job_name: &str) -> String {
         let rest = &ci[start..];
         let after_first_line = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
         // Find next job at same indentation level
-        let section_end = rest[after_first_line..]
-            .find("\n  ")
-            .and_then(|pos| {
-                // Check if this is a new job (word followed by colon at indent 2)
-                let candidate = &rest[after_first_line + pos + 3..];
-                if candidate.starts_with(char::is_alphabetic)
-                    && candidate.contains(':')
-                    && candidate.find(':') < candidate.find('\n')
-                    && !candidate.starts_with(' ')
-                {
-                    Some(after_first_line + pos)
-                } else {
-                    None
-                }
-            });
+        let section_end = rest[after_first_line..].find("\n  ").and_then(|pos| {
+            // Check if this is a new job (word followed by colon at indent 2)
+            let candidate = &rest[after_first_line + pos + 3..];
+            if candidate.starts_with(char::is_alphabetic)
+                && candidate.contains(':')
+                && candidate.find(':') < candidate.find('\n')
+                && !candidate.starts_with(' ')
+            {
+                Some(after_first_line + pos)
+            } else {
+                None
+            }
+        });
 
         // Fallback: grab a generous chunk
         let end = section_end.unwrap_or(rest.len().min(3000));

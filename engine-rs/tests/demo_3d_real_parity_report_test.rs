@@ -64,8 +64,8 @@ fn load_tscn_to_tree(filename: &str) -> SceneTree {
     let path = fixture_path(filename);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("should read {}: {}", filename, e));
-    let scene = PackedScene::from_tscn(&source)
-        .unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
+    let scene =
+        PackedScene::from_tscn(&source).unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene)
@@ -391,9 +391,7 @@ fn multi_light_3d_light_props_match_golden() {
         .get_node_by_path("/root/Stage/FillLight")
         .expect("FillLight");
     assert_eq!(
-        tree.get_node(fill_id)
-            .unwrap()
-            .get_property("light_energy"),
+        tree.get_node(fill_id).unwrap().get_property("light_energy"),
         Variant::Float(0.6)
     );
 }
@@ -425,7 +423,10 @@ fn indoor_3d_renders_with_two_lights() {
     let report = snapshot.parity_report();
     assert!(report.has_camera, "indoor_3d should detect camera");
     assert_eq!(report.light_count, 2, "indoor_3d has 2 OmniLight3D nodes");
-    assert_eq!(report.mesh_count, 2, "indoor_3d has 2 MeshInstance3D (Table + Chair)");
+    assert_eq!(
+        report.mesh_count, 2,
+        "indoor_3d has 2 MeshInstance3D (Table + Chair)"
+    );
 }
 
 #[test]
@@ -438,7 +439,10 @@ fn multi_light_3d_renders_with_four_lights() {
     let report = snapshot.parity_report();
     assert!(report.has_camera, "multi_light_3d should detect camera");
     assert_eq!(report.light_count, 4, "multi_light_3d has 4 lights");
-    assert_eq!(report.mesh_count, 2, "multi_light_3d has 2 meshes (Sphere + Pedestal)");
+    assert_eq!(
+        report.mesh_count, 2,
+        "multi_light_3d has 2 meshes (Sphere + Pedestal)"
+    );
 }
 
 #[test]
@@ -450,7 +454,10 @@ fn physics_3d_playground_renders_with_rigid_bodies() {
 
     let report = snapshot.parity_report();
     assert!(report.has_camera, "physics_3d should detect camera");
-    assert_eq!(report.light_count, 1, "physics_3d has 1 DirectionalLight3D (Sun)");
+    assert_eq!(
+        report.light_count, 1,
+        "physics_3d has 1 DirectionalLight3D (Sun)"
+    );
     // BallMesh, CubeMesh, PlatformMesh = 3 mesh instances
     assert!(
         report.mesh_count >= 3,
@@ -542,10 +549,7 @@ fn cross_fixture_parity_summary_report() {
 
     // All fixtures should have some checks
     for (name, checks, _, _) in &fixture_results {
-        assert!(
-            *checks > 0,
-            "{name}: should have at least 1 parity check"
-        );
+        assert!(*checks > 0, "{name}: should have at least 1 parity check");
     }
 
     // Overall parity should be non-zero
@@ -711,9 +715,7 @@ fn hierarchy_3d_transform_chain_matches_golden() {
         }
     }
 
-    eprintln!(
-        "hierarchy_3d transform chain parity: {matching}/{total} nodes match"
-    );
+    eprintln!("hierarchy_3d transform chain parity: {matching}/{total} nodes match");
     // Report parity rather than hard-fail — global transform accumulation
     // through nested Node3D chains is a known gap to close.
     assert!(total > 0, "should have checked at least one transform");

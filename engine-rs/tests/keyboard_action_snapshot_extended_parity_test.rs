@@ -335,10 +335,25 @@ fn action_map_hot_swap() {
 #[test]
 fn key_name_roundtrip() {
     let keys: Vec<Key> = vec![
-        Key::A, Key::Z, Key::Num0, Key::Num9, Key::Space, Key::Enter,
-        Key::Escape, Key::Tab, Key::Shift, Key::Ctrl, Key::Alt,
-        Key::Left, Key::Right, Key::Up, Key::Down,
-        Key::F1, Key::F12, Key::Backspace, Key::Delete,
+        Key::A,
+        Key::Z,
+        Key::Num0,
+        Key::Num9,
+        Key::Space,
+        Key::Enter,
+        Key::Escape,
+        Key::Tab,
+        Key::Shift,
+        Key::Ctrl,
+        Key::Alt,
+        Key::Left,
+        Key::Right,
+        Key::Up,
+        Key::Down,
+        Key::F1,
+        Key::F12,
+        Key::Backspace,
+        Key::Delete,
     ];
 
     for key in &keys {
@@ -400,14 +415,26 @@ fn snapshot_pressed_key_names_complete() {
     let snap = state.snapshot();
     let names = snap.pressed_key_names();
 
-    assert!(names.contains(&"A".to_string()) || names.contains(&"a".to_string()),
-        "A must be in pressed_key_names: {:?}", names);
-    assert!(names.contains(&Key::Space.name().to_string()),
-        "Space must be in pressed_key_names: {:?}", names);
-    assert!(names.contains(&Key::Left.name().to_string()),
-        "Left must be in pressed_key_names: {:?}", names);
-    assert!(names.contains(&Key::Enter.name().to_string()),
-        "Enter must be in pressed_key_names: {:?}", names);
+    assert!(
+        names.contains(&"A".to_string()) || names.contains(&"a".to_string()),
+        "A must be in pressed_key_names: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&Key::Space.name().to_string()),
+        "Space must be in pressed_key_names: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&Key::Left.name().to_string()),
+        "Left must be in pressed_key_names: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&Key::Enter.name().to_string()),
+        "Enter must be in pressed_key_names: {:?}",
+        names
+    );
     assert_eq!(names.len(), 4, "exactly 4 keys pressed: {:?}", names);
 }
 
@@ -422,16 +449,8 @@ fn get_vector_opposing_cancels() {
     state.process_event(key_press(Key::Right));
 
     let v = state.get_vector("ui_left", "ui_right", "ui_up", "ui_down");
-    assert!(
-        v.x.abs() < 0.01,
-        "left+right should cancel x: {}",
-        v.x
-    );
-    assert!(
-        v.y.abs() < 0.01,
-        "no vertical input: {}",
-        v.y
-    );
+    assert!(v.x.abs() < 0.01, "left+right should cancel x: {}", v.x);
+    assert!(v.y.abs() < 0.01, "no vertical input: {}", v.y);
 }
 
 #[test]
@@ -441,11 +460,7 @@ fn get_axis_opposing_cancels() {
     state.process_event(key_press(Key::Right));
 
     let axis = state.get_axis("ui_left", "ui_right");
-    assert!(
-        axis.abs() < 0.01,
-        "left+right should cancel: {}",
-        axis
-    );
+    assert!(axis.abs() < 0.01, "left+right should cancel: {}", axis);
 }
 
 // ===========================================================================
@@ -688,12 +703,7 @@ fn snapshot_just_pressed_key_names_transient() {
     state.flush_frame();
     let snap2 = state.snapshot();
     let jp2 = snap2.just_pressed_key_names();
-    assert_eq!(
-        jp2.len(),
-        0,
-        "no keys just pressed after flush: {:?}",
-        jp2
-    );
+    assert_eq!(jp2.len(), 0, "no keys just pressed after flush: {:?}", jp2);
 
     // But still 2 pressed
     assert_eq!(snap2.pressed_key_names().len(), 2);

@@ -313,8 +313,8 @@ fn no_duplicate_prefixes_within_domain() {
 /// wired into the real CI workflow.
 #[test]
 fn domain_prefixes_present_in_ci_yaml() {
-    let ci_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../.github/workflows/ci.yml");
+    let ci_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/ci.yml");
     let ci = std::fs::read_to_string(&ci_path).expect("CI workflow must exist");
 
     let all_prefixes: &[(&str, &[&str])] = &[

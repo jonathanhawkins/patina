@@ -51,8 +51,8 @@ fn load_tscn_to_tree(filename: &str) -> SceneTree {
     let path = fixture_path(filename);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("should read {}: {}", filename, e));
-    let scene = PackedScene::from_tscn(&source)
-        .unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
+    let scene =
+        PackedScene::from_tscn(&source).unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene)
@@ -125,7 +125,10 @@ fn load_real_golden_physics_trace() {
     assert_eq!(trace[0].frame, 0);
     assert!((trace[0].position.y - 5.0).abs() < 0.001);
     // Frame 9 should show significant freefall
-    assert!(trace[9].position.y < 0.0, "ball should have fallen below origin");
+    assert!(
+        trace[9].position.y < 0.0,
+        "ball should have fallen below origin"
+    );
 }
 
 #[test]
@@ -189,11 +192,7 @@ fn compare_golden_trace_with_tolerance() {
             PhysicsTraceEntry3D::new(
                 &e.name,
                 e.frame,
-                Vector3::new(
-                    e.position.x + 0.001,
-                    e.position.y + 0.001,
-                    e.position.z,
-                ),
+                Vector3::new(e.position.x + 0.001, e.position.y + 0.001, e.position.z),
                 e.velocity,
                 e.angular_velocity,
             )
@@ -215,8 +214,7 @@ fn compare_golden_trace_with_tolerance() {
 fn batch_report_across_real_fixtures() {
     let _g = setup();
 
-    let mut report = BatchComparisonReport::new("pat-oo6mh-integration")
-        .with_threshold(0.50);
+    let mut report = BatchComparisonReport::new("pat-oo6mh-integration").with_threshold(0.50);
 
     for &(name, tscn) in FIXTURES_3D {
         let tree = load_tscn_to_tree(tscn);
@@ -354,9 +352,7 @@ fn full_pipeline_golden_to_json_report() {
     let score = SubsystemScore::from(&result);
 
     let mut report = BatchComparisonReport::new("pipeline-test");
-    report.add_fixture(
-        FixtureResult::new("minimal_3d_freefall").with_physics(score),
-    );
+    report.add_fixture(FixtureResult::new("minimal_3d_freefall").with_physics(score));
 
     assert!(report.passes());
     assert!((report.overall_parity() - 1.0).abs() < f64::EPSILON);

@@ -185,7 +185,10 @@ fn move_and_slide_lands_on_floor() {
     assert!(ch.is_on_floor(), "Should detect floor");
     assert!(!ch.is_on_wall());
     assert!(!ch.is_on_ceiling());
-    assert!(result.y.abs() < EPSILON, "Y velocity should be zeroed after floor contact");
+    assert!(
+        result.y.abs() < EPSILON,
+        "Y velocity should be zeroed after floor contact"
+    );
 }
 
 #[test]
@@ -195,7 +198,11 @@ fn move_and_slide_floor_normal_points_up() {
     let bodies: Vec<&PhysicsBody3D> = vec![&floor];
     ch.move_and_slide(Vector3::new(0.0, -2.5, 0.0), &bodies);
     let normal = ch.get_floor_normal();
-    assert!(normal.y > 0.5, "Floor normal should point up, got {:?}", normal);
+    assert!(
+        normal.y > 0.5,
+        "Floor normal should point up, got {:?}",
+        normal
+    );
 }
 
 #[test]
@@ -205,7 +212,10 @@ fn move_and_slide_slides_along_wall_preserves_parallel() {
     let bodies: Vec<&PhysicsBody3D> = vec![&wall];
     let result = ch.move_and_slide(Vector3::new(6.0, 0.0, 4.0), &bodies);
     assert!(ch.is_on_wall(), "Should detect wall");
-    assert!(result.x.abs() < EPSILON, "X velocity should be zeroed by wall");
+    assert!(
+        result.x.abs() < EPSILON,
+        "X velocity should be zeroed by wall"
+    );
     assert!(approx(result.z, 4.0), "Z velocity should be preserved");
 }
 
@@ -304,7 +314,10 @@ fn move_and_slide_moderate_speed_hits_wall() {
     let wall = make_wall_x(5.0, 2);
     let bodies: Vec<&PhysicsBody3D> = vec![&wall];
     ch.move_and_slide(Vector3::new(6.0, 0.0, 0.0), &bodies);
-    assert!(ch.is_on_wall(), "Should detect wall with moderate speed motion");
+    assert!(
+        ch.is_on_wall(),
+        "Should detect wall with moderate speed motion"
+    );
 }
 
 // ===========================================================================
@@ -342,8 +355,14 @@ fn move_and_slide_corner_two_walls() {
 
     let result = ch.move_and_slide(Vector3::new(6.0, 0.0, 6.0), &bodies);
     // Both X and Z should be blocked.
-    assert!(result.x.abs() < 1.0, "X should be mostly zeroed near corner");
-    assert!(result.z.abs() < 1.0, "Z should be mostly zeroed near corner");
+    assert!(
+        result.x.abs() < 1.0,
+        "X should be mostly zeroed near corner"
+    );
+    assert!(
+        result.z.abs() < 1.0,
+        "Z should be mostly zeroed near corner"
+    );
 }
 
 #[test]
@@ -388,7 +407,11 @@ fn wall_normal_available_after_collision() {
     ch.move_and_slide(Vector3::new(6.0, 0.0, 0.0), &bodies);
     assert!(ch.is_on_wall());
     let wn = ch.get_wall_normal();
-    assert!(wn.x.abs() > 0.5, "Wall normal should have significant X, got {:?}", wn);
+    assert!(
+        wn.x.abs() > 0.5,
+        "Wall normal should have significant X, got {:?}",
+        wn
+    );
 }
 
 // ===========================================================================
