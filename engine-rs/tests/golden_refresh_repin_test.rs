@@ -103,7 +103,10 @@ fn golden_rigid_sphere_bounce_3d_physics_plausible() {
         let dy = py1 - py0;
         // Semi-implicit: dy = vy1 * dt, and since vy increments by -9.8,
         // dt = (-9.8) / vy_delta_per_frame... let's just check monotonic decrease
-        assert!(dy < 0.0, "position should decrease each frame under gravity");
+        assert!(
+            dy < 0.0,
+            "position should decrease each frame under gravity"
+        );
         // vy is negative, dy is negative, and |dy| should grow over time
         assert!(
             vy1 < 0.0 || w[1]["frame"] == 0,
@@ -292,7 +295,10 @@ fn golden_signal_registration_order_trace_valid() {
 
     let order = golden["expected_callback_order"].as_array().unwrap();
     assert_eq!(
-        order.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(),
+        order
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
         vec!["RecvA", "RecvB", "RecvC"],
         "callbacks fire in insertion order"
     );
@@ -336,7 +342,10 @@ fn golden_signal_deferred_behavior_trace_valid() {
         .as_array()
         .unwrap();
     assert_eq!(
-        order.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(),
+        order
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
         vec!["first", "second", "third"],
         "FIFO order after flush"
     );
@@ -443,11 +452,18 @@ fn frame_trace_goldens_all_valid_json() {
         if path.extension().map_or(false, |ext| ext == "json") {
             let content = std::fs::read_to_string(&path).unwrap();
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(&content);
-            assert!(parsed.is_ok(), "trace golden {} must be valid JSON", path.display());
+            assert!(
+                parsed.is_ok(),
+                "trace golden {} must be valid JSON",
+                path.display()
+            );
             count += 1;
         }
     }
-    assert!(count >= 15, "must have >= 15 trace golden files, found {count}");
+    assert!(
+        count >= 15,
+        "must have >= 15 trace golden files, found {count}"
+    );
 }
 
 #[test]
@@ -456,7 +472,12 @@ fn frame_trace_patina_goldens_have_event_trace() {
     for entry in std::fs::read_dir(&traces_dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().map_or(false, |ext| ext == "json")
-            && path.file_name().unwrap().to_str().unwrap().contains("_patina")
+            && path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("_patina")
         {
             let content = std::fs::read_to_string(&path).unwrap();
             let val: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -613,8 +634,7 @@ fn lifecycle_trace_goldens_regenerate_match() {
 #[test]
 fn upstream_version_stamp_exists_and_nonempty() {
     let stamp_path = golden_dir().join("UPSTREAM_VERSION");
-    let stamp = std::fs::read_to_string(&stamp_path)
-        .expect("UPSTREAM_VERSION file should exist");
+    let stamp = std::fs::read_to_string(&stamp_path).expect("UPSTREAM_VERSION file should exist");
     let trimmed = stamp.trim();
     assert!(!trimmed.is_empty(), "UPSTREAM_VERSION should not be empty");
     assert!(
@@ -663,7 +683,10 @@ fn physics_golden_inventory_includes_3d() {
 #[test]
 fn signal_golden_inventory_complete() {
     let signals_dir = golden_dir().join("signals");
-    assert!(signals_dir.is_dir(), "signals golden directory should exist");
+    assert!(
+        signals_dir.is_dir(),
+        "signals golden directory should exist"
+    );
 
     let files: Vec<String> = std::fs::read_dir(&signals_dir)
         .unwrap()
@@ -701,11 +724,7 @@ fn repin_freshness_report() {
         std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map_or(false, |x| x == ext)
-            })
+            .filter(|e| e.path().extension().map_or(false, |x| x == ext))
             .count()
     };
 

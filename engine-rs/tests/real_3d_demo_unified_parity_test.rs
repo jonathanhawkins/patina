@@ -82,8 +82,8 @@ fn load_tscn_to_tree(filename: &str) -> SceneTree {
     let path = fixture_path(filename);
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("should read {}: {}", filename, e));
-    let scene = PackedScene::from_tscn(&source)
-        .unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
+    let scene =
+        PackedScene::from_tscn(&source).unwrap_or_else(|e| panic!("parse {}: {:?}", filename, e));
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene)
@@ -416,7 +416,9 @@ fn hierarchy_3d_fixture_transforms_match_golden() {
 
 #[test]
 fn physics_freefall_golden_trace_10_frames() {
-    let golden_y: &[f32] = &[5.0, 4.837, 4.511, 4.022, 3.370, 2.555, 1.577, 0.436, -0.868, -2.335];
+    let golden_y: &[f32] = &[
+        5.0, 4.837, 4.511, 4.022, 3.370, 2.555, 1.577, 0.436, -0.868, -2.335,
+    ];
 
     let mut world = PhysicsWorld3D::new();
     world.gravity = Vector3::new(0.0, -588.0, 0.0);
@@ -640,9 +642,7 @@ fn unified_parity_report_all_subsystems() {
 
     // --- Transform subsystem ---
     let tree = load_tscn_to_tree("minimal_3d.tscn");
-    let cam_id = tree
-        .get_node_by_path("/root/World/Camera")
-        .expect("Camera");
+    let cam_id = tree.get_node_by_path("/root/World/Camera").expect("Camera");
     // Camera exists and has valid FOV — transform subsystem is functional
     let fov = node3d::get_fov(&tree, cam_id);
     let transform_ok = fov > 0.0 && tree.get_node(cam_id).is_some();

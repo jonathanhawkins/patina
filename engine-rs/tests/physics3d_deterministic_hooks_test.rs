@@ -29,7 +29,13 @@ fn v3_approx_eq(a: Vector3, b: Vector3) -> bool {
 // ===========================================================================
 
 fn rigid_sphere(pos: Vector3, radius: f32, mass: f32) -> PhysicsBody3D {
-    PhysicsBody3D::new(BodyId3D(0), BodyType3D::Rigid, pos, Shape3D::Sphere { radius }, mass)
+    PhysicsBody3D::new(
+        BodyId3D(0),
+        BodyType3D::Rigid,
+        pos,
+        Shape3D::Sphere { radius },
+        mass,
+    )
 }
 
 fn static_box(pos: Vector3, half: Vector3) -> PhysicsBody3D {
@@ -43,7 +49,13 @@ fn static_box(pos: Vector3, half: Vector3) -> PhysicsBody3D {
 }
 
 fn kinematic_sphere(pos: Vector3, radius: f32) -> PhysicsBody3D {
-    PhysicsBody3D::new(BodyId3D(0), BodyType3D::Kinematic, pos, Shape3D::Sphere { radius }, 1.0)
+    PhysicsBody3D::new(
+        BodyId3D(0),
+        BodyType3D::Kinematic,
+        pos,
+        Shape3D::Sphere { radius },
+        1.0,
+    )
 }
 
 // ===========================================================================
@@ -68,8 +80,14 @@ fn azsj_determinism_gravity_freefall() {
 
     let (a1, b1) = run();
     let (a2, b2) = run();
-    assert!(v3_approx_eq(a1, a2), "body A not deterministic: {a1:?} vs {a2:?}");
-    assert!(v3_approx_eq(b1, b2), "body B not deterministic: {b1:?} vs {b2:?}");
+    assert!(
+        v3_approx_eq(a1, a2),
+        "body A not deterministic: {a1:?} vs {a2:?}"
+    );
+    assert!(
+        v3_approx_eq(b1, b2),
+        "body B not deterministic: {b1:?} vs {b2:?}"
+    );
 }
 
 #[test]
@@ -104,7 +122,10 @@ fn azsj_determinism_collision_scenario() {
     let r1 = run();
     let r2 = run();
     for (i, (a, b)) in r1.iter().zip(r2.iter()).enumerate() {
-        assert!(v3_approx_eq(*a, *b), "body {i} not deterministic: {a:?} vs {b:?}");
+        assert!(
+            v3_approx_eq(*a, *b),
+            "body {i} not deterministic: {a:?} vs {b:?}"
+        );
     }
 }
 
@@ -128,7 +149,10 @@ fn azsj_gravity_freefall_60_frames() {
     assert!(body.position.y < initial_y, "body should fall");
     assert!(body.position.x == 0.0, "no lateral movement");
     assert!(body.position.z == 0.0, "no lateral movement");
-    assert!(body.linear_velocity.y < 0.0, "should have downward velocity");
+    assert!(
+        body.linear_velocity.y < 0.0,
+        "should have downward velocity"
+    );
 }
 
 // ===========================================================================
@@ -194,7 +218,11 @@ fn azsj_kinematic_body_moves_ignores_gravity() {
 
     let b = world.get_body(id).unwrap();
     // Should move up, not be pulled down by gravity.
-    assert!(b.position.y > 9.0, "kinematic should move up: y={}", b.position.y);
+    assert!(
+        b.position.y > 9.0,
+        "kinematic should move up: y={}",
+        b.position.y
+    );
 }
 
 // ===========================================================================
@@ -343,7 +371,11 @@ fn azsj_raycast_hits_sphere() {
     assert!(hit.is_some(), "ray should hit the sphere");
     let hit = hit.unwrap();
     assert_eq!(hit.body_id, sphere_id);
-    assert!(approx_eq(hit.distance, 17.0), "hit distance should be 20 - 3 = 17, got {}", hit.distance);
+    assert!(
+        approx_eq(hit.distance, 17.0),
+        "hit distance should be 20 - 3 = 17, got {}",
+        hit.distance
+    );
 }
 
 // ===========================================================================
@@ -363,7 +395,11 @@ fn azsj_raycast_hits_box() {
     assert!(hit.is_some());
     let hit = hit.unwrap();
     assert_eq!(hit.body_id, box_id);
-    assert!(approx_eq(hit.distance, 8.0), "distance should be 10-2=8, got {}", hit.distance);
+    assert!(
+        approx_eq(hit.distance, 8.0),
+        "distance should be 10-2=8, got {}",
+        hit.distance
+    );
 }
 
 // ===========================================================================
@@ -425,10 +461,7 @@ fn azsj_determinism_300_frames() {
 
         let pa = world.get_body(id_a).unwrap().position;
         let pb = world.get_body(id_b).unwrap().position;
-        vec![
-            (pa.x, pa.y, pa.z),
-            (pb.x, pb.y, pb.z),
-        ]
+        vec![(pa.x, pa.y, pa.z), (pb.x, pb.y, pb.z)]
     }
 
     let r1 = run();
@@ -533,7 +566,10 @@ fn azsj_custom_gravity_direction() {
     }
 
     let b = world.get_body(id).unwrap();
-    assert!(b.position.x > 1.0, "should move right under sideways gravity");
+    assert!(
+        b.position.x > 1.0,
+        "should move right under sideways gravity"
+    );
     assert!(approx_eq(b.position.y, 0.0), "no vertical movement");
 }
 
@@ -561,6 +597,9 @@ fn azsj_shape_bounding_volumes_consistent() {
         assert!(aabb.size.y > 0.0, "{shape:?} AABB has zero/negative y size");
         assert!(aabb.size.z > 0.0, "{shape:?} AABB has zero/negative z size");
         // Origin should be inside AABB.
-        assert!(shape.contains_point(Vector3::ZERO), "{shape:?} should contain origin");
+        assert!(
+            shape.contains_point(Vector3::ZERO),
+            "{shape:?} should contain origin"
+        );
     }
 }

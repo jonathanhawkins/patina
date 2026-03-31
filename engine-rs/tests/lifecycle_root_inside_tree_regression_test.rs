@@ -13,10 +13,10 @@
 //!
 //! Covers: regression, boundary, stress, variant, and negative cases.
 
+use gdobject::weak_ref::WeakRef;
 use gdscene::node::{Node, NodeId};
 use gdscene::scene_tree::SceneTree;
 use gdscene::LifecycleManager;
-use gdobject::weak_ref::WeakRef;
 use gdvariant::Variant;
 
 // ===========================================================================
@@ -178,9 +178,7 @@ fn test_camera3d_manual_current_blocks_auto_activate() {
 fn test_weakref_valid_after_add_child_regression() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child_id = tree
-        .add_child(root, Node::new("Child", "Node"))
-        .unwrap();
+    let child_id = tree.add_child(root, Node::new("Child", "Node")).unwrap();
 
     let weak = WeakRef::new(child_id.object_id());
     assert!(
@@ -194,9 +192,7 @@ fn test_weakref_valid_after_add_child_regression() {
 fn test_weakref_invalidates_after_free_regression() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let child_id = tree
-        .add_child(root, Node::new("ToFree", "Node"))
-        .unwrap();
+    let child_id = tree.add_child(root, Node::new("ToFree", "Node")).unwrap();
 
     let weak = WeakRef::new(child_id.object_id());
     assert!(weak.get_ref().is_some());

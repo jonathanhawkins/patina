@@ -72,10 +72,20 @@ fn classdb_rigidbody3d_has_physics_properties() {
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
 
     let expected = [
-        "mass", "gravity_scale", "linear_velocity", "angular_velocity",
-        "linear_damp", "angular_damp", "friction", "bounce",
-        "continuous_cd", "can_sleep", "sleeping", "freeze_mode",
-        "contact_monitor", "max_contacts_reported",
+        "mass",
+        "gravity_scale",
+        "linear_velocity",
+        "angular_velocity",
+        "linear_damp",
+        "angular_damp",
+        "friction",
+        "bounce",
+        "continuous_cd",
+        "can_sleep",
+        "sleeping",
+        "freeze_mode",
+        "contact_monitor",
+        "max_contacts_reported",
     ];
     for prop in &expected {
         assert!(names.contains(prop), "Missing property: {prop}");
@@ -86,8 +96,12 @@ fn classdb_rigidbody3d_has_physics_properties() {
 fn classdb_rigidbody3d_has_force_methods() {
     gdobject::class_db::register_3d_classes();
     let methods = [
-        "apply_force", "apply_central_force", "apply_impulse",
-        "apply_torque", "apply_torque_impulse", "get_contact_count",
+        "apply_force",
+        "apply_central_force",
+        "apply_impulse",
+        "apply_torque",
+        "apply_torque_impulse",
+        "get_contact_count",
     ];
     for method in &methods {
         assert!(
@@ -125,11 +139,21 @@ fn rigidbody3d_set_get_properties() {
     let node = Node::new("R", "RigidBody3D");
     let id = tree.add_child(root, node).unwrap();
 
-    tree.get_node_mut(id).unwrap().set_property("mass", Variant::Float(5.0));
-    assert_eq!(tree.get_node(id).unwrap().get_property("mass"), Variant::Float(5.0));
+    tree.get_node_mut(id)
+        .unwrap()
+        .set_property("mass", Variant::Float(5.0));
+    assert_eq!(
+        tree.get_node(id).unwrap().get_property("mass"),
+        Variant::Float(5.0)
+    );
 
-    tree.get_node_mut(id).unwrap().set_property("gravity_scale", Variant::Float(0.5));
-    assert_eq!(tree.get_node(id).unwrap().get_property("gravity_scale"), Variant::Float(0.5));
+    tree.get_node_mut(id)
+        .unwrap()
+        .set_property("gravity_scale", Variant::Float(0.5));
+    assert_eq!(
+        tree.get_node(id).unwrap().get_property("gravity_scale"),
+        Variant::Float(0.5)
+    );
 }
 
 // ===========================================================================
@@ -143,7 +167,11 @@ fn apply_force_accumulates() {
     body.apply_force(Vector3::new(5.0, 0.0, 0.0));
     body.integrate(1.0, Vector3::ZERO);
     // 15N on 1kg for 1s → v = 15 m/s
-    assert!(approx(body.linear_velocity.x, 15.0), "v.x={}", body.linear_velocity.x);
+    assert!(
+        approx(body.linear_velocity.x, 15.0),
+        "v.x={}",
+        body.linear_velocity.x
+    );
 }
 
 #[test]
@@ -167,14 +195,20 @@ fn apply_force_at_position_generates_torque() {
     );
     body.integrate(1.0, Vector3::ZERO);
     // Torque = offset × force = (1,0,0) × (0,10,0) = (0,0,10)
-    assert!(body.angular_velocity.length() > 0.1, "Should have angular velocity");
+    assert!(
+        body.angular_velocity.length() > 0.1,
+        "Should have angular velocity"
+    );
 }
 
 #[test]
 fn static_body_ignores_forces() {
     let mut body = PhysicsBody3D::new(
-        BodyId3D(0), BodyType3D::Static, Vector3::ZERO,
-        Shape3D::Sphere { radius: 1.0 }, 1.0,
+        BodyId3D(0),
+        BodyType3D::Static,
+        Vector3::ZERO,
+        Shape3D::Sphere { radius: 1.0 },
+        1.0,
     );
     body.apply_force(Vector3::new(100.0, 0.0, 0.0));
     body.integrate(1.0, Vector3::ZERO);
@@ -185,8 +219,11 @@ fn static_body_ignores_forces() {
 #[test]
 fn kinematic_body_ignores_forces() {
     let mut body = PhysicsBody3D::new(
-        BodyId3D(0), BodyType3D::Kinematic, Vector3::ZERO,
-        Shape3D::Sphere { radius: 1.0 }, 1.0,
+        BodyId3D(0),
+        BodyType3D::Kinematic,
+        Vector3::ZERO,
+        Shape3D::Sphere { radius: 1.0 },
+        1.0,
     );
     body.apply_force(Vector3::new(100.0, 0.0, 0.0));
     body.integrate(1.0, Vector3::ZERO);
@@ -216,12 +253,12 @@ fn apply_impulse_mass_dependent() {
 #[test]
 fn apply_impulse_at_position_affects_angular() {
     let mut body = make_rigid(Vector3::ZERO);
-    body.apply_impulse_at_position(
-        Vector3::new(0.0, 10.0, 0.0),
-        Vector3::new(1.0, 0.0, 0.0),
-    );
+    body.apply_impulse_at_position(Vector3::new(0.0, 10.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
     assert!(body.linear_velocity.y > 0.0, "Should have linear velocity");
-    assert!(body.angular_velocity.length() > 0.1, "Should have angular velocity");
+    assert!(
+        body.angular_velocity.length() > 0.1,
+        "Should have angular velocity"
+    );
 }
 
 // ===========================================================================
@@ -233,14 +270,20 @@ fn apply_torque_changes_angular_velocity() {
     let mut body = make_rigid(Vector3::ZERO);
     body.apply_torque(Vector3::new(0.0, 5.0, 0.0));
     body.integrate(1.0, Vector3::ZERO);
-    assert!(body.angular_velocity.y > 0.0, "Torque should create angular velocity");
+    assert!(
+        body.angular_velocity.y > 0.0,
+        "Torque should create angular velocity"
+    );
 }
 
 #[test]
 fn apply_torque_impulse_instant() {
     let mut body = make_rigid(Vector3::ZERO);
     body.apply_torque_impulse(Vector3::new(0.0, 0.0, 3.0));
-    assert!(body.angular_velocity.z > 0.0, "Torque impulse should be instant");
+    assert!(
+        body.angular_velocity.z > 0.0,
+        "Torque impulse should be instant"
+    );
 }
 
 #[test]
@@ -250,14 +293,21 @@ fn torque_accumulates() {
     body.apply_torque(Vector3::new(1.0, 0.0, 0.0));
     body.integrate(1.0, Vector3::ZERO);
     // 2 Nm on 1kg body for 1s → ω ≈ 2 rad/s (simplified inertia)
-    assert!(body.angular_velocity.x > 1.5, "Torque should accumulate: ω.x={}", body.angular_velocity.x);
+    assert!(
+        body.angular_velocity.x > 1.5,
+        "Torque should accumulate: ω.x={}",
+        body.angular_velocity.x
+    );
 }
 
 #[test]
 fn static_body_ignores_torque() {
     let mut body = PhysicsBody3D::new(
-        BodyId3D(0), BodyType3D::Static, Vector3::ZERO,
-        Shape3D::Sphere { radius: 1.0 }, 1.0,
+        BodyId3D(0),
+        BodyType3D::Static,
+        Vector3::ZERO,
+        Shape3D::Sphere { radius: 1.0 },
+        1.0,
     );
     body.apply_torque(Vector3::new(100.0, 0.0, 0.0));
     body.integrate(1.0, Vector3::ZERO);
@@ -279,7 +329,11 @@ fn gravity_scale_zero_no_gravity() {
     let mut body = make_rigid(Vector3::new(0.0, 10.0, 0.0));
     body.gravity_scale = 0.0;
     body.integrate(1.0, Vector3::new(0.0, -9.8, 0.0));
-    assert!(approx(body.position.y, 10.0), "Zero gravity scale should not move: y={}", body.position.y);
+    assert!(
+        approx(body.position.y, 10.0),
+        "Zero gravity scale should not move: y={}",
+        body.position.y
+    );
 }
 
 #[test]
@@ -298,7 +352,11 @@ fn gravity_scale_negative_floats_up() {
     let mut body = make_rigid(Vector3::new(0.0, 0.0, 0.0));
     body.gravity_scale = -1.0;
     body.integrate(1.0, Vector3::new(0.0, -9.8, 0.0));
-    assert!(body.position.y > 0.0, "Negative gravity scale should go up: y={}", body.position.y);
+    assert!(
+        body.position.y > 0.0,
+        "Negative gravity scale should go up: y={}",
+        body.position.y
+    );
 }
 
 // ===========================================================================
@@ -312,7 +370,10 @@ fn linear_damp_reduces_velocity() {
     body.apply_impulse(Vector3::new(10.0, 0.0, 0.0));
     let v0 = body.linear_velocity.x;
     body.integrate(1.0, Vector3::ZERO);
-    assert!(body.linear_velocity.x < v0, "Linear damp should reduce velocity");
+    assert!(
+        body.linear_velocity.x < v0,
+        "Linear damp should reduce velocity"
+    );
 }
 
 #[test]
@@ -322,7 +383,10 @@ fn angular_damp_reduces_angular_velocity() {
     body.apply_torque_impulse(Vector3::new(0.0, 10.0, 0.0));
     let w0 = body.angular_velocity.y;
     body.integrate(1.0, Vector3::ZERO);
-    assert!(body.angular_velocity.y < w0, "Angular damp should reduce angular velocity");
+    assert!(
+        body.angular_velocity.y < w0,
+        "Angular damp should reduce angular velocity"
+    );
 }
 
 #[test]
@@ -333,7 +397,11 @@ fn zero_damp_preserves_velocity() {
     body.apply_impulse(Vector3::new(10.0, 0.0, 0.0));
     body.integrate(1.0, Vector3::ZERO);
     // With no gravity and no damp, velocity should be preserved
-    assert!(approx(body.linear_velocity.x, 10.0), "v.x={}", body.linear_velocity.x);
+    assert!(
+        approx(body.linear_velocity.x, 10.0),
+        "v.x={}",
+        body.linear_velocity.x
+    );
 }
 
 // ===========================================================================
@@ -524,8 +592,14 @@ fn world_collision_records_contacts() {
 
     let body_a = world.get_body(id_a).unwrap();
     let body_b = world.get_body(id_b).unwrap();
-    assert!(body_a.get_contact_count() > 0, "Body A should have contacts");
-    assert!(body_b.get_contact_count() > 0, "Body B should have contacts");
+    assert!(
+        body_a.get_contact_count() > 0,
+        "Body A should have contacts"
+    );
+    assert!(
+        body_b.get_contact_count() > 0,
+        "Body B should have contacts"
+    );
     assert_eq!(body_a.get_contacts()[0].other_body, id_b);
     assert_eq!(body_b.get_contacts()[0].other_body, id_a);
 }
@@ -574,7 +648,10 @@ fn world_force_then_step() {
     world.gravity = Vector3::ZERO;
 
     let id = world.add_body(make_rigid(Vector3::ZERO));
-    world.get_body_mut(id).unwrap().apply_force(Vector3::new(10.0, 0.0, 0.0));
+    world
+        .get_body_mut(id)
+        .unwrap()
+        .apply_force(Vector3::new(10.0, 0.0, 0.0));
     world.step(1.0);
 
     let body = world.get_body(id).unwrap();
@@ -592,8 +669,14 @@ fn deterministic_with_forces_and_torques() {
         let mut body = make_rigid(Vector3::new(0.0, 50.0, 0.0));
         body.can_sleep = false;
         let id = world.add_body(body);
-        world.get_body_mut(id).unwrap().apply_force(Vector3::new(5.0, 0.0, 0.0));
-        world.get_body_mut(id).unwrap().apply_torque(Vector3::new(0.0, 1.0, 0.0));
+        world
+            .get_body_mut(id)
+            .unwrap()
+            .apply_force(Vector3::new(5.0, 0.0, 0.0));
+        world
+            .get_body_mut(id)
+            .unwrap()
+            .apply_torque(Vector3::new(0.0, 1.0, 0.0));
         for _ in 0..60 {
             world.step(1.0 / 60.0);
         }
@@ -620,8 +703,11 @@ fn inverse_mass_rigid() {
 #[test]
 fn inverse_mass_static_zero() {
     let body = PhysicsBody3D::new(
-        BodyId3D(0), BodyType3D::Static, Vector3::ZERO,
-        Shape3D::Sphere { radius: 1.0 }, 10.0,
+        BodyId3D(0),
+        BodyType3D::Static,
+        Vector3::ZERO,
+        Shape3D::Sphere { radius: 1.0 },
+        10.0,
     );
     assert!(approx(body.inverse_mass(), 0.0));
 }
@@ -637,7 +723,10 @@ fn angular_velocity_changes_rotation() {
     body.apply_torque_impulse(Vector3::new(0.0, 5.0, 0.0));
     let rot_before = body.rotation;
     body.integrate(0.1, Vector3::ZERO);
-    assert_ne!(body.rotation, rot_before, "Rotation should change with angular velocity");
+    assert_ne!(
+        body.rotation, rot_before,
+        "Rotation should change with angular velocity"
+    );
 }
 
 // ===========================================================================
@@ -665,6 +754,7 @@ fn two_bodies_different_masses() {
     assert!(
         light_pos.x.abs() > (heavy_pos.x - 1.0).abs() * 0.5,
         "Light body should move more: light.x={}, heavy.x={}",
-        light_pos.x, heavy_pos.x
+        light_pos.x,
+        heavy_pos.x
     );
 }

@@ -24,7 +24,12 @@ const FRAME_COUNT: u64 = 60;
 const DT: f64 = 1.0 / 60.0;
 
 /// Loads the demo_2d scene and returns the tree + node IDs.
-fn load_demo_scene() -> (SceneTree, gdscene::node::NodeId, gdscene::node::NodeId, gdscene::node::NodeId) {
+fn load_demo_scene() -> (
+    SceneTree,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+) {
     let tscn_source = include_str!("../fixtures/scenes/demo_2d.tscn");
     let packed_scene = PackedScene::from_tscn(tscn_source).unwrap();
 
@@ -281,7 +286,11 @@ fn headless_demo_2d_render_after_headless_run() {
             (c.r - bg.r).abs() > 0.01 || (c.g - bg.g).abs() > 0.01 || (c.b - bg.b).abs() > 0.01
         })
         .count();
-    assert!(non_bg > 100, "rendered frame should have visible content, got {} non-bg pixels", non_bg);
+    assert!(
+        non_bg > 100,
+        "rendered frame should have visible content, got {} non-bg pixels",
+        non_bg
+    );
 }
 
 #[test]
@@ -294,27 +303,41 @@ fn headless_demo_2d_deterministic_across_backend_paths() {
 
         let player_pos = get_position(&tree, player_id);
         let mut pb = PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid, player_pos,
-            Shape2D::Circle { radius: 16.0 }, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            player_pos,
+            Shape2D::Circle { radius: 16.0 },
+            1.0,
         );
         pb.linear_velocity = Vector2::new(30.0, 0.0);
         let pbid = physics.add_body(pb);
 
         let enemy_pos = get_position(&tree, enemy_id);
         let mut eb = PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid, enemy_pos,
-            Shape2D::Circle { radius: 16.0 }, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            enemy_pos,
+            Shape2D::Circle { radius: 16.0 },
+            1.0,
         );
         eb.linear_velocity = Vector2::new(-20.0, 0.0);
         let ebid = physics.add_body(eb);
 
         let mut ml = MainLoop::new(tree);
         for _ in 0..FRAME_COUNT {
-            if let Some(b) = physics.get_body_mut(pbid) { b.apply_force(Vector2::new(0.0, 200.0)); }
-            if let Some(b) = physics.get_body_mut(ebid) { b.apply_force(Vector2::new(0.0, 200.0)); }
+            if let Some(b) = physics.get_body_mut(pbid) {
+                b.apply_force(Vector2::new(0.0, 200.0));
+            }
+            if let Some(b) = physics.get_body_mut(ebid) {
+                b.apply_force(Vector2::new(0.0, 200.0));
+            }
             physics.step(DT as f32);
-            if let Some(b) = physics.get_body(pbid) { set_position(ml.tree_mut(), player_id, b.position); }
-            if let Some(b) = physics.get_body(ebid) { set_position(ml.tree_mut(), enemy_id, b.position); }
+            if let Some(b) = physics.get_body(pbid) {
+                set_position(ml.tree_mut(), player_id, b.position);
+            }
+            if let Some(b) = physics.get_body(ebid) {
+                set_position(ml.tree_mut(), enemy_id, b.position);
+            }
             ml.step(DT);
         }
         (
@@ -331,16 +354,22 @@ fn headless_demo_2d_deterministic_across_backend_paths() {
 
         let player_pos = get_position(&tree, player_id);
         let mut pb = PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid, player_pos,
-            Shape2D::Circle { radius: 16.0 }, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            player_pos,
+            Shape2D::Circle { radius: 16.0 },
+            1.0,
         );
         pb.linear_velocity = Vector2::new(30.0, 0.0);
         let pbid = physics.add_body(pb);
 
         let enemy_pos = get_position(&tree, enemy_id);
         let mut eb = PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid, enemy_pos,
-            Shape2D::Circle { radius: 16.0 }, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            enemy_pos,
+            Shape2D::Circle { radius: 16.0 },
+            1.0,
         );
         eb.linear_velocity = Vector2::new(-20.0, 0.0);
         let ebid = physics.add_body(eb);
@@ -348,11 +377,19 @@ fn headless_demo_2d_deterministic_across_backend_paths() {
         let mut ml = MainLoop::new(tree);
         let mut backend = HeadlessPlatform::new(WIDTH, HEIGHT);
         for _ in 0..FRAME_COUNT {
-            if let Some(b) = physics.get_body_mut(pbid) { b.apply_force(Vector2::new(0.0, 200.0)); }
-            if let Some(b) = physics.get_body_mut(ebid) { b.apply_force(Vector2::new(0.0, 200.0)); }
+            if let Some(b) = physics.get_body_mut(pbid) {
+                b.apply_force(Vector2::new(0.0, 200.0));
+            }
+            if let Some(b) = physics.get_body_mut(ebid) {
+                b.apply_force(Vector2::new(0.0, 200.0));
+            }
             physics.step(DT as f32);
-            if let Some(b) = physics.get_body(pbid) { set_position(ml.tree_mut(), player_id, b.position); }
-            if let Some(b) = physics.get_body(ebid) { set_position(ml.tree_mut(), enemy_id, b.position); }
+            if let Some(b) = physics.get_body(pbid) {
+                set_position(ml.tree_mut(), player_id, b.position);
+            }
+            if let Some(b) = physics.get_body(ebid) {
+                set_position(ml.tree_mut(), enemy_id, b.position);
+            }
             ml.run_frame(&mut backend, DT);
         }
         (
@@ -366,7 +403,10 @@ fn headless_demo_2d_deterministic_across_backend_paths() {
     let (sp, se, sg, sf) = run_via_step();
     let (bp, be, bg, bf) = run_via_backend();
 
-    assert_eq!(sp, bp, "player positions must match between step() and run_frame()");
+    assert_eq!(
+        sp, bp,
+        "player positions must match between step() and run_frame()"
+    );
     assert_eq!(se, be, "enemy positions must match");
     assert_eq!(sg, bg, "ground positions must match");
     assert_eq!(sf, bf, "frame counts must match");
@@ -396,5 +436,9 @@ fn headless_demo_2d_early_quit_via_close_event() {
 
     // MainLoop::run() should exit immediately.
     main_loop.run(&mut backend, DT);
-    assert_eq!(main_loop.frame_count(), 11, "run() should not advance past quit");
+    assert_eq!(
+        main_loop.frame_count(),
+        11,
+        "run() should not advance past quit"
+    );
 }

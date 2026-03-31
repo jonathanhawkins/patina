@@ -99,10 +99,10 @@ impl CSGBox3D {
         // 8 vertices of the box
         let vertices = vec![
             // Front face (z+)
-            Vector3::new(-hx, -hy, hz),  // 0
-            Vector3::new(hx, -hy, hz),   // 1
-            Vector3::new(hx, hy, hz),    // 2
-            Vector3::new(-hx, hy, hz),   // 3
+            Vector3::new(-hx, -hy, hz), // 0
+            Vector3::new(hx, -hy, hz),  // 1
+            Vector3::new(hx, hy, hz),   // 2
+            Vector3::new(-hx, hy, hz),  // 3
             // Back face (z-)
             Vector3::new(hx, -hy, -hz),  // 4
             Vector3::new(-hx, -hy, -hz), // 5
@@ -113,16 +113,11 @@ impl CSGBox3D {
         // 12 triangles (2 per face, CCW winding)
         let indices = vec![
             // Front
-            0, 1, 2, 0, 2, 3,
-            // Back
-            4, 5, 6, 4, 6, 7,
-            // Top
-            3, 2, 7, 3, 7, 6,
-            // Bottom
-            5, 4, 1, 5, 1, 0,
-            // Right
-            1, 4, 7, 1, 7, 2,
-            // Left
+            0, 1, 2, 0, 2, 3, // Back
+            4, 5, 6, 4, 6, 7, // Top
+            3, 2, 7, 3, 7, 6, // Bottom
+            5, 4, 1, 5, 1, 0, // Right
+            1, 4, 7, 1, 7, 2, // Left
             5, 0, 3, 5, 3, 6,
         ];
 
@@ -635,7 +630,11 @@ fn invert_winding(mesh: &Mesh3D) -> Mesh3D {
     }
     Mesh3D {
         vertices: mesh.vertices.clone(),
-        normals: mesh.normals.iter().map(|n| Vector3::new(-n.x, -n.y, -n.z)).collect(),
+        normals: mesh
+            .normals
+            .iter()
+            .map(|n| Vector3::new(-n.x, -n.y, -n.z))
+            .collect(),
         uvs: mesh.uvs.clone(),
         indices,
         primitive_type: mesh.primitive_type,
@@ -686,7 +685,11 @@ mod tests {
         let b = CSGBox3D::new(Vector3::new(2.0, 2.0, 2.0));
         let mesh = b.to_mesh();
         assert_eq!(mesh.vertices.len(), 8, "box should have 8 vertices");
-        assert_eq!(mesh.indices.len(), 36, "box should have 36 indices (12 triangles)");
+        assert_eq!(
+            mesh.indices.len(),
+            36,
+            "box should have 36 indices (12 triangles)"
+        );
     }
 
     #[test]
@@ -739,7 +742,10 @@ mod tests {
         let s = CSGSphere3D::new(1.0);
         let mesh = s.to_mesh();
         assert!(!mesh.vertices.is_empty());
-        assert!(mesh.indices.len() >= 6, "sphere should have at least 2 triangles");
+        assert!(
+            mesh.indices.len() >= 6,
+            "sphere should have at least 2 triangles"
+        );
         assert_eq!(mesh.indices.len() % 3, 0, "indices must be multiple of 3");
     }
 
@@ -838,14 +844,8 @@ mod tests {
         let a = CSGBox3D::new(Vector3::new(1.0, 1.0, 1.0)).to_mesh();
         let b = CSGBox3D::new(Vector3::new(2.0, 2.0, 2.0)).to_mesh();
         let combined = CSGCombiner3D::combine_union(&[a.clone(), b.clone()]);
-        assert_eq!(
-            combined.vertices.len(),
-            a.vertices.len() + b.vertices.len()
-        );
-        assert_eq!(
-            combined.indices.len(),
-            a.indices.len() + b.indices.len()
-        );
+        assert_eq!(combined.vertices.len(), a.vertices.len() + b.vertices.len());
+        assert_eq!(combined.indices.len(), a.indices.len() + b.indices.len());
     }
 
     #[test]
@@ -879,7 +879,10 @@ mod tests {
         }
         let result = CSGCombiner3D::combine_intersection(&a, &b);
         // Should have some triangles (the overlap region)
-        assert!(!result.vertices.is_empty(), "intersection of overlapping boxes should produce geometry");
+        assert!(
+            !result.vertices.is_empty(),
+            "intersection of overlapping boxes should produce geometry"
+        );
         assert!(!result.indices.is_empty());
         assert_eq!(result.indices.len() % 3, 0, "indices must be multiple of 3");
     }
@@ -893,7 +896,10 @@ mod tests {
             v.x += 10.0;
         }
         let result = CSGCombiner3D::combine_intersection(&a, &b);
-        assert!(result.vertices.is_empty(), "disjoint boxes should produce empty intersection");
+        assert!(
+            result.vertices.is_empty(),
+            "disjoint boxes should produce empty intersection"
+        );
         assert!(result.indices.is_empty());
     }
 
@@ -956,7 +962,10 @@ mod tests {
         }
         let result = CSGCombiner3D::combine_subtraction(&a, &b);
         // Should have geometry from both A (exterior) and inverted B (interior)
-        assert!(!result.indices.is_empty(), "subtraction should produce geometry");
+        assert!(
+            !result.indices.is_empty(),
+            "subtraction should produce geometry"
+        );
         assert_eq!(result.indices.len() % 3, 0);
         // Result should differ from A alone (B carves into it)
         let n = result.vertices.len() as u32;
@@ -991,10 +1000,7 @@ mod tests {
         let a = CSGBox3D::new(Vector3::new(1.0, 1.0, 1.0)).to_mesh();
         let b = CSGBox3D::new(Vector3::new(1.0, 1.0, 1.0)).to_mesh();
         let result = CSGCombiner3D::combine(&a, &b, CSGOperation::Union);
-        assert_eq!(
-            result.vertices.len(),
-            a.vertices.len() + b.vertices.len()
-        );
+        assert_eq!(result.vertices.len(), a.vertices.len() + b.vertices.len());
     }
 
     #[test]
@@ -1055,53 +1061,37 @@ mod tests {
 
     #[test]
     fn aabb_contains_point_inside() {
-        let aabb = Aabb::from_vertices(&[
-            Vector3::new(-1.0, -1.0, -1.0),
-            Vector3::new(1.0, 1.0, 1.0),
-        ])
-        .unwrap();
+        let aabb =
+            Aabb::from_vertices(&[Vector3::new(-1.0, -1.0, -1.0), Vector3::new(1.0, 1.0, 1.0)])
+                .unwrap();
         assert!(aabb.contains_point(Vector3::new(0.0, 0.0, 0.0)));
         assert!(aabb.contains_point(Vector3::new(0.5, 0.5, 0.5)));
     }
 
     #[test]
     fn aabb_does_not_contain_point_outside() {
-        let aabb = Aabb::from_vertices(&[
-            Vector3::new(-1.0, -1.0, -1.0),
-            Vector3::new(1.0, 1.0, 1.0),
-        ])
-        .unwrap();
+        let aabb =
+            Aabb::from_vertices(&[Vector3::new(-1.0, -1.0, -1.0), Vector3::new(1.0, 1.0, 1.0)])
+                .unwrap();
         assert!(!aabb.contains_point(Vector3::new(2.0, 0.0, 0.0)));
     }
 
     #[test]
     fn aabb_overlaps_adjacent() {
-        let a = Aabb::from_vertices(&[
-            Vector3::new(0.0, 0.0, 0.0),
-            Vector3::new(1.0, 1.0, 1.0),
-        ])
-        .unwrap();
-        let b = Aabb::from_vertices(&[
-            Vector3::new(0.5, 0.0, 0.0),
-            Vector3::new(1.5, 1.0, 1.0),
-        ])
-        .unwrap();
+        let a = Aabb::from_vertices(&[Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 1.0, 1.0)])
+            .unwrap();
+        let b = Aabb::from_vertices(&[Vector3::new(0.5, 0.0, 0.0), Vector3::new(1.5, 1.0, 1.0)])
+            .unwrap();
         assert!(a.overlaps(&b));
         assert!(b.overlaps(&a));
     }
 
     #[test]
     fn aabb_no_overlap_disjoint() {
-        let a = Aabb::from_vertices(&[
-            Vector3::new(0.0, 0.0, 0.0),
-            Vector3::new(1.0, 1.0, 1.0),
-        ])
-        .unwrap();
-        let b = Aabb::from_vertices(&[
-            Vector3::new(5.0, 5.0, 5.0),
-            Vector3::new(6.0, 6.0, 6.0),
-        ])
-        .unwrap();
+        let a = Aabb::from_vertices(&[Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 1.0, 1.0)])
+            .unwrap();
+        let b = Aabb::from_vertices(&[Vector3::new(5.0, 5.0, 5.0), Vector3::new(6.0, 6.0, 6.0)])
+            .unwrap();
         assert!(!a.overlaps(&b));
     }
 

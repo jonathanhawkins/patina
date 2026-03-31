@@ -13,8 +13,8 @@ use gdscene::node::Node;
 use gdscene::render_server_3d::RenderServer3DAdapter;
 use gdscene::scene_tree::SceneTree;
 use gdserver3d::shader::{
-    CompiledShader3D, RenderModeFlags, Shader3D, ShaderCompiler3D, ShaderMaterial3D,
-    ShaderType3D, UniformType,
+    CompiledShader3D, RenderModeFlags, Shader3D, ShaderCompiler3D, ShaderMaterial3D, ShaderType3D,
+    UniformType,
 };
 use gdvariant::Variant;
 use std::collections::HashMap;
@@ -37,9 +37,18 @@ fn classdb_shader_material_has_expected_properties() {
     gdobject::class_db::register_3d_classes();
     let props = gdobject::class_db::get_property_list("ShaderMaterial");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
-    assert!(names.contains(&"shader_code"), "missing shader_code property");
-    assert!(names.contains(&"shader_type"), "missing shader_type property");
-    assert!(names.contains(&"render_mode"), "missing render_mode property");
+    assert!(
+        names.contains(&"shader_code"),
+        "missing shader_code property"
+    );
+    assert!(
+        names.contains(&"shader_type"),
+        "missing shader_type property"
+    );
+    assert!(
+        names.contains(&"render_mode"),
+        "missing render_mode property"
+    );
 }
 
 // ===========================================================================
@@ -61,7 +70,10 @@ void fragment() {
     let compiler = ShaderCompiler3D::new();
     let compiled = compiler.compile(ShaderType3D::Spatial, source);
 
-    assert!(!compiled.has_errors(), "clean shader should not produce errors");
+    assert!(
+        !compiled.has_errors(),
+        "clean shader should not produce errors"
+    );
     assert_eq!(compiled.uniform_count(), 4);
     assert!(compiled.render_modes.unshaded);
     assert!(compiled.render_modes.cull_disabled);
@@ -88,7 +100,10 @@ fn compiler_detects_shader_type_mismatch() {
     let source = "shader_type sky;\nuniform float x;";
     let compiler = ShaderCompiler3D::new();
     let compiled = compiler.compile(ShaderType3D::Spatial, source);
-    assert!(compiled.has_errors(), "declaring sky but compiling as spatial should error");
+    assert!(
+        compiled.has_errors(),
+        "declaring sky but compiling as spatial should error"
+    );
 }
 
 #[test]
@@ -96,7 +111,10 @@ fn compiler_detects_mismatched_braces() {
     let source = "shader_type spatial;\nvoid fragment() {";
     let compiler = ShaderCompiler3D::new();
     let compiled = compiler.compile(ShaderType3D::Spatial, source);
-    assert!(compiled.has_errors(), "mismatched braces should produce an error");
+    assert!(
+        compiled.has_errors(),
+        "mismatched braces should produce an error"
+    );
 }
 
 #[test]
@@ -104,7 +122,10 @@ fn compiler_detects_duplicate_uniforms() {
     let source = "shader_type spatial;\nuniform float x;\nuniform float x;";
     let compiler = ShaderCompiler3D::new();
     let compiled = compiler.compile(ShaderType3D::Spatial, source);
-    assert!(compiled.has_errors(), "duplicate uniforms should produce an error");
+    assert!(
+        compiled.has_errors(),
+        "duplicate uniforms should produce an error"
+    );
 }
 
 #[test]
@@ -129,13 +150,17 @@ fn compiler_empty_source_is_valid() {
 
 #[test]
 fn shader_material_compiles_attached_shader() {
-    let source = "shader_type spatial;\nrender_mode unshaded;\nuniform vec4 albedo_color : source_color;";
+    let source =
+        "shader_type spatial;\nrender_mode unshaded;\nuniform vec4 albedo_color : source_color;";
     let shader = Shader3D::new(ShaderType3D::Spatial, source);
     assert_eq!(shader.uniforms.len(), 1);
 
     let mut mat = ShaderMaterial3D::new();
     mat.shader = Some(shader);
-    mat.set_shader_parameter("albedo_color", Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)));
+    mat.set_shader_parameter(
+        "albedo_color",
+        Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
 
     let compiler = ShaderCompiler3D::new();
     let compiled = compiler.compile(
@@ -163,11 +188,8 @@ fn shader_material_parameters_override_defaults() {
         &mat.shader.as_ref().unwrap().source_code,
     );
 
-    let resolved = gdserver3d::shader::ShaderProcessor3D::resolve_uniform(
-        &compiled,
-        &mat.parameters,
-        "speed",
-    );
+    let resolved =
+        gdserver3d::shader::ShaderProcessor3D::resolve_uniform(&compiled, &mat.parameters, "speed");
     assert_eq!(resolved, Some(&Variant::Float(5.0)));
 }
 
@@ -205,10 +227,7 @@ fn unknown_render_mode_flags_are_silently_ignored() {
 
 /// Helper: builds a scene tree with Camera3D and a MeshInstance3D that has
 /// ShaderMaterial3D properties set on it.
-fn scene_with_shader_material(
-    shader_code: &str,
-    params: &[(&str, Variant)],
-) -> SceneTree {
+fn scene_with_shader_material(shader_code: &str, params: &[(&str, Variant)]) -> SceneTree {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
@@ -235,7 +254,10 @@ fn scene_tree_shader_material_renders_custom_color() {
 
     let tree = scene_with_shader_material(
         shader_code,
-        &[("albedo_color", Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)))],
+        &[(
+            "albedo_color",
+            Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)),
+        )],
     );
 
     let mut adapter = RenderServer3DAdapter::new(64, 64);
@@ -287,7 +309,10 @@ uniform float alpha = 1.0;
     let tree = scene_with_shader_material(
         shader_code,
         &[
-            ("albedo_color", Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0))),
+            (
+                "albedo_color",
+                Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+            ),
             ("alpha", Variant::Float(0.5)),
         ],
     );
@@ -337,7 +362,10 @@ fn shader_processor_emission_adds_to_color() {
     use gdserver3d::shader::{FragmentContext3D, ShaderProcessor3D};
 
     let compiler = ShaderCompiler3D::new();
-    let compiled = compiler.compile(ShaderType3D::Spatial, "shader_type spatial;\nvoid fragment() {}");
+    let compiled = compiler.compile(
+        ShaderType3D::Spatial,
+        "shader_type spatial;\nvoid fragment() {}",
+    );
     let processor = ShaderProcessor3D::new();
 
     let mut params = HashMap::new();

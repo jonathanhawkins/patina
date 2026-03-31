@@ -17,8 +17,8 @@
 //! 14. ScriptEditor: gutter per-tab isolation
 //! 15. GutterMarker enum variants
 
-use gdeditor::script_gutter::{GutterManager, ScriptGutter};
 use gdeditor::script_editor::{Gutter, GutterMarker, ScriptEditor, ScriptTab};
+use gdeditor::script_gutter::{GutterManager, ScriptGutter};
 
 // ── ScriptGutter: creation and defaults ─────────────────────────────
 

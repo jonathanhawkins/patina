@@ -210,8 +210,7 @@ impl LightUniform {
                     return (Vector3::UP, 1.0);
                 }
                 let dir = to_light * (1.0 / dist);
-                let dist_atten =
-                    Self::distance_attenuation(dist, self.range, self.attenuation);
+                let dist_atten = Self::distance_attenuation(dist, self.range, self.attenuation);
                 let cone_atten = self.cone_attenuation(dir);
                 (dir, dist_atten * cone_atten)
             }
@@ -450,7 +449,9 @@ impl FragmentShader for PhongFragmentShader {
 }
 
 /// Selects the appropriate fragment shader for a given shading mode.
-pub fn fragment_shader_for_mode(mode: gdserver3d::material::ShadingMode) -> Box<dyn FragmentShader> {
+pub fn fragment_shader_for_mode(
+    mode: gdserver3d::material::ShadingMode,
+) -> Box<dyn FragmentShader> {
     match mode {
         gdserver3d::material::ShadingMode::Unlit => Box::new(UnlitFragmentShader),
         gdserver3d::material::ShadingMode::Lambert => Box::new(LambertFragmentShader),
@@ -497,7 +498,10 @@ impl CustomFragmentShader {
         compiled: gdserver3d::CompiledShader3D,
         parameters: std::collections::HashMap<String, gdvariant::Variant>,
     ) -> Self {
-        Self { compiled, parameters }
+        Self {
+            compiled,
+            parameters,
+        }
     }
 
     /// Returns a reference to the compiled shader.
@@ -545,9 +549,7 @@ impl FragmentShader for CustomFragmentShader {
 
         for light in &uniforms.lights {
             let n_dot_l = match light.kind {
-                LightKind::Directional => {
-                    normal.dot(light.direction).max(0.0)
-                }
+                LightKind::Directional => normal.dot(light.direction).max(0.0),
                 LightKind::Point | LightKind::Spot => {
                     let to_light = (light.position - input.world_position).normalized();
                     normal.dot(to_light).max(0.0)

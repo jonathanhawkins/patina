@@ -163,9 +163,7 @@ pub fn fuzzy_match(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     }
 
     // Exact prefix match bonus
-    if text_lower.len() >= query_lower.len()
-        && text_lower[..query_lower.len()] == query_lower[..]
-    {
+    if text_lower.len() >= query_lower.len() && text_lower[..query_lower.len()] == query_lower[..] {
         score += 20;
     }
 
@@ -403,7 +401,11 @@ impl CommandPalette {
                 // Take the better score
                 let best = match (label_match, id_match) {
                     (Some((ls, li)), Some((is, _))) => {
-                        if ls >= is { Some((ls, li)) } else { Some((is, Vec::new())) }
+                        if ls >= is {
+                            Some((ls, li))
+                        } else {
+                            Some((is, Vec::new()))
+                        }
                     }
                     (Some(m), None) | (None, Some(m)) => Some(m),
                     (None, None) => None,
@@ -454,8 +456,12 @@ impl CommandPalette {
             Command::new("editor.settings", "Editor Settings", Editor),
             Command::new("editor.toggle_fullscreen", "Toggle Fullscreen", Editor)
                 .with_shortcut("F11"),
-            Command::new("editor.toggle_distraction_free", "Toggle Distraction Free Mode", Editor)
-                .with_shortcut("Ctrl+Shift+F11"),
+            Command::new(
+                "editor.toggle_distraction_free",
+                "Toggle Distraction Free Mode",
+                Editor,
+            )
+            .with_shortcut("Ctrl+Shift+F11"),
             Command::new("editor.command_palette", "Command Palette", Editor)
                 .with_shortcut("Ctrl+Shift+P"),
             // View
@@ -482,8 +488,7 @@ impl CommandPalette {
             Command::new("script.goto_line", "Go to Line", Script).with_shortcut("Ctrl+G"),
             // Debug
             Command::new("debug.run_file", "Run File", Debug),
-            Command::new("debug.toggle_breakpoint", "Toggle Breakpoint", Debug)
-                .with_shortcut("F9"),
+            Command::new("debug.toggle_breakpoint", "Toggle Breakpoint", Debug).with_shortcut("F9"),
             Command::new("debug.step_over", "Step Over", Debug).with_shortcut("F10"),
             Command::new("debug.step_into", "Step Into", Debug).with_shortcut("F11"),
             // Project
@@ -589,7 +594,11 @@ mod tests {
     #[test]
     fn register_and_find() {
         let mut p = CommandPalette::new();
-        p.register(Command::new("test.cmd", "Test Command", CommandCategory::Editor));
+        p.register(Command::new(
+            "test.cmd",
+            "Test Command",
+            CommandCategory::Editor,
+        ));
         assert_eq!(p.command_count(), 1);
         let cmd = p.find_command("test.cmd").unwrap();
         assert_eq!(cmd.label, "Test Command");
@@ -598,8 +607,16 @@ mod tests {
     #[test]
     fn register_replaces_existing() {
         let mut p = CommandPalette::new();
-        p.register(Command::new("test.cmd", "Old Label", CommandCategory::Editor));
-        p.register(Command::new("test.cmd", "New Label", CommandCategory::Editor));
+        p.register(Command::new(
+            "test.cmd",
+            "Old Label",
+            CommandCategory::Editor,
+        ));
+        p.register(Command::new(
+            "test.cmd",
+            "New Label",
+            CommandCategory::Editor,
+        ));
         assert_eq!(p.command_count(), 1);
         assert_eq!(p.find_command("test.cmd").unwrap().label, "New Label");
     }

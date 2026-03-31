@@ -29,8 +29,7 @@ fn audit_path() -> PathBuf {
 }
 
 fn read_audit() -> String {
-    std::fs::read_to_string(audit_path())
-        .expect("prd/PHASE6_3D_PARITY_AUDIT.md must exist")
+    std::fs::read_to_string(audit_path()).expect("prd/PHASE6_3D_PARITY_AUDIT.md must exist")
 }
 
 // ── Audit doc validation ────────────────────────────────────────────
@@ -59,7 +58,11 @@ fn primary_3d_crates_exist() {
     let crates = ["gdscene", "gdserver3d", "gdrender3d", "gdphysics3d"];
     for name in &crates {
         let src = crate_src(name);
-        assert!(src.exists(), "primary 3D crate '{name}' must exist at {}", src.display());
+        assert!(
+            src.exists(),
+            "primary 3D crate '{name}' must exist at {}",
+            src.display()
+        );
         assert!(
             src.join("lib.rs").exists(),
             "crate '{name}' must have lib.rs"

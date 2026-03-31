@@ -3184,8 +3184,7 @@ impl Interpreter {
                     let valid = match &**callable_ref {
                         CallableRef::Method { method, .. } => !method.is_empty(),
                         CallableRef::Lambda { .. } => true,
-                        CallableRef::Bound { inner, .. }
-                        | CallableRef::Unbound { inner, .. } => {
+                        CallableRef::Bound { inner, .. } | CallableRef::Unbound { inner, .. } => {
                             match inner.inner_callable() {
                                 CallableRef::Method { method, .. } => !method.is_empty(),
                                 _ => true,
@@ -3197,10 +3196,11 @@ impl Interpreter {
                 "get_method" => match &**callable_ref {
                     CallableRef::Method { method, .. } => Ok(Variant::String(method.clone())),
                     CallableRef::Lambda { .. } => Ok(Variant::String("<lambda>".into())),
-                    CallableRef::Bound { inner, .. }
-                    | CallableRef::Unbound { inner, .. } => {
+                    CallableRef::Bound { inner, .. } | CallableRef::Unbound { inner, .. } => {
                         match inner.inner_callable() {
-                            CallableRef::Method { method, .. } => Ok(Variant::String(method.clone())),
+                            CallableRef::Method { method, .. } => {
+                                Ok(Variant::String(method.clone()))
+                            }
                             _ => Ok(Variant::String("<lambda>".into())),
                         }
                     }

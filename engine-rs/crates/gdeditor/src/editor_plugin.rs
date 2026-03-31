@@ -198,8 +198,7 @@ impl ToolScriptDescriptor {
 
     /// Adds an exported property.
     pub fn with_export(mut self, name: impl Into<String>, default: impl Into<String>) -> Self {
-        self.exported_properties
-            .insert(name.into(), default.into());
+        self.exported_properties.insert(name.into(), default.into());
         self
     }
 }
@@ -615,9 +614,11 @@ impl EditorPluginRegistry {
 
     /// Moves a dock panel to a different slot.
     pub fn move_dock(&mut self, plugin_id: &str, title: &str, new_slot: DockSlot) -> bool {
-        if let Some(panel) = self.dock_panels.iter_mut().find(|(id, _, t)| {
-            id == plugin_id && t == title
-        }) {
+        if let Some(panel) = self
+            .dock_panels
+            .iter_mut()
+            .find(|(id, _, t)| id == plugin_id && t == title)
+        {
             panel.1 = new_slot;
             true
         } else {
@@ -627,7 +628,10 @@ impl EditorPluginRegistry {
 
     /// Returns the number of dock panels for a specific plugin.
     pub fn dock_count_for_plugin(&self, plugin_id: &str) -> usize {
-        self.dock_panels.iter().filter(|(id, _, _)| id == plugin_id).count()
+        self.dock_panels
+            .iter()
+            .filter(|(id, _, _)| id == plugin_id)
+            .count()
     }
 
     /// Returns a summary of the dock layout (slot -> list of panel titles).
@@ -753,7 +757,10 @@ impl TodoListPlugin {
 
     /// Returns TODOs filtered by priority.
     pub fn todos_by_priority(&self, priority: TodoPriority) -> Vec<&TodoItem> {
-        self.todos.iter().filter(|t| t.priority == priority).collect()
+        self.todos
+            .iter()
+            .filter(|t| t.priority == priority)
+            .collect()
     }
 }
 
@@ -1057,12 +1064,15 @@ impl ResourcePreviewPlugin {
     /// Records a resource preview.
     pub fn record_preview(&mut self, path: &str, resource_type: &str, width: u32, height: u32) {
         self.previewed_resources.retain(|p| p.path != path);
-        self.previewed_resources.insert(0, PreviewEntry {
-            path: path.to_string(),
-            resource_type: resource_type.to_string(),
-            width,
-            height,
-        });
+        self.previewed_resources.insert(
+            0,
+            PreviewEntry {
+                path: path.to_string(),
+                resource_type: resource_type.to_string(),
+                width,
+                height,
+            },
+        );
         self.previewed_resources.truncate(self.max_previews);
     }
 
@@ -1109,8 +1119,12 @@ impl EditorPluginExt for ResourcePreviewPlugin {
     fn handles(&self, class_name: &str) -> bool {
         matches!(
             class_name,
-            "Texture2D" | "ImageTexture" | "CompressedTexture2D"
-                | "MeshInstance3D" | "StandardMaterial3D" | "ShaderMaterial"
+            "Texture2D"
+                | "ImageTexture"
+                | "CompressedTexture2D"
+                | "MeshInstance3D"
+                | "StandardMaterial3D"
+                | "ShaderMaterial"
         )
     }
 }
@@ -1468,8 +1482,8 @@ mod tests {
     #[test]
     fn unregister_removes_autoloads() {
         let mut registry = EditorPluginRegistry::new();
-        let plugin = ToolScriptPlugin::new("al-rem", "res://plugin.gd")
-            .with_autoload("Mgr", "res://mgr.gd");
+        let plugin =
+            ToolScriptPlugin::new("al-rem", "res://plugin.gd").with_autoload("Mgr", "res://mgr.gd");
         registry.register(Box::new(plugin));
         assert_eq!(registry.autoloads().len(), 1);
 
@@ -1502,10 +1516,7 @@ mod tests {
     fn tool_script_plugins_list() {
         let mut registry = EditorPluginRegistry::new();
         registry.register(Box::new(SimplePlugin::new("simple", "Simple")));
-        registry.register(Box::new(ToolScriptPlugin::new(
-            "tool",
-            "res://plugin.gd",
-        )));
+        registry.register(Box::new(ToolScriptPlugin::new("tool", "res://plugin.gd")));
 
         let tool_plugins = registry.tool_script_plugins();
         assert_eq!(tool_plugins.len(), 1);
@@ -1925,10 +1936,7 @@ mod tests {
 
         registry.disable("patina.todo_list");
         assert_eq!(registry.enabled_dock_panels().len(), 1);
-        assert_eq!(
-            registry.enabled_dock_panels()[0].2,
-            "Favorites"
-        );
+        assert_eq!(registry.enabled_dock_panels()[0].2, "Favorites");
     }
 
     #[test]
@@ -1980,9 +1988,18 @@ mod tests {
         registry.register(Box::new(ResourcePreviewPlugin::new()));
 
         let layout = registry.dock_layout_summary();
-        assert!(layout.get(&DockSlot::Bottom).unwrap().contains(&"TODOs".to_string()));
-        assert!(layout.get(&DockSlot::RightLower).unwrap().contains(&"Favorites".to_string()));
-        assert!(layout.get(&DockSlot::RightLower).unwrap().contains(&"Preview History".to_string()));
+        assert!(layout
+            .get(&DockSlot::Bottom)
+            .unwrap()
+            .contains(&"TODOs".to_string()));
+        assert!(layout
+            .get(&DockSlot::RightLower)
+            .unwrap()
+            .contains(&"Favorites".to_string()));
+        assert!(layout
+            .get(&DockSlot::RightLower)
+            .unwrap()
+            .contains(&"Preview History".to_string()));
     }
 
     #[test]

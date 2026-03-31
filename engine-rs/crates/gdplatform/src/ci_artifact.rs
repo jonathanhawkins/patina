@@ -43,7 +43,12 @@ pub struct CiArtifact {
 
 impl CiArtifact {
     /// Returns the artifact name in the standard naming convention.
-    pub fn standard_name(app_name: &str, platform: &str, arch: &str, profile: BuildProfile) -> String {
+    pub fn standard_name(
+        app_name: &str,
+        platform: &str,
+        arch: &str,
+        profile: BuildProfile,
+    ) -> String {
         let profile_str = match profile {
             BuildProfile::Debug => "debug",
             BuildProfile::Release => "release",
@@ -173,8 +178,8 @@ impl CiArtifactPlan {
 
             for profile in &self.profiles {
                 let name = CiArtifact::standard_name(&self.app_name, &platform, &arch, *profile);
-                let export_cfg = ExportConfig::new(&platform, &self.app_name)
-                    .with_build_profile(*profile);
+                let export_cfg =
+                    ExportConfig::new(&platform, &self.app_name).with_build_profile(*profile);
                 let template = ExportTemplate::from_config(export_cfg);
                 let filename = template.output_filename();
 
@@ -283,7 +288,10 @@ mod tests {
         assert!(!plan.targets.is_empty());
         for triple in &plan.targets {
             let target = find_target(triple);
-            assert!(target.is_some(), "CI target {triple} must be in DESKTOP_TARGETS");
+            assert!(
+                target.is_some(),
+                "CI target {triple} must be in DESKTOP_TARGETS"
+            );
             assert!(target.unwrap().ci_tested, "{triple} must be CI-tested");
         }
     }
@@ -320,8 +328,7 @@ mod tests {
 
     #[test]
     fn generate_artifacts_single_target() {
-        let plan = CiArtifactPlan::new("patina")
-            .with_target("x86_64-unknown-linux-gnu");
+        let plan = CiArtifactPlan::new("patina").with_target("x86_64-unknown-linux-gnu");
         let artifacts = plan.generate_artifacts();
         assert_eq!(artifacts.len(), 1);
         let a = &artifacts[0];
@@ -338,8 +345,14 @@ mod tests {
             .with_debug_and_release()
             .with_target("x86_64-unknown-linux-gnu");
         let artifacts = plan.generate_artifacts();
-        let debug = artifacts.iter().find(|a| a.profile == BuildProfile::Debug).unwrap();
-        let release = artifacts.iter().find(|a| a.profile == BuildProfile::Release).unwrap();
+        let debug = artifacts
+            .iter()
+            .find(|a| a.profile == BuildProfile::Debug)
+            .unwrap();
+        let release = artifacts
+            .iter()
+            .find(|a| a.profile == BuildProfile::Release)
+            .unwrap();
         assert!(!debug.upload);
         assert!(release.upload);
     }
@@ -404,8 +417,7 @@ mod tests {
 
     #[test]
     fn github_actions_matrix_format() {
-        let plan = CiArtifactPlan::new("app")
-            .with_target("x86_64-unknown-linux-gnu");
+        let plan = CiArtifactPlan::new("app").with_target("x86_64-unknown-linux-gnu");
         let matrix = plan.github_actions_matrix();
         assert!(matrix.contains("\"include\""));
         assert!(matrix.contains("ubuntu-latest"));
@@ -415,16 +427,14 @@ mod tests {
 
     #[test]
     fn github_actions_matrix_windows() {
-        let plan = CiArtifactPlan::new("app")
-            .with_target("x86_64-pc-windows-msvc");
+        let plan = CiArtifactPlan::new("app").with_target("x86_64-pc-windows-msvc");
         let matrix = plan.github_actions_matrix();
         assert!(matrix.contains("windows-latest"));
     }
 
     #[test]
     fn github_actions_matrix_macos() {
-        let plan = CiArtifactPlan::new("app")
-            .with_target("aarch64-apple-darwin");
+        let plan = CiArtifactPlan::new("app").with_target("aarch64-apple-darwin");
         let matrix = plan.github_actions_matrix();
         assert!(matrix.contains("macos-latest"));
     }

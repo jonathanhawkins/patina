@@ -52,7 +52,10 @@ fn make_multi_body_scene() -> (SceneTree, gdscene::node::NodeId, gdscene::node::
     let mut ball_a = Node::new("BallA", "RigidBody2D");
     ball_a.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
     ball_a.set_property("mass", Variant::Float(1.0));
-    ball_a.set_property("linear_velocity", Variant::Vector2(Vector2::new(120.0, 0.0)));
+    ball_a.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(120.0, 0.0)),
+    );
     let ball_a_id = tree.add_child(root, ball_a).unwrap();
     let mut shape_a = Node::new("CollisionShape", "CollisionShape2D");
     shape_a.set_property("radius", Variant::Float(8.0));
@@ -199,10 +202,7 @@ fn multi_tick_physics_all_before_process() {
         physics_events.len() >= 3,
         "expected at least 3 physics tick notifications"
     );
-    assert!(
-        !process_events.is_empty(),
-        "expected process notifications"
-    );
+    assert!(!process_events.is_empty(), "expected process notifications");
 
     let max_physics = *physics_events.last().unwrap();
     let min_process = *process_events.first().unwrap();
@@ -494,7 +494,10 @@ fn lower_tps_fewer_ticks() {
     // 30 TPS: physics_dt = 1/30. With delta=1/60, no tick.
     ml.set_physics_ticks_per_second(30);
     let out1 = ml.step(1.0 / 60.0);
-    assert_eq!(out1.physics_steps, 0, "half-tick at 30 TPS should produce 0 ticks");
+    assert_eq!(
+        out1.physics_steps, 0,
+        "half-tick at 30 TPS should produce 0 ticks"
+    );
 
     // Next 1/60 frame accumulates to full tick.
     let out2 = ml.step(1.0 / 60.0);
@@ -511,7 +514,10 @@ fn negative_delta_no_ticks() {
     let (mut ml, _) = make_single_body_mainloop();
     let output = ml.step(-1.0 / 60.0);
 
-    assert_eq!(output.physics_steps, 0, "negative delta should produce 0 ticks");
+    assert_eq!(
+        output.physics_steps, 0,
+        "negative delta should produce 0 ticks"
+    );
     assert_eq!(output.frame_count, 1, "frame counter still increments");
 }
 

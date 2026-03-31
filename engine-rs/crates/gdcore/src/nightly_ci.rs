@@ -150,11 +150,7 @@ impl TestSuite {
 
     /// Returns the suites that run in the fast nightly (skip long-running).
     pub fn fast_nightly() -> &'static [TestSuite] {
-        &[
-            TestSuite::Unit,
-            TestSuite::Integration,
-            TestSuite::Golden,
-        ]
+        &[TestSuite::Unit, TestSuite::Integration, TestSuite::Golden]
     }
 
     /// Returns the suites for the full nightly.
@@ -464,7 +460,10 @@ impl NightlyRunner {
             "{:<20} {:>10} {:>12} {:>10}\n",
             "Platform", "Status", "Duration", "Artifact"
         ));
-        out.push_str(&format!("{:-<20} {:-<10} {:-<12} {:-<10}\n", "", "", "", ""));
+        out.push_str(&format!(
+            "{:-<20} {:-<10} {:-<12} {:-<10}\n",
+            "", "", "", ""
+        ));
 
         for platform in &self.config.platforms {
             if let Some(result) = self.build_results.get(platform) {
@@ -497,9 +496,9 @@ impl NightlyRunner {
             .platforms
             .iter()
             .filter_map(|p| {
-                self.build_results.get(p).and_then(|r| {
-                    r.error.as_deref().map(|e| (p.label(), e))
-                })
+                self.build_results
+                    .get(p)
+                    .and_then(|r| r.error.as_deref().map(|e| (p.label(), e)))
             })
             .collect();
         if !build_errors.is_empty() {

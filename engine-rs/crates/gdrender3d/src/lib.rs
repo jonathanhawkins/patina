@@ -26,9 +26,9 @@ pub use compare::{compare_framebuffers_3d, diff_image_3d, DiffResult3D};
 pub use depth_buffer::DepthBuffer;
 pub use rasterizer::{clip_to_screen, rasterize_triangle, ScreenVertex};
 pub use renderer::{FrameBuffer3D, RenderMode, SoftwareRenderer3D};
-pub use shadow_map::{generate_omni_shadow_cubemaps, generate_shadow_maps, ShadowMap};
 pub use shader::{
     CustomFragmentShader, FragmentInput, FragmentShader, LambertFragmentShader, LightKind,
-    LightUniform, PhongFragmentShader, ShaderUniforms, StandardVertexShader,
-    UnlitFragmentShader, VertexInput, VertexOutput, VertexShader,
+    LightUniform, PhongFragmentShader, ShaderUniforms, StandardVertexShader, UnlitFragmentShader,
+    VertexInput, VertexOutput, VertexShader,
 };
+pub use shadow_map::{generate_omni_shadow_cubemaps, generate_shadow_maps, ShadowMap};

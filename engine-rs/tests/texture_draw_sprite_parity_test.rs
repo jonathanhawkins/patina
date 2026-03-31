@@ -147,8 +147,16 @@ fn draw_texture_rect_clips_at_edges() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 7, 7), red(), "visible portion should render");
-    assert_eq!(pixel_at(&frame, 2, 2), Color::BLACK, "outside rect should be clear");
+    assert_eq!(
+        pixel_at(&frame, 7, 7),
+        red(),
+        "visible portion should render"
+    );
+    assert_eq!(
+        pixel_at(&frame, 2, 2),
+        Color::BLACK,
+        "outside rect should be clear"
+    );
 }
 
 /// Zero-size texture does not crash.
@@ -168,7 +176,11 @@ fn draw_texture_rect_zero_texture_no_crash() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "zero-size texture draws nothing");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "zero-size texture draws nothing"
+    );
 }
 
 /// Missing texture path draws nothing.
@@ -274,7 +286,10 @@ fn modulate_zero_alpha() {
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
     // Alpha should be 0 (1.0 * 0.0 = 0.0)
-    assert!(p.a < 0.01, "modulate alpha=0 should produce transparent pixel");
+    assert!(
+        p.a < 0.01,
+        "modulate alpha=0 should produce transparent pixel"
+    );
 }
 
 /// Different modulate per-channel tints correctly.
@@ -323,7 +338,11 @@ fn draw_texture_region_draws_subregion() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), red(), "sub-region should sample top-left (red)");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        red(),
+        "sub-region should sample top-left (red)"
+    );
 }
 
 /// Sub-region with modulate applies tinting.
@@ -376,7 +395,7 @@ fn draw_texture_region_zero_source_draws_nothing() {
 #[test]
 fn texture_flip_horizontal() {
     let mut pixels = vec![Color::BLACK; 4];
-    pixels[0] = red();  // (0,0)
+    pixels[0] = red(); // (0,0)
     pixels[1] = blue(); // (1,0)
     let tex = Texture2D {
         width: 2,
@@ -392,7 +411,7 @@ fn texture_flip_horizontal() {
 #[test]
 fn texture_flip_vertical() {
     let mut pixels = vec![Color::BLACK; 4];
-    pixels[0] = red();  // (0,0) top
+    pixels[0] = red(); // (0,0) top
     pixels[2] = blue(); // (0,1) bottom
     let tex = Texture2D {
         width: 2,
@@ -461,8 +480,16 @@ fn flipped_texture_renders_correctly() {
 
     let frame = renderer.render_frame(&vp);
     // After horizontal flip: left=blue, right=red
-    assert_eq!(pixel_at(&frame, 0, 0), blue(), "left should be blue after flip");
-    assert_eq!(pixel_at(&frame, 9, 0), red(), "right should be red after flip");
+    assert_eq!(
+        pixel_at(&frame, 0, 0),
+        blue(),
+        "left should be blue after flip"
+    );
+    assert_eq!(
+        pixel_at(&frame, 9, 0),
+        red(),
+        "right should be red after flip"
+    );
 }
 
 /// Sprite item with transform translation offsets texture.
@@ -483,8 +510,16 @@ fn sprite_transform_translation() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 12, 12), green(), "translated sprite should render offset");
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "origin should be clear");
+    assert_eq!(
+        pixel_at(&frame, 12, 12),
+        green(),
+        "translated sprite should render offset"
+    );
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "origin should be clear"
+    );
 }
 
 /// Hidden sprite with texture does not render.
@@ -521,7 +556,11 @@ fn texture_resize_preserves_color() {
     assert_eq!(resized.height, 8);
     for y in 0..8 {
         for x in 0..8 {
-            assert_eq!(resized.get_pixel(x, y), red(), "all pixels should be red at ({x},{y})");
+            assert_eq!(
+                resized.get_pixel(x, y),
+                red(),
+                "all pixels should be red at ({x},{y})"
+            );
         }
     }
 }
@@ -580,7 +619,11 @@ fn texture_z_ordering() {
     vp.add_canvas_item(fg);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), green(), "higher z texture should be on top");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        green(),
+        "higher z texture should be on top"
+    );
 }
 
 /// Multiple draw commands on same item render in command order.
@@ -609,8 +652,16 @@ fn multiple_draw_commands_same_item() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 0, 0), red(), "corner should be red (first draw)");
-    assert_eq!(pixel_at(&frame, 4, 4), blue(), "center should be blue (second draw overwrites)");
+    assert_eq!(
+        pixel_at(&frame, 0, 0),
+        red(),
+        "corner should be red (first draw)"
+    );
+    assert_eq!(
+        pixel_at(&frame, 4, 4),
+        blue(),
+        "center should be blue (second draw overwrites)"
+    );
 }
 
 // ===========================================================================
@@ -642,7 +693,11 @@ fn mixed_rect_and_texture_draw() {
 
     let frame = renderer.render_frame(&vp);
     assert_eq!(pixel_at(&frame, 0, 0), red(), "corner should be red rect");
-    assert_eq!(pixel_at(&frame, 4, 4), green(), "center should be green texture");
+    assert_eq!(
+        pixel_at(&frame, 4, 4),
+        green(),
+        "center should be green texture"
+    );
 }
 
 /// Texture on lower z, rect on higher z — rect wins.
@@ -673,7 +728,11 @@ fn rect_over_texture_z_ordering() {
     vp.add_canvas_item(rect_item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), red(), "higher z rect should be on top of lower z texture");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        red(),
+        "higher z rect should be on top of lower z texture"
+    );
 }
 
 // ===========================================================================
@@ -698,9 +757,21 @@ fn draw_texture_rect_scaled_down() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 2, 2), red(), "scaled-down texture should render");
-    assert_eq!(pixel_at(&frame, 0, 0), Color::BLACK, "outside should be clear");
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "outside should be clear");
+    assert_eq!(
+        pixel_at(&frame, 2, 2),
+        red(),
+        "scaled-down texture should render"
+    );
+    assert_eq!(
+        pixel_at(&frame, 0, 0),
+        Color::BLACK,
+        "outside should be clear"
+    );
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "outside should be clear"
+    );
 }
 
 /// Scale-down preserves quadrant pattern from a multi-colored texture.
@@ -769,7 +840,11 @@ fn wide_texture_draws_correctly() {
 
     let frame = renderer.render_frame(&vp);
     assert_eq!(pixel_at(&frame, 2, 1), red(), "left side should be red");
-    assert_eq!(pixel_at(&frame, 12, 1), green(), "right side should be green");
+    assert_eq!(
+        pixel_at(&frame, 12, 1),
+        green(),
+        "right side should be green"
+    );
 }
 
 /// Tall texture drawn into matching aspect rect.
@@ -881,7 +956,11 @@ fn draw_texture_region_top_right_quadrant() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), green(), "top-right quadrant should be green");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        green(),
+        "top-right quadrant should be green"
+    );
 }
 
 /// Region: bottom-left quadrant (blue).
@@ -901,7 +980,11 @@ fn draw_texture_region_bottom_left_quadrant() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), blue(), "bottom-left quadrant should be blue");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        blue(),
+        "bottom-left quadrant should be blue"
+    );
 }
 
 /// Region: bottom-right quadrant (white).
@@ -921,7 +1004,11 @@ fn draw_texture_region_bottom_right_quadrant() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), white(), "bottom-right quadrant should be white");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        white(),
+        "bottom-right quadrant should be white"
+    );
 }
 
 // ===========================================================================
@@ -948,7 +1035,11 @@ fn flipped_texture_region_horizontal() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), green(), "H-flipped TL should be green");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        green(),
+        "H-flipped TL should be green"
+    );
 }
 
 /// Vertically flipped texture sampled via region.
@@ -971,7 +1062,11 @@ fn flipped_texture_region_vertical() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), blue(), "V-flipped TL should be blue");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        blue(),
+        "V-flipped TL should be blue"
+    );
 }
 
 // ===========================================================================
@@ -999,8 +1094,11 @@ fn flipped_region_with_modulate() {
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 5, 5);
     // Green * 0.5 = (0, 0.5, 0).
-    assert!(approx_eq(p, Color::rgb(0.0, 0.5, 0.0), 0.02),
-        "flipped green region modulated by 0.5: expected ~(0, 0.5, 0), got {:?}", p);
+    assert!(
+        approx_eq(p, Color::rgb(0.0, 0.5, 0.0), 0.02),
+        "flipped green region modulated by 0.5: expected ~(0, 0.5, 0), got {:?}",
+        p
+    );
 }
 
 // ===========================================================================
@@ -1081,7 +1179,11 @@ fn same_z_texture_tree_order() {
     vp.add_canvas_item(second);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), green(), "same z: later item renders on top");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        green(),
+        "same z: later item renders on top"
+    );
 }
 
 // ===========================================================================
@@ -1107,8 +1209,11 @@ fn modulate_half_alpha_produces_semitransparent() {
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
     // Red(1,0,0,1) * modulate(1,1,1,0.5) → (1,0,0,0.5).
-    assert!(approx_eq(p, Color::new(1.0, 0.0, 0.0, 0.5), 0.02),
-        "half-alpha modulate: expected (1,0,0,0.5), got {:?}", p);
+    assert!(
+        approx_eq(p, Color::new(1.0, 0.0, 0.0, 0.5), 0.02),
+        "half-alpha modulate: expected (1,0,0,0.5), got {:?}",
+        p
+    );
 }
 
 /// Modulate with per-channel alpha and color tint.
@@ -1130,8 +1235,11 @@ fn modulate_tint_with_alpha() {
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
     // White * (0, 1, 0, 0.25) = (0, 1, 0, 0.25).
-    assert!(approx_eq(p, Color::new(0.0, 1.0, 0.0, 0.25), 0.02),
-        "green tint + quarter alpha: expected (0,1,0,0.25), got {:?}", p);
+    assert!(
+        approx_eq(p, Color::new(0.0, 1.0, 0.0, 0.25), 0.02),
+        "green tint + quarter alpha: expected (0,1,0,0.25), got {:?}",
+        p
+    );
 }
 
 // ===========================================================================
@@ -1156,9 +1264,21 @@ fn texture_negative_position_clips() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 0, 0), green(), "clipped but visible at origin");
-    assert_eq!(pixel_at(&frame, 4, 4), green(), "clipped but visible at edge");
-    assert_eq!(pixel_at(&frame, 5, 5), Color::BLACK, "outside rect should be clear");
+    assert_eq!(
+        pixel_at(&frame, 0, 0),
+        green(),
+        "clipped but visible at origin"
+    );
+    assert_eq!(
+        pixel_at(&frame, 4, 4),
+        green(),
+        "clipped but visible at edge"
+    );
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        Color::BLACK,
+        "outside rect should be clear"
+    );
 }
 
 // ===========================================================================
@@ -1185,7 +1305,11 @@ fn draw_texture_region_source_rect_clamped() {
 
     let frame = renderer.render_frame(&vp);
     // Should render red (clamped to edge texels), not crash or show garbage.
-    assert_eq!(pixel_at(&frame, 5, 5), red(), "clamped source rect should still produce valid color");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        red(),
+        "clamped source rect should still produce valid color"
+    );
 }
 
 // ===========================================================================
@@ -1207,8 +1331,16 @@ fn texture_resize_then_flip_preserves_pattern() {
     let flipped = resized.flip_horizontal();
     // After H-flip of 4x4 that was resized from [R,G / G,R]:
     // (0,0) was red → after resize (0,0)=red. After H-flip, (0,0)=green (was right side).
-    assert_eq!(flipped.get_pixel(0, 0), green(), "H-flip of resized: left should be green");
-    assert_eq!(flipped.get_pixel(3, 0), red(), "H-flip of resized: right should be red");
+    assert_eq!(
+        flipped.get_pixel(0, 0),
+        green(),
+        "H-flip of resized: left should be green"
+    );
+    assert_eq!(
+        flipped.get_pixel(3, 0),
+        red(),
+        "H-flip of resized: right should be red"
+    );
 }
 
 /// Flip then resize produces same result as resize then flip.
@@ -1222,7 +1354,11 @@ fn flip_then_resize_equals_resize_then_flip() {
     for y in 0..4u32 {
         for x in 0..4u32 {
             assert!(
-                approx_eq(flip_first.get_pixel(x, y), resize_first.get_pixel(x, y), 0.02),
+                approx_eq(
+                    flip_first.get_pixel(x, y),
+                    resize_first.get_pixel(x, y),
+                    0.02
+                ),
                 "flip→resize vs resize→flip mismatch at ({x},{y}): {:?} vs {:?}",
                 flip_first.get_pixel(x, y),
                 resize_first.get_pixel(x, y),
@@ -1241,7 +1377,10 @@ fn deterministic_multi_sprite_scene() {
     let make_frame = || {
         let mut renderer = SoftwareRenderer::new();
         renderer.register_texture("res://r.png", Texture2D::solid(4, 4, red()));
-        renderer.register_texture("res://g.png", Texture2D::solid(4, 4, green()).flip_horizontal());
+        renderer.register_texture(
+            "res://g.png",
+            Texture2D::solid(4, 4, green()).flip_horizontal(),
+        );
         renderer.register_texture("res://b.png", Texture2D::solid(4, 4, blue()));
 
         let mut vp = Viewport::new(20, 20, Color::BLACK);
@@ -1280,7 +1419,10 @@ fn deterministic_multi_sprite_scene() {
 
     let f1 = make_frame();
     let f2 = make_frame();
-    assert_eq!(f1.pixels, f2.pixels, "complex multi-sprite scene must be deterministic");
+    assert_eq!(
+        f1.pixels, f2.pixels,
+        "complex multi-sprite scene must be deterministic"
+    );
 }
 
 // ===========================================================================
@@ -1339,7 +1481,11 @@ fn nine_patch_no_center_through_renderer() {
 
     let frame = renderer.render_frame(&vp);
     assert_eq!(pixel_at(&frame, 0, 0), red(), "NP corner should render");
-    assert_eq!(pixel_at(&frame, 10, 10), Color::BLACK, "NP center should be empty");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        Color::BLACK,
+        "NP center should be empty"
+    );
 }
 
 /// NinePatch with modulate tints all regions.
@@ -1365,8 +1511,16 @@ fn nine_patch_with_modulate_through_renderer() {
 
     let frame = renderer.render_frame(&vp);
     // White * blue = blue.
-    assert_eq!(pixel_at(&frame, 0, 0), blue(), "NP corner modulated to blue");
-    assert_eq!(pixel_at(&frame, 6, 6), blue(), "NP center modulated to blue");
+    assert_eq!(
+        pixel_at(&frame, 0, 0),
+        blue(),
+        "NP corner modulated to blue"
+    );
+    assert_eq!(
+        pixel_at(&frame, 6, 6),
+        blue(),
+        "NP center modulated to blue"
+    );
 }
 
 /// NinePatch with asymmetric texture preserves corner pixel identity.
@@ -1452,8 +1606,16 @@ fn transform_scale_and_translate() {
     vp.add_canvas_item(item);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 12, 12), blue(), "scaled+translated interior");
-    assert_eq!(pixel_at(&frame, 9, 9), Color::BLACK, "before translated rect");
+    assert_eq!(
+        pixel_at(&frame, 12, 12),
+        blue(),
+        "scaled+translated interior"
+    );
+    assert_eq!(
+        pixel_at(&frame, 9, 9),
+        Color::BLACK,
+        "before translated rect"
+    );
     assert_eq!(pixel_at(&frame, 18, 18), Color::BLACK, "after scaled rect");
 }
 
@@ -1486,8 +1648,16 @@ fn flipped_texture_at_2x_scale() {
 
     let frame = renderer.render_frame(&vp);
     // After H-flip: left=green, right=red. Scaled 10x.
-    assert_eq!(pixel_at(&frame, 2, 0), green(), "left side after flip+scale = green");
-    assert_eq!(pixel_at(&frame, 15, 0), red(), "right side after flip+scale = red");
+    assert_eq!(
+        pixel_at(&frame, 2, 0),
+        green(),
+        "left side after flip+scale = green"
+    );
+    assert_eq!(
+        pixel_at(&frame, 15, 0),
+        red(),
+        "right side after flip+scale = red"
+    );
 }
 
 /// Vertically flipped asymmetric texture at 2x scale.
@@ -1528,9 +1698,9 @@ fn texture_with_per_pixel_alpha() {
         width: 2,
         height: 2,
         pixels: vec![
-            Color::new(1.0, 0.0, 0.0, 1.0), // TL: fully opaque red
-            Color::new(0.0, 1.0, 0.0, 0.5), // TR: half-alpha green
-            Color::new(0.0, 0.0, 1.0, 0.0), // BL: fully transparent blue
+            Color::new(1.0, 0.0, 0.0, 1.0),  // TL: fully opaque red
+            Color::new(0.0, 1.0, 0.0, 0.5),  // TR: half-alpha green
+            Color::new(0.0, 0.0, 1.0, 0.0),  // BL: fully transparent blue
             Color::new(1.0, 1.0, 1.0, 0.25), // BR: quarter-alpha white
         ],
     };
@@ -1551,11 +1721,18 @@ fn texture_with_per_pixel_alpha() {
     assert_eq!(pixel_at(&frame, 0, 0), Color::new(1.0, 0.0, 0.0, 1.0));
     // TR: half-alpha green.
     let tr = pixel_at(&frame, 2, 0);
-    assert!(approx_eq(tr, Color::new(0.0, 1.0, 0.0, 0.5), 0.02),
-        "half-alpha green: got {:?}", tr);
+    assert!(
+        approx_eq(tr, Color::new(0.0, 1.0, 0.0, 0.5), 0.02),
+        "half-alpha green: got {:?}",
+        tr
+    );
     // BL: fully transparent blue → alpha channel = 0.
     let bl = pixel_at(&frame, 0, 2);
-    assert!(bl.a < 0.01, "fully transparent pixel should have near-zero alpha, got {}", bl.a);
+    assert!(
+        bl.a < 0.01,
+        "fully transparent pixel should have near-zero alpha, got {}",
+        bl.a
+    );
 }
 
 /// Modulate alpha multiplies with texture alpha.
@@ -1579,8 +1756,11 @@ fn modulate_alpha_multiplies_with_texture_alpha() {
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
     // (1,0,0,0.5) * modulate(1,1,1,0.5) = (1,0,0,0.25).
-    assert!(approx_eq(p, Color::new(1.0, 0.0, 0.0, 0.25), 0.02),
-        "alpha multiply: expected (1,0,0,0.25), got {:?}", p);
+    assert!(
+        approx_eq(p, Color::new(1.0, 0.0, 0.0, 0.25), 0.02),
+        "alpha multiply: expected (1,0,0,0.25), got {:?}",
+        p
+    );
 }
 
 // ===========================================================================
@@ -1613,7 +1793,11 @@ fn nine_patch_with_transform() {
     assert_eq!(pixel_at(&frame, 4, 4), Color::BLACK, "before translated NP");
     assert_eq!(pixel_at(&frame, 5, 5), green(), "translated NP start");
     assert_eq!(pixel_at(&frame, 14, 14), green(), "translated NP end");
-    assert_eq!(pixel_at(&frame, 15, 15), Color::BLACK, "after translated NP");
+    assert_eq!(
+        pixel_at(&frame, 15, 15),
+        Color::BLACK,
+        "after translated NP"
+    );
 }
 
 // ===========================================================================
@@ -1688,8 +1872,16 @@ fn texture_region_with_transform() {
 
     let frame = renderer.render_frame(&vp);
     // Region drawn at (5,5) to (11,11) should be green.
-    assert_eq!(pixel_at(&frame, 7, 7), green(), "transformed region interior = green");
-    assert_eq!(pixel_at(&frame, 4, 4), Color::BLACK, "before transformed region");
+    assert_eq!(
+        pixel_at(&frame, 7, 7),
+        green(),
+        "transformed region interior = green"
+    );
+    assert_eq!(
+        pixel_at(&frame, 4, 4),
+        Color::BLACK,
+        "before transformed region"
+    );
 }
 
 // ===========================================================================
@@ -1730,7 +1922,11 @@ fn nine_patch_over_texture_z_order() {
 
     let frame = renderer.render_frame(&vp);
     assert_eq!(pixel_at(&frame, 0, 0), red(), "corner: bg texture");
-    assert_eq!(pixel_at(&frame, 10, 10), green(), "center: fg nine-patch on top");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        green(),
+        "center: fg nine-patch on top"
+    );
 }
 
 // ===========================================================================
@@ -1761,8 +1957,11 @@ fn full_sprite_property_combo() {
     let frame = renderer.render_frame(&vp);
     // blue * red = black. Drawn at (5,5) to (13,13).
     let p = pixel_at(&frame, 8, 8);
-    assert!(approx_eq(p, Color::rgb(0.0, 0.0, 0.0), 0.02),
-        "blue region * red modulate = black, got {:?}", p);
+    assert!(
+        approx_eq(p, Color::rgb(0.0, 0.0, 0.0), 0.02),
+        "blue region * red modulate = black, got {:?}",
+        p
+    );
     assert_eq!(pixel_at(&frame, 4, 4), Color::BLACK, "before region");
 }
 
@@ -1846,5 +2045,8 @@ fn deterministic_ninepatch_scene() {
 
     let f1 = make_frame();
     let f2 = make_frame();
-    assert_eq!(f1.pixels, f2.pixels, "NP + texture + region scene must be deterministic");
+    assert_eq!(
+        f1.pixels, f2.pixels,
+        "NP + texture + region scene must be deterministic"
+    );
 }

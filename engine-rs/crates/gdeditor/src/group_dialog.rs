@@ -100,11 +100,7 @@ impl GroupDialog {
     }
 
     /// Recursive helper to collect groups from all nodes.
-    fn walk_groups(
-        tree: &SceneTree,
-        id: NodeId,
-        groups: &mut BTreeMap<String, HashSet<NodeId>>,
-    ) {
+    fn walk_groups(tree: &SceneTree, id: NodeId, groups: &mut BTreeMap<String, HashSet<NodeId>>) {
         let node = match tree.get_node(id) {
             Some(n) => n,
             None => return,

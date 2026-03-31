@@ -52,7 +52,7 @@ fn find_multiple_on_different_lines() {
     let fr = FindReplace::new("var");
     let matches = fr.find_all(SAMPLE);
     assert!(matches.len() >= 3); // speed, health, name
-    // All on different lines
+                                 // All on different lines
     let lines: Vec<usize> = matches.iter().map(|m| m.line).collect();
     assert!(lines.windows(2).all(|w| w[0] <= w[1]));
 }

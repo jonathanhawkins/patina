@@ -132,10 +132,7 @@ fn golden_scene_count_at_least_24() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
         .count();
-    assert!(
-        count >= 24,
-        "Expected >= 24 scene goldens, found {count}"
-    );
+    assert!(count >= 24, "Expected >= 24 scene goldens, found {count}");
 }
 
 #[test]
@@ -146,10 +143,7 @@ fn golden_physics_count_at_least_17() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
         .count();
-    assert!(
-        count >= 17,
-        "Expected >= 17 physics goldens, found {count}"
-    );
+    assert!(count >= 17, "Expected >= 17 physics goldens, found {count}");
 }
 
 #[test]
@@ -160,10 +154,7 @@ fn golden_traces_count_at_least_23() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
         .count();
-    assert!(
-        count >= 23,
-        "Expected >= 23 trace goldens, found {count}"
-    );
+    assert!(count >= 23, "Expected >= 23 trace goldens, found {count}");
 }
 
 #[test]
@@ -174,10 +165,7 @@ fn golden_signals_count_at_least_3() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
         .count();
-    assert!(
-        count >= 3,
-        "Expected >= 3 signal goldens, found {count}"
-    );
+    assert!(count >= 3, "Expected >= 3 signal goldens, found {count}");
 }
 
 #[test]
@@ -188,10 +176,7 @@ fn golden_resources_count_at_least_5() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
         .count();
-    assert!(
-        count >= 5,
-        "Expected >= 5 resource goldens, found {count}"
-    );
+    assert!(count >= 5, "Expected >= 5 resource goldens, found {count}");
 }
 
 #[test]
@@ -321,8 +306,5 @@ fn scene_fixtures_at_least_24() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "tscn"))
         .count();
-    assert!(
-        count >= 24,
-        "Expected >= 24 scene fixtures, found {count}"
-    );
+    assert!(count >= 24, "Expected >= 24 scene fixtures, found {count}");
 }

@@ -13,8 +13,7 @@ use std::sync::Arc;
 use gdcore::error::{EngineError, EngineResult};
 use gdcore::ResourceUid;
 use gdresource::{
-    parse_uid_string, Resource, ResourceLoader, TresLoader, UidRegistry,
-    UnifiedLoader,
+    parse_uid_string, Resource, ResourceLoader, TresLoader, UidRegistry, UnifiedLoader,
 };
 use gdvariant::Variant;
 
@@ -106,9 +105,7 @@ fn parsed_uid_matches_string_derived_uid() {
 hp = 100
 "#;
     let tres = TresLoader::new();
-    let parsed = tres
-        .parse_str(source, "res://stats/player.tres")
-        .unwrap();
+    let parsed = tres.parse_str(source, "res://stats/player.tres").unwrap();
 
     let from_string = parse_uid_string("uid://player_stats");
 
@@ -728,9 +725,7 @@ name = "FullTheme"
 style = SubResource("panel")
 "#;
     let tres = TresLoader::new();
-    let parsed = tres
-        .parse_str(source, "res://themes/full.tres")
-        .unwrap();
+    let parsed = tres.parse_str(source, "res://themes/full.tres").unwrap();
 
     // Verify parse results.
     assert!(parsed.uid.is_valid());
@@ -746,12 +741,6 @@ style = SubResource("panel")
     // Register and verify the UID round-trips through the registry.
     let mut reg = UidRegistry::new();
     reg.register(parsed.uid, &parsed.path);
-    assert_eq!(
-        reg.lookup_uid(parsed.uid),
-        Some("res://themes/full.tres")
-    );
-    assert_eq!(
-        reg.lookup_path("res://themes/full.tres"),
-        Some(parsed.uid)
-    );
+    assert_eq!(reg.lookup_uid(parsed.uid), Some("res://themes/full.tres"));
+    assert_eq!(reg.lookup_path("res://themes/full.tres"), Some(parsed.uid));
 }

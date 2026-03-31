@@ -187,7 +187,9 @@ fn indoor_3d_loads_all_nodes() {
     assert!(tree.get_node_by_path("/root/Room/Lamp").is_some());
     assert!(tree.get_node_by_path("/root/Room/CeilingLight").is_some());
     assert!(tree.get_node_by_path("/root/Room/Floor").is_some());
-    assert!(tree.get_node_by_path("/root/Room/Floor/FloorShape").is_some());
+    assert!(tree
+        .get_node_by_path("/root/Room/Floor/FloorShape")
+        .is_some());
     assert!(tree.get_node_by_path("/root/Room/Wall_Back").is_some());
     assert!(tree
         .get_node_by_path("/root/Room/Wall_Back/WallShape")
@@ -300,16 +302,10 @@ fn physics_3d_playground_static_bodies() {
     let tree = load_tscn_to_tree("physics_3d_playground.tscn");
 
     let plat_id = tree.get_node_by_path("/root/World/Platform").unwrap();
-    assert_eq!(
-        tree.get_node(plat_id).unwrap().class_name(),
-        "StaticBody3D"
-    );
+    assert_eq!(tree.get_node(plat_id).unwrap().class_name(), "StaticBody3D");
 
     let ramp_id = tree.get_node_by_path("/root/World/Ramp").unwrap();
-    assert_eq!(
-        tree.get_node(ramp_id).unwrap().class_name(),
-        "StaticBody3D"
-    );
+    assert_eq!(tree.get_node(ramp_id).unwrap().class_name(), "StaticBody3D");
 }
 
 #[test]
@@ -341,9 +337,7 @@ fn physics_3d_playground_child_hierarchy() {
     assert!(tree
         .get_node_by_path("/root/World/Ball/BallShape")
         .is_some());
-    assert!(tree
-        .get_node_by_path("/root/World/Ball/BallMesh")
-        .is_some());
+    assert!(tree.get_node_by_path("/root/World/Ball/BallMesh").is_some());
 
     // Platform has two children: PlatformShape and PlatformMesh
     assert!(tree
@@ -390,10 +384,7 @@ fn multi_light_3d_four_lights() {
     );
 
     let fill_id = tree.get_node_by_path("/root/Stage/FillLight").unwrap();
-    assert_eq!(
-        tree.get_node(fill_id).unwrap().class_name(),
-        "OmniLight3D"
-    );
+    assert_eq!(tree.get_node(fill_id).unwrap().class_name(), "OmniLight3D");
     assert_eq!(
         tree.get_node(fill_id).unwrap().get_property("light_energy"),
         Variant::Float(0.6)
@@ -567,11 +558,17 @@ fn golden_multi_body_all_bodies_present() {
 fn golden_multi_body_all_fall_under_gravity() {
     let trace = load_golden_3d_trace("multi_body_3d_20frames");
 
-    let ball_start = trace.iter().find(|e| e.name == "Ball" && e.frame == 0).unwrap();
+    let ball_start = trace
+        .iter()
+        .find(|e| e.name == "Ball" && e.frame == 0)
+        .unwrap();
     let ball_end = trace.iter().filter(|e| e.name == "Ball").last().unwrap();
     assert!(ball_start.position.y > ball_end.position.y);
 
-    let cube_start = trace.iter().find(|e| e.name == "Cube" && e.frame == 0).unwrap();
+    let cube_start = trace
+        .iter()
+        .find(|e| e.name == "Cube" && e.frame == 0)
+        .unwrap();
     let cube_end = trace.iter().filter(|e| e.name == "Cube").last().unwrap();
     assert!(cube_start.position.y > cube_end.position.y);
 
@@ -694,11 +691,7 @@ fn all_3d_golden_scenes_valid_json() {
             .as_array()
             .or_else(|| golden["nodes"].as_array())
             .unwrap_or_else(|| panic!("{} golden has no nodes array", name));
-        assert!(
-            !nodes.is_empty(),
-            "{} golden has no nodes",
-            name
-        );
+        assert!(!nodes.is_empty(), "{} golden has no nodes", name);
     }
 }
 
@@ -796,7 +789,9 @@ fn outdoor_3d_loads_terrain_and_trees() {
     assert!(tree.get_node_by_path("/root/Outdoor/Tree1").is_some());
     assert!(tree.get_node_by_path("/root/Outdoor/Tree2").is_some());
     assert!(tree.get_node_by_path("/root/Outdoor/Rock").is_some());
-    assert!(tree.get_node_by_path("/root/Outdoor/AmbientLight").is_some());
+    assert!(tree
+        .get_node_by_path("/root/Outdoor/AmbientLight")
+        .is_some());
 }
 
 #[test]
@@ -903,9 +898,7 @@ fn spotlight_gallery_3d_spot_energies() {
         Variant::Float(2.0)
     );
 
-    let green_id = tree
-        .get_node_by_path("/root/Gallery/SpotGreen")
-        .unwrap();
+    let green_id = tree.get_node_by_path("/root/Gallery/SpotGreen").unwrap();
     assert_eq!(
         tree.get_node(green_id)
             .unwrap()
@@ -947,10 +940,7 @@ fn animated_scene_3d_has_skeleton_and_anim() {
     let skel_id = tree
         .get_node_by_path("/root/Scene/Character/Skeleton")
         .unwrap();
-    assert_eq!(
-        tree.get_node(skel_id).unwrap().class_name(),
-        "Skeleton3D"
-    );
+    assert_eq!(tree.get_node(skel_id).unwrap().class_name(), "Skeleton3D");
 
     let anim_id = tree
         .get_node_by_path("/root/Scene/Character/AnimPlayer")
@@ -1087,11 +1077,11 @@ fn golden_foggy_terrain_3d_valid() {
 fn golden_foggy_terrain_3d_has_fog_and_environment() {
     let golden = load_golden_scene("foggy_terrain_3d");
     let nodes = golden["data"]["nodes"].as_array().unwrap();
-    let classes: Vec<&str> = nodes
-        .iter()
-        .map(|n| n["class"].as_str().unwrap())
-        .collect();
-    assert!(classes.contains(&"FogVolume"), "missing FogVolume in golden");
+    let classes: Vec<&str> = nodes.iter().map(|n| n["class"].as_str().unwrap()).collect();
+    assert!(
+        classes.contains(&"FogVolume"),
+        "missing FogVolume in golden"
+    );
     assert!(
         classes.contains(&"WorldEnvironment"),
         "missing WorldEnvironment in golden"
@@ -1113,9 +1103,7 @@ fn csg_composition_loads_all_nodes() {
     let tree = load_tscn_to_tree("csg_composition.tscn");
 
     assert!(tree.get_node_by_path("/root/CSGWorld").is_some());
-    assert!(tree
-        .get_node_by_path("/root/CSGWorld/Combiner")
-        .is_some());
+    assert!(tree.get_node_by_path("/root/CSGWorld/Combiner").is_some());
     assert!(tree
         .get_node_by_path("/root/CSGWorld/Combiner/Box")
         .is_some());
@@ -1125,9 +1113,7 @@ fn csg_composition_loads_all_nodes() {
     assert!(tree
         .get_node_by_path("/root/CSGWorld/Combiner/Cylinder")
         .is_some());
-    assert!(tree
-        .get_node_by_path("/root/CSGWorld/Standalone")
-        .is_some());
+    assert!(tree.get_node_by_path("/root/CSGWorld/Standalone").is_some());
     assert!(tree.get_node_by_path("/root/CSGWorld/Probe").is_some());
 }
 
@@ -1136,9 +1122,7 @@ fn csg_composition_node_classes() {
     let _g = setup();
     let tree = load_tscn_to_tree("csg_composition.tscn");
 
-    let combiner_id = tree
-        .get_node_by_path("/root/CSGWorld/Combiner")
-        .unwrap();
+    let combiner_id = tree.get_node_by_path("/root/CSGWorld/Combiner").unwrap();
     assert_eq!(
         tree.get_node(combiner_id).unwrap().class_name(),
         "CSGCombiner3D"
@@ -1157,9 +1141,7 @@ fn csg_composition_node_classes() {
         "CSGSphere3D"
     );
 
-    let probe_id = tree
-        .get_node_by_path("/root/CSGWorld/Probe")
-        .unwrap();
+    let probe_id = tree.get_node_by_path("/root/CSGWorld/Probe").unwrap();
     assert_eq!(
         tree.get_node(probe_id).unwrap().class_name(),
         "ReflectionProbe"
@@ -1174,10 +1156,7 @@ fn golden_csg_composition_valid() {
         .as_array()
         .or_else(|| golden["data"]["nodes"].as_array())
         .expect("csg_composition golden must have nodes array");
-    assert!(
-        !nodes.is_empty(),
-        "csg_composition golden has no nodes"
-    );
+    assert!(!nodes.is_empty(), "csg_composition golden has no nodes");
 }
 
 /// Recursively collect all "class" values from a nested node tree.
@@ -1233,8 +1212,8 @@ fn fixture_corpus_maps_to_audited_families() {
         "{}/../prd/PHASE6_3D_PARITY_AUDIT.md",
         env!("CARGO_MANIFEST_DIR")
     );
-    let audit = std::fs::read_to_string(&audit_path)
-        .expect("should read PHASE6_3D_PARITY_AUDIT.md");
+    let audit =
+        std::fs::read_to_string(&audit_path).expect("should read PHASE6_3D_PARITY_AUDIT.md");
 
     // The audit must contain the corpus definition section
     assert!(
@@ -1314,8 +1293,8 @@ fn all_corpus_fixtures_have_golden_json() {
         );
         let golden = load_golden_scene(name);
         // Some golden files use "data.nodes", others use flat "nodes"
-        let has_nodes = golden["data"]["nodes"].as_array().is_some()
-            || golden["nodes"].as_array().is_some();
+        let has_nodes =
+            golden["data"]["nodes"].as_array().is_some() || golden["nodes"].as_array().is_some();
         assert!(
             has_nodes,
             "{} golden must have nodes array (checked data.nodes and nodes)",

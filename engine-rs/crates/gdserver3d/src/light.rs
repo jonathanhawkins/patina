@@ -355,7 +355,12 @@ mod tests {
         for face in CubeFace::ALL {
             let fwd = face.forward();
             let len = (fwd.x * fwd.x + fwd.y * fwd.y + fwd.z * fwd.z).sqrt();
-            assert!((len - 1.0).abs() < 1e-5, "face {:?} forward not unit: {}", face, len);
+            assert!(
+                (len - 1.0).abs() < 1e-5,
+                "face {:?} forward not unit: {}",
+                face,
+                len
+            );
         }
     }
 
@@ -364,7 +369,12 @@ mod tests {
         for face in CubeFace::ALL {
             let up = face.up();
             let len = (up.x * up.x + up.y * up.y + up.z * up.z).sqrt();
-            assert!((len - 1.0).abs() < 1e-5, "face {:?} up not unit: {}", face, len);
+            assert!(
+                (len - 1.0).abs() < 1e-5,
+                "face {:?} up not unit: {}",
+                face,
+                len
+            );
         }
     }
 
@@ -426,7 +436,10 @@ mod tests {
         cm.test_and_set(CubeFace::PositiveX, 4, 4, 7.5);
         // Sampling in the +X direction should hit that face.
         let depth = cm.sample(Vector3::new(1.0, 0.0, 0.0));
-        assert!(depth < f32::MAX, "expected written depth on +X face, got MAX");
+        assert!(
+            depth < f32::MAX,
+            "expected written depth on +X face, got MAX"
+        );
     }
 
     #[test]

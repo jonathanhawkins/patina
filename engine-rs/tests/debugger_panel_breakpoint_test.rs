@@ -309,9 +309,10 @@ fn variable_value_display_dictionary() {
 
 #[test]
 fn variable_value_display_nested() {
-    let val = VariableValue::Array(vec![
-        VariableValue::Dictionary(vec![("x".into(), VariableValue::Float(1.5))]),
-    ]);
+    let val = VariableValue::Array(vec![VariableValue::Dictionary(vec![(
+        "x".into(),
+        VariableValue::Float(1.5),
+    )])]);
     assert_eq!(format!("{val}"), "[{x: 1.5}]");
 }
 

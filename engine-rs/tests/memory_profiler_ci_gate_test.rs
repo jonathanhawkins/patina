@@ -240,9 +240,7 @@ fn from_env_with_all_vars() {
 
 #[test]
 fn from_env_no_vars_has_defaults() {
-    let gate = CiMemoryGate::from_env_reader("env-empty", |_| {
-        Err(std::env::VarError::NotPresent)
-    });
+    let gate = CiMemoryGate::from_env_reader("env-empty", |_| Err(std::env::VarError::NotPresent));
 
     assert!(gate.budget().max_total_bytes.is_none());
     assert!(gate.budget().max_live_count.is_none());
@@ -391,7 +389,11 @@ fn realistic_ci_scenario() {
     });
 
     let result = gate.check(&profiler);
-    assert!(result.passed(), "CI gate should pass: {:?}", result.reasons());
+    assert!(
+        result.passed(),
+        "CI gate should pass: {:?}",
+        result.reasons()
+    );
 
     // Verify snapshots were captured
     let snaps = profiler.snapshots();

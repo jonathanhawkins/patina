@@ -17,14 +17,12 @@ fn examples_dir() -> std::path::PathBuf {
 
 fn read_gallery() -> String {
     let path = repo_root().join("docs/EXAMPLE_GALLERY.md");
-    fs::read_to_string(&path)
-        .expect("docs/EXAMPLE_GALLERY.md must exist")
+    fs::read_to_string(&path).expect("docs/EXAMPLE_GALLERY.md must exist")
 }
 
 fn read_readme() -> String {
     let path = examples_dir().join("README.md");
-    fs::read_to_string(&path)
-        .expect("examples/README.md must exist")
+    fs::read_to_string(&path).expect("examples/README.md must exist")
 }
 
 // ===========================================================================
@@ -55,7 +53,8 @@ fn examples_readme_exists() {
 fn gallery_has_at_least_5_demos() {
     let gallery = read_gallery();
     // Count numbered section headers (## 1. ... ## 2. ... etc.)
-    let demo_count = gallery.lines()
+    let demo_count = gallery
+        .lines()
         .filter(|l| l.starts_with("## ") && l.chars().nth(3).map_or(false, |c| c.is_ascii_digit()))
         .count();
     assert!(
@@ -150,29 +149,50 @@ fn gallery_documents_subsystems_per_demo() {
 #[test]
 fn gallery_has_space_shooter() {
     let gallery = read_gallery();
-    assert!(gallery.contains("Space Shooter"), "must have Space Shooter demo");
-    assert!(gallery.contains("space_shooter.rs"), "must reference the file");
+    assert!(
+        gallery.contains("Space Shooter"),
+        "must have Space Shooter demo"
+    );
+    assert!(
+        gallery.contains("space_shooter.rs"),
+        "must reference the file"
+    );
 }
 
 #[test]
 fn gallery_has_platformer() {
     let gallery = read_gallery();
-    assert!(gallery.contains("Platformer Demo"), "must have Platformer Demo");
-    assert!(gallery.contains("platformer_demo.rs"), "must reference the file");
+    assert!(
+        gallery.contains("Platformer Demo"),
+        "must have Platformer Demo"
+    );
+    assert!(
+        gallery.contains("platformer_demo.rs"),
+        "must reference the file"
+    );
 }
 
 #[test]
 fn gallery_has_gdscript_example() {
     let gallery = read_gallery();
     assert!(gallery.contains("GDScript"), "must have GDScript example");
-    assert!(gallery.contains("hello_gdscript.rs"), "must reference the file");
+    assert!(
+        gallery.contains("hello_gdscript.rs"),
+        "must reference the file"
+    );
 }
 
 #[test]
 fn gallery_has_project_loader() {
     let gallery = read_gallery();
-    assert!(gallery.contains("Project Loader"), "must have Project Loader");
-    assert!(gallery.contains("run_project.rs"), "must reference the file");
+    assert!(
+        gallery.contains("Project Loader"),
+        "must have Project Loader"
+    );
+    assert!(
+        gallery.contains("run_project.rs"),
+        "must reference the file"
+    );
 }
 
 #[test]
@@ -211,10 +231,7 @@ fn readme_documents_all_examples() {
     ];
 
     for ex in &examples {
-        assert!(
-            readme.contains(ex),
-            "README must document example: {ex}"
-        );
+        assert!(readme.contains(ex), "README must document example: {ex}");
     }
 }
 
@@ -225,7 +242,16 @@ fn readme_documents_all_examples() {
 #[test]
 fn gallery_has_see_also() {
     let gallery = read_gallery();
-    assert!(gallery.contains("## See Also"), "must have See Also section");
-    assert!(gallery.contains("migration-guide.md"), "must link to migration guide");
-    assert!(gallery.contains("GDSCRIPT_COMPATIBILITY.md"), "must link to GDScript compat");
+    assert!(
+        gallery.contains("## See Also"),
+        "must have See Also section"
+    );
+    assert!(
+        gallery.contains("migration-guide.md"),
+        "must link to migration guide"
+    );
+    assert!(
+        gallery.contains("GDSCRIPT_COMPATIBILITY.md"),
+        "must link to GDScript compat"
+    );
 }

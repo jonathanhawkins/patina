@@ -118,7 +118,10 @@ fn quaternion_identity_is_correct() {
     assert_eq!(id.x, 0.0);
     assert_eq!(id.y, 0.0);
     assert_eq!(id.z, 0.0);
-    assert_eq!(id.w, 1.0, "Quaternion identity w must be 1.0 (4.6.1 compat)");
+    assert_eq!(
+        id.w, 1.0,
+        "Quaternion identity w must be 1.0 (4.6.1 compat)"
+    );
 }
 
 #[test]
@@ -349,7 +352,10 @@ fn change_scene_to_node_exists_and_works() {
     let new_id = tree.change_scene_to_node(new_scene).unwrap();
 
     // Old scene should be gone, new scene should be current
-    assert!(tree.get_node(initial_id).is_none(), "Old scene must be removed");
+    assert!(
+        tree.get_node(initial_id).is_none(),
+        "Old scene must be removed"
+    );
     assert!(tree.get_node(new_id).is_some(), "New scene must exist");
     assert_eq!(tree.current_scene(), Some(new_id));
 }
@@ -610,8 +616,7 @@ fn repin_diff_document_exists_with_per_fixture_breakdown() {
         env!("CARGO_MANIFEST_DIR"),
         "/../prd/GODOT_4_6_1_REPIN_DIFF.md"
     );
-    let content =
-        std::fs::read_to_string(diff_path).expect("Repin diff report must exist");
+    let content = std::fs::read_to_string(diff_path).expect("Repin diff report must exist");
 
     assert!(
         content.contains("Per-Fixture Breakdown"),
@@ -667,10 +672,7 @@ fn audit_covers_all_category_types() {
 
     let categories = ["breaking", "behavioral-change", "new-api", "cosmetic"];
     for cat in &categories {
-        assert!(
-            content.contains(cat),
-            "Audit must cover category '{cat}'"
-        );
+        assert!(content.contains(cat), "Audit must cover category '{cat}'");
     }
 }
 
@@ -686,7 +688,12 @@ fn audit_covers_all_impact_levels() {
     );
     let content = std::fs::read_to_string(audit_path).unwrap();
 
-    let impacts = ["needs-fix", "already-compatible", "not-yet-implemented", "monitor"];
+    let impacts = [
+        "needs-fix",
+        "already-compatible",
+        "not-yet-implemented",
+        "monitor",
+    ];
     for impact in &impacts {
         assert!(
             content.contains(impact),
@@ -787,7 +794,8 @@ fn audit_deferred_action_references_animation_player() {
         .unwrap_or("");
 
     assert!(
-        deferred_section.contains("AnimationPlayer") && deferred_section.contains("animation_finished"),
+        deferred_section.contains("AnimationPlayer")
+            && deferred_section.contains("animation_finished"),
         "Deferred action must reference AnimationPlayer animation_finished"
     );
 }
@@ -832,10 +840,7 @@ fn audit_out_of_scope_lists_3d_deferred() {
     );
     let content = std::fs::read_to_string(audit_path).unwrap();
 
-    let oos = content
-        .split("Out-of-Scope")
-        .nth(1)
-        .unwrap_or("");
+    let oos = content.split("Out-of-Scope").nth(1).unwrap_or("");
 
     assert!(
         oos.contains("3D deferred"),
@@ -869,13 +874,40 @@ fn release_delta_461_comprehensive_validation() {
 
     let checks = [
         ("25 rows in audit table", row_count == 25),
-        ("Version range 4.5.1 → 4.6.1", content.contains("4.5.1") && content.contains("4.6.1")),
-        ("All 4 categories present", ["breaking", "behavioral-change", "new-api", "cosmetic"].iter().all(|c| content.contains(c))),
-        ("All 4 impact levels present", ["needs-fix", "already-compatible", "not-yet-implemented", "monitor"].iter().all(|c| content.contains(c))),
-        ("Priority action list exists", content.contains("Priority-Ordered Action List")),
-        ("Out-of-scope section exists", content.contains("Out-of-Scope")),
+        (
+            "Version range 4.5.1 → 4.6.1",
+            content.contains("4.5.1") && content.contains("4.6.1"),
+        ),
+        (
+            "All 4 categories present",
+            ["breaking", "behavioral-change", "new-api", "cosmetic"]
+                .iter()
+                .all(|c| content.contains(c)),
+        ),
+        (
+            "All 4 impact levels present",
+            [
+                "needs-fix",
+                "already-compatible",
+                "not-yet-implemented",
+                "monitor",
+            ]
+            .iter()
+            .all(|c| content.contains(c)),
+        ),
+        (
+            "Priority action list exists",
+            content.contains("Priority-Ordered Action List"),
+        ),
+        (
+            "Out-of-scope section exists",
+            content.contains("Out-of-Scope"),
+        ),
         ("Immediate action: ClassDB", content.contains("ClassDB")),
-        ("How to read section exists", content.contains("How to Read")),
+        (
+            "How to read section exists",
+            content.contains("How to Read"),
+        ),
         ("Oracle parity baseline noted", content.contains("90.5%")),
         ("Date documented", content.contains("2026-03-20")),
     ];

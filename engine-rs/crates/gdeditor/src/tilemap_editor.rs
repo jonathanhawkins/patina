@@ -568,8 +568,14 @@ mod tests {
     #[test]
     fn grid_world_to_grid() {
         let conv = GridCoordConverter::new(Vector2i::new(16, 16), Vector2::ZERO);
-        assert_eq!(conv.world_to_grid(Vector2::new(24.0, 8.0)), Vector2i::new(1, 0));
-        assert_eq!(conv.world_to_grid(Vector2::new(-1.0, -1.0)), Vector2i::new(-1, -1));
+        assert_eq!(
+            conv.world_to_grid(Vector2::new(24.0, 8.0)),
+            Vector2i::new(1, 0)
+        );
+        assert_eq!(
+            conv.world_to_grid(Vector2::new(-1.0, -1.0)),
+            Vector2i::new(-1, -1)
+        );
     }
 
     #[test]

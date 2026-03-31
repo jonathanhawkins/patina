@@ -49,8 +49,7 @@ fn has_safety_comment(lines: &[&str], line_idx: usize) -> bool {
 
 #[test]
 fn all_unsafe_blocks_have_safety_comments() {
-    let crates_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates");
+    let crates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates");
 
     let files = collect_rs_files(&crates_dir);
     assert!(!files.is_empty(), "Should find .rs files in crates/");
@@ -76,14 +75,21 @@ fn all_unsafe_blocks_have_safety_comments() {
             }
 
             // Skip test code
-            if lines[..idx].iter().rev().take(5).any(|l| l.contains("#[test]") || l.contains("#[cfg(test)]")) {
+            if lines[..idx]
+                .iter()
+                .rev()
+                .take(5)
+                .any(|l| l.contains("#[test]") || l.contains("#[cfg(test)]"))
+            {
                 continue;
             }
 
             total_unsafe += 1;
 
             if !has_safety_comment(&lines, idx) {
-                let relative = file.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap_or(file);
+                let relative = file
+                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .unwrap_or(file);
                 violations.push(format!(
                     "  {}:{} — {}",
                     relative.display(),
@@ -111,9 +117,7 @@ fn all_unsafe_blocks_have_safety_comments() {
         "Expected to find at least one unsafe block in engine crates"
     );
 
-    eprintln!(
-        "Unsafe code audit PASSED: {total_unsafe} unsafe blocks, all with SAFETY comments."
-    );
+    eprintln!("Unsafe code audit PASSED: {total_unsafe} unsafe blocks, all with SAFETY comments.");
 }
 
 #[test]
@@ -131,11 +135,11 @@ fn unsafe_send_impls_have_justification() {
 
         for (idx, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("unsafe impl Send")
-                || trimmed.starts_with("unsafe impl Sync")
-            {
+            if trimmed.starts_with("unsafe impl Send") || trimmed.starts_with("unsafe impl Sync") {
                 if !has_safety_comment(&lines, idx) {
-                    let relative = file.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap_or(file);
+                    let relative = file
+                        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap_or(file);
                     violations.push(format!(
                         "  {}:{} — {}",
                         relative.display(),

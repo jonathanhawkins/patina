@@ -25,10 +25,9 @@ fn arb_circle() -> impl Strategy<Value = Shape2D> {
 }
 
 fn arb_rectangle() -> impl Strategy<Value = Shape2D> {
-    (arb_positive_f32(), arb_positive_f32())
-        .prop_map(|(w, h)| Shape2D::Rectangle {
-            half_extents: Vector2::new(w, h),
-        })
+    (arb_positive_f32(), arb_positive_f32()).prop_map(|(w, h)| Shape2D::Rectangle {
+        half_extents: Vector2::new(w, h),
+    })
 }
 
 fn arb_shape() -> impl Strategy<Value = Shape2D> {

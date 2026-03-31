@@ -14,8 +14,8 @@
 //! 11. Integration with ResourceCache (deduplication)
 //! 12. ClassDB registration of PCKPacker and ProjectSettings.load_resource_pack
 
-use gdresource::pck::{PckArchive, PckPacker, PckResourceLoader, PCK_MAGIC};
 use gdresource::loader::ResourceLoader;
+use gdresource::pck::{PckArchive, PckPacker, PckResourceLoader, PCK_MAGIC};
 use std::sync::Arc;
 
 // ── Pack/unpack roundtrip ────────────────────────────────────────────
@@ -46,7 +46,10 @@ fn single_file_roundtrip() {
 #[test]
 fn multiple_files_roundtrip() {
     let mut packer = PckPacker::new();
-    packer.add_file("res://scripts/player.gd", b"extends CharacterBody2D".to_vec());
+    packer.add_file(
+        "res://scripts/player.gd",
+        b"extends CharacterBody2D".to_vec(),
+    );
     packer.add_file("res://scenes/main.tscn", b"[gd_scene]".to_vec());
     packer.add_file("res://icon.png", vec![0x89, 0x50, 0x4E, 0x47]);
     let data = packer.pack().unwrap();
@@ -55,7 +58,9 @@ fn multiple_files_roundtrip() {
     assert_eq!(archive.file_count(), 3);
 
     assert_eq!(
-        archive.extract_file(&data, "res://scripts/player.gd").unwrap(),
+        archive
+            .extract_file(&data, "res://scripts/player.gd")
+            .unwrap(),
         b"extends CharacterBody2D"
     );
     assert_eq!(
@@ -101,7 +106,10 @@ fn file_paths_sorted() {
     let data = packer.pack().unwrap();
 
     let archive = PckArchive::from_bytes(&data).unwrap();
-    assert_eq!(archive.file_paths(), vec!["res://a.txt", "res://m.txt", "res://z.txt"]);
+    assert_eq!(
+        archive.file_paths(),
+        vec!["res://a.txt", "res://m.txt", "res://z.txt"]
+    );
 }
 
 #[test]
@@ -125,7 +133,12 @@ fn entry_offsets_aligned_to_64() {
 
     let archive = PckArchive::from_bytes(&data).unwrap();
     for entry in archive.entries.values() {
-        assert_eq!(entry.offset % 64, 0, "offset {} not 64-aligned", entry.offset);
+        assert_eq!(
+            entry.offset % 64,
+            0,
+            "offset {} not 64-aligned",
+            entry.offset
+        );
     }
 }
 
@@ -387,13 +400,22 @@ fn classdb_pck_packer_exists() {
 #[test]
 fn classdb_pck_packer_has_methods() {
     gdobject::class_db::register_3d_classes();
-    assert!(gdobject::class_db::class_has_method("PCKPacker", "pck_start"));
-    assert!(gdobject::class_db::class_has_method("PCKPacker", "add_file"));
+    assert!(gdobject::class_db::class_has_method(
+        "PCKPacker",
+        "pck_start"
+    ));
+    assert!(gdobject::class_db::class_has_method(
+        "PCKPacker",
+        "add_file"
+    ));
     assert!(gdobject::class_db::class_has_method("PCKPacker", "flush"));
 }
 
 #[test]
 fn classdb_project_settings_has_load_resource_pack() {
     gdobject::class_db::register_3d_classes();
-    assert!(gdobject::class_db::class_has_method("ProjectSettings", "load_resource_pack"));
+    assert!(gdobject::class_db::class_has_method(
+        "ProjectSettings",
+        "load_resource_pack"
+    ));
 }

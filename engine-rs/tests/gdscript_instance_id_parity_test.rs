@@ -182,5 +182,8 @@ func check():
     // Deliberately do NOT set scene access.
 
     let result = interp.call_instance_method(&mut inst, "check", &[]);
-    assert!(result.is_err(), "get_instance_id() without scene access should error");
+    assert!(
+        result.is_err(),
+        "get_instance_id() without scene access should error"
+    );
 }

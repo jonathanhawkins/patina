@@ -152,7 +152,10 @@ impl FixtureResult {
         let mut total = 0u64;
         let mut matching = 0u64;
 
-        for score in [&self.render, &self.physics, &self.scene_tree].into_iter().flatten() {
+        for score in [&self.render, &self.physics, &self.scene_tree]
+            .into_iter()
+            .flatten()
+        {
             total += score.total;
             matching += score.matching;
         }
@@ -567,8 +570,7 @@ mod tests {
 
     #[test]
     fn fixture_result_render_only() {
-        let f = FixtureResult::new("minimal_3d")
-            .with_render(SubsystemScore::new(95, 100));
+        let f = FixtureResult::new("minimal_3d").with_render(SubsystemScore::new(95, 100));
         assert!((f.overall_parity() - 0.95).abs() < 0.001);
         assert!(!f.is_perfect());
     }
@@ -628,20 +630,12 @@ mod tests {
 
     #[test]
     fn batch_report_passes_with_threshold() {
-        let mut report = BatchComparisonReport::new("high-parity")
-            .with_threshold(0.90);
-        report.add_fixture(
-            FixtureResult::new("a")
-                .with_render(SubsystemScore::new(95, 100)),
-        );
+        let mut report = BatchComparisonReport::new("high-parity").with_threshold(0.90);
+        report.add_fixture(FixtureResult::new("a").with_render(SubsystemScore::new(95, 100)));
         assert!(report.passes());
 
-        let mut report_low = BatchComparisonReport::new("low-parity")
-            .with_threshold(0.90);
-        report_low.add_fixture(
-            FixtureResult::new("a")
-                .with_render(SubsystemScore::new(80, 100)),
-        );
+        let mut report_low = BatchComparisonReport::new("low-parity").with_threshold(0.90);
+        report_low.add_fixture(FixtureResult::new("a").with_render(SubsystemScore::new(80, 100)));
         assert!(!report_low.passes());
     }
 
@@ -694,8 +688,7 @@ mod tests {
 
     #[test]
     fn to_text_report_contains_sections() {
-        let mut report = BatchComparisonReport::new("text-test")
-            .with_threshold(0.90);
+        let mut report = BatchComparisonReport::new("text-test").with_threshold(0.90);
         report.add_fixture(
             FixtureResult::new("minimal_3d")
                 .with_render(SubsystemScore::new(95, 100))
@@ -710,12 +703,8 @@ mod tests {
 
     #[test]
     fn to_text_report_shows_fail() {
-        let mut report = BatchComparisonReport::new("fail-test")
-            .with_threshold(0.99);
-        report.add_fixture(
-            FixtureResult::new("bad")
-                .with_render(SubsystemScore::new(50, 100)),
-        );
+        let mut report = BatchComparisonReport::new("fail-test").with_threshold(0.99);
+        report.add_fixture(FixtureResult::new("bad").with_render(SubsystemScore::new(50, 100)));
         let text = report.to_text_report();
         assert!(text.contains("FAIL"));
     }
@@ -768,8 +757,7 @@ mod tests {
 
     #[test]
     fn fixture_to_json_with_nulls() {
-        let f = FixtureResult::new("render_only")
-            .with_render(SubsystemScore::new(100, 100));
+        let f = FixtureResult::new("render_only").with_render(SubsystemScore::new(100, 100));
         let json = f.to_json();
         assert!(json.contains("\"physics\":null"));
         assert!(json.contains("\"scene_tree\":null"));
@@ -818,13 +806,7 @@ mod tests {
     #[test]
     fn save_physics_trace_roundtrip() {
         let trace = vec![
-            PhysicsTraceEntry3D::new(
-                "Ball",
-                0,
-                Vector3::new(0.0, 5.0, 0.0),
-                Vector3::ZERO,
-                0.0,
-            ),
+            PhysicsTraceEntry3D::new("Ball", 0, Vector3::new(0.0, 5.0, 0.0), Vector3::ZERO, 0.0),
             PhysicsTraceEntry3D::new(
                 "Ball",
                 1,

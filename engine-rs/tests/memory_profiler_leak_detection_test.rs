@@ -248,8 +248,7 @@ fn budget_tag_limit_violation() {
     let mut p = MemoryProfiler::new();
     p.record_alloc(AllocationTag::Render, 5000, "gpu buffer");
 
-    let budget = MemoryBudget::unlimited()
-        .with_tag_limit(AllocationTag::Render, 4096);
+    let budget = MemoryBudget::unlimited().with_tag_limit(AllocationTag::Render, 4096);
     let violations = p.check_budget(&budget);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].kind, "tag_render");
@@ -408,8 +407,7 @@ fn ci_leak_detection_with_budget() {
     p.record_free(freed);
 
     // Budget should catch the oversized resource allocation
-    let budget = MemoryBudget::unlimited()
-        .with_tag_limit(AllocationTag::Resource, 4096);
+    let budget = MemoryBudget::unlimited().with_tag_limit(AllocationTag::Resource, 4096);
     let violations = p.check_budget(&budget);
     assert_eq!(violations.len(), 1);
 

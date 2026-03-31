@@ -6,11 +6,13 @@
 use std::fs;
 use std::path::Path;
 
-const DOC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/GDSCRIPT_COMPATIBILITY.md");
+const DOC_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs/GDSCRIPT_COMPATIBILITY.md"
+);
 
 fn read_doc() -> String {
-    fs::read_to_string(DOC_PATH)
-        .expect("docs/GDSCRIPT_COMPATIBILITY.md must exist")
+    fs::read_to_string(DOC_PATH).expect("docs/GDSCRIPT_COMPATIBILITY.md must exist")
 }
 
 // ===========================================================================
@@ -135,10 +137,7 @@ fn doc_covers_variant_types() {
     ];
 
     for t in &types {
-        assert!(
-            doc.contains(t),
-            "variant type mapping must include: {t}"
-        );
+        assert!(doc.contains(t), "variant type mapping must include: {t}");
     }
 }
 
@@ -147,7 +146,10 @@ fn doc_covers_truthiness_rules() {
     let doc = read_doc();
     assert!(doc.contains("Truthiness"), "must document truthiness rules");
     assert!(doc.contains("false"), "must list false values");
-    assert!(doc.contains("empty string"), "must mention empty string as falsy");
+    assert!(
+        doc.contains("empty string"),
+        "must mention empty string as falsy"
+    );
 }
 
 // ===========================================================================
@@ -159,16 +161,12 @@ fn doc_covers_math_builtins() {
     let doc = read_doc();
 
     let builtins = [
-        "abs(", "sign(", "floor(", "ceil(", "round(",
-        "sqrt(", "pow(", "sin(", "cos(",
-        "min(", "max(", "clamp(", "lerp(",
+        "abs(", "sign(", "floor(", "ceil(", "round(", "sqrt(", "pow(", "sin(", "cos(", "min(",
+        "max(", "clamp(", "lerp(",
     ];
 
     for func in &builtins {
-        assert!(
-            doc.contains(func),
-            "math builtins must include: {func}"
-        );
+        assert!(doc.contains(func), "math builtins must include: {func}");
     }
 }
 
@@ -178,10 +176,7 @@ fn doc_covers_random_functions() {
 
     let funcs = ["randi()", "randf()", "randi_range(", "randf_range("];
     for func in &funcs {
-        assert!(
-            doc.contains(func),
-            "random functions must include: {func}"
-        );
+        assert!(doc.contains(func), "random functions must include: {func}");
     }
 }
 
@@ -190,15 +185,17 @@ fn doc_covers_array_methods() {
     let doc = read_doc();
 
     let methods = [
-        ".append(", ".push_back(", ".size()", ".sort()",
-        ".find(", ".has(", ".slice(",
+        ".append(",
+        ".push_back(",
+        ".size()",
+        ".sort()",
+        ".find(",
+        ".has(",
+        ".slice(",
     ];
 
     for m in &methods {
-        assert!(
-            doc.contains(m),
-            "array methods must include: {m}"
-        );
+        assert!(doc.contains(m), "array methods must include: {m}");
     }
 }
 
@@ -206,12 +203,16 @@ fn doc_covers_array_methods() {
 fn doc_covers_dictionary_methods() {
     let doc = read_doc();
 
-    let methods = [".keys()", ".values()", ".has(", ".get(", ".erase(", ".merge("];
+    let methods = [
+        ".keys()",
+        ".values()",
+        ".has(",
+        ".get(",
+        ".erase(",
+        ".merge(",
+    ];
     for m in &methods {
-        assert!(
-            doc.contains(m),
-            "dictionary methods must include: {m}"
-        );
+        assert!(doc.contains(m), "dictionary methods must include: {m}");
     }
 }
 
@@ -220,15 +221,16 @@ fn doc_covers_string_methods() {
     let doc = read_doc();
 
     let methods = [
-        ".to_lower()", ".to_upper()", ".split(",
-        ".begins_with(", ".ends_with(", ".find(",
+        ".to_lower()",
+        ".to_upper()",
+        ".split(",
+        ".begins_with(",
+        ".ends_with(",
+        ".find(",
     ];
 
     for m in &methods {
-        assert!(
-            doc.contains(m),
-            "string methods must include: {m}"
-        );
+        assert!(doc.contains(m), "string methods must include: {m}");
     }
 }
 
@@ -268,10 +270,7 @@ fn doc_covers_input_functions() {
     ];
 
     for func in &functions {
-        assert!(
-            doc.contains(func),
-            "input functions must include: {func}"
-        );
+        assert!(doc.contains(func), "input functions must include: {func}");
     }
 }
 
@@ -293,10 +292,7 @@ fn doc_covers_lifecycle_methods() {
     ];
 
     for m in &methods {
-        assert!(
-            doc.contains(m),
-            "lifecycle methods must include: {m}"
-        );
+        assert!(doc.contains(m), "lifecycle methods must include: {m}");
     }
 }
 
@@ -342,19 +338,11 @@ fn referenced_crates_exist() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let crates_dir = Path::new(manifest_dir).join("crates");
 
-    let crates = [
-        "gdscript-interop",
-        "gdvariant",
-        "gdobject",
-        "gdscene",
-    ];
+    let crates = ["gdscript-interop", "gdvariant", "gdobject", "gdscene"];
 
     for c in &crates {
         let p = crates_dir.join(c);
-        assert!(
-            p.exists(),
-            "referenced crate '{c}' must exist at {p:?}"
-        );
+        assert!(p.exists(), "referenced crate '{c}' must exist at {p:?}");
     }
 }
 
@@ -366,12 +354,7 @@ fn referenced_crates_exist() {
 fn doc_lists_missing_builtins() {
     let doc = read_doc();
 
-    let missing = [
-        "preload()",
-        "load()",
-        "weakref()",
-        "instance_from_id()",
-    ];
+    let missing = ["preload()", "load()", "weakref()", "instance_from_id()"];
 
     for func in &missing {
         assert!(
@@ -389,7 +372,10 @@ fn doc_lists_missing_builtins() {
 fn doc_has_see_also_links() {
     let doc = read_doc();
     assert!(doc.contains("## See Also"), "must have See Also section");
-    assert!(doc.contains("migration-guide.md"), "must link to migration guide");
+    assert!(
+        doc.contains("migration-guide.md"),
+        "must link to migration guide"
+    );
 }
 
 // ===========================================================================

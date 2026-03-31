@@ -358,8 +358,8 @@ fn bench_render_fixtures_regression_check() {
         }
     };
 
-    let baseline: serde_json::Value = serde_json::from_str(&baseline_data)
-        .expect("Failed to parse baseline JSON");
+    let baseline: serde_json::Value =
+        serde_json::from_str(&baseline_data).expect("Failed to parse baseline JSON");
 
     let stored_fixtures = baseline["fixtures"]
         .as_object()
@@ -419,10 +419,7 @@ fn bench_render_fixtures_regression_check() {
         "improved_fixtures": improvements,
     });
 
-    eprintln!(
-        "\n{}",
-        serde_json::to_string_pretty(&summary).unwrap()
-    );
+    eprintln!("\n{}", serde_json::to_string_pretty(&summary).unwrap());
 
     // Report regressions as warnings but don't fail the test —
     // timing is inherently noisy in CI.

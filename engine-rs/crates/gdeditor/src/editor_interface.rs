@@ -151,9 +151,8 @@ impl EditorInterface {
         let tree = self.editor.tree();
         let root = tree.root_id();
         let tscn = TscnSaver::save_tree(tree, root);
-        std::fs::write(path, tscn).map_err(|e| {
-            EditorError::Engine(gdcore::error::EngineError::Io(e))
-        })?;
+        std::fs::write(path, tscn)
+            .map_err(|e| EditorError::Engine(gdcore::error::EngineError::Io(e)))?;
         self.current_scene_path = Some(path.to_string());
         self.settings.recent_files.retain(|f| f != path);
         self.settings.recent_files.insert(0, path.to_string());
@@ -163,19 +162,17 @@ impl EditorInterface {
 
     /// Loads a scene from a `.tscn` file at `path`, replacing the current scene.
     pub fn open_scene_from_path(&mut self, path: &str) -> EditorResult<()> {
-        let source = std::fs::read_to_string(path).map_err(|e| {
-            EditorError::Engine(gdcore::error::EngineError::Io(e))
-        })?;
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| EditorError::Engine(gdcore::error::EngineError::Io(e)))?;
         use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
         let packed = PackedScene::from_tscn(&source).map_err(|e| {
-            EditorError::Engine(gdcore::error::EngineError::InvalidOperation(
-                format!("failed to parse tscn: {e}"),
-            ))
+            EditorError::Engine(gdcore::error::EngineError::InvalidOperation(format!(
+                "failed to parse tscn: {e}"
+            )))
         })?;
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        add_packed_scene_to_tree(&mut tree, root, &packed)
-            .map_err(EditorError::Engine)?;
+        add_packed_scene_to_tree(&mut tree, root, &packed).map_err(EditorError::Engine)?;
         self.editor = Editor::new(tree);
         self.current_scene_path = Some(path.to_string());
         self.settings.recent_files.retain(|f| f != path);
@@ -186,14 +183,9 @@ impl EditorInterface {
 
     /// Reloads the currently open scene from disk.
     pub fn reload_scene_from_disk(&mut self) -> EditorResult<()> {
-        let path = self
-            .current_scene_path
-            .clone()
-            .ok_or(EditorError::Engine(
-                gdcore::error::EngineError::InvalidOperation(
-                    "no scene path to reload from".into(),
-                ),
-            ))?;
+        let path = self.current_scene_path.clone().ok_or(EditorError::Engine(
+            gdcore::error::EngineError::InvalidOperation("no scene path to reload from".into()),
+        ))?;
         self.open_scene_from_path(&path)
     }
 
@@ -338,7 +330,12 @@ mod tests {
     fn execute_command_and_undo() {
         let mut ei = make_interface();
         let root = ei.get_edited_scene_root().root_id();
-        let children = ei.get_edited_scene_root().get_node(root).unwrap().children().to_vec();
+        let children = ei
+            .get_edited_scene_root()
+            .get_node(root)
+            .unwrap()
+            .children()
+            .to_vec();
         let main_id = children[0];
 
         let cmd = EditorCommand::SetProperty {

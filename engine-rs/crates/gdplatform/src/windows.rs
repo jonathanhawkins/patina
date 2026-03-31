@@ -43,7 +43,10 @@ impl DpiAwarenessMode {
 
     /// Returns whether the mode handles per-monitor DPI changes.
     pub fn is_per_monitor(&self) -> bool {
-        matches!(self, DpiAwarenessMode::PerMonitor | DpiAwarenessMode::PerMonitorV2)
+        matches!(
+            self,
+            DpiAwarenessMode::PerMonitor | DpiAwarenessMode::PerMonitorV2
+        )
     }
 
     /// Returns the recommended mode for modern applications.
@@ -442,7 +445,10 @@ mod tests {
 
     #[test]
     fn dpi_awareness_recommended() {
-        assert_eq!(DpiAwarenessMode::recommended(), DpiAwarenessMode::PerMonitorV2);
+        assert_eq!(
+            DpiAwarenessMode::recommended(),
+            DpiAwarenessMode::PerMonitorV2
+        );
     }
 
     // -- TaskbarProgressState -------------------------------------------------
@@ -589,7 +595,10 @@ mod tests {
     fn taskbar_progress_indeterminate() {
         let mut layer = WindowsPlatformLayer::headless("App");
         layer.set_taskbar_progress(TaskbarProgressState::Indeterminate, 0);
-        assert_eq!(layer.taskbar_progress_state(), TaskbarProgressState::Indeterminate);
+        assert_eq!(
+            layer.taskbar_progress_state(),
+            TaskbarProgressState::Indeterminate
+        );
     }
 
     #[test]

@@ -27,9 +27,7 @@ fn ra42_classdb_method_registration() {
     let _g = CLASSDB_LOCK.lock().unwrap();
     gdobject::class_db::clear_for_testing();
 
-    gdobject::class_db::register_class(
-        gdobject::class_db::ClassRegistration::new("Object"),
-    );
+    gdobject::class_db::register_class(gdobject::class_db::ClassRegistration::new("Object"));
     gdobject::class_db::register_class(
         gdobject::class_db::ClassRegistration::new("Node")
             .parent("Object")
@@ -54,9 +52,7 @@ fn ra42_classdb_inherited_method_lookup() {
     let _g = CLASSDB_LOCK.lock().unwrap();
     gdobject::class_db::clear_for_testing();
 
-    gdobject::class_db::register_class(
-        gdobject::class_db::ClassRegistration::new("Object"),
-    );
+    gdobject::class_db::register_class(gdobject::class_db::ClassRegistration::new("Object"));
     gdobject::class_db::register_class(
         gdobject::class_db::ClassRegistration::new("Node")
             .parent("Object")
@@ -70,7 +66,10 @@ fn ra42_classdb_inherited_method_lookup() {
 
     let methods = gdobject::class_db::get_method_list("Node2D");
     let method_names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
-    assert!(method_names.contains(&"get_name"), "Node2D should inherit get_name from Node");
+    assert!(
+        method_names.contains(&"get_name"),
+        "Node2D should inherit get_name from Node"
+    );
 }
 
 // ===========================================================================
@@ -113,7 +112,10 @@ fn ra42_native_script_undefined_method_returns_error() {
 
     let result = script.call_method("nonexistent", &[]);
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ScriptError::MethodNotFound(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ScriptError::MethodNotFound(_)
+    ));
 }
 
 // ===========================================================================
@@ -197,9 +199,18 @@ fn ra42_multiple_methods_dispatch_correctly() {
         .method("method_c", |_| Ok(Variant::String("C".into())))
         .build();
 
-    assert_eq!(script.call_method("method_a", &[]).unwrap(), Variant::String("A".into()));
-    assert_eq!(script.call_method("method_b", &[]).unwrap(), Variant::String("B".into()));
-    assert_eq!(script.call_method("method_c", &[]).unwrap(), Variant::String("C".into()));
+    assert_eq!(
+        script.call_method("method_a", &[]).unwrap(),
+        Variant::String("A".into())
+    );
+    assert_eq!(
+        script.call_method("method_b", &[]).unwrap(),
+        Variant::String("B".into())
+    );
+    assert_eq!(
+        script.call_method("method_c", &[]).unwrap(),
+        Variant::String("C".into())
+    );
 }
 
 // ===========================================================================

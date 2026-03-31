@@ -316,11 +316,7 @@ pub enum PropertyHint {
     /// Use the default editor for this property type.
     None,
     /// A numeric range: `min..=max` with optional step.
-    Range {
-        min: i64,
-        max: i64,
-        step: i64,
-    },
+    Range { min: i64, max: i64, step: i64 },
     /// A drop-down of string options.
     Enum(Vec<String>),
     /// A file path selector (with optional extension filter like `"*.png"`).
@@ -330,17 +326,11 @@ pub enum PropertyHint {
     /// A color picker without alpha channel.
     ColorNoAlpha,
     /// An exponential range slider.
-    ExpRange {
-        min: i64,
-        max: i64,
-        step: i64,
-    },
+    ExpRange { min: i64, max: i64, step: i64 },
     /// Bitfield flags editor with named bits.
     Flags(Vec<String>),
     /// Physics/render layer bitfield (up to 32 layers).
-    Layers {
-        layer_type: LayerType,
-    },
+    Layers { layer_type: LayerType },
     /// A directory picker.
     Dir,
     /// A global file picker (not project-relative).
@@ -599,7 +589,9 @@ impl InspectorPluginRegistry {
     ) -> Option<CustomPropertyEditor> {
         for plugin in &self.plugins {
             if plugin.can_handle(class_name) {
-                if let Some(editor) = plugin.parse_property(class_name, property_name, property_value) {
+                if let Some(editor) =
+                    plugin.parse_property(class_name, property_name, property_value)
+                {
                     return Some(editor);
                 }
             }
@@ -667,9 +659,7 @@ pub fn coerce_variant(value: &Variant, target: VariantType) -> Option<Variant> {
     match (value, target) {
         // -- Bool -> numeric --
         (Variant::Bool(b), VariantType::Int) => Some(Variant::Int(if *b { 1 } else { 0 })),
-        (Variant::Bool(b), VariantType::Float) => {
-            Some(Variant::Float(if *b { 1.0 } else { 0.0 }))
-        }
+        (Variant::Bool(b), VariantType::Float) => Some(Variant::Float(if *b { 1.0 } else { 0.0 })),
 
         // -- Int -> other numeric / bool --
         (Variant::Int(i), VariantType::Float) => Some(Variant::Float(*i as f64)),
@@ -688,12 +678,8 @@ pub fn coerce_variant(value: &Variant, target: VariantType) -> Option<Variant> {
         }
 
         // -- String <-> NodePath --
-        (Variant::String(s), VariantType::NodePath) => {
-            Some(Variant::NodePath(NodePath::new(s)))
-        }
-        (Variant::NodePath(np), VariantType::String) => {
-            Some(Variant::String(np.to_string()))
-        }
+        (Variant::String(s), VariantType::NodePath) => Some(Variant::NodePath(NodePath::new(s))),
+        (Variant::NodePath(np), VariantType::String) => Some(Variant::String(np.to_string())),
 
         // -- StringName <-> NodePath --
         (Variant::StringName(sn), VariantType::NodePath) => {
@@ -775,9 +761,17 @@ pub enum PropertyEditor {
     /// Boolean checkbox.
     CheckBox,
     /// Integer spin box.
-    SpinBoxInt { min: Option<i64>, max: Option<i64>, step: i64 },
+    SpinBoxInt {
+        min: Option<i64>,
+        max: Option<i64>,
+        step: i64,
+    },
     /// Float spin box.
-    SpinBoxFloat { min: Option<f64>, max: Option<f64>, step: f64 },
+    SpinBoxFloat {
+        min: Option<f64>,
+        max: Option<f64>,
+        step: f64,
+    },
     /// Single-line text input.
     LineEdit,
     /// Multi-line text editor.
@@ -834,8 +828,16 @@ impl PropertyEditor {
         match vtype {
             VariantType::Nil => Self::None,
             VariantType::Bool => Self::CheckBox,
-            VariantType::Int => Self::SpinBoxInt { min: Option::None, max: Option::None, step: 1 },
-            VariantType::Float => Self::SpinBoxFloat { min: Option::None, max: Option::None, step: 0.001 },
+            VariantType::Int => Self::SpinBoxInt {
+                min: Option::None,
+                max: Option::None,
+                step: 1,
+            },
+            VariantType::Float => Self::SpinBoxFloat {
+                min: Option::None,
+                max: Option::None,
+                step: 0.001,
+            },
             VariantType::String => Self::LineEdit,
             VariantType::StringName => Self::LineEdit,
             VariantType::NodePath => Self::NodePath,
@@ -913,13 +915,17 @@ impl PropertyEditor {
                 },
                 other => other.clone(),
             },
-            EditorHint::Enum(options) => Self::EnumSelect { options: options.clone() },
+            EditorHint::Enum(options) => Self::EnumSelect {
+                options: options.clone(),
+            },
             EditorHint::MultilineText => match self {
                 Self::LineEdit => Self::TextEdit,
                 other => other.clone(),
             },
             EditorHint::File(filters) => match self {
-                Self::LineEdit => Self::FilePicker { filters: filters.clone() },
+                Self::LineEdit => Self::FilePicker {
+                    filters: filters.clone(),
+                },
                 other => other.clone(),
             },
             EditorHint::ResourceType(_) => self.clone(),
@@ -936,14 +942,18 @@ impl PropertyEditor {
                 },
                 other => other.clone(),
             },
-            EditorHint::Flags(flags) => Self::FlagsEditor { flags: flags.clone() },
+            EditorHint::Flags(flags) => Self::FlagsEditor {
+                flags: flags.clone(),
+            },
             EditorHint::Dir => match self {
                 Self::LineEdit => Self::DirPicker,
                 other => other.clone(),
             },
             EditorHint::PlaceholderText(_) => self.clone(),
             EditorHint::ExpEasing => Self::EasingEditor,
-            EditorHint::Layers(layer_type) => Self::LayerEditor { layer_type: layer_type.clone() },
+            EditorHint::Layers(layer_type) => Self::LayerEditor {
+                layer_type: layer_type.clone(),
+            },
         }
     }
 }
@@ -1050,8 +1060,16 @@ impl ResourceSubEditor {
     ///
     /// Uses clone-on-write: the internal resource is cloned, modified, and
     /// stored. The original Arc is not mutated.
-    pub fn set_property(&mut self, name: &str, value: Variant) -> std::sync::Arc<gdresource::Resource> {
-        let old_value = self.resource.get_property(name).cloned().unwrap_or(Variant::Nil);
+    pub fn set_property(
+        &mut self,
+        name: &str,
+        value: Variant,
+    ) -> std::sync::Arc<gdresource::Resource> {
+        let old_value = self
+            .resource
+            .get_property(name)
+            .cloned()
+            .unwrap_or(Variant::Nil);
         self.change_log.push(PropertyChange {
             property: name.to_string(),
             old_value,
@@ -1098,7 +1116,10 @@ impl ResourceSubEditor {
 
     /// Opens a sub-resource by its ID, returning a new sub-editor for it.
     pub fn open_subresource(&self, id: &str) -> Option<ResourceSubEditor> {
-        self.resource.subresources.get(id).map(|sub| ResourceSubEditor::new(sub.clone()))
+        self.resource
+            .subresources
+            .get(id)
+            .map(|sub| ResourceSubEditor::new(sub.clone()))
     }
 }
 
@@ -1123,7 +1144,10 @@ impl SectionedInspector {
             if !section_map.contains_key(&entry.category) {
                 section_order.push(entry.category.clone());
             }
-            section_map.entry(entry.category.clone()).or_default().push(entry);
+            section_map
+                .entry(entry.category.clone())
+                .or_default()
+                .push(entry);
         }
 
         let sections = section_order
@@ -1534,7 +1558,12 @@ impl LinkedValues {
     ///
     /// If linked, returns a Vector2 with all components set to the changed value.
     /// If not linked, returns the value unchanged.
-    pub fn apply_vec2(&self, property: &str, value: gdcore::math::Vector2, changed_component: usize) -> gdcore::math::Vector2 {
+    pub fn apply_vec2(
+        &self,
+        property: &str,
+        value: gdcore::math::Vector2,
+        changed_component: usize,
+    ) -> gdcore::math::Vector2 {
         if !self.is_linked(property) {
             return value;
         }
@@ -1549,7 +1578,12 @@ impl LinkedValues {
     ///
     /// If linked, returns a Vector3 with all components set to the changed value.
     /// If not linked, returns the value unchanged.
-    pub fn apply_vec3(&self, property: &str, value: gdcore::math::Vector3, changed_component: usize) -> gdcore::math::Vector3 {
+    pub fn apply_vec3(
+        &self,
+        property: &str,
+        value: gdcore::math::Vector3,
+        changed_component: usize,
+    ) -> gdcore::math::Vector3 {
         if !self.is_linked(property) {
             return value;
         }
@@ -2209,14 +2243,32 @@ mod tests {
 
     #[test]
     fn property_hint_layers() {
-        let hint = PropertyHint::Layers { layer_type: LayerType::Physics2D };
-        assert!(matches!(hint, PropertyHint::Layers { layer_type: LayerType::Physics2D }));
+        let hint = PropertyHint::Layers {
+            layer_type: LayerType::Physics2D,
+        };
+        assert!(matches!(
+            hint,
+            PropertyHint::Layers {
+                layer_type: LayerType::Physics2D
+            }
+        ));
     }
 
     #[test]
     fn property_hint_exp_range() {
-        let hint = PropertyHint::ExpRange { min: 0, max: 1000, step: 1 };
-        assert!(matches!(hint, PropertyHint::ExpRange { min: 0, max: 1000, step: 1 }));
+        let hint = PropertyHint::ExpRange {
+            min: 0,
+            max: 1000,
+            step: 1,
+        };
+        assert!(matches!(
+            hint,
+            PropertyHint::ExpRange {
+                min: 0,
+                max: 1000,
+                step: 1
+            }
+        ));
     }
 
     #[test]
@@ -2233,7 +2285,11 @@ mod tests {
 
     #[test]
     fn editor_hint_flags_produces_flags_editor() {
-        let base = PropertyEditor::SpinBoxInt { min: None, max: None, step: 1 };
+        let base = PropertyEditor::SpinBoxInt {
+            min: None,
+            max: None,
+            step: 1,
+        };
         let result = base.with_hint(&EditorHint::Flags(vec!["A".into(), "B".into()]));
         assert!(matches!(result, PropertyEditor::FlagsEditor { flags } if flags.len() == 2));
     }
@@ -2247,23 +2303,46 @@ mod tests {
 
     #[test]
     fn editor_hint_easing_produces_easing_editor() {
-        let base = PropertyEditor::SpinBoxFloat { min: None, max: None, step: 0.001 };
+        let base = PropertyEditor::SpinBoxFloat {
+            min: None,
+            max: None,
+            step: 0.001,
+        };
         let result = base.with_hint(&EditorHint::ExpEasing);
         assert!(matches!(result, PropertyEditor::EasingEditor));
     }
 
     #[test]
     fn editor_hint_layers_produces_layer_editor() {
-        let base = PropertyEditor::SpinBoxInt { min: None, max: None, step: 1 };
+        let base = PropertyEditor::SpinBoxInt {
+            min: None,
+            max: None,
+            step: 1,
+        };
         let result = base.with_hint(&EditorHint::Layers(LayerType::Render3D));
-        assert!(matches!(result, PropertyEditor::LayerEditor { layer_type: LayerType::Render3D }));
+        assert!(matches!(
+            result,
+            PropertyEditor::LayerEditor {
+                layer_type: LayerType::Render3D
+            }
+        ));
     }
 
     #[test]
     fn editor_hint_exp_range_refines_spinbox() {
-        let base = PropertyEditor::SpinBoxFloat { min: None, max: None, step: 0.001 };
-        let result = base.with_hint(&EditorHint::ExpRange { min: 1.0, max: 100.0, step: 0.1 });
-        assert!(matches!(result, PropertyEditor::SpinBoxFloat { min: Some(m), max: Some(mx), .. } if m == 1.0 && mx == 100.0));
+        let base = PropertyEditor::SpinBoxFloat {
+            min: None,
+            max: None,
+            step: 0.001,
+        };
+        let result = base.with_hint(&EditorHint::ExpRange {
+            min: 1.0,
+            max: 100.0,
+            step: 0.1,
+        });
+        assert!(
+            matches!(result, PropertyEditor::SpinBoxFloat { min: Some(m), max: Some(mx), .. } if m == 1.0 && mx == 100.0)
+        );
     }
 
     #[test]
@@ -2275,8 +2354,17 @@ mod tests {
 
     #[test]
     fn new_editor_display_names() {
-        assert_eq!(PropertyEditor::FlagsEditor { flags: vec![] }.display_name(), "Flags");
-        assert_eq!(PropertyEditor::LayerEditor { layer_type: LayerType::Physics2D }.display_name(), "Layers");
+        assert_eq!(
+            PropertyEditor::FlagsEditor { flags: vec![] }.display_name(),
+            "Flags"
+        );
+        assert_eq!(
+            PropertyEditor::LayerEditor {
+                layer_type: LayerType::Physics2D
+            }
+            .display_name(),
+            "Layers"
+        );
         assert_eq!(PropertyEditor::EasingEditor.display_name(), "Easing");
         assert_eq!(PropertyEditor::DirPicker.display_name(), "DirPicker");
     }

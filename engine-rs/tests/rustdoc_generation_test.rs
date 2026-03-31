@@ -197,10 +197,7 @@ fn no_broken_intra_doc_links() {
     // may have links that reference types not yet fully documented.
     // The main test (cargo_doc_builds_without_errors) already ensures
     // the build succeeds.
-    eprintln!(
-        "Intra-doc link check: {} issues found.",
-        broken_links.len()
-    );
+    eprintln!("Intra-doc link check: {} issues found.", broken_links.len());
 }
 
 #[test]
@@ -248,25 +245,15 @@ fn crate_list_matches_workspace() {
     // Extract crate names from paths like "crates/gdcore"
     let member_names: Vec<String> = workspace_members
         .iter()
-        .map(|m| {
-            m.rsplit('/')
-                .next()
-                .unwrap_or(m)
-                .to_string()
-        })
+        .map(|m| m.rsplit('/').next().unwrap_or(m).to_string())
         .collect();
 
-    let public_set: std::collections::HashSet<&str> =
-        PUBLIC_CRATES.iter().copied().collect();
+    let public_set: std::collections::HashSet<&str> = PUBLIC_CRATES.iter().copied().collect();
     let member_set: std::collections::HashSet<&str> =
         member_names.iter().map(|s| s.as_str()).collect();
 
-    let missing_from_test: Vec<&&str> = member_set
-        .difference(&public_set)
-        .collect();
-    let extra_in_test: Vec<&&str> = public_set
-        .difference(&member_set)
-        .collect();
+    let missing_from_test: Vec<&&str> = member_set.difference(&public_set).collect();
+    let extra_in_test: Vec<&&str> = public_set.difference(&member_set).collect();
 
     if !missing_from_test.is_empty() {
         eprintln!(

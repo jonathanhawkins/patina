@@ -64,10 +64,19 @@ fn audit_classifies_fuzz_property_as_measured() {
 /// These are the subsystems where malformed input is most likely to
 /// cause crashes, data corruption, or security issues.
 const HIGH_RISK_SURFACES: &[(&str, &str)] = &[
-    ("Variant serialization", "crates/gdvariant/src/fuzz_variant.rs"),
+    (
+        "Variant serialization",
+        "crates/gdvariant/src/fuzz_variant.rs",
+    ),
     ("Resource loading", "crates/gdresource/src/fuzz_res.rs"),
-    ("GDScript parsing", "crates/gdscript-interop/src/fuzz_gdscript.rs"),
-    ("Math property testing", "crates/gdcore/src/property_testing.rs"),
+    (
+        "GDScript parsing",
+        "crates/gdscript-interop/src/fuzz_gdscript.rs",
+    ),
+    (
+        "Math property testing",
+        "crates/gdcore/src/property_testing.rs",
+    ),
 ];
 
 #[test]
@@ -87,8 +96,7 @@ fn fuzz_modules_contain_test_logic() {
         let full = workspace_root().join(path);
         let content = std::fs::read_to_string(&full)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", full.display()));
-        let test_count = content.matches("#[test]").count()
-            + content.matches("proptest!").count();
+        let test_count = content.matches("#[test]").count() + content.matches("proptest!").count();
         assert!(
             test_count >= 5,
             "high-risk surface '{surface}' must have >= 5 test/proptest entries, found {test_count}"
@@ -113,10 +121,7 @@ const FUZZ_INTEGRATION_TESTS: &[&str] = &[
 fn fuzz_integration_test_files_exist() {
     for path in FUZZ_INTEGRATION_TESTS {
         let full = workspace_root().join(path);
-        assert!(
-            full.exists(),
-            "fuzz integration test must exist: {path}"
-        );
+        assert!(full.exists(), "fuzz integration test must exist: {path}");
     }
 }
 
@@ -127,8 +132,7 @@ fn fuzz_integration_tests_have_sufficient_coverage() {
         let full = workspace_root().join(path);
         let content = std::fs::read_to_string(&full)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", full.display()));
-        let test_count = content.matches("#[test]").count()
-            + content.matches("proptest!").count();
+        let test_count = content.matches("#[test]").count() + content.matches("proptest!").count();
         assert!(
             test_count >= 3,
             "fuzz test '{path}' must have >= 3 tests, found {test_count}"

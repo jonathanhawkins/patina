@@ -45,8 +45,7 @@ mod tests {
     }
 
     fn arb_vector3() -> impl Strategy<Value = Vector3> {
-        (finite_f32(), finite_f32(), finite_f32())
-            .prop_map(|(x, y, z)| Vector3::new(x, y, z))
+        (finite_f32(), finite_f32(), finite_f32()).prop_map(|(x, y, z)| Vector3::new(x, y, z))
     }
 
     fn arb_color() -> impl Strategy<Value = Color> {
@@ -76,23 +75,20 @@ mod tests {
                 .prop_map(|(x, y, z)| Variant::Basis(Basis { x, y, z })),
             (finite_f32(), finite_f32(), finite_f32(), finite_f32())
                 .prop_map(|(x, y, z, w)| Variant::Quaternion(Quaternion::new(x, y, z, w))),
-            (arb_vector3(), arb_vector3())
-                .prop_map(|(pos, sz)| Variant::Aabb(Aabb::new(pos, sz))),
-            (arb_vector3(), finite_f32())
-                .prop_map(|(n, d)| Variant::Plane(Plane::new(n, d))),
+            (arb_vector3(), arb_vector3()).prop_map(|(pos, sz)| Variant::Aabb(Aabb::new(pos, sz))),
+            (arb_vector3(), finite_f32()).prop_map(|(n, d)| Variant::Plane(Plane::new(n, d))),
         ]
     }
 
     /// Generate a Variant that may include Arrays and Dictionaries (recursive).
     fn arb_variant() -> impl Strategy<Value = Variant> {
         arb_leaf_variant().prop_recursive(
-            3,   // max depth
-            64,  // max nodes
-            8,   // items per collection
+            3,  // max depth
+            64, // max nodes
+            8,  // items per collection
             |inner| {
                 prop_oneof![
-                    prop::collection::vec(inner.clone(), 0..8)
-                        .prop_map(Variant::Array),
+                    prop::collection::vec(inner.clone(), 0..8).prop_map(Variant::Array),
                     prop::collection::hash_map("[a-z]{1,8}", inner, 0..6)
                         .prop_map(Variant::Dictionary),
                 ]

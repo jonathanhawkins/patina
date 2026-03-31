@@ -104,8 +104,22 @@ fn register_bodies_counts_physics_nodes() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_body_circle(&mut tree, root, "Rigid", "RigidBody2D", Vector2::ZERO, 10.0);
-    add_body_circle(&mut tree, root, "Static", "StaticBody2D", Vector2::new(0.0, 100.0), 20.0);
-    add_body_circle(&mut tree, root, "Char", "CharacterBody2D", Vector2::new(50.0, 0.0), 10.0);
+    add_body_circle(
+        &mut tree,
+        root,
+        "Static",
+        "StaticBody2D",
+        Vector2::new(0.0, 100.0),
+        20.0,
+    );
+    add_body_circle(
+        &mut tree,
+        root,
+        "Char",
+        "CharacterBody2D",
+        Vector2::new(50.0, 0.0),
+        10.0,
+    );
 
     let mut server = PhysicsServer::new();
     assert_eq!(server.body_count(), 0);
@@ -124,8 +138,22 @@ fn register_bodies_counts_physics_nodes() {
 fn register_bodies_counts_area_nodes() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_body_circle(&mut tree, root, "Zone1", "Area2D", Vector2::new(0.0, 0.0), 30.0);
-    add_body_circle(&mut tree, root, "Zone2", "Area2D", Vector2::new(100.0, 0.0), 20.0);
+    add_body_circle(
+        &mut tree,
+        root,
+        "Zone1",
+        "Area2D",
+        Vector2::new(0.0, 0.0),
+        30.0,
+    );
+    add_body_circle(
+        &mut tree,
+        root,
+        "Zone2",
+        "Area2D",
+        Vector2::new(100.0, 0.0),
+        20.0,
+    );
 
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
@@ -141,7 +169,14 @@ fn re_registration_idempotent() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_body_circle(&mut tree, root, "Ball", "RigidBody2D", Vector2::ZERO, 10.0);
-    add_body_circle(&mut tree, root, "Zone", "Area2D", Vector2::new(50.0, 0.0), 15.0);
+    add_body_circle(
+        &mut tree,
+        root,
+        "Zone",
+        "Area2D",
+        Vector2::new(50.0, 0.0),
+        15.0,
+    );
 
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
@@ -309,7 +344,14 @@ fn sync_to_physics_pushes_kinematic_position() {
 fn area2d_position_synced_to_physics() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let zone = add_body_circle(&mut tree, root, "Zone", "Area2D", Vector2::new(0.0, 0.0), 50.0);
+    let zone = add_body_circle(
+        &mut tree,
+        root,
+        "Zone",
+        "Area2D",
+        Vector2::new(0.0, 0.0),
+        50.0,
+    );
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
@@ -364,13 +406,23 @@ fn spiral_of_death_guard_caps_physics_steps() {
 fn physics_tracing_records_positions() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_body_circle(&mut tree, root, "TracedBall", "RigidBody2D", Vector2::ZERO, 5.0);
+    add_body_circle(
+        &mut tree,
+        root,
+        "TracedBall",
+        "RigidBody2D",
+        Vector2::ZERO,
+        5.0,
+    );
 
     let mut ml = MainLoop::new(tree);
     ml.physics_server_mut().set_tracing(true);
     ml.register_physics_bodies();
 
-    assert!(ml.physics_server().trace().is_empty(), "trace should start empty");
+    assert!(
+        ml.physics_server().trace().is_empty(),
+        "trace should start empty"
+    );
 
     ml.run_frames(5, 1.0 / 60.0);
 
@@ -406,7 +458,14 @@ fn body_and_area_lookup_after_registration() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let ball = add_body_circle(&mut tree, root, "Ball", "RigidBody2D", Vector2::ZERO, 10.0);
-    let zone = add_body_circle(&mut tree, root, "Zone", "Area2D", Vector2::new(50.0, 0.0), 20.0);
+    let zone = add_body_circle(
+        &mut tree,
+        root,
+        "Zone",
+        "Area2D",
+        Vector2::new(50.0, 0.0),
+        20.0,
+    );
 
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
@@ -440,8 +499,22 @@ fn collision_events_accessible_after_step() {
     let root = tree.root_id();
 
     // Two overlapping bodies — should produce collision events.
-    add_body_circle(&mut tree, root, "A", "RigidBody2D", Vector2::new(0.0, 0.0), 20.0);
-    add_body_circle(&mut tree, root, "B", "RigidBody2D", Vector2::new(10.0, 0.0), 20.0);
+    add_body_circle(
+        &mut tree,
+        root,
+        "A",
+        "RigidBody2D",
+        Vector2::new(0.0, 0.0),
+        20.0,
+    );
+    add_body_circle(
+        &mut tree,
+        root,
+        "B",
+        "RigidBody2D",
+        Vector2::new(10.0, 0.0),
+        20.0,
+    );
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
@@ -461,10 +534,38 @@ fn mixed_body_types_register_and_advance() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let rigid = add_body_circle(&mut tree, root, "Rigid", "RigidBody2D", Vector2::new(0.0, 0.0), 10.0);
-    let sttc = add_body_circle(&mut tree, root, "Static", "StaticBody2D", Vector2::new(0.0, 500.0), 50.0);
-    let kinematic = add_body_circle(&mut tree, root, "Player", "CharacterBody2D", Vector2::new(100.0, 0.0), 10.0);
-    let area = add_body_circle(&mut tree, root, "Zone", "Area2D", Vector2::new(200.0, 0.0), 30.0);
+    let rigid = add_body_circle(
+        &mut tree,
+        root,
+        "Rigid",
+        "RigidBody2D",
+        Vector2::new(0.0, 0.0),
+        10.0,
+    );
+    let sttc = add_body_circle(
+        &mut tree,
+        root,
+        "Static",
+        "StaticBody2D",
+        Vector2::new(0.0, 500.0),
+        50.0,
+    );
+    let kinematic = add_body_circle(
+        &mut tree,
+        root,
+        "Player",
+        "CharacterBody2D",
+        Vector2::new(100.0, 0.0),
+        10.0,
+    );
+    let area = add_body_circle(
+        &mut tree,
+        root,
+        "Zone",
+        "Area2D",
+        Vector2::new(200.0, 0.0),
+        30.0,
+    );
     // A plain Node2D — should NOT be registered as a physics body.
     let plain = {
         let node = Node::new("Decoration", "Node2D");
@@ -474,7 +575,11 @@ fn mixed_body_types_register_and_advance() {
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
 
-    assert_eq!(ml.physics_server().body_count(), 3, "rigid + static + kinematic = 3 bodies");
+    assert_eq!(
+        ml.physics_server().body_count(),
+        3,
+        "rigid + static + kinematic = 3 bodies"
+    );
     assert_eq!(ml.physics_server().area_count(), 1, "1 area");
 
     // Verify lookups.
@@ -482,8 +587,14 @@ fn mixed_body_types_register_and_advance() {
     assert!(ml.physics_server().body_for_node(sttc).is_some());
     assert!(ml.physics_server().body_for_node(kinematic).is_some());
     assert!(ml.physics_server().area_for_node(area).is_some());
-    assert!(ml.physics_server().body_for_node(plain).is_none(), "plain Node2D should not register");
-    assert!(ml.physics_server().area_for_node(plain).is_none(), "plain Node2D should not register as area");
+    assert!(
+        ml.physics_server().body_for_node(plain).is_none(),
+        "plain Node2D should not register"
+    );
+    assert!(
+        ml.physics_server().area_for_node(plain).is_none(),
+        "plain Node2D should not register as area"
+    );
 
     // Run frames and verify expected behaviors.
     let rigid_y_before = get_pos(ml.tree(), rigid).y;
@@ -496,7 +607,16 @@ fn mixed_body_types_register_and_advance() {
     let static_pos_after = get_pos(ml.tree(), sttc);
     let kinematic_pos_after = get_pos(ml.tree(), kinematic);
 
-    assert!(rigid_y_after > rigid_y_before + 1.0, "rigid body should fall");
-    assert_eq!(static_pos_before, static_pos_after, "static body should not move");
-    assert_eq!(kinematic_pos_before, kinematic_pos_after, "kinematic body with no velocity should not move");
+    assert!(
+        rigid_y_after > rigid_y_before + 1.0,
+        "rigid body should fall"
+    );
+    assert_eq!(
+        static_pos_before, static_pos_after,
+        "static body should not move"
+    );
+    assert_eq!(
+        kinematic_pos_before, kinematic_pos_after,
+        "kinematic body with no velocity should not move"
+    );
 }

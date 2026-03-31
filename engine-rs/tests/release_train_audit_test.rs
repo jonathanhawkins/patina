@@ -38,10 +38,7 @@ fn audit_references_release_train_bead() {
 #[test]
 fn audit_cites_release_train_evidence() {
     let audit = read_audit();
-    let expected = [
-        "release_train_workflow_test.rs",
-        "docs/RELEASE_PROCESS.md",
-    ];
+    let expected = ["release_train_workflow_test.rs", "docs/RELEASE_PROCESS.md"];
     for evidence in &expected {
         assert!(
             audit.contains(evidence),
@@ -129,8 +126,8 @@ fn release_doc_documents_oracle_parity_gate() {
 
 #[test]
 fn release_train_workflow_test_exists() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/release_train_workflow_test.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/release_train_workflow_test.rs");
     assert!(path.exists(), "release_train_workflow_test.rs must exist");
 }
 

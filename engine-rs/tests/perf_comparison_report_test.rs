@@ -301,19 +301,54 @@ fn loose_tolerance_passes_large_differences() {
 #[test]
 fn subsystems_returns_sorted_unique() {
     let mut report = ComparisonReport::new("4.6.1", "0.1.0");
-    report.add(SubsystemBenchmark::new("render", "A", Measurement::new(1.0, "ms"), Measurement::new(1.0, "ms")));
-    report.add(SubsystemBenchmark::new("audio", "B", Measurement::new(1.0, "ms"), Measurement::new(1.0, "ms")));
-    report.add(SubsystemBenchmark::new("render", "C", Measurement::new(1.0, "ms"), Measurement::new(1.0, "ms")));
-    report.add(SubsystemBenchmark::new("physics", "D", Measurement::new(1.0, "ms"), Measurement::new(1.0, "ms")));
+    report.add(SubsystemBenchmark::new(
+        "render",
+        "A",
+        Measurement::new(1.0, "ms"),
+        Measurement::new(1.0, "ms"),
+    ));
+    report.add(SubsystemBenchmark::new(
+        "audio",
+        "B",
+        Measurement::new(1.0, "ms"),
+        Measurement::new(1.0, "ms"),
+    ));
+    report.add(SubsystemBenchmark::new(
+        "render",
+        "C",
+        Measurement::new(1.0, "ms"),
+        Measurement::new(1.0, "ms"),
+    ));
+    report.add(SubsystemBenchmark::new(
+        "physics",
+        "D",
+        Measurement::new(1.0, "ms"),
+        Measurement::new(1.0, "ms"),
+    ));
     assert_eq!(report.subsystems(), vec!["audio", "physics", "render"]);
 }
 
 #[test]
 fn by_subsystem_groups_correctly() {
     let mut report = ComparisonReport::new("4.6.1", "0.1.0");
-    report.add(SubsystemBenchmark::new("scene", "A", Measurement::new(1.0, "ms"), Measurement::new(1.0, "ms")));
-    report.add(SubsystemBenchmark::new("scene", "B", Measurement::new(1.0, "ms"), Measurement::new(1.0, "ms")));
-    report.add(SubsystemBenchmark::new("render", "C", Measurement::new(1.0, "ms"), Measurement::new(1.0, "ms")));
+    report.add(SubsystemBenchmark::new(
+        "scene",
+        "A",
+        Measurement::new(1.0, "ms"),
+        Measurement::new(1.0, "ms"),
+    ));
+    report.add(SubsystemBenchmark::new(
+        "scene",
+        "B",
+        Measurement::new(1.0, "ms"),
+        Measurement::new(1.0, "ms"),
+    ));
+    report.add(SubsystemBenchmark::new(
+        "render",
+        "C",
+        Measurement::new(1.0, "ms"),
+        Measurement::new(1.0, "ms"),
+    ));
     let groups = report.by_subsystem();
     assert_eq!(groups["scene"].len(), 2);
     assert_eq!(groups["render"].len(), 1);
@@ -354,9 +389,24 @@ fn text_report_shows_verdicts() {
 #[test]
 fn text_report_summary_counts() {
     let mut report = ComparisonReport::new("4.6.1", "0.1.0");
-    report.add(SubsystemBenchmark::new("a", "1", Measurement::new(20.0, "ms"), Measurement::new(10.0, "ms")));
-    report.add(SubsystemBenchmark::new("b", "2", Measurement::new(10.0, "ms"), Measurement::new(10.0, "ms")));
-    report.add(SubsystemBenchmark::new("c", "3", Measurement::new(10.0, "ms"), Measurement::new(25.0, "ms")));
+    report.add(SubsystemBenchmark::new(
+        "a",
+        "1",
+        Measurement::new(20.0, "ms"),
+        Measurement::new(10.0, "ms"),
+    ));
+    report.add(SubsystemBenchmark::new(
+        "b",
+        "2",
+        Measurement::new(10.0, "ms"),
+        Measurement::new(10.0, "ms"),
+    ));
+    report.add(SubsystemBenchmark::new(
+        "c",
+        "3",
+        Measurement::new(10.0, "ms"),
+        Measurement::new(25.0, "ms"),
+    ));
     let text = report.render_text();
     assert!(text.contains("Patina faster:  1"));
     assert!(text.contains("Comparable:     1"));

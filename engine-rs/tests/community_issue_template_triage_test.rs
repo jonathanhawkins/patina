@@ -13,8 +13,7 @@ fn repo_root() -> &'static Path {
 
 fn read_file(rel_path: &str) -> String {
     let path = repo_root().join(rel_path);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("{rel_path} must exist at {path:?}"))
+    fs::read_to_string(&path).unwrap_or_else(|_| panic!("{rel_path} must exist at {path:?}"))
 }
 
 // ===========================================================================
@@ -24,7 +23,9 @@ fn read_file(rel_path: &str) -> String {
 #[test]
 fn bug_report_template_exists() {
     assert!(
-        repo_root().join(".github/ISSUE_TEMPLATE/bug_report.yml").exists(),
+        repo_root()
+            .join(".github/ISSUE_TEMPLATE/bug_report.yml")
+            .exists(),
         "bug report template must exist"
     );
 }
@@ -32,7 +33,9 @@ fn bug_report_template_exists() {
 #[test]
 fn feature_request_template_exists() {
     assert!(
-        repo_root().join(".github/ISSUE_TEMPLATE/feature_request.yml").exists(),
+        repo_root()
+            .join(".github/ISSUE_TEMPLATE/feature_request.yml")
+            .exists(),
         "feature request template must exist"
     );
 }
@@ -40,7 +43,9 @@ fn feature_request_template_exists() {
 #[test]
 fn parity_report_template_exists() {
     assert!(
-        repo_root().join(".github/ISSUE_TEMPLATE/parity_report.yml").exists(),
+        repo_root()
+            .join(".github/ISSUE_TEMPLATE/parity_report.yml")
+            .exists(),
         "parity report template must exist"
     );
 }
@@ -48,7 +53,9 @@ fn parity_report_template_exists() {
 #[test]
 fn template_config_exists() {
     assert!(
-        repo_root().join(".github/ISSUE_TEMPLATE/config.yml").exists(),
+        repo_root()
+            .join(".github/ISSUE_TEMPLATE/config.yml")
+            .exists(),
         "template config.yml must exist"
     );
 }
@@ -85,16 +92,21 @@ fn bug_report_lists_engine_subsystems() {
     let tmpl = read_file(".github/ISSUE_TEMPLATE/bug_report.yml");
 
     let subsystems = [
-        "gdcore", "gdvariant", "gdobject", "gdresource", "gdscene",
-        "gdphysics2d", "gdphysics3d", "gdaudio", "gdplatform",
-        "gdscript-interop", "gdeditor",
+        "gdcore",
+        "gdvariant",
+        "gdobject",
+        "gdresource",
+        "gdscene",
+        "gdphysics2d",
+        "gdphysics3d",
+        "gdaudio",
+        "gdplatform",
+        "gdscript-interop",
+        "gdeditor",
     ];
 
     for sub in &subsystems {
-        assert!(
-            tmpl.contains(sub),
-            "bug report must list subsystem: {sub}"
-        );
+        assert!(tmpl.contains(sub), "bug report must list subsystem: {sub}");
     }
 }
 
@@ -204,7 +216,12 @@ fn triage_process_has_required_sections() {
 fn triage_process_covers_all_priorities() {
     let doc = read_file("docs/TRIAGE_PROCESS.md");
 
-    let priorities = ["### P0 Critical", "### P1 High", "### P2 Medium", "### P3 Low"];
+    let priorities = [
+        "### P0 Critical",
+        "### P1 High",
+        "### P2 Medium",
+        "### P3 Low",
+    ];
     for p in &priorities {
         assert!(
             doc.contains(p),
@@ -227,8 +244,14 @@ fn triage_process_documents_labels() {
     let doc = read_file("docs/TRIAGE_PROCESS.md");
 
     let labels = [
-        "needs-triage", "triaged", "blocked", "wontfix", "duplicate",
-        "bug", "enhancement", "parity",
+        "needs-triage",
+        "triaged",
+        "blocked",
+        "wontfix",
+        "duplicate",
+        "bug",
+        "enhancement",
+        "parity",
     ];
 
     for label in &labels {

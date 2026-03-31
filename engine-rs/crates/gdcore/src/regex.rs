@@ -106,7 +106,11 @@ impl RegEx {
     /// If `end` is 0, searches to the end of the subject (Godot convention).
     pub fn search(&self, subject: &str, offset: usize, end: usize) -> Option<RegExMatch> {
         let re = self.compiled.as_ref()?;
-        let actual_end = if end == 0 { subject.len() } else { end.min(subject.len()) };
+        let actual_end = if end == 0 {
+            subject.len()
+        } else {
+            end.min(subject.len())
+        };
         let haystack = subject.get(offset..actual_end)?;
         let caps = re.captures(haystack)?;
         let full = caps.get(0)?;
@@ -146,7 +150,11 @@ impl RegEx {
             Some(r) => r,
             None => return Vec::new(),
         };
-        let actual_end = if end == 0 { subject.len() } else { end.min(subject.len()) };
+        let actual_end = if end == 0 {
+            subject.len()
+        } else {
+            end.min(subject.len())
+        };
         let haystack = match subject.get(offset..actual_end) {
             Some(h) => h,
             None => return Vec::new(),
@@ -198,7 +206,11 @@ impl RegEx {
             Some(r) => r,
             None => return subject.to_string(),
         };
-        let actual_end = if end == 0 { subject.len() } else { end.min(subject.len()) };
+        let actual_end = if end == 0 {
+            subject.len()
+        } else {
+            end.min(subject.len())
+        };
         let (prefix, haystack, suffix) = match subject
             .get(..offset)
             .and_then(|p| subject.get(offset..actual_end).map(|h| (p, h)))
@@ -458,10 +470,7 @@ mod tests {
     #[test]
     fn sub_with_backreference() {
         let re = RegEx::create_from_string(r"(\w+)@(\w+)").unwrap();
-        assert_eq!(
-            re.sub("user@host", "$2/$1", false, 0, 0),
-            "host/user"
-        );
+        assert_eq!(re.sub("user@host", "$2/$1", false, 0, 0), "host/user");
     }
 
     // -- edge cases -----------------------------------------------------------

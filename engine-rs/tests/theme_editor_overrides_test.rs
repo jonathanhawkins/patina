@@ -140,7 +140,10 @@ fn set_default_font() {
         italic: false,
     });
     assert_eq!(editor.revision(), rev + 1);
-    assert_eq!(editor.theme().default_font.as_ref().unwrap().family, "Inter");
+    assert_eq!(
+        editor.theme().default_font.as_ref().unwrap().family,
+        "Inter"
+    );
 }
 
 #[test]
@@ -238,7 +241,10 @@ fn copy_overrides_between_controls() {
     editor.set_stylebox("Button", "normal", StyleBoxFlat::default());
     let count = editor.copy_overrides("Button", "CustomButton");
     assert_eq!(count, 2);
-    assert_eq!(editor.get_color("CustomButton", "font_color"), Some(Color::WHITE));
+    assert_eq!(
+        editor.get_color("CustomButton", "font_color"),
+        Some(Color::WHITE)
+    );
     assert!(editor.get_stylebox("CustomButton", "normal").is_some());
 }
 
@@ -359,7 +365,11 @@ fn load_light_preset() {
     assert!(editor.total_override_count() > 0);
     // Light theme font color should be dark.
     let fc = editor.get_color("Button", "font_color").unwrap();
-    assert!(fc.r < 0.5, "Light theme font should be dark, got r={}", fc.r);
+    assert!(
+        fc.r < 0.5,
+        "Light theme font should be dark, got r={}",
+        fc.r
+    );
 }
 
 #[test]
@@ -401,7 +411,10 @@ fn preview_updates_after_palette_application() {
     editor.apply_palette(&palette);
     let preview = editor.generate_preview();
     let button = preview.iter().find(|p| p.control_type == "Button").unwrap();
-    assert_eq!(*button.colors.get("font_color").unwrap(), palette.font_color);
+    assert_eq!(
+        *button.colors.get("font_color").unwrap(),
+        palette.font_color
+    );
     assert_eq!(
         button.styleboxes.get("hover").unwrap().bg_color,
         palette.accent_color,

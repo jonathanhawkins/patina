@@ -18,13 +18,11 @@
 //! - Remove-and-reinstance cycles
 //! - Property modification after instancing
 
+use gdobject::notification::{NOTIFICATION_ENTER_TREE, NOTIFICATION_READY};
 use gdscene::packed_scene::{
     add_packed_scene_to_tree, add_packed_scene_to_tree_with_subscenes, PackedScene,
 };
 use gdscene::scene_tree::SceneTree;
-use gdobject::notification::{
-    NOTIFICATION_ENTER_TREE, NOTIFICATION_READY,
-};
 
 // ===========================================================================
 // Helpers
@@ -79,7 +77,10 @@ fn two_instances_of_same_scene_are_independent() {
     }
 
     // Instances should have distinct NodeIds.
-    assert_ne!(children[0], children[1], "Instances must have unique NodeIds");
+    assert_ne!(
+        children[0], children[1],
+        "Instances must have unique NodeIds"
+    );
 }
 
 #[test]
@@ -628,7 +629,10 @@ fn subscene_instancing_resolves_child_scene() {
 
     // The sub-scene root should be renamed to "Enemy" (from the parent template).
     let enemy = tree.get_node_by_path("/root/World/Enemy");
-    assert!(enemy.is_some(), "Sub-scene root should be renamed to 'Enemy'");
+    assert!(
+        enemy.is_some(),
+        "Sub-scene root should be renamed to 'Enemy'"
+    );
 
     let enemy_id = enemy.unwrap();
     let enemy_node = tree.get_node(enemy_id).unwrap();
@@ -642,7 +646,9 @@ fn subscene_instancing_resolves_child_scene() {
 
     // Sprite and Collision should be reachable.
     assert!(tree.get_node_by_path("/root/World/Enemy/Sprite").is_some());
-    assert!(tree.get_node_by_path("/root/World/Enemy/Collision").is_some());
+    assert!(tree
+        .get_node_by_path("/root/World/Enemy/Collision")
+        .is_some());
 }
 
 // ===========================================================================
@@ -858,7 +864,9 @@ fn connection_deferred_flag_preserved() {
     let tree = instance_into_tree(FLAGS_SCENE);
     let timer_id = tree.get_node_by_path("/root/Root/Timer").unwrap();
 
-    let store = tree.signal_store(timer_id).expect("Timer should have signal store");
+    let store = tree
+        .signal_store(timer_id)
+        .expect("Timer should have signal store");
 
     // flags=1 → CONNECT_DEFERRED
     let timeout = store.get_signal("timeout").expect("should have 'timeout'");
@@ -877,7 +885,9 @@ fn connection_one_shot_flag_preserved() {
     let tree = instance_into_tree(FLAGS_SCENE);
     let timer_id = tree.get_node_by_path("/root/Root/Timer").unwrap();
 
-    let store = tree.signal_store(timer_id).expect("Timer should have signal store");
+    let store = tree
+        .signal_store(timer_id)
+        .expect("Timer should have signal store");
 
     // flags=4 → CONNECT_ONE_SHOT
     let exit = store
@@ -898,7 +908,9 @@ fn connection_combined_flags_preserved() {
     let tree = instance_into_tree(FLAGS_SCENE);
     let timer_id = tree.get_node_by_path("/root/Root/Timer").unwrap();
 
-    let store = tree.signal_store(timer_id).expect("Timer should have signal store");
+    let store = tree
+        .signal_store(timer_id)
+        .expect("Timer should have signal store");
 
     // flags=5 → DEFERRED | ONE_SHOT
     let ready = store.get_signal("ready").expect("should have 'ready'");
@@ -1038,7 +1050,11 @@ fn multiple_subscene_instances_independent() {
     // Each mob should have sub-scene children (Sprite + Collision).
     for &mob_id in &[mob1, mob2, mob3] {
         let mob = tree.get_node(mob_id).unwrap();
-        assert_eq!(mob.children().len(), 2, "Each mob instance should have 2 children");
+        assert_eq!(
+            mob.children().len(),
+            2,
+            "Each mob instance should have 2 children"
+        );
     }
 }
 
@@ -1149,11 +1165,17 @@ fn nested_subscene_two_levels_deep() {
 
     // Guard should have the soldier's health.
     let guard_node = tree.get_node(guard.unwrap()).unwrap();
-    assert_eq!(guard_node.get_property("health"), gdvariant::Variant::Int(100));
+    assert_eq!(
+        guard_node.get_property("health"),
+        gdvariant::Variant::Int(100)
+    );
 
     // Arm (renamed from Weapon) should be a child of Guard.
     let arm = tree.get_node_by_path("/root/Army/Guard/Arm");
-    assert!(arm.is_some(), "Arm (from weapon sub-scene) should exist under Guard");
+    assert!(
+        arm.is_some(),
+        "Arm (from weapon sub-scene) should exist under Guard"
+    );
 
     // Arm should have the weapon's damage property.
     let arm_node = tree.get_node(arm.unwrap()).unwrap();
@@ -1161,7 +1183,10 @@ fn nested_subscene_two_levels_deep() {
 
     // HitArea should be under Arm.
     let hit_area = tree.get_node_by_path("/root/Army/Guard/Arm/HitArea");
-    assert!(hit_area.is_some(), "HitArea from weapon sub-scene should be under Arm");
+    assert!(
+        hit_area.is_some(),
+        "HitArea from weapon sub-scene should be under Arm"
+    );
 }
 
 // ===========================================================================
@@ -1200,7 +1225,10 @@ fn total_node_count_correct_after_subscene_instancing() {
 fn empty_scene_returns_error() {
     let tscn = "[gd_scene format=3]\n";
     let result = PackedScene::from_tscn(tscn);
-    assert!(result.is_err(), "Parsing an empty scene (no nodes) should fail");
+    assert!(
+        result.is_err(),
+        "Parsing an empty scene (no nodes) should fail"
+    );
 }
 
 // ===========================================================================
@@ -1292,7 +1320,11 @@ fn reparent_instanced_node_preserves_children() {
 
     // Enemy subtree should still be intact under the new parent path.
     let enemy_node = tree.get_node(enemy_id).unwrap();
-    assert_eq!(enemy_node.children().len(), 2, "Enemy children should survive reparent");
+    assert_eq!(
+        enemy_node.children().len(),
+        2,
+        "Enemy children should survive reparent"
+    );
     assert_eq!(enemy_node.class_name(), "Node2D");
 }
 
@@ -1329,14 +1361,19 @@ fn wide_and_deep_combined_100_nodes() {
     // Total: root + 5 branches + 5*3 depth nodes = 1 + 5 + 15 = 21
     let all = tree.all_nodes_in_tree_order();
     // tree root + instanced root + 20 descendants = 22
-    assert_eq!(all.len(), 22, "Should have 22 total nodes (tree root + 21 instanced)");
+    assert_eq!(
+        all.len(),
+        22,
+        "Should have 22 total nodes (tree root + 21 instanced)"
+    );
 
     // Verify deepest nodes are reachable.
     for branch in 0..5 {
-        let path = format!(
-            "/root/Root/Branch{branch}/B{branch}D0/B{branch}D1/B{branch}D2"
+        let path = format!("/root/Root/Branch{branch}/B{branch}D0/B{branch}D1/B{branch}D2");
+        assert!(
+            tree.get_node_by_path(&path).is_some(),
+            "Deepest node at {path} should exist"
         );
-        assert!(tree.get_node_by_path(&path).is_some(), "Deepest node at {path} should exist");
     }
 }
 
@@ -1380,7 +1417,11 @@ fn multiple_connections_from_same_signal() {
     );
 
     // Verify each target method.
-    let methods: Vec<&str> = pressed.connections().iter().map(|c| c.method.as_str()).collect();
+    let methods: Vec<&str> = pressed
+        .connections()
+        .iter()
+        .map(|c| c.method.as_str())
+        .collect();
     assert!(methods.contains(&"_on_pressed"));
     assert!(methods.contains(&"_update_text"));
     assert!(methods.contains(&"_increment"));
@@ -1422,8 +1463,12 @@ fn cross_boundary_connection_wired() {
     let enemy_id = tree.get_node_by_path("/root/World/Enemy").unwrap();
 
     // The connection should be wired from Enemy to World.
-    let store = tree.signal_store(enemy_id).expect("Enemy should have signal store");
-    let signal = store.get_signal("tree_entered").expect("Should have tree_entered");
+    let store = tree
+        .signal_store(enemy_id)
+        .expect("Enemy should have signal store");
+    let signal = store
+        .get_signal("tree_entered")
+        .expect("Should have tree_entered");
     assert_eq!(signal.connection_count(), 1);
     assert_eq!(signal.connections()[0].method, "_on_enemy_entered");
     assert_eq!(signal.connections()[0].target_id, world_id.object_id());
@@ -1502,12 +1547,19 @@ fn meta_properties_preserved_after_instancing() {
     let enemy_id = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
 
     // Set meta on the instanced node.
-    tree.get_node_mut(enemy_id).unwrap().set_meta("editor_hint", gdvariant::Variant::String("spawner".into()));
-    tree.get_node_mut(enemy_id).unwrap().set_meta("spawn_weight", gdvariant::Variant::Int(5));
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_meta("editor_hint", gdvariant::Variant::String("spawner".into()));
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_meta("spawn_weight", gdvariant::Variant::Int(5));
 
     // Verify meta is readable.
     let node = tree.get_node(enemy_id).unwrap();
-    assert_eq!(node.get_meta("editor_hint"), gdvariant::Variant::String("spawner".into()));
+    assert_eq!(
+        node.get_meta("editor_hint"),
+        gdvariant::Variant::String("spawner".into())
+    );
     assert_eq!(node.get_meta("spawn_weight"), gdvariant::Variant::Int(5));
     assert!(node.has_meta("editor_hint"));
     assert!(!node.has_meta("nonexistent"));
@@ -1526,8 +1578,12 @@ fn two_instances_have_independent_meta() {
     let inst2 = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
 
     // Set different meta on each instance.
-    tree.get_node_mut(inst1).unwrap().set_meta("team", gdvariant::Variant::String("red".into()));
-    tree.get_node_mut(inst2).unwrap().set_meta("team", gdvariant::Variant::String("blue".into()));
+    tree.get_node_mut(inst1)
+        .unwrap()
+        .set_meta("team", gdvariant::Variant::String("red".into()));
+    tree.get_node_mut(inst2)
+        .unwrap()
+        .set_meta("team", gdvariant::Variant::String("blue".into()));
 
     assert_eq!(
         tree.get_node(inst1).unwrap().get_meta("team"),
@@ -1546,7 +1602,9 @@ fn remove_meta_works_on_instanced_node() {
     let root = tree.root_id();
 
     let enemy_id = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    tree.get_node_mut(enemy_id).unwrap().set_meta("temp", gdvariant::Variant::Bool(true));
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_meta("temp", gdvariant::Variant::Bool(true));
     assert!(tree.get_node(enemy_id).unwrap().has_meta("temp"));
 
     tree.get_node_mut(enemy_id).unwrap().remove_meta("temp");
@@ -1563,7 +1621,10 @@ use gdscene::node::ProcessMode;
 fn process_mode_default_is_inherit() {
     let tree = instance_into_tree(SIMPLE_SCENE);
     let enemy_id = tree.get_node_by_path("/root/Enemy").unwrap();
-    assert_eq!(tree.get_node(enemy_id).unwrap().process_mode(), ProcessMode::Inherit);
+    assert_eq!(
+        tree.get_node(enemy_id).unwrap().process_mode(),
+        ProcessMode::Inherit
+    );
 }
 
 #[test]
@@ -1573,9 +1634,14 @@ fn explicit_process_mode_preserved_after_instancing() {
     let root = tree.root_id();
 
     let enemy_id = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    tree.get_node_mut(enemy_id).unwrap().set_process_mode(ProcessMode::Always);
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
 
-    assert_eq!(tree.get_node(enemy_id).unwrap().process_mode(), ProcessMode::Always);
+    assert_eq!(
+        tree.get_node(enemy_id).unwrap().process_mode(),
+        ProcessMode::Always
+    );
     assert_eq!(tree.effective_process_mode(enemy_id), ProcessMode::Always);
 }
 
@@ -1589,9 +1655,17 @@ fn inherit_resolves_to_parent_process_mode() {
     let sprite_id = tree.get_node_by_path("/root/Enemy/Sprite").unwrap();
 
     // Set parent to Disabled — child with Inherit should resolve to Disabled.
-    tree.get_node_mut(enemy_id).unwrap().set_process_mode(ProcessMode::Disabled);
-    assert_eq!(tree.get_node(sprite_id).unwrap().process_mode(), ProcessMode::Inherit);
-    assert_eq!(tree.effective_process_mode(sprite_id), ProcessMode::Disabled);
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
+    assert_eq!(
+        tree.get_node(sprite_id).unwrap().process_mode(),
+        ProcessMode::Inherit
+    );
+    assert_eq!(
+        tree.effective_process_mode(sprite_id),
+        ProcessMode::Disabled
+    );
 }
 
 #[test]
@@ -1603,8 +1677,12 @@ fn two_instances_independent_process_modes() {
     let inst1 = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
     let inst2 = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
 
-    tree.get_node_mut(inst1).unwrap().set_process_mode(ProcessMode::Always);
-    tree.get_node_mut(inst2).unwrap().set_process_mode(ProcessMode::Disabled);
+    tree.get_node_mut(inst1)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
+    tree.get_node_mut(inst2)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
 
     assert_eq!(tree.effective_process_mode(inst1), ProcessMode::Always);
     assert_eq!(tree.effective_process_mode(inst2), ProcessMode::Disabled);
@@ -1624,17 +1702,23 @@ fn should_process_respects_pause_and_process_mode() {
     assert!(!tree.should_process_node(enemy_id));
 
     // Always: processes even when paused.
-    tree.get_node_mut(enemy_id).unwrap().set_process_mode(ProcessMode::Always);
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::Always);
     assert!(tree.should_process_node(enemy_id));
 
     // WhenPaused: processes only when paused.
-    tree.get_node_mut(enemy_id).unwrap().set_process_mode(ProcessMode::WhenPaused);
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::WhenPaused);
     assert!(tree.should_process_node(enemy_id));
     tree.set_paused(false);
     assert!(!tree.should_process_node(enemy_id));
 
     // Disabled: never processes.
-    tree.get_node_mut(enemy_id).unwrap().set_process_mode(ProcessMode::Disabled);
+    tree.get_node_mut(enemy_id)
+        .unwrap()
+        .set_process_mode(ProcessMode::Disabled);
     assert!(!tree.should_process_node(enemy_id));
     tree.set_paused(true);
     assert!(!tree.should_process_node(enemy_id));
@@ -1735,7 +1819,11 @@ fn two_instances_subresource_refs_independent() {
     for &child_id in root_node.children() {
         let child = tree.get_node(child_id).unwrap();
         let collision_ids: Vec<_> = child.children().iter().copied().collect();
-        assert_eq!(collision_ids.len(), 2, "Each instance should have 2 collision children");
+        assert_eq!(
+            collision_ids.len(),
+            2,
+            "Each instance should have 2 collision children"
+        );
     }
 }
 
@@ -1788,10 +1876,15 @@ position = Vector2(42, 42)
 fn unique_name_at_depth_3_flagged() {
     let tree = instance_into_tree(DEEP_UNIQUE_SCENE);
 
-    let target = tree.get_node_by_path("/root/Root/Level1/Level2/DeepTarget").unwrap();
+    let target = tree
+        .get_node_by_path("/root/Root/Level1/Level2/DeepTarget")
+        .unwrap();
     let target_node = tree.get_node(target).unwrap();
 
-    assert!(target_node.is_unique_name(), "DeepTarget should be unique-name even at depth 3");
+    assert!(
+        target_node.is_unique_name(),
+        "DeepTarget should be unique-name even at depth 3"
+    );
     assert_eq!(
         target_node.get_property("position"),
         gdvariant::Variant::Vector2(gdcore::math::Vector2::new(42.0, 42.0))
@@ -1844,7 +1937,9 @@ fn reparent_instanced_subtree_preserves_children() {
     let root = tree.root_id();
 
     // Add a second container node.
-    let container = tree.add_child(root, gdscene::node::Node::new("Container", "Node2D")).unwrap();
+    let container = tree
+        .add_child(root, gdscene::node::Node::new("Container", "Node2D"))
+        .unwrap();
 
     // Find Player.
     let world = tree.get_node(root).unwrap().children()[0];
@@ -1873,7 +1968,9 @@ fn reparent_instanced_node_fires_lifecycle_notifications() {
     let mut tree = instance_into_tree(REPARENT_SCENE);
     let root = tree.root_id();
 
-    let container = tree.add_child(root, gdscene::node::Node::new("Container", "Node2D")).unwrap();
+    let container = tree
+        .add_child(root, gdscene::node::Node::new("Container", "Node2D"))
+        .unwrap();
 
     let world = tree.get_node(root).unwrap().children()[0];
     let player = tree.get_node(world).unwrap().children()[0];
@@ -1962,7 +2059,11 @@ fn wide_scene_100_siblings_all_instanced() {
     // Verify ordering: children must be in declaration order.
     for (i, &child_id) in children.iter().enumerate() {
         let name = tree.get_node(child_id).unwrap().name().to_string();
-        assert_eq!(name, format!("Child{i}"), "Child order must match .tscn order");
+        assert_eq!(
+            name,
+            format!("Child{i}"),
+            "Child order must match .tscn order"
+        );
     }
 }
 
@@ -2006,7 +2107,10 @@ fn remove_and_reinstance_same_scene() {
     let inst2 = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
 
     // Old id should be gone, new id should work.
-    assert!(tree.get_node(inst1).is_none(), "Removed instance must be gone");
+    assert!(
+        tree.get_node(inst1).is_none(),
+        "Removed instance must be gone"
+    );
     assert!(tree.get_node(inst2).is_some(), "New instance must exist");
 
     let enemy = tree.get_node(inst2).unwrap();
@@ -2128,11 +2232,11 @@ fn get_node_relative_from_child_to_sibling_parent() {
 
     // Relative path "../../" from Inner should reach Outer.
     let outer = tree.get_node_relative(inner, "../..");
-    assert!(outer.is_some(), "Relative path ../.. from Inner must reach Outer");
-    assert_eq!(
-        tree.get_node(outer.unwrap()).unwrap().name(),
-        "Outer"
+    assert!(
+        outer.is_some(),
+        "Relative path ../.. from Inner must reach Outer"
     );
+    assert_eq!(tree.get_node(outer.unwrap()).unwrap().name(), "Outer");
 }
 
 #[test]
@@ -2141,7 +2245,10 @@ fn relative_path_to_nonexistent_returns_none() {
 
     let outer = tree.get_node_by_path("/root/Outer").unwrap();
     let result = tree.get_node_relative(outer, "DoesNotExist/Child");
-    assert!(result.is_none(), "Non-existent relative path must return None");
+    assert!(
+        result.is_none(),
+        "Non-existent relative path must return None"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2155,7 +2262,9 @@ fn instance_under_dynamically_created_parent() {
     let root = tree.root_id();
 
     // Create a parent dynamically, then instance under it.
-    let entities = tree.add_child(root, gdscene::node::Node::new("Entities", "Node2D")).unwrap();
+    let entities = tree
+        .add_child(root, gdscene::node::Node::new("Entities", "Node2D"))
+        .unwrap();
 
     let inst = add_packed_scene_to_tree(&mut tree, entities, &packed).unwrap();
 
@@ -2176,7 +2285,9 @@ fn multiple_scenes_under_dynamic_parent_maintain_order() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let container = tree.add_child(root, gdscene::node::Node::new("Container", "Node2D")).unwrap();
+    let container = tree
+        .add_child(root, gdscene::node::Node::new("Container", "Node2D"))
+        .unwrap();
 
     let ids: Vec<_> = (0..5)
         .map(|_| add_packed_scene_to_tree(&mut tree, container, &packed).unwrap())
@@ -2277,7 +2388,9 @@ fn add_dynamic_child_to_instanced_node() {
     assert_eq!(tree.get_node(enemy).unwrap().children().len(), 2);
 
     // Add a dynamic child.
-    let extra = tree.add_child(enemy, gdscene::node::Node::new("HealthBar", "Control")).unwrap();
+    let extra = tree
+        .add_child(enemy, gdscene::node::Node::new("HealthBar", "Control"))
+        .unwrap();
 
     assert_eq!(
         tree.get_node(enemy).unwrap().children().len(),
@@ -2285,10 +2398,7 @@ fn add_dynamic_child_to_instanced_node() {
         "Instanced node must accept dynamic children"
     );
     assert_eq!(tree.get_node(extra).unwrap().name(), "HealthBar");
-    assert_eq!(
-        tree.get_node(extra).unwrap().parent(),
-        Some(enemy)
-    );
+    assert_eq!(tree.get_node(extra).unwrap().parent(), Some(enemy));
 }
 
 #[test]
@@ -2297,7 +2407,9 @@ fn dynamic_child_receives_lifecycle_notifications() {
     let root = tree.root_id();
     let enemy = tree.get_node(root).unwrap().children()[0];
 
-    let extra = tree.add_child(enemy, gdscene::node::Node::new("HealthBar", "Control")).unwrap();
+    let extra = tree
+        .add_child(enemy, gdscene::node::Node::new("HealthBar", "Control"))
+        .unwrap();
 
     let log = tree.get_node(extra).unwrap().notification_log();
     assert!(

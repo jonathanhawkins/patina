@@ -126,10 +126,7 @@ fn ci_has_fuzz_gate() {
         ci.contains("rust-compat-fuzz"),
         "CI must have a dedicated fuzz/property test gate"
     );
-    assert!(
-        ci.contains("Fuzz"),
-        "fuzz gate must have descriptive name"
-    );
+    assert!(ci.contains("Fuzz"), "fuzz gate must have descriptive name");
 }
 
 // ===========================================================================
@@ -203,12 +200,7 @@ fn platform_gate_covers_core_patterns() {
     let ci = read_ci();
     let section = extract_section(&ci, "rust-compat-platform");
 
-    let patterns = [
-        "input_",
-        "window_",
-        "platform_",
-        "audio_",
-    ];
+    let patterns = ["input_", "window_", "platform_", "audio_"];
 
     for pattern in &patterns {
         assert!(
@@ -271,15 +263,9 @@ fn parity_tests_are_covered_by_ci() {
     let ci = read_ci();
     let test_files = list_test_files();
 
-    let parity_tests: Vec<&String> = test_files
-        .iter()
-        .filter(|f| f.contains("parity"))
-        .collect();
+    let parity_tests: Vec<&String> = test_files.iter().filter(|f| f.contains("parity")).collect();
 
-    assert!(
-        !parity_tests.is_empty(),
-        "must have parity test files"
-    );
+    assert!(!parity_tests.is_empty(), "must have parity test files");
 
     // All parity tests should be matched by at least one CI filter pattern.
     // The full workspace test catches everything, but we check that
@@ -289,8 +275,7 @@ fn parity_tests_are_covered_by_ci() {
         let stem = test.trim_end_matches(".rs");
         // Check if any part of the stem appears in CI gate filter patterns
         let short = stem.trim_end_matches("_test");
-        let covered = ci.contains(short)
-            || find_matching_prefix(&ci, short);
+        let covered = ci.contains(short) || find_matching_prefix(&ci, short);
         if !covered {
             uncovered.push(test.as_str());
         }
@@ -323,10 +308,7 @@ fn slice_test_files_are_covered() {
     for test in &slice_tests {
         let stem = test.trim_end_matches("_test.rs");
         let covered = ci.contains(stem) || find_matching_prefix(&ci, stem);
-        assert!(
-            covered,
-            "slice test '{test}' must be referenced in CI"
-        );
+        assert!(covered, "slice test '{test}' must be referenced in CI");
     }
 }
 
@@ -335,24 +317,15 @@ fn golden_tests_are_covered() {
     let ci = read_ci();
     let test_files = list_test_files();
 
-    let golden_tests: Vec<&String> = test_files
-        .iter()
-        .filter(|f| f.contains("golden"))
-        .collect();
+    let golden_tests: Vec<&String> = test_files.iter().filter(|f| f.contains("golden")).collect();
 
-    assert!(
-        !golden_tests.is_empty(),
-        "must have golden test files"
-    );
+    assert!(!golden_tests.is_empty(), "must have golden test files");
 
     // Golden tests should be covered by either the render goldens gate
     // or the dedicated slice gates.
     for test in &golden_tests {
         let covered = ci.contains("golden") || ci.contains("render_golden");
-        assert!(
-            covered,
-            "golden test '{test}' must be covered by CI"
-        );
+        assert!(covered, "golden test '{test}' must be covered by CI");
     }
 }
 
@@ -388,7 +361,7 @@ fn existing_gates_still_present() {
     // Original CI gates must not have been removed
     let original_gates = [
         "rust-fmt",
-        "rust:",          // main rust job
+        "rust:", // main rust job
         "rust-render-goldens",
         "rust-release",
         "rust-audit",
@@ -519,10 +492,23 @@ fn headless_domain_test_files_covered_by_headless_gate() {
     let test_files = list_test_files();
 
     let headless_keywords = [
-        "resource_", "scene_", "signal_", "notification_", "object_",
-        "classdb_", "lifecycle_", "packed_scene_", "nodepath_",
-        "connect_", "instanc", "reparent_", "default_property_",
-        "gdscript_", "script_", "mainloop_", "change_scene_",
+        "resource_",
+        "scene_",
+        "signal_",
+        "notification_",
+        "object_",
+        "classdb_",
+        "lifecycle_",
+        "packed_scene_",
+        "nodepath_",
+        "connect_",
+        "instanc",
+        "reparent_",
+        "default_property_",
+        "gdscript_",
+        "script_",
+        "mainloop_",
+        "change_scene_",
         "cache_",
     ];
 
@@ -553,8 +539,14 @@ fn two_d_domain_test_files_covered_by_2d_gate() {
     let test_files = list_test_files();
 
     let two_d_keywords = [
-        "physics_", "collision_", "node2d_", "geometry2d_",
-        "area2d_", "character_", "fixed_step_", "gdphysics2d_",
+        "physics_",
+        "collision_",
+        "node2d_",
+        "geometry2d_",
+        "area2d_",
+        "character_",
+        "fixed_step_",
+        "gdphysics2d_",
         "deterministic_physics",
     ];
 
@@ -563,10 +555,7 @@ fn two_d_domain_test_files_covered_by_2d_gate() {
         .filter(|f| two_d_keywords.iter().any(|k| f.contains(k)))
         .collect();
 
-    assert!(
-        !two_d_tests.is_empty(),
-        "must have 2D domain test files"
-    );
+    assert!(!two_d_tests.is_empty(), "must have 2D domain test files");
 
     for keyword in &two_d_keywords {
         assert!(
@@ -590,10 +579,7 @@ fn three_d_domain_test_files_covered_by_3d_gate() {
         .filter(|f| three_d_keywords.iter().any(|k| f.contains(k)))
         .collect();
 
-    assert!(
-        !three_d_tests.is_empty(),
-        "must have 3D domain test files"
-    );
+    assert!(!three_d_tests.is_empty(), "must have 3D domain test files");
 
     for keyword in &three_d_keywords {
         assert!(
@@ -611,8 +597,13 @@ fn platform_domain_test_files_covered_by_platform_gate() {
     let test_files = list_test_files();
 
     let platform_keywords = [
-        "input_", "window_", "platform_", "audio_",
-        "keyboard_", "mouse_input_", "winit_",
+        "input_",
+        "window_",
+        "platform_",
+        "audio_",
+        "keyboard_",
+        "mouse_input_",
+        "winit_",
     ];
 
     let platform_tests: Vec<&String> = test_files
@@ -640,8 +631,12 @@ fn ci_meta_gate_covers_infrastructure_patterns() {
     let section = extract_section(&ci, "rust-compat-ci-meta");
 
     let meta_keywords = [
-        "ci_", "version_consistency", "startup_packaging",
-        "release_", "migration_", "contributor_",
+        "ci_",
+        "version_consistency",
+        "startup_packaging",
+        "release_",
+        "migration_",
+        "contributor_",
     ];
 
     for keyword in &meta_keywords {
@@ -728,16 +723,15 @@ fn three_d_gate_covers_all_existing_3d_test_prefixes() {
     let mut uncovered_3d = Vec::new();
     for file in &three_d_files {
         let stem = file.trim_end_matches("_test.rs");
-        let covered = find_matching_prefix(&section, stem)
-            || section.contains(&stem[..stem.len().min(8)]);
+        let covered =
+            find_matching_prefix(&section, stem) || section.contains(&stem[..stem.len().min(8)]);
         if !covered {
             uncovered_3d.push(file.as_str());
         }
     }
 
-    let coverage = ((three_d_files.len() - uncovered_3d.len()) as f64
-        / three_d_files.len() as f64)
-        * 100.0;
+    let coverage =
+        ((three_d_files.len() - uncovered_3d.len()) as f64 / three_d_files.len() as f64) * 100.0;
     assert!(
         coverage >= 80.0,
         "3D gate must cover >= 80% of 3D test files (got {coverage:.0}%, uncovered: {uncovered_3d:?})"
@@ -782,10 +776,8 @@ fn each_domain_gate_has_matching_test_files() {
 
     for (domain, patterns) in &domains {
         for pattern in patterns {
-            let matching: Vec<&String> = test_files
-                .iter()
-                .filter(|f| f.contains(pattern))
-                .collect();
+            let matching: Vec<&String> =
+                test_files.iter().filter(|f| f.contains(pattern)).collect();
             assert!(
                 !matching.is_empty(),
                 "domain '{domain}' pattern '{pattern}' must match at least one test file"
@@ -842,8 +834,7 @@ fn fuzz_test_files_covered_by_fuzz_gate() {
     for test in &fuzz_tests {
         let stem = test.trim_end_matches("_test.rs");
         // Check if any fuzz gate pattern matches the file
-        let covered = section.contains(stem)
-            || find_matching_prefix(&section, stem);
+        let covered = section.contains(stem) || find_matching_prefix(&section, stem);
         if !covered {
             uncovered.push(test.as_str());
         }
@@ -888,10 +879,7 @@ fn headless_gate_covers_broader_execution_tests() {
     // Broader resource/scene execution tests should be covered by headless
     let broader_tests: Vec<&String> = test_files
         .iter()
-        .filter(|f| {
-            f.contains("resource_scene_")
-                || f.contains("scene_tree_broad")
-        })
+        .filter(|f| f.contains("resource_scene_") || f.contains("scene_tree_broad"))
         .collect();
 
     assert!(

@@ -71,7 +71,11 @@ fn collision_shape_3d_has_expected_properties() {
 fn collision_shape_3d_default_disabled_is_false() {
     let _g = init_classdb();
     let info = class_db::get_class_info("CollisionShape3D").unwrap();
-    let disabled = info.properties.iter().find(|p| p.name == "disabled").unwrap();
+    let disabled = info
+        .properties
+        .iter()
+        .find(|p| p.name == "disabled")
+        .unwrap();
     assert_eq!(disabled.default_value, Variant::Bool(false));
 }
 
@@ -79,7 +83,10 @@ fn collision_shape_3d_default_disabled_is_false() {
 
 #[test]
 fn cylinder_aabb() {
-    let shape = Shape3D::CylinderShape { radius: 2.0, height: 4.0 };
+    let shape = Shape3D::CylinderShape {
+        radius: 2.0,
+        height: 4.0,
+    };
     let aabb = shape.bounding_aabb();
     assert_eq!(aabb.position, Vector3::new(-2.0, -2.0, -2.0));
     assert_eq!(aabb.size, Vector3::new(4.0, 4.0, 4.0));
@@ -137,19 +144,28 @@ fn empty_convex_polygon_aabb() {
 
 #[test]
 fn cylinder_contains_center() {
-    let shape = Shape3D::CylinderShape { radius: 1.0, height: 2.0 };
+    let shape = Shape3D::CylinderShape {
+        radius: 1.0,
+        height: 2.0,
+    };
     assert!(shape.contains_point(Vector3::ZERO));
 }
 
 #[test]
 fn cylinder_excludes_above() {
-    let shape = Shape3D::CylinderShape { radius: 1.0, height: 2.0 };
+    let shape = Shape3D::CylinderShape {
+        radius: 1.0,
+        height: 2.0,
+    };
     assert!(!shape.contains_point(Vector3::new(0.0, 2.0, 0.0)));
 }
 
 #[test]
 fn cylinder_excludes_outside_radius() {
-    let shape = Shape3D::CylinderShape { radius: 1.0, height: 2.0 };
+    let shape = Shape3D::CylinderShape {
+        radius: 1.0,
+        height: 2.0,
+    };
     assert!(!shape.contains_point(Vector3::new(1.5, 0.0, 0.0)));
 }
 

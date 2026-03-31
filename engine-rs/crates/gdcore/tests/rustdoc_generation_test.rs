@@ -107,7 +107,9 @@ fn all_public_crates_have_crate_level_docs() {
         }
 
         let content = std::fs::read_to_string(&lib_rs).unwrap();
-        let has_crate_doc = content.lines().any(|line| line.trim_start().starts_with("//!"));
+        let has_crate_doc = content
+            .lines()
+            .any(|line| line.trim_start().starts_with("//!"));
 
         if !has_crate_doc {
             missing_docs.push(format!("{}: no //! crate-level doc comment", crate_name));

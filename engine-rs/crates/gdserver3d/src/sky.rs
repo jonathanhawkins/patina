@@ -263,28 +263,49 @@ impl ProceduralSkyMaterial {
             props.push(("sky_top_color".into(), Variant::Color(self.sky_top_color)));
         }
         if self.sky_horizon_color != def.sky_horizon_color {
-            props.push(("sky_horizon_color".into(), Variant::Color(self.sky_horizon_color)));
+            props.push((
+                "sky_horizon_color".into(),
+                Variant::Color(self.sky_horizon_color),
+            ));
         }
         if (self.sky_curve - def.sky_curve).abs() > f32::EPSILON {
             props.push(("sky_curve".into(), Variant::Float(self.sky_curve as f64)));
         }
         if (self.sky_energy_multiplier - def.sky_energy_multiplier).abs() > f32::EPSILON {
-            props.push(("sky_energy_multiplier".into(), Variant::Float(self.sky_energy_multiplier as f64)));
+            props.push((
+                "sky_energy_multiplier".into(),
+                Variant::Float(self.sky_energy_multiplier as f64),
+            ));
         }
         if self.ground_bottom_color != def.ground_bottom_color {
-            props.push(("ground_bottom_color".into(), Variant::Color(self.ground_bottom_color)));
+            props.push((
+                "ground_bottom_color".into(),
+                Variant::Color(self.ground_bottom_color),
+            ));
         }
         if self.ground_horizon_color != def.ground_horizon_color {
-            props.push(("ground_horizon_color".into(), Variant::Color(self.ground_horizon_color)));
+            props.push((
+                "ground_horizon_color".into(),
+                Variant::Color(self.ground_horizon_color),
+            ));
         }
         if (self.ground_curve - def.ground_curve).abs() > f32::EPSILON {
-            props.push(("ground_curve".into(), Variant::Float(self.ground_curve as f64)));
+            props.push((
+                "ground_curve".into(),
+                Variant::Float(self.ground_curve as f64),
+            ));
         }
         if (self.ground_energy_multiplier - def.ground_energy_multiplier).abs() > f32::EPSILON {
-            props.push(("ground_energy_multiplier".into(), Variant::Float(self.ground_energy_multiplier as f64)));
+            props.push((
+                "ground_energy_multiplier".into(),
+                Variant::Float(self.ground_energy_multiplier as f64),
+            ));
         }
         if (self.sun_angle_max - def.sun_angle_max).abs() > f32::EPSILON {
-            props.push(("sun_angle_max".into(), Variant::Float(self.sun_angle_max as f64)));
+            props.push((
+                "sun_angle_max".into(),
+                Variant::Float(self.sun_angle_max as f64),
+            ));
         }
         if (self.sun_curve - def.sun_curve).abs() > f32::EPSILON {
             props.push(("sun_curve".into(), Variant::Float(self.sun_curve as f64)));
@@ -325,13 +346,19 @@ impl PanoramicSkyMaterial {
         let def = Self::default();
         let mut props = Vec::new();
         if self.panorama_path != def.panorama_path {
-            props.push(("panorama".into(), Variant::String(self.panorama_path.clone())));
+            props.push((
+                "panorama".into(),
+                Variant::String(self.panorama_path.clone()),
+            ));
         }
         if self.filter != def.filter {
             props.push(("filter".into(), Variant::Bool(self.filter)));
         }
         if (self.energy_multiplier - def.energy_multiplier).abs() > f32::EPSILON {
-            props.push(("energy_multiplier".into(), Variant::Float(self.energy_multiplier as f64)));
+            props.push((
+                "energy_multiplier".into(),
+                Variant::Float(self.energy_multiplier as f64),
+            ));
         }
         props
     }
@@ -399,16 +426,25 @@ impl PhysicalSkyMaterial {
         let def = Self::default();
         let mut props = Vec::new();
         if (self.rayleigh_coefficient - def.rayleigh_coefficient).abs() > f32::EPSILON {
-            props.push(("rayleigh_coefficient".into(), Variant::Float(self.rayleigh_coefficient as f64)));
+            props.push((
+                "rayleigh_coefficient".into(),
+                Variant::Float(self.rayleigh_coefficient as f64),
+            ));
         }
         if self.rayleigh_color != def.rayleigh_color {
             props.push(("rayleigh_color".into(), Variant::Color(self.rayleigh_color)));
         }
         if (self.mie_coefficient - def.mie_coefficient).abs() > f32::EPSILON {
-            props.push(("mie_coefficient".into(), Variant::Float(self.mie_coefficient as f64)));
+            props.push((
+                "mie_coefficient".into(),
+                Variant::Float(self.mie_coefficient as f64),
+            ));
         }
         if (self.mie_eccentricity - def.mie_eccentricity).abs() > f32::EPSILON {
-            props.push(("mie_eccentricity".into(), Variant::Float(self.mie_eccentricity as f64)));
+            props.push((
+                "mie_eccentricity".into(),
+                Variant::Float(self.mie_eccentricity as f64),
+            ));
         }
         if self.mie_color != def.mie_color {
             props.push(("mie_color".into(), Variant::Color(self.mie_color)));
@@ -417,13 +453,19 @@ impl PhysicalSkyMaterial {
             props.push(("turbidity".into(), Variant::Float(self.turbidity as f64)));
         }
         if (self.sun_disk_scale - def.sun_disk_scale).abs() > f32::EPSILON {
-            props.push(("sun_disk_scale".into(), Variant::Float(self.sun_disk_scale as f64)));
+            props.push((
+                "sun_disk_scale".into(),
+                Variant::Float(self.sun_disk_scale as f64),
+            ));
         }
         if self.ground_color != def.ground_color {
             props.push(("ground_color".into(), Variant::Color(self.ground_color)));
         }
         if (self.energy_multiplier - def.energy_multiplier).abs() > f32::EPSILON {
-            props.push(("energy_multiplier".into(), Variant::Float(self.energy_multiplier as f64)));
+            props.push((
+                "energy_multiplier".into(),
+                Variant::Float(self.energy_multiplier as f64),
+            ));
         }
         props
     }
@@ -465,16 +507,12 @@ impl Sky {
         }
 
         sky.material = match material_type.as_str() {
-            "PanoramaSkyMaterial" | "PanoramicSkyMaterial" => {
-                SkyMaterial::Panoramic(PanoramicSkyMaterial::from_properties(
-                    material_props.into_iter(),
-                ))
-            }
-            "PhysicalSkyMaterial" => {
-                SkyMaterial::Physical(PhysicalSkyMaterial::from_properties(
-                    material_props.into_iter(),
-                ))
-            }
+            "PanoramaSkyMaterial" | "PanoramicSkyMaterial" => SkyMaterial::Panoramic(
+                PanoramicSkyMaterial::from_properties(material_props.into_iter()),
+            ),
+            "PhysicalSkyMaterial" => SkyMaterial::Physical(PhysicalSkyMaterial::from_properties(
+                material_props.into_iter(),
+            )),
             _ => {
                 // Default to procedural
                 SkyMaterial::Procedural(ProceduralSkyMaterial::from_properties(
@@ -601,7 +639,10 @@ mod tests {
 
     #[test]
     fn sky_process_mode_unknown_defaults_to_automatic() {
-        assert_eq!(SkyProcessMode::from_godot_int(99), SkyProcessMode::Automatic);
+        assert_eq!(
+            SkyProcessMode::from_godot_int(99),
+            SkyProcessMode::Automatic
+        );
     }
 
     #[test]

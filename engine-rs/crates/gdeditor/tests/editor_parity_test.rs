@@ -424,11 +424,26 @@ fn test_xse8a_top_menu_bar_five_menus() {
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
     // The top menu bar should have Scene, Project, Debug, Editor, and Help menus
-    assert!(b.contains("data-menu=\"scene\""), "Menu bar must have Scene menu");
-    assert!(b.contains("data-menu=\"project\""), "Menu bar must have Project menu");
-    assert!(b.contains("data-menu=\"debug\""), "Menu bar must have Debug menu");
-    assert!(b.contains("data-menu=\"editor\""), "Menu bar must have Editor menu");
-    assert!(b.contains("data-menu=\"help\""), "Menu bar must have Help menu");
+    assert!(
+        b.contains("data-menu=\"scene\""),
+        "Menu bar must have Scene menu"
+    );
+    assert!(
+        b.contains("data-menu=\"project\""),
+        "Menu bar must have Project menu"
+    );
+    assert!(
+        b.contains("data-menu=\"debug\""),
+        "Menu bar must have Debug menu"
+    );
+    assert!(
+        b.contains("data-menu=\"editor\""),
+        "Menu bar must have Editor menu"
+    );
+    assert!(
+        b.contains("data-menu=\"help\""),
+        "Menu bar must have Help menu"
+    );
     handle.stop();
 }
 
@@ -437,12 +452,30 @@ fn test_xse8a_scene_menu_actions() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("data-action=\"scene-new\""), "Scene menu needs New Scene");
-    assert!(b.contains("data-action=\"scene-open\""), "Scene menu needs Open Scene");
-    assert!(b.contains("data-action=\"scene-save\""), "Scene menu needs Save Scene");
-    assert!(b.contains("data-action=\"scene-save-as\""), "Scene menu needs Save As");
-    assert!(b.contains("data-action=\"scene-close\""), "Scene menu needs Close Scene");
-    assert!(b.contains("data-action=\"scene-quit\""), "Scene menu needs Quit");
+    assert!(
+        b.contains("data-action=\"scene-new\""),
+        "Scene menu needs New Scene"
+    );
+    assert!(
+        b.contains("data-action=\"scene-open\""),
+        "Scene menu needs Open Scene"
+    );
+    assert!(
+        b.contains("data-action=\"scene-save\""),
+        "Scene menu needs Save Scene"
+    );
+    assert!(
+        b.contains("data-action=\"scene-save-as\""),
+        "Scene menu needs Save As"
+    );
+    assert!(
+        b.contains("data-action=\"scene-close\""),
+        "Scene menu needs Close Scene"
+    );
+    assert!(
+        b.contains("data-action=\"scene-quit\""),
+        "Scene menu needs Quit"
+    );
     handle.stop();
 }
 
@@ -451,11 +484,26 @@ fn test_xse8a_debug_menu_actions() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("data-action=\"debug-run\""), "Debug menu needs Run Project");
-    assert!(b.contains("data-action=\"debug-run-current\""), "Debug menu needs Run Current");
-    assert!(b.contains("data-action=\"debug-pause\""), "Debug menu needs Pause");
-    assert!(b.contains("data-action=\"debug-stop\""), "Debug menu needs Stop");
-    assert!(b.contains("data-action=\"debug-step\""), "Debug menu needs Step");
+    assert!(
+        b.contains("data-action=\"debug-run\""),
+        "Debug menu needs Run Project"
+    );
+    assert!(
+        b.contains("data-action=\"debug-run-current\""),
+        "Debug menu needs Run Current"
+    );
+    assert!(
+        b.contains("data-action=\"debug-pause\""),
+        "Debug menu needs Pause"
+    );
+    assert!(
+        b.contains("data-action=\"debug-stop\""),
+        "Debug menu needs Stop"
+    );
+    assert!(
+        b.contains("data-action=\"debug-step\""),
+        "Debug menu needs Step"
+    );
     handle.stop();
 }
 
@@ -464,9 +512,18 @@ fn test_xse8a_editor_menu_actions() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("data-action=\"editor-settings\""), "Editor menu needs Settings");
-    assert!(b.contains("data-action=\"editor-toggle-fullscreen\""), "Editor menu needs Toggle Fullscreen");
-    assert!(b.contains("data-action=\"editor-toggle-console\""), "Editor menu needs Toggle Console");
+    assert!(
+        b.contains("data-action=\"editor-settings\""),
+        "Editor menu needs Settings"
+    );
+    assert!(
+        b.contains("data-action=\"editor-toggle-fullscreen\""),
+        "Editor menu needs Toggle Fullscreen"
+    );
+    assert!(
+        b.contains("data-action=\"editor-toggle-console\""),
+        "Editor menu needs Toggle Console"
+    );
     handle.stop();
 }
 
@@ -475,9 +532,18 @@ fn test_xse8a_help_menu_actions() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("data-action=\"help-docs\""), "Help menu needs Documentation");
-    assert!(b.contains("data-action=\"help-about\""), "Help menu needs About");
-    assert!(b.contains("data-action=\"help-issues\""), "Help menu needs Report Bug");
+    assert!(
+        b.contains("data-action=\"help-docs\""),
+        "Help menu needs Documentation"
+    );
+    assert!(
+        b.contains("data-action=\"help-about\""),
+        "Help menu needs About"
+    );
+    assert!(
+        b.contains("data-action=\"help-issues\""),
+        "Help menu needs Report Bug"
+    );
     handle.stop();
 }
 
@@ -486,10 +552,19 @@ fn test_xse8a_menu_keyboard_shortcuts_shown() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("Ctrl+N"), "New Scene should show Ctrl+N shortcut");
-    assert!(b.contains("Ctrl+S"), "Save Scene should show Ctrl+S shortcut");
+    assert!(
+        b.contains("Ctrl+N"),
+        "New Scene should show Ctrl+N shortcut"
+    );
+    assert!(
+        b.contains("Ctrl+S"),
+        "Save Scene should show Ctrl+S shortcut"
+    );
     assert!(b.contains("F5"), "Run Project should show F5 shortcut");
-    assert!(b.contains("F11"), "Toggle Fullscreen should show F11 shortcut");
+    assert!(
+        b.contains("F11"),
+        "Toggle Fullscreen should show F11 shortcut"
+    );
     handle.stop();
 }
 
@@ -500,10 +575,22 @@ fn test_7wvfu_profiler_tab_present() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("data-tab=\"profiler\""), "Bottom panel must have Profiler tab");
-    assert!(b.contains("profiler-panel"), "Editor must have profiler-panel div");
-    assert!(b.contains("profiler-graph-canvas"), "Profiler must have graph canvas");
-    assert!(b.contains("profiler-func-breakdown"), "Profiler must have function breakdown area");
+    assert!(
+        b.contains("data-tab=\"profiler\""),
+        "Bottom panel must have Profiler tab"
+    );
+    assert!(
+        b.contains("profiler-panel"),
+        "Editor must have profiler-panel div"
+    );
+    assert!(
+        b.contains("profiler-graph-canvas"),
+        "Profiler must have graph canvas"
+    );
+    assert!(
+        b.contains("profiler-func-breakdown"),
+        "Profiler must have function breakdown area"
+    );
     handle.stop();
 }
 
@@ -672,10 +759,7 @@ fn test_zgwgu_group_badge_js() {
         b.contains("node.groups"),
         "Editor JS must check node.groups for group badge"
     );
-    assert!(
-        b.contains("[G]"),
-        "Group badge must show [G] marker"
-    );
+    assert!(b.contains("[G]"), "Group badge must show [G] marker");
     handle.stop();
 }
 
@@ -860,18 +944,25 @@ fn test_pcnuj_property_hints_enum() {
     // Verify the PropertyHint enum exists in the Rust inspector module
     use gdeditor::inspector::PropertyHint;
     let _none = PropertyHint::None;
-    let _range = PropertyHint::Range { min: 0, max: 100, step: 1 };
+    let _range = PropertyHint::Range {
+        min: 0,
+        max: 100,
+        step: 1,
+    };
     let _enum_hint = PropertyHint::Enum(vec!["A".into(), "B".into()]);
 }
 
 #[test]
 fn test_pcnuj_inspector_sections() {
     // Verify InspectorSection and CustomPropertyEditor exist
-    use gdeditor::inspector::{InspectorSection, CustomPropertyEditor};
-    let section = InspectorSection::new_custom("Test Group")
-        .with_property(CustomPropertyEditor::new("speed").with_hint(
-            gdeditor::inspector::PropertyHint::Range { min: 0, max: 100, step: 1 },
-        ));
+    use gdeditor::inspector::{CustomPropertyEditor, InspectorSection};
+    let section = InspectorSection::new_custom("Test Group").with_property(
+        CustomPropertyEditor::new("speed").with_hint(gdeditor::inspector::PropertyHint::Range {
+            min: 0,
+            max: 100,
+            step: 1,
+        }),
+    );
     assert_eq!(section.name, "Test Group");
     assert_eq!(section.properties.len(), 1);
 }
@@ -895,10 +986,22 @@ fn test_zoh4r_grid_settings_in_ui() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("set-grid-snap"), "Editor must have grid snap checkbox");
-    assert!(b.contains("set-snap-size"), "Editor must have snap size selector");
-    assert!(b.contains("set-grid-visible"), "Editor must have grid visible toggle");
-    assert!(b.contains("set-rulers-visible"), "Editor must have rulers visible toggle");
+    assert!(
+        b.contains("set-grid-snap"),
+        "Editor must have grid snap checkbox"
+    );
+    assert!(
+        b.contains("set-snap-size"),
+        "Editor must have snap size selector"
+    );
+    assert!(
+        b.contains("set-grid-visible"),
+        "Editor must have grid visible toggle"
+    );
+    assert!(
+        b.contains("set-rulers-visible"),
+        "Editor must have rulers visible toggle"
+    );
     handle.stop();
 }
 
@@ -931,10 +1034,22 @@ fn test_zoh4r_snap_info_api() {
     let (handle, port) = make_server();
     let resp = http_get(port, "/api/viewport/snap_info");
     let body = extract_body(&resp);
-    assert!(body.contains("snap_enabled"), "snap_info must include snap_enabled");
-    assert!(body.contains("grid_visible"), "snap_info must include grid_visible");
-    assert!(body.contains("rulers_visible"), "snap_info must include rulers_visible");
-    assert!(body.contains("smart_snap_enabled"), "snap_info must include smart_snap_enabled");
+    assert!(
+        body.contains("snap_enabled"),
+        "snap_info must include snap_enabled"
+    );
+    assert!(
+        body.contains("grid_visible"),
+        "snap_info must include grid_visible"
+    );
+    assert!(
+        body.contains("rulers_visible"),
+        "snap_info must include rulers_visible"
+    );
+    assert!(
+        body.contains("smart_snap_enabled"),
+        "snap_info must include smart_snap_enabled"
+    );
     handle.stop();
 }
 
@@ -997,7 +1112,10 @@ fn test_vxq4y_edit_menu_undo_redo() {
     assert!(b.contains("edit-undo"), "Edit menu must have Undo action");
     assert!(b.contains("edit-redo"), "Edit menu must have Redo action");
     assert!(b.contains("Ctrl+Z"), "Undo must show Ctrl+Z shortcut");
-    assert!(b.contains("Ctrl+Shift+Z"), "Redo must show Ctrl+Shift+Z shortcut");
+    assert!(
+        b.contains("Ctrl+Shift+Z"),
+        "Redo must show Ctrl+Shift+Z shortcut"
+    );
     handle.stop();
 }
 
@@ -1017,8 +1135,14 @@ fn test_vxq4y_edit_menu_selection_actions() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("edit-select-all"), "Edit menu must have Select All action");
-    assert!(b.contains("edit-deselect"), "Edit menu must have Deselect All action");
+    assert!(
+        b.contains("edit-select-all"),
+        "Edit menu must have Select All action"
+    );
+    assert!(
+        b.contains("edit-deselect"),
+        "Edit menu must have Deselect All action"
+    );
     handle.stop();
 }
 
@@ -1029,7 +1153,10 @@ fn test_vxq4y_six_menus_in_menu_bar() {
     let b = extract_body(&html);
     assert!(b.contains("data-menu=\"scene\""), "Must have Scene menu");
     assert!(b.contains("data-menu=\"edit\""), "Must have Edit menu");
-    assert!(b.contains("data-menu=\"project\""), "Must have Project menu");
+    assert!(
+        b.contains("data-menu=\"project\""),
+        "Must have Project menu"
+    );
     assert!(b.contains("data-menu=\"debug\""), "Must have Debug menu");
     assert!(b.contains("data-menu=\"editor\""), "Must have Editor menu");
     assert!(b.contains("data-menu=\"help\""), "Must have Help menu");
@@ -1061,7 +1188,10 @@ fn test_vxq4y_scene_menu_actions_present() {
     assert!(b.contains("scene-open"), "Scene menu must have Open Scene");
     assert!(b.contains("scene-save"), "Scene menu must have Save Scene");
     assert!(b.contains("scene-save-as"), "Scene menu must have Save As");
-    assert!(b.contains("scene-close"), "Scene menu must have Close Scene");
+    assert!(
+        b.contains("scene-close"),
+        "Scene menu must have Close Scene"
+    );
     assert!(b.contains("scene-quit"), "Scene menu must have Quit");
     handle.stop();
 }
@@ -1108,7 +1238,10 @@ fn test_e0heb_set_editor_mode_game() {
     let resp = http_post(port, "/api/editor/mode", r#"{"mode":"game"}"#);
     assert!(resp.contains("200 OK"), "Setting game mode should succeed");
     let body = extract_body(&resp);
-    assert!(body.contains(r#""mode":"game""#), "Response should confirm game mode");
+    assert!(
+        body.contains(r#""mode":"game""#),
+        "Response should confirm game mode"
+    );
     // Verify GET returns the new mode
     let get_resp = http_get(port, "/api/editor/mode");
     let get_body = extract_body(&get_resp);
@@ -1160,11 +1293,18 @@ fn test_e0heb_run_control_buttons_present() {
 fn test_e0heb_scene_tabs_api_get() {
     let (handle, port) = make_server();
     let resp = http_get(port, "/api/scene/tabs");
-    assert!(resp.contains("200 OK"), "GET /api/scene/tabs should succeed");
+    assert!(
+        resp.contains("200 OK"),
+        "GET /api/scene/tabs should succeed"
+    );
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
     assert!(v["tabs"].is_array(), "tabs must be an array");
-    assert_eq!(v["tabs"].as_array().unwrap().len(), 1, "should start with 1 tab");
+    assert_eq!(
+        v["tabs"].as_array().unwrap().len(),
+        1,
+        "should start with 1 tab"
+    );
     assert_eq!(v["active_tab_index"], 0, "active tab should be 0");
     assert_eq!(v["tabs"][0]["name"], "Untitled", "default tab name");
     handle.stop();
@@ -1197,11 +1337,7 @@ fn test_e0heb_scene_tabs_open_and_switch() {
     );
 
     // Switch back to first tab
-    let resp3 = http_post(
-        port,
-        "/api/scene/tabs/switch",
-        r#"{"index":0}"#,
-    );
+    let resp3 = http_post(port, "/api/scene/tabs/switch", r#"{"index":0}"#);
     assert!(resp3.contains("200 OK"), "Switch should succeed");
     let body3 = extract_body(&resp3);
     let v3: serde_json::Value = serde_json::from_str(body3).unwrap();
@@ -1355,8 +1491,14 @@ fn test_x8i15_2d_node_catalog() {
     assert!(b.contains("'Node2D'"), "Catalog must include Node2D");
     assert!(b.contains("'Sprite2D'"), "Catalog must include Sprite2D");
     assert!(b.contains("'Camera2D'"), "Catalog must include Camera2D");
-    assert!(b.contains("'CharacterBody2D'"), "Catalog must include CharacterBody2D");
-    assert!(b.contains("'AnimatedSprite2D'"), "Catalog must include AnimatedSprite2D");
+    assert!(
+        b.contains("'CharacterBody2D'"),
+        "Catalog must include CharacterBody2D"
+    );
+    assert!(
+        b.contains("'AnimatedSprite2D'"),
+        "Catalog must include AnimatedSprite2D"
+    );
     handle.stop();
 }
 
@@ -1365,9 +1507,15 @@ fn test_x8i15_node_categories() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("CATEGORY_DISPLAY_ORDER"), "Must define category display order");
+    assert!(
+        b.contains("CATEGORY_DISPLAY_ORDER"),
+        "Must define category display order"
+    );
     assert!(b.contains("'2D'"), "Categories must include 2D");
-    assert!(b.contains("'Physics 2D'"), "Categories must include Physics 2D");
+    assert!(
+        b.contains("'Physics 2D'"),
+        "Categories must include Physics 2D"
+    );
     assert!(b.contains("'UI'"), "Categories must include UI");
     handle.stop();
 }
@@ -1397,17 +1545,14 @@ fn test_x8i15_recent_section() {
         b.contains("recentNodeTypes"),
         "Must track recent node types"
     );
-    assert!(
-        b.contains("Recent"),
-        "Must show Recent section header"
-    );
+    assert!(b.contains("Recent"), "Must show Recent section header");
     handle.stop();
 }
 
 #[test]
 fn test_x8i15_create_node_dialog_rust_types() {
     // Verify the Rust-side CreateNodeDialog is accessible
-    use gdeditor::create_dialog::{CreateNodeDialog, ClassFilter};
+    use gdeditor::create_dialog::{ClassFilter, CreateNodeDialog};
     let d = CreateNodeDialog::new();
     assert!(!d.is_visible());
     assert!(d.search_text().is_empty());
@@ -1419,8 +1564,14 @@ fn test_x8i15_dialog_footer_buttons() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("add-node-cancel"), "Dialog must have Cancel button");
-    assert!(b.contains("add-node-create"), "Dialog must have Create button");
+    assert!(
+        b.contains("add-node-cancel"),
+        "Dialog must have Cancel button"
+    );
+    assert!(
+        b.contains("add-node-create"),
+        "Dialog must have Create button"
+    );
     handle.stop();
 }
 
@@ -1454,7 +1605,10 @@ fn test_9ujvj_animation_toolbar() {
     let b = extract_body(&html);
     assert!(b.contains("anim-select"), "Must have animation selector");
     assert!(b.contains("anim-new-btn"), "Must have new animation button");
-    assert!(b.contains("anim-delete-btn"), "Must have delete animation button");
+    assert!(
+        b.contains("anim-delete-btn"),
+        "Must have delete animation button"
+    );
     assert!(b.contains("anim-record-btn"), "Must have record button");
     assert!(b.contains("anim-play-btn"), "Must have play button");
     assert!(b.contains("anim-stop-btn"), "Must have stop button");
@@ -1466,7 +1620,10 @@ fn test_9ujvj_timeline_canvas() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("anim-timeline-canvas"), "Must have timeline canvas");
+    assert!(
+        b.contains("anim-timeline-canvas"),
+        "Must have timeline canvas"
+    );
     assert!(b.contains("anim-playhead"), "Must have playhead indicator");
     assert!(b.contains("anim-tracks"), "Must have tracks container");
     handle.stop();
@@ -1497,7 +1654,10 @@ fn test_9ujvj_bezier_curve_editing() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("anim-curve-btn"), "Must have curve editor button");
+    assert!(
+        b.contains("anim-curve-btn"),
+        "Must have curve editor button"
+    );
     assert!(
         b.contains("cubic_bezier"),
         "Must support cubic bezier transitions"
@@ -1510,7 +1670,10 @@ fn test_9ujvj_onion_skinning_toggle() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("anim-onion-btn"), "Must have onion skinning button");
+    assert!(
+        b.contains("anim-onion-btn"),
+        "Must have onion skinning button"
+    );
     assert!(
         b.contains("onion_skinning_enabled"),
         "Must track onion skinning state"
@@ -1523,8 +1686,14 @@ fn test_9ujvj_animation_tree_dialog() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("anim-tree-dialog"), "Must have AnimationTree dialog");
-    assert!(b.contains("anim-tree-btn"), "Must have AnimationTree button");
+    assert!(
+        b.contains("anim-tree-dialog"),
+        "Must have AnimationTree dialog"
+    );
+    assert!(
+        b.contains("anim-tree-btn"),
+        "Must have AnimationTree button"
+    );
     assert!(
         b.contains("AnimationNodeStateMachine"),
         "AnimationTree must show state machine node"
@@ -1537,7 +1706,10 @@ fn test_9ujvj_add_track_button() {
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    assert!(b.contains("anim-add-track-btn"), "Must have Add Track button");
+    assert!(
+        b.contains("anim-add-track-btn"),
+        "Must have Add Track button"
+    );
     handle.stop();
 }
 
@@ -1547,7 +1719,13 @@ fn test_9ujvj_blend_toolbar() {
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
     assert!(b.contains("anim-blend-toolbar"), "Must have blend toolbar");
-    assert!(b.contains("anim-blend-slider"), "Must have blend weight slider");
-    assert!(b.contains("anim-blend-select"), "Must have blend animation selector");
+    assert!(
+        b.contains("anim-blend-slider"),
+        "Must have blend weight slider"
+    );
+    assert!(
+        b.contains("anim-blend-select"),
+        "Must have blend animation selector"
+    );
     handle.stop();
 }

@@ -28,9 +28,8 @@ fn arb_variant() -> impl Strategy<Value = Variant> {
         (any::<f32>(), any::<f32>()).prop_map(|(x, y)| Variant::Vector2(Vector2::new(x, y))),
         (any::<f32>(), any::<f32>(), any::<f32>())
             .prop_map(|(x, y, z)| Variant::Vector3(Vector3::new(x, y, z))),
-        (any::<f32>(), any::<f32>(), any::<f32>(), any::<f32>()).prop_map(|(r, g, b, a)| {
-            Variant::Color(Color::new(r, g, b, a))
-        }),
+        (any::<f32>(), any::<f32>(), any::<f32>(), any::<f32>())
+            .prop_map(|(r, g, b, a)| { Variant::Color(Color::new(r, g, b, a)) }),
     ]
 }
 
@@ -418,8 +417,7 @@ fn coerce_empty_string_to_nodepath() {
 
 #[test]
 fn coerce_empty_string_to_stringname() {
-    let result =
-        coerce_variant(&Variant::String(String::new()), VariantType::StringName).unwrap();
+    let result = coerce_variant(&Variant::String(String::new()), VariantType::StringName).unwrap();
     match result {
         Variant::StringName(sn) => assert!(sn.as_str().is_empty()),
         _ => panic!("expected StringName"),

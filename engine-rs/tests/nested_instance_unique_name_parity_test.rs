@@ -123,12 +123,13 @@ fn ahop_nested_unique_names_do_not_leak_to_outer_scope() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let ui_root = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &outer, &resolve_two_level,
-    ).unwrap();
+    let ui_root =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &outer, &resolve_two_level)
+            .unwrap();
 
     // %Banner is in the outer scope — should resolve.
-    let banner = tree.get_node_relative(ui_root, "%Banner")
+    let banner = tree
+        .get_node_relative(ui_root, "%Banner")
         .expect("%Banner should resolve in outer scope");
     assert_eq!(tree.get_node(banner).unwrap().name(), "Banner");
 
@@ -156,24 +157,28 @@ fn ahop_nested_unique_names_accessible_from_inner_scope() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let ui_root = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &outer, &resolve_two_level,
-    ).unwrap();
+    let ui_root =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &outer, &resolve_two_level)
+            .unwrap();
 
     // Navigate to the inner HUD root.
-    let inner_hud = tree.get_node_relative(ui_root, "InnerHUD")
+    let inner_hud = tree
+        .get_node_relative(ui_root, "InnerHUD")
         .expect("InnerHUD should exist as instanced sub-scene root");
 
     // From a CHILD of the inner scene (not the root), unique names should resolve
     // within the inner scope.
-    let inner_panel = tree.get_node_relative(inner_hud, "Panel")
+    let inner_panel = tree
+        .get_node_relative(inner_hud, "Panel")
         .expect("Panel should exist in inner scene");
 
-    let hb_from_child = tree.get_node_relative(inner_panel, "%HealthBar")
+    let hb_from_child = tree
+        .get_node_relative(inner_panel, "%HealthBar")
         .expect("%HealthBar should resolve from inner scene child");
     assert_eq!(tree.get_node(hb_from_child).unwrap().name(), "HealthBar");
 
-    let sl_from_child = tree.get_node_relative(inner_panel, "%ScoreLabel")
+    let sl_from_child = tree
+        .get_node_relative(inner_panel, "%ScoreLabel")
         .expect("%ScoreLabel should resolve from inner scene child");
     assert_eq!(tree.get_node(sl_from_child).unwrap().name(), "ScoreLabel");
 }
@@ -188,9 +193,9 @@ fn ahop_lookup_from_subscene_root_searches_parent_scope() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let ui_root = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &outer, &resolve_two_level,
-    ).unwrap();
+    let ui_root =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &outer, &resolve_two_level)
+            .unwrap();
 
     let inner_hud = tree.get_node_relative(ui_root, "InnerHUD").unwrap();
 
@@ -222,12 +227,13 @@ fn ahop_three_level_nesting_scopes_independent() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let world = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &top, &resolve_three_level,
-    ).unwrap();
+    let world =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &top, &resolve_three_level)
+            .unwrap();
 
     // Top scope has %Title.
-    let title = tree.get_node_relative(world, "%Title")
+    let title = tree
+        .get_node_relative(world, "%Title")
         .expect("%Title should resolve in top scope");
     assert_eq!(tree.get_node(title).unwrap().name(), "Title");
 
@@ -244,13 +250,16 @@ fn ahop_three_level_nesting_scopes_independent() {
     );
 
     // Navigate to middle scene and verify its scope.
-    let level = tree.get_node_relative(world, "LevelArea")
+    let level = tree
+        .get_node_relative(world, "LevelArea")
         .expect("LevelArea (middle scene root) should exist");
-    let marker_node = tree.get_node_relative(level, "Marker")
+    let marker_node = tree
+        .get_node_relative(level, "Marker")
         .expect("Marker should exist in middle scene");
 
     // From a child of the middle scene, %Marker should resolve.
-    let marker_from_child = tree.get_node_relative(marker_node, "%Marker")
+    let marker_from_child = tree
+        .get_node_relative(marker_node, "%Marker")
         .expect("%Marker should resolve from within middle scope");
     assert_eq!(tree.get_node(marker_from_child).unwrap().name(), "Marker");
 
@@ -261,13 +270,16 @@ fn ahop_three_level_nesting_scopes_independent() {
     );
 
     // Navigate to the leaf scene and verify its scope.
-    let pickup = tree.get_node_relative(level, "PickupSpot")
+    let pickup = tree
+        .get_node_relative(level, "PickupSpot")
         .expect("PickupSpot (leaf scene root) should exist");
-    let gem_child = tree.get_node_relative(pickup, "Gem")
+    let gem_child = tree
+        .get_node_relative(pickup, "Gem")
         .expect("Gem should exist in leaf scene");
 
     // From a child of the leaf scene, %Gem should resolve.
-    let gem_from_child = tree.get_node_relative(gem_child, "%Gem")
+    let gem_from_child = tree
+        .get_node_relative(gem_child, "%Gem")
         .expect("%Gem should resolve from within leaf scope (queried from Gem itself)");
     assert_eq!(tree.get_node(gem_from_child).unwrap().name(), "Gem");
 
@@ -292,9 +304,9 @@ fn ahop_multiple_nested_instances_independent_scopes() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let outer_root = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &outer, &resolve_two_level,
-    ).unwrap();
+    let outer_root =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &outer, &resolve_two_level)
+            .unwrap();
 
     // Get both instanced sub-scene roots.
     let hud_left = tree.get_node_relative(outer_root, "HUD_Left").unwrap();
@@ -306,21 +318,23 @@ fn ahop_multiple_nested_instances_independent_scopes() {
     let right_panel = tree.get_node_relative(hud_right, "Panel").unwrap();
 
     // Each instance's child resolves %HealthBar to its own copy.
-    let hb_left = tree.get_node_relative(left_panel, "%HealthBar")
+    let hb_left = tree
+        .get_node_relative(left_panel, "%HealthBar")
         .expect("%HealthBar should resolve in left instance");
-    let hb_right = tree.get_node_relative(right_panel, "%HealthBar")
+    let hb_right = tree
+        .get_node_relative(right_panel, "%HealthBar")
         .expect("%HealthBar should resolve in right instance");
 
-    assert_ne!(hb_left, hb_right,
-        "two nested instances should have different %HealthBar nodes");
+    assert_ne!(
+        hb_left, hb_right,
+        "two nested instances should have different %HealthBar nodes"
+    );
     assert_eq!(tree.get_node(hb_left).unwrap().name(), "HealthBar");
     assert_eq!(tree.get_node(hb_right).unwrap().name(), "HealthBar");
 
     // Each has independent ownership.
-    assert_eq!(tree.get_node(hb_left).unwrap().owner(),
-        Some(hud_left));
-    assert_eq!(tree.get_node(hb_right).unwrap().owner(),
-        Some(hud_right));
+    assert_eq!(tree.get_node(hb_left).unwrap().owner(), Some(hud_left));
+    assert_eq!(tree.get_node(hb_right).unwrap().owner(), Some(hud_right));
 
     // Neither leaks to the outer scope.
     assert!(tree.get_node_relative(outer_root, "%HealthBar").is_none());
@@ -336,13 +350,14 @@ fn ahop_unique_subscene_root_visible_in_parent_scope() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let outer_root = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &outer, &resolve_two_level,
-    ).unwrap();
+    let outer_root =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &outer, &resolve_two_level)
+            .unwrap();
 
     // %MyHUD is the sub-scene root marked as unique in the outer scene's template.
     // It should be visible in the outer scope.
-    let my_hud = tree.get_node_relative(outer_root, "%MyHUD")
+    let my_hud = tree
+        .get_node_relative(outer_root, "%MyHUD")
         .expect("%MyHUD (unique sub-scene root) should be visible in parent scope");
     assert_eq!(tree.get_node(my_hud).unwrap().name(), "MyHUD");
     assert!(tree.get_node(my_hud).unwrap().is_unique_name());
@@ -364,20 +379,25 @@ fn ahop_path_suffix_after_unique_name_across_nesting() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let outer_root = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &outer, &resolve_two_level,
-    ).unwrap();
+    let outer_root =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &outer, &resolve_two_level)
+            .unwrap();
 
     // %MyHUD/Panel should resolve: first find %MyHUD (the sub-scene root),
     // then walk to its child "Panel".
-    let panel_via_unique = tree.get_node_relative(outer_root, "%MyHUD/Panel")
+    let panel_via_unique = tree
+        .get_node_relative(outer_root, "%MyHUD/Panel")
         .expect("%MyHUD/Panel should resolve via unique name + path suffix");
     assert_eq!(tree.get_node(panel_via_unique).unwrap().name(), "Panel");
 
     // %MyHUD/Panel/ScoreLabel should also work (deeper path suffix).
-    let score_via_unique = tree.get_node_relative(outer_root, "%MyHUD/Panel/ScoreLabel")
+    let score_via_unique = tree
+        .get_node_relative(outer_root, "%MyHUD/Panel/ScoreLabel")
         .expect("%MyHUD/Panel/ScoreLabel should resolve via unique name + deep path suffix");
-    assert_eq!(tree.get_node(score_via_unique).unwrap().name(), "ScoreLabel");
+    assert_eq!(
+        tree.get_node(score_via_unique).unwrap().name(),
+        "ScoreLabel"
+    );
 }
 
 // ===========================================================================
@@ -390,35 +410,55 @@ fn ahop_owner_chain_correct_through_nested_instancing() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    let ui_root = add_packed_scene_to_tree_with_subscenes(
-        &mut tree, root, &outer, &resolve_two_level,
-    ).unwrap();
+    let ui_root =
+        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &outer, &resolve_two_level)
+            .unwrap();
 
     // Outer root has no owner (it IS the owner scope).
-    assert_eq!(tree.get_node(ui_root).unwrap().owner(), None,
-        "outer scene root should have owner == None");
+    assert_eq!(
+        tree.get_node(ui_root).unwrap().owner(),
+        None,
+        "outer scene root should have owner == None"
+    );
 
     // %Banner is owned by the outer root.
     let banner = tree.get_node_relative(ui_root, "%Banner").unwrap();
-    assert_eq!(tree.get_node(banner).unwrap().owner(), Some(ui_root),
-        "Banner should be owned by outer root");
+    assert_eq!(
+        tree.get_node(banner).unwrap().owner(),
+        Some(ui_root),
+        "Banner should be owned by outer root"
+    );
 
     // InnerHUD root is owned by the outer root (it's embedded in the outer scene).
     let inner_hud = tree.get_node_relative(ui_root, "InnerHUD").unwrap();
-    assert_eq!(tree.get_node(inner_hud).unwrap().owner(), Some(ui_root),
-        "instanced sub-scene root should be owned by outer root");
+    assert_eq!(
+        tree.get_node(inner_hud).unwrap().owner(),
+        Some(ui_root),
+        "instanced sub-scene root should be owned by outer root"
+    );
 
     // InnerHUD's children are owned by InnerHUD (not the outer root).
     let inner_panel = tree.get_node_relative(inner_hud, "Panel").unwrap();
-    assert_eq!(tree.get_node(inner_panel).unwrap().owner(), Some(inner_hud),
-        "inner scene's child should be owned by inner scene root");
+    assert_eq!(
+        tree.get_node(inner_panel).unwrap().owner(),
+        Some(inner_hud),
+        "inner scene's child should be owned by inner scene root"
+    );
 
     let inner_hb = tree.get_node_relative(inner_hud, "HealthBar").unwrap();
-    assert_eq!(tree.get_node(inner_hb).unwrap().owner(), Some(inner_hud),
-        "inner scene's unique-name child should be owned by inner scene root");
+    assert_eq!(
+        tree.get_node(inner_hb).unwrap().owner(),
+        Some(inner_hud),
+        "inner scene's unique-name child should be owned by inner scene root"
+    );
 
     // Deeply nested: ScoreLabel is under Panel, still owned by InnerHUD.
-    let inner_sl = tree.get_node_relative(inner_hud, "Panel/ScoreLabel").unwrap();
-    assert_eq!(tree.get_node(inner_sl).unwrap().owner(), Some(inner_hud),
-        "deeply nested inner child should still be owned by inner scene root");
+    let inner_sl = tree
+        .get_node_relative(inner_hud, "Panel/ScoreLabel")
+        .unwrap();
+    assert_eq!(
+        tree.get_node(inner_sl).unwrap().owner(),
+        Some(inner_hud),
+        "deeply nested inner child should still be owned by inner scene root"
+    );
 }

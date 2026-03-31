@@ -243,8 +243,20 @@ fn atlas_full_texture_as_region() {
     let blue = Color::new(0.0, 0.0, 1.0, 1.0);
     let white = Color::new(1.0, 1.0, 1.0, 1.0);
 
-    assert!(color_distance(fb.get_pixel(0, 0), red) < TOLERANCE, "top-left red");
-    assert!(color_distance(fb.get_pixel(3, 0), green) < TOLERANCE, "top-right green");
-    assert!(color_distance(fb.get_pixel(0, 3), blue) < TOLERANCE, "bottom-left blue");
-    assert!(color_distance(fb.get_pixel(3, 3), white) < TOLERANCE, "bottom-right white");
+    assert!(
+        color_distance(fb.get_pixel(0, 0), red) < TOLERANCE,
+        "top-left red"
+    );
+    assert!(
+        color_distance(fb.get_pixel(3, 0), green) < TOLERANCE,
+        "top-right green"
+    );
+    assert!(
+        color_distance(fb.get_pixel(0, 3), blue) < TOLERANCE,
+        "bottom-left blue"
+    );
+    assert!(
+        color_distance(fb.get_pixel(3, 3), white) < TOLERANCE,
+        "bottom-right white"
+    );
 }

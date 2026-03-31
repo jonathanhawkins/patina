@@ -4,9 +4,7 @@
 //! for bead pat-f0qa2: "Theme editor with live preview of control styling".
 
 use gdcore::math::Color;
-use gdeditor::theme_editor::{
-    StyleBoxFlat, ThemeEditor, ThemeFont, ThemeItem, ThemeResource,
-};
+use gdeditor::theme_editor::{StyleBoxFlat, ThemeEditor, ThemeFont, ThemeItem, ThemeResource};
 
 // ---------------------------------------------------------------------------
 // ThemeResource basics
@@ -27,7 +25,10 @@ fn theme_resource_set_get_color() {
     let red = Color::new(1.0, 0.0, 0.0, 1.0);
     theme.set_item("Button", "font_color", ThemeItem::color(red));
     assert!(theme.has_item("Button", "font_color"));
-    assert_eq!(theme.resolve_color("Button", "font_color", Color::WHITE), red);
+    assert_eq!(
+        theme.resolve_color("Button", "font_color", Color::WHITE),
+        red
+    );
 }
 
 #[test]
@@ -117,7 +118,10 @@ fn theme_resource_item_names_sorted() {
     theme.set_item("Button", "hover", ThemeItem::StyleBox(Default::default()));
     theme.set_item("Button", "font_color", ThemeItem::color(Color::WHITE));
     theme.set_item("Button", "normal", ThemeItem::StyleBox(Default::default()));
-    assert_eq!(theme.item_names("Button"), vec!["font_color", "hover", "normal"]);
+    assert_eq!(
+        theme.item_names("Button"),
+        vec!["font_color", "hover", "normal"]
+    );
 }
 
 #[test]
@@ -300,8 +304,12 @@ fn all_control_types_includes_custom() {
 fn standard_items_for_known_control() {
     let items = ThemeEditor::standard_items_for("Button");
     assert!(!items.is_empty());
-    assert!(items.iter().any(|(n, k)| *n == "font_color" && *k == "Color"));
-    assert!(items.iter().any(|(n, k)| *n == "normal" && *k == "StyleBox"));
+    assert!(items
+        .iter()
+        .any(|(n, k)| *n == "font_color" && *k == "Color"));
+    assert!(items
+        .iter()
+        .any(|(n, k)| *n == "normal" && *k == "StyleBox"));
 }
 
 #[test]
@@ -318,7 +326,11 @@ fn theme_resource_json_roundtrip() {
     let mut theme = ThemeResource::new();
     theme.default_font = Some(ThemeFont::default());
     theme.default_font_size = Some(16);
-    theme.set_item("Button", "font_color", ThemeItem::color(Color::new(1.0, 0.0, 0.0, 1.0)));
+    theme.set_item(
+        "Button",
+        "font_color",
+        ThemeItem::color(Color::new(1.0, 0.0, 0.0, 1.0)),
+    );
     theme.set_item("Button", "normal", ThemeItem::StyleBox(Default::default()));
     theme.set_item("Label", "shadow_offset_x", ThemeItem::Constant(2));
     theme.set_item("ProgressBar", "font_size", ThemeItem::FontSize(14));

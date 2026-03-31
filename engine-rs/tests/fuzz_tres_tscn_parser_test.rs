@@ -174,9 +174,7 @@ fn tres_binary_garbage() {
 
 #[test]
 fn tres_null_bytes() {
-    tres_no_panic(
-        "[gd_resource type=\"Resource\" format=3]\n\n[resource]\nname = \"has\0null\"\n",
-    );
+    tres_no_panic("[gd_resource type=\"Resource\" format=3]\n\n[resource]\nname = \"has\0null\"\n");
 }
 
 #[test]
@@ -355,23 +353,17 @@ fn tscn_unclosed_bracket() {
 
 #[test]
 fn tscn_node_missing_type() {
-    tscn_no_panic(
-        "[gd_scene format=3]\n\n[node name=\"Root\"]\n",
-    );
+    tscn_no_panic("[gd_scene format=3]\n\n[node name=\"Root\"]\n");
 }
 
 #[test]
 fn tscn_node_missing_name() {
-    tscn_no_panic(
-        "[gd_scene format=3]\n\n[node type=\"Node2D\"]\n",
-    );
+    tscn_no_panic("[gd_scene format=3]\n\n[node type=\"Node2D\"]\n");
 }
 
 #[test]
 fn tscn_node_with_parent_but_no_root() {
-    tscn_no_panic(
-        "[gd_scene format=3]\n\n[node name=\"Child\" type=\"Node2D\" parent=\".\"]\n",
-    );
+    tscn_no_panic("[gd_scene format=3]\n\n[node name=\"Child\" type=\"Node2D\" parent=\".\"]\n");
 }
 
 #[test]
@@ -404,9 +396,7 @@ fn tscn_binary_garbage() {
 
 #[test]
 fn tscn_null_bytes() {
-    tscn_no_panic(
-        "[gd_scene format=3]\n\n[node name=\"Root\0\" type=\"Node2D\"]\n",
-    );
+    tscn_no_panic("[gd_scene format=3]\n\n[node name=\"Root\0\" type=\"Node2D\"]\n");
 }
 
 #[test]

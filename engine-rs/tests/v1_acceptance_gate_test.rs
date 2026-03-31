@@ -25,10 +25,7 @@ fn test_v1_classdb_full_property_enumeration() {
     // Register a 3-level hierarchy: Object -> Node -> Node2D
     register_class(
         ClassRegistration::new("Object")
-            .property(PropertyInfo::new(
-                "script",
-                gdvariant::Variant::Nil,
-            ))
+            .property(PropertyInfo::new("script", gdvariant::Variant::Nil))
             .method(MethodInfo::new("get_class", 0))
             .method(MethodInfo::new("free", 0)),
     );
@@ -184,9 +181,7 @@ fn test_v1_notification_dispatch_ordering() {
     let enter = log
         .iter()
         .position(|n| *n == gdobject::NOTIFICATION_ENTER_TREE);
-    let ready = log
-        .iter()
-        .position(|n| *n == gdobject::NOTIFICATION_READY);
+    let ready = log.iter().position(|n| *n == gdobject::NOTIFICATION_READY);
 
     assert!(
         pos_init.is_some(),
@@ -280,16 +275,14 @@ fn test_v1_object_free_use_after_free_guard() {
     tree.process_deletions();
 
     // After free: any access must return None, NOT panic.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tree.get_node(child_id)
-    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree.get_node(child_id)));
 
     match result {
         Ok(None) => {} // Correct: returns None for freed node.
         Ok(Some(_)) => panic!("V1 GATE FAIL: get_node returned Some for a freed node"),
-        Err(_) => panic!(
-            "V1 GATE FAIL: get_node panicked on freed node ID instead of returning None"
-        ),
+        Err(_) => {
+            panic!("V1 GATE FAIL: get_node panicked on freed node ID instead of returning None")
+        }
     }
 }
 
@@ -380,8 +373,7 @@ name = "UidGateTest"
     unified.register_uid_str("uid://abc", "res://item.tres");
     let resolved = unified.resolve_to_path("uid://abc").unwrap();
     assert_eq!(
-        resolved,
-        "res://item.tres",
+        resolved, "res://item.tres",
         "UnifiedLoader must resolve uid:// to res:// path"
     );
 
@@ -395,8 +387,7 @@ name = "UidGateTest"
     // 8. res:// paths pass through unchanged.
     let passthrough = unified.resolve_to_path("res://direct.tres").unwrap();
     assert_eq!(
-        passthrough,
-        "res://direct.tres",
+        passthrough, "res://direct.tres",
         "res:// paths must pass through unchanged"
     );
 }
@@ -588,15 +579,14 @@ fn test_v1_instance_inheritance_ext_resource() {
 
     // Instance with sub-scene resolution.
     // The callback receives the resolved res:// path from the ext_resource entry.
-    let nodes = child_packed.instance_with_subscenes(
-        &|path: &str| -> Option<gdscene::PackedScene> {
+    let nodes =
+        child_packed.instance_with_subscenes(&|path: &str| -> Option<gdscene::PackedScene> {
             if path == "res://parent.tscn" {
                 Some(parent_packed.clone())
             } else {
                 None
             }
-        },
-    );
+        });
 
     assert!(
         nodes.is_ok(),
@@ -689,7 +679,11 @@ fn test_v1_scene_signal_connections_wired() {
     let button_id = scene_children
         .iter()
         .copied()
-        .find(|&id| tree.get_node(id).map(|n| n.name() == "Button").unwrap_or(false))
+        .find(|&id| {
+            tree.get_node(id)
+                .map(|n| n.name() == "Button")
+                .unwrap_or(false)
+        })
         .expect("Button node must exist");
 
     // Check that the "pressed" signal is connected.
@@ -743,13 +737,21 @@ fn test_v1_scene_signals() {
     let button_id = scene_children
         .iter()
         .copied()
-        .find(|&id| tree.get_node(id).map(|n| n.name() == "Button").unwrap_or(false))
+        .find(|&id| {
+            tree.get_node(id)
+                .map(|n| n.name() == "Button")
+                .unwrap_or(false)
+        })
         .expect("Button node must exist");
 
     let timer_id = scene_children
         .iter()
         .copied()
-        .find(|&id| tree.get_node(id).map(|n| n.name() == "Timer").unwrap_or(false))
+        .find(|&id| {
+            tree.get_node(id)
+                .map(|n| n.name() == "Timer")
+                .unwrap_or(false)
+        })
         .expect("Timer node must exist");
 
     // Verify Button's "pressed" signal is connected.
@@ -824,8 +826,7 @@ fn test_v1_scene_oracle_golden_comparison() {
         golden_path
     );
 
-    let golden: serde_json::Value =
-        serde_json::from_str(&golden_content.unwrap()).unwrap();
+    let golden: serde_json::Value = serde_json::from_str(&golden_content.unwrap()).unwrap();
 
     // The golden must contain a "nodes" array with node metadata.
     let nodes = golden.get("nodes").or_else(|| golden.get("tree"));
@@ -837,14 +838,9 @@ fn test_v1_scene_oracle_golden_comparison() {
     // Count all nodes recursively (golden stores hierarchical children).
     fn count_nodes(value: &serde_json::Value) -> usize {
         match value {
-            serde_json::Value::Array(arr) => {
-                arr.iter().map(count_nodes).sum()
-            }
+            serde_json::Value::Array(arr) => arr.iter().map(count_nodes).sum(),
             serde_json::Value::Object(obj) => {
-                let children_count = obj
-                    .get("children")
-                    .map(count_nodes)
-                    .unwrap_or(0);
+                let children_count = obj.get("children").map(count_nodes).unwrap_or(0);
                 1 + children_count
             }
             _ => 0,
@@ -1109,7 +1105,10 @@ func greet():
 
     // Dispatch add(3, 4) via method table
     let result = instance
-        .call_method("add", &[gdvariant::Variant::Int(3), gdvariant::Variant::Int(4)])
+        .call_method(
+            "add",
+            &[gdvariant::Variant::Int(3), gdvariant::Variant::Int(4)],
+        )
         .expect("call_method should succeed");
     assert_eq!(result, gdvariant::Variant::Int(7), "add(3,4) must return 7");
 
@@ -1131,7 +1130,10 @@ func greet():
     let methods = instance.list_methods();
     let names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
     assert!(names.contains(&"add"), "method table must include 'add'");
-    assert!(names.contains(&"greet"), "method table must include 'greet'");
+    assert!(
+        names.contains(&"greet"),
+        "method table must include 'greet'"
+    );
 }
 
 /// V1 gate: signal declaration from script (line 80)
@@ -1152,7 +1154,9 @@ signal died
 var health = 100
 ";
     let mut interp = Interpreter::new();
-    let class_def = interp.run_class(src).expect("V1 GATE FAIL: class parse failed");
+    let class_def = interp
+        .run_class(src)
+        .expect("V1 GATE FAIL: class parse failed");
 
     assert!(
         class_def.signals.contains(&"health_changed".to_string()),
@@ -1197,7 +1201,9 @@ func _ready():
     emit_signal(\"died\")
 ";
     let mut interp = Interpreter::new();
-    let class_def = interp.run_class(src).expect("V1 GATE FAIL: class parse failed");
+    let class_def = interp
+        .run_class(src)
+        .expect("V1 GATE FAIL: class parse failed");
     assert!(
         class_def.signals.contains(&"health_changed".to_string()),
         "V1 GATE FAIL: 'health_changed' signal must be declared"
@@ -1294,10 +1300,7 @@ fn test_v1_script_fixture_oracle_match() {
     let scene_root = gdscene::add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
 
     // 3. Attach scripts to nodes that have them.
-    let fixtures_dir = std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../fixtures"
-    ));
+    let fixtures_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures"));
     let all_nodes = tree.all_nodes_in_tree_order();
     for &nid in &all_nodes {
         let script_prop = tree.get_node(nid).unwrap().get_property("script");
@@ -1339,7 +1342,10 @@ fn test_v1_script_fixture_oracle_match() {
 
     // Verify against golden nodes — the golden has one top-level node (TestScene)
     // with children.
-    assert!(!golden_nodes.is_empty(), "golden must have at least one node");
+    assert!(
+        !golden_nodes.is_empty(),
+        "golden must have at least one node"
+    );
     let golden_root = &golden_nodes[0];
     assert_eq!(
         golden_root["name"].as_str().unwrap(),
@@ -1368,11 +1374,7 @@ fn test_v1_script_fixture_oracle_match() {
         let golden_name = golden_child["name"].as_str().unwrap();
         let golden_class = golden_child["class"].as_str().unwrap();
 
-        assert_eq!(
-            child_node.name(),
-            golden_name,
-            "child name mismatch"
-        );
+        assert_eq!(child_node.name(), golden_name, "child name mismatch");
         assert_eq!(
             child_node.class_name(),
             golden_class,
@@ -1428,10 +1430,7 @@ fn test_v1_space_shooter_script_exported_properties() {
     let scene_root = gdscene::add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
 
     // Attach scripts from fixture directory.
-    let fixtures_dir = std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../fixtures"
-    ));
+    let fixtures_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures"));
 
     // Find Player and EnemySpawner nodes by scanning the tree.
     let all_nodes = tree.all_nodes_in_tree_order();
@@ -1443,14 +1442,17 @@ fn test_v1_space_shooter_script_exported_properties() {
     let spawner_id = all_nodes
         .iter()
         .copied()
-        .find(|&id| tree.get_node(id).map_or(false, |n| n.name() == "EnemySpawner"))
+        .find(|&id| {
+            tree.get_node(id)
+                .map_or(false, |n| n.name() == "EnemySpawner")
+        })
         .expect("EnemySpawner node must exist in space_shooter scene");
 
     // Load and attach player script.
     let player_src = std::fs::read_to_string(fixtures_dir.join("scripts/player.gd"))
         .expect("player.gd must exist");
-    let player_script = GDScriptNodeInstance::from_source(&player_src, player_id)
-        .expect("player.gd must parse");
+    let player_script =
+        GDScriptNodeInstance::from_source(&player_src, player_id).expect("player.gd must parse");
     tree.attach_script(player_id, Box::new(player_script));
 
     // Load and attach enemy_spawner script.
@@ -1461,7 +1463,8 @@ fn test_v1_space_shooter_script_exported_properties() {
     tree.attach_script(spawner_id, Box::new(spawner_script));
 
     // Verify Player script-exported properties.
-    let player_script_ref = tree.get_script(player_id)
+    let player_script_ref = tree
+        .get_script(player_id)
         .expect("Player must have a script attached");
     let player_props: Vec<String> = player_script_ref
         .list_properties()
@@ -1500,7 +1503,8 @@ fn test_v1_space_shooter_script_exported_properties() {
     );
 
     // Verify EnemySpawner script-exported properties.
-    let spawner_script_ref = tree.get_script(spawner_id)
+    let spawner_script_ref = tree
+        .get_script(spawner_id)
         .expect("EnemySpawner must have a script attached");
     let spawner_props: Vec<String> = spawner_script_ref
         .list_properties()
@@ -1551,7 +1555,9 @@ fn test_v1_physics_server_2d_api_surface() {
     ));
 
     // body_get_state: read back body properties
-    let body = world.get_body(body_id).expect("body must exist after create");
+    let body = world
+        .get_body(body_id)
+        .expect("body must exist after create");
     assert_eq!(body.body_type, gdphysics2d::BodyType::Rigid);
     assert_eq!(body.position.x, 10.0, "initial x position");
     assert_eq!(body.position.y, 20.0, "initial y position");
@@ -1645,9 +1651,9 @@ fn test_v1_collision_layers_and_masks() {
     );
 
     // C should NOT collide with A or B.
-    let c_collided = events.iter().any(|e| {
-        e.body_a == gdphysics2d::BodyId(3) || e.body_b == gdphysics2d::BodyId(3)
-    });
+    let c_collided = events
+        .iter()
+        .any(|e| e.body_a == gdphysics2d::BodyId(3) || e.body_b == gdphysics2d::BodyId(3));
     assert!(
         !c_collided,
         "V1 GATE FAIL: body C (layer 4) must NOT collide with A or B (masks 1,2)"
@@ -1696,8 +1702,7 @@ fn test_v1_kinematic_move_and_collide() {
     );
 
     // Move away from wall — should return None.
-    let no_collision =
-        character.move_and_collide(gdcore::math::Vector2::new(-5.0, 0.0), &bodies);
+    let no_collision = character.move_and_collide(gdcore::math::Vector2::new(-5.0, 0.0), &bodies);
     assert!(
         no_collision.is_none(),
         "V1 GATE FAIL: move_and_collide must return None when no collision"
@@ -1785,8 +1790,7 @@ fn test_v1_multibody_oracle_trace() {
 
             // Find matching golden entry.
             let golden_entry = golden.iter().find(|e| {
-                e["frame"].as_i64() == Some(frame as i64)
-                    && e["name"].as_str() == Some(name)
+                e["frame"].as_i64() == Some(frame as i64) && e["name"].as_str() == Some(name)
             });
 
             if let Some(ge) = golden_entry {
@@ -1883,7 +1887,9 @@ fn test_v1_texture_atlas_sampling() {
             assert!(
                 (px.r - 0.0).abs() < 0.01 && (px.g - 1.0).abs() < 0.01 && (px.b - 0.0).abs() < 0.01,
                 "pixel ({x},{y}) should be green, got ({},{},{})",
-                px.r, px.g, px.b
+                px.r,
+                px.g,
+                px.b
             );
         }
     }
@@ -1899,7 +1905,9 @@ fn test_v1_texture_atlas_sampling() {
             assert!(
                 (px.r - 0.0).abs() < 0.01 && (px.g - 0.0).abs() < 0.01 && (px.b - 1.0).abs() < 0.01,
                 "pixel ({x},{y}) should be blue, got ({},{},{})",
-                px.r, px.g, px.b
+                px.r,
+                px.g,
+                px.b
             );
         }
     }
@@ -1917,7 +1925,9 @@ fn test_v1_texture_atlas_sampling() {
             assert!(
                 px.r < 0.01 && px.g < 0.01 && px.b < 0.01,
                 "red × green tint should be near-black, got ({},{},{})",
-                px.r, px.g, px.b
+                px.r,
+                px.g,
+                px.b
             );
         }
     }
@@ -2050,16 +2060,27 @@ fn test_v1_camera2d_transform() {
     let vp1 = make_viewport(Vector2::new(10.0, 10.0), Vector2::ONE);
     let f1 = renderer.render_frame(&vp1);
     let p = px(&f1, 0, 0);
-    assert!(p.r > 0.9, "cam(10,10): world origin → screen(0,0) should be red, got r={}", p.r);
+    assert!(
+        p.r > 0.9,
+        "cam(10,10): world origin → screen(0,0) should be red, got r={}",
+        p.r
+    );
     let p = px(&f1, 10, 10);
-    assert!(p.r < 0.1, "cam(10,10): screen center should be black (no rect)");
+    assert!(
+        p.r < 0.1,
+        "cam(10,10): screen center should be black (no rect)"
+    );
 
     // ── 2. Camera at (-10,-10): world origin pushed off-screen ─────────
     // screen = (10,10) + 1*(0 - (-10), 0 - (-10)) = (20,20) → off-screen
     let vp2 = make_viewport(Vector2::new(-10.0, -10.0), Vector2::ONE);
     let f2 = renderer.render_frame(&vp2);
     let p = px(&f2, 0, 0);
-    assert!(p.r < 0.1, "cam(-10,-10): rect should be off-screen, pixel(0,0) r={}", p.r);
+    assert!(
+        p.r < 0.1,
+        "cam(-10,-10): rect should be off-screen, pixel(0,0) r={}",
+        p.r
+    );
 
     // ── 3. Camera zoom 2× centered on rect ─────────────────────────────
     // cam at (2,2), zoom 2: screen = (10,10) + 2*(world - (2,2))
@@ -2069,13 +2090,26 @@ fn test_v1_camera2d_transform() {
     let vp3 = make_viewport(Vector2::new(2.0, 2.0), Vector2::new(2.0, 2.0));
     let f3 = renderer.render_frame(&vp3);
     let p = px(&f3, 10, 10);
-    assert!(p.r > 0.9, "zoom 2×: viewport center should be red, got r={}", p.r);
+    assert!(
+        p.r > 0.9,
+        "zoom 2×: viewport center should be red, got r={}",
+        p.r
+    );
     let p = px(&f3, 5, 5);
-    assert!(p.r < 0.1, "zoom 2×: pixel(5,5) outside zoomed rect should be black");
+    assert!(
+        p.r < 0.1,
+        "zoom 2×: pixel(5,5) outside zoomed rect should be black"
+    );
     let p = px(&f3, 7, 7);
-    assert!(p.r > 0.9, "zoom 2×: pixel(7,7) inside zoomed rect should be red");
+    assert!(
+        p.r > 0.9,
+        "zoom 2×: pixel(7,7) inside zoomed rect should be red"
+    );
     let p = px(&f3, 15, 15);
-    assert!(p.r < 0.1, "zoom 2×: pixel(15,15) past zoomed rect should be black");
+    assert!(
+        p.r < 0.1,
+        "zoom 2×: pixel(15,15) past zoomed rect should be black"
+    );
 }
 
 /// V1 gate: Pixel diff <= 0.5% against upstream golden (line 109)
@@ -2132,10 +2166,7 @@ fn test_v1_window_creation() {
     let events = wm.poll_events();
 
     // HeadlessWindow must not panic.
-    assert!(
-        events.is_empty() || true,
-        "window creation must not panic"
-    );
+    assert!(events.is_empty() || true, "window creation must not panic");
 }
 
 /// V1 gate: Input event delivery (line 118)
@@ -2523,10 +2554,7 @@ fn test_v1_camera3d_current_auto_activation() {
     let cam = Node::new("Camera", "Camera3D");
     let cam_id = tree.add_child(root, cam).unwrap();
 
-    let current = tree
-        .get_node(cam_id)
-        .unwrap()
-        .get_property("current");
+    let current = tree.get_node(cam_id).unwrap().get_property("current");
     assert_eq!(
         current,
         Variant::Bool(true),
@@ -2537,20 +2565,14 @@ fn test_v1_camera3d_current_auto_activation() {
     let cam2 = Node::new("Camera2", "Camera3D");
     let cam2_id = tree.add_child(root, cam2).unwrap();
 
-    let current2 = tree
-        .get_node(cam2_id)
-        .unwrap()
-        .get_property("current");
+    let current2 = tree.get_node(cam2_id).unwrap().get_property("current");
     assert!(
         !matches!(current2, Variant::Bool(true)),
         "V1 GATE FAIL: Second Camera3D must NOT auto-activate when another is already current"
     );
 
     // First camera should still be current.
-    let still_current = tree
-        .get_node(cam_id)
-        .unwrap()
-        .get_property("current");
+    let still_current = tree.get_node(cam_id).unwrap().get_property("current");
     assert_eq!(
         still_current,
         Variant::Bool(true),
@@ -2651,10 +2673,7 @@ fn normalize_f64_as_f32_gate(val: f64) -> f64 {
 fn normalize_oracle_float(val: &serde_json::Value) -> serde_json::Value {
     if let Some(obj) = val.as_object() {
         if let Some(inner) = obj.get("value").and_then(|v| v.as_f64()) {
-            let ty = obj
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let ty = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
             if ty.eq_ignore_ascii_case("float") {
                 return serde_json::json!({
                     "type": ty,
@@ -2709,9 +2728,7 @@ fn test_v1_overall_parity_gate() {
         .lines()
         .find(|l| l.contains("OVERALL"))
         .unwrap_or_else(|| {
-            panic!(
-                "Could not find OVERALL line in oracle parity report.\nstderr:\n{stderr}"
-            )
+            panic!("Could not find OVERALL line in oracle parity report.\nstderr:\n{stderr}")
         });
 
     // Extract the percentage from the last column.
@@ -2719,9 +2736,7 @@ fn test_v1_overall_parity_gate() {
         .split_whitespace()
         .last()
         .and_then(|s| s.trim_end_matches('%').parse().ok())
-        .unwrap_or_else(|| {
-            panic!("Could not parse parity percentage from: {overall_line}")
-        });
+        .unwrap_or_else(|| panic!("Could not parse parity percentage from: {overall_line}"));
 
     eprintln!("Overall oracle parity: {parity_pct:.1}%");
     assert!(

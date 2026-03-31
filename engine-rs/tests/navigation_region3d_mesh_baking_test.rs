@@ -62,7 +62,10 @@ fn classdb_navigation_region3d_default_enabled() {
 fn classdb_navigation_region3d_default_layers() {
     gdobject::class_db::register_3d_classes();
     let props = gdobject::class_db::get_property_list("NavigationRegion3D");
-    let prop = props.iter().find(|p| p.name == "navigation_layers").unwrap();
+    let prop = props
+        .iter()
+        .find(|p| p.name == "navigation_layers")
+        .unwrap();
     assert_eq!(prop.default_value, Variant::Int(1));
 }
 
@@ -137,7 +140,11 @@ fn nav_mesh_empty_aabb_is_zero() {
 #[test]
 fn nav_mesh_clear_removes_all_data() {
     let mut mesh = NavigationMesh3D::new();
-    mesh.vertices = vec![Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0)];
+    mesh.vertices = vec![
+        Vector3::ZERO,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    ];
     mesh.add_polygon(&[0, 1, 2]);
     assert_eq!(mesh.polygon_count(), 1);
     mesh.clear();
@@ -226,7 +233,11 @@ fn bake_max_slope_90_accepts_all() {
         Vector3::new(0.0, 0.0, 10.0),
     );
     let result = bake_navigation_mesh(&params, &src);
-    assert_eq!(result.polygon_count(), 2, "90° max slope should accept everything");
+    assert_eq!(
+        result.polygon_count(),
+        2,
+        "90° max slope should accept everything"
+    );
 }
 
 #[test]
@@ -337,7 +348,7 @@ fn region_navigation_layers_get_set() {
 #[test]
 fn region_navigation_layers_boundary_values() {
     let region = NavigationRegion3D::new();
-    assert!(!region.get_navigation_layer_value(0));  // invalid
+    assert!(!region.get_navigation_layer_value(0)); // invalid
     assert!(!region.get_navigation_layer_value(33)); // invalid
 }
 
@@ -399,9 +410,18 @@ fn find_closest_polygon_selects_nearest() {
     mesh.add_polygon(&[0, 1, 2]);
     mesh.add_polygon(&[3, 4, 5]);
 
-    assert_eq!(mesh.find_closest_polygon(Vector3::new(0.0, 0.0, 0.0)), Some(0));
-    assert_eq!(mesh.find_closest_polygon(Vector3::new(20.0, 0.0, 0.0)), Some(1));
-    assert_eq!(mesh.find_closest_polygon(Vector3::new(15.0, 0.0, 0.0)), Some(1));
+    assert_eq!(
+        mesh.find_closest_polygon(Vector3::new(0.0, 0.0, 0.0)),
+        Some(0)
+    );
+    assert_eq!(
+        mesh.find_closest_polygon(Vector3::new(20.0, 0.0, 0.0)),
+        Some(1)
+    );
+    assert_eq!(
+        mesh.find_closest_polygon(Vector3::new(15.0, 0.0, 0.0)),
+        Some(1)
+    );
 }
 
 #[test]

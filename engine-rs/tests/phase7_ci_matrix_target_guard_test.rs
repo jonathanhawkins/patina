@@ -11,10 +11,7 @@ use gdplatform::os::Platform;
 use gdplatform::platform_targets::{ci_tested_targets, DESKTOP_TARGETS};
 
 fn read_ci_yml() -> String {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
     std::fs::read_to_string(path).expect("should read .github/workflows/ci.yml")
 }
 
@@ -33,19 +30,28 @@ fn read_audit_doc() -> String {
 #[test]
 fn ci_matrix_includes_ubuntu() {
     let ci = read_ci_yml();
-    assert!(ci.contains("ubuntu-latest"), "CI matrix must include ubuntu-latest");
+    assert!(
+        ci.contains("ubuntu-latest"),
+        "CI matrix must include ubuntu-latest"
+    );
 }
 
 #[test]
 fn ci_matrix_includes_macos() {
     let ci = read_ci_yml();
-    assert!(ci.contains("macos-latest"), "CI matrix must include macos-latest");
+    assert!(
+        ci.contains("macos-latest"),
+        "CI matrix must include macos-latest"
+    );
 }
 
 #[test]
 fn ci_matrix_includes_windows() {
     let ci = read_ci_yml();
-    assert!(ci.contains("windows-latest"), "CI matrix must include windows-latest");
+    assert!(
+        ci.contains("windows-latest"),
+        "CI matrix must include windows-latest"
+    );
 }
 
 #[test]
@@ -55,7 +61,10 @@ fn ci_matrix_has_three_os_entries() {
     let has_all = ci.contains("ubuntu-latest")
         && ci.contains("macos-latest")
         && ci.contains("windows-latest");
-    assert!(has_all, "CI matrix must include all three desktop OS runners");
+    assert!(
+        has_all,
+        "CI matrix must include all three desktop OS runners"
+    );
 }
 
 // ===========================================================================
@@ -94,9 +103,18 @@ fn no_untested_platform_claims_ci_runner() {
         ci_targets.iter().map(|t| t.platform).collect();
 
     // All three desktop platforms must be CI-tested.
-    assert!(ci_platforms.contains(&Platform::Linux), "Linux must be CI-tested");
-    assert!(ci_platforms.contains(&Platform::MacOS), "macOS must be CI-tested");
-    assert!(ci_platforms.contains(&Platform::Windows), "Windows must be CI-tested");
+    assert!(
+        ci_platforms.contains(&Platform::Linux),
+        "Linux must be CI-tested"
+    );
+    assert!(
+        ci_platforms.contains(&Platform::MacOS),
+        "macOS must be CI-tested"
+    );
+    assert!(
+        ci_platforms.contains(&Platform::Windows),
+        "Windows must be CI-tested"
+    );
 }
 
 // ===========================================================================

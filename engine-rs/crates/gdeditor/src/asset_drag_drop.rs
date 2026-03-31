@@ -87,11 +87,7 @@ impl DragPayload {
     /// Creates a drag payload from a res:// path.
     pub fn from_res_path(res_path: impl Into<String>) -> Self {
         let res_path = res_path.into();
-        let display_name = res_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&res_path)
-            .to_string();
+        let display_name = res_path.rsplit('/').next().unwrap_or(&res_path).to_string();
         let resource_type = DragResourceType::from_path(&res_path);
         let icon = res_path
             .rsplit('.')
@@ -176,12 +172,10 @@ pub fn validate_drop(payload: &DragPayload, target: &DropTarget) -> DropValidity
                         DropValidity::Invalid("3D meshes cannot be dropped on a 2D viewport".into())
                     }
                 }
-                DragResourceType::Audio => {
-                    DropValidity::Valid(DropAction::CreateNodeFromResource)
-                }
-                DragResourceType::Script => {
-                    DropValidity::Invalid("Scripts must be dropped on a node, not the viewport".into())
-                }
+                DragResourceType::Audio => DropValidity::Valid(DropAction::CreateNodeFromResource),
+                DragResourceType::Script => DropValidity::Invalid(
+                    "Scripts must be dropped on a node, not the viewport".into(),
+                ),
                 DragResourceType::Shader => {
                     DropValidity::Invalid("Shaders must be assigned to a material property".into())
                 }
@@ -199,9 +193,13 @@ pub fn validate_drop(payload: &DragPayload, target: &DropTarget) -> DropValidity
             let prop = property_name.to_lowercase();
             match payload.resource_type {
                 DragResourceType::Texture => {
-                    if prop.contains("texture") || prop.contains("sprite") || prop.contains("icon")
-                        || prop.contains("albedo") || prop.contains("normal_map")
-                        || prop.contains("emission") || prop.contains("image")
+                    if prop.contains("texture")
+                        || prop.contains("sprite")
+                        || prop.contains("icon")
+                        || prop.contains("albedo")
+                        || prop.contains("normal_map")
+                        || prop.contains("emission")
+                        || prop.contains("image")
                     {
                         DropValidity::Valid(DropAction::AssignProperty)
                     } else {
@@ -215,7 +213,9 @@ pub fn validate_drop(payload: &DragPayload, target: &DropTarget) -> DropValidity
                     if prop == "script" {
                         DropValidity::Valid(DropAction::AttachScript)
                     } else {
-                        DropValidity::Invalid("Scripts can only be assigned to the 'script' property".into())
+                        DropValidity::Invalid(
+                            "Scripts can only be assigned to the 'script' property".into(),
+                        )
                     }
                 }
                 DragResourceType::Audio => {
@@ -261,31 +261,44 @@ pub fn validate_drop(payload: &DragPayload, target: &DropTarget) -> DropValidity
             }
         }
 
-        DropTarget::SceneTree { .. } => {
-            match payload.resource_type {
-                DragResourceType::Scene => DropValidity::Valid(DropAction::InstantiateScene),
-                DragResourceType::Script => DropValidity::Valid(DropAction::AttachScript),
-                _ => DropValidity::Invalid(
-                    "Only scenes and scripts can be dropped on the scene tree".into(),
-                ),
-            }
-        }
+        DropTarget::SceneTree { .. } => match payload.resource_type {
+            DragResourceType::Scene => DropValidity::Valid(DropAction::InstantiateScene),
+            DragResourceType::Script => DropValidity::Valid(DropAction::AttachScript),
+            _ => DropValidity::Invalid(
+                "Only scenes and scripts can be dropped on the scene tree".into(),
+            ),
+        },
     }
 }
 
 /// Returns the default node type that would be created when dropping a resource
 /// of the given type onto a viewport.
-pub fn default_node_type_for_resource(resource_type: DragResourceType, is_3d: bool) -> Option<&'static str> {
+pub fn default_node_type_for_resource(
+    resource_type: DragResourceType,
+    is_3d: bool,
+) -> Option<&'static str> {
     match resource_type {
         DragResourceType::Scene => Some("PackedScene"),
         DragResourceType::Texture => {
-            if is_3d { Some("Sprite3D") } else { Some("Sprite2D") }
+            if is_3d {
+                Some("Sprite3D")
+            } else {
+                Some("Sprite2D")
+            }
         }
         DragResourceType::Audio => {
-            if is_3d { Some("AudioStreamPlayer3D") } else { Some("AudioStreamPlayer2D") }
+            if is_3d {
+                Some("AudioStreamPlayer3D")
+            } else {
+                Some("AudioStreamPlayer2D")
+            }
         }
         DragResourceType::Mesh3D => {
-            if is_3d { Some("MeshInstance3D") } else { None }
+            if is_3d {
+                Some("MeshInstance3D")
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -374,10 +387,7 @@ impl AssetDragDrop {
 
     /// Returns true if the current hover position would accept a drop.
     pub fn can_drop(&self) -> bool {
-        matches!(
-            self.current_validity(),
-            Some(DropValidity::Valid(_))
-        )
+        matches!(self.current_validity(), Some(DropValidity::Valid(_)))
     }
 
     /// Begins a drag operation from the filesystem dock.
@@ -491,9 +501,7 @@ mod tests {
             relative_path: res_path.trim_start_matches("res://").to_string(),
             res_path: res_path.to_string(),
             is_directory: is_dir,
-            icon: FileIcon::from_extension(
-                res_path.rsplit('.').next().unwrap_or(""),
-            ),
+            icon: FileIcon::from_extension(res_path.rsplit('.').next().unwrap_or("")),
             depth: 0,
             expanded: false,
             child_count: 0,
@@ -504,30 +512,78 @@ mod tests {
 
     #[test]
     fn resource_type_from_extension() {
-        assert_eq!(DragResourceType::from_extension("tscn"), DragResourceType::Scene);
-        assert_eq!(DragResourceType::from_extension("scn"), DragResourceType::Scene);
-        assert_eq!(DragResourceType::from_extension("png"), DragResourceType::Texture);
-        assert_eq!(DragResourceType::from_extension("jpg"), DragResourceType::Texture);
-        assert_eq!(DragResourceType::from_extension("gd"), DragResourceType::Script);
-        assert_eq!(DragResourceType::from_extension("wav"), DragResourceType::Audio);
-        assert_eq!(DragResourceType::from_extension("glb"), DragResourceType::Mesh3D);
-        assert_eq!(DragResourceType::from_extension("gdshader"), DragResourceType::Shader);
-        assert_eq!(DragResourceType::from_extension("tres"), DragResourceType::Resource);
-        assert_eq!(DragResourceType::from_extension("xyz"), DragResourceType::Unknown);
+        assert_eq!(
+            DragResourceType::from_extension("tscn"),
+            DragResourceType::Scene
+        );
+        assert_eq!(
+            DragResourceType::from_extension("scn"),
+            DragResourceType::Scene
+        );
+        assert_eq!(
+            DragResourceType::from_extension("png"),
+            DragResourceType::Texture
+        );
+        assert_eq!(
+            DragResourceType::from_extension("jpg"),
+            DragResourceType::Texture
+        );
+        assert_eq!(
+            DragResourceType::from_extension("gd"),
+            DragResourceType::Script
+        );
+        assert_eq!(
+            DragResourceType::from_extension("wav"),
+            DragResourceType::Audio
+        );
+        assert_eq!(
+            DragResourceType::from_extension("glb"),
+            DragResourceType::Mesh3D
+        );
+        assert_eq!(
+            DragResourceType::from_extension("gdshader"),
+            DragResourceType::Shader
+        );
+        assert_eq!(
+            DragResourceType::from_extension("tres"),
+            DragResourceType::Resource
+        );
+        assert_eq!(
+            DragResourceType::from_extension("xyz"),
+            DragResourceType::Unknown
+        );
     }
 
     #[test]
     fn resource_type_from_path() {
-        assert_eq!(DragResourceType::from_path("res://scenes/main.tscn"), DragResourceType::Scene);
-        assert_eq!(DragResourceType::from_path("res://icon.png"), DragResourceType::Texture);
-        assert_eq!(DragResourceType::from_path("no_extension"), DragResourceType::Unknown);
+        assert_eq!(
+            DragResourceType::from_path("res://scenes/main.tscn"),
+            DragResourceType::Scene
+        );
+        assert_eq!(
+            DragResourceType::from_path("res://icon.png"),
+            DragResourceType::Texture
+        );
+        assert_eq!(
+            DragResourceType::from_path("no_extension"),
+            DragResourceType::Unknown
+        );
     }
 
     #[test]
     fn resource_type_case_insensitive() {
-        assert_eq!(DragResourceType::from_extension("PNG"), DragResourceType::Texture);
-        assert_eq!(DragResourceType::from_extension("GD"), DragResourceType::Script);
-        assert_eq!(DragResourceType::from_extension("TSCN"), DragResourceType::Scene);
+        assert_eq!(
+            DragResourceType::from_extension("PNG"),
+            DragResourceType::Texture
+        );
+        assert_eq!(
+            DragResourceType::from_extension("GD"),
+            DragResourceType::Script
+        );
+        assert_eq!(
+            DragResourceType::from_extension("TSCN"),
+            DragResourceType::Scene
+        );
     }
 
     // -- DragPayload --
@@ -815,7 +871,10 @@ mod tests {
         let mut dd = AssetDragDrop::new();
         dd.begin_drag_from_path("res://icon.png");
         assert!(dd.is_dragging());
-        assert_eq!(dd.payload().unwrap().resource_type, DragResourceType::Texture);
+        assert_eq!(
+            dd.payload().unwrap().resource_type,
+            DragResourceType::Texture
+        );
     }
 
     #[test]

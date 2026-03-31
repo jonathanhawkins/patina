@@ -60,7 +60,13 @@ impl DepthBuffer {
     pub fn into_normalized(self) -> Vec<f32> {
         self.data
             .into_iter()
-            .map(|d| if d >= f32::MAX { 1.0 } else { d.clamp(0.0, 1.0) })
+            .map(|d| {
+                if d >= f32::MAX {
+                    1.0
+                } else {
+                    d.clamp(0.0, 1.0)
+                }
+            })
             .collect()
     }
 }

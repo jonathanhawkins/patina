@@ -73,9 +73,21 @@ fn parent_transform_offsets_child() {
     vp.add_canvas_item(child);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 2, 2), Color::BLACK, "left of parent offset should be clear");
-    assert_eq!(pixel_at(&frame, 12, 2), red(), "child should render at parent-offset position");
-    assert_eq!(pixel_at(&frame, 20, 2), Color::BLACK, "right of child should be clear");
+    assert_eq!(
+        pixel_at(&frame, 2, 2),
+        Color::BLACK,
+        "left of parent offset should be clear"
+    );
+    assert_eq!(
+        pixel_at(&frame, 12, 2),
+        red(),
+        "child should render at parent-offset position"
+    );
+    assert_eq!(
+        pixel_at(&frame, 20, 2),
+        Color::BLACK,
+        "right of child should be clear"
+    );
 }
 
 /// Nested parent transforms compose (grandparent → parent → child).
@@ -104,9 +116,21 @@ fn nested_parent_transforms_compose() {
     vp.add_canvas_item(child);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 2, 2), Color::BLACK, "before grandparent offset");
-    assert_eq!(pixel_at(&frame, 7, 2), Color::BLACK, "between gp and parent offsets");
-    assert_eq!(pixel_at(&frame, 17, 2), green(), "child at composed offset (15+2, 2)");
+    assert_eq!(
+        pixel_at(&frame, 2, 2),
+        Color::BLACK,
+        "before grandparent offset"
+    );
+    assert_eq!(
+        pixel_at(&frame, 7, 2),
+        Color::BLACK,
+        "between gp and parent offsets"
+    );
+    assert_eq!(
+        pixel_at(&frame, 17, 2),
+        green(),
+        "child at composed offset (15+2, 2)"
+    );
 }
 
 /// Parent rotation transforms child position.
@@ -136,7 +160,11 @@ fn parent_rotation_transforms_child() {
     // screen (6..10, 10..14). The exact pixels depend on rasterization.
     // We verify the pixel at approximately the rotated center.
     let center_pixel = pixel_at(&frame, 8, 12);
-    assert_eq!(center_pixel, blue(), "rotated child should render in rotated position");
+    assert_eq!(
+        center_pixel,
+        blue(),
+        "rotated child should render in rotated position"
+    );
 }
 
 /// Parent scale applies to child.
@@ -159,9 +187,21 @@ fn parent_scale_applies_to_child() {
 
     let frame = renderer.render_frame(&vp);
     // At 2x scale, the rect extends from (0,0) to (10,10).
-    assert_eq!(pixel_at(&frame, 1, 1), red(), "scaled child should fill (0,0)");
-    assert_eq!(pixel_at(&frame, 9, 9), red(), "scaled child should extend to ~(10,10)");
-    assert_eq!(pixel_at(&frame, 11, 11), Color::BLACK, "beyond scaled bounds should be clear");
+    assert_eq!(
+        pixel_at(&frame, 1, 1),
+        red(),
+        "scaled child should fill (0,0)"
+    );
+    assert_eq!(
+        pixel_at(&frame, 9, 9),
+        red(),
+        "scaled child should extend to ~(10,10)"
+    );
+    assert_eq!(
+        pixel_at(&frame, 11, 11),
+        Color::BLACK,
+        "beyond scaled bounds should be clear"
+    );
 }
 
 // ===========================================================================
@@ -228,7 +268,11 @@ fn sibling_children_sort_by_z_index() {
     vp.add_canvas_item(child_b);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 10, 10), blue(), "higher z_index sibling should render on top");
+    assert_eq!(
+        pixel_at(&frame, 10, 10),
+        blue(),
+        "higher z_index sibling should render on top"
+    );
 }
 
 /// Z-index ordering works correctly across different parent hierarchies.
@@ -295,9 +339,21 @@ fn z_index_and_parent_transform_combined() {
     vp.add_canvas_item(child);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 5), yellow(), "left of parent offset shows background");
-    assert_eq!(pixel_at(&frame, 15, 5), red(), "child at parent offset with higher z renders on top");
-    assert_eq!(pixel_at(&frame, 25, 5), yellow(), "right of child shows background");
+    assert_eq!(
+        pixel_at(&frame, 5, 5),
+        yellow(),
+        "left of parent offset shows background"
+    );
+    assert_eq!(
+        pixel_at(&frame, 15, 5),
+        red(),
+        "child at parent offset with higher z renders on top"
+    );
+    assert_eq!(
+        pixel_at(&frame, 25, 5),
+        yellow(),
+        "right of child shows background"
+    );
 }
 
 /// Multiple siblings at same parent offset with z-index tiebreaker.
@@ -551,7 +607,10 @@ fn scene_tree_z_index_roundtrip_to_renderer() {
     let fg_z = node2d::get_z_index(&tree, fg_id);
     assert_eq!(bg_z, -1, "background z_index should be -1");
     assert_eq!(fg_z, 10, "foreground z_index should be 10");
-    assert!(fg_z > bg_z, "foreground z must be > background z for top rendering");
+    assert!(
+        fg_z > bg_z,
+        "foreground z must be > background z for top rendering"
+    );
 
     // Build canvas items from scene tree state and verify renderer ordering.
     let mut renderer = SoftwareRenderer::new();
@@ -709,15 +768,15 @@ fn z_as_relative_defaults_true_in_scene_tree() {
     let id = tree.add_child(root, node).unwrap();
 
     // Default value should be true (Godot contract).
-    let z_rel = tree
-        .get_node(id)
-        .unwrap()
-        .get_property("z_as_relative");
+    let z_rel = tree.get_node(id).unwrap().get_property("z_as_relative");
     // Property may not be explicitly set (returns Nil), which means default true.
     match z_rel {
         Variant::Bool(b) => assert!(b, "z_as_relative should default to true"),
         Variant::Nil => {} // Nil means default, which is true — acceptable
-        other => panic!("z_as_relative should be Bool or Nil (default), got {:?}", other),
+        other => panic!(
+            "z_as_relative should be Bool or Nil (default), got {:?}",
+            other
+        ),
     }
 
     // Explicitly set to false and verify.

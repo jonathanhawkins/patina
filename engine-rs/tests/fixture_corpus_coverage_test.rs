@@ -21,19 +21,16 @@ const DT: f64 = 1.0 / 60.0;
 // Fixture sources
 // ---------------------------------------------------------------------------
 
-const AUDIO_INTEGRATION_TSCN: &str =
-    include_str!("../../fixtures/scenes/audio_integration.tscn");
+const AUDIO_INTEGRATION_TSCN: &str = include_str!("../../fixtures/scenes/audio_integration.tscn");
 const NAVIGATION_INTEGRATION_TSCN: &str =
     include_str!("../../fixtures/scenes/navigation_integration.tscn");
-const UI_COMPLEX_TSCN: &str =
-    include_str!("../../fixtures/scenes/ui_complex.tscn");
+const UI_COMPLEX_TSCN: &str = include_str!("../../fixtures/scenes/ui_complex.tscn");
 
 const AUDIO_INTEGRATION_GOLDEN: &str =
     include_str!("../../fixtures/golden/scenes/audio_integration.json");
 const NAVIGATION_INTEGRATION_GOLDEN: &str =
     include_str!("../../fixtures/golden/scenes/navigation_integration.json");
-const UI_COMPLEX_GOLDEN: &str =
-    include_str!("../../fixtures/golden/scenes/ui_complex.json");
+const UI_COMPLEX_GOLDEN: &str = include_str!("../../fixtures/golden/scenes/ui_complex.json");
 
 fn parse_scene(tscn: &str) -> PackedScene {
     PackedScene::from_tscn(tscn).expect("failed to parse scene")
@@ -265,7 +262,11 @@ fn corpus_golden_parity_ui_complex() {
 fn corpus_scene_transition_through_all_corpus_fixtures() {
     let scenes: &[(&str, &str, &str)] = &[
         ("audio_integration", AUDIO_INTEGRATION_TSCN, "AudioWorld"),
-        ("navigation_integration", NAVIGATION_INTEGRATION_TSCN, "NavWorld"),
+        (
+            "navigation_integration",
+            NAVIGATION_INTEGRATION_TSCN,
+            "NavWorld",
+        ),
         ("ui_complex", UI_COMPLEX_TSCN, "UIRoot"),
     ];
 

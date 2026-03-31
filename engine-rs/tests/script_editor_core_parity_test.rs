@@ -13,12 +13,12 @@
 //!   - Status bar displays cursor/diagnostic info
 
 use gdeditor::script_editor::{
-    Caret, CodeFolding, CompletionKind, CompletionProvider, Diagnostic, DiagnosticList,
-    DiagnosticSeverity, FoldKind, GutterMarker, HighlightKind, Minimap, MultiCaret, ScriptEditor,
-    ScriptStatusBar, Selection, SyntaxHighlighter,
-    build_script_list, detect_fold_regions, extract_outline,
+    build_script_list, detect_fold_regions, extract_outline, Caret, CodeFolding, CompletionKind,
+    CompletionProvider, Diagnostic, DiagnosticList, DiagnosticSeverity, FoldKind, GutterMarker,
+    HighlightKind, Minimap, MultiCaret, ScriptEditor, ScriptStatusBar, Selection,
+    SyntaxHighlighter,
 };
-use gdeditor::script_editor::{OutlineKind, FindReplace, FindOptions};
+use gdeditor::script_editor::{FindOptions, FindReplace, OutlineKind};
 
 // ── Sample GDScript sources for testing ─────────────────────────────
 
@@ -105,13 +105,34 @@ fn highlight_covers_all_token_categories() {
 
     let kinds: Vec<HighlightKind> = spans.iter().map(|s| s.kind).collect();
 
-    assert!(kinds.contains(&HighlightKind::Keyword), "must have keywords");
-    assert!(kinds.contains(&HighlightKind::Identifier), "must have identifiers");
-    assert!(kinds.contains(&HighlightKind::StringLiteral), "must have strings");
-    assert!(kinds.contains(&HighlightKind::NumberLiteral), "must have numbers");
-    assert!(kinds.contains(&HighlightKind::Operator), "must have operators");
-    assert!(kinds.contains(&HighlightKind::Punctuation), "must have punctuation");
-    assert!(kinds.contains(&HighlightKind::Annotation), "must have annotations");
+    assert!(
+        kinds.contains(&HighlightKind::Keyword),
+        "must have keywords"
+    );
+    assert!(
+        kinds.contains(&HighlightKind::Identifier),
+        "must have identifiers"
+    );
+    assert!(
+        kinds.contains(&HighlightKind::StringLiteral),
+        "must have strings"
+    );
+    assert!(
+        kinds.contains(&HighlightKind::NumberLiteral),
+        "must have numbers"
+    );
+    assert!(
+        kinds.contains(&HighlightKind::Operator),
+        "must have operators"
+    );
+    assert!(
+        kinds.contains(&HighlightKind::Punctuation),
+        "must have punctuation"
+    );
+    assert!(
+        kinds.contains(&HighlightKind::Annotation),
+        "must have annotations"
+    );
 }
 
 #[test]
@@ -120,9 +141,14 @@ fn highlight_line_filters_correctly() {
     // Line 1 is "extends CharacterBody2D"
     let line1 = hl.highlight_line(PLAYER_GD, 1).unwrap();
     assert!(!line1.is_empty());
-    assert!(line1.iter().all(|s| s.line == 1), "all spans must be on line 1");
     assert!(
-        line1.iter().any(|s| s.kind == HighlightKind::Keyword && s.text == "extends"),
+        line1.iter().all(|s| s.line == 1),
+        "all spans must be on line 1"
+    );
+    assert!(
+        line1
+            .iter()
+            .any(|s| s.kind == HighlightKind::Keyword && s.text == "extends"),
         "line 1 should contain 'extends' keyword"
     );
 }
@@ -142,11 +168,15 @@ fn highlight_constant_literals() {
     let hl = SyntaxHighlighter::new();
     let spans = hl.highlight("var x = true\nvar y = null").unwrap();
     assert!(
-        spans.iter().any(|s| s.kind == HighlightKind::ConstantLiteral && s.text == "true"),
+        spans
+            .iter()
+            .any(|s| s.kind == HighlightKind::ConstantLiteral && s.text == "true"),
         "should highlight 'true' as constant"
     );
     assert!(
-        spans.iter().any(|s| s.kind == HighlightKind::ConstantLiteral && s.text == "null"),
+        spans
+            .iter()
+            .any(|s| s.kind == HighlightKind::ConstantLiteral && s.text == "null"),
         "should highlight 'null' as constant"
     );
 }
@@ -159,7 +189,10 @@ fn highlight_constant_literals() {
 fn completion_empty_prefix_returns_nothing() {
     let provider = CompletionProvider::new();
     let items = provider.complete("", PLAYER_GD);
-    assert!(items.is_empty(), "empty prefix should return no completions");
+    assert!(
+        items.is_empty(),
+        "empty prefix should return no completions"
+    );
 }
 
 #[test]
@@ -167,7 +200,9 @@ fn completion_keyword_prefix() {
     let provider = CompletionProvider::new();
     let items = provider.complete("re", PLAYER_GD);
     assert!(
-        items.iter().any(|i| i.label == "return" && i.kind == CompletionKind::Keyword),
+        items
+            .iter()
+            .any(|i| i.label == "return" && i.kind == CompletionKind::Keyword),
         "should suggest 'return' for prefix 're'"
     );
 }
@@ -177,7 +212,9 @@ fn completion_class_prefix() {
     let provider = CompletionProvider::new();
     let items = provider.complete("Vec", PLAYER_GD);
     assert!(
-        items.iter().any(|i| i.kind == CompletionKind::Class && i.label.starts_with("Vec")),
+        items
+            .iter()
+            .any(|i| i.kind == CompletionKind::Class && i.label.starts_with("Vec")),
         "should suggest Vector classes for prefix 'Vec'"
     );
 }
@@ -187,7 +224,9 @@ fn completion_builtin_function() {
     let provider = CompletionProvider::new();
     let items = provider.complete("pri", PLAYER_GD);
     assert!(
-        items.iter().any(|i| i.kind == CompletionKind::Function && i.label.contains("print")),
+        items
+            .iter()
+            .any(|i| i.kind == CompletionKind::Function && i.label.contains("print")),
         "should suggest print() for prefix 'pri'"
     );
 }
@@ -197,7 +236,9 @@ fn completion_source_identifiers() {
     let provider = CompletionProvider::new();
     let items = provider.complete("hea", PLAYER_GD);
     assert!(
-        items.iter().any(|i| i.label == "health" || i.label == "health_changed"),
+        items
+            .iter()
+            .any(|i| i.label == "health" || i.label == "health_changed"),
         "should suggest identifiers from source for prefix 'hea'"
     );
 }
@@ -218,7 +259,11 @@ fn completion_deduplicates_results() {
     let items = provider.complete("pr", PLAYER_GD);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
-    assert_eq!(labels.len(), unique.len(), "completions should be deduplicated");
+    assert_eq!(
+        labels.len(),
+        unique.len(),
+        "completions should be deduplicated"
+    );
 }
 
 // ===========================================================================
@@ -228,8 +273,15 @@ fn completion_deduplicates_results() {
 #[test]
 fn fold_regions_detect_functions() {
     let regions = detect_fold_regions(FOLDING_GD);
-    let funcs: Vec<_> = regions.iter().filter(|r| r.kind == FoldKind::Function).collect();
-    assert!(funcs.len() >= 2, "should detect at least 2 functions, got {}", funcs.len());
+    let funcs: Vec<_> = regions
+        .iter()
+        .filter(|r| r.kind == FoldKind::Function)
+        .collect();
+    assert!(
+        funcs.len() >= 2,
+        "should detect at least 2 functions, got {}",
+        funcs.len()
+    );
 }
 
 #[test]
@@ -244,14 +296,20 @@ fn fold_regions_detect_class() {
 #[test]
 fn fold_regions_detect_conditionals() {
     let regions = detect_fold_regions(FOLDING_GD);
-    let conds: Vec<_> = regions.iter().filter(|r| r.kind == FoldKind::Conditional).collect();
+    let conds: Vec<_> = regions
+        .iter()
+        .filter(|r| r.kind == FoldKind::Conditional)
+        .collect();
     assert!(conds.len() >= 2, "should detect if/elif/else blocks");
 }
 
 #[test]
 fn fold_regions_detect_loops() {
     let regions = detect_fold_regions(FOLDING_GD);
-    let loops: Vec<_> = regions.iter().filter(|r| r.kind == FoldKind::Loop).collect();
+    let loops: Vec<_> = regions
+        .iter()
+        .filter(|r| r.kind == FoldKind::Loop)
+        .collect();
     assert!(loops.len() >= 2, "should detect for and while loops");
 }
 
@@ -305,7 +363,12 @@ fn code_folding_fold_all_unfold_all() {
 fn fold_region_line_ranges_valid() {
     let regions = detect_fold_regions(FOLDING_GD);
     for r in &regions {
-        assert!(r.start_line < r.end_line, "fold region start {} must be before end {}", r.start_line, r.end_line);
+        assert!(
+            r.start_line < r.end_line,
+            "fold region start {} must be before end {}",
+            r.start_line,
+            r.end_line
+        );
         assert!(r.start_line >= 1, "line numbers are 1-based");
     }
 }
@@ -351,7 +414,10 @@ fn multi_caret_selections_sorted() {
 
     let sels = mc.selections();
     for i in 1..sels.len() {
-        assert!(sels[i - 1].caret <= sels[i].caret, "selections must be sorted by position");
+        assert!(
+            sels[i - 1].caret <= sels[i].caret,
+            "selections must be sorted by position"
+        );
     }
 }
 
@@ -433,7 +499,11 @@ fn minimap_viewport_fraction() {
 fn minimap_viewport_fraction_empty_doc() {
     let mut mm = Minimap::new();
     mm.update(1, 1, 0);
-    assert_eq!(mm.viewport_fraction(), 1.0, "empty doc should show full viewport");
+    assert_eq!(
+        mm.viewport_fraction(),
+        1.0,
+        "empty doc should show full viewport"
+    );
 }
 
 #[test]
@@ -442,7 +512,10 @@ fn minimap_scroll_fraction() {
     mm.update(100, 140, 200);
     let frac = mm.scroll_fraction();
     // (100 - 1) / (200 - 1) ≈ 0.497
-    assert!(frac > 0.49 && frac < 0.51, "scroll should be ~0.5, got {frac}");
+    assert!(
+        frac > 0.49 && frac < 0.51,
+        "scroll should be ~0.5, got {frac}"
+    );
 }
 
 #[test]
@@ -565,7 +638,10 @@ fn diagnostics_sorted_by_position() {
     ]);
     let all = diags.all();
     for i in 1..all.len() {
-        assert!(all[i - 1].line <= all[i].line, "diagnostics should be sorted by line");
+        assert!(
+            all[i - 1].line <= all[i].line,
+            "diagnostics should be sorted by line"
+        );
     }
 }
 
@@ -576,19 +652,27 @@ fn diagnostics_sorted_by_position() {
 #[test]
 fn outline_extracts_functions() {
     let outline = extract_outline(PLAYER_GD);
-    let funcs: Vec<_> = outline.iter().filter(|e| e.kind == OutlineKind::Function).collect();
+    let funcs: Vec<_> = outline
+        .iter()
+        .filter(|e| e.kind == OutlineKind::Function)
+        .collect();
     let names: Vec<&str> = funcs.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"_ready"), "should find _ready");
     assert!(names.contains(&"_process"), "should find _process");
     assert!(names.contains(&"take_damage"), "should find take_damage");
-    assert!(names.contains(&"_on_health_changed"), "should find _on_health_changed");
+    assert!(
+        names.contains(&"_on_health_changed"),
+        "should find _on_health_changed"
+    );
 }
 
 #[test]
 fn outline_extracts_class() {
     let outline = extract_outline(PLAYER_GD);
     assert!(
-        outline.iter().any(|e| e.kind == OutlineKind::Class && e.name == "InnerState"),
+        outline
+            .iter()
+            .any(|e| e.kind == OutlineKind::Class && e.name == "InnerState"),
         "should find InnerState class"
     );
 }
@@ -597,7 +681,9 @@ fn outline_extracts_class() {
 fn outline_extracts_signal() {
     let outline = extract_outline(PLAYER_GD);
     assert!(
-        outline.iter().any(|e| e.kind == OutlineKind::Signal && e.name == "health_changed"),
+        outline
+            .iter()
+            .any(|e| e.kind == OutlineKind::Signal && e.name == "health_changed"),
         "should find health_changed signal"
     );
 }
@@ -606,7 +692,9 @@ fn outline_extracts_signal() {
 fn outline_extracts_enum() {
     let outline = extract_outline(PLAYER_GD);
     assert!(
-        outline.iter().any(|e| e.kind == OutlineKind::Enum && e.name == "Direction"),
+        outline
+            .iter()
+            .any(|e| e.kind == OutlineKind::Enum && e.name == "Direction"),
         "should find Direction enum"
     );
 }
@@ -615,7 +703,9 @@ fn outline_extracts_enum() {
 fn outline_extracts_constant() {
     let outline = extract_outline(PLAYER_GD);
     assert!(
-        outline.iter().any(|e| e.kind == OutlineKind::Constant && e.name == "MAX_SPEED"),
+        outline
+            .iter()
+            .any(|e| e.kind == OutlineKind::Constant && e.name == "MAX_SPEED"),
         "should find MAX_SPEED constant"
     );
 }
@@ -624,7 +714,9 @@ fn outline_extracts_constant() {
 fn outline_extracts_exports() {
     let outline = extract_outline(PLAYER_GD);
     assert!(
-        outline.iter().any(|e| e.kind == OutlineKind::Export && e.name == "health"),
+        outline
+            .iter()
+            .any(|e| e.kind == OutlineKind::Export && e.name == "health"),
         "should find @export health"
     );
 }
@@ -738,7 +830,10 @@ fn status_bar_shows_multi_caret_count() {
     let bar = ScriptStatusBar::from_editor(tab, &carets, &diags);
     assert_eq!(bar.selection_count, 3);
     let display = bar.display();
-    assert!(display.contains("3 carets"), "display should mention caret count: {display}");
+    assert!(
+        display.contains("3 carets"),
+        "display should mention caret count: {display}"
+    );
 }
 
 #[test]
@@ -758,8 +853,14 @@ fn status_bar_shows_diagnostics_count() {
     assert_eq!(bar.error_count, 2);
     assert_eq!(bar.warning_count, 1);
     let display = bar.display();
-    assert!(display.contains("2 errors"), "should show error count: {display}");
-    assert!(display.contains("1 warnings"), "should show warning count: {display}");
+    assert!(
+        display.contains("2 errors"),
+        "should show error count: {display}"
+    );
+    assert!(
+        display.contains("1 warnings"),
+        "should show warning count: {display}"
+    );
 }
 
 #[test]
@@ -794,21 +895,30 @@ fn find_basic_search() {
 
 #[test]
 fn find_case_sensitive() {
-    let fr = FindReplace::new("MAX_SPEED")
-        .with_options(FindOptions { case_sensitive: true, ..Default::default() });
+    let fr = FindReplace::new("MAX_SPEED").with_options(FindOptions {
+        case_sensitive: true,
+        ..Default::default()
+    });
     let matches = fr.find_all(PLAYER_GD);
     assert!(!matches.is_empty(), "should find MAX_SPEED case-sensitive");
 
-    let fr2 = FindReplace::new("max_speed")
-        .with_options(FindOptions { case_sensitive: true, ..Default::default() });
+    let fr2 = FindReplace::new("max_speed").with_options(FindOptions {
+        case_sensitive: true,
+        ..Default::default()
+    });
     let no_match = fr2.find_all(PLAYER_GD);
-    assert!(no_match.is_empty(), "should not find max_speed case-sensitive");
+    assert!(
+        no_match.is_empty(),
+        "should not find max_speed case-sensitive"
+    );
 }
 
 #[test]
 fn find_whole_word() {
-    let fr = FindReplace::new("health")
-        .with_options(FindOptions { whole_word: true, ..Default::default() });
+    let fr = FindReplace::new("health").with_options(FindOptions {
+        whole_word: true,
+        ..Default::default()
+    });
     let matches = fr.find_all(PLAYER_GD);
     // Should find "health" standalone but not as part of "health_changed"
     for m in &matches {
@@ -816,7 +926,10 @@ fn find_whole_word() {
         let start = m.col;
         if start > 0 {
             let before = line.as_bytes()[start - 1];
-            assert!(!before.is_ascii_alphanumeric() && before != b'_', "match should be whole word");
+            assert!(
+                !before.is_ascii_alphanumeric() && before != b'_',
+                "match should be whole word"
+            );
         }
     }
 }
@@ -997,9 +1110,11 @@ fn full_editing_session_simulation() {
 
     // 6. Diagnostics.
     let mut diags = DiagnosticList::new();
-    diags.set(vec![
-        make_diag(DiagnosticSeverity::Warning, 10, "unused variable"),
-    ]);
+    diags.set(vec![make_diag(
+        DiagnosticSeverity::Warning,
+        10,
+        "unused variable",
+    )]);
 
     // 7. Outline.
     let outline = extract_outline(PLAYER_GD);

@@ -9,9 +9,9 @@
 
 use std::sync::Arc;
 
-use gdresource::loader::{parse_uid_string, TresLoader};
-use gdresource::{Resource, UidRegistry, UnifiedLoader, ResourceLoader};
 use gdcore::error::EngineResult;
+use gdresource::loader::{parse_uid_string, TresLoader};
+use gdresource::{Resource, ResourceLoader, UidRegistry, UnifiedLoader};
 
 // ===========================================================================
 // Fixture content — matches fixtures/resources/with_ext_refs.tres
@@ -38,29 +38,43 @@ name = "TestScene"
 #[test]
 fn ext_resource_fields_parsed_correctly() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn").unwrap();
+    let res = loader
+        .parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn")
+        .unwrap();
 
     // Should have 3 ext_resources
     assert_eq!(res.ext_resources.len(), 3, "expected 3 ext_resources");
 
     // ext_resource id="1" — Texture2D with UID
-    let ext1 = res.ext_resources.get("1").expect("ext_resource id=1 missing");
+    let ext1 = res
+        .ext_resources
+        .get("1")
+        .expect("ext_resource id=1 missing");
     assert_eq!(ext1.resource_type, "Texture2D");
     assert_eq!(ext1.uid, "uid://icon_texture");
     assert_eq!(ext1.path, "res://icon.png");
     assert_eq!(ext1.id, "1");
 
     // ext_resource id="2" — Script with UID
-    let ext2 = res.ext_resources.get("2").expect("ext_resource id=2 missing");
+    let ext2 = res
+        .ext_resources
+        .get("2")
+        .expect("ext_resource id=2 missing");
     assert_eq!(ext2.resource_type, "Script");
     assert_eq!(ext2.uid, "uid://player_script");
     assert_eq!(ext2.path, "res://scripts/player.gd");
     assert_eq!(ext2.id, "2");
 
     // ext_resource id="3" — PackedScene WITHOUT UID
-    let ext3 = res.ext_resources.get("3").expect("ext_resource id=3 missing");
+    let ext3 = res
+        .ext_resources
+        .get("3")
+        .expect("ext_resource id=3 missing");
     assert_eq!(ext3.resource_type, "PackedScene");
-    assert_eq!(ext3.uid, "", "ext_resource without uid= should have empty uid");
+    assert_eq!(
+        ext3.uid, "",
+        "ext_resource without uid= should have empty uid"
+    );
     assert_eq!(ext3.path, "res://scenes/enemy.tscn");
     assert_eq!(ext3.id, "3");
 }
@@ -72,7 +86,9 @@ fn ext_resource_fields_parsed_correctly() {
 #[test]
 fn ext_resource_uids_register_in_uid_registry() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn").unwrap();
+    let res = loader
+        .parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn")
+        .unwrap();
 
     let mut registry = UidRegistry::new();
 
@@ -99,7 +115,10 @@ fn ext_resource_uids_register_in_uid_registry() {
     assert_eq!(registry.lookup_uid(icon_uid), Some("res://icon.png"));
 
     let script_uid = parse_uid_string("uid://player_script");
-    assert_eq!(registry.lookup_uid(script_uid), Some("res://scripts/player.gd"));
+    assert_eq!(
+        registry.lookup_uid(script_uid),
+        Some("res://scripts/player.gd")
+    );
 
     // ext_resource without UID should NOT be in registry
     // (id="3" has no uid= attribute)
@@ -154,7 +173,9 @@ fn ext_resource_uid_round_trips_through_unified_loader() {
 #[test]
 fn sub_resource_parsed_with_properties() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn").unwrap();
+    let res = loader
+        .parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn")
+        .unwrap();
 
     assert_eq!(res.subresources.len(), 1, "expected 1 sub_resource");
 
@@ -172,9 +193,10 @@ fn sub_resource_parsed_with_properties() {
 #[test]
 fn sub_resource_in_theme_fixture() {
     let loader = TresLoader::new();
-    let source = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/resources/theme.tres")
-    );
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fixtures/resources/theme.tres"
+    ));
     // Only run if fixture is accessible
     if let Ok(source) = source {
         let res = loader.parse_str(&source, "res://theme.tres").unwrap();
@@ -192,7 +214,9 @@ fn sub_resource_in_theme_fixture() {
 #[test]
 fn gd_resource_uid_extracted() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn").unwrap();
+    let res = loader
+        .parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn")
+        .unwrap();
 
     assert!(res.uid.is_valid(), "gd_resource uid should be extracted");
     assert_eq!(res.uid, parse_uid_string("uid://scene_with_refs"));
@@ -201,7 +225,9 @@ fn gd_resource_uid_extracted() {
 #[test]
 fn gd_resource_class_name_extracted() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn").unwrap();
+    let res = loader
+        .parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn")
+        .unwrap();
     assert_eq!(res.class_name, "PackedScene");
 }
 
@@ -221,8 +247,14 @@ name = "OldFormat"
     let loader = TresLoader::new();
     let res = loader.parse_str(tres, "res://old.tres").unwrap();
 
-    let ext = res.ext_resources.get("1").expect("ext_resource id=1 missing");
-    assert_eq!(ext.uid, "", "ext_resource without uid= should have empty uid");
+    let ext = res
+        .ext_resources
+        .get("1")
+        .expect("ext_resource id=1 missing");
+    assert_eq!(
+        ext.uid, "",
+        "ext_resource without uid= should have empty uid"
+    );
     assert_eq!(ext.path, "res://old_style.png");
     assert_eq!(ext.resource_type, "Texture2D");
 }
@@ -262,7 +294,9 @@ name = "NoUid"
 #[test]
 fn multiple_ext_resource_uids_distinct() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn").unwrap();
+    let res = loader
+        .parse_str(FIXTURE_WITH_EXT_REFS, "res://test.tscn")
+        .unwrap();
 
     let ext1 = &res.ext_resources["1"];
     let ext2 = &res.ext_resources["2"];
@@ -270,7 +304,10 @@ fn multiple_ext_resource_uids_distinct() {
     let uid1 = parse_uid_string(&ext1.uid);
     let uid2 = parse_uid_string(&ext2.uid);
 
-    assert_ne!(uid1, uid2, "different uid:// strings must produce different UIDs");
+    assert_ne!(
+        uid1, uid2,
+        "different uid:// strings must produce different UIDs"
+    );
     assert!(uid1.is_valid());
     assert!(uid2.is_valid());
 }

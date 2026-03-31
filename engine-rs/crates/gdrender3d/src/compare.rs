@@ -73,7 +73,10 @@ pub fn compare_framebuffers_3d(
         (a.width, a.height),
         (b.width, b.height),
         "framebuffer dimensions must match: ({}, {}) vs ({}, {})",
-        a.width, a.height, b.width, b.height,
+        a.width,
+        a.height,
+        b.width,
+        b.height,
     );
 
     let total = (a.width as u64) * (a.height as u64);

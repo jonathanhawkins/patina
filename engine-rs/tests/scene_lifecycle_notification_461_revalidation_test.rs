@@ -408,10 +408,7 @@ fn scene_transition_2d_to_3d_preserves_lifecycle_461() {
     let hierarchy_oracle = load_oracle_tree("hierarchy");
     let expected_exits = expected_ready(&hierarchy_oracle);
     let actual_exits = notification_paths(&tree, "EXIT_TREE");
-    assert_eq!(
-        actual_exits, expected_exits,
-        "[461] 2D→3D EXIT_TREE drift"
-    );
+    assert_eq!(actual_exits, expected_exits, "[461] 2D→3D EXIT_TREE drift");
 
     // Verify ENTER_TREE of 3D scene is top-down
     let h3d_oracle = load_oracle_tree("hierarchy_3d");
@@ -558,10 +555,7 @@ fn process_fires_after_lifecycle_complete_461() {
         .iter()
         .filter(|e| {
             e.event_type == TraceEventType::Notification
-                && matches!(
-                    e.detail.as_str(),
-                    "ENTER_TREE" | "READY" | "PROCESS"
-                )
+                && matches!(e.detail.as_str(), "ENTER_TREE" | "READY" | "PROCESS")
         })
         .map(|e| (e.detail.as_str(), e.node_path.as_str()))
         .collect();

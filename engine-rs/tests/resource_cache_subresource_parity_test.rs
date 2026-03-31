@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
+use gdcore::error::EngineResult;
 use gdresource::loader::TresLoader;
 use gdresource::{Resource, ResourceCache, ResourceLoader};
-use gdcore::error::EngineResult;
 use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
@@ -87,7 +87,9 @@ impl ResourceLoader for InlineTresLoader {
 #[test]
 fn subresource_has_concrete_class_name() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_WITH_SHAPE, "res://shape.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_WITH_SHAPE, "res://shape.tres")
+        .unwrap();
 
     let sub = res
         .subresources
@@ -99,7 +101,9 @@ fn subresource_has_concrete_class_name() {
 #[test]
 fn subresource_properties_parsed_as_typed_variants() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_WITH_SHAPE, "res://shape.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_WITH_SHAPE, "res://shape.tres")
+        .unwrap();
 
     let sub = &res.subresources["shape_1"];
     let size = sub.get_property("size").expect("size property missing");
@@ -119,7 +123,9 @@ fn subresource_properties_parsed_as_typed_variants() {
 #[test]
 fn subresource_ref_stored_as_prefixed_string() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_WITH_SHAPE, "res://shape.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_WITH_SHAPE, "res://shape.tres")
+        .unwrap();
 
     assert_eq!(
         res.get_property("shape_ref"),
@@ -135,7 +141,9 @@ fn subresource_ref_stored_as_prefixed_string() {
 #[test]
 fn multiple_subresources_are_distinct_arcs() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_WITH_TWO_SUBS, "res://theme.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_WITH_TWO_SUBS, "res://theme.tres")
+        .unwrap();
 
     assert_eq!(res.subresources.len(), 2);
     let panel = &res.subresources["panel"];
@@ -144,7 +152,10 @@ fn multiple_subresources_are_distinct_arcs() {
     // Same class_name but distinct objects.
     assert_eq!(panel.class_name, "StyleBoxFlat");
     assert_eq!(button.class_name, "StyleBoxFlat");
-    assert!(!Arc::ptr_eq(panel, button), "two sub_resources must not alias");
+    assert!(
+        !Arc::ptr_eq(panel, button),
+        "two sub_resources must not alias"
+    );
 
     // Properties are independent.
     assert_eq!(panel.get_property("border_width"), Some(&Variant::Int(2)));
@@ -157,9 +168,7 @@ fn multiple_subresources_are_distinct_arcs() {
 
 #[test]
 fn cached_load_returns_same_subresource_arcs() {
-    let loader = InlineTresLoader::new(vec![
-        ("res://shape.tres", TRES_WITH_SHAPE),
-    ]);
+    let loader = InlineTresLoader::new(vec![("res://shape.tres", TRES_WITH_SHAPE)]);
     let mut cache = ResourceCache::new(loader);
 
     let first = cache.load("res://shape.tres").unwrap();
@@ -213,9 +222,7 @@ fn different_resources_have_independent_subresources() {
 
 #[test]
 fn invalidated_reload_produces_fresh_subresource_arcs() {
-    let loader = InlineTresLoader::new(vec![
-        ("res://shape.tres", TRES_WITH_SHAPE),
-    ]);
+    let loader = InlineTresLoader::new(vec![("res://shape.tres", TRES_WITH_SHAPE)]);
     let mut cache = ResourceCache::new(loader);
 
     let first = cache.load("res://shape.tres").unwrap();
@@ -246,7 +253,9 @@ fn invalidated_reload_produces_fresh_subresource_arcs() {
 #[test]
 fn cloned_resource_has_independent_subresource_copies() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_WITH_TWO_SUBS, "res://theme.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_WITH_TWO_SUBS, "res://theme.tres")
+        .unwrap();
 
     // Resource derives Clone. Cloning should give independent sub_resources.
     let cloned = (*res).clone();
@@ -293,7 +302,10 @@ fn fixture_theme_subresources_resolved_through_cache() {
     assert!(!Arc::ptr_eq(panel, button));
 
     // Verify distinct bg_color values survived parsing.
-    match (panel.get_property("bg_color"), button.get_property("bg_color")) {
+    match (
+        panel.get_property("bg_color"),
+        button.get_property("bg_color"),
+    ) {
         (Some(Variant::Color(pc)), Some(Variant::Color(bc))) => {
             assert!((pc.r - 0.25).abs() < 0.01, "panel bg_color.r");
             assert!((bc.r - 0.5).abs() < 0.01, "button bg_color.r");
@@ -312,9 +324,7 @@ fn fixture_theme_subresources_resolved_through_cache() {
 
 #[test]
 fn cache_clear_releases_subresource_arcs() {
-    let loader = InlineTresLoader::new(vec![
-        ("res://theme.tres", TRES_WITH_TWO_SUBS),
-    ]);
+    let loader = InlineTresLoader::new(vec![("res://theme.tres", TRES_WITH_TWO_SUBS)]);
     let mut cache = ResourceCache::new(loader);
 
     let res = cache.load("res://theme.tres").unwrap();

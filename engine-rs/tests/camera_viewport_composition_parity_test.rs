@@ -160,7 +160,11 @@ fn invisible_layer_hides_its_items() {
 
     let fb = capture_frame(&mut renderer, &vp);
     // No red pixels should be visible.
-    assert_eq!(count_color(&fb, red()), 0, "Invisible layer items must not render");
+    assert_eq!(
+        count_color(&fb, red()),
+        0,
+        "Invisible layer items must not render"
+    );
     // Entire viewport should be clear color.
     assert_pixel_color(&fb, 10, 10, Color::BLACK, TOL);
 }

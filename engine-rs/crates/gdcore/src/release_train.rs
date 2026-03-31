@@ -330,10 +330,7 @@ impl Release {
     /// Adds a change entry to this release. Only allowed in Draft state.
     pub fn add_change(&mut self, entry: ChangeEntry) -> Result<(), String> {
         if self.state != ReleaseState::Draft {
-            return Err(format!(
-                "cannot add changes to a {} release",
-                self.state
-            ));
+            return Err(format!("cannot add changes to a {} release", self.state));
         }
         self.changes.push(entry);
         Ok(())
@@ -347,7 +344,10 @@ impl Release {
     /// Transitions the release to Staged state.
     pub fn stage(&mut self, date: &str) -> Result<(), String> {
         if self.state != ReleaseState::Draft {
-            return Err(format!("can only stage a Draft release, current: {}", self.state));
+            return Err(format!(
+                "can only stage a Draft release, current: {}",
+                self.state
+            ));
         }
         self.state = ReleaseState::Staged;
         self.date = Some(date.to_string());
@@ -607,7 +607,12 @@ mod tests {
     #[test]
     fn parse_version_with_pre_and_build() {
         let v = SemVer::parse("2.1.0-rc.1+sha.abc123").unwrap();
-        assert_eq!(v, SemVer::new(2, 1, 0).with_pre("rc.1").with_build("sha.abc123"));
+        assert_eq!(
+            v,
+            SemVer::new(2, 1, 0)
+                .with_pre("rc.1")
+                .with_build("sha.abc123")
+        );
     }
 
     #[test]
@@ -724,15 +729,14 @@ mod tests {
 
     #[test]
     fn change_entry_markdown_with_reference() {
-        let e = ChangeEntry::new(ChangeCategory::Fixed, "Fix crash on load")
-            .with_reference("pat-abc");
+        let e =
+            ChangeEntry::new(ChangeCategory::Fixed, "Fix crash on load").with_reference("pat-abc");
         assert_eq!(e.to_markdown(), "- Fix crash on load (pat-abc)");
     }
 
     #[test]
     fn change_entry_markdown_with_author() {
-        let e = ChangeEntry::new(ChangeCategory::Added, "New feature")
-            .with_author("bone");
+        let e = ChangeEntry::new(ChangeCategory::Added, "New feature").with_author("bone");
         assert_eq!(e.to_markdown(), "- New feature — @bone");
     }
 
@@ -830,9 +834,12 @@ mod tests {
     #[test]
     fn changes_by_category_groups_correctly() {
         let mut r = Release::new(SemVer::new(1, 0, 0));
-        r.add_change(ChangeEntry::new(ChangeCategory::Added, "A")).unwrap();
-        r.add_change(ChangeEntry::new(ChangeCategory::Fixed, "B")).unwrap();
-        r.add_change(ChangeEntry::new(ChangeCategory::Added, "C")).unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Added, "A"))
+            .unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Fixed, "B"))
+            .unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Added, "C"))
+            .unwrap();
 
         let grouped = r.changes_by_category();
         assert_eq!(grouped[&ChangeCategory::Added].len(), 2);
@@ -842,7 +849,8 @@ mod tests {
     #[test]
     fn has_breaking_changes() {
         let mut r = Release::new(SemVer::new(2, 0, 0));
-        r.add_change(ChangeEntry::new(ChangeCategory::Breaking, "Remove API")).unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Breaking, "Remove API"))
+            .unwrap();
         assert!(r.has_breaking_changes());
 
         let r2 = Release::new(SemVer::new(1, 1, 0));
@@ -943,14 +951,17 @@ mod tests {
 
         // v0.1.0
         let r = train.create_release(SemVer::new(0, 1, 0)).unwrap();
-        r.add_change(ChangeEntry::new(ChangeCategory::Added, "Initial release")).unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Added, "Initial release"))
+            .unwrap();
         r.stage("2026-01-01").unwrap();
         r.publish().unwrap();
 
         // v0.2.0
         let r = train.create_release(SemVer::new(0, 2, 0)).unwrap();
-        r.add_change(ChangeEntry::new(ChangeCategory::Added, "Editor")).unwrap();
-        r.add_change(ChangeEntry::new(ChangeCategory::Fixed, "Crash")).unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Added, "Editor"))
+            .unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Fixed, "Crash"))
+            .unwrap();
         r.stage("2026-02-01").unwrap();
         r.publish().unwrap();
 
@@ -969,7 +980,8 @@ mod tests {
         let mut train = ReleaseTrain::new();
 
         let r = train.create_release(SemVer::new(0, 1, 0)).unwrap();
-        r.add_change(ChangeEntry::new(ChangeCategory::Added, "Feature")).unwrap();
+        r.add_change(ChangeEntry::new(ChangeCategory::Added, "Feature"))
+            .unwrap();
         r.cancel().unwrap();
 
         let changelog = train.generate_changelog();
@@ -1013,7 +1025,11 @@ mod tests {
 
         for i in 1..=5 {
             let r = train.create_release(SemVer::new(0, i, 0)).unwrap();
-            r.add_change(ChangeEntry::new(ChangeCategory::Added, &format!("Feature {}", i))).unwrap();
+            r.add_change(ChangeEntry::new(
+                ChangeCategory::Added,
+                &format!("Feature {}", i),
+            ))
+            .unwrap();
             r.stage(&format!("2026-0{}-01", i)).unwrap();
             r.publish().unwrap();
         }

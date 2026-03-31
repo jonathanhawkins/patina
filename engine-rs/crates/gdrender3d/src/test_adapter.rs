@@ -38,13 +38,7 @@ pub fn depth_at(fb: &FrameBuffer3D, x: u32, y: u32) -> f32 {
 /// # Panics
 ///
 /// Panics if the color difference exceeds tolerance on any channel.
-pub fn assert_pixel_color_3d(
-    fb: &FrameBuffer3D,
-    x: u32,
-    y: u32,
-    expected: Color,
-    tolerance: f32,
-) {
+pub fn assert_pixel_color_3d(fb: &FrameBuffer3D, x: u32, y: u32, expected: Color, tolerance: f32) {
     let actual = fb.get_pixel(x, y);
     assert!(
         (actual.r - expected.r).abs() <= tolerance
@@ -52,7 +46,11 @@ pub fn assert_pixel_color_3d(
             && (actual.b - expected.b).abs() <= tolerance
             && (actual.a - expected.a).abs() <= tolerance,
         "Pixel ({}, {}): expected {:?}, got {:?} (tolerance {})",
-        x, y, expected, actual, tolerance,
+        x,
+        y,
+        expected,
+        actual,
+        tolerance,
     );
 }
 
@@ -66,7 +64,11 @@ pub fn assert_depth_3d(fb: &FrameBuffer3D, x: u32, y: u32, expected: f32, tolera
     assert!(
         (actual - expected).abs() <= tolerance,
         "Depth ({}, {}): expected {}, got {} (tolerance {})",
-        x, y, expected, actual, tolerance,
+        x,
+        y,
+        expected,
+        actual,
+        tolerance,
     );
 }
 

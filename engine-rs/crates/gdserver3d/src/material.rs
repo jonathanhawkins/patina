@@ -354,25 +354,16 @@ mod tests {
 
         let mat = StandardMaterial3D::from_properties(props.iter());
         assert_eq!(mat.albedo_color, Color::new(0.5, 0.5, 0.5, 1.0));
-        assert_eq!(
-            mat.albedo_texture.as_ref().unwrap().path,
-            "ExtResource:1"
-        );
+        assert_eq!(mat.albedo_texture.as_ref().unwrap().path, "ExtResource:1");
         assert!((mat.metallic - 0.7).abs() < f32::EPSILON);
-        assert_eq!(
-            mat.metallic_texture.as_ref().unwrap().path,
-            "ExtResource:2"
-        );
+        assert_eq!(mat.metallic_texture.as_ref().unwrap().path, "ExtResource:2");
         assert!((mat.roughness - 0.4).abs() < f32::EPSILON);
         assert_eq!(
             mat.roughness_texture.as_ref().unwrap().path,
             "SubResource:3"
         );
         assert!(mat.normal_enabled);
-        assert_eq!(
-            mat.normal_texture.as_ref().unwrap().path,
-            "ExtResource:4"
-        );
+        assert_eq!(mat.normal_texture.as_ref().unwrap().path, "ExtResource:4");
         assert!((mat.normal_scale - 2.0).abs() < f32::EPSILON);
     }
 

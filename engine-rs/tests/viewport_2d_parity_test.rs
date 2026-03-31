@@ -9,8 +9,8 @@
 //! - Snap settings for grid, rotation, and scale
 //! - Screen-to-world and world-to-screen coordinate conversion
 
-use gdeditor::viewport_2d::*;
 use gdcore::math::Vector2;
+use gdeditor::viewport_2d::*;
 
 const VIEWPORT_W: u32 = 800;
 const VIEWPORT_H: u32 = 600;
@@ -32,7 +32,12 @@ fn tool_mode_default_is_select() {
 #[test]
 fn tool_mode_cycles_through_all_modes() {
     let mut vp = make_viewport();
-    for mode in [ToolMode2D::Select, ToolMode2D::Move, ToolMode2D::Rotate, ToolMode2D::Scale] {
+    for mode in [
+        ToolMode2D::Select,
+        ToolMode2D::Move,
+        ToolMode2D::Rotate,
+        ToolMode2D::Scale,
+    ] {
         vp.set_tool_mode(mode);
         assert_eq!(vp.tool_mode, mode);
     }
@@ -49,15 +54,26 @@ fn camera_pan_moves_world_offset() {
     cam.pan(200.0, 100.0);
     cam.end_pan();
     // Screen-right drag => world offset shifts left (negative x).
-    assert!(cam.offset.x < -0.1, "expected offset.x < 0, got {}", cam.offset.x);
-    assert!(cam.offset.y < -0.1, "expected offset.y < 0, got {}", cam.offset.y);
+    assert!(
+        cam.offset.x < -0.1,
+        "expected offset.x < 0, got {}",
+        cam.offset.x
+    );
+    assert!(
+        cam.offset.y < -0.1,
+        "expected offset.y < 0, got {}",
+        cam.offset.y
+    );
 }
 
 #[test]
 fn camera_pan_only_active_during_gesture() {
     let mut cam = ViewportCamera2D::new();
     cam.pan(999.0, 999.0); // no begin_pan
-    assert!((cam.offset.x).abs() < 0.001, "should not move without begin_pan");
+    assert!(
+        (cam.offset.x).abs() < 0.001,
+        "should not move without begin_pan"
+    );
 }
 
 #[test]
@@ -149,11 +165,7 @@ fn camera_zoom_at_cursor_anchors_point() {
 fn camera_frame_rect_centers_on_rect() {
     let mut cam = ViewportCamera2D::new();
     let vp = Vector2::new(VIEWPORT_W as f32, VIEWPORT_H as f32);
-    cam.frame_rect(
-        Vector2::new(500.0, 500.0),
-        Vector2::new(200.0, 200.0),
-        vp,
-    );
+    cam.frame_rect(Vector2::new(500.0, 500.0), Vector2::new(200.0, 200.0), vp);
     assert!((cam.offset.x - 500.0).abs() < 0.01);
     assert!((cam.offset.y - 500.0).abs() < 0.01);
     assert!(cam.zoom > 0.0, "zoom should be positive");
@@ -188,7 +200,10 @@ fn screen_to_world_roundtrip_at_various_zooms() {
         assert!(
             (back.x - screen.x).abs() < 0.01 && (back.y - screen.y).abs() < 0.01,
             "roundtrip failed at zoom={}: screen={:?} -> world={:?} -> back={:?}",
-            zoom, screen, world, back
+            zoom,
+            screen,
+            world,
+            back
         );
     }
 }
@@ -245,9 +260,18 @@ fn selection_clear() {
 fn overlap_selection_picks_intersecting_nodes() {
     let mut sel = Selection2D::new();
     let candidates = vec![
-        (1, SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0))),
-        (2, SelectionRect::new(Vector2::new(20.0, 20.0), Vector2::new(30.0, 30.0))),
-        (3, SelectionRect::new(Vector2::new(5.0, 5.0), Vector2::new(15.0, 15.0))),
+        (
+            1,
+            SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0)),
+        ),
+        (
+            2,
+            SelectionRect::new(Vector2::new(20.0, 20.0), Vector2::new(30.0, 30.0)),
+        ),
+        (
+            3,
+            SelectionRect::new(Vector2::new(5.0, 5.0), Vector2::new(15.0, 15.0)),
+        ),
     ];
     // Drag rect covers [0,0]-[12,12], should pick 1 and 3 but not 2.
     let rect = SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(12.0, 12.0));
@@ -261,9 +285,10 @@ fn overlap_selection_picks_intersecting_nodes() {
 #[test]
 fn overlap_selection_empty_rect_selects_nothing() {
     let mut sel = Selection2D::new();
-    let candidates = vec![
-        (1, SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0))),
-    ];
+    let candidates = vec![(
+        1,
+        SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0)),
+    )];
     let rect = SelectionRect::new(Vector2::new(100.0, 100.0), Vector2::new(100.1, 100.1));
     sel.select_overlap(&rect, &candidates);
     assert_eq!(sel.count(), 0);
@@ -286,8 +311,14 @@ fn locked_node_excluded_from_overlap_selection() {
     let mut sel = Selection2D::new();
     sel.lock(2);
     let candidates = vec![
-        (1, SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(5.0, 5.0))),
-        (2, SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(5.0, 5.0))),
+        (
+            1,
+            SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(5.0, 5.0)),
+        ),
+        (
+            2,
+            SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(5.0, 5.0)),
+        ),
     ];
     let rect = SelectionRect::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0));
     sel.select_overlap(&rect, &candidates);
@@ -386,7 +417,7 @@ fn snap_position_rounds_to_grid() {
     };
     let snapped = snap.snap_position(Vector2::new(25.0, 7.0));
     assert!((snapped.x - 32.0).abs() < 0.01); // 25 rounds to 32 (1.5625 * 16)
-    assert!((snapped.y - 0.0).abs() < 0.01);  // 7 rounds to 0
+    assert!((snapped.y - 0.0).abs() < 0.01); // 7 rounds to 0
 }
 
 #[test]
@@ -436,10 +467,7 @@ fn viewport_pan_via_mouse_drag() {
 #[test]
 fn viewport_frame_selection() {
     let mut vp = make_viewport();
-    vp.frame_selection(
-        Vector2::new(200.0, 200.0),
-        Vector2::new(100.0, 100.0),
-    );
+    vp.frame_selection(Vector2::new(200.0, 200.0), Vector2::new(100.0, 100.0));
     assert!((vp.camera.offset.x - 200.0).abs() < 0.01);
 }
 

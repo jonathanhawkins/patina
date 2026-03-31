@@ -56,14 +56,20 @@ func _ready():
     tree.attach_script(child_id, Box::new(script));
 
     // Before lifecycle
-    let val = tree.get_script(child_id).unwrap().get_property("initialized");
+    let val = tree
+        .get_script(child_id)
+        .unwrap()
+        .get_property("initialized");
     assert_eq!(val, Some(Variant::Bool(false)));
 
     // Run lifecycle
     gdscene::lifecycle::LifecycleManager::enter_tree(&mut tree, root);
 
     // After lifecycle
-    let val = tree.get_script(child_id).unwrap().get_property("initialized");
+    let val = tree
+        .get_script(child_id)
+        .unwrap()
+        .get_property("initialized");
     assert_eq!(val, Some(Variant::Bool(true)));
 }
 
@@ -215,11 +221,7 @@ fn tween_evolves_property_through_mainloop() {
     let mut ml = MainLoop::new(tree);
     ml.run_frames(60, 1.0 / 60.0);
 
-    let opacity = ml
-        .tree()
-        .get_node(node_id)
-        .unwrap()
-        .get_property("opacity");
+    let opacity = ml.tree().get_node(node_id).unwrap().get_property("opacity");
     if let Variant::Float(v) = opacity {
         assert!(
             (v - 1.0).abs() < 0.05,

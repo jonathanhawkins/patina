@@ -15,8 +15,8 @@
 //! full pipeline from file load to mixed audio output works end-to-end.
 
 use gdaudio::import::{
-    audio_buffer_to_sample_buffer, decode_audio_data, load_audio_file, sample_buffer_to_audio_buffer,
-    AudioFormat, AudioStreamLoader, ImportError,
+    audio_buffer_to_sample_buffer, decode_audio_data, load_audio_file,
+    sample_buffer_to_audio_buffer, AudioFormat, AudioStreamLoader, ImportError,
 };
 use gdaudio::{AudioBuffer, AudioServer};
 
@@ -288,10 +288,7 @@ fn uxn40_audio_buffer_sample_buffer_roundtrip() {
     let sample_buf = audio_buffer_to_sample_buffer(&original);
     assert_eq!(sample_buf.sample_rate, 48000);
     assert_eq!(sample_buf.channels, 2);
-    assert_eq!(
-        sample_buf.channel_layout,
-        gdaudio::ChannelLayout::Stereo
-    );
+    assert_eq!(sample_buf.channel_layout, gdaudio::ChannelLayout::Stereo);
 
     let back = sample_buffer_to_audio_buffer(&sample_buf);
     assert_eq!(back.sample_rate, original.sample_rate);

@@ -102,7 +102,8 @@ impl MultiMesh3D {
     /// Resizes the instance count, truncating or extending with identity
     /// transforms.
     pub fn set_instance_count(&mut self, count: usize) {
-        self.instance_transforms.resize(count, Transform3D::IDENTITY);
+        self.instance_transforms
+            .resize(count, Transform3D::IDENTITY);
         if !self.instance_colors.is_empty() {
             self.instance_colors.resize(count, Color::WHITE);
         }
@@ -132,7 +133,10 @@ mod tests {
             origin: Vector3::new(1.0, 2.0, 3.0),
         };
         mm.set_instance_transform(1, t);
-        assert_eq!(mm.get_instance_transform(1).origin, Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            mm.get_instance_transform(1).origin,
+            Vector3::new(1.0, 2.0, 3.0)
+        );
         assert_eq!(mm.get_instance_transform(0), Transform3D::IDENTITY);
     }
 

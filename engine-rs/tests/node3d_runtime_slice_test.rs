@@ -104,7 +104,10 @@ fn register_3d_classes_registers_character_body3d() {
     let _g = setup();
     assert!(class_db::class_exists("CharacterBody3D"));
     assert!(class_db::is_parent_class("CharacterBody3D", "Node3D"));
-    assert!(class_db::class_has_method("CharacterBody3D", "move_and_slide"));
+    assert!(class_db::class_has_method(
+        "CharacterBody3D",
+        "move_and_slide"
+    ));
     assert!(class_db::class_has_method("CharacterBody3D", "is_on_floor"));
 }
 
@@ -169,7 +172,10 @@ fn rigid_body3d_inherits_node3d_properties() {
     let _g = setup();
     assert!(class_db::class_has_property("RigidBody3D", "position"));
     assert!(class_db::class_has_property("RigidBody3D", "mass"));
-    assert!(class_db::class_has_property("RigidBody3D", "linear_velocity"));
+    assert!(class_db::class_has_property(
+        "RigidBody3D",
+        "linear_velocity"
+    ));
 }
 
 #[test]
@@ -177,7 +183,10 @@ fn mesh_instance3d_inherits_node3d_properties() {
     let _g = setup();
     assert!(class_db::class_has_property("MeshInstance3D", "position"));
     assert!(class_db::class_has_property("MeshInstance3D", "mesh"));
-    assert!(class_db::class_has_property("MeshInstance3D", "cast_shadow"));
+    assert!(class_db::class_has_property(
+        "MeshInstance3D",
+        "cast_shadow"
+    ));
 }
 
 // ===========================================================================
@@ -189,7 +198,10 @@ fn instantiate_node3d_defaults() {
     let _g = setup();
     let obj = class_db::instantiate("Node3D").expect("instantiate Node3D");
     assert_eq!(obj.get_class(), "Node3D");
-    assert_eq!(obj.get_property("position"), Variant::Vector3(Vector3::ZERO));
+    assert_eq!(
+        obj.get_property("position"),
+        Variant::Vector3(Vector3::ZERO)
+    );
     assert_eq!(obj.get_property("scale"), Variant::Vector3(Vector3::ONE));
     assert_eq!(obj.get_property("visible"), Variant::Bool(true));
 }
@@ -223,7 +235,10 @@ fn instantiate_character_body3d_defaults() {
     let _g = setup();
     let obj = class_db::instantiate("CharacterBody3D").expect("instantiate CharacterBody3D");
     assert_eq!(obj.get_class(), "CharacterBody3D");
-    assert_eq!(obj.get_property("velocity"), Variant::Vector3(Vector3::ZERO));
+    assert_eq!(
+        obj.get_property("velocity"),
+        Variant::Vector3(Vector3::ZERO)
+    );
     assert_eq!(
         obj.get_property("up_direction"),
         Variant::Vector3(Vector3::new(0.0, 1.0, 0.0))
@@ -490,10 +505,22 @@ fn mixed_3d_hierarchy() {
 
     // Verify hierarchy.
     assert_eq!(tree.get_node(cam_id).unwrap().class_name(), "Camera3D");
-    assert_eq!(tree.get_node(cube_id).unwrap().class_name(), "MeshInstance3D");
-    assert_eq!(tree.get_node(sun_id).unwrap().class_name(), "DirectionalLight3D");
-    assert_eq!(tree.get_node(floor_id).unwrap().class_name(), "StaticBody3D");
-    assert_eq!(tree.get_node(col_id).unwrap().class_name(), "CollisionShape3D");
+    assert_eq!(
+        tree.get_node(cube_id).unwrap().class_name(),
+        "MeshInstance3D"
+    );
+    assert_eq!(
+        tree.get_node(sun_id).unwrap().class_name(),
+        "DirectionalLight3D"
+    );
+    assert_eq!(
+        tree.get_node(floor_id).unwrap().class_name(),
+        "StaticBody3D"
+    );
+    assert_eq!(
+        tree.get_node(col_id).unwrap().class_name(),
+        "CollisionShape3D"
+    );
 
     // Verify path lookup.
     let found_cam = tree.get_node_by_path("/root/World/Camera");
@@ -555,8 +582,8 @@ fn load_minimal_3d_fixture() {
         "{}/../fixtures/scenes/minimal_3d.tscn",
         env!("CARGO_MANIFEST_DIR")
     );
-    let source = std::fs::read_to_string(&fixture_path)
-        .expect("should read minimal_3d.tscn fixture");
+    let source =
+        std::fs::read_to_string(&fixture_path).expect("should read minimal_3d.tscn fixture");
     let scene =
         gdscene::packed_scene::PackedScene::from_tscn(&source).expect("parse minimal_3d.tscn");
     let mut tree = SceneTree::new();
@@ -570,7 +597,9 @@ fn load_minimal_3d_fixture() {
     assert!(tree.get_node_by_path("/root/World/Cube").is_some());
     assert!(tree.get_node_by_path("/root/World/Sun").is_some());
     assert!(tree.get_node_by_path("/root/World/Floor").is_some());
-    assert!(tree.get_node_by_path("/root/World/Floor/CollisionShape").is_some());
+    assert!(tree
+        .get_node_by_path("/root/World/Floor/CollisionShape")
+        .is_some());
 }
 
 #[test]
@@ -580,8 +609,8 @@ fn loaded_3d_fixture_has_correct_types() {
         "{}/../fixtures/scenes/minimal_3d.tscn",
         env!("CARGO_MANIFEST_DIR")
     );
-    let source = std::fs::read_to_string(&fixture_path)
-        .expect("should read minimal_3d.tscn fixture");
+    let source =
+        std::fs::read_to_string(&fixture_path).expect("should read minimal_3d.tscn fixture");
     let scene =
         gdscene::packed_scene::PackedScene::from_tscn(&source).expect("parse minimal_3d.tscn");
     let mut tree = SceneTree::new();
@@ -596,9 +625,18 @@ fn loaded_3d_fixture_has_correct_types() {
 
     assert_eq!(tree.get_node(world_id).unwrap().class_name(), "Node3D");
     assert_eq!(tree.get_node(cam_id).unwrap().class_name(), "Camera3D");
-    assert_eq!(tree.get_node(cube_id).unwrap().class_name(), "MeshInstance3D");
-    assert_eq!(tree.get_node(sun_id).unwrap().class_name(), "DirectionalLight3D");
-    assert_eq!(tree.get_node(floor_id).unwrap().class_name(), "StaticBody3D");
+    assert_eq!(
+        tree.get_node(cube_id).unwrap().class_name(),
+        "MeshInstance3D"
+    );
+    assert_eq!(
+        tree.get_node(sun_id).unwrap().class_name(),
+        "DirectionalLight3D"
+    );
+    assert_eq!(
+        tree.get_node(floor_id).unwrap().class_name(),
+        "StaticBody3D"
+    );
 }
 
 #[test]
@@ -608,8 +646,8 @@ fn loaded_3d_fixture_has_correct_node_count() {
         "{}/../fixtures/scenes/minimal_3d.tscn",
         env!("CARGO_MANIFEST_DIR")
     );
-    let source = std::fs::read_to_string(&fixture_path)
-        .expect("should read minimal_3d.tscn fixture");
+    let source =
+        std::fs::read_to_string(&fixture_path).expect("should read minimal_3d.tscn fixture");
     let scene =
         gdscene::packed_scene::PackedScene::from_tscn(&source).expect("parse minimal_3d.tscn");
     let mut tree = SceneTree::new();

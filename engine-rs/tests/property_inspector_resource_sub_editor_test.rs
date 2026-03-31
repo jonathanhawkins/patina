@@ -126,7 +126,10 @@ fn sub_editor_set_property_clone_on_write() {
 
     let new_res = editor.set_property("border_width", Variant::Int(10));
     // New resource has updated value
-    assert_eq!(new_res.get_property("border_width"), Some(&Variant::Int(10)));
+    assert_eq!(
+        new_res.get_property("border_width"),
+        Some(&Variant::Int(10))
+    );
     // Editor's internal resource also updated
     assert_eq!(editor.get_property("border_width"), Some(&Variant::Int(10)));
     // Original resource unchanged (Arc clone-on-write)
@@ -175,12 +178,18 @@ fn sub_editor_multiple_changes_sequential_undo() {
 
     // Undo bg_color
     editor.undo_last();
-    assert_eq!(editor.get_property("bg_color"), Some(&Variant::String("red".into())));
+    assert_eq!(
+        editor.get_property("bg_color"),
+        Some(&Variant::String("red".into()))
+    );
     assert_eq!(editor.change_count(), 2);
 
     // Undo corner_radius
     editor.undo_last();
-    assert_eq!(editor.get_property("corner_radius"), Some(&Variant::Float(4.0)));
+    assert_eq!(
+        editor.get_property("corner_radius"),
+        Some(&Variant::Float(4.0))
+    );
     assert_eq!(editor.change_count(), 1);
 
     // Undo border_width
@@ -215,7 +224,8 @@ fn sub_editor_subresource_navigation() {
 
     let mut sub = Resource::new("StyleBoxFlat");
     sub.set_property("bg_color", Variant::String("green".into()));
-    res.subresources.insert("StyleBoxFlat_001".into(), Arc::new(sub));
+    res.subresources
+        .insert("StyleBoxFlat_001".into(), Arc::new(sub));
 
     let editor = ResourceSubEditor::new(Arc::new(res));
     let ids = editor.subresource_ids();
@@ -224,7 +234,10 @@ fn sub_editor_subresource_navigation() {
 
     let sub_editor = editor.open_subresource("StyleBoxFlat_001").unwrap();
     assert_eq!(sub_editor.class_name(), "StyleBoxFlat");
-    assert_eq!(sub_editor.get_property("bg_color"), Some(&Variant::String("green".into())));
+    assert_eq!(
+        sub_editor.get_property("bg_color"),
+        Some(&Variant::String("green".into()))
+    );
 }
 
 #[test]

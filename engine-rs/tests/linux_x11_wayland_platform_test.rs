@@ -39,23 +39,44 @@ fn classdb_has_display_properties() {
 fn classdb_has_protocol_methods() {
     class_db::register_3d_classes();
     assert!(class_db::class_has_method("LinuxPlatformLayer", "is_x11"));
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "is_wayland"));
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "is_headless"));
+    assert!(class_db::class_has_method(
+        "LinuxPlatformLayer",
+        "is_wayland"
+    ));
+    assert!(class_db::class_has_method(
+        "LinuxPlatformLayer",
+        "is_headless"
+    ));
 }
 
 #[test]
 fn classdb_has_capability_methods() {
     class_db::register_3d_classes();
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "supports_window_positioning"));
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "supports_global_shortcuts"));
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "has_system_tray"));
+    assert!(class_db::class_has_method(
+        "LinuxPlatformLayer",
+        "supports_window_positioning"
+    ));
+    assert!(class_db::class_has_method(
+        "LinuxPlatformLayer",
+        "supports_global_shortcuts"
+    ));
+    assert!(class_db::class_has_method(
+        "LinuxPlatformLayer",
+        "has_system_tray"
+    ));
 }
 
 #[test]
 fn classdb_has_cursor_methods() {
     class_db::register_3d_classes();
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "set_cursor_theme"));
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "get_cursor_theme"));
+    assert!(class_db::class_has_method(
+        "LinuxPlatformLayer",
+        "set_cursor_theme"
+    ));
+    assert!(class_db::class_has_method(
+        "LinuxPlatformLayer",
+        "get_cursor_theme"
+    ));
 }
 
 // ── LinuxDisplayProtocol ─────────────────────────────────────────────────────
@@ -146,7 +167,9 @@ fn headless_not_x11_or_wayland() {
 
 #[test]
 fn with_config() {
-    let config = WindowConfig::new().with_title("Linux Game").with_size(1920, 1080);
+    let config = WindowConfig::new()
+        .with_title("Linux Game")
+        .with_size(1920, 1080);
     let layer = LinuxPlatformLayer::new("LinuxGame", &config);
     assert_eq!(layer.app_name(), "LinuxGame");
     assert_eq!(layer.window_size(), (1920, 1080));

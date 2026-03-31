@@ -68,10 +68,7 @@ fn all_documented_modules_exist_as_source_files() {
 
 #[test]
 fn lib_rs_declares_all_documented_modules() {
-    let lib_path = format!(
-        "{}/crates/gdeditor/src/lib.rs",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let lib_path = format!("{}/crates/gdeditor/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let lib_src = std::fs::read_to_string(&lib_path).unwrap();
     for module in DOCUMENTED_MODULES {
         let decl = format!("pub mod {};", module);
@@ -103,10 +100,7 @@ const DOCUMENTED_DEPS: &[&str] = &[
 
 #[test]
 fn cargo_toml_contains_all_documented_dependencies() {
-    let cargo_path = format!(
-        "{}/crates/gdeditor/Cargo.toml",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let cargo_path = format!("{}/crates/gdeditor/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
     let cargo_src = std::fs::read_to_string(&cargo_path).unwrap();
     for dep in DOCUMENTED_DEPS {
         assert!(
@@ -143,7 +137,10 @@ fn editor_plugin_trait_exists() {
 #[test]
 fn undo_redo_stack_exists() {
     let stack = gdeditor::undo_redo::UndoRedoManager::new(100);
-    assert!(!stack.can_undo(), "fresh undo stack should have nothing to undo");
+    assert!(
+        !stack.can_undo(),
+        "fresh undo stack should have nothing to undo"
+    );
 }
 
 #[test]
@@ -245,12 +242,31 @@ fn architecture_doc_exists_and_has_substance() {
         env!("CARGO_MANIFEST_DIR")
     );
     let doc = std::fs::read_to_string(&doc_path).unwrap();
-    assert!(doc.len() > 2000, "architecture doc should be substantial (got {} bytes)", doc.len());
-    assert!(doc.contains("## Architecture Goals"), "doc should contain architecture goals");
-    assert!(doc.contains("## Dependency Graph"), "doc should contain dependency graph");
-    assert!(doc.contains("## Testing Strategy"), "doc should contain testing strategy");
-    assert!(doc.contains("## Current State"), "doc should contain current state");
-    assert!(doc.contains("### Module Inventory"), "doc should contain module inventory");
+    assert!(
+        doc.len() > 2000,
+        "architecture doc should be substantial (got {} bytes)",
+        doc.len()
+    );
+    assert!(
+        doc.contains("## Architecture Goals"),
+        "doc should contain architecture goals"
+    );
+    assert!(
+        doc.contains("## Dependency Graph"),
+        "doc should contain dependency graph"
+    );
+    assert!(
+        doc.contains("## Testing Strategy"),
+        "doc should contain testing strategy"
+    );
+    assert!(
+        doc.contains("## Current State"),
+        "doc should contain current state"
+    );
+    assert!(
+        doc.contains("### Module Inventory"),
+        "doc should contain module inventory"
+    );
 }
 
 // ===========================================================================
@@ -313,10 +329,7 @@ fn architecture_doc_defines_deferred_scope() {
     );
 
     // Must list at least 5 deferred items with reasons
-    let deferred_markers = &[
-        "Reason Deferred",
-        "Prerequisite",
-    ];
+    let deferred_markers = &["Reason Deferred", "Prerequisite"];
     for marker in deferred_markers {
         assert!(
             doc.contains(marker),

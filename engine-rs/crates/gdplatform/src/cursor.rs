@@ -289,7 +289,10 @@ mod tests {
     #[test]
     fn cursor_shape_from_u8_valid() {
         for i in 0..17u8 {
-            assert!(CursorShape::from_u8(i).is_some(), "shape {i} should be valid");
+            assert!(
+                CursorShape::from_u8(i).is_some(),
+                "shape {i} should be valid"
+            );
         }
     }
 

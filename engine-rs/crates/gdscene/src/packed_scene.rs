@@ -821,10 +821,7 @@ where
 ///
 /// This matches Godot's behavior where the first Camera3D entering the
 /// viewport becomes the active camera.
-fn auto_assign_current_camera(
-    tree: &mut crate::scene_tree::SceneTree,
-    root_id: NodeId,
-) {
+fn auto_assign_current_camera(tree: &mut crate::scene_tree::SceneTree, root_id: NodeId) {
     let mut subtree = Vec::new();
     tree.collect_subtree_top_down(root_id, &mut subtree);
 
@@ -2448,7 +2445,11 @@ fov = 70.0
         tree.collect_subtree_top_down(scene_root, &mut subtree);
         let cam_id = subtree
             .iter()
-            .find(|&&nid| tree.get_node(nid).map(|n| n.class_name() == "Camera3D").unwrap_or(false))
+            .find(|&&nid| {
+                tree.get_node(nid)
+                    .map(|n| n.class_name() == "Camera3D")
+                    .unwrap_or(false)
+            })
             .copied()
             .expect("Camera3D should exist");
 
@@ -2485,12 +2486,20 @@ fov = 90.0
 
         let cam_a = subtree
             .iter()
-            .find(|&&nid| tree.get_node(nid).map(|n| n.name() == "CamA").unwrap_or(false))
+            .find(|&&nid| {
+                tree.get_node(nid)
+                    .map(|n| n.name() == "CamA")
+                    .unwrap_or(false)
+            })
             .copied()
             .expect("CamA");
         let cam_b = subtree
             .iter()
-            .find(|&&nid| tree.get_node(nid).map(|n| n.name() == "CamB").unwrap_or(false))
+            .find(|&&nid| {
+                tree.get_node(nid)
+                    .map(|n| n.name() == "CamB")
+                    .unwrap_or(false)
+            })
             .copied()
             .expect("CamB");
 

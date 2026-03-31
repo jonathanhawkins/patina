@@ -16,7 +16,7 @@
 use gdcore::math::Color;
 use gdrender2d::renderer::FrameBuffer;
 use gdserver3d::environment::{BackgroundMode, Environment3D};
-use gdserver3d::sky::{SkyMaterial, ProceduralSkyMaterial, PhysicalSkyMaterial};
+use gdserver3d::sky::{PhysicalSkyMaterial, ProceduralSkyMaterial, SkyMaterial};
 
 /// Renders an environment preview into a framebuffer.
 ///
@@ -269,7 +269,10 @@ impl EnvironmentPreviewInfo {
         let fog_description = if env.fog_enabled {
             Some(format!(
                 "Density: {:.3}, Color: ({:.2}, {:.2}, {:.2})",
-                env.fog_density, env.fog_light_color.r, env.fog_light_color.g, env.fog_light_color.b
+                env.fog_density,
+                env.fog_light_color.r,
+                env.fog_light_color.g,
+                env.fog_light_color.b
             ))
         } else {
             None
@@ -277,7 +280,9 @@ impl EnvironmentPreviewInfo {
 
         let ambient_description = match env.ambient_source {
             AmbientSource::Disabled => "Disabled".to_string(),
-            AmbientSource::Background => format!("From Background (energy: {:.2})", env.ambient_energy),
+            AmbientSource::Background => {
+                format!("From Background (energy: {:.2})", env.ambient_energy)
+            }
             AmbientSource::Color => format!(
                 "Color ({:.2}, {:.2}, {:.2}), energy: {:.2}",
                 env.ambient_color.r, env.ambient_color.g, env.ambient_color.b, env.ambient_energy
@@ -384,7 +389,11 @@ mod tests {
         // With black background and white fog at 0.5 density, pixels should be ~0.5 gray
         // (skip the ambient indicator area)
         let mid = fb.pixels[0];
-        assert!((mid.r - 0.5).abs() < 0.01, "fog should tint to ~0.5, got {}", mid.r);
+        assert!(
+            (mid.r - 0.5).abs() < 0.01,
+            "fog should tint to ~0.5, got {}",
+            mid.r
+        );
     }
 
     #[test]
@@ -450,7 +459,11 @@ mod tests {
         };
         let fb = render_environment_preview(&env, 32, 32);
         // Should produce non-black pixels
-        let nonblack = fb.pixels.iter().filter(|c| c.r > 0.01 || c.g > 0.01 || c.b > 0.01).count();
+        let nonblack = fb
+            .pixels
+            .iter()
+            .filter(|c| c.r > 0.01 || c.g > 0.01 || c.b > 0.01)
+            .count();
         assert!(nonblack > 0, "physical sky should produce visible pixels");
     }
 
@@ -467,8 +480,15 @@ mod tests {
             ..Default::default()
         };
         let fb = render_environment_preview(&env, 32, 32);
-        let nonblack = fb.pixels.iter().filter(|c| c.r > 0.01 || c.g > 0.01 || c.b > 0.01).count();
-        assert!(nonblack > 0, "panoramic sky should produce visible placeholder");
+        let nonblack = fb
+            .pixels
+            .iter()
+            .filter(|c| c.r > 0.01 || c.g > 0.01 || c.b > 0.01)
+            .count();
+        assert!(
+            nonblack > 0,
+            "panoramic sky should produce visible placeholder"
+        );
     }
 
     #[test]

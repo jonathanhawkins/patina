@@ -169,8 +169,7 @@ fn audit_doc_describes_output_marker() {
 fn audit_doc_disclaims_godot_export_parity() {
     let doc = read_audit_doc();
     assert!(
-        doc.contains("Godot export preset/template parity")
-            || doc.contains("full Godot export"),
+        doc.contains("Godot export preset/template parity") || doc.contains("full Godot export"),
         "audit doc must disclaim Godot export parity"
     );
 }
@@ -179,8 +178,7 @@ fn audit_doc_disclaims_godot_export_parity() {
 fn audit_doc_disclaims_native_binary_generation() {
     let doc = read_audit_doc();
     assert!(
-        doc.contains("Native binary generation")
-            || doc.contains("native binary"),
+        doc.contains("Native binary generation") || doc.contains("native binary"),
         "audit doc must disclaim native binary generation"
     );
 }
@@ -189,8 +187,7 @@ fn audit_doc_disclaims_native_binary_generation() {
 fn audit_doc_disclaims_app_bundle_creation() {
     let doc = read_audit_doc();
     assert!(
-        doc.contains("App bundle creation")
-            || doc.contains("app bundle"),
+        doc.contains("App bundle creation") || doc.contains("app bundle"),
         "audit doc must disclaim app bundle creation"
     );
 }

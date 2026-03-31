@@ -81,9 +81,11 @@ mod tests {
 
     /// A unit quaternion from axis-angle.
     fn arb_unit_quat() -> impl Strategy<Value = Quaternion> {
-        (arb_nonzero_vec3(), -std::f32::consts::PI..std::f32::consts::PI).prop_map(
-            |(axis, angle)| Quaternion::from_axis_angle(axis.normalized(), angle),
+        (
+            arb_nonzero_vec3(),
+            -std::f32::consts::PI..std::f32::consts::PI,
         )
+            .prop_map(|(axis, angle)| Quaternion::from_axis_angle(axis.normalized(), angle))
     }
 
     fn arb_color() -> impl Strategy<Value = Color> {
@@ -96,8 +98,7 @@ mod tests {
     }
 
     fn arb_positive_size_vec3() -> impl Strategy<Value = Vector3> {
-        (0.1f32..50.0, 0.1f32..50.0, 0.1f32..50.0)
-            .prop_map(|(x, y, z)| Vector3::new(x, y, z))
+        (0.1f32..50.0, 0.1f32..50.0, 0.1f32..50.0).prop_map(|(x, y, z)| Vector3::new(x, y, z))
     }
 
     // -----------------------------------------------------------------------

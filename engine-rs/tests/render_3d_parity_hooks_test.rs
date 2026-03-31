@@ -221,7 +221,10 @@ fn parity_report_empty_scene_not_functional() {
     let (snapshot, _) = adapter.render_frame(&tree);
 
     let report = snapshot.parity_report();
-    assert!(!report.is_functional(), "empty scene should not be functional");
+    assert!(
+        !report.is_functional(),
+        "empty scene should not be functional"
+    );
     assert_eq!(report.mesh_count, 0);
     assert_eq!(report.light_count, 0);
     assert_eq!(report.coverage, 0.0);
@@ -343,8 +346,14 @@ fn software_renderer_wireframe_coverage_measurable() {
     let coverage = visible as f64 / total as f64;
 
     assert!(visible > 0, "wireframe must produce visible pixels");
-    assert!(coverage < 0.5, "wireframe should not fill more than half the viewport");
-    assert!(coverage > 0.001, "wireframe coverage should be measurable (> 0.1%)");
+    assert!(
+        coverage < 0.5,
+        "wireframe should not fill more than half the viewport"
+    );
+    assert!(
+        coverage > 0.001,
+        "wireframe coverage should be measurable (> 0.1%)"
+    );
 }
 
 #[test]
@@ -439,7 +448,10 @@ fn plane_mesh_renders_visible_wireframe() {
 
     let vp = Viewport3D::new(64, 64);
     let fb = capture_frame_3d(&mut renderer, &vp);
-    assert!(count_visible_pixels(&fb) > 0, "plane should produce wireframe pixels");
+    assert!(
+        count_visible_pixels(&fb) > 0,
+        "plane should produce wireframe pixels"
+    );
 }
 
 // ===========================================================================
@@ -453,7 +465,11 @@ fn coverage_bounded_zero_to_one() {
     let (snapshot, _) = adapter.render_frame(&tree);
 
     let c = snapshot.coverage();
-    assert!(c >= 0.0 && c <= 1.0, "coverage must be in [0, 1], got {}", c);
+    assert!(
+        c >= 0.0 && c <= 1.0,
+        "coverage must be in [0, 1], got {}",
+        c
+    );
 }
 
 #[test]

@@ -408,8 +408,7 @@ impl GPUParticles3D {
                     for _ in 0..self.amount {
                         self.total_emitted += 1;
                         let seed = (self.total_emitted & 0xFFFF_FFFF) as u32;
-                        self.active_particles
-                            .push(self.emit_particle(seed.max(1)));
+                        self.active_particles.push(self.emit_particle(seed.max(1)));
                     }
                     if self.one_shot {
                         self.emitting = false;
@@ -423,8 +422,7 @@ impl GPUParticles3D {
                     self.time_accumulator -= emit_interval;
                     self.total_emitted += 1;
                     let seed = (self.total_emitted & 0xFFFF_FFFF) as u32;
-                    self.active_particles
-                        .push(self.emit_particle(seed.max(1)));
+                    self.active_particles.push(self.emit_particle(seed.max(1)));
                 }
 
                 if self.one_shot && self.total_emitted >= self.amount as u64 {
@@ -606,10 +604,7 @@ mod tests {
 
         let p = emitter.emit_particle(1);
         let speed = p.velocity.length();
-        assert!(
-            approx_eq(speed, 50.0),
-            "Expected speed ~50, got {speed}"
-        );
+        assert!(approx_eq(speed, 50.0), "Expected speed ~50, got {speed}");
     }
 
     // -- Particle3D age/death ---
@@ -674,7 +669,10 @@ mod tests {
         assert_eq!(particles.particle_count(), 0);
 
         particles.step(0.3);
-        assert!(particles.particle_count() > 0, "Should have emitted particles");
+        assert!(
+            particles.particle_count() > 0,
+            "Should have emitted particles"
+        );
     }
 
     #[test]
@@ -692,7 +690,10 @@ mod tests {
 
         assert!(particles.particle_count() > 0);
         let p = &particles.active_particles[0];
-        assert!(p.velocity.y < 0.0, "Gravity should push velocity negative Y");
+        assert!(
+            p.velocity.y < 0.0,
+            "Gravity should push velocity negative Y"
+        );
     }
 
     #[test]

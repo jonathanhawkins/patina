@@ -562,12 +562,24 @@ action_name = StringName("interact")
     );
 
     assert_eq!(res.class_name, "Environment3D");
-    assert!(matches!(res.get_property("rotation"), Some(Variant::Quaternion(_))));
-    assert!(matches!(res.get_property("transform"), Some(Variant::Transform3D(_))));
+    assert!(matches!(
+        res.get_property("rotation"),
+        Some(Variant::Quaternion(_))
+    ));
+    assert!(matches!(
+        res.get_property("transform"),
+        Some(Variant::Transform3D(_))
+    ));
     assert!(matches!(res.get_property("bounds"), Some(Variant::Aabb(_))));
-    assert!(matches!(res.get_property("ground_plane"), Some(Variant::Plane(_))));
+    assert!(matches!(
+        res.get_property("ground_plane"),
+        Some(Variant::Plane(_))
+    ));
     assert!(matches!(res.get_property("basis"), Some(Variant::Basis(_))));
-    assert!(matches!(res.get_property("action_name"), Some(Variant::StringName(_))));
+    assert!(matches!(
+        res.get_property("action_name"),
+        Some(Variant::StringName(_))
+    ));
 }
 
 #[test]
@@ -583,7 +595,10 @@ shape = SubResource("shape_1")
 "#,
     );
 
-    let sub = res.subresources.get("shape_1").expect("should have sub-resource");
+    let sub = res
+        .subresources
+        .get("shape_1")
+        .expect("should have sub-resource");
     assert_eq!(sub.class_name, "CollisionShape3D");
     match sub.get_property("half_extents") {
         Some(Variant::Aabb(a)) => {
@@ -606,7 +621,10 @@ fn saver_formats_quaternion_correctly() {
     );
     let saver = TresSaver::new();
     let output = saver.save_to_string(&r).unwrap();
-    assert!(output.contains("q = Quaternion(0, 0, 0, 1)"), "got: {output}");
+    assert!(
+        output.contains("q = Quaternion(0, 0, 0, 1)"),
+        "got: {output}"
+    );
 }
 
 #[test]
@@ -643,7 +661,10 @@ fn saver_formats_aabb_correctly() {
     );
     let saver = TresSaver::new();
     let output = saver.save_to_string(&r).unwrap();
-    assert!(output.contains("a = AABB(1, 2, 3, 4, 5, 6)"), "got: {output}");
+    assert!(
+        output.contains("a = AABB(1, 2, 3, 4, 5, 6)"),
+        "got: {output}"
+    );
 }
 
 #[test]
@@ -685,7 +706,10 @@ fn saver_formats_rect2_correctly() {
     );
     let saver = TresSaver::new();
     let output = saver.save_to_string(&r).unwrap();
-    assert!(output.contains("r = Rect2(0, 0, 100, 200)"), "got: {output}");
+    assert!(
+        output.contains("r = Rect2(0, 0, 100, 200)"),
+        "got: {output}"
+    );
 }
 
 #[test]
@@ -785,7 +809,10 @@ raw = PackedByteArray()
     );
     match res.get_property("raw") {
         Some(Variant::Array(arr)) => {
-            assert!(arr.is_empty(), "empty PackedByteArray should produce empty array");
+            assert!(
+                arr.is_empty(),
+                "empty PackedByteArray should produce empty array"
+            );
         }
         other => panic!("expected empty Array, got {other:?}"),
     }
@@ -962,7 +989,10 @@ fn load_style_box_flat_fixture() {
         other => panic!("expected Color for bg_color, got {other:?}"),
     }
     // border_width_left = 2
-    assert_eq!(res.get_property("border_width_left"), Some(&Variant::Int(2)));
+    assert_eq!(
+        res.get_property("border_width_left"),
+        Some(&Variant::Int(2))
+    );
     // corner_radius_top_left = 4
     assert_eq!(
         res.get_property("corner_radius_top_left"),
@@ -979,10 +1009,7 @@ fn load_environment_fixture() {
     .unwrap();
     let res = parse_tres(&content);
     assert_eq!(res.class_name, "Environment");
-    assert_eq!(
-        res.get_property("background_mode"),
-        Some(&Variant::Int(0))
-    );
+    assert_eq!(res.get_property("background_mode"), Some(&Variant::Int(0)));
 }
 
 #[test]
@@ -1049,8 +1076,7 @@ fn load_theme_fixture() {
 #[test]
 fn load_theme_with_subresources() {
     let content = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../fixtures/resources/theme.tres"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/resources/theme.tres"),
     )
     .unwrap();
     let res = parse_tres(&content);
@@ -1089,7 +1115,10 @@ fn load_resource_with_ext_refs() {
         res.ext_resources.len()
     );
     // First ext_resource should be Texture2D
-    let tex = res.ext_resources.get("1").expect("should have ext_resource id=1");
+    let tex = res
+        .ext_resources
+        .get("1")
+        .expect("should have ext_resource id=1");
     assert_eq!(tex.resource_type, "Texture2D");
     assert_eq!(tex.path, "res://icon.png");
     // Should have inline sub-resource

@@ -15,8 +15,7 @@ use gdscript_interop::tokenizer::tokenize;
 
 /// Arbitrary strings including non-ASCII, control chars, and unicode.
 fn random_string() -> impl Strategy<Value = String> {
-    prop::string::string_regex(".{0,200}")
-        .unwrap()
+    prop::string::string_regex(".{0,200}").unwrap()
 }
 
 /// ASCII-only random strings (more likely to hit keyword/operator paths).
@@ -31,36 +30,67 @@ fn random_ascii() -> impl Strategy<Value = String> {
 
 /// GDScript keywords and built-in names.
 const KEYWORDS: &[&str] = &[
-    "var", "func", "if", "else", "elif", "while", "for", "in", "return",
-    "class", "extends", "signal", "enum", "match", "pass", "break",
-    "continue", "const", "static", "export", "onready", "tool", "true",
-    "false", "null", "self", "not", "and", "or", "is", "as", "yield",
-    "await", "class_name", "preload", "super", "void",
+    "var",
+    "func",
+    "if",
+    "else",
+    "elif",
+    "while",
+    "for",
+    "in",
+    "return",
+    "class",
+    "extends",
+    "signal",
+    "enum",
+    "match",
+    "pass",
+    "break",
+    "continue",
+    "const",
+    "static",
+    "export",
+    "onready",
+    "tool",
+    "true",
+    "false",
+    "null",
+    "self",
+    "not",
+    "and",
+    "or",
+    "is",
+    "as",
+    "yield",
+    "await",
+    "class_name",
+    "preload",
+    "super",
+    "void",
 ];
 
 const OPERATORS: &[&str] = &[
-    "+", "-", "*", "/", "%", "**", "=", "==", "!=", "<", ">", "<=", ">=",
-    "+=", "-=", "*=", "/=", "->", ".", ",", ":", ";", "(", ")", "[", "]",
-    "{", "}", "@", "$", "~", "&", "|", "^", "<<", ">>", "!",
+    "+", "-", "*", "/", "%", "**", "=", "==", "!=", "<", ">", "<=", ">=", "+=", "-=", "*=", "/=",
+    "->", ".", ",", ":", ";", "(", ")", "[", "]", "{", "}", "@", "$", "~", "&", "|", "^", "<<",
+    ">>", "!",
 ];
 
 /// Generates structured GDScript-like fragments with proper indentation.
 fn gdscript_fragment() -> impl Strategy<Value = String> {
-    prop::collection::vec(gdscript_line(), 1..20)
-        .prop_map(|lines| lines.join("\n"))
+    prop::collection::vec(gdscript_line(), 1..20).prop_map(|lines| lines.join("\n"))
 }
 
 fn gdscript_line() -> impl Strategy<Value = String> {
     prop_oneof![
         // Variable declaration
-        (gdscript_identifier(), gdscript_expr()).prop_map(|(name, expr)| {
-            format!("var {} = {}", name, expr)
-        }),
+        (gdscript_identifier(), gdscript_expr())
+            .prop_map(|(name, expr)| { format!("var {} = {}", name, expr) }),
         // Function declaration
-        (gdscript_identifier(), prop::collection::vec(gdscript_identifier(), 0..4))
-            .prop_map(|(name, params)| {
-                format!("func {}({}):", name, params.join(", "))
-            }),
+        (
+            gdscript_identifier(),
+            prop::collection::vec(gdscript_identifier(), 0..4)
+        )
+            .prop_map(|(name, params)| { format!("func {}({}):", name, params.join(", ")) }),
         // If statement
         gdscript_expr().prop_map(|expr| format!("if {}:", expr)),
         // Return statement
@@ -100,14 +130,17 @@ fn gdscript_expr() -> impl Strategy<Value = String> {
         // Identifier
         gdscript_identifier(),
         // Binary expression
-        (gdscript_identifier(), prop::sample::select(OPERATORS), gdscript_identifier())
+        (
+            gdscript_identifier(),
+            prop::sample::select(OPERATORS),
+            gdscript_identifier()
+        )
             .prop_map(|(a, op, b)| format!("{} {} {}", a, op, b)),
         // Function call
         (gdscript_identifier(), gdscript_identifier())
             .prop_map(|(func, arg)| format!("{}({})", func, arg)),
         // Boolean/null
-        prop_oneof![Just("true"), Just("false"), Just("null")]
-            .prop_map(|s| s.to_string()),
+        prop_oneof![Just("true"), Just("false"), Just("null")].prop_map(|s| s.to_string()),
         // Array literal
         prop::collection::vec((-100i64..100).prop_map(|n| n.to_string()), 0..5)
             .prop_map(|items| format!("[{}]", items.join(", "))),

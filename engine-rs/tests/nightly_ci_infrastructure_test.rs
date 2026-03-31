@@ -19,7 +19,10 @@ fn full_nightly_pipeline_green() {
 
     // All platforms build successfully.
     for platform in Platform::all() {
-        runner.record_build(*platform, BuildResult::success_with_artifact(45.0, 15_000_000));
+        runner.record_build(
+            *platform,
+            BuildResult::success_with_artifact(45.0, 15_000_000),
+        );
     }
 
     // All test suites pass.
@@ -107,7 +110,10 @@ fn nightly_with_test_failures() {
             20.0,
             vec![
                 ("test_scene_load".into(), "timeout after 30s".into()),
-                ("test_physics_step".into(), "assertion failed: dt > 0".into()),
+                (
+                    "test_physics_step".into(),
+                    "assertion failed: dt > 0".into(),
+                ),
             ],
         ),
     );
@@ -135,7 +141,11 @@ fn platform_triples_are_valid() {
     for p in Platform::all() {
         let triple = p.triple();
         assert!(!triple.is_empty());
-        assert!(triple.contains('-'), "Triple should contain dashes: {}", triple);
+        assert!(
+            triple.contains('-'),
+            "Triple should contain dashes: {}",
+            triple
+        );
     }
 }
 
@@ -323,11 +333,26 @@ fn realistic_mixed_nightly() {
     runner.start(0.0);
 
     // Builds: 4 pass, 1 fails (wasm)
-    runner.record_build(Platform::LinuxX86_64, BuildResult::success_with_artifact(45.0, 20_000_000));
-    runner.record_build(Platform::MacosX86_64, BuildResult::success_with_artifact(50.0, 18_000_000));
-    runner.record_build(Platform::MacosAarch64, BuildResult::success_with_artifact(42.0, 17_000_000));
-    runner.record_build(Platform::WindowsX86_64, BuildResult::success_with_artifact(55.0, 22_000_000));
-    runner.record_build(Platform::Wasm32, BuildResult::failure(30.0, "wasm-bindgen version mismatch"));
+    runner.record_build(
+        Platform::LinuxX86_64,
+        BuildResult::success_with_artifact(45.0, 20_000_000),
+    );
+    runner.record_build(
+        Platform::MacosX86_64,
+        BuildResult::success_with_artifact(50.0, 18_000_000),
+    );
+    runner.record_build(
+        Platform::MacosAarch64,
+        BuildResult::success_with_artifact(42.0, 17_000_000),
+    );
+    runner.record_build(
+        Platform::WindowsX86_64,
+        BuildResult::success_with_artifact(55.0, 22_000_000),
+    );
+    runner.record_build(
+        Platform::Wasm32,
+        BuildResult::failure(30.0, "wasm-bindgen version mismatch"),
+    );
 
     // Tests: most pass, one suite has failures
     runner.record_test(TestSuite::Unit, TestResult::passed(200, 5, 8.0));
@@ -341,7 +366,10 @@ fn realistic_mixed_nightly() {
             1,
             0,
             45.0,
-            vec![("bench_render_grid".into(), "regression: 2.3x slower than baseline".into())],
+            vec![(
+                "bench_render_grid".into(),
+                "regression: 2.3x slower than baseline".into(),
+            )],
         ),
     );
     runner.record_test(TestSuite::Fuzz, TestResult::passed(1000, 0, 120.0));

@@ -5,8 +5,8 @@
 //! `PckArchive::from_bytes`, and `PckResourceLoader::from_bytes` never panic on
 //! arbitrary input, and that well-formed inputs parse correctly.
 
-use gdresource::res_loader::{is_res_binary, load_res_binary, parse_res_header, RES_MAGIC};
 use gdresource::pck::{PckArchive, PckResourceLoader, PCK_MAGIC};
+use gdresource::res_loader::{is_res_binary, load_res_binary, parse_res_header, RES_MAGIC};
 use proptest::prelude::*;
 
 // ===========================================================================
@@ -372,7 +372,10 @@ fn pck_archive_empty() {
 fn pck_loader_extracts_files() {
     let data = build_pck_archive(&[("res://icon.png", b"FAKE_PNG_DATA")]);
     let loader = PckResourceLoader::from_bytes(data).unwrap();
-    assert_eq!(loader.extract_raw("res://icon.png").unwrap(), b"FAKE_PNG_DATA");
+    assert_eq!(
+        loader.extract_raw("res://icon.png").unwrap(),
+        b"FAKE_PNG_DATA"
+    );
     assert_eq!(loader.file_count(), 1);
 }
 
@@ -420,7 +423,9 @@ fn pck_file_with_very_long_path() {
 #[test]
 fn load_res_binary_always_returns_unsupported_for_valid_data() {
     let data = build_res_header(false, false, 4, 3, 5, b"AnimationLibrary");
-    let err = load_res_binary(&data, "res://lib.res").unwrap_err().to_string();
+    let err = load_res_binary(&data, "res://lib.res")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("not yet supported"));
     assert!(err.contains("AnimationLibrary"));
 }

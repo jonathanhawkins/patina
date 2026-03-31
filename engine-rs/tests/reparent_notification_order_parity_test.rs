@@ -12,14 +12,14 @@
 //! Acceptance: focused tests prove enter_tree/exit_tree/ready ordering when a
 //! node is reparented at runtime, with upstream Godot treated as the oracle.
 
-use gdscene::node::{Node, NodeId};
-use gdscene::scene_tree::SceneTree;
-use gdscene::LifecycleManager;
 use gdobject::notification::{
     NOTIFICATION_CHILD_ORDER_CHANGED, NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE,
     NOTIFICATION_MOVED_IN_PARENT, NOTIFICATION_PARENTED, NOTIFICATION_READY,
     NOTIFICATION_UNPARENTED,
 };
+use gdscene::node::{Node, NodeId};
+use gdscene::scene_tree::SceneTree;
+use gdscene::LifecycleManager;
 
 // ===========================================================================
 // Helpers
@@ -52,9 +52,15 @@ fn build_reparent_tree() -> (SceneTree, NodeId, NodeId, NodeId, NodeId) {
 
     // Clear notification logs so we only see reparent notifications.
     tree.get_node_mut(root).unwrap().clear_notification_log();
-    tree.get_node_mut(parent_a_id).unwrap().clear_notification_log();
-    tree.get_node_mut(parent_b_id).unwrap().clear_notification_log();
-    tree.get_node_mut(child_id).unwrap().clear_notification_log();
+    tree.get_node_mut(parent_a_id)
+        .unwrap()
+        .clear_notification_log();
+    tree.get_node_mut(parent_b_id)
+        .unwrap()
+        .clear_notification_log();
+    tree.get_node_mut(child_id)
+        .unwrap()
+        .clear_notification_log();
 
     (tree, root, parent_a_id, parent_b_id, child_id)
 }
@@ -86,7 +92,10 @@ fn reparent_full_notification_sequence_on_child() {
     assert_eq!(log[0], NOTIFICATION_EXIT_TREE, "1st must be EXIT_TREE");
     assert_eq!(log[1], NOTIFICATION_UNPARENTED, "2nd must be UNPARENTED");
     assert_eq!(log[2], NOTIFICATION_PARENTED, "3rd must be PARENTED");
-    assert_eq!(log[3], NOTIFICATION_MOVED_IN_PARENT, "4th must be MOVED_IN_PARENT");
+    assert_eq!(
+        log[3], NOTIFICATION_MOVED_IN_PARENT,
+        "4th must be MOVED_IN_PARENT"
+    );
     assert_eq!(log[4], NOTIFICATION_ENTER_TREE, "5th must be ENTER_TREE");
     assert_eq!(log[5], NOTIFICATION_READY, "6th must be READY");
 }
@@ -106,7 +115,10 @@ fn reparent_exit_tree_before_unparented() {
     let unparent_pos = log.iter().position(|n| *n == NOTIFICATION_UNPARENTED);
 
     assert!(exit_pos.is_some(), "EXIT_TREE must fire during reparent");
-    assert!(unparent_pos.is_some(), "UNPARENTED must fire during reparent");
+    assert!(
+        unparent_pos.is_some(),
+        "UNPARENTED must fire during reparent"
+    );
     assert!(
         exit_pos.unwrap() < unparent_pos.unwrap(),
         "EXIT_TREE (pos={}) must fire before UNPARENTED (pos={})",
@@ -174,7 +186,10 @@ fn reparent_node_state_restored() {
     tree.reparent(child, parent_b).unwrap();
 
     let node = tree.get_node(child).unwrap();
-    assert!(node.is_inside_tree(), "node must be inside_tree after reparent");
+    assert!(
+        node.is_inside_tree(),
+        "node must be inside_tree after reparent"
+    );
     assert!(node.is_ready(), "node must be ready after reparent");
     assert_eq!(
         node.parent(),
@@ -301,7 +316,10 @@ fn reparent_event_trace_global_ordering() {
     assert!(unparent_pos.is_some(), "trace must contain UNPARENTED");
     assert!(parent_pos.is_some(), "trace must contain PARENTED");
     assert!(moved_pos.is_some(), "trace must contain MOVED_IN_PARENT");
-    assert!(child_order_pos.is_some(), "trace must contain CHILD_ORDER_CHANGED");
+    assert!(
+        child_order_pos.is_some(),
+        "trace must contain CHILD_ORDER_CHANGED"
+    );
     assert!(enter_pos.is_some(), "trace must contain ENTER_TREE");
     assert!(ready_pos.is_some(), "trace must contain READY");
 
@@ -316,8 +334,14 @@ fn reparent_event_trace_global_ordering() {
     assert!(e < u, "EXIT_TREE ({e}) before UNPARENTED ({u})");
     assert!(u < p, "UNPARENTED ({u}) before PARENTED ({p})");
     assert!(p < m, "PARENTED ({p}) before MOVED_IN_PARENT ({m})");
-    assert!(m < co, "MOVED_IN_PARENT ({m}) before CHILD_ORDER_CHANGED ({co})");
-    assert!(co < en, "CHILD_ORDER_CHANGED ({co}) before ENTER_TREE ({en})");
+    assert!(
+        m < co,
+        "MOVED_IN_PARENT ({m}) before CHILD_ORDER_CHANGED ({co})"
+    );
+    assert!(
+        co < en,
+        "CHILD_ORDER_CHANGED ({co}) before ENTER_TREE ({en})"
+    );
     assert!(en < r, "ENTER_TREE ({en}) before READY ({r})");
 }
 
@@ -416,7 +440,10 @@ fn reparent_to_nonexistent_parent_is_error() {
     tree.remove_node(tmp).unwrap();
 
     let result = tree.reparent(child, tmp);
-    assert!(result.is_err(), "reparenting to non-existent parent must fail");
+    assert!(
+        result.is_err(),
+        "reparenting to non-existent parent must fail"
+    );
 }
 
 // ===========================================================================
@@ -466,7 +493,11 @@ fn reparent_double_roundtrip_lifecycle() {
 
     let log = tree.get_node(child).unwrap().notification_log().to_vec();
     // Must see the full sequence again.
-    assert!(log.len() >= 6, "second reparent must produce full lifecycle, got {:?}", log);
+    assert!(
+        log.len() >= 6,
+        "second reparent must produce full lifecycle, got {:?}",
+        log
+    );
     assert_eq!(log[0], NOTIFICATION_EXIT_TREE);
     assert_eq!(log[1], NOTIFICATION_UNPARENTED);
     assert_eq!(log[2], NOTIFICATION_PARENTED);
@@ -508,22 +539,42 @@ fn reparent_deep_subtree_trace_ordering() {
         .collect();
 
     // EXIT_TREE must be bottom-up: Leaf before Mid.
-    let leaf_exit = tagged.iter().position(|t| t.0 == "Leaf" && t.1 == "EXIT_TREE");
-    let mid_exit = tagged.iter().position(|t| t.0 == "Mid" && t.1 == "EXIT_TREE");
-    assert!(leaf_exit.unwrap() < mid_exit.unwrap(), "Leaf EXIT_TREE before Mid EXIT_TREE");
+    let leaf_exit = tagged
+        .iter()
+        .position(|t| t.0 == "Leaf" && t.1 == "EXIT_TREE");
+    let mid_exit = tagged
+        .iter()
+        .position(|t| t.0 == "Mid" && t.1 == "EXIT_TREE");
+    assert!(
+        leaf_exit.unwrap() < mid_exit.unwrap(),
+        "Leaf EXIT_TREE before Mid EXIT_TREE"
+    );
 
     // ENTER_TREE must be top-down: Mid before Leaf.
-    let mid_enter = tagged.iter().position(|t| t.0 == "Mid" && t.1 == "ENTER_TREE");
-    let leaf_enter = tagged.iter().position(|t| t.0 == "Leaf" && t.1 == "ENTER_TREE");
-    assert!(mid_enter.unwrap() < leaf_enter.unwrap(), "Mid ENTER_TREE before Leaf ENTER_TREE");
+    let mid_enter = tagged
+        .iter()
+        .position(|t| t.0 == "Mid" && t.1 == "ENTER_TREE");
+    let leaf_enter = tagged
+        .iter()
+        .position(|t| t.0 == "Leaf" && t.1 == "ENTER_TREE");
+    assert!(
+        mid_enter.unwrap() < leaf_enter.unwrap(),
+        "Mid ENTER_TREE before Leaf ENTER_TREE"
+    );
 
     // READY must be bottom-up: Leaf before Mid.
     let leaf_ready = tagged.iter().position(|t| t.0 == "Leaf" && t.1 == "READY");
     let mid_ready = tagged.iter().position(|t| t.0 == "Mid" && t.1 == "READY");
-    assert!(leaf_ready.unwrap() < mid_ready.unwrap(), "Leaf READY before Mid READY");
+    assert!(
+        leaf_ready.unwrap() < mid_ready.unwrap(),
+        "Leaf READY before Mid READY"
+    );
 
     // All EXIT_TREEs finish before any PARENTED/ENTER_TREE.
-    assert!(mid_exit.unwrap() < mid_enter.unwrap(), "all exits before enters");
+    assert!(
+        mid_exit.unwrap() < mid_enter.unwrap(),
+        "all exits before enters"
+    );
 }
 
 // ===========================================================================
@@ -650,6 +701,9 @@ fn reparent_notification_parity_report() {
         let mark = if *pass { "PASS" } else { "FAIL" };
         println!("  [{mark}] {item}");
     }
-    println!("\nParity: {matched}/{total} ({:.1}%)", matched as f64 / total as f64 * 100.0);
+    println!(
+        "\nParity: {matched}/{total} ({:.1}%)",
+        matched as f64 / total as f64 * 100.0
+    );
     assert_eq!(matched, total, "all contract items must pass");
 }

@@ -81,10 +81,7 @@ fn api_filesystem_tree_returns_entries() {
 #[test]
 fn api_filesystem_tree_nonexistent_root() {
     let (handle, port) = make_server();
-    let resp = http_get(
-        port,
-        "/api/filesystem/tree?root=nonexistent_dir_xyz_42",
-    );
+    let resp = http_get(port, "/api/filesystem/tree?root=nonexistent_dir_xyz_42");
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
     assert!(v["error"].is_string());
@@ -229,7 +226,10 @@ fn editor_filesystem_skips_hidden_dirs() {
 
     let mut fs = EditorFileSystem::new(dir.path());
     let count = fs.scan().unwrap();
-    assert_eq!(count, 1, "should only find visible.gd, not hidden dir contents");
+    assert_eq!(
+        count, 1,
+        "should only find visible.gd, not hidden dir contents"
+    );
 }
 
 #[test]

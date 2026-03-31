@@ -140,12 +140,8 @@ impl CharacterBody3D {
                     continue;
                 }
 
-                let result = collision::test_collision(
-                    target,
-                    &self.shape,
-                    body.position,
-                    &body.shape,
-                );
+                let result =
+                    collision::test_collision(target, &self.shape, body.position, &body.shape);
 
                 if result.colliding
                     && result.depth > 0.0
@@ -193,12 +189,7 @@ impl CharacterBody3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            let result = collision::test_collision(
-                target,
-                &self.shape,
-                body.position,
-                &body.shape,
-            );
+            let result = collision::test_collision(target, &self.shape, body.position, &body.shape);
             if result.colliding
                 && result.depth > 0.0
                 && (deepest.is_none() || result.depth > deepest.as_ref().unwrap().depth)
@@ -313,8 +304,7 @@ mod tests {
 
     #[test]
     fn move_and_slide_no_collision() {
-        let mut character =
-            CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
+        let mut character = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
         let bodies: Vec<&PhysicsBody3D> = vec![];
         let result = character.move_and_slide(Vector3::new(10.0, 0.0, 0.0), &bodies);
         assert!((character.position.x - 10.0).abs() < 1e-4);
@@ -341,8 +331,7 @@ mod tests {
 
     #[test]
     fn move_and_slide_slides_along_wall() {
-        let mut character =
-            CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
+        let mut character = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
         // Wall box centered at x=5, half_extents (1, 100, 100) => left edge at x=4
         // Character moves right by 5 => center at x=5 (inside wall box)
         let wall = make_static_wall(5.0);
@@ -356,8 +345,10 @@ mod tests {
 
     #[test]
     fn move_and_slide_detects_ceiling() {
-        let mut character =
-            CharacterBody3D::new(Vector3::new(0.0, -2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        let mut character = CharacterBody3D::new(
+            Vector3::new(0.0, -2.0, 0.0),
+            Shape3D::Sphere { radius: 1.0 },
+        );
         // Ceiling box centered at y=1, half_extents (100, 1, 100) => bottom edge at y=0
         // Character at y=-2, moves up by 2.5 => center at y=0.5 (inside ceiling box)
         let ceiling = make_static_ceiling(1.0);
@@ -370,8 +361,7 @@ mod tests {
 
     #[test]
     fn move_and_slide_respects_collision_mask() {
-        let mut character =
-            CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
+        let mut character = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
         character.collision_mask = 2; // Only scan layer 2
 
         let mut wall = make_static_wall(3.0);
@@ -385,8 +375,7 @@ mod tests {
 
     #[test]
     fn move_and_collide_no_collision() {
-        let mut character =
-            CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
+        let mut character = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
         let bodies: Vec<&PhysicsBody3D> = vec![];
         let result = character.move_and_collide(Vector3::new(5.0, 0.0, 0.0), &bodies);
         assert!(result.is_none());
@@ -395,8 +384,7 @@ mod tests {
 
     #[test]
     fn move_and_collide_stops_at_wall() {
-        let mut character =
-            CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
+        let mut character = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
         // Wall at x=5 with half_extent 1 => left edge at x=4
         // Move right by 5 => center at x=5, inside the wall box
         let wall = make_static_wall(5.0);

@@ -129,8 +129,7 @@ impl JsBridge {
 
     /// Register a stubbed return value for an object.method call.
     pub fn stub_method(&mut self, object: &str, method: &str, value: JsValue) {
-        self.stubs
-            .insert(format!("{}.{}", object, method), value);
+        self.stubs.insert(format!("{}.{}", object, method), value);
     }
 
     /// Call a method on a global JS object (e.g. "document.getElementById").
@@ -397,9 +396,9 @@ impl WebPlatformLayer {
                 Ok(())
             }
             AudioContextState::Running => Ok(()),
-            AudioContextState::Closed => Err(JsError::Exception(
-                "AudioContext is closed".to_string(),
-            )),
+            AudioContextState::Closed => {
+                Err(JsError::Exception("AudioContext is closed".to_string()))
+            }
         }
     }
 
@@ -527,12 +526,18 @@ mod tests {
         assert_eq!(JsValue::Bool(true).to_string(), "true");
         assert_eq!(JsValue::Number(3.14).to_string(), "3.14");
         assert_eq!(JsValue::String("hi".into()).to_string(), "\"hi\"");
-        assert_eq!(JsValue::ArrayBuffer(vec![0; 10]).to_string(), "ArrayBuffer(10)");
+        assert_eq!(
+            JsValue::ArrayBuffer(vec![0; 10]).to_string(),
+            "ArrayBuffer(10)"
+        );
     }
 
     #[test]
     fn js_error_display() {
-        assert_eq!(JsError::NotAvailable.to_string(), "WASM environment not available");
+        assert_eq!(
+            JsError::NotAvailable.to_string(),
+            "WASM environment not available"
+        );
         assert_eq!(
             JsError::Exception("oops".into()).to_string(),
             "JS exception: oops"
@@ -578,7 +583,10 @@ mod tests {
 
     #[test]
     fn audio_context_state_display() {
-        assert_eq!(AudioContextState::Uninitialized.to_string(), "uninitialized");
+        assert_eq!(
+            AudioContextState::Uninitialized.to_string(),
+            "uninitialized"
+        );
         assert_eq!(AudioContextState::Suspended.to_string(), "suspended");
         assert_eq!(AudioContextState::Running.to_string(), "running");
         assert_eq!(AudioContextState::Closed.to_string(), "closed");
@@ -663,10 +671,14 @@ mod tests {
     fn web_platform_download_file_stub() {
         let mut layer = WebPlatformLayer::new();
         layer.js.set_available(true);
-        layer.js.stub_method("URL", "createObjectURL", JsValue::String("blob:...".into()));
-        layer.js.stub_method("document", "createElement", JsValue::Object(
-            JsObjectHandle::new(1, "HTMLAnchorElement"),
-        ));
+        layer
+            .js
+            .stub_method("URL", "createObjectURL", JsValue::String("blob:...".into()));
+        layer.js.stub_method(
+            "document",
+            "createElement",
+            JsValue::Object(JsObjectHandle::new(1, "HTMLAnchorElement")),
+        );
         assert!(layer.download_file("save.dat", &[1, 2, 3]).is_ok());
         assert_eq!(layer.js.call_log().len(), 2);
     }

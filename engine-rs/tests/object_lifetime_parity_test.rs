@@ -7,11 +7,11 @@
 //! - Use-after-free guard: NodeId lookups return None after deletion
 //! - Double queue_free is idempotent
 
+use gdobject::weak_ref::WeakRef;
 use gdscene::lifecycle::LifecycleManager;
 use gdscene::node::Node;
 use gdscene::scene_tree::SceneTree;
 use gdscene::trace::TraceEventType;
-use gdobject::weak_ref::WeakRef;
 
 // ── Notification ordering ───────────────────────────────────────────
 
@@ -30,12 +30,16 @@ fn queue_free_fires_exit_tree_before_predelete() {
     tree.process_deletions();
 
     let events = tree.event_trace().events();
-    let exit_idx = events
-        .iter()
-        .position(|e| e.node_path.contains("Victim") && e.event_type == TraceEventType::Notification && e.detail == "EXIT_TREE");
-    let predel_idx = events
-        .iter()
-        .position(|e| e.node_path.contains("Victim") && e.event_type == TraceEventType::Notification && e.detail == "PREDELETE");
+    let exit_idx = events.iter().position(|e| {
+        e.node_path.contains("Victim")
+            && e.event_type == TraceEventType::Notification
+            && e.detail == "EXIT_TREE"
+    });
+    let predel_idx = events.iter().position(|e| {
+        e.node_path.contains("Victim")
+            && e.event_type == TraceEventType::Notification
+            && e.detail == "PREDELETE"
+    });
 
     assert!(exit_idx.is_some(), "EXIT_TREE must fire on queue_free");
     assert!(predel_idx.is_some(), "PREDELETE must fire on queue_free");
@@ -143,7 +147,10 @@ fn node_lookup_returns_none_after_queue_free() {
     tree.queue_free(nid);
     tree.process_deletions();
 
-    assert!(tree.get_node(nid).is_none(), "Freed node must not be accessible");
+    assert!(
+        tree.get_node(nid).is_none(),
+        "Freed node must not be accessible"
+    );
     assert!(
         tree.get_node_by_path("/root/Ephemeral").is_none(),
         "Path lookup must fail after free"
@@ -160,7 +167,11 @@ fn double_queue_free_is_idempotent() {
 
     tree.queue_free(nid);
     tree.queue_free(nid); // should not panic or double-add
-    assert_eq!(tree.pending_deletion_count(), 1, "No duplicate pending entries");
+    assert_eq!(
+        tree.pending_deletion_count(),
+        1,
+        "No duplicate pending entries"
+    );
 
     tree.process_deletions();
     assert!(tree.get_node(nid).is_none());
@@ -263,13 +274,11 @@ fn freed_node_received_predelete_in_notification_log() {
     LifecycleManager::enter_tree(&mut tree, root);
 
     // Check the node received lifecycle notifications.
-    let log_before: Vec<_> = tree
-        .get_node(nid)
-        .unwrap()
-        .notification_log()
-        .to_vec();
+    let log_before: Vec<_> = tree.get_node(nid).unwrap().notification_log().to_vec();
     assert!(
-        log_before.iter().any(|n| n.code() == gdobject::NOTIFICATION_ENTER_TREE.code()),
+        log_before
+            .iter()
+            .any(|n| n.code() == gdobject::NOTIFICATION_ENTER_TREE.code()),
         "Node should have received ENTER_TREE"
     );
 

@@ -55,7 +55,10 @@ fn test_scripts_golden_has_mover_and_vartest() {
     let nodes = data["nodes"].as_array().unwrap();
     let test_scene = &nodes[0];
     let children = test_scene["children"].as_array().unwrap();
-    let names: Vec<&str> = children.iter().map(|n| n["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = children
+        .iter()
+        .map(|n| n["name"].as_str().unwrap())
+        .collect();
 
     assert!(names.contains(&"Mover"), "must have Mover node");
     assert!(names.contains(&"VarTest"), "must have VarTest node");

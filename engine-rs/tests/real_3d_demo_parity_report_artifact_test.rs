@@ -20,7 +20,8 @@ fn report_path() -> PathBuf {
 }
 
 fn count_scene_classes(nodes: &[Value], classes: &[&str]) -> usize {
-    nodes.iter()
+    nodes
+        .iter()
         .filter(|node| {
             node.get("class")
                 .and_then(Value::as_str)
@@ -57,7 +58,11 @@ fn report_cites_phase6_audit_and_classifies_3d_families() {
         "report must cite the Phase 6 parity audit document"
     );
     let audit_path = repo_root().join(report["audit_source"].as_str().unwrap());
-    assert!(audit_path.exists(), "audit source file must exist: {}", audit_path.display());
+    assert!(
+        audit_path.exists(),
+        "audit source file must exist: {}",
+        audit_path.display()
+    );
 
     // Must have classification with all three tiers
     let classification = &report["classification"];
@@ -71,33 +76,64 @@ fn report_cites_phase6_audit_and_classifies_3d_families() {
         .as_array()
         .expect("classification.deferred should be an array");
 
-    assert!(!measured.is_empty(), "measured families should not be empty");
-    assert!(!implemented.is_empty(), "implemented-not-yet-measured families should not be empty");
-    assert!(!deferred.is_empty(), "deferred families should not be empty");
+    assert!(
+        !measured.is_empty(),
+        "measured families should not be empty"
+    );
+    assert!(
+        !implemented.is_empty(),
+        "implemented-not-yet-measured families should not be empty"
+    );
+    assert!(
+        !deferred.is_empty(),
+        "deferred families should not be empty"
+    );
 
     // Each measured family must have evidence
     for family in measured {
-        let name = family["family"].as_str().expect("measured family must have a name");
-        let evidence = family["evidence"].as_array().expect("measured family must have evidence");
-        assert!(!evidence.is_empty(), "measured family '{name}' must cite at least one evidence item");
+        let name = family["family"]
+            .as_str()
+            .expect("measured family must have a name");
+        let evidence = family["evidence"]
+            .as_array()
+            .expect("measured family must have evidence");
+        assert!(
+            !evidence.is_empty(),
+            "measured family '{name}' must cite at least one evidence item"
+        );
     }
 
     // Each implemented-not-yet-measured family must have a reason
     for family in implemented {
-        let name = family["family"].as_str().expect("implemented family must have a name");
-        let reason = family["reason"].as_str().expect("implemented family must have a reason");
-        assert!(!reason.is_empty(), "implemented family '{name}' must explain why not yet measured");
+        let name = family["family"]
+            .as_str()
+            .expect("implemented family must have a name");
+        let reason = family["reason"]
+            .as_str()
+            .expect("implemented family must have a reason");
+        assert!(
+            !reason.is_empty(),
+            "implemented family '{name}' must explain why not yet measured"
+        );
     }
 
     // Each deferred family must have a reason
     for family in deferred {
-        let name = family["family"].as_str().expect("deferred family must have a name");
-        let reason = family["reason"].as_str().expect("deferred family must have a reason");
-        assert!(!reason.is_empty(), "deferred family '{name}' must explain why deferred");
+        let name = family["family"]
+            .as_str()
+            .expect("deferred family must have a name");
+        let reason = family["reason"]
+            .as_str()
+            .expect("deferred family must have a reason");
+        assert!(
+            !reason.is_empty(),
+            "deferred family '{name}' must explain why deferred"
+        );
     }
 
     // Key families from the audit must be classified somewhere
-    let all_families: Vec<&str> = measured.iter()
+    let all_families: Vec<&str> = measured
+        .iter()
         .chain(implemented.iter())
         .chain(deferred.iter())
         .filter_map(|f| f["family"].as_str())
@@ -105,11 +141,23 @@ fn report_cites_phase6_audit_and_classifies_3d_families() {
 
     // Key families from the Phase 6 audit must all be classified
     for required in &[
-        "Node3D", "Camera3D", "MeshInstance3D", "DirectionalLight3D",
-        "OmniLight3D", "SpotLight3D", "CollisionShape3D",
-        "RigidBody3D", "StaticBody3D", "CharacterBody3D",
-        "Area3D", "ReflectionProbe", "FogVolume", "Decal",
-        "VehicleBody3D", "SoftBody3D", "NavigationRegion3D",
+        "Node3D",
+        "Camera3D",
+        "MeshInstance3D",
+        "DirectionalLight3D",
+        "OmniLight3D",
+        "SpotLight3D",
+        "CollisionShape3D",
+        "RigidBody3D",
+        "StaticBody3D",
+        "CharacterBody3D",
+        "Area3D",
+        "ReflectionProbe",
+        "FogVolume",
+        "Decal",
+        "VehicleBody3D",
+        "SoftBody3D",
+        "NavigationRegion3D",
     ] {
         assert!(
             all_families.contains(required),
@@ -124,7 +172,11 @@ fn report_scene_inventory_matches_scene_goldens() {
     let scene_fixtures = report["scene_fixtures"]
         .as_array()
         .expect("scene_fixtures should be an array");
-    assert_eq!(scene_fixtures.len(), 5, "expected 5 representative 3D scenes");
+    assert_eq!(
+        scene_fixtures.len(),
+        5,
+        "expected 5 representative 3D scenes"
+    );
 
     let mut total_nodes = 0usize;
     let mut total_cameras = 0usize;
@@ -143,7 +195,11 @@ fn report_scene_inventory_matches_scene_goldens() {
                 .expect("golden_path should be present"),
         );
 
-        assert!(scene_path.exists(), "missing scene fixture: {}", scene_path.display());
+        assert!(
+            scene_path.exists(),
+            "missing scene fixture: {}",
+            scene_path.display()
+        );
         assert!(
             golden_path.exists(),
             "missing golden scene fixture: {}",
@@ -160,10 +216,8 @@ fn report_scene_inventory_matches_scene_goldens() {
             .expect("golden scene should have data.nodes");
         let node_count = nodes.len();
         let camera_count = count_scene_classes(nodes, &["Camera3D"]);
-        let light_count = count_scene_classes(
-            nodes,
-            &["DirectionalLight3D", "OmniLight3D", "SpotLight3D"],
-        );
+        let light_count =
+            count_scene_classes(nodes, &["DirectionalLight3D", "OmniLight3D", "SpotLight3D"]);
         let physics_body_count = count_scene_classes(
             nodes,
             &["StaticBody3D", "RigidBody3D", "CharacterBody3D", "Area3D"],
@@ -204,7 +258,10 @@ fn report_scene_inventory_matches_scene_goldens() {
     assert_eq!(report["summary"]["total_scene_nodes"], total_nodes as u64);
     assert_eq!(report["summary"]["total_cameras"], total_cameras as u64);
     assert_eq!(report["summary"]["total_lights"], total_lights as u64);
-    assert_eq!(report["summary"]["total_physics_bodies"], total_bodies as u64);
+    assert_eq!(
+        report["summary"]["total_physics_bodies"],
+        total_bodies as u64
+    );
 }
 
 #[test]
@@ -238,14 +295,25 @@ fn report_physics_inventory_and_evidence_are_rerunnable() {
     }
 
     assert_eq!(report["summary"]["physics_trace_count"], 3);
-    assert_eq!(report["summary"]["physics_trace_frames"], total_frames as u64);
+    assert_eq!(
+        report["summary"]["physics_trace_frames"],
+        total_frames as u64
+    );
 
     let test_files = report["evidence"]["test_files"]
         .as_array()
         .expect("evidence.test_files should be an array");
     for test_file in test_files {
-        let path = repo_root().join(test_file.as_str().expect("test file path should be a string"));
-        assert!(path.exists(), "missing evidence test file: {}", path.display());
+        let path = repo_root().join(
+            test_file
+                .as_str()
+                .expect("test file path should be a string"),
+        );
+        assert!(
+            path.exists(),
+            "missing evidence test file: {}",
+            path.display()
+        );
     }
 
     let tests = report["evidence"]["tests"]

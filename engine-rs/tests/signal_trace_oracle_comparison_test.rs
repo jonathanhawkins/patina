@@ -37,8 +37,8 @@ use gdscene::node::Node;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_tree::SceneTree;
 use gdscene::trace::TraceEventType;
-use gdscene::SignalConnection as Connection;
 use gdscene::LifecycleManager;
+use gdscene::SignalConnection as Connection;
 use gdvariant::Variant;
 
 // ===========================================================================
@@ -74,8 +74,8 @@ fn load_signal_instantiation_scene() -> SceneTree {
     let tscn_path = fixtures_dir()
         .join("scenes")
         .join("signal_instantiation.tscn");
-    let tscn = std::fs::read_to_string(&tscn_path)
-        .unwrap_or_else(|e| panic!("failed to load tscn: {e}"));
+    let tscn =
+        std::fs::read_to_string(&tscn_path).unwrap_or_else(|e| panic!("failed to load tscn: {e}"));
     let scene = PackedScene::from_tscn(&tscn).expect("parse signal_instantiation.tscn");
 
     let mut tree = SceneTree::new();
@@ -110,7 +110,9 @@ fn signal_emit_trace_events(tree: &SceneTree) -> Vec<TraceEvent> {
 }
 
 /// Build expected trace events from oracle connections for a single emission pass.
-fn build_expected_signal_trace(oracle: &[(String, String, String, String, u32)]) -> Vec<TraceEvent> {
+fn build_expected_signal_trace(
+    oracle: &[(String, String, String, String, u32)],
+) -> Vec<TraceEvent> {
     // Collect unique (from_node, signal_name) in oracle declaration order.
     let mut unique_signals: Vec<(String, String)> = Vec::new();
     for (sig, from, _, _, _) in oracle {
@@ -210,10 +212,14 @@ fn signal_trace_order_matches_oracle_declaration_order() {
     // Use trace_compare to diff expected vs actual signal trace.
     let diffs = compare_traces(&expected, &actual);
     if !diffs.is_empty() {
-        let report = format_report("Oracle Expected", "Patina Runtime", &expected, &actual, &diffs);
-        panic!(
-            "Signal trace order does not match oracle declaration order:\n{report}"
+        let report = format_report(
+            "Oracle Expected",
+            "Patina Runtime",
+            &expected,
+            &actual,
+            &diffs,
         );
+        panic!("Signal trace order does not match oracle declaration order:\n{report}");
     }
 }
 
@@ -315,7 +321,11 @@ fn one_shot_signal_trace_across_frames() {
     // Frame 1: second emission.
     tree.set_trace_frame(1);
     tree.emit_signal(src_id, "defeated", &[]);
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "one-shot should not fire again");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "one-shot should not fire again"
+    );
 
     // Both emissions should produce trace events.
     let emits = signal_emit_trace_events(&tree);
@@ -597,10 +607,9 @@ fn signals_complex_lifecycle_trace_parity() {
     let patina_path = golden_dir.join("signals_complex_patina.json");
     let upstream_path = golden_dir.join("signals_complex_upstream_mock.json");
 
-    let patina_json: Value = serde_json::from_str(
-        &std::fs::read_to_string(&patina_path).expect("load patina golden"),
-    )
-    .expect("parse patina golden");
+    let patina_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&patina_path).expect("load patina golden"))
+            .expect("parse patina golden");
 
     let upstream_json: Value = serde_json::from_str(
         &std::fs::read_to_string(&upstream_path).expect("load upstream golden"),
@@ -769,7 +778,13 @@ fn full_oracle_emission_trace_comparison() {
     // Full trace_compare comparison.
     let diffs = compare_traces(&expected, &actual);
     if !diffs.is_empty() {
-        let report = format_report("Oracle Expected", "Patina Runtime", &expected, &actual, &diffs);
+        let report = format_report(
+            "Oracle Expected",
+            "Patina Runtime",
+            &expected,
+            &actual,
+            &diffs,
+        );
         panic!("Full oracle emission trace comparison failed:\n{report}");
     }
 }

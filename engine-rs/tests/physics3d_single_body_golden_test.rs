@@ -11,9 +11,7 @@
 //! - Zero-gravity scenes produce linear motion traces
 //! - Custom gravity direction scenes produce correct traces
 
-use gdcore::compare3d::{
-    assert_deterministic, compare_physics_traces, PhysicsTraceEntry3D,
-};
+use gdcore::compare3d::{assert_deterministic, compare_physics_traces, PhysicsTraceEntry3D};
 use gdcore::math::Vector3;
 use gdphysics2d::body3d::{BodyId3D, BodyType3D, PhysicsBody3D};
 use gdphysics2d::shape3d::Shape3D;
@@ -209,13 +207,7 @@ fn deterministic_with_initial_velocity() {
 #[test]
 fn zero_gravity_linear_motion() {
     let velocity = Vector3::new(3.0, 0.0, -2.0);
-    let trace = run_single_body_sim(
-        "Drifter",
-        Vector3::ZERO,
-        velocity,
-        Vector3::ZERO,
-        20,
-    );
+    let trace = run_single_body_sim("Drifter", Vector3::ZERO, velocity, Vector3::ZERO, 20);
 
     // Verify each frame's position matches linear extrapolation.
     for entry in &trace {
@@ -225,8 +217,12 @@ fn zero_gravity_linear_motion() {
             pos_diff < 1e-4,
             "frame {}: expected pos ({:.4}, {:.4}, {:.4}), got ({:.4}, {:.4}, {:.4}), diff={:.6}",
             entry.frame,
-            expected_pos.x, expected_pos.y, expected_pos.z,
-            entry.position.x, entry.position.y, entry.position.z,
+            expected_pos.x,
+            expected_pos.y,
+            expected_pos.z,
+            entry.position.x,
+            entry.position.y,
+            entry.position.z,
             pos_diff
         );
     }
@@ -484,7 +480,11 @@ fn mass_does_not_affect_freefall() {
 #[test]
 fn p6ax_minimal_3d_golden_frame_count() {
     let golden = load_golden_3d_trace("minimal_3d_10frames");
-    assert_eq!(golden.len(), 10, "minimal_3d golden should have exactly 10 frames");
+    assert_eq!(
+        golden.len(),
+        10,
+        "minimal_3d golden should have exactly 10 frames"
+    );
     assert_eq!(golden[0].frame, 0);
     assert_eq!(golden[9].frame, 9);
 }
@@ -492,7 +492,11 @@ fn p6ax_minimal_3d_golden_frame_count() {
 #[test]
 fn p6ax_rigid_sphere_golden_frame_count() {
     let golden = load_golden_3d_trace("rigid_sphere_bounce_3d_20frames");
-    assert_eq!(golden.len(), 20, "rigid_sphere golden should have exactly 20 frames");
+    assert_eq!(
+        golden.len(),
+        20,
+        "rigid_sphere golden should have exactly 20 frames"
+    );
     assert_eq!(golden[0].frame, 0);
     assert_eq!(golden[19].frame, 19);
 }
@@ -522,7 +526,10 @@ fn p6ax_rigid_sphere_initial_conditions() {
 #[test]
 fn p6ax_golden_velocity_delta_constant() {
     // For both goldens, gravity causes constant velocity delta per frame
-    for (name, expected_len) in [("minimal_3d_10frames", 10), ("rigid_sphere_bounce_3d_20frames", 20)] {
+    for (name, expected_len) in [
+        ("minimal_3d_10frames", 10),
+        ("rigid_sphere_bounce_3d_20frames", 20),
+    ] {
         let golden = load_golden_3d_trace(name);
         assert_eq!(golden.len(), expected_len);
 
@@ -582,8 +589,18 @@ fn p6ax_engine_matches_both_goldens_simultaneously() {
         20,
     );
 
-    let r1 = compare_physics_traces(&golden_minimal, &actual_minimal, POSITION_TOLERANCE, VELOCITY_TOLERANCE);
-    let r2 = compare_physics_traces(&golden_sphere, &actual_sphere, POSITION_TOLERANCE, VELOCITY_TOLERANCE);
+    let r1 = compare_physics_traces(
+        &golden_minimal,
+        &actual_minimal,
+        POSITION_TOLERANCE,
+        VELOCITY_TOLERANCE,
+    );
+    let r2 = compare_physics_traces(
+        &golden_sphere,
+        &actual_sphere,
+        POSITION_TOLERANCE,
+        VELOCITY_TOLERANCE,
+    );
 
     assert!(r1.is_exact_match(), "minimal golden mismatch");
     assert!(r2.is_exact_match(), "sphere golden mismatch");

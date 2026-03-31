@@ -22,18 +22,12 @@ const ALLOWED_LICENSES: &[&str] = &[
     "unicode-3.0",
     "unicode-dfs-2016",
     "cc0-1.0",
-    "bsl-1.0",       // Boost
+    "bsl-1.0",           // Boost
     "lgpl-2.1-or-later", // LGPL with "or later" is acceptable for linking
 ];
 
 /// Licenses that are NOT compatible (copyleft without linking exception).
-const BLOCKED_LICENSES: &[&str] = &[
-    "gpl-2.0-only",
-    "gpl-3.0-only",
-    "agpl-",
-    "sspl",
-    "eupl",
-];
+const BLOCKED_LICENSES: &[&str] = &["gpl-2.0-only", "gpl-3.0-only", "agpl-", "sspl", "eupl"];
 
 fn is_license_compatible(license: &str) -> bool {
     let lower = license.to_lowercase();
@@ -47,7 +41,9 @@ fn is_license_compatible(license: &str) -> bool {
 
     // Check if at least one allowed license is present
     // (handles OR expressions like "MIT OR Apache-2.0")
-    ALLOWED_LICENSES.iter().any(|allowed| lower.contains(allowed))
+    ALLOWED_LICENSES
+        .iter()
+        .any(|allowed| lower.contains(allowed))
 }
 
 #[test]
@@ -146,10 +142,8 @@ fn no_gpl_dependencies() {
 
         // Match GPL-only licenses (not "OR MIT" alternatives)
         let has_gpl = license.contains("gpl");
-        let has_permissive_alt = license.contains(" or ")
-            && ALLOWED_LICENSES
-                .iter()
-                .any(|a| license.contains(a));
+        let has_permissive_alt =
+            license.contains(" or ") && ALLOWED_LICENSES.iter().any(|a| license.contains(a));
 
         if has_gpl && !has_permissive_alt {
             gpl_crates.push(format!("  {name}: {license}"));

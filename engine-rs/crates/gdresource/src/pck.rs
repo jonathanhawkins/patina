@@ -436,9 +436,8 @@ impl ResourceLoader for PckResourceLoader {
 
         // Parse .tres files as text resources.
         if path.ends_with(".tres") || path.ends_with(".tscn") {
-            let text = std::str::from_utf8(bytes).map_err(|e| {
-                EngineError::Parse(format!("invalid UTF-8 in {path}: {e}"))
-            })?;
+            let text = std::str::from_utf8(bytes)
+                .map_err(|e| EngineError::Parse(format!("invalid UTF-8 in {path}: {e}")))?;
             let loader = TresLoader::new();
             loader.parse_str(text, path)
         } else {
@@ -526,9 +525,7 @@ pub struct PckMountManager {
 impl PckMountManager {
     /// Creates a new empty mount manager.
     pub fn new() -> Self {
-        Self {
-            mounts: Vec::new(),
-        }
+        Self { mounts: Vec::new() }
     }
 
     /// Mounts a PCK archive with the given label and priority.
@@ -536,7 +533,12 @@ impl PckMountManager {
     /// Higher priority mounts are searched first. Returns an error if the
     /// PCK data is invalid. If a mount with the same label already exists,
     /// it is replaced.
-    pub fn mount(&mut self, label: impl Into<String>, data: Vec<u8>, priority: i32) -> io::Result<()> {
+    pub fn mount(
+        &mut self,
+        label: impl Into<String>,
+        data: Vec<u8>,
+        priority: i32,
+    ) -> io::Result<()> {
         let label = label.into();
         let loader = PckResourceLoader::from_bytes(data)?;
         // Remove existing mount with the same label.
@@ -594,9 +596,7 @@ impl PckMountManager {
 
     /// Extracts raw bytes for a path from the highest-priority mount that has it.
     pub fn extract_raw(&self, path: &str) -> Option<&[u8]> {
-        self.mounts
-            .iter()
-            .find_map(|m| m.loader.extract_raw(path))
+        self.mounts.iter().find_map(|m| m.loader.extract_raw(path))
     }
 }
 
@@ -662,7 +662,10 @@ mod tests {
         let archive = PckArchive::from_bytes(&data).unwrap();
         assert_eq!(archive.file_count(), 3);
 
-        assert_eq!(archive.extract_file(&data, "res://a.txt").unwrap(), b"alpha");
+        assert_eq!(
+            archive.extract_file(&data, "res://a.txt").unwrap(),
+            b"alpha"
+        );
         assert_eq!(archive.extract_file(&data, "res://b.txt").unwrap(), b"beta");
         assert_eq!(
             archive.extract_file(&data, "res://sub/c.txt").unwrap(),

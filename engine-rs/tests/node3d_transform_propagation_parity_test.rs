@@ -39,7 +39,11 @@ fn make_tree() -> SceneTree {
     SceneTree::new()
 }
 
-fn add_node3d(tree: &mut SceneTree, parent: gdscene::node::NodeId, name: &str) -> gdscene::node::NodeId {
+fn add_node3d(
+    tree: &mut SceneTree,
+    parent: gdscene::node::NodeId,
+    name: &str,
+) -> gdscene::node::NodeId {
     let node = Node::new(name, "Node3D");
     tree.add_child(parent, node).unwrap()
 }
@@ -60,7 +64,11 @@ fn parent_translation_offsets_child_globally() {
     node3d::set_position(&mut tree, child, Vector3::new(1.0, 2.0, 3.0));
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(11.0, 22.0, 33.0), "child global = parent + child local");
+    assert_vec3(
+        global,
+        Vector3::new(11.0, 22.0, 33.0),
+        "child global = parent + child local",
+    );
 }
 
 #[test]
@@ -112,14 +120,22 @@ fn parent_90deg_y_rotation_swaps_child_xz() {
 
     let parent = add_node3d(&mut tree, root, "Parent");
     // 90 degrees around Y axis
-    node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     let child = add_node3d(&mut tree, parent, "Child");
     node3d::set_position(&mut tree, child, Vector3::new(10.0, 0.0, 0.0));
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
     // 90 degrees Y: (10,0,0) -> (0,0,-10)
-    assert_vec3(global, Vector3::new(0.0, 0.0, -10.0), "90 deg Y: X becomes -Z");
+    assert_vec3(
+        global,
+        Vector3::new(0.0, 0.0, -10.0),
+        "90 deg Y: X becomes -Z",
+    );
 }
 
 #[test]
@@ -128,14 +144,22 @@ fn parent_90deg_x_rotation_swaps_child_yz() {
     let root = tree.root_id();
 
     let parent = add_node3d(&mut tree, root, "Parent");
-    node3d::set_rotation(&mut tree, parent, Vector3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent,
+        Vector3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+    );
 
     let child = add_node3d(&mut tree, parent, "Child");
     node3d::set_position(&mut tree, child, Vector3::new(0.0, 10.0, 0.0));
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
     // 90 degrees X: (0,10,0) -> (0,0,10)
-    assert_vec3(global, Vector3::new(0.0, 0.0, 10.0), "90 deg X: Y becomes Z");
+    assert_vec3(
+        global,
+        Vector3::new(0.0, 0.0, 10.0),
+        "90 deg X: Y becomes Z",
+    );
 }
 
 #[test]
@@ -144,14 +168,22 @@ fn parent_180deg_y_rotation_negates_child_x_and_z() {
     let root = tree.root_id();
 
     let parent = add_node3d(&mut tree, root, "Parent");
-    node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::PI, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent,
+        Vector3::new(0.0, std::f32::consts::PI, 0.0),
+    );
 
     let child = add_node3d(&mut tree, parent, "Child");
     node3d::set_position(&mut tree, child, Vector3::new(5.0, 3.0, 7.0));
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
     // 180 degrees Y: (5,3,7) -> (-5,3,-7)
-    assert_vec3(global, Vector3::new(-5.0, 3.0, -7.0), "180 deg Y: negate X and Z");
+    assert_vec3(
+        global,
+        Vector3::new(-5.0, 3.0, -7.0),
+        "180 deg Y: negate X and Z",
+    );
 }
 
 #[test]
@@ -161,7 +193,11 @@ fn parent_rotation_plus_translation() {
 
     let parent = add_node3d(&mut tree, root, "Parent");
     node3d::set_position(&mut tree, parent, Vector3::new(100.0, 0.0, 0.0));
-    node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     let child = add_node3d(&mut tree, parent, "Child");
     node3d::set_position(&mut tree, child, Vector3::new(10.0, 0.0, 0.0));
@@ -169,7 +205,11 @@ fn parent_rotation_plus_translation() {
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
     // Parent at (100,0,0), rotated 90Y. Child local (10,0,0) becomes (0,0,-10) in parent frame.
     // Global = (100,0,0) + (0,0,-10) = (100,0,-10)
-    assert_vec3(global, Vector3::new(100.0, 0.0, -10.0), "translation + rotation");
+    assert_vec3(
+        global,
+        Vector3::new(100.0, 0.0, -10.0),
+        "translation + rotation",
+    );
 }
 
 // ===========================================================================
@@ -188,7 +228,11 @@ fn parent_uniform_scale_multiplies_child_position() {
     node3d::set_position(&mut tree, child, Vector3::new(5.0, 10.0, 15.0));
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(10.0, 20.0, 30.0), "uniform 2x scale doubles child pos");
+    assert_vec3(
+        global,
+        Vector3::new(10.0, 20.0, 30.0),
+        "uniform 2x scale doubles child pos",
+    );
 }
 
 #[test]
@@ -222,7 +266,11 @@ fn parent_scale_affects_grandchild_cumulatively() {
 
     let global = node3d::get_global_transform(&tree, grandchild).xform(Vector3::ZERO);
     // Cumulative scale: 2 * 3 = 6x
-    assert_vec3(global, Vector3::new(6.0, 6.0, 6.0), "cumulative scale 2*3=6");
+    assert_vec3(
+        global,
+        Vector3::new(6.0, 6.0, 6.0),
+        "cumulative scale 2*3=6",
+    );
 }
 
 // ===========================================================================
@@ -236,7 +284,11 @@ fn parent_translate_rotate_scale_combined() {
 
     let parent = add_node3d(&mut tree, root, "Parent");
     node3d::set_position(&mut tree, parent, Vector3::new(50.0, 0.0, 0.0));
-    node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
     node3d::set_scale(&mut tree, parent, Vector3::new(2.0, 2.0, 2.0));
 
     let child = add_node3d(&mut tree, parent, "Child");
@@ -245,7 +297,11 @@ fn parent_translate_rotate_scale_combined() {
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
     // Scale(2) * Rotate(90Y) applied to (10,0,0) = 2 * (0,0,-10) = (0,0,-20)
     // Then translate by (50,0,0): (50,0,-20)
-    assert_vec3(global, Vector3::new(50.0, 0.0, -20.0), "combined T*R*S on child");
+    assert_vec3(
+        global,
+        Vector3::new(50.0, 0.0, -20.0),
+        "combined T*R*S on child",
+    );
 }
 
 #[test]
@@ -254,10 +310,18 @@ fn child_has_own_rotation_on_top_of_parent() {
     let root = tree.root_id();
 
     let parent = add_node3d(&mut tree, root, "Parent");
-    node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     let child = add_node3d(&mut tree, parent, "Child");
-    node3d::set_rotation(&mut tree, child, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        child,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     // Two 90-degree Y rotations = 180 degrees
     let grandchild = add_node3d(&mut tree, child, "GrandChild");
@@ -265,7 +329,11 @@ fn child_has_own_rotation_on_top_of_parent() {
 
     let global = node3d::get_global_transform(&tree, grandchild).xform(Vector3::ZERO);
     // 180 deg Y: (10,0,0) -> (-10,0,0)
-    assert_vec3(global, Vector3::new(-10.0, 0.0, 0.0), "two 90-deg Y rotations compound to 180");
+    assert_vec3(
+        global,
+        Vector3::new(-10.0, 0.0, 0.0),
+        "two 90-deg Y rotations compound to 180",
+    );
 }
 
 #[test]
@@ -283,7 +351,7 @@ fn child_scale_does_not_affect_parent_global() {
     assert_vec3(
         parent_global,
         Vector3::new(5.0, 5.0, 5.0),
-        "child scale must not affect parent's global transform"
+        "child scale must not affect parent's global transform",
     );
 }
 
@@ -297,18 +365,30 @@ fn set_global_position_with_rotated_parent() {
     let root = tree.root_id();
 
     let parent = add_node3d(&mut tree, root, "Parent");
-    node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        parent,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     let child = add_node3d(&mut tree, parent, "Child");
     node3d::set_global_position(&mut tree, child, Vector3::new(0.0, 0.0, -10.0));
 
     // Verify the global position is correct
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(0.0, 0.0, -10.0), "global position after set_global_position");
+    assert_vec3(
+        global,
+        Vector3::new(0.0, 0.0, -10.0),
+        "global position after set_global_position",
+    );
 
     // Under 90 deg Y, global (0,0,-10) -> inverse maps -Z back to +X -> local (10,0,0)
     let local = node3d::get_position(&tree, child);
-    assert_vec3(local, Vector3::new(10.0, 0.0, 0.0), "local position under rotated parent");
+    assert_vec3(
+        local,
+        Vector3::new(10.0, 0.0, 0.0),
+        "local position under rotated parent",
+    );
 }
 
 #[test]
@@ -324,10 +404,18 @@ fn set_global_position_with_scaled_parent() {
 
     let local = node3d::get_position(&tree, child);
     // Parent has 2x scale, so local = global / 2
-    assert_vec3(local, Vector3::new(10.0, 20.0, 30.0), "local = global / parent_scale");
+    assert_vec3(
+        local,
+        Vector3::new(10.0, 20.0, 30.0),
+        "local = global / parent_scale",
+    );
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(20.0, 40.0, 60.0), "verify global roundtrip");
+    assert_vec3(
+        global,
+        Vector3::new(20.0, 40.0, 60.0),
+        "verify global roundtrip",
+    );
 }
 
 #[test]
@@ -344,7 +432,11 @@ fn set_global_position_with_translated_and_scaled_parent() {
 
     let local = node3d::get_position(&tree, child);
     // Global (150,0,0), parent at (100,0,0) with 5x scale: local = (150-100)/5 = (10,0,0)
-    assert_vec3(local, Vector3::new(10.0, 0.0, 0.0), "local compensates for translation+scale");
+    assert_vec3(
+        local,
+        Vector3::new(10.0, 0.0, 0.0),
+        "local compensates for translation+scale",
+    );
 }
 
 #[test]
@@ -362,10 +454,18 @@ fn set_global_position_deep_hierarchy() {
     node3d::set_global_position(&mut tree, c, Vector3::new(10.0, 10.0, 50.0));
 
     let global = node3d::get_global_transform(&tree, c).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(10.0, 10.0, 50.0), "deep set_global_position roundtrip");
+    assert_vec3(
+        global,
+        Vector3::new(10.0, 10.0, 50.0),
+        "deep set_global_position roundtrip",
+    );
 
     let local = node3d::get_position(&tree, c);
-    assert_vec3(local, Vector3::new(0.0, 0.0, 50.0), "deep local compensates ancestor chain");
+    assert_vec3(
+        local,
+        Vector3::new(0.0, 0.0, 50.0),
+        "deep local compensates ancestor chain",
+    );
 }
 
 // ===========================================================================
@@ -390,7 +490,11 @@ fn four_level_translation_accumulation() {
     node3d::set_position(&mut tree, d, Vector3::new(4.0, 5.0, 6.0));
 
     let global = node3d::get_global_transform(&tree, d).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(5.0, 7.0, 9.0), "4-level translation sum");
+    assert_vec3(
+        global,
+        Vector3::new(5.0, 7.0, 9.0),
+        "4-level translation sum",
+    );
 }
 
 #[test]
@@ -408,7 +512,11 @@ fn four_level_mixed_transforms() {
 
     // Level 3: rotate 90 Y
     let c = add_node3d(&mut tree, b, "C");
-    node3d::set_rotation(&mut tree, c, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+    node3d::set_rotation(
+        &mut tree,
+        c,
+        Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+    );
 
     // Level 4: child at (10,0,0) local
     let d = add_node3d(&mut tree, c, "D");
@@ -417,7 +525,11 @@ fn four_level_mixed_transforms() {
     let global = node3d::get_global_transform(&tree, d).xform(Vector3::ZERO);
     // D local (10,0,0) -> rotated 90Y by C -> (0,0,-10) -> scaled 2x by B -> (0,0,-20)
     // -> translated by A -> (100,0,-20)
-    assert_vec3(global, Vector3::new(100.0, 0.0, -20.0), "4-level mixed transforms");
+    assert_vec3(
+        global,
+        Vector3::new(100.0, 0.0, -20.0),
+        "4-level mixed transforms",
+    );
 }
 
 #[test]
@@ -435,7 +547,11 @@ fn five_level_chain() {
         .collect();
 
     let global = node3d::get_global_transform(&tree, *nodes.last().unwrap()).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(5.0, 5.0, 5.0), "5-level uniform offset");
+    assert_vec3(
+        global,
+        Vector3::new(5.0, 5.0, 5.0),
+        "5-level uniform offset",
+    );
 }
 
 // ===========================================================================
@@ -472,7 +588,11 @@ fn nonuniform_scale_also_affects_child_scale() {
     // A point at (1,1,1) in child local space should scale by parent
     let global = node3d::get_global_transform(&tree, child);
     let point = global.xform(Vector3::new(1.0, 1.0, 1.0));
-    assert_vec3(point, Vector3::new(2.0, 3.0, 4.0), "parent scale applies to child-local points");
+    assert_vec3(
+        point,
+        Vector3::new(2.0, 3.0, 4.0),
+        "parent scale applies to child-local points",
+    );
 }
 
 // ===========================================================================
@@ -488,7 +608,11 @@ fn node_at_root_has_identity_parent_transform() {
     node3d::set_position(&mut tree, child, Vector3::new(7.0, 8.0, 9.0));
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(7.0, 8.0, 9.0), "root child: global == local");
+    assert_vec3(
+        global,
+        Vector3::new(7.0, 8.0, 9.0),
+        "root child: global == local",
+    );
 }
 
 #[test]
@@ -528,7 +652,11 @@ fn identity_parent_does_not_alter_child() {
     node3d::set_position(&mut tree, child, Vector3::new(42.0, 43.0, 44.0));
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(42.0, 43.0, 44.0), "identity parent => global == local");
+    assert_vec3(
+        global,
+        Vector3::new(42.0, 43.0, 44.0),
+        "identity parent => global == local",
+    );
 }
 
 #[test]
@@ -543,7 +671,11 @@ fn chain_of_identity_parents_is_transparent() {
     node3d::set_position(&mut tree, d, Vector3::new(1.0, 2.0, 3.0));
 
     let global = node3d::get_global_transform(&tree, d).xform(Vector3::ZERO);
-    assert_vec3(global, Vector3::new(1.0, 2.0, 3.0), "identity chain is transparent");
+    assert_vec3(
+        global,
+        Vector3::new(1.0, 2.0, 3.0),
+        "identity chain is transparent",
+    );
 }
 
 #[test]
@@ -617,7 +749,11 @@ fn global_transform_inverse_roundtrip_deep() {
     let transformed = global.xform(original);
     let recovered = inv.xform(transformed);
 
-    assert_vec3(recovered, original, "global * inverse roundtrip in deep hierarchy");
+    assert_vec3(
+        recovered,
+        original,
+        "global * inverse roundtrip in deep hierarchy",
+    );
 }
 
 #[test]
@@ -635,5 +771,9 @@ fn set_global_position_then_read_global_matches() {
     node3d::set_global_position(&mut tree, child, target);
 
     let global = node3d::get_global_transform(&tree, child).xform(Vector3::ZERO);
-    assert_vec3(global, target, "set then get global position must roundtrip");
+    assert_vec3(
+        global,
+        target,
+        "set then get global position must roundtrip",
+    );
 }

@@ -22,8 +22,7 @@ fn crate_src(crate_name: &str) -> PathBuf {
 
 fn audit_doc() -> String {
     let path = repo_root().join("prd/PHASE6_3D_PARITY_AUDIT.md");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read audit doc: {e}"))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read audit doc: {e}"))
 }
 
 // ===========================================================================

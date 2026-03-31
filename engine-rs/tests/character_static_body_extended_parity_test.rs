@@ -386,11 +386,7 @@ fn simulated_gravity_lands_and_stays() {
 
     let pos = vec2_prop(ml.tree(), player_id, "position");
     // Should be resting on or near the floor (floor top = 100 - 10 = 90)
-    assert!(
-        pos.y < 105.0,
-        "character should be near floor: y={}",
-        pos.y
-    );
+    assert!(pos.y < 105.0, "character should be near floor: y={}", pos.y);
     assert!(
         pos.y > 50.0,
         "character should have fallen toward floor: y={}",
@@ -673,7 +669,11 @@ fn static_walls_form_corridor() {
 
     let pos = vec2_prop(ml.tree(), player_id, "position");
     // Should have moved right
-    assert!(pos.x > 50.0, "character should move through corridor: x={}", pos.x);
+    assert!(
+        pos.x > 50.0,
+        "character should move through corridor: x={}",
+        pos.x
+    );
     // Should still be within corridor bounds (y between ~35 and ~65)
     assert!(
         pos.y > 35.0 && pos.y < 65.0,

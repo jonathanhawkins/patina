@@ -26,10 +26,9 @@ fn golden_dir() -> PathBuf {
 
 fn load_json(rel_path: &str) -> serde_json::Value {
     let path = golden_dir().join(rel_path);
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {rel_path}: {e}"));
-    serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("failed to parse {rel_path}: {e}"))
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {rel_path}: {e}"));
+    serde_json::from_str(&content).unwrap_or_else(|e| panic!("failed to parse {rel_path}: {e}"))
 }
 
 // ===========================================================================
@@ -167,7 +166,9 @@ fn a7p_vartest_vars_stable_after_10_frames() {
 fn a7p_vartest_position_unchanged() {
     let golden = load_json("traces/test_scripts_upstream.json");
     let vartest = &golden["tree"]["children"][0]["children"][1];
-    let pos = vartest["properties"]["position"]["value"].as_array().unwrap();
+    let pos = vartest["properties"]["position"]["value"]
+        .as_array()
+        .unwrap();
     let x = pos[0].as_f64().unwrap();
     let y = pos[1].as_f64().unwrap();
 
@@ -226,7 +227,10 @@ fn a7p_frame_0_has_lifecycle_plus_processing() {
         .filter(|e| e["frame"] == 0 && e["detail"] == "READY")
         .count();
 
-    assert!(enter_tree_count >= 3, "frame 0 should have >= 3 ENTER_TREE events");
+    assert!(
+        enter_tree_count >= 3,
+        "frame 0 should have >= 3 ENTER_TREE events"
+    );
     assert!(ready_count >= 3, "frame 0 should have >= 3 READY events");
 }
 
@@ -260,9 +264,7 @@ fn a7p_no_physics_process_script_calls() {
 
     let physics_calls: Vec<_> = events
         .iter()
-        .filter(|e| {
-            e["event_type"] == "script_call" && e["detail"] == "_physics_process"
-        })
+        .filter(|e| e["event_type"] == "script_call" && e["detail"] == "_physics_process")
         .collect();
 
     assert!(
@@ -305,9 +307,7 @@ fn a7p_process_script_calls_fire_for_both_nodes() {
         let frame_calls: Vec<_> = events
             .iter()
             .filter(|e| {
-                e["frame"] == frame
-                    && e["event_type"] == "script_call"
-                    && e["detail"] == "_process"
+                e["frame"] == frame && e["event_type"] == "script_call" && e["detail"] == "_process"
             })
             .collect();
 
@@ -335,10 +335,7 @@ fn a7p_process_script_calls_fire_for_both_nodes() {
 fn a7p_patina_trace_exists_and_has_events() {
     let patina = load_json("traces/test_scripts_patina.json");
     let events = patina["event_trace"].as_array().unwrap();
-    assert!(
-        !events.is_empty(),
-        "patina trace should have events"
-    );
+    assert!(!events.is_empty(), "patina trace should have events");
 }
 
 #[test]
@@ -350,12 +347,12 @@ fn a7p_patina_trace_has_enter_tree_and_ready() {
         .iter()
         .filter(|e| e["detail"] == "ENTER_TREE")
         .collect();
-    let ready: Vec<_> = events
-        .iter()
-        .filter(|e| e["detail"] == "READY")
-        .collect();
+    let ready: Vec<_> = events.iter().filter(|e| e["detail"] == "READY").collect();
 
-    assert!(enter_tree.len() >= 3, "patina should have >= 3 ENTER_TREE events");
+    assert!(
+        enter_tree.len() >= 3,
+        "patina should have >= 3 ENTER_TREE events"
+    );
     assert!(ready.len() >= 3, "patina should have >= 3 READY events");
 }
 
@@ -372,8 +369,12 @@ fn a7p_patina_trace_enter_tree_top_down() {
 
     // TestScene before Mover and VarTest
     let scene_idx = enter_tree.iter().position(|p| *p == "/root/TestScene");
-    let mover_idx = enter_tree.iter().position(|p| *p == "/root/TestScene/Mover");
-    let vartest_idx = enter_tree.iter().position(|p| *p == "/root/TestScene/VarTest");
+    let mover_idx = enter_tree
+        .iter()
+        .position(|p| *p == "/root/TestScene/Mover");
+    let vartest_idx = enter_tree
+        .iter()
+        .position(|p| *p == "/root/TestScene/VarTest");
 
     assert!(scene_idx.is_some(), "TestScene should have ENTER_TREE");
     assert!(mover_idx.is_some(), "Mover should have ENTER_TREE");

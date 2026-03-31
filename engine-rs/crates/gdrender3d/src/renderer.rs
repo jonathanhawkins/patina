@@ -16,7 +16,7 @@ use gdserver3d::projection::perspective_projection_matrix;
 use gdserver3d::reflection_probe::ReflectionProbeId;
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
 use gdserver3d::shader::ShaderMaterial3D;
-use gdserver3d::sky::{SkyMaterial, ProceduralSkyMaterial, PhysicalSkyMaterial};
+use gdserver3d::sky::{PhysicalSkyMaterial, ProceduralSkyMaterial, SkyMaterial};
 use gdserver3d::viewport::Viewport3D;
 
 use crate::depth_buffer::DepthBuffer;
@@ -150,10 +150,22 @@ impl SoftwareRenderer3D {
         let view_pos = view.inverse().xform(point);
 
         // Apply projection matrix (column-major).
-        let x = proj[0][0] * view_pos.x + proj[1][0] * view_pos.y + proj[2][0] * view_pos.z + proj[3][0];
-        let y = proj[0][1] * view_pos.x + proj[1][1] * view_pos.y + proj[2][1] * view_pos.z + proj[3][1];
-        let z = proj[0][2] * view_pos.x + proj[1][2] * view_pos.y + proj[2][2] * view_pos.z + proj[3][2];
-        let w = proj[0][3] * view_pos.x + proj[1][3] * view_pos.y + proj[2][3] * view_pos.z + proj[3][3];
+        let x = proj[0][0] * view_pos.x
+            + proj[1][0] * view_pos.y
+            + proj[2][0] * view_pos.z
+            + proj[3][0];
+        let y = proj[0][1] * view_pos.x
+            + proj[1][1] * view_pos.y
+            + proj[2][1] * view_pos.z
+            + proj[3][1];
+        let z = proj[0][2] * view_pos.x
+            + proj[1][2] * view_pos.y
+            + proj[2][2] * view_pos.z
+            + proj[3][2];
+        let w = proj[0][3] * view_pos.x
+            + proj[1][3] * view_pos.y
+            + proj[2][3] * view_pos.z
+            + proj[3][3];
 
         if w <= 0.0 {
             return None; // Behind camera.
@@ -256,13 +268,7 @@ impl SoftwareRenderer3D {
                             return None;
                         }
                         let world_pos = inst.transform.xform(verts[vi]);
-                        self.project_point(
-                            world_pos,
-                            &viewport.camera_transform,
-                            &proj,
-                            w,
-                            h,
-                        )
+                        self.project_point(world_pos, &viewport.camera_transform, &proj, w, h)
                     })
                     .collect();
 
@@ -575,8 +581,13 @@ impl SoftwareRenderer3D {
                     let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
                     for x in 0..w {
                         let ndc_x = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
-                        pixels[(y * w + x) as usize] =
-                            environment_background_color(env, ndc_x, ndc_y, inv_proj, camera_transform);
+                        pixels[(y * w + x) as usize] = environment_background_color(
+                            env,
+                            ndc_x,
+                            ndc_y,
+                            inv_proj,
+                            camera_transform,
+                        );
                     }
                 }
                 pixels
@@ -586,13 +597,7 @@ impl SoftwareRenderer3D {
     }
 
     /// Post-processes pixels with distance-based fog from the environment.
-    fn apply_fog_pass(
-        pixels: &mut [Color],
-        depth: &[f32],
-        w: u32,
-        h: u32,
-        env: &Environment3D,
-    ) {
+    fn apply_fog_pass(pixels: &mut [Color], depth: &[f32], w: u32, h: u32, env: &Environment3D) {
         if !env.fog_enabled || env.fog_density <= 0.0 {
             return;
         }
@@ -664,10 +669,14 @@ fn pixel_view_direction(
     camera_transform: &Transform3D,
 ) -> Vector3 {
     // Unproject from NDC to view space.
-    let vx = inv_proj[0][0] * ndc_x + inv_proj[1][0] * ndc_y + inv_proj[2][0] * (-1.0) + inv_proj[3][0];
-    let vy = inv_proj[0][1] * ndc_x + inv_proj[1][1] * ndc_y + inv_proj[2][1] * (-1.0) + inv_proj[3][1];
-    let vz = inv_proj[0][2] * ndc_x + inv_proj[1][2] * ndc_y + inv_proj[2][2] * (-1.0) + inv_proj[3][2];
-    let vw = inv_proj[0][3] * ndc_x + inv_proj[1][3] * ndc_y + inv_proj[2][3] * (-1.0) + inv_proj[3][3];
+    let vx =
+        inv_proj[0][0] * ndc_x + inv_proj[1][0] * ndc_y + inv_proj[2][0] * (-1.0) + inv_proj[3][0];
+    let vy =
+        inv_proj[0][1] * ndc_x + inv_proj[1][1] * ndc_y + inv_proj[2][1] * (-1.0) + inv_proj[3][1];
+    let vz =
+        inv_proj[0][2] * ndc_x + inv_proj[1][2] * ndc_y + inv_proj[2][2] * (-1.0) + inv_proj[3][2];
+    let vw =
+        inv_proj[0][3] * ndc_x + inv_proj[1][3] * ndc_y + inv_proj[2][3] * (-1.0) + inv_proj[3][3];
 
     let view_dir = if vw.abs() > 1e-6 {
         Vector3::new(vx / vw, vy / vw, vz / vw)
@@ -700,10 +709,20 @@ fn sample_procedural_sky(mat: &ProceduralSkyMaterial, dir: &Vector3, energy: f32
 
     let (top, horizon, curve, mat_energy) = if y >= 0.0 {
         // Sky hemisphere
-        (&mat.sky_top_color, &mat.sky_horizon_color, mat.sky_curve, mat.sky_energy_multiplier)
+        (
+            &mat.sky_top_color,
+            &mat.sky_horizon_color,
+            mat.sky_curve,
+            mat.sky_energy_multiplier,
+        )
     } else {
         // Ground hemisphere
-        (&mat.ground_bottom_color, &mat.ground_horizon_color, mat.ground_curve, mat.ground_energy_multiplier)
+        (
+            &mat.ground_bottom_color,
+            &mat.ground_horizon_color,
+            mat.ground_curve,
+            mat.ground_energy_multiplier,
+        )
     };
 
     // Godot uses pow(abs(y), curve) to blend from horizon to top/bottom.
@@ -1097,7 +1116,10 @@ mod tests {
         let vp = Viewport3D::new(32, 32);
         let f1 = renderer.render_frame(&vp);
         let f2 = renderer.render_frame(&vp);
-        assert_eq!(f1.pixels, f2.pixels, "solid rendering must be deterministic");
+        assert_eq!(
+            f1.pixels, f2.pixels,
+            "solid rendering must be deterministic"
+        );
         assert_eq!(f1.depth, f2.depth, "solid depth must be deterministic");
     }
 
@@ -1177,7 +1199,10 @@ mod tests {
             .iter()
             .filter(|c| c.r > 0.9 && c.g < 0.1 && c.b < 0.1)
             .count();
-        assert!(red > 50, "red unlit material should produce red pixels, got {red}");
+        assert!(
+            red > 50,
+            "red unlit material should produce red pixels, got {red}"
+        );
     }
 
     #[test]
@@ -1280,7 +1305,10 @@ mod tests {
         let frame = renderer.render_frame(&vp);
 
         let green = frame.pixels.iter().filter(|c| c.g > 0.9).count();
-        assert!(green > 50, "sphere should produce green pixels, got {green}");
+        assert!(
+            green > 50,
+            "sphere should produce green pixels, got {green}"
+        );
     }
 
     // ── FrameBuffer3D tests (pat-5p5q) ──
@@ -1372,7 +1400,8 @@ mod tests {
         for px in &frame.pixels {
             assert!(
                 (px.r - 0.5).abs() < 0.01 && (px.g - 0.2).abs() < 0.01 && (px.b - 0.1).abs() < 0.01,
-                "Expected custom bg color, got {:?}", px
+                "Expected custom bg color, got {:?}",
+                px
             );
         }
     }
@@ -1388,14 +1417,17 @@ mod tests {
         let vp = viewport_with_env(env);
         let frame = renderer.render_frame(&vp);
         assert!(
-            frame.pixels.iter().any(|c| c.r > 0.01 || c.g > 0.01 || c.b > 0.01),
+            frame
+                .pixels
+                .iter()
+                .any(|c| c.r > 0.01 || c.g > 0.01 || c.b > 0.01),
             "Procedural sky should produce visible colors"
         );
     }
 
     #[test]
     fn procedural_sky_custom_red() {
-        use gdserver3d::sky::{Sky as Sky3D, SkyMaterial as SM, ProceduralSkyMaterial as PSM};
+        use gdserver3d::sky::{ProceduralSkyMaterial as PSM, Sky as Sky3D, SkyMaterial as SM};
         let mut renderer = SoftwareRenderer3D::new();
         let env = Environment3D {
             background_mode: BackgroundMode::Sky,
@@ -1428,7 +1460,10 @@ mod tests {
         };
         let vp = viewport_with_env(env);
         let frame = renderer.render_frame(&vp);
-        assert!(frame.pixels.iter().all(|c| c.r < 0.01 && c.g < 0.01 && c.b < 0.01));
+        assert!(frame
+            .pixels
+            .iter()
+            .all(|c| c.r < 0.01 && c.g < 0.01 && c.b < 0.01));
     }
 
     #[test]
@@ -1436,11 +1471,20 @@ mod tests {
         let mut renderer = SoftwareRenderer3D::new();
         let id = renderer.create_instance();
         renderer.set_mesh(id, Mesh3D::cube(1.0));
-        renderer.set_material(id, Material3D { albedo: Color::WHITE, ..Default::default() });
-        renderer.set_transform(id, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 0.0, -5.0),
-        });
+        renderer.set_material(
+            id,
+            Material3D {
+                albedo: Color::WHITE,
+                ..Default::default()
+            },
+        );
+        renderer.set_transform(
+            id,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 0.0, -5.0),
+            },
+        );
         let lid = gdserver3d::light::Light3DId(1);
         renderer.add_light(lid);
 
@@ -1476,10 +1520,13 @@ mod tests {
         let id = renderer.create_instance();
         renderer.set_mesh(id, Mesh3D::cube(1.0));
         renderer.set_material(id, Material3D::default());
-        renderer.set_transform(id, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 0.0, -5.0),
-        });
+        renderer.set_transform(
+            id,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 0.0, -5.0),
+            },
+        );
 
         let vp_no = Viewport3D::new(32, 32);
         let frame_no = renderer.render_frame(&vp_no);
@@ -1512,7 +1559,11 @@ mod tests {
         let vp = viewport_with_env(env);
         let frame = renderer.render_frame(&vp);
         let avg = avg_color(&frame.pixels);
-        assert!(avg.g > 0.4, "Wireframe should show env background, got g={:.3}", avg.g);
+        assert!(
+            avg.g > 0.4,
+            "Wireframe should show env background, got g={:.3}",
+            avg.g
+        );
     }
 
     #[test]
@@ -1524,7 +1575,10 @@ mod tests {
         };
         let vp = viewport_with_env(env);
         let frame = renderer.render_frame(&vp);
-        assert!(frame.pixels.iter().all(|c| c.r < 0.01 && c.g < 0.01 && c.b < 0.01));
+        assert!(frame
+            .pixels
+            .iter()
+            .all(|c| c.r < 0.01 && c.g < 0.01 && c.b < 0.01));
     }
 
     #[test]

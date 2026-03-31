@@ -83,18 +83,12 @@ fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Shape3D> {
                 let height = float_prop_3d(tree, node_id, "height", 1.0) as f32;
                 Some(Shape3D::CylinderShape { radius, height })
             }
-            "ConvexPolygonShape3D" => {
-                Some(Shape3D::ConvexPolygonShape { points: vec![] })
-            }
-            "ConcavePolygonShape3D" => {
-                Some(Shape3D::ConcavePolygonShape { faces: vec![] })
-            }
-            "WorldBoundaryShape3D" => {
-                Some(Shape3D::WorldBoundaryShape {
-                    normal: Vector3::new(0.0, 1.0, 0.0),
-                    distance: 0.0,
-                })
-            }
+            "ConvexPolygonShape3D" => Some(Shape3D::ConvexPolygonShape { points: vec![] }),
+            "ConcavePolygonShape3D" => Some(Shape3D::ConcavePolygonShape { faces: vec![] }),
+            "WorldBoundaryShape3D" => Some(Shape3D::WorldBoundaryShape {
+                normal: Vector3::new(0.0, 1.0, 0.0),
+                distance: 0.0,
+            }),
             _ => None,
         },
         _ => {
@@ -182,7 +176,8 @@ impl PhysicsServer3D {
                             .find_map(|&child_id| shape_from_node_3d(tree, child_id))
                             .unwrap_or(Shape3D::Sphere { radius: 0.5 });
 
-                        let body = PhysicsBody3D::new(placeholder_id, body_type, position, shape, mass);
+                        let body =
+                            PhysicsBody3D::new(placeholder_id, body_type, position, shape, mass);
                         let actual_id = self.world.add_body(body);
                         self.node_to_body.insert(nid, actual_id);
                     }
@@ -301,7 +296,8 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
-        tree.add_child(root, Node::new("Mesh", "MeshInstance3D")).unwrap();
+        tree.add_child(root, Node::new("Mesh", "MeshInstance3D"))
+            .unwrap();
         tree.add_child(root, Node::new("Cam", "Camera3D")).unwrap();
 
         let mut server = PhysicsServer3D::new();

@@ -173,19 +173,38 @@ pub fn compute_smart_snap(
     let mut best_dx: f32 = threshold + 1.0;
     let mut best_dy: f32 = threshold + 1.0;
 
-    let dragged_size = tree.get_node(dragged_id).map(|n| extract_size(n)).unwrap_or(Vector2::ZERO);
-    let parent_id = tree.get_node(dragged_id).and_then(|n| n.parent()).unwrap_or_else(|| tree.root_id());
-    let sibling_ids: Vec<NodeId> = tree.get_node(parent_id).map(|n| n.children().to_vec()).unwrap_or_default();
-    let siblings: Vec<(NodeId, Vector2, Vector2)> = sibling_ids.iter()
+    let dragged_size = tree
+        .get_node(dragged_id)
+        .map(|n| extract_size(n))
+        .unwrap_or(Vector2::ZERO);
+    let parent_id = tree
+        .get_node(dragged_id)
+        .and_then(|n| n.parent())
+        .unwrap_or_else(|| tree.root_id());
+    let sibling_ids: Vec<NodeId> = tree
+        .get_node(parent_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    let siblings: Vec<(NodeId, Vector2, Vector2)> = sibling_ids
+        .iter()
         .filter(|&&nid| nid != dragged_id)
-        .filter_map(|&nid| tree.get_node(nid).map(|n| (nid, extract_position(n), extract_size(n))))
+        .filter_map(|&nid| {
+            tree.get_node(nid)
+                .map(|n| (nid, extract_position(n), extract_size(n)))
+        })
         .collect();
 
     for &(nid, sib_pos, sib_size) in &siblings {
         let snap_xs: [(f32, f32); 3] = [
             (candidate_pos.x, sib_pos.x),
-            (candidate_pos.x, sib_pos.x - sib_size.x / 2.0 + dragged_size.x / 2.0),
-            (candidate_pos.x, sib_pos.x + sib_size.x / 2.0 - dragged_size.x / 2.0),
+            (
+                candidate_pos.x,
+                sib_pos.x - sib_size.x / 2.0 + dragged_size.x / 2.0,
+            ),
+            (
+                candidate_pos.x,
+                sib_pos.x + sib_size.x / 2.0 - dragged_size.x / 2.0,
+            ),
         ];
         for (cand_x, target_x) in snap_xs {
             let dx = (cand_x - target_x).abs();
@@ -193,13 +212,23 @@ pub fn compute_smart_snap(
                 best_dx = dx;
                 snapped.x = target_x;
                 guides.retain(|g: &SnapGuide| g.axis != "x");
-                guides.push(SnapGuide { axis: "x", position: target_x, target_node_id: nid });
+                guides.push(SnapGuide {
+                    axis: "x",
+                    position: target_x,
+                    target_node_id: nid,
+                });
             }
         }
         let snap_ys: [(f32, f32); 3] = [
             (candidate_pos.y, sib_pos.y),
-            (candidate_pos.y, sib_pos.y - sib_size.y / 2.0 + dragged_size.y / 2.0),
-            (candidate_pos.y, sib_pos.y + sib_size.y / 2.0 - dragged_size.y / 2.0),
+            (
+                candidate_pos.y,
+                sib_pos.y - sib_size.y / 2.0 + dragged_size.y / 2.0,
+            ),
+            (
+                candidate_pos.y,
+                sib_pos.y + sib_size.y / 2.0 - dragged_size.y / 2.0,
+            ),
         ];
         for (cand_y, target_y) in snap_ys {
             let dy = (cand_y - target_y).abs();
@@ -207,7 +236,11 @@ pub fn compute_smart_snap(
                 best_dy = dy;
                 snapped.y = target_y;
                 guides.retain(|g: &SnapGuide| g.axis != "y");
-                guides.push(SnapGuide { axis: "y", position: target_y, target_node_id: nid });
+                guides.push(SnapGuide {
+                    axis: "y",
+                    position: target_y,
+                    target_node_id: nid,
+                });
             }
         }
     }
@@ -226,7 +259,8 @@ pub fn apply_snap(
         pos = snap_to_grid(pos, settings.grid_snap_size);
     }
     if settings.smart_snap_enabled {
-        let (snapped, guides) = compute_smart_snap(tree, dragged_id, pos, settings.smart_snap_threshold);
+        let (snapped, guides) =
+            compute_smart_snap(tree, dragged_id, pos, settings.smart_snap_threshold);
         return (snapped, guides);
     }
     (pos, Vec::new())
@@ -461,26 +495,106 @@ pub struct EditorKeyBinding {
 impl EditorKeyBinding {
     fn defaults() -> Vec<Self> {
         vec![
-            Self { action: "delete".into(), description: "Delete selected node".into(), keys: "Delete".into() },
-            Self { action: "rename".into(), description: "Rename selected node".into(), keys: "F2".into() },
-            Self { action: "duplicate".into(), description: "Duplicate selected node".into(), keys: "Ctrl+D".into() },
-            Self { action: "copy".into(), description: "Copy selected node".into(), keys: "Ctrl+C".into() },
-            Self { action: "paste".into(), description: "Paste node".into(), keys: "Ctrl+V".into() },
-            Self { action: "cut".into(), description: "Cut selected node".into(), keys: "Ctrl+X".into() },
-            Self { action: "undo".into(), description: "Undo last action".into(), keys: "Ctrl+Z".into() },
-            Self { action: "redo".into(), description: "Redo last action".into(), keys: "Ctrl+Y".into() },
-            Self { action: "save".into(), description: "Save scene".into(), keys: "Ctrl+S".into() },
-            Self { action: "zoom_in".into(), description: "Zoom in".into(), keys: "Ctrl++".into() },
-            Self { action: "zoom_out".into(), description: "Zoom out".into(), keys: "Ctrl+-".into() },
-            Self { action: "zoom_reset".into(), description: "Reset zoom".into(), keys: "Ctrl+0".into() },
-            Self { action: "tool_select".into(), description: "Select tool".into(), keys: "Q".into() },
-            Self { action: "tool_move".into(), description: "Move tool".into(), keys: "W".into() },
-            Self { action: "tool_rotate".into(), description: "Rotate tool".into(), keys: "E".into() },
-            Self { action: "play".into(), description: "Play scene".into(), keys: "F5".into() },
-            Self { action: "play_current".into(), description: "Play current scene".into(), keys: "F6".into() },
-            Self { action: "pause".into(), description: "Pause playback".into(), keys: "F7".into() },
-            Self { action: "stop".into(), description: "Stop playback".into(), keys: "F8".into() },
-            Self { action: "help".into(), description: "Show help".into(), keys: "F1".into() },
+            Self {
+                action: "delete".into(),
+                description: "Delete selected node".into(),
+                keys: "Delete".into(),
+            },
+            Self {
+                action: "rename".into(),
+                description: "Rename selected node".into(),
+                keys: "F2".into(),
+            },
+            Self {
+                action: "duplicate".into(),
+                description: "Duplicate selected node".into(),
+                keys: "Ctrl+D".into(),
+            },
+            Self {
+                action: "copy".into(),
+                description: "Copy selected node".into(),
+                keys: "Ctrl+C".into(),
+            },
+            Self {
+                action: "paste".into(),
+                description: "Paste node".into(),
+                keys: "Ctrl+V".into(),
+            },
+            Self {
+                action: "cut".into(),
+                description: "Cut selected node".into(),
+                keys: "Ctrl+X".into(),
+            },
+            Self {
+                action: "undo".into(),
+                description: "Undo last action".into(),
+                keys: "Ctrl+Z".into(),
+            },
+            Self {
+                action: "redo".into(),
+                description: "Redo last action".into(),
+                keys: "Ctrl+Y".into(),
+            },
+            Self {
+                action: "save".into(),
+                description: "Save scene".into(),
+                keys: "Ctrl+S".into(),
+            },
+            Self {
+                action: "zoom_in".into(),
+                description: "Zoom in".into(),
+                keys: "Ctrl++".into(),
+            },
+            Self {
+                action: "zoom_out".into(),
+                description: "Zoom out".into(),
+                keys: "Ctrl+-".into(),
+            },
+            Self {
+                action: "zoom_reset".into(),
+                description: "Reset zoom".into(),
+                keys: "Ctrl+0".into(),
+            },
+            Self {
+                action: "tool_select".into(),
+                description: "Select tool".into(),
+                keys: "Q".into(),
+            },
+            Self {
+                action: "tool_move".into(),
+                description: "Move tool".into(),
+                keys: "W".into(),
+            },
+            Self {
+                action: "tool_rotate".into(),
+                description: "Rotate tool".into(),
+                keys: "E".into(),
+            },
+            Self {
+                action: "play".into(),
+                description: "Play scene".into(),
+                keys: "F5".into(),
+            },
+            Self {
+                action: "play_current".into(),
+                description: "Play current scene".into(),
+                keys: "F6".into(),
+            },
+            Self {
+                action: "pause".into(),
+                description: "Pause playback".into(),
+                keys: "F7".into(),
+            },
+            Self {
+                action: "stop".into(),
+                description: "Stop playback".into(),
+                keys: "F8".into(),
+            },
+            Self {
+                action: "help".into(),
+                description: "Show help".into(),
+                keys: "F1".into(),
+            },
         ]
     }
 }
@@ -996,18 +1110,14 @@ fn handle_connection(
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
-        ("POST", "/api/node/create_dialog") => {
-            api_create_dialog(state, &req.body, &mut stream)
-        }
+        ("POST", "/api/node/create_dialog") => api_create_dialog(state, &req.body, &mut stream),
         ("POST", "/api/node/create_dialog/toggle_favorite") => {
             api_create_dialog_toggle_favorite(state, &req.body, &mut stream)
         }
         ("POST", "/api/node/create_dialog/confirm") => {
             api_create_dialog_confirm(state, &req.body, &mut stream)
         }
-        ("GET", "/api/node/catalog_2d") => {
-            api_node_catalog_2d(state, &mut stream)
-        }
+        ("GET", "/api/node/catalog_2d") => api_node_catalog_2d(state, &mut stream),
         ("POST", "/api/resource/property/set") => {
             api_set_resource_property(state, &req.body, &mut stream)
         }
@@ -1118,12 +1228,8 @@ fn handle_connection(
         }
         ("GET", "/api/script/breakpoints") => api_get_breakpoints(state, &req.query, &mut stream),
         // pat-n86px: Explicit typed track creation (property/method/audio)
-        ("POST", "/api/animation/track/add") => {
-            api_add_track(state, &req.body, &mut stream)
-        }
-        ("POST", "/api/animation/track/delete") => {
-            api_delete_track(state, &req.body, &mut stream)
-        }
+        ("POST", "/api/animation/track/add") => api_add_track(state, &req.body, &mut stream),
+        ("POST", "/api/animation/track/delete") => api_delete_track(state, &req.body, &mut stream),
         // pat-2s1: Animation track reorder + keyframe copy/paste
         ("POST", "/api/animation/track/reorder") => {
             api_reorder_track(state, &req.body, &mut stream)
@@ -1150,7 +1256,9 @@ fn handle_connection(
         ("POST", "/api/debug/step_in") => api_debug_step_in(state, &mut stream),
         ("POST", "/api/debug/step_over") => api_debug_step_over(state, &mut stream),
         ("POST", "/api/debug/step_out") => api_debug_step_out(state, &mut stream),
-        ("POST", "/api/debug/remove_breakpoint") => api_debug_remove_breakpoint(state, &req.body, &mut stream),
+        ("POST", "/api/debug/remove_breakpoint") => {
+            api_debug_remove_breakpoint(state, &req.body, &mut stream)
+        }
         ("GET", "/api/monitors/frame_times") => api_get_frame_times(state, &mut stream),
         ("GET", "/api/profiler") => api_get_profiler(state, &mut stream),
         ("POST", "/api/profiler/record") => api_profiler_record(state, &req.body, &mut stream),
@@ -1184,9 +1292,7 @@ fn handle_connection(
         }
         // pat-ugb0p: Command palette
         ("GET", "/api/commands") => api_get_commands(&mut stream),
-        ("POST", "/api/command/execute") => {
-            api_execute_command(state, &req.body, &mut stream)
-        }
+        ("POST", "/api/command/execute") => api_execute_command(state, &req.body, &mut stream),
         // pat-omfrq: Filesystem tree and dir
         ("GET", "/api/filesystem/tree") => api_filesystem_tree(&req.query, &mut stream),
         ("GET", "/api/filesystem/dir") => api_filesystem_dir(&req.query, &mut stream),
@@ -1778,8 +1884,11 @@ fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
                 dlg.set_search("");
             }
             if let Some(base) = parsed.get("base_class").and_then(|v| v.as_str()) {
-                if base.is_empty() { dlg.set_base_class(None); }
-                else { dlg.set_base_class(Some(base.to_string())); }
+                if base.is_empty() {
+                    dlg.set_base_class(None);
+                } else {
+                    dlg.set_base_class(Some(base.to_string()));
+                }
             }
             if let Some(cat) = parsed.get("category").and_then(|v| v.as_str()) {
                 let category = match cat {
@@ -1803,20 +1912,25 @@ fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     let recent = dlg.recent_entries();
     let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
     let class_names: Vec<&str> = classes.iter().map(|c| c.class_name.as_str()).collect();
-    let class_entries: Vec<serde_json::Value> = classes.iter().map(|c| {
-        serde_json::json!({
-            "class_name": c.class_name, "parent_class": c.parent_class,
-            "inheritance_chain": c.inheritance_chain, "is_favorite": c.is_favorite,
-            "description": c.description, "category": c.category.map(|cat| cat.label()),
+    let class_entries: Vec<serde_json::Value> = classes
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "class_name": c.class_name, "parent_class": c.parent_class,
+                "inheritance_chain": c.inheritance_chain, "is_favorite": c.is_favorite,
+                "description": c.description, "category": c.category.map(|cat| cat.label()),
+            })
         })
-    }).collect();
-    let recent_json: Vec<serde_json::Value> = recent.iter().map(|c| {
-        serde_json::json!({ "class_name": c.class_name, "parent_class": c.parent_class })
-    }).collect();
+        .collect();
+    let recent_json: Vec<serde_json::Value> = recent
+        .iter()
+        .map(|c| serde_json::json!({ "class_name": c.class_name, "parent_class": c.parent_class }))
+        .collect();
     let json = serde_json::json!({
         "classes": class_names, "class_entries": class_entries, "favorites": favorites,
         "recent": recent_json, "match_count": class_names.len(),
-    }).to_string();
+    })
+    .to_string();
     send_json(stream, &json);
 }
 
@@ -1825,25 +1939,34 @@ fn api_node_catalog_2d(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
     let st = state.lock().unwrap();
     let dlg = &st.create_node_dialog;
     if let Some(catalog) = dlg.catalog() {
-        let entries: Vec<serde_json::Value> = catalog.entries().iter().map(|e| {
-            serde_json::json!({
-                "class_name": e.class_name,
-                "category": e.category.label(),
-                "description": e.description,
+        let entries: Vec<serde_json::Value> = catalog
+            .entries()
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "class_name": e.class_name,
+                    "category": e.category.label(),
+                    "description": e.description,
+                })
             })
-        }).collect();
-        let helpers: Vec<serde_json::Value> = catalog.helpers().iter().map(|h| {
-            serde_json::json!({
-                "name": h.name,
-                "description": h.description,
-                "root_class": h.root_class,
-                "children": h.children,
+            .collect();
+        let helpers: Vec<serde_json::Value> = catalog
+            .helpers()
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "name": h.name,
+                    "description": h.description,
+                    "root_class": h.root_class,
+                    "children": h.children,
+                })
             })
-        }).collect();
+            .collect();
         let categories: Vec<&str> = catalog.categories().iter().map(|c| c.label()).collect();
         let json = serde_json::json!({
             "entries": entries, "helpers": helpers, "categories": categories,
-        }).to_string();
+        })
+        .to_string();
         send_json(stream, &json);
     } else {
         send_json(stream, r#"{"entries":[],"helpers":[],"categories":[]}"#);
@@ -1851,21 +1974,56 @@ fn api_node_catalog_2d(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
 }
 
 /// `POST /api/node/create_dialog/toggle_favorite` — toggle a class favorite.
-fn api_create_dialog_toggle_favorite(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
-    let parsed = match parse_json_body(body) { Some(v) => v, None => { send_error(stream, 400, "invalid JSON"); return; } };
-    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) { Some(n) => n.to_string(), None => { send_error(stream, 400, "missing class_name"); return; } };
+fn api_create_dialog_toggle_favorite(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
     let mut st = state.lock().unwrap();
     let dlg = &mut st.create_node_dialog;
-    let is_favorite = if dlg.favorites().contains(&class_name) { dlg.remove_favorite(&class_name); false } else { dlg.add_favorite(&class_name); true };
+    let is_favorite = if dlg.favorites().contains(&class_name) {
+        dlg.remove_favorite(&class_name);
+        false
+    } else {
+        dlg.add_favorite(&class_name);
+        true
+    };
     let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
-    let json = serde_json::json!({ "is_favorite": is_favorite, "favorites": favorites }).to_string();
+    let json =
+        serde_json::json!({ "is_favorite": is_favorite, "favorites": favorites }).to_string();
     send_json(stream, &json);
 }
 
 /// `POST /api/node/create_dialog/confirm` — confirm selection, track in recent list.
 fn api_create_dialog_confirm(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
-    let parsed = match parse_json_body(body) { Some(v) => v, None => { send_error(stream, 400, "invalid JSON"); return; } };
-    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) { Some(n) => n.to_string(), None => { send_error(stream, 400, "missing class_name"); return; } };
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
     let mut st = state.lock().unwrap();
     let dlg = &mut st.create_node_dialog;
     dlg.select(&class_name);
@@ -1875,27 +2033,97 @@ fn api_create_dialog_confirm(state: &Arc<Mutex<EditorState>>, body: &str, stream
 
 /// `POST /api/resource/property/set` — set a property within a resource sub-editor.
 fn api_set_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
-    let parsed = match parse_json_body(body) { Some(v) => v, None => { send_error(stream, 400, "invalid JSON"); return; } };
-    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) { Some(v) => v, None => { send_error(stream, 400, "missing node_id"); return; } };
-    let resource_property = match parsed.get("resource_property").and_then(|v| v.as_str()) { Some(v) => v.to_string(), None => { send_error(stream, 400, "missing resource_property"); return; } };
-    let sub_property = match parsed.get("sub_property").and_then(|v| v.as_str()) { Some(v) => v.to_string(), None => { send_error(stream, 400, "missing sub_property"); return; } };
-    let value_json = match parsed.get("value") { Some(v) => v, None => { send_error(stream, 400, "missing value"); return; } };
-    let new_sub_value = match from_json(value_json) { Some(v) => v, None => { send_error(stream, 400, "invalid variant value"); return; } };
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let resource_property = match parsed.get("resource_property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing resource_property");
+            return;
+        }
+    };
+    let sub_property = match parsed.get("sub_property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing sub_property");
+            return;
+        }
+    };
+    let value_json = match parsed.get("value") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing value");
+            return;
+        }
+    };
+    let new_sub_value = match from_json(value_json) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid variant value");
+            return;
+        }
+    };
     let mut state = state.lock().unwrap();
-    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) { Some(id) => id, None => { send_error(stream, 404, "node not found"); return; } };
-    let current = match state.scene_tree.get_node(node_id).map(|n| n.get_property(&resource_property)) {
-        Some(v) => v, None => { send_error(stream, 404, "resource property not found"); return; }
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let current = match state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property(&resource_property))
+    {
+        Some(v) => v,
+        None => {
+            send_error(stream, 404, "resource property not found");
+            return;
+        }
     };
     let new_value = match current {
-        Variant::Resource(mut r) => { r.properties.insert(sub_property.clone(), new_sub_value); Variant::Resource(r) }
-        _ => { send_error(stream, 400, "property is not a Resource type"); return; }
+        Variant::Resource(mut r) => {
+            r.properties.insert(sub_property.clone(), new_sub_value);
+            Variant::Resource(r)
+        }
+        _ => {
+            send_error(stream, 400, "property is not a Resource type");
+            return;
+        }
     };
-    let mut cmd = EditorCommand::SetProperty { node_id, property: resource_property.clone(), new_value, old_value: Variant::Nil };
-    if let Err(e) = cmd.execute(&mut state.scene_tree) { send_error(stream, 500, &e.to_string()); return; }
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: resource_property.clone(),
+        new_value,
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
     state.scene_modified = true;
-    state.add_log("info", format!("Changed resource property '{}.{}'", resource_property, sub_property));
+    state.add_log(
+        "info",
+        format!(
+            "Changed resource property '{}.{}'",
+            resource_property, sub_property
+        ),
+    );
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -2623,7 +2851,20 @@ fn scan_directory(
             }
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "tscn" | "gd" | "tres" | "png" | "jpg" | "jpeg" | "webp" | "svg" | "gdshader" | "glsl" | "cfg") {
+            if matches!(
+                ext,
+                "tscn"
+                    | "gd"
+                    | "tres"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "webp"
+                    | "svg"
+                    | "gdshader"
+                    | "glsl"
+                    | "cfg"
+            ) {
                 let file_path = if prefix.is_empty() {
                     format!("res://{}", name)
                 } else {
@@ -2735,12 +2976,9 @@ fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
                 .lines()
                 .find(|l| l.starts_with("[node") && !l.contains("parent="))
                 .and_then(|l| {
-                    l.split("type=").nth(1).map(|t| {
-                        t.split('"')
-                            .nth(1)
-                            .unwrap_or("Node")
-                            .to_string()
-                    })
+                    l.split("type=")
+                        .nth(1)
+                        .map(|t| t.split('"').nth(1).unwrap_or("Node").to_string())
                 })
                 .unwrap_or_else(|| "Node".to_string());
             let ext_res_count = content.matches("[ext_resource").count();
@@ -2759,12 +2997,9 @@ fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
                 .lines()
                 .find(|l| l.starts_with("[gd_resource"))
                 .and_then(|l| {
-                    l.split("type=").nth(1).map(|t| {
-                        t.split('"')
-                            .nth(1)
-                            .unwrap_or("Resource")
-                            .to_string()
-                    })
+                    l.split("type=")
+                        .nth(1)
+                        .map(|t| t.split('"').nth(1).unwrap_or("Resource").to_string())
                 })
                 .unwrap_or_else(|| "Resource".to_string());
             let sub_res_count = content.matches("[sub_resource").count();
@@ -3911,10 +4146,9 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
             return;
         }
     };
-    let track_idx = anim
-        .tracks
-        .iter()
-        .position(|t| t.node_path == node_path && t.property_path == property && t.track_type == track_type);
+    let track_idx = anim.tracks.iter().position(|t| {
+        t.node_path == node_path && t.property_path == property && t.track_type == track_type
+    });
     let track_idx = match track_idx {
         Some(idx) => idx,
         None => {
@@ -3926,7 +4160,11 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     anim.tracks[track_idx].add_keyframe(KeyFrame::linear(time, value));
     send_json(
         stream,
-        &format!(r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#, track_idx, track_type.as_str()),
+        &format!(
+            r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#,
+            track_idx,
+            track_type.as_str()
+        ),
     );
 }
 
@@ -3964,7 +4202,11 @@ fn api_add_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpSt
         Some(s) => match TrackType::from_str_name(s) {
             Some(tt) => tt,
             None => {
-                send_error(stream, 400, "invalid track_type (use property, method, or audio)");
+                send_error(
+                    stream,
+                    400,
+                    "invalid track_type (use property, method, or audio)",
+                );
                 return;
             }
         },
@@ -3991,7 +4233,11 @@ fn api_add_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpSt
     let idx = anim.tracks.len() - 1;
     send_json(
         stream,
-        &format!(r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#, idx, track_type.as_str()),
+        &format!(
+            r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#,
+            idx,
+            track_type.as_str()
+        ),
     );
 }
 
@@ -4227,10 +4473,7 @@ fn api_animation_blend(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         .get("secondary")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let weight = parsed
-        .get("weight")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0) as f32;
+    let weight = parsed.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
 
     // Validate the secondary animation exists (if provided).
     if let Some(ref name) = secondary {
@@ -4249,23 +4492,25 @@ fn api_animation_blend(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
     let blend_w = state.animation_playback.blend_weight;
 
     if let (Some(ref prim), Some(ref sec)) = (&primary_name, &secondary) {
-        if let (Some(prim_anim), Some(sec_anim)) =
-            (state.animations.get(prim).cloned(), state.animations.get(sec).cloned())
-        {
+        if let (Some(prim_anim), Some(sec_anim)) = (
+            state.animations.get(prim).cloned(),
+            state.animations.get(sec).cloned(),
+        ) {
             let prim_values = prim_anim.sample_all(time);
             let sec_values = sec_anim.sample_all(time);
 
             // Build map from secondary animation.
-            let sec_map: std::collections::HashMap<String, gdvariant::Variant> = sec_values
-                .into_iter()
-                .collect();
+            let sec_map: std::collections::HashMap<String, gdvariant::Variant> =
+                sec_values.into_iter().collect();
 
             for (prop, prim_val) in &prim_values {
                 if let Some(sec_val) = sec_map.get(prop) {
-                    let blended = gdscene::animation::interpolate_variant(prim_val, sec_val, blend_w)
-                        .unwrap_or_else(|| prim_val.clone());
+                    let blended =
+                        gdscene::animation::interpolate_variant(prim_val, sec_val, blend_w)
+                            .unwrap_or_else(|| prim_val.clone());
                     // Find the track's node path from the primary animation.
-                    if let Some(track) = prim_anim.tracks.iter().find(|t| t.property_path == *prop) {
+                    if let Some(track) = prim_anim.tracks.iter().find(|t| t.property_path == *prop)
+                    {
                         let node_id = find_node_by_name(&state.scene_tree, &track.node_path);
                         if let Some(nid) = node_id {
                             if let Some(node) = state.scene_tree.get_node_mut(nid) {
@@ -4621,13 +4866,22 @@ fn api_viewport_drop(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
 
             // Set the instanced root's position to the drop location
             if let Some(node) = state.scene_tree.get_node_mut(root_id) {
-                node.set_property("position", Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)));
+                node.set_property(
+                    "position",
+                    Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)),
+                );
             }
 
             state.undo_stack.push(cmd);
             state.redo_stack.clear();
             state.scene_modified = true;
-            state.add_log("info", format!("Dropped scene '{}' at ({:.0}, {:.0})", path, world_pos.x, world_pos.y));
+            state.add_log(
+                "info",
+                format!(
+                    "Dropped scene '{}' at ({:.0}, {:.0})",
+                    path, world_pos.x, world_pos.y
+                ),
+            );
 
             let json = format!(r#"{{"id":{}}}"#, root_id.raw());
             send_json(stream, &json);
@@ -4670,7 +4924,10 @@ fn api_viewport_drop(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
 
             // Set position and texture
             if let Some(node) = state.scene_tree.get_node_mut(created_id) {
-                node.set_property("position", Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)));
+                node.set_property(
+                    "position",
+                    Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)),
+                );
                 node.set_property("texture", Variant::String(format!("res://{}", path)));
             }
 
@@ -4734,7 +4991,11 @@ fn api_viewport_drop(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
             send_json(stream, &json);
         }
         _ => {
-            send_error(stream, 400, &format!("unsupported asset_type: {}", asset_type));
+            send_error(
+                stream,
+                400,
+                &format!("unsupported asset_type: {}", asset_type),
+            );
         }
     }
 }
@@ -5326,8 +5587,13 @@ fn api_viewport_drag_axis(state: &Arc<Mutex<EditorState>>, body: &str, stream: &
         _ => (dx / z, dy / z),
     };
     if let Some(nid) = s.selected_node {
-        let cur_pos = s.scene_tree.get_node(nid)
-            .map(|n| match n.get_property("position") { Variant::Vector2(v) => v, _ => Vector2::ZERO })
+        let cur_pos = s
+            .scene_tree
+            .get_node(nid)
+            .map(|n| match n.get_property("position") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::ZERO,
+            })
             .unwrap_or(Vector2::ZERO);
         let candidate = Vector2::new(cur_pos.x + wdx, cur_pos.y + wdy);
         let settings = s.display_settings.clone();
@@ -5494,18 +5760,34 @@ fn api_get_snap_info(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         stream,
         &format!(
             r#"{{"snap_enabled":{},"snap_size":{},"grid_visible":{},"rulers_visible":{},"smart_snap_enabled":{},"smart_snap_threshold":{}}}"#,
-            ds.grid_snap_enabled, ds.grid_snap_size, ds.grid_visible, ds.rulers_visible,
-            ds.smart_snap_enabled, ds.smart_snap_threshold
+            ds.grid_snap_enabled,
+            ds.grid_snap_size,
+            ds.grid_visible,
+            ds.rulers_visible,
+            ds.smart_snap_enabled,
+            ds.smart_snap_threshold
         ),
     );
 }
 
 fn api_get_snap_guides(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let s = state.lock().unwrap();
-    let guides_json: Vec<String> = s.snap_guides.iter().map(|g| {
-        format!(r#"{{"axis":"{}","position":{},"target_node_id":{}}}"#, g.axis, g.position, g.target_node_id.raw())
-    }).collect();
-    send_json(stream, &format!(r#"{{"guides":[{}]}}"#, guides_json.join(",")));
+    let guides_json: Vec<String> = s
+        .snap_guides
+        .iter()
+        .map(|g| {
+            format!(
+                r#"{{"axis":"{}","position":{},"target_node_id":{}}}"#,
+                g.axis,
+                g.position,
+                g.target_node_id.raw()
+            )
+        })
+        .collect();
+    send_json(
+        stream,
+        &format!(r#"{{"guides":[{}]}}"#, guides_json.join(",")),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5901,24 +6183,39 @@ fn api_set_keyframe_transition(
 ) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
-        None => { send_error(stream, 400, "invalid JSON"); return; }
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
     };
 
     let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => { send_error(stream, 400, "missing animation"); return; }
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
     };
     let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
         Some(v) => v as usize,
-        None => { send_error(stream, 400, "missing track_index"); return; }
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
     };
     let keyframe_index = match parsed.get("keyframe_index").and_then(|v| v.as_u64()) {
         Some(v) => v as usize,
-        None => { send_error(stream, 400, "missing keyframe_index"); return; }
+        None => {
+            send_error(stream, 400, "missing keyframe_index");
+            return;
+        }
     };
     let transition_str = match parsed.get("transition").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => { send_error(stream, 400, "missing transition"); return; }
+        None => {
+            send_error(stream, 400, "missing transition");
+            return;
+        }
     };
 
     use gdscene::animation::TransitionType;
@@ -5932,16 +6229,23 @@ fn api_set_keyframe_transition(
             let y2 = parsed.get("y2").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
             TransitionType::CubicBezier(x1.clamp(0.0, 1.0), y1, x2.clamp(0.0, 1.0), y2)
         }
-        _ => { send_error(stream, 400, "unknown transition type"); return; }
+        _ => {
+            send_error(stream, 400, "unknown transition type");
+            return;
+        }
     };
 
     let mut s = state.lock().unwrap();
     let anim = match s.animations.get_mut(&anim_name) {
         Some(a) => a,
-        None => { send_error(stream, 404, "animation not found"); return; }
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
     };
     if track_index >= anim.tracks.len() {
-        send_error(stream, 400, "track_index out of range"); return;
+        send_error(stream, 400, "track_index out of range");
+        return;
     }
     let track = &mut anim.tracks[track_index];
     // Access keyframes mutably — we need to get the underlying Vec.
@@ -5949,7 +6253,8 @@ fn api_set_keyframe_transition(
     // We use a helper: remove + re-add with new transition.
     let kfs = track.keyframes();
     if keyframe_index >= kfs.len() {
-        send_error(stream, 400, "keyframe_index out of range"); return;
+        send_error(stream, 400, "keyframe_index out of range");
+        return;
     }
     let mut kf = kfs[keyframe_index].clone();
     kf.transition = transition;
@@ -5968,28 +6273,43 @@ fn api_get_keyframe_transition(
 ) {
     let anim_name = match query_param(query, "animation") {
         Some(s) => url_decode(s),
-        None => { send_error(stream, 400, "missing animation"); return; }
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
     };
     let track_index: usize = match query_param(query, "track_index").and_then(|v| v.parse().ok()) {
         Some(v) => v,
-        None => { send_error(stream, 400, "missing track_index"); return; }
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
     };
-    let keyframe_index: usize = match query_param(query, "keyframe_index").and_then(|v| v.parse().ok()) {
-        Some(v) => v,
-        None => { send_error(stream, 400, "missing keyframe_index"); return; }
-    };
+    let keyframe_index: usize =
+        match query_param(query, "keyframe_index").and_then(|v| v.parse().ok()) {
+            Some(v) => v,
+            None => {
+                send_error(stream, 400, "missing keyframe_index");
+                return;
+            }
+        };
 
     let s = state.lock().unwrap();
     let anim = match s.animations.get(&anim_name) {
         Some(a) => a,
-        None => { send_error(stream, 404, "animation not found"); return; }
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
     };
     if track_index >= anim.tracks.len() {
-        send_error(stream, 400, "track_index out of range"); return;
+        send_error(stream, 400, "track_index out of range");
+        return;
     }
     let kfs = anim.tracks[track_index].keyframes();
     if keyframe_index >= kfs.len() {
-        send_error(stream, 400, "keyframe_index out of range"); return;
+        send_error(stream, 400, "keyframe_index out of range");
+        return;
     }
     let kf = &kfs[keyframe_index];
     use gdscene::animation::TransitionType;
@@ -5997,7 +6317,10 @@ fn api_get_keyframe_transition(
         TransitionType::Linear => r#"{"transition":"linear"}"#.to_string(),
         TransitionType::Nearest => r#"{"transition":"nearest"}"#.to_string(),
         TransitionType::CubicBezier(x1, y1, x2, y2) => {
-            format!(r#"{{"transition":"cubic_bezier","x1":{},"y1":{},"x2":{},"y2":{}}}"#, x1, y1, x2, y2)
+            format!(
+                r#"{{"transition":"cubic_bezier","x1":{},"y1":{},"x2":{},"y2":{}}}"#,
+                x1, y1, x2, y2
+            )
         }
     };
     send_json(stream, &json);
@@ -6075,11 +6398,7 @@ fn format_var_list(vars: &[(String, String, String)]) -> String {
 }
 
 /// `GET /api/debug/locals` -- get local variables for a specific stack frame.
-fn api_get_debug_locals(
-    state: &Arc<Mutex<EditorState>>,
-    _query: &str,
-    stream: &mut TcpStream,
-) {
+fn api_get_debug_locals(state: &Arc<Mutex<EditorState>>, _query: &str, stream: &mut TcpStream) {
     let s = state.lock().unwrap();
     let locals = format_var_list(&s.debug_locals);
     send_json(stream, &format!(r#"{{"locals":[{}]}}"#, locals));
@@ -6133,7 +6452,8 @@ fn api_debug_remove_breakpoint(
     if let Some(v) = parse_json_body(body) {
         let script = v["script"].as_str().unwrap_or_default().to_string();
         let line = v["line"].as_u64().unwrap_or(0) as usize;
-        s.debug_breakpoints.retain(|(sc, ln)| !(sc == &script && *ln == line));
+        s.debug_breakpoints
+            .retain(|(sc, ln)| !(sc == &script && *ln == line));
     }
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -6183,7 +6503,11 @@ fn api_get_profiler(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
                 .collect();
             format!(
                 r#"{{"frame":{},"total_ms":{:.2},"cpu_ms":{:.2},"gpu_ms":{:.2},"functions":[{}]}}"#,
-                f.frame_number, f.total_ms, f.cpu_ms, f.gpu_ms, funcs.join(",")
+                f.frame_number,
+                f.total_ms,
+                f.cpu_ms,
+                f.gpu_ms,
+                funcs.join(",")
             )
         })
         .collect();
@@ -6229,10 +6553,7 @@ fn api_profiler_record(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         }
     };
 
-    let frame_number = parsed
-        .get("frame")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let frame_number = parsed.get("frame").and_then(|v| v.as_u64()).unwrap_or(0);
     let total_ms = parsed
         .get("total_ms")
         .and_then(|v| v.as_f64())
@@ -6241,10 +6562,7 @@ fn api_profiler_record(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         .get("cpu_ms")
         .and_then(|v| v.as_f64())
         .unwrap_or(total_ms);
-    let gpu_ms = parsed
-        .get("gpu_ms")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+    let gpu_ms = parsed.get("gpu_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     let functions = parsed
         .get("functions")
@@ -6369,7 +6687,11 @@ fn api_open_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         });
     let mut s = state.lock().unwrap();
     // Check if already open
-    if let Some(idx) = s.scene_tabs.iter().position(|t| !t.path.is_empty() && t.path == path) {
+    if let Some(idx) = s
+        .scene_tabs
+        .iter()
+        .position(|t| !t.path.is_empty() && t.path == path)
+    {
         s.active_tab_index = idx;
         send_json(
             stream,
@@ -6425,10 +6747,7 @@ fn api_close_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         }
         send_json(
             stream,
-            &format!(
-                r#"{{"ok":true,"active_tab_index":{}}}"#,
-                s.active_tab_index
-            ),
+            &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, s.active_tab_index),
         );
     } else {
         send_error(stream, 404, "tab not found");
@@ -6448,7 +6767,10 @@ fn api_switch_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     if let Some(tab_id) = parsed.get("tab_id").and_then(|v| v.as_u64()) {
         if let Some(idx) = s.scene_tabs.iter().position(|t| t.id == tab_id as u32) {
             s.active_tab_index = idx;
-            send_json(stream, &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx));
+            send_json(
+                stream,
+                &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
+            );
         } else {
             send_error(stream, 404, "tab not found");
         }
@@ -6456,7 +6778,10 @@ fn api_switch_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
         let idx = index as usize;
         if idx < s.scene_tabs.len() {
             s.active_tab_index = idx;
-            send_json(stream, &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx));
+            send_json(
+                stream,
+                &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
+            );
         } else {
             send_error(stream, 400, "index out of range");
         }
@@ -6723,7 +7048,8 @@ fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStr
             "main_scene": &s.project_main_scene,
             "description": &s.project_description,
             "categories": categories,
-        }).to_string()
+        })
+        .to_string()
     };
     send_json(stream, &json);
 }
@@ -7187,11 +7513,7 @@ fn api_get_commands(stream: &mut TcpStream) {
 /// Server-side commands (undo, redo, etc.) are executed directly.
 /// Client-side commands return `{"action": "client", "command": "<id>"}` to
 /// signal the frontend to handle them.
-fn api_execute_command(
-    state: &Arc<Mutex<EditorState>>,
-    body: &str,
-    stream: &mut TcpStream,
-) {
+fn api_execute_command(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
         None => {
@@ -7229,11 +7551,7 @@ fn api_execute_command(
             let st = state.lock().unwrap();
             if let Some(sel) = st.selected_node {
                 drop(st);
-                api_delete_node(
-                    state,
-                    &format!(r#"{{"node_id":{}}}"#, sel.raw()),
-                    stream,
-                );
+                api_delete_node(state, &format!(r#"{{"node_id":{}}}"#, sel.raw()), stream);
             } else {
                 send_json(stream, r#"{"ok":false,"reason":"no node selected"}"#);
             }
@@ -8527,10 +8845,21 @@ mod tests {
 
         let entries = super::scan_directory(tmp.path(), "", 0, 3);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"icon.png"), "should find png files, got {:?}", names);
-        assert!(names.contains(&"bg.jpg"), "should find jpg files, got {:?}", names);
+        assert!(
+            names.contains(&"icon.png"),
+            "should find png files, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"bg.jpg"),
+            "should find jpg files, got {:?}",
+            names
+        );
         assert!(names.contains(&"main.tscn"), "should still find tscn files");
-        assert!(!names.contains(&"readme.txt"), "should not include txt files");
+        assert!(
+            !names.contains(&"readme.txt"),
+            "should not include txt files"
+        );
 
         let png_entry = entries.iter().find(|e| e.name == "icon.png").unwrap();
         assert_eq!(png_entry.file_type, "Image");
@@ -8544,7 +8873,10 @@ mod tests {
 
         let entries = super::scan_directory(tmp.path(), "", 0, 3);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"water.gdshader"), "should find shader files");
+        assert!(
+            names.contains(&"water.gdshader"),
+            "should find shader files"
+        );
         assert!(names.contains(&"project.cfg"), "should find cfg files");
     }
 
@@ -10200,11 +10532,26 @@ position = Vector2(10, 20)
         let (handle, port) = make_server();
         let resp = http_get(port, "/editor");
         let body = extract_body(&resp);
-        assert!(body.contains("id=\"fs-preview\""), "should have preview panel");
-        assert!(body.contains("showFilePreview"), "should have preview JS function");
-        assert!(body.contains("preview-img"), "should have image preview CSS class");
-        assert!(body.contains("preview-code"), "should have code preview CSS class");
-        assert!(body.contains("/api/preview/file"), "should reference preview API");
+        assert!(
+            body.contains("id=\"fs-preview\""),
+            "should have preview panel"
+        );
+        assert!(
+            body.contains("showFilePreview"),
+            "should have preview JS function"
+        );
+        assert!(
+            body.contains("preview-img"),
+            "should have image preview CSS class"
+        );
+        assert!(
+            body.contains("preview-code"),
+            "should have code preview CSS class"
+        );
+        assert!(
+            body.contains("/api/preview/file"),
+            "should reference preview API"
+        );
         handle.stop();
     }
 
@@ -10232,8 +10579,15 @@ position = Vector2(10, 20)
     fn test_file_preview_endpoint_script() {
         let (handle, port) = make_server();
         let tmp_script = format!("test_preview_script_{}.gd", port);
-        std::fs::write(&tmp_script, "extends Node\n\nfunc _ready():\n\tprint(\"hello\")\n").unwrap();
-        let resp = http_get(port, &format!("/api/preview/file?path=res://{}", tmp_script));
+        std::fs::write(
+            &tmp_script,
+            "extends Node\n\nfunc _ready():\n\tprint(\"hello\")\n",
+        )
+        .unwrap();
+        let resp = http_get(
+            port,
+            &format!("/api/preview/file?path=res://{}", tmp_script),
+        );
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(v["type"], "script");
@@ -10254,7 +10608,8 @@ position = Vector2(10, 20)
         .unwrap();
         let resp = http_get(port, &format!("/api/preview/file?path=res://{}", tmp_res));
         let body = extract_body(&resp);
-        let v: serde_json::Value = serde_json::from_str(body).expect(&format!("invalid JSON: {}", body));
+        let v: serde_json::Value =
+            serde_json::from_str(body).expect(&format!("invalid JSON: {}", body));
         assert_eq!(v["type"], "resource", "body was: {}", body);
         assert_eq!(v["resource_type"], "Theme");
         assert_eq!(v["sub_resources"], 1);
@@ -10268,7 +10623,10 @@ position = Vector2(10, 20)
         let resp = http_get(port, "/api/preview/file?path=res://nonexistent_xyz.gd");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert!(v["error"].is_string(), "should return error for missing file");
+        assert!(
+            v["error"].is_string(),
+            "should return error for missing file"
+        );
         handle.stop();
     }
 
@@ -10278,7 +10636,10 @@ position = Vector2(10, 20)
         let resp = http_get(port, "/api/preview/file");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert!(v["error"].is_string(), "should return error for missing param");
+        assert!(
+            v["error"].is_string(),
+            "should return error for missing param"
+        );
         handle.stop();
     }
 
@@ -10348,48 +10709,132 @@ position = Vector2(10, 20)
 
         // Scene menu and its actions
         assert!(body.contains("data-menu=\"scene\""), "Scene menu missing");
-        assert!(body.contains("data-action=\"scene-new\""), "scene-new action missing");
-        assert!(body.contains("data-action=\"scene-open\""), "scene-open action missing");
-        assert!(body.contains("data-action=\"scene-save\""), "scene-save action missing");
-        assert!(body.contains("data-action=\"scene-save-as\""), "scene-save-as action missing");
-        assert!(body.contains("data-action=\"scene-close\""), "scene-close action missing");
-        assert!(body.contains("data-action=\"scene-quit\""), "scene-quit action missing");
+        assert!(
+            body.contains("data-action=\"scene-new\""),
+            "scene-new action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-open\""),
+            "scene-open action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-save\""),
+            "scene-save action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-save-as\""),
+            "scene-save-as action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-close\""),
+            "scene-close action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-quit\""),
+            "scene-quit action missing"
+        );
 
         // Edit menu and its actions
         assert!(body.contains("data-menu=\"edit\""), "Edit menu missing");
-        assert!(body.contains("data-action=\"edit-undo\""), "edit-undo action missing");
-        assert!(body.contains("data-action=\"edit-redo\""), "edit-redo action missing");
-        assert!(body.contains("data-action=\"edit-cut\""), "edit-cut action missing");
-        assert!(body.contains("data-action=\"edit-copy\""), "edit-copy action missing");
-        assert!(body.contains("data-action=\"edit-paste\""), "edit-paste action missing");
+        assert!(
+            body.contains("data-action=\"edit-undo\""),
+            "edit-undo action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-redo\""),
+            "edit-redo action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-cut\""),
+            "edit-cut action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-copy\""),
+            "edit-copy action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-paste\""),
+            "edit-paste action missing"
+        );
 
         // Project menu and its actions
-        assert!(body.contains("data-menu=\"project\""), "Project menu missing");
-        assert!(body.contains("data-action=\"project-settings\""), "project-settings action missing");
-        assert!(body.contains("data-action=\"project-export\""), "project-export action missing");
-        assert!(body.contains("data-action=\"project-refresh\""), "project-refresh action missing");
+        assert!(
+            body.contains("data-menu=\"project\""),
+            "Project menu missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-settings\""),
+            "project-settings action missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-export\""),
+            "project-export action missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-refresh\""),
+            "project-refresh action missing"
+        );
 
         // Debug menu and its actions
         assert!(body.contains("data-menu=\"debug\""), "Debug menu missing");
-        assert!(body.contains("data-action=\"debug-run\""), "debug-run action missing");
-        assert!(body.contains("data-action=\"debug-run-current\""), "debug-run-current action missing");
-        assert!(body.contains("data-action=\"debug-pause\""), "debug-pause action missing");
-        assert!(body.contains("data-action=\"debug-stop\""), "debug-stop action missing");
-        assert!(body.contains("data-action=\"debug-step\""), "debug-step action missing");
+        assert!(
+            body.contains("data-action=\"debug-run\""),
+            "debug-run action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-run-current\""),
+            "debug-run-current action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-pause\""),
+            "debug-pause action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-stop\""),
+            "debug-stop action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-step\""),
+            "debug-step action missing"
+        );
 
         // Editor menu and its actions
         assert!(body.contains("data-menu=\"editor\""), "Editor menu missing");
-        assert!(body.contains("data-action=\"editor-settings\""), "editor-settings action missing");
-        assert!(body.contains("data-action=\"editor-layout-save\""), "editor-layout-save action missing");
-        assert!(body.contains("data-action=\"editor-layout-default\""), "editor-layout-default action missing");
-        assert!(body.contains("data-action=\"editor-toggle-fullscreen\""), "editor-toggle-fullscreen action missing");
-        assert!(body.contains("data-action=\"editor-toggle-console\""), "editor-toggle-console action missing");
+        assert!(
+            body.contains("data-action=\"editor-settings\""),
+            "editor-settings action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-layout-save\""),
+            "editor-layout-save action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-layout-default\""),
+            "editor-layout-default action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-toggle-fullscreen\""),
+            "editor-toggle-fullscreen action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-toggle-console\""),
+            "editor-toggle-console action missing"
+        );
 
         // Help menu and its actions
         assert!(body.contains("data-menu=\"help\""), "Help menu missing");
-        assert!(body.contains("data-action=\"help-docs\""), "help-docs action missing");
-        assert!(body.contains("data-action=\"help-issues\""), "help-issues action missing");
-        assert!(body.contains("data-action=\"help-about\""), "help-about action missing");
+        assert!(
+            body.contains("data-action=\"help-docs\""),
+            "help-docs action missing"
+        );
+        assert!(
+            body.contains("data-action=\"help-issues\""),
+            "help-issues action missing"
+        );
+        assert!(
+            body.contains("data-action=\"help-about\""),
+            "help-about action missing"
+        );
 
         // Keyboard shortcuts are shown
         assert!(body.contains("Ctrl+N"), "Ctrl+N shortcut missing");
@@ -10399,7 +10844,10 @@ position = Vector2(10, 20)
         assert!(body.contains("F11"), "F11 shortcut missing");
 
         // handleMenuAction function exists in JS
-        assert!(body.contains("handleMenuAction"), "handleMenuAction function missing");
+        assert!(
+            body.contains("handleMenuAction"),
+            "handleMenuAction function missing"
+        );
 
         handle.stop();
     }
@@ -10413,53 +10861,131 @@ position = Vector2(10, 20)
         let body = extract_body(&resp);
 
         // Inspector toolbar CSS classes
-        assert!(body.contains(".insp-history"), "insp-history CSS class missing");
-        assert!(body.contains(".insp-history button"), "insp-history button CSS missing");
-        assert!(body.contains(".resource-info"), "resource-info CSS class missing");
-        assert!(body.contains(".resource-info .resource-type"), "resource-type CSS class missing");
-        assert!(body.contains(".resource-info .resource-path"), "resource-path CSS class missing");
+        assert!(
+            body.contains(".insp-history"),
+            "insp-history CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-history button"),
+            "insp-history button CSS missing"
+        );
+        assert!(
+            body.contains(".resource-info"),
+            "resource-info CSS class missing"
+        );
+        assert!(
+            body.contains(".resource-info .resource-type"),
+            "resource-type CSS class missing"
+        );
+        assert!(
+            body.contains(".resource-info .resource-path"),
+            "resource-path CSS class missing"
+        );
 
         // Sub-resource breadcrumb CSS
-        assert!(body.contains(".insp-breadcrumb"), "insp-breadcrumb CSS class missing");
-        assert!(body.contains(".insp-breadcrumb-item"), "insp-breadcrumb-item CSS class missing");
-        assert!(body.contains(".insp-breadcrumb-sep"), "insp-breadcrumb-sep CSS class missing");
+        assert!(
+            body.contains(".insp-breadcrumb"),
+            "insp-breadcrumb CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-breadcrumb-item"),
+            "insp-breadcrumb-item CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-breadcrumb-sep"),
+            "insp-breadcrumb-sep CSS class missing"
+        );
 
         // Inspector history JS state variables
-        assert!(body.contains("var inspectorHistory = []"), "inspectorHistory state missing");
-        assert!(body.contains("var inspectorHistoryIndex = -1"), "inspectorHistoryIndex state missing");
-        assert!(body.contains("var subResourceStack = []"), "subResourceStack state missing");
+        assert!(
+            body.contains("var inspectorHistory = []"),
+            "inspectorHistory state missing"
+        );
+        assert!(
+            body.contains("var inspectorHistoryIndex = -1"),
+            "inspectorHistoryIndex state missing"
+        );
+        assert!(
+            body.contains("var subResourceStack = []"),
+            "subResourceStack state missing"
+        );
 
         // Inspector history navigation functions
-        assert!(body.contains("function inspectorBack()"), "inspectorBack function missing");
-        assert!(body.contains("function inspectorForward()"), "inspectorForward function missing");
-        assert!(body.contains("function pushInspectorHistory("), "pushInspectorHistory function missing");
-        assert!(body.contains("function updateHistoryButtons()"), "updateHistoryButtons function missing");
+        assert!(
+            body.contains("function inspectorBack()"),
+            "inspectorBack function missing"
+        );
+        assert!(
+            body.contains("function inspectorForward()"),
+            "inspectorForward function missing"
+        );
+        assert!(
+            body.contains("function pushInspectorHistory("),
+            "pushInspectorHistory function missing"
+        );
+        assert!(
+            body.contains("function updateHistoryButtons()"),
+            "updateHistoryButtons function missing"
+        );
 
         // Inspector toolbar creates back/forward buttons with keyboard shortcut tooltips
-        assert!(body.contains("inspector-history-back"), "back button id missing");
-        assert!(body.contains("inspector-history-forward"), "forward button id missing");
+        assert!(
+            body.contains("inspector-history-back"),
+            "back button id missing"
+        );
+        assert!(
+            body.contains("inspector-history-forward"),
+            "forward button id missing"
+        );
         assert!(body.contains("Alt+Left"), "Alt+Left shortcut hint missing");
-        assert!(body.contains("Alt+Right"), "Alt+Right shortcut hint missing");
+        assert!(
+            body.contains("Alt+Right"),
+            "Alt+Right shortcut hint missing"
+        );
 
         // Alt+Arrow keyboard shortcuts wired up
-        assert!(body.contains("e.altKey && e.key === 'ArrowLeft'"), "Alt+Left keyboard shortcut missing");
-        assert!(body.contains("e.altKey && e.key === 'ArrowRight'"), "Alt+Right keyboard shortcut missing");
+        assert!(
+            body.contains("e.altKey && e.key === 'ArrowLeft'"),
+            "Alt+Left keyboard shortcut missing"
+        );
+        assert!(
+            body.contains("e.altKey && e.key === 'ArrowRight'"),
+            "Alt+Right keyboard shortcut missing"
+        );
 
         // Resource info structured display (type + path spans)
         assert!(body.contains("resource-type"), "resource-type span missing");
         assert!(body.contains("resource-path"), "resource-path span missing");
 
         // Sub-resource navigation: breadcrumb rendering with root and stack items
-        assert!(body.contains("insp-breadcrumb"), "breadcrumb element id/class missing");
-        assert!(body.contains("subResourceStack.length"), "sub-resource stack length check missing");
+        assert!(
+            body.contains("insp-breadcrumb"),
+            "breadcrumb element id/class missing"
+        );
+        assert!(
+            body.contains("subResourceStack.length"),
+            "sub-resource stack length check missing"
+        );
 
         // Sub-resource button navigates into sub-resource (pushes to stack)
-        assert!(body.contains("subResourceStack.push"), "subResourceStack.push missing for navigation");
-        assert!(body.contains("SubResource"), "SubResource pattern matching missing");
+        assert!(
+            body.contains("subResourceStack.push"),
+            "subResourceStack.push missing for navigation"
+        );
+        assert!(
+            body.contains("SubResource"),
+            "SubResource pattern matching missing"
+        );
 
         // Sub-resource inline edit button
-        assert!(body.contains("insp-sub-resource-btn"), "sub-resource button class missing");
-        assert!(body.contains("data-sub-resource"), "data-sub-resource attribute missing");
+        assert!(
+            body.contains("insp-sub-resource-btn"),
+            "sub-resource button class missing"
+        );
+        assert!(
+            body.contains("data-sub-resource"),
+            "data-sub-resource attribute missing"
+        );
 
         handle.stop();
     }

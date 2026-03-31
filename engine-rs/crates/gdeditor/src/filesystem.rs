@@ -389,9 +389,7 @@ impl FileSystemDock {
             let path_str = file_path.display().to_string();
 
             // Apply filter.
-            if !filter_lower.is_empty()
-                && !path_str.to_ascii_lowercase().contains(&filter_lower)
-            {
+            if !filter_lower.is_empty() && !path_str.to_ascii_lowercase().contains(&filter_lower) {
                 continue;
             }
 
@@ -411,8 +409,7 @@ impl FileSystemDock {
 
         // Add directories.
         for dir_path in &dir_set {
-            let depth = dir_path.matches('/').count()
-                + if dir_path.is_empty() { 0 } else { 1 };
+            let depth = dir_path.matches('/').count() + if dir_path.is_empty() { 0 } else { 1 };
 
             // Check if parent is expanded.
             let parent = if let Some(idx) = dir_path.rfind('/') {
@@ -427,11 +424,7 @@ impl FileSystemDock {
 
             // When filter is active, show all matching dirs.
             if !filter_lower.is_empty() || self.expanded_dirs.contains(parent) || depth == 0 {
-                let name = dir_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(dir_path)
-                    .to_string();
+                let name = dir_path.rsplit('/').next().unwrap_or(dir_path).to_string();
                 let child_count = files
                     .iter()
                     .filter(|f| {
@@ -459,9 +452,7 @@ impl FileSystemDock {
             let path_str = file_path.display().to_string();
 
             // Apply filter.
-            if !filter_lower.is_empty()
-                && !path_str.to_ascii_lowercase().contains(&filter_lower)
-            {
+            if !filter_lower.is_empty() && !path_str.to_ascii_lowercase().contains(&filter_lower) {
                 continue;
             }
 
@@ -485,10 +476,7 @@ impl FileSystemDock {
                 .unwrap_or("")
                 .to_string();
 
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let icon = FileIcon::from_extension(ext);
 
             visible_items.push(FileSystemEntry {
@@ -504,9 +492,7 @@ impl FileSystemDock {
         }
 
         // Sort: directories before files at each level, alphabetical within.
-        visible_items.sort_by(|a, b| {
-            a.relative_path.cmp(&b.relative_path)
-        });
+        visible_items.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
         self.entries = visible_items;
     }
@@ -541,10 +527,7 @@ impl FileSystemDock {
 
     /// Returns entries matching a specific icon type.
     pub fn entries_by_type(&self, icon: FileIcon) -> Vec<&FileSystemEntry> {
-        self.entries
-            .iter()
-            .filter(|e| e.icon == icon)
-            .collect()
+        self.entries.iter().filter(|e| e.icon == icon).collect()
     }
 }
 
@@ -830,10 +813,7 @@ mod tests {
         dock.refresh().unwrap();
         dock.expand_dir("scenes");
 
-        let main = dock
-            .entries()
-            .iter()
-            .find(|e| e.name == "main.tscn");
+        let main = dock.entries().iter().find(|e| e.name == "main.tscn");
         assert!(main.is_some());
         assert_eq!(main.unwrap().res_path, "res://scenes/main.tscn");
     }

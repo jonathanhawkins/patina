@@ -23,7 +23,10 @@ use gdscene::scene_tree::SceneTree;
 #[test]
 fn node_id_is_positive() {
     let node = Node::new("Test", "Node");
-    assert!(node.id().raw() > 0, "NodeId must be positive (Godot 4.6.1 contract)");
+    assert!(
+        node.id().raw() > 0,
+        "NodeId must be positive (Godot 4.6.1 contract)"
+    );
 }
 
 #[test]
@@ -78,7 +81,10 @@ fn id_survives_add_to_tree() {
     let expected_id = child.id();
     let child_id = tree.add_child(root_id, child).unwrap();
 
-    assert_eq!(child_id, expected_id, "ID must not change when added to tree");
+    assert_eq!(
+        child_id, expected_id,
+        "ID must not change when added to tree"
+    );
 }
 
 #[test]
@@ -120,7 +126,11 @@ fn id_stable_after_sibling_removal() {
 
     // B's ID must be unchanged
     let node_b = tree.get_node(b_id).unwrap();
-    assert_eq!(node_b.id(), b_id, "Sibling removal must not affect other IDs");
+    assert_eq!(
+        node_b.id(),
+        b_id,
+        "Sibling removal must not affect other IDs"
+    );
 }
 
 // ===========================================================================
@@ -156,9 +166,7 @@ fn removed_node_id_is_never_recycled() {
 #[test]
 fn concurrent_id_generation_is_unique() {
     // Simulate rapid sequential ID creation (AtomicU64 ensures uniqueness)
-    let ids: Vec<u64> = (0..10_000)
-        .map(|_| NodeId::next().raw())
-        .collect();
+    let ids: Vec<u64> = (0..10_000).map(|_| NodeId::next().raw()).collect();
     let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
     assert_eq!(ids.len(), unique.len(), "All 10,000 IDs must be unique");
 }
@@ -172,7 +180,11 @@ fn unique_name_flag_does_not_affect_id() {
     let mut node = Node::new("Player", "Node");
     let id_before = node.id();
     node.set_unique_name(true);
-    assert_eq!(node.id(), id_before, "Setting unique_name must not change the node ID");
+    assert_eq!(
+        node.id(),
+        id_before,
+        "Setting unique_name must not change the node ID"
+    );
 }
 
 #[test]
@@ -200,7 +212,10 @@ fn unique_name_scoped_to_owner_not_global() {
     tree.get_node_mut(btn_b_id).unwrap().set_owner(Some(sb_id));
 
     // Both have different IDs despite same name + unique flag
-    assert_ne!(btn_a_id, btn_b_id, "Same-named unique nodes in different scopes must have different IDs");
+    assert_ne!(
+        btn_a_id, btn_b_id,
+        "Same-named unique nodes in different scopes must have different IDs"
+    );
 
     // Unique name lookup is scoped to owner
     let found_a = tree.get_node_by_unique_name(btn_a_id, "Button");
@@ -237,7 +252,10 @@ fn non_unique_name_not_found_by_unique_lookup() {
     tree.add_child(root_id, normal).unwrap();
 
     let found = tree.get_node_by_unique_name(root_id, "Player");
-    assert_eq!(found, None, "Non-unique-named nodes must not be found by unique lookup");
+    assert_eq!(
+        found, None,
+        "Non-unique-named nodes must not be found by unique lookup"
+    );
 }
 
 // ===========================================================================

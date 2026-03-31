@@ -4,8 +4,8 @@
 //! and AnimationPlayer/AnimationTree API surfaces match Godot 4 behavior.
 
 use gdeditor::animation_editor::{
-    AnimationEditor, KeyframeRef, KeyframeSelection, PlaybackMode, PlaybackState,
-    Timeline, TrackDescriptor,
+    AnimationEditor, KeyframeRef, KeyframeSelection, PlaybackMode, PlaybackState, Timeline,
+    TrackDescriptor,
 };
 use gdeditor::curve_editor::CurveEditor;
 use gdscene::animation::{
@@ -72,10 +72,7 @@ fn track_descriptor_converts_to_runtime_track() {
 #[test]
 fn keyframe_selection_multi_track_range() {
     let mut sel = KeyframeSelection::new();
-    let times = vec![
-        vec![0.0, 0.5, 1.0, 1.5, 2.0],
-        vec![0.25, 0.75, 1.25],
-    ];
+    let times = vec![vec![0.0, 0.5, 1.0, 1.5, 2.0], vec![0.25, 0.75, 1.25]];
     let counts = vec![5, 3];
     sel.select_range(2, &counts, &times, 0.4, 1.1);
 

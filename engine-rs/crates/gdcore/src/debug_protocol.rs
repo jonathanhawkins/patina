@@ -87,18 +87,14 @@ pub enum DebugEvent {
     /// The game has resumed running.
     Resumed,
     /// Call stack response.
-    CallStack {
-        frames: Vec<StackFrameInfo>,
-    },
+    CallStack { frames: Vec<StackFrameInfo> },
     /// Local variables response.
     Locals {
         frame: usize,
         variables: Vec<(String, String)>,
     },
     /// Global variables response.
-    Globals {
-        variables: Vec<(String, String)>,
-    },
+    Globals { variables: Vec<(String, String)> },
     /// Expression evaluation result.
     EvalResult {
         expression: String,
@@ -106,19 +102,11 @@ pub enum DebugEvent {
         error: Option<String>,
     },
     /// Breakpoint confirmed set.
-    BreakpointSet {
-        script: String,
-        line: usize,
-    },
+    BreakpointSet { script: String, line: usize },
     /// Breakpoint confirmed removed.
-    BreakpointRemoved {
-        script: String,
-        line: usize,
-    },
+    BreakpointRemoved { script: String, line: usize },
     /// An error occurred processing a command.
-    Error {
-        message: String,
-    },
+    Error { message: String },
     /// Game is exiting.
     Exiting,
 }
@@ -257,14 +245,15 @@ impl DebugEvent {
                         )
                     })
                     .collect();
-                format!(r#"{{"type":"call_stack","frames":[{}]}}"#, frames_json.join(","))
+                format!(
+                    r#"{{"type":"call_stack","frames":[{}]}}"#,
+                    frames_json.join(",")
+                )
             }
             DebugEvent::Locals { frame, variables } => {
                 let vars: Vec<String> = variables
                     .iter()
-                    .map(|(k, v)| {
-                        format!("[{},{}]", escape_json_string(k), escape_json_string(v))
-                    })
+                    .map(|(k, v)| format!("[{},{}]", escape_json_string(k), escape_json_string(v)))
                     .collect();
                 format!(
                     r#"{{"type":"locals","frame":{},"variables":[{}]}}"#,
@@ -275,9 +264,7 @@ impl DebugEvent {
             DebugEvent::Globals { variables } => {
                 let vars: Vec<String> = variables
                     .iter()
-                    .map(|(k, v)| {
-                        format!("[{},{}]", escape_json_string(k), escape_json_string(v))
-                    })
+                    .map(|(k, v)| format!("[{},{}]", escape_json_string(k), escape_json_string(v)))
                     .collect();
                 format!(r#"{{"type":"globals","variables":[{}]}}"#, vars.join(","))
             }
@@ -425,7 +412,13 @@ fn parse_json_object(s: &str) -> Option<HashMap<String, JsonValue>> {
             c if c.is_ascii_digit() || *c == '-' => {
                 let mut num_str = String::new();
                 while let Some(&c) = chars.peek() {
-                    if c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' || c == 'E' || c == '+' {
+                    if c.is_ascii_digit()
+                        || c == '.'
+                        || c == '-'
+                        || c == 'e'
+                        || c == 'E'
+                        || c == '+'
+                    {
                         num_str.push(c);
                         chars.next();
                     } else {
@@ -603,18 +596,16 @@ impl DebugSession {
     pub fn recv_command(&mut self) -> io::Result<DebugCommand> {
         let mut line = String::new();
         self.reader.read_line(&mut line)?;
-        DebugCommand::from_json(line.trim()).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid debug command")
-        })
+        DebugCommand::from_json(line.trim())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid debug command"))
     }
 
     /// Reads an event from the wire (blocking).
     pub fn recv_event(&mut self) -> io::Result<DebugEvent> {
         let mut line = String::new();
         self.reader.read_line(&mut line)?;
-        DebugEvent::from_json(line.trim()).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid debug event")
-        })
+        DebugEvent::from_json(line.trim())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid debug event"))
     }
 
     /// Non-blocking poll for a command. Returns `None` if no data available.
@@ -629,7 +620,9 @@ impl DebugSession {
                 })?;
                 Ok(Some(cmd))
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            Err(ref e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
                 Ok(None)
             }
             Err(e) => Err(e),

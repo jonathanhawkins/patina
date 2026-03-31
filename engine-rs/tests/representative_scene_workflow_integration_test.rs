@@ -61,7 +61,11 @@ fn pm64_platformer_initial_positions() {
 
     let player = tree.get_node_by_path("/root/World/Player").unwrap();
     let pos = get_position(&tree, player);
-    assert_eq!(pos, Vector2::new(100.0, 300.0), "Player starts at (100, 300)");
+    assert_eq!(
+        pos,
+        Vector2::new(100.0, 300.0),
+        "Player starts at (100, 300)"
+    );
 
     let collectible = tree.get_node_by_path("/root/World/Collectible").unwrap();
     let cpos = get_position(&tree, collectible);
@@ -105,7 +109,9 @@ fn pm64_ui_menu_loads_correct_structure() {
     assert_eq!(tree.get_node(scene_root).unwrap().name(), "MenuRoot");
     assert!(tree.get_node_by_path("/root/MenuRoot/Title").is_some());
     assert!(tree.get_node_by_path("/root/MenuRoot/PlayButton").is_some());
-    assert!(tree.get_node_by_path("/root/MenuRoot/SettingsButton").is_some());
+    assert!(tree
+        .get_node_by_path("/root/MenuRoot/SettingsButton")
+        .is_some());
     assert!(tree.get_node_by_path("/root/MenuRoot/QuitButton").is_some());
 
     let children = tree.get_node(scene_root).unwrap().children();
@@ -136,13 +142,19 @@ fn pm64_physics_playground_loads_nested_structure() {
 
     // Ball is a RigidBody2D with a CollisionShape2D child.
     let ball = tree.get_node_by_path("/root/World/Ball").unwrap();
-    assert!(tree.get_node_by_path("/root/World/Ball/CollisionShape").is_some());
+    assert!(tree
+        .get_node_by_path("/root/World/Ball/CollisionShape")
+        .is_some());
 
     // Wall and Floor are StaticBody2D with children.
     assert!(tree.get_node_by_path("/root/World/Wall").is_some());
-    assert!(tree.get_node_by_path("/root/World/Wall/CollisionShape").is_some());
+    assert!(tree
+        .get_node_by_path("/root/World/Wall/CollisionShape")
+        .is_some());
     assert!(tree.get_node_by_path("/root/World/Floor").is_some());
-    assert!(tree.get_node_by_path("/root/World/Floor/CollisionShape").is_some());
+    assert!(tree
+        .get_node_by_path("/root/World/Floor/CollisionShape")
+        .is_some());
 
     // Verify Ball initial position.
     let ball_pos = get_position(&tree, ball);
@@ -162,8 +174,7 @@ fn pm64_physics_playground_runs_60_frames() {
 // 4. Complex signals scene: connections parsed + frame stepping
 // ===========================================================================
 
-const SIGNALS_COMPLEX_TSCN: &str =
-    include_str!("../../fixtures/scenes/signals_complex.tscn");
+const SIGNALS_COMPLEX_TSCN: &str = include_str!("../../fixtures/scenes/signals_complex.tscn");
 
 #[test]
 fn pm64_signals_complex_loads_all_nodes() {
@@ -177,7 +188,8 @@ fn pm64_signals_complex_loads_all_nodes() {
 
     // Nested child under Player.
     assert!(
-        tree.get_node_by_path("/root/Root/Player/TriggerZone").is_some(),
+        tree.get_node_by_path("/root/Root/Player/TriggerZone")
+            .is_some(),
         "TriggerZone should be a child of Player"
     );
 }
@@ -224,7 +236,11 @@ fn pm64_properties_scene_loads_custom_values() {
     // Custom properties should be stored.
     let node = tree.get_node(player).unwrap();
     let speed = node.get_property("speed");
-    assert_ne!(speed, gdvariant::Variant::Nil, "speed property should be set");
+    assert_ne!(
+        speed,
+        gdvariant::Variant::Nil,
+        "speed property should be set"
+    );
 }
 
 // ===========================================================================
@@ -455,9 +471,15 @@ fn pm64_space_shooter_loads_with_ext_resources() {
 
     assert_eq!(tree.get_node(scene_root).unwrap().name(), "SpaceShooter");
     assert!(tree.get_node_by_path("/root/SpaceShooter/Player").is_some());
-    assert!(tree.get_node_by_path("/root/SpaceShooter/Background").is_some());
-    assert!(tree.get_node_by_path("/root/SpaceShooter/EnemySpawner").is_some());
-    assert!(tree.get_node_by_path("/root/SpaceShooter/ScoreLabel").is_some());
+    assert!(tree
+        .get_node_by_path("/root/SpaceShooter/Background")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/SpaceShooter/EnemySpawner")
+        .is_some());
+    assert!(tree
+        .get_node_by_path("/root/SpaceShooter/ScoreLabel")
+        .is_some());
 
     let player = tree.get_node_by_path("/root/SpaceShooter/Player").unwrap();
     let pos = get_position(&tree, player);
@@ -507,7 +529,10 @@ fn pm64_position_modification_persists() {
     let (tree, _) = load_scene(PLATFORMER_TSCN);
     let mut main_loop = MainLoop::new(tree);
 
-    let player = main_loop.tree().get_node_by_path("/root/World/Player").unwrap();
+    let player = main_loop
+        .tree()
+        .get_node_by_path("/root/World/Player")
+        .unwrap();
     let initial = get_position(main_loop.tree(), player);
 
     // Move the player.
@@ -519,6 +544,9 @@ fn pm64_position_modification_persists() {
 
     // Position should still be the modified value (no scripts to change it).
     let final_pos = get_position(main_loop.tree(), player);
-    assert_eq!(final_pos, new_pos, "position set before stepping should persist");
+    assert_eq!(
+        final_pos, new_pos,
+        "position set before stepping should persist"
+    );
     assert_ne!(final_pos, initial);
 }

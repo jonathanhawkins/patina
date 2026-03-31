@@ -381,15 +381,13 @@ impl GpuContext3D {
         }))
         .ok()?;
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("patina-3d-gpu"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                    .using_resolution(adapter.limits()),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("patina-3d-gpu"),
+            required_features: wgpu::Features::empty(),
+            required_limits:
+                wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        }))
         .ok()?;
 
         Some(Self {
@@ -472,7 +470,11 @@ impl RenderPipeline3D {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("patina-3d-pipeline-layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&model_layout), Some(&light_layout)],
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&model_layout),
+                Some(&light_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -954,10 +956,12 @@ impl GpuRenderer3D {
         // Map and read color data.
         let color_slice = readback_buf.slice(..);
         color_slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        }).ok();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
         let color_mapped = color_slice.get_mapped_range();
 
         let mut pixels = Vec::with_capacity((w * h) as usize);
@@ -978,10 +982,12 @@ impl GpuRenderer3D {
         // Map and read depth data.
         let depth_slice = depth_readback_buf.slice(..);
         depth_slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        }).ok();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
         let depth_mapped = depth_slice.get_mapped_range();
 
         let mut depth = Vec::with_capacity((w * h) as usize);
@@ -1014,14 +1020,17 @@ impl RenderingServer3D for GpuRenderer3D {
         let id_val = self.next_id;
         self.next_id += 1;
         let id = Instance3DId(id_val);
-        self.instances.insert(id_val, Instance3D {
-            id,
-            mesh: None,
-            material: None,
-            shader_material: None,
-            transform: Transform3D::IDENTITY,
-            visible: true,
-        });
+        self.instances.insert(
+            id_val,
+            Instance3D {
+                id,
+                mesh: None,
+                material: None,
+                shader_material: None,
+                transform: Transform3D::IDENTITY,
+                visible: true,
+            },
+        );
         id
     }
 

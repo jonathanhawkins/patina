@@ -91,7 +91,10 @@ impl NodeCatalog2D {
 
     /// Returns entries filtered by category.
     pub fn entries_by_category(&self, category: NodeCategory) -> Vec<&CatalogEntry> {
-        self.entries.iter().filter(|e| e.category == category).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.category == category)
+            .collect()
     }
 
     /// Returns entries matching a search string (case-insensitive, searches name and description).
@@ -203,7 +206,8 @@ fn default_2d_entries() -> Vec<CatalogEntry> {
         CatalogEntry {
             class_name: "CharacterBody2D".into(),
             category: NodeCategory::Physics2D,
-            description: "Physics body for player-controlled characters with move_and_slide.".into(),
+            description: "Physics body for player-controlled characters with move_and_slide."
+                .into(),
         },
         CatalogEntry {
             class_name: "StaticBody2D".into(),
@@ -255,7 +259,8 @@ fn default_2d_entries() -> Vec<CatalogEntry> {
         CatalogEntry {
             class_name: "Node".into(),
             category: NodeCategory::Utility,
-            description: "Base class for all scene tree nodes. Use as a script-only container.".into(),
+            description: "Base class for all scene tree nodes. Use as a script-only container."
+                .into(),
         },
     ]
 }
@@ -320,10 +325,7 @@ pub enum ClassFilter {
     /// Only show classes whose name contains the search string (case-insensitive).
     Search(String),
     /// Combined: must inherit from base AND match search text.
-    SearchWithBase {
-        search: String,
-        base_class: String,
-    },
+    SearchWithBase { search: String, base_class: String },
 }
 
 /// Result of confirming a selection in the dialog.
@@ -522,9 +524,7 @@ impl CreateNodeDialog {
 
         match (has_search, has_base) {
             (false, false) => ClassFilter::None,
-            (false, true) => {
-                ClassFilter::InheritsFrom(self.base_class.clone().unwrap())
-            }
+            (false, true) => ClassFilter::InheritsFrom(self.base_class.clone().unwrap()),
             (true, false) => ClassFilter::Search(self.search_text.clone()),
             (true, true) => ClassFilter::SearchWithBase {
                 search: self.search_text.clone(),
@@ -638,12 +638,8 @@ impl Default for CreateNodeDialog {
 fn matches_filter(class_name: &str, filter: &ClassFilter) -> bool {
     match filter {
         ClassFilter::None => true,
-        ClassFilter::InheritsFrom(base) => {
-            class_db::is_parent_class(class_name, base)
-        }
-        ClassFilter::Search(search) => {
-            class_name.to_lowercase().contains(&search.to_lowercase())
-        }
+        ClassFilter::InheritsFrom(base) => class_db::is_parent_class(class_name, base),
+        ClassFilter::Search(search) => class_name.to_lowercase().contains(&search.to_lowercase()),
         ClassFilter::SearchWithBase { search, base_class } => {
             class_db::is_parent_class(class_name, base_class)
                 && class_name.to_lowercase().contains(&search.to_lowercase())

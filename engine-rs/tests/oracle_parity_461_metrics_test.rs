@@ -105,9 +105,7 @@ fn compare_node_structure(
             .unwrap_or(oracle_path.as_str());
 
         let found = patina_nodes.iter().any(|(p_path, p_class)| {
-            let p_suffix = p_path
-                .strip_prefix("/root/")
-                .unwrap_or(p_path.as_str());
+            let p_suffix = p_path.strip_prefix("/root/").unwrap_or(p_path.as_str());
             p_suffix == oracle_suffix && p_class == oracle_class
         });
 
@@ -129,11 +127,7 @@ fn oracle_tree_outputs_enumerated() {
     let tree_files: Vec<_> = std::fs::read_dir(&dir)
         .expect("read oracle_outputs dir")
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .ends_with("_tree.json")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with("_tree.json"))
         .collect();
 
     eprintln!("Oracle tree outputs: {}", tree_files.len());
@@ -250,9 +244,7 @@ fn per_scene_node_structure_parity() {
         } else {
             "LOW "
         };
-        eprintln!(
-            "  [{status}] {name}: {matched}/{total} nodes ({pct:.1}%)"
-        );
+        eprintln!("  [{status}] {name}: {matched}/{total} nodes ({pct:.1}%)");
     }
     eprintln!(
         "  Overall: {}/{} ({:.1}%)",
@@ -382,7 +374,10 @@ fn scene_3d_parity_metrics() {
     } else {
         0.0
     };
-    eprintln!("  3D overall: {}/{} ({:.1}%)", total_matched, total_nodes, pct);
+    eprintln!(
+        "  3D overall: {}/{} ({:.1}%)",
+        total_matched, total_nodes, pct
+    );
 
     // 3D parity is expected to be lower since 3D is deferred
     assert!(

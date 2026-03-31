@@ -143,7 +143,11 @@ impl ExportPreset {
     /// Creates a new preset with defaults for the given platform.
     pub fn new(name: impl Into<String>, platform: ExportPlatform) -> Self {
         let name = name.into();
-        let export_path = format!("export/{}/{name}{}", platform.id(), platform.default_extension());
+        let export_path = format!(
+            "export/{}/{name}{}",
+            platform.id(),
+            platform.default_extension()
+        );
         Self {
             name,
             platform,
@@ -172,11 +176,12 @@ impl ExportPreset {
         } else {
             self.app_name.clone()
         };
-        let mut cfg = ExportConfig::new(self.platform.id(), app_name)
-            .with_build_profile(match self.build_profile {
+        let mut cfg = ExportConfig::new(self.platform.id(), app_name).with_build_profile(
+            match self.build_profile {
                 ExportBuildProfile::Debug => BuildProfile::Debug,
                 ExportBuildProfile::Release => BuildProfile::Release,
-            });
+            },
+        );
         if !self.icon_path.is_empty() {
             cfg = cfg.with_icon(&self.icon_path);
         }
@@ -547,7 +552,10 @@ impl ExportDialog {
             }
             out.push_str(&format!("name={}\n", preset.name));
             out.push_str(&format!("platform={}\n", preset.platform.id()));
-            out.push_str(&format!("build_profile={}\n", preset.build_profile.as_str()));
+            out.push_str(&format!(
+                "build_profile={}\n",
+                preset.build_profile.as_str()
+            ));
             out.push_str(&format!("export_path={}\n", preset.export_path));
             if !preset.app_name.is_empty() {
                 out.push_str(&format!("app_name={}\n", preset.app_name));
@@ -947,13 +955,17 @@ mod tests {
     #[test]
     fn platform_default_custom_properties() {
         let mac_preset = ExportPreset::new("Mac", ExportPlatform::MacOS);
-        assert!(mac_preset.custom_properties.contains_key("bundle_identifier"));
+        assert!(mac_preset
+            .custom_properties
+            .contains_key("bundle_identifier"));
 
         let android_preset = ExportPreset::new("Droid", ExportPlatform::Android);
         assert!(android_preset.custom_properties.contains_key("min_sdk"));
 
         let web_preset = ExportPreset::new("Web", ExportPlatform::Web);
-        assert!(web_preset.custom_properties.contains_key("canvas_resize_policy"));
+        assert!(web_preset
+            .custom_properties
+            .contains_key("canvas_resize_policy"));
     }
 
     #[test]
@@ -1231,16 +1243,28 @@ mod tests {
         let added = dialog.add_desktop_presets();
         assert_eq!(added, 3);
         assert_eq!(dialog.preset_count(), 3);
-        assert!(dialog.presets().iter().any(|p| p.platform == ExportPlatform::Windows));
-        assert!(dialog.presets().iter().any(|p| p.platform == ExportPlatform::Linux));
-        assert!(dialog.presets().iter().any(|p| p.platform == ExportPlatform::MacOS));
+        assert!(dialog
+            .presets()
+            .iter()
+            .any(|p| p.platform == ExportPlatform::Windows));
+        assert!(dialog
+            .presets()
+            .iter()
+            .any(|p| p.platform == ExportPlatform::Linux));
+        assert!(dialog
+            .presets()
+            .iter()
+            .any(|p| p.platform == ExportPlatform::MacOS));
     }
 
     #[test]
     fn add_desktop_presets_skips_existing() {
         let mut dialog = ExportDialog::new();
         dialog
-            .add_preset(ExportPreset::new("Windows Desktop", ExportPlatform::Windows))
+            .add_preset(ExportPreset::new(
+                "Windows Desktop",
+                ExportPlatform::Windows,
+            ))
             .unwrap();
         let added = dialog.add_desktop_presets();
         assert_eq!(added, 2); // Linux + macOS
@@ -1308,7 +1332,10 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(dialog2.presets()[0].name, "Win");
         assert_eq!(dialog2.presets()[0].platform, ExportPlatform::Windows);
-        assert_eq!(dialog2.presets()[0].build_profile, ExportBuildProfile::Debug);
+        assert_eq!(
+            dialog2.presets()[0].build_profile,
+            ExportBuildProfile::Debug
+        );
         assert_eq!(dialog2.presets()[0].app_name, "TestApp");
         assert_eq!(dialog2.presets()[1].name, "Linux");
         assert_eq!(dialog2.presets()[1].platform, ExportPlatform::Linux);
@@ -1502,7 +1529,10 @@ mod tests {
 
         let mut dialog2 = ExportDialog::new();
         dialog2.deserialize_presets(&serialized);
-        assert_eq!(dialog2.presets()[0].include_filters, vec!["*.tscn", "*.tres"]);
+        assert_eq!(
+            dialog2.presets()[0].include_filters,
+            vec!["*.tscn", "*.tres"]
+        );
         assert_eq!(dialog2.presets()[0].exclude_filters, vec!["*.tmp"]);
     }
 }

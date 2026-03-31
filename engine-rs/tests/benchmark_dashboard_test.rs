@@ -67,8 +67,18 @@ fn render_benchmark_no_regression() {
 
     // Simulated render benchmarks based on fixture baselines
     dash.add_benchmark(BenchmarkEntry::new("grid_100_1280x720", 11.1, 11.125, 2.0));
-    dash.add_benchmark(BenchmarkEntry::new("layered_5x20_1280x720", 6.2, 6.173, 2.0));
-    dash.add_benchmark(BenchmarkEntry::new("layered_10x50_1280x720", 14.8, 15.0, 2.0));
+    dash.add_benchmark(BenchmarkEntry::new(
+        "layered_5x20_1280x720",
+        6.2,
+        6.173,
+        2.0,
+    ));
+    dash.add_benchmark(BenchmarkEntry::new(
+        "layered_10x50_1280x720",
+        14.8,
+        15.0,
+        2.0,
+    ));
 
     assert!(dash.is_green());
     assert_eq!(dash.regression_count(), 0);
@@ -309,8 +319,14 @@ fn frame_time_stats_realistic_60fps() {
     let stats = FrameTimeStats::from_samples(&samples).unwrap();
     assert!(stats.min_ms < 16.667, "min should be below target");
     assert!(stats.max_ms > 16.667, "max should be above target");
-    assert!((stats.avg_ms - 16.667).abs() < 1.0, "avg should be near target");
-    assert!(stats.avg_fps() > 55.0 && stats.avg_fps() < 65.0, "FPS should be near 60");
+    assert!(
+        (stats.avg_ms - 16.667).abs() < 1.0,
+        "avg should be near target"
+    );
+    assert!(
+        stats.avg_fps() > 55.0 && stats.avg_fps() < 65.0,
+        "FPS should be near 60"
+    );
     assert_eq!(stats.sample_count, 120);
 }
 
@@ -399,7 +415,9 @@ fn runtime_dashboard_full_engine_workflow() {
     let mut dash = RuntimeDashboard::new("Patina v0.1 — Runtime Dashboard");
 
     // Frame times: 120 frames at ~60 FPS
-    let frame_times: Vec<f64> = (0..120).map(|i| 16.0 + (i as f64 * 0.1).sin() * 1.5).collect();
+    let frame_times: Vec<f64> = (0..120)
+        .map(|i| 16.0 + (i as f64 * 0.1).sin() * 1.5)
+        .collect();
     dash.set_frame_times(&frame_times);
 
     // Physics: 60 steps at 60 TPS with 15 bodies
@@ -462,8 +480,15 @@ fn runtime_dashboard_full_engine_workflow() {
 #[test]
 fn runtime_dashboard_detects_physics_budget_overrun() {
     let mut dash = RuntimeDashboard::new("Overloaded");
-    dash.set_physics_metrics(PhysicsStepMetrics::from_step_times(&[20.0, 18.0, 22.0], 200, 60));
-    assert!(!dash.is_healthy(), "physics over budget should be unhealthy");
+    dash.set_physics_metrics(PhysicsStepMetrics::from_step_times(
+        &[20.0, 18.0, 22.0],
+        200,
+        60,
+    ));
+    assert!(
+        !dash.is_healthy(),
+        "physics over budget should be unhealthy"
+    );
     let report = dash.render_report();
     assert!(report.contains("UNHEALTHY"));
 }

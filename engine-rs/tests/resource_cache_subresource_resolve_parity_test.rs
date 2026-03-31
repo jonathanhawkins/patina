@@ -96,7 +96,9 @@ impl ResourceLoader for InlineTresLoader {
 #[test]
 fn resolve_subresource_returns_concrete_class() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_SINGLE_REF, "res://single.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_SINGLE_REF, "res://single.tres")
+        .unwrap();
 
     let resolved = res
         .resolve_subresource("shape")
@@ -112,7 +114,9 @@ fn resolve_subresource_returns_concrete_class() {
 #[test]
 fn resolved_subresource_has_typed_properties() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_SINGLE_REF, "res://single.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_SINGLE_REF, "res://single.tres")
+        .unwrap();
 
     let resolved = res.resolve_subresource("shape").unwrap();
 
@@ -265,7 +269,9 @@ fn invalidated_resolve_produces_fresh_subresource() {
 #[test]
 fn resolve_returns_none_for_missing_property() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_SINGLE_REF, "res://single.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_SINGLE_REF, "res://single.tres")
+        .unwrap();
 
     assert!(
         res.resolve_subresource("nonexistent_key").is_none(),
@@ -276,7 +282,9 @@ fn resolve_returns_none_for_missing_property() {
 #[test]
 fn resolve_returns_none_for_non_subresource_string() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_SINGLE_REF, "res://single.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_SINGLE_REF, "res://single.tres")
+        .unwrap();
 
     // "name" is a plain string, not a SubResource reference.
     assert!(
@@ -394,7 +402,9 @@ secondary_shape = SubResource("shared_shape")
 #[test]
 fn two_properties_same_id_resolve_to_pointer_equal_arc() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_SHARED_REF, "res://shared.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_SHARED_REF, "res://shared.tres")
+        .unwrap();
 
     let primary = res
         .resolve_subresource("primary_shape")
@@ -482,10 +492,22 @@ fn resolve_returns_none_for_non_string_variant_types() {
     res.set_property("float_prop", Variant::Float(3.14));
     res.set_property("nil_prop", Variant::Nil);
 
-    assert!(res.resolve_subresource("int_prop").is_none(), "Int must not resolve");
-    assert!(res.resolve_subresource("bool_prop").is_none(), "Bool must not resolve");
-    assert!(res.resolve_subresource("float_prop").is_none(), "Float must not resolve");
-    assert!(res.resolve_subresource("nil_prop").is_none(), "Nil must not resolve");
+    assert!(
+        res.resolve_subresource("int_prop").is_none(),
+        "Int must not resolve"
+    );
+    assert!(
+        res.resolve_subresource("bool_prop").is_none(),
+        "Bool must not resolve"
+    );
+    assert!(
+        res.resolve_subresource("float_prop").is_none(),
+        "Float must not resolve"
+    );
+    assert!(
+        res.resolve_subresource("nil_prop").is_none(),
+        "Nil must not resolve"
+    );
 }
 
 // ===========================================================================
@@ -496,10 +518,7 @@ fn resolve_returns_none_for_non_string_variant_types() {
 fn ext_resource_ref_does_not_resolve_as_subresource() {
     let mut res = Resource::new("ExtRefTest");
     // ExtResource references use "ExtResource:" prefix, not "SubResource:".
-    res.set_property(
-        "texture",
-        Variant::String("ExtResource:1".into()),
-    );
+    res.set_property("texture", Variant::String("ExtResource:1".into()));
     // Also add a sub-resource to ensure the lookup isn't confused.
     let mut sub = Resource::new("SomeSubRes");
     sub.set_property("x", Variant::Int(1));

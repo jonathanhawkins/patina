@@ -8,11 +8,11 @@
 //!
 //! Also tests WeakRef lifecycle and Object.free()/queue_free() semantics.
 
+use gdobject::weak_ref::WeakRef;
 use gdscene::node::Node;
 use gdscene::scene_tree::SceneTree;
 use gdscene::trace::TraceEventType;
 use gdscene::{LifecycleManager, MainLoop};
-use gdobject::weak_ref::WeakRef;
 
 // ===========================================================================
 // Helpers
@@ -33,7 +33,13 @@ fn notification_paths(tree: &SceneTree, detail: &str) -> Vec<String> {
 ///       ├── B (Node2D)
 ///       │   └── D (Node2D)
 ///       └── C (Node2D)
-fn build_nested_tree() -> (SceneTree, gdscene::node::NodeId, gdscene::node::NodeId, gdscene::node::NodeId, gdscene::node::NodeId) {
+fn build_nested_tree() -> (
+    SceneTree,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+    gdscene::node::NodeId,
+) {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let a = tree.add_child(root, Node::new("A", "Node2D")).unwrap();

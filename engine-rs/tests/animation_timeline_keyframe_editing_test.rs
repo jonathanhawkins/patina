@@ -25,10 +25,7 @@ fn make_test_server() -> (EditorServerHandle, u16) {
     let root = tree.root_id();
 
     let mut player = Node::new("Player", "Node2D");
-    player.set_property(
-        "position",
-        Variant::Vector2(Vector2::new(0.0, 0.0)),
-    );
+    player.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
     tree.add_child(root, player).unwrap();
 
     let state = EditorState::new(tree);
@@ -51,8 +48,7 @@ fn http_get(port: u16, path: &str) -> String {
 }
 
 fn http_request(port: u16, request: &str) -> String {
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("failed to connect");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.write_all(request.as_bytes()).unwrap();
     let mut response = Vec::new();
@@ -277,11 +273,7 @@ fn play_and_stop_animation() {
     );
 
     // Play
-    let resp = http_post(
-        port,
-        "/api/animation/play",
-        r#"{"name":"Bounce"}"#,
-    );
+    let resp = http_post(port, "/api/animation/play", r#"{"name":"Bounce"}"#);
     assert!(resp.contains("200 OK"), "Play should succeed");
 
     // Check status
@@ -325,11 +317,7 @@ fn seek_animation() {
     );
 
     // Seek to midpoint
-    let resp = http_post(
-        port,
-        "/api/animation/seek",
-        r#"{"time":1.0}"#,
-    );
+    let resp = http_post(port, "/api/animation/seek", r#"{"time":1.0}"#);
     assert!(resp.contains("200 OK"), "Seek should succeed");
 
     handle.stop();
@@ -410,10 +398,7 @@ fn editor_html_contains_animation_panel() {
         resp.contains("anim-new-btn"),
         "Should contain new animation button"
     );
-    assert!(
-        resp.contains("anim-play-btn"),
-        "Should contain play button"
-    );
+    assert!(resp.contains("anim-play-btn"), "Should contain play button");
     assert!(
         resp.contains("renderTimeline"),
         "Should contain timeline rendering code"

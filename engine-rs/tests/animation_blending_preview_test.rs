@@ -98,7 +98,10 @@ fn crossfade_basic_blend() {
     let vals = player.get_current_values();
     // from_position=1.0 → idle samples 5.0, walk at 0.0 → 100.0, factor=0.0 → 5.0
     let x = float_val(&vals, "x");
-    assert!((x - 5.0).abs() < 1e-6, "expected ~5.0 at blend start, got {x}");
+    assert!(
+        (x - 5.0).abs() < 1e-6,
+        "expected ~5.0 at blend start, got {x}"
+    );
 
     // Advance 0.25s (half the blend)
     player.advance(0.25);
@@ -150,7 +153,10 @@ fn crossfade_zero_duration_snaps_immediately() {
     // With zero duration, blend_factor() = 1.0 → fully "to"
     let vals = player.get_current_values();
     let x = float_val(&vals, "x");
-    assert!((x - 100.0).abs() < 1e-6, "zero-duration blend should snap, got {x}");
+    assert!(
+        (x - 100.0).abs() < 1e-6,
+        "zero-duration blend should snap, got {x}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +175,10 @@ fn set_blend_preview_at_zero() {
     let vals = player.get_current_values();
     let x = float_val(&vals, "x");
     // weight=0.0 → fully idle at position 0.5 → x=5.0
-    assert!((x - 5.0).abs() < 1e-6, "blend preview at 0.0 failed, got {x}");
+    assert!(
+        (x - 5.0).abs() < 1e-6,
+        "blend preview at 0.0 failed, got {x}"
+    );
 }
 
 #[test]
@@ -184,7 +193,10 @@ fn set_blend_preview_at_one() {
     let vals = player.get_current_values();
     let x = float_val(&vals, "x");
     // weight=1.0 → fully walk at position 0.5 → x=150.0
-    assert!((x - 150.0).abs() < 1e-6, "blend preview at 1.0 failed, got {x}");
+    assert!(
+        (x - 150.0).abs() < 1e-6,
+        "blend preview at 1.0 failed, got {x}"
+    );
 }
 
 #[test]
@@ -199,7 +211,10 @@ fn set_blend_preview_at_half() {
     let vals = player.get_current_values();
     let x = float_val(&vals, "x");
     // from=5.0 (idle@0.5), to=150.0 (walk@0.5), factor=0.5 → 77.5
-    assert!((x - 77.5).abs() < 1e-6, "blend preview at 0.5 failed, got {x}");
+    assert!(
+        (x - 77.5).abs() < 1e-6,
+        "blend preview at 0.5 failed, got {x}"
+    );
 }
 
 #[test]
@@ -256,7 +271,10 @@ fn blend_animations_factor_zero() {
     let b = make_anim("b", 1.0, "x", 100.0, 200.0);
     let vals = blend_animations(&a, &b, 0.5, 0.5, 0.0);
     let x = float_val(&vals, "x");
-    assert!((x - 5.0).abs() < 1e-6, "factor 0.0 should be fully A, got {x}");
+    assert!(
+        (x - 5.0).abs() < 1e-6,
+        "factor 0.0 should be fully A, got {x}"
+    );
 }
 
 #[test]

@@ -176,8 +176,8 @@ fn signal_connections_match_oracle_after_instantiation() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let _scene_root = add_packed_scene_to_tree(&mut tree, root, &scene)
-        .expect("add_packed_scene_to_tree");
+    let _scene_root =
+        add_packed_scene_to_tree(&mut tree, root, &scene).expect("add_packed_scene_to_tree");
 
     let oracle = load_oracle_connections();
     let live = extract_live_connections(&tree);

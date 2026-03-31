@@ -65,7 +65,10 @@ fn make_mixed_bodies() -> SceneTree {
     // Rigid body falling
     let mut ball = Node::new("Ball", "RigidBody2D");
     ball.set_property("position", Variant::Vector2(Vector2::new(100.0, 0.0)));
-    ball.set_property("linear_velocity", Variant::Vector2(Vector2::new(0.0, 120.0)));
+    ball.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(0.0, 120.0)),
+    );
     ball.set_property("mass", Variant::Float(1.0));
     let bid = tree.add_child(root, ball).unwrap();
     let mut bs = Node::new("Shape", "CollisionShape2D");
@@ -99,7 +102,10 @@ fn make_multi_rigid_cascade() -> SceneTree {
 
     let mut a = Node::new("A", "RigidBody2D");
     a.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
-    a.set_property("linear_velocity", Variant::Vector2(Vector2::new(200.0, 0.0)));
+    a.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(200.0, 0.0)),
+    );
     a.set_property("mass", Variant::Float(2.0));
     a.set_property("bounce", Variant::Float(0.8));
     let aid = tree.add_child(root, a).unwrap();
@@ -137,7 +143,10 @@ fn make_high_tps_gravity() -> SceneTree {
 
     let mut ball = Node::new("Ball", "RigidBody2D");
     ball.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
-    ball.set_property("linear_velocity", Variant::Vector2(Vector2::new(0.0, 100.0)));
+    ball.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(0.0, 100.0)),
+    );
     let bid = tree.add_child(root, ball).unwrap();
     let mut s = Node::new("Shape", "CollisionShape2D");
     s.set_property("radius", Variant::Float(5.0));
@@ -153,7 +162,10 @@ fn make_pause_resume() -> SceneTree {
 
     let mut ball = Node::new("Ball", "RigidBody2D");
     ball.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
-    ball.set_property("linear_velocity", Variant::Vector2(Vector2::new(60.0, 90.0)));
+    ball.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(60.0, 90.0)),
+    );
     let bid = tree.add_child(root, ball).unwrap();
     let mut s = Node::new("Shape", "CollisionShape2D");
     s.set_property("radius", Variant::Float(5.0));
@@ -218,20 +230,24 @@ fn run_traced_with_pause(
 
 /// Assert two traces are entry-by-entry equal within EPSILON.
 fn assert_traces_equal(label: &str, a: &[PhysicsTraceEntry], b: &[PhysicsTraceEntry]) {
-    assert_eq!(a.len(), b.len(), "{label}: trace length mismatch ({} vs {})", a.len(), b.len());
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "{label}: trace length mismatch ({} vs {})",
+        a.len(),
+        b.len()
+    );
     for (i, (ga, gb)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(ga.name, gb.name, "{label} entry {i}: name");
         assert_eq!(ga.frame, gb.frame, "{label} entry {i}: frame");
         assert!(
-            approx_eq(ga.position.x, gb.position.x)
-                && approx_eq(ga.position.y, gb.position.y),
+            approx_eq(ga.position.x, gb.position.x) && approx_eq(ga.position.y, gb.position.y),
             "{label} entry {i}: position drift: {:?} vs {:?}",
             ga.position,
             gb.position,
         );
         assert!(
-            approx_eq(ga.velocity.x, gb.velocity.x)
-                && approx_eq(ga.velocity.y, gb.velocity.y),
+            approx_eq(ga.velocity.x, gb.velocity.x) && approx_eq(ga.velocity.y, gb.velocity.y),
             "{label} entry {i}: velocity drift: {:?} vs {:?}",
             ga.velocity,
             gb.velocity,
@@ -244,8 +260,7 @@ fn load_golden(name: &str) -> Vec<serde_json::Value> {
         .join(format!("../fixtures/golden/physics/{name}.json"));
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to load golden {name}: {e}"));
-    serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("failed to parse golden {name}: {e}"))
+    serde_json::from_str(&content).unwrap_or_else(|e| panic!("failed to parse golden {name}: {e}"))
 }
 
 fn assert_trace_matches_golden(
@@ -540,8 +555,8 @@ fn generate_goldens_if_requested() {
         return; // Skip unless explicitly requested
     }
 
-    let golden_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/golden/physics");
+    let golden_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden/physics");
     std::fs::create_dir_all(&golden_dir).unwrap();
 
     // 1. Character slide

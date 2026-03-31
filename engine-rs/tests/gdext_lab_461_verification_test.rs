@@ -88,8 +88,8 @@ fn each_probe_has_func_entry_point() {
 
 #[test]
 fn project_godot_config_valid() {
-    let project = fs::read_to_string(Path::new(LAB_DIR).join("project.godot"))
-        .expect("read project.godot");
+    let project =
+        fs::read_to_string(Path::new(LAB_DIR).join("project.godot")).expect("read project.godot");
 
     assert!(
         project.contains("config_version=5"),
@@ -135,8 +135,7 @@ fn gdextension_file_valid() {
 
 #[test]
 fn cargo_toml_uses_compatible_godot_rust() {
-    let cargo = fs::read_to_string(Path::new(LAB_DIR).join("Cargo.toml"))
-        .expect("read Cargo.toml");
+    let cargo = fs::read_to_string(Path::new(LAB_DIR).join("Cargo.toml")).expect("read Cargo.toml");
 
     assert!(
         cargo.contains("godot = \"0.2\"") || cargo.contains("godot = { version = \"0.2\""),
@@ -223,8 +222,7 @@ fn probe_module_count_matches() {
 
 #[test]
 fn lib_rs_has_gdextension_entry() {
-    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs"))
-        .expect("read lib.rs");
+    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs")).expect("read lib.rs");
 
     assert!(
         lib_rs.contains("#[gdextension]"),
@@ -242,8 +240,7 @@ fn lib_rs_has_gdextension_entry() {
 
 #[test]
 fn smoke_probe_class_registered() {
-    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs"))
-        .expect("read lib.rs");
+    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs")).expect("read lib.rs");
 
     assert!(
         lib_rs.contains("GodotClass"),
@@ -268,7 +265,14 @@ fn gdextension_covers_all_platforms() {
     let ext = fs::read_to_string(Path::new(LAB_DIR).join("patina_lab.gdextension"))
         .expect("read .gdextension");
 
-    let required = ["linux.debug", "linux.release", "macos.debug", "macos.release", "windows.debug", "windows.release"];
+    let required = [
+        "linux.debug",
+        "linux.release",
+        "macos.debug",
+        "macos.release",
+        "windows.debug",
+        "windows.release",
+    ];
     let mut missing = Vec::new();
 
     for platform in &required {
@@ -326,7 +330,11 @@ fn oracle_fixtures_have_tree_and_property_variants() {
 
     // Key scenes should have both _tree.json and _properties.json
     let scenes = [
-        "main", "minimal", "hierarchy", "platformer", "physics_playground",
+        "main",
+        "minimal",
+        "hierarchy",
+        "platformer",
+        "physics_playground",
     ];
 
     let mut missing = Vec::new();
@@ -354,8 +362,8 @@ fn oracle_fixtures_have_tree_and_property_variants() {
 
 #[test]
 fn project_godot_pinned_to_461() {
-    let project = fs::read_to_string(Path::new(LAB_DIR).join("project.godot"))
-        .expect("read project.godot");
+    let project =
+        fs::read_to_string(Path::new(LAB_DIR).join("project.godot")).expect("read project.godot");
 
     assert!(
         project.contains("4.6.1"),
@@ -369,8 +377,8 @@ fn project_godot_pinned_to_461() {
 
 #[test]
 fn smoke_probe_scene_exists() {
-    let project = fs::read_to_string(Path::new(LAB_DIR).join("project.godot"))
-        .expect("read project.godot");
+    let project =
+        fs::read_to_string(Path::new(LAB_DIR).join("project.godot")).expect("read project.godot");
 
     // Extract main scene path
     assert!(
@@ -381,8 +389,7 @@ fn smoke_probe_scene_exists() {
     // The scene file referenced should exist
     let scenes_dir = Path::new(LAB_DIR).join("scenes");
     assert!(
-        scenes_dir.exists() || Path::new(LAB_DIR).join("scenes/smoke_probe.tscn").exists()
-            || true, // scene dir may not exist yet if lab is code-only
+        scenes_dir.exists() || Path::new(LAB_DIR).join("scenes/smoke_probe.tscn").exists() || true, // scene dir may not exist yet if lab is code-only
         "Lab scene structure is valid"
     );
 }
@@ -393,8 +400,7 @@ fn smoke_probe_scene_exists() {
 
 #[test]
 fn smoke_probe_has_var_exports() {
-    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs"))
-        .expect("read lib.rs");
+    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs")).expect("read lib.rs");
 
     assert!(
         lib_rs.contains("#[var]"),
@@ -416,8 +422,7 @@ fn smoke_probe_has_var_exports() {
 
 #[test]
 fn smoke_probe_has_signal_recording() {
-    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs"))
-        .expect("read lib.rs");
+    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs")).expect("read lib.rs");
 
     assert!(
         lib_rs.contains("record_probe_signal"),
@@ -437,9 +442,7 @@ fn smoke_probe_has_signal_recording() {
 fn oracle_3d_fixtures_exist() {
     let fixtures_dir = Path::new(LAB_DIR).join("../../fixtures/oracle_outputs");
 
-    let scenes_3d = [
-        "minimal_3d", "indoor_3d", "multi_light_3d",
-    ];
+    let scenes_3d = ["minimal_3d", "indoor_3d", "multi_light_3d"];
 
     let mut missing = Vec::new();
     for scene in &scenes_3d {
@@ -515,12 +518,14 @@ fn gdextension_library_names_match_cargo_package() {
 
 #[test]
 fn project_uses_ci_compatible_renderer() {
-    let project = fs::read_to_string(Path::new(LAB_DIR).join("project.godot"))
-        .expect("read project.godot");
+    let project =
+        fs::read_to_string(Path::new(LAB_DIR).join("project.godot")).expect("read project.godot");
 
     // Mobile or compatibility renderer is appropriate for CI (not forward+)
     assert!(
-        project.contains("mobile") || project.contains("compatibility") || project.contains("gl_compatibility"),
+        project.contains("mobile")
+            || project.contains("compatibility")
+            || project.contains("gl_compatibility"),
         "project.godot should use mobile or compatibility renderer for CI"
     );
 }
@@ -681,8 +686,7 @@ fn resource_probes_complete() {
 
 #[test]
 fn cargo_toml_edition_2021() {
-    let cargo = fs::read_to_string(Path::new(LAB_DIR).join("Cargo.toml"))
-        .expect("read Cargo.toml");
+    let cargo = fs::read_to_string(Path::new(LAB_DIR).join("Cargo.toml")).expect("read Cargo.toml");
 
     assert!(
         cargo.contains("edition = \"2021\""),
@@ -756,8 +760,7 @@ fn oracle_outputs_cover_scene_fixtures() {
 
 #[test]
 fn smoke_probe_covers_all_basic_domains() {
-    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs"))
-        .expect("read lib.rs");
+    let lib_rs = fs::read_to_string(Path::new(LAB_DIR).join("src/lib.rs")).expect("read lib.rs");
 
     let required_calls = [
         "scene_probe::emit",

@@ -188,11 +188,7 @@ fn load_golden(filename: &str) -> Vec<GoldenEntry> {
     entries
 }
 
-fn assert_trace_matches_golden(
-    label: &str,
-    trace: &[PhysicsTraceEntry],
-    golden: &[GoldenEntry],
-) {
+fn assert_trace_matches_golden(label: &str, trace: &[PhysicsTraceEntry], golden: &[GoldenEntry]) {
     assert_eq!(
         trace.len(),
         golden.len(),
@@ -201,17 +197,35 @@ fn assert_trace_matches_golden(
         golden.len()
     );
     for (i, (t, g)) in trace.iter().zip(golden.iter()).enumerate() {
-        assert_eq!(t.name, g.name, "{label} entry {i}: name '{}' vs '{}'", t.name, g.name);
-        assert_eq!(t.frame, g.frame, "{label} entry {i} ({}): frame {} vs {}", t.name, t.frame, g.frame);
+        assert_eq!(
+            t.name, g.name,
+            "{label} entry {i}: name '{}' vs '{}'",
+            t.name, g.name
+        );
+        assert_eq!(
+            t.frame, g.frame,
+            "{label} entry {i} ({}): frame {} vs {}",
+            t.name, t.frame, g.frame
+        );
         assert!(
             approx_eq(t.position.x, g.px) && approx_eq(t.position.y, g.py),
             "{label} entry {i} ({}, frame {}): position ({},{}) vs golden ({},{})",
-            t.name, t.frame, t.position.x, t.position.y, g.px, g.py
+            t.name,
+            t.frame,
+            t.position.x,
+            t.position.y,
+            g.px,
+            g.py
         );
         assert!(
             approx_eq(t.velocity.x, g.vx) && approx_eq(t.velocity.y, g.vy),
             "{label} entry {i} ({}, frame {}): velocity ({},{}) vs golden ({},{})",
-            t.name, t.frame, t.velocity.x, t.velocity.y, g.vx, g.vy
+            t.name,
+            t.frame,
+            t.velocity.x,
+            t.velocity.y,
+            g.vx,
+            g.vy
         );
     }
 }
@@ -270,12 +284,14 @@ fn extended_programmatic_and_tscn_identical() {
         assert!(
             approx_eq(p.position.x, t.position.x) && approx_eq(p.position.y, t.position.y),
             "entry {i} ({}, frame {}): position drift prog vs tscn",
-            p.name, p.frame
+            p.name,
+            p.frame
         );
         assert!(
             approx_eq(p.velocity.x, t.velocity.x) && approx_eq(p.velocity.y, t.velocity.y),
             "entry {i} ({}, frame {}): velocity drift prog vs tscn",
-            p.name, p.frame
+            p.name,
+            p.frame
         );
     }
 }
@@ -307,7 +323,10 @@ fn golden_extended_structure_valid() {
 
     for name in &expected {
         let count = golden.iter().filter(|e| e.name == *name).count();
-        assert_eq!(count, FRAMES as usize, "{name} should have {FRAMES} entries, got {count}");
+        assert_eq!(
+            count, FRAMES as usize,
+            "{name} should have {FRAMES} entries, got {count}"
+        );
     }
 }
 
@@ -330,7 +349,11 @@ fn extended_static_bodies_stationary() {
             assert!(
                 approx_eq(entry.px, *exp_x) && approx_eq(entry.py, *exp_y),
                 "{name} must stay at ({},{}), got ({},{}) at frame {}",
-                exp_x, exp_y, entry.px, entry.py, entry.frame
+                exp_x,
+                exp_y,
+                entry.px,
+                entry.py,
+                entry.frame
             );
             assert!(
                 approx_eq(entry.vx, 0.0) && approx_eq(entry.vy, 0.0),
@@ -413,7 +436,11 @@ fn extended_body_and_frame_counts() {
     assert_eq!(ml.frame_count(), FRAMES);
 
     let names: std::collections::HashSet<_> = trace.iter().map(|e| e.name.as_str()).collect();
-    assert!(names.len() >= 6, "should trace at least 6 bodies, got {}", names.len());
+    assert!(
+        names.len() >= 6,
+        "should trace at least 6 bodies, got {}",
+        names.len()
+    );
 
     let max_frame = trace.iter().map(|e| e.frame).max().unwrap_or(0);
     assert_eq!(max_frame, FRAMES);
@@ -428,10 +455,24 @@ fn extended_trace_frames_contiguous() {
     let (_, trace) = run_traced(make_extended_playground(), FRAMES, DELTA);
 
     for name in ["BallA", "BallB", "Player", "Floor", "WallLeft", "WallRight"] {
-        let frames: Vec<u64> = trace.iter().filter(|e| e.name == name).map(|e| e.frame).collect();
-        assert_eq!(frames.len(), FRAMES as usize, "{name}: expected {FRAMES} frames");
+        let frames: Vec<u64> = trace
+            .iter()
+            .filter(|e| e.name == name)
+            .map(|e| e.frame)
+            .collect();
+        assert_eq!(
+            frames.len(),
+            FRAMES as usize,
+            "{name}: expected {FRAMES} frames"
+        );
         for (i, &f) in frames.iter().enumerate() {
-            assert_eq!(f, (i + 1) as u64, "{name}: frame {i} should be {}, got {}", i + 1, f);
+            assert_eq!(
+                f,
+                (i + 1) as u64,
+                "{name}: frame {i} should be {}, got {}",
+                i + 1,
+                f
+            );
         }
     }
 }
@@ -476,8 +517,14 @@ fn extended_velocity_evolves() {
     // BallA starts with velocity (80,120). After 60 frames with possible
     // collisions, velocity should have changed at some point.
     let ball_a: Vec<_> = trace.iter().filter(|e| e.name == "BallA").collect();
-    let first_vel = (ball_a.first().unwrap().velocity.x, ball_a.first().unwrap().velocity.y);
-    let last_vel = (ball_a.last().unwrap().velocity.x, ball_a.last().unwrap().velocity.y);
+    let first_vel = (
+        ball_a.first().unwrap().velocity.x,
+        ball_a.first().unwrap().velocity.y,
+    );
+    let last_vel = (
+        ball_a.last().unwrap().velocity.x,
+        ball_a.last().unwrap().velocity.y,
+    );
 
     // Position definitely changes
     let first_pos = ball_a.first().unwrap().position;
@@ -485,7 +532,10 @@ fn extended_velocity_evolves() {
     assert!(
         (first_pos.x - last_pos.x).abs() > 1.0 || (first_pos.y - last_pos.y).abs() > 1.0,
         "BallA position must change over 60 frames: first=({},{}) last=({},{})",
-        first_pos.x, first_pos.y, last_pos.x, last_pos.y
+        first_pos.x,
+        first_pos.y,
+        last_pos.x,
+        last_pos.y
     );
 
     // If no collision occurred, velocity stays constant for rigid bodies
@@ -504,8 +554,8 @@ fn generate_extended_golden_if_requested() {
         return;
     }
 
-    let golden_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures/golden/physics");
+    let golden_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/golden/physics");
     std::fs::create_dir_all(&golden_dir).unwrap();
 
     let (_, trace) = run_traced(make_extended_playground(), FRAMES, DELTA);

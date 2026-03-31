@@ -140,11 +140,7 @@ fn make_static_blocking() -> SceneTree {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn run_traced(
-    tree: SceneTree,
-    frames: u64,
-    delta: f64,
-) -> (MainLoop, Vec<PhysicsTraceEntry>) {
+fn run_traced(tree: SceneTree, frames: u64, delta: f64) -> (MainLoop, Vec<PhysicsTraceEntry>) {
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
     ml.physics_server_mut().set_tracing(true);
@@ -161,15 +157,13 @@ fn assert_traces_equal(label: &str, a: &[PhysicsTraceEntry], b: &[PhysicsTraceEn
         assert_eq!(ga.name, gb.name, "{label} entry {i}: name");
         assert_eq!(ga.frame, gb.frame, "{label} entry {i}: frame");
         assert!(
-            approx_eq(ga.position.x, gb.position.x)
-                && approx_eq(ga.position.y, gb.position.y),
+            approx_eq(ga.position.x, gb.position.x) && approx_eq(ga.position.y, gb.position.y),
             "{label} entry {i}: position drift: {:?} vs {:?}",
             ga.position,
             gb.position,
         );
         assert!(
-            approx_eq(ga.velocity.x, gb.velocity.x)
-                && approx_eq(ga.velocity.y, gb.velocity.y),
+            approx_eq(ga.velocity.x, gb.velocity.x) && approx_eq(ga.velocity.y, gb.velocity.y),
             "{label} entry {i}: velocity drift: {:?} vs {:?}",
             ga.velocity,
             gb.velocity,
@@ -183,12 +177,15 @@ fn load_golden(name: &str) -> Vec<serde_json::Value> {
         .join(format!("../fixtures/golden/physics/{name}.json"));
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to load golden {name}: {e}"));
-    serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("failed to parse golden {name}: {e}"))
+    serde_json::from_str(&content).unwrap_or_else(|e| panic!("failed to parse golden {name}: {e}"))
 }
 
 /// Compare a physics trace against a loaded golden JSON array.
-fn assert_trace_matches_golden(label: &str, trace: &[PhysicsTraceEntry], golden: &[serde_json::Value]) {
+fn assert_trace_matches_golden(
+    label: &str,
+    trace: &[PhysicsTraceEntry],
+    golden: &[serde_json::Value],
+) {
     assert_eq!(
         trace.len(),
         golden.len(),

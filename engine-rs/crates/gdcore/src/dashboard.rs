@@ -268,7 +268,9 @@ impl FrameTimeStats {
         // p99: sort a copy, take the ceil(0.99 * n)-th element.
         let mut sorted = samples.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let p99_idx = ((n as f64 * 0.99).ceil() as usize).saturating_sub(1).min(n - 1);
+        let p99_idx = ((n as f64 * 0.99).ceil() as usize)
+            .saturating_sub(1)
+            .min(n - 1);
         let p99_ms = sorted[p99_idx];
 
         Some(Self {
@@ -301,8 +303,12 @@ impl FrameTimeStats {
                 "\"sample_count\":{}",
                 "}}"
             ),
-            self.min_ms, self.max_ms, self.avg_ms, self.p99_ms,
-            self.avg_fps(), self.sample_count
+            self.min_ms,
+            self.max_ms,
+            self.avg_ms,
+            self.p99_ms,
+            self.avg_fps(),
+            self.sample_count
         )
     }
 }
@@ -335,10 +341,7 @@ impl PhysicsStepMetrics {
         } else {
             0.0
         };
-        let step_max_ms = step_times_ms
-            .iter()
-            .copied()
-            .fold(0.0_f64, f64::max);
+        let step_max_ms = step_times_ms.iter().copied().fold(0.0_f64, f64::max);
 
         Self {
             step_avg_ms,
@@ -375,8 +378,12 @@ impl PhysicsStepMetrics {
                 "\"budget_ratio\":{:.4}",
                 "}}"
             ),
-            self.step_avg_ms, self.step_max_ms, self.step_count,
-            self.body_count, self.target_tps, self.budget_ratio()
+            self.step_avg_ms,
+            self.step_max_ms,
+            self.step_count,
+            self.body_count,
+            self.target_tps,
+            self.budget_ratio()
         )
     }
 }
@@ -419,10 +426,7 @@ impl RenderMetrics {
         } else {
             0.0
         };
-        let render_max_ms = render_times_ms
-            .iter()
-            .copied()
-            .fold(0.0_f64, f64::max);
+        let render_max_ms = render_times_ms.iter().copied().fold(0.0_f64, f64::max);
 
         Self {
             render_avg_ms,
@@ -467,9 +471,12 @@ impl RenderMetrics {
                 "\"avg_vertices_per_frame\":{:.2}",
                 "}}"
             ),
-            self.render_avg_ms, self.render_max_ms,
-            self.draw_calls, self.vertices,
-            self.viewport_width, self.viewport_height,
+            self.render_avg_ms,
+            self.render_max_ms,
+            self.draw_calls,
+            self.vertices,
+            self.viewport_width,
+            self.viewport_height,
             self.frame_count,
             self.avg_draw_calls_per_frame(),
             self.avg_vertices_per_frame()
@@ -595,14 +602,19 @@ impl RuntimeDashboard {
                 }
                 out.push_str(&format!(
                     "{{\"label\":\"{}\",\"matched\":{},\"total\":{},\"pct\":{:.2}}}",
-                    m.label, m.matched, m.total, m.percentage()
+                    m.label,
+                    m.matched,
+                    m.total,
+                    m.percentage()
                 ));
             }
             out.push(']');
             let c = self.combined_parity();
             out.push_str(&format!(
                 ",\"combined_parity\":{{\"matched\":{},\"total\":{},\"pct\":{:.2}}}",
-                c.matched, c.total, c.percentage()
+                c.matched,
+                c.total,
+                c.percentage()
             ));
         }
 
@@ -628,14 +640,21 @@ impl RuntimeDashboard {
                         "\"ratio\":{:.4},",
                         "\"status\":\"{}\"}}"
                     ),
-                    b.name, b.current_ms, b.baseline_ms, b.ratio(), status
+                    b.name,
+                    b.current_ms,
+                    b.baseline_ms,
+                    b.ratio(),
+                    status
                 ));
             }
             out.push(']');
         }
 
         out.push_str(&format!(",\"healthy\":{}", self.is_healthy()));
-        out.push_str(&format!(",\"regression_count\":{}", self.regression_count()));
+        out.push_str(&format!(
+            ",\"regression_count\":{}",
+            self.regression_count()
+        ));
         out.push('}');
         out
     }
@@ -653,7 +672,11 @@ impl RuntimeDashboard {
         if let Some(ref fs) = self.frame_stats {
             out.push_str("FRAME TIME\n");
             out.push_str(&format!("  Min:    {:>8.3} ms\n", fs.min_ms));
-            out.push_str(&format!("  Avg:    {:>8.3} ms ({:.1} FPS)\n", fs.avg_ms, fs.avg_fps()));
+            out.push_str(&format!(
+                "  Avg:    {:>8.3} ms ({:.1} FPS)\n",
+                fs.avg_ms,
+                fs.avg_fps()
+            ));
             out.push_str(&format!("  Max:    {:>8.3} ms\n", fs.max_ms));
             out.push_str(&format!("  P99:    {:>8.3} ms\n", fs.p99_ms));
             out.push_str(&format!("  Samples: {}\n\n", fs.sample_count));
@@ -678,8 +701,14 @@ impl RuntimeDashboard {
             out.push_str("RENDER\n");
             out.push_str(&format!("  Render avg: {:>7.3} ms\n", rm.render_avg_ms));
             out.push_str(&format!("  Render max: {:>7.3} ms\n", rm.render_max_ms));
-            out.push_str(&format!("  Draw calls: {:>7.1}/frame\n", rm.avg_draw_calls_per_frame()));
-            out.push_str(&format!("  Vertices:   {:>7.0}/frame\n", rm.avg_vertices_per_frame()));
+            out.push_str(&format!(
+                "  Draw calls: {:>7.1}/frame\n",
+                rm.avg_draw_calls_per_frame()
+            ));
+            out.push_str(&format!(
+                "  Vertices:   {:>7.0}/frame\n",
+                rm.avg_vertices_per_frame()
+            ));
             out.push_str(&format!(
                 "  Viewport:   {}x{}\n",
                 rm.viewport_width, rm.viewport_height
@@ -698,7 +727,10 @@ impl RuntimeDashboard {
             for m in &self.parity_metrics {
                 out.push_str(&format!(
                     "  {:<28} {:>6} {:>6} {:>6.1}%\n",
-                    m.label, m.matched, m.total, m.percentage()
+                    m.label,
+                    m.matched,
+                    m.total,
+                    m.percentage()
                 ));
             }
             let combined = self.combined_parity();
@@ -733,7 +765,11 @@ impl RuntimeDashboard {
                 };
                 out.push_str(&format!(
                     "  {:<26} {:>7.3}ms {:>7.3}ms {:>+6.1}% {:>9}\n",
-                    b.name, b.current_ms, b.baseline_ms, b.delta_pct(), status
+                    b.name,
+                    b.current_ms,
+                    b.baseline_ms,
+                    b.delta_pct(),
+                    status
                 ));
             }
             out.push('\n');
@@ -742,7 +778,11 @@ impl RuntimeDashboard {
         // Overall status
         out.push_str(&format!(
             "Status: {}\n",
-            if self.is_healthy() { "HEALTHY" } else { "UNHEALTHY" }
+            if self.is_healthy() {
+                "HEALTHY"
+            } else {
+                "UNHEALTHY"
+            }
         ));
 
         out
@@ -927,9 +967,18 @@ impl BenchmarkGate {
     /// Generates a CI-friendly summary string.
     pub fn summary(results: &[GateResult]) -> String {
         let mut out = String::new();
-        let pass_count = results.iter().filter(|r| r.verdict == GateVerdict::Pass).count();
-        let fail_count = results.iter().filter(|r| r.verdict == GateVerdict::Fail).count();
-        let skip_count = results.iter().filter(|r| r.verdict == GateVerdict::Skip).count();
+        let pass_count = results
+            .iter()
+            .filter(|r| r.verdict == GateVerdict::Pass)
+            .count();
+        let fail_count = results
+            .iter()
+            .filter(|r| r.verdict == GateVerdict::Fail)
+            .count();
+        let skip_count = results
+            .iter()
+            .filter(|r| r.verdict == GateVerdict::Skip)
+            .count();
 
         out.push_str(&format!(
             "Benchmark gate: {} passed, {} failed, {} skipped\n",

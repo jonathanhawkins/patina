@@ -239,7 +239,10 @@ fn multi_body_scene_all_registered() {
     let (_tree, server, rigid, static_b, kinematic) = build_physics_scene();
 
     assert!(server.body_for_node(rigid).is_some(), "rigid registered");
-    assert!(server.body_for_node(static_b).is_some(), "static registered");
+    assert!(
+        server.body_for_node(static_b).is_some(),
+        "static registered"
+    );
     assert!(
         server.body_for_node(kinematic).is_some(),
         "kinematic registered"
@@ -539,7 +542,11 @@ fn body_count_matches_scene_physics_nodes() {
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
 
-    assert_eq!(server.body_count(), 4, "only physics nodes should be counted");
+    assert_eq!(
+        server.body_count(),
+        4,
+        "only physics nodes should be counted"
+    );
 }
 
 // ===========================================================================
@@ -793,7 +800,10 @@ fn one_way_collision_property_preserved() {
     let body = server.world().get_body(body_id).unwrap();
 
     // Default one_way_collision should be false.
-    assert!(!body.one_way_collision, "default one_way_collision should be false");
+    assert!(
+        !body.one_way_collision,
+        "default one_way_collision should be false"
+    );
     assert_eq!(body.body_type, BodyType::Static);
 }
 
@@ -808,12 +818,20 @@ fn multiple_kinematic_bodies_sync_independently() {
     LifecycleManager::enter_tree(&mut tree, root);
 
     let char_a = add_body_node(
-        &mut tree, root, "PlayerA", "CharacterBody2D",
-        Vector2::new(100.0, 100.0), 8.0,
+        &mut tree,
+        root,
+        "PlayerA",
+        "CharacterBody2D",
+        Vector2::new(100.0, 100.0),
+        8.0,
     );
     let char_b = add_body_node(
-        &mut tree, root, "PlayerB", "CharacterBody2D",
-        Vector2::new(300.0, 300.0), 8.0,
+        &mut tree,
+        root,
+        "PlayerB",
+        "CharacterBody2D",
+        Vector2::new(300.0, 300.0),
+        8.0,
     );
 
     let mut server = PhysicsServer::new();
@@ -826,16 +844,24 @@ fn multiple_kinematic_bodies_sync_independently() {
 
     server.sync_to_physics(&tree);
 
-    let body_a = server.world().get_body(server.body_for_node(char_a).unwrap()).unwrap();
-    let body_b = server.world().get_body(server.body_for_node(char_b).unwrap()).unwrap();
+    let body_a = server
+        .world()
+        .get_body(server.body_for_node(char_a).unwrap())
+        .unwrap();
+    let body_b = server
+        .world()
+        .get_body(server.body_for_node(char_b).unwrap())
+        .unwrap();
 
     assert!(
         approx_vec2(body_a.position, Vector2::new(150.0, 150.0)),
-        "PlayerA should have moved: {:?}", body_a.position
+        "PlayerA should have moved: {:?}",
+        body_a.position
     );
     assert!(
         approx_vec2(body_b.position, Vector2::new(300.0, 300.0)),
-        "PlayerB should be unchanged: {:?}", body_b.position
+        "PlayerB should be unchanged: {:?}",
+        body_b.position
     );
 }
 
@@ -851,8 +877,12 @@ fn collision_shape_type_preserved_after_registration() {
 
     // Circle shape body.
     let circle_id = add_body_node(
-        &mut tree, root, "Circle", "RigidBody2D",
-        Vector2::ZERO, 15.0,
+        &mut tree,
+        root,
+        "Circle",
+        "RigidBody2D",
+        Vector2::ZERO,
+        15.0,
     );
 
     // Rectangle shape body.
@@ -867,13 +897,21 @@ fn collision_shape_type_preserved_after_registration() {
     let mut server = PhysicsServer::new();
     server.register_bodies(&tree);
 
-    let circle_body = server.world().get_body(server.body_for_node(circle_id).unwrap()).unwrap();
+    let circle_body = server
+        .world()
+        .get_body(server.body_for_node(circle_id).unwrap())
+        .unwrap();
     assert_eq!(circle_body.shape, Shape2D::Circle { radius: 15.0 });
 
-    let rect_body = server.world().get_body(server.body_for_node(rect_id).unwrap()).unwrap();
+    let rect_body = server
+        .world()
+        .get_body(server.body_for_node(rect_id).unwrap())
+        .unwrap();
     assert_eq!(
         rect_body.shape,
-        Shape2D::Rectangle { half_extents: Vector2::new(15.0, 10.0) }
+        Shape2D::Rectangle {
+            half_extents: Vector2::new(15.0, 10.0)
+        }
     );
 }
 
@@ -940,7 +978,8 @@ fn re_registration_does_not_duplicate_bodies() {
     // Re-register should not create duplicates.
     server.register_bodies(&tree);
     assert_eq!(
-        server.body_count(), 3,
+        server.body_count(),
+        3,
         "re-registration should not duplicate bodies"
     );
 
@@ -960,9 +999,14 @@ fn velocity_writeback_roundtrip_across_frames() {
     LifecycleManager::enter_tree(&mut tree, root);
 
     let rigid = add_body_with_props(
-        &mut tree, root, "Moving", "RigidBody2D",
-        Vector2::ZERO, 10.0,
-        Vector2::new(200.0, 100.0), 0.5,
+        &mut tree,
+        root,
+        "Moving",
+        "RigidBody2D",
+        Vector2::ZERO,
+        10.0,
+        Vector2::new(200.0, 100.0),
+        0.5,
     );
 
     let mut server = PhysicsServer::new();
@@ -992,4 +1036,3 @@ fn velocity_writeback_roundtrip_across_frames() {
         );
     }
 }
-

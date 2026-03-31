@@ -113,9 +113,7 @@ impl<L: ResourceLoader> UnifiedLoader<L> {
             self.uid_registry
                 .lookup_uid(uid)
                 .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    EngineError::NotFound(format!("no path registered for {reference}"))
-                })
+                .ok_or_else(|| EngineError::NotFound(format!("no path registered for {reference}")))
         } else {
             Ok(reference.to_string())
         }

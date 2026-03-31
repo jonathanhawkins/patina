@@ -60,10 +60,7 @@ fn hex_sha256(data: &[u8]) -> String {
     use std::process::{Command, Stdio};
 
     // Try shasum -a 256 (macOS) then sha256sum (Linux).
-    let commands = [
-        ("shasum", vec!["-a", "256"]),
-        ("sha256sum", vec![]),
-    ];
+    let commands = [("shasum", vec!["-a", "256"]), ("sha256sum", vec![])];
 
     for (cmd, args) in &commands {
         if let Ok(mut child) = Command::new(cmd)
@@ -100,7 +97,13 @@ fn fallback_hash(data: &[u8]) -> String {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
-    format!("{:016x}{:016x}{:016x}{:016x}", h, h.rotate_left(16), h.rotate_left(32), h.rotate_left(48))
+    format!(
+        "{:016x}{:016x}{:016x}{:016x}",
+        h,
+        h.rotate_left(16),
+        h.rotate_left(32),
+        h.rotate_left(48)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +304,10 @@ impl BuildManifest {
         output.push('\n');
 
         for entry in self.artifacts.values() {
-            output.push_str(&format!("{}  {}  {}\n", entry.checksum, entry.path, entry.size));
+            output.push_str(&format!(
+                "{}  {}  {}\n",
+                entry.checksum, entry.path, entry.size
+            ));
         }
         output
     }
@@ -585,7 +591,10 @@ mod tests {
         std::env::set_var("TEST_REPRO_VAR", "hello");
         let env = BuildEnvironment::capture("debug")
             .with_env_vars(&["TEST_REPRO_VAR", "NONEXISTENT_VAR"]);
-        assert_eq!(env.env_vars.get("TEST_REPRO_VAR"), Some(&"hello".to_string()));
+        assert_eq!(
+            env.env_vars.get("TEST_REPRO_VAR"),
+            Some(&"hello".to_string())
+        );
         assert!(!env.env_vars.contains_key("NONEXISTENT_VAR"));
         std::env::remove_var("TEST_REPRO_VAR");
     }
@@ -797,7 +806,10 @@ mod tests {
         manifest_b.scan_directory(dir.path()).unwrap();
 
         let diff = ManifestDiff::compare(&manifest_a, &manifest_b);
-        assert!(diff.is_identical(), "same directory should produce identical manifests");
+        assert!(
+            diff.is_identical(),
+            "same directory should produce identical manifests"
+        );
         assert_eq!(diff.matching.len(), 3);
     }
 

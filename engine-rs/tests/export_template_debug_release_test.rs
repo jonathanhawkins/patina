@@ -21,7 +21,11 @@ fn build_profile_default_is_release() {
 
 #[test]
 fn build_profile_all_variants_distinct() {
-    let profiles = [BuildProfile::Debug, BuildProfile::Release, BuildProfile::ReleaseDebug];
+    let profiles = [
+        BuildProfile::Debug,
+        BuildProfile::Release,
+        BuildProfile::ReleaseDebug,
+    ];
     for i in 0..profiles.len() {
         for j in (i + 1)..profiles.len() {
             assert_ne!(profiles[i], profiles[j]);
@@ -67,8 +71,7 @@ fn export_config_builder_chain() {
 
 #[test]
 fn export_config_with_resources_batch() {
-    let cfg = ExportConfig::new("macos", "App")
-        .with_resources(["a/", "b/", "c/", "d/"]);
+    let cfg = ExportConfig::new("macos", "App").with_resources(["a/", "b/", "c/", "d/"]);
     assert_eq!(cfg.resources.len(), 4);
     assert_eq!(cfg.resources[0], "a/");
     assert_eq!(cfg.resources[3], "d/");
@@ -80,7 +83,10 @@ fn export_config_mixed_resource_methods() {
         .with_resource("single/")
         .with_resources(["batch1/", "batch2/"])
         .with_resource("another/");
-    assert_eq!(cfg.resources, vec!["single/", "batch1/", "batch2/", "another/"]);
+    assert_eq!(
+        cfg.resources,
+        vec!["single/", "batch1/", "batch2/", "another/"]
+    );
 }
 
 #[test]
@@ -164,8 +170,7 @@ fn generate_pair_preserves_base_fields() {
 
 #[test]
 fn generate_pair_overrides_existing_profile() {
-    let base = ExportConfig::new("macos", "App")
-        .with_build_profile(BuildProfile::ReleaseDebug);
+    let base = ExportConfig::new("macos", "App").with_build_profile(BuildProfile::ReleaseDebug);
     let (debug, release) = ExportTemplate::generate_debug_and_release(base);
     assert_eq!(debug.config.build_profile, BuildProfile::Debug);
     assert_eq!(release.config.build_profile, BuildProfile::Release);
@@ -325,8 +330,7 @@ fn multi_platform_export_workflow() {
     let expected_exts = [".x86_64", ".exe", ".app", ".wasm"];
 
     for (platform, ext) in platforms.iter().zip(expected_exts.iter()) {
-        let base = ExportConfig::new(*platform, "CrossPlatGame")
-            .with_resource("res://");
+        let base = ExportConfig::new(*platform, "CrossPlatGame").with_resource("res://");
         let (debug, release) = ExportTemplate::generate_debug_and_release(base);
 
         assert!(debug.output_filename().ends_with(ext));
@@ -401,8 +405,7 @@ fn export_config_no_resources() {
 #[test]
 fn export_config_many_resources() {
     let resources: Vec<String> = (0..100).map(|i| format!("res://dir_{i}")).collect();
-    let cfg = ExportConfig::new("linux", "Big")
-        .with_resources(resources.clone());
+    let cfg = ExportConfig::new("linux", "Big").with_resources(resources.clone());
     assert_eq!(cfg.resources.len(), 100);
 
     let template = ExportTemplate::from_config(cfg);

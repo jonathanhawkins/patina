@@ -83,8 +83,14 @@ fn metadata_probe_success_schema() {
         assert!(prop["name"].is_string(), "property must have string name");
         assert!(prop["type"].is_number(), "property must have numeric type");
         assert!(prop["hint"].is_number(), "property must have numeric hint");
-        assert!(prop["hint_string"].is_string(), "property must have string hint_string");
-        assert!(prop["usage"].is_number(), "property must have numeric usage");
+        assert!(
+            prop["hint_string"].is_string(),
+            "property must have string hint_string"
+        );
+        assert!(
+            prop["usage"].is_number(),
+            "property must have numeric usage"
+        );
     }
 
     let subs = data["subresources"].as_array().unwrap();
@@ -129,8 +135,14 @@ fn metadata_probe_subresources_schema() {
     let subs = data["subresources"].as_array().unwrap();
     assert_eq!(subs.len(), 2);
     for sub in subs {
-        assert!(sub["property"].is_string(), "subresource must have string property");
-        assert!(sub["class"].is_string(), "subresource must have string class");
+        assert!(
+            sub["property"].is_string(),
+            "subresource must have string property"
+        );
+        assert!(
+            sub["class"].is_string(),
+            "subresource must have string class"
+        );
         assert!(sub["path"].is_string(), "subresource must have string path");
     }
 }
@@ -175,19 +187,21 @@ fn parse_metadata_probe_line() {
 
 #[test]
 fn metadata_property_fields_complete() {
-    let required_fields = [
-        "name",
-        "type",
-        "hint",
-        "hint_string",
-        "usage",
-    ];
-    assert_eq!(required_fields.len(), 5, "metadata property must have 5 fields");
+    let required_fields = ["name", "type", "hint", "hint_string", "usage"];
+    assert_eq!(
+        required_fields.len(),
+        5,
+        "metadata property must have 5 fields"
+    );
 
     let mut sorted = required_fields.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), required_fields.len(), "all field names must be unique");
+    assert_eq!(
+        sorted.len(),
+        required_fields.len(),
+        "all field names must be unique"
+    );
 }
 
 // ===========================================================================
@@ -196,17 +210,21 @@ fn metadata_property_fields_complete() {
 
 #[test]
 fn metadata_subresource_fields_complete() {
-    let required_fields = [
-        "property",
-        "class",
-        "path",
-    ];
-    assert_eq!(required_fields.len(), 3, "metadata subresource must have 3 fields");
+    let required_fields = ["property", "class", "path"];
+    assert_eq!(
+        required_fields.len(),
+        3,
+        "metadata subresource must have 3 fields"
+    );
 
     let mut sorted = required_fields.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), required_fields.len(), "all field names must be unique");
+    assert_eq!(
+        sorted.len(),
+        required_fields.len(),
+        "all field names must be unique"
+    );
 }
 
 // ===========================================================================
@@ -229,9 +247,9 @@ bg_color = Color(0.2, 0.3, 0.4, 1)
 
 #[test]
 fn tres_loader_extracts_properties_matching_metadata_schema() {
+    use gdcore::math::Color;
     use gdresource::loader::TresLoader;
     use gdvariant::Variant;
-    use gdcore::math::Color;
 
     let tres = r#"[gd_resource type="StyleBoxFlat" format=3]
 
@@ -262,8 +280,8 @@ corner_radius_top_left = 4
 
 #[test]
 fn tres_loader_extracts_subresources_matching_metadata_schema() {
-    use gdresource::loader::TresLoader;
     use gdcore::math::Color;
+    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let tres = r#"[gd_resource type="Theme" format=3]
@@ -312,12 +330,20 @@ fn metadata_fixture_set_covers_probe_fixtures() {
         "res://fixtures/test_style_box.tres",
         "res://fixtures/test_animation.tres",
     ];
-    assert_eq!(probe_fixtures.len(), 6, "should have 6 metadata probe fixtures");
+    assert_eq!(
+        probe_fixtures.len(),
+        6,
+        "should have 6 metadata probe fixtures"
+    );
 
     let mut sorted = probe_fixtures.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), probe_fixtures.len(), "all paths must be unique");
+    assert_eq!(
+        sorted.len(),
+        probe_fixtures.len(),
+        "all paths must be unique"
+    );
 }
 
 // ===========================================================================
@@ -348,10 +374,10 @@ fn metadata_capture_type_registered() {
 
 #[test]
 fn tres_loader_style_box_flat_fixture() {
+    use gdcore::math::Color;
     use gdresource::loader::TresLoader;
     use gdresource::saver::TresSaver;
     use gdvariant::Variant;
-    use gdcore::math::Color;
 
     let tres = r#"[gd_resource type="StyleBoxFlat" format=3]
 
@@ -369,7 +395,9 @@ corner_radius_bottom_left = 4
 "#;
 
     let loader = TresLoader::new();
-    let res = loader.parse_str(tres, "res://fixtures/test_style_box.tres").unwrap();
+    let res = loader
+        .parse_str(tres, "res://fixtures/test_style_box.tres")
+        .unwrap();
 
     assert_eq!(res.class_name, "StyleBoxFlat");
     assert_eq!(res.property_count(), 10);
@@ -389,7 +417,9 @@ corner_radius_bottom_left = 4
     // Roundtrip preserves all properties
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&res).unwrap();
-    let reloaded = loader.parse_str(&saved, "res://fixtures/test_style_box.tres").unwrap();
+    let reloaded = loader
+        .parse_str(&saved, "res://fixtures/test_style_box.tres")
+        .unwrap();
     assert_eq!(reloaded.property_count(), res.property_count());
     assert_eq!(
         reloaded.get_property("bg_color"),
@@ -417,30 +447,25 @@ step = 0.05
 "#;
 
     let loader = TresLoader::new();
-    let res = loader.parse_str(tres, "res://fixtures/test_animation.tres").unwrap();
+    let res = loader
+        .parse_str(tres, "res://fixtures/test_animation.tres")
+        .unwrap();
 
     assert_eq!(res.class_name, "Animation");
     assert_eq!(
         res.get_property("resource_name"),
         Some(&Variant::String("test_walk".into()))
     );
-    assert_eq!(
-        res.get_property("length"),
-        Some(&Variant::Float(1.0))
-    );
-    assert_eq!(
-        res.get_property("loop_mode"),
-        Some(&Variant::Int(1))
-    );
-    assert_eq!(
-        res.get_property("step"),
-        Some(&Variant::Float(0.05))
-    );
+    assert_eq!(res.get_property("length"), Some(&Variant::Float(1.0)));
+    assert_eq!(res.get_property("loop_mode"), Some(&Variant::Int(1)));
+    assert_eq!(res.get_property("step"), Some(&Variant::Float(0.05)));
 
     // Roundtrip preserves animation properties
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&res).unwrap();
-    let reloaded = loader.parse_str(&saved, "res://fixtures/test_animation.tres").unwrap();
+    let reloaded = loader
+        .parse_str(&saved, "res://fixtures/test_animation.tres")
+        .unwrap();
     assert_eq!(reloaded.property_count(), res.property_count());
     assert_eq!(
         reloaded.get_property("resource_name"),
@@ -566,8 +591,8 @@ fn tres_loader_parses_ext_resources_from_fixture() {
 
 #[test]
 fn tres_loader_parses_subresources_from_fixture() {
-    use gdresource::loader::TresLoader;
     use gdcore::math::Color;
+    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -596,8 +621,8 @@ fn tres_loader_parses_subresources_from_fixture() {
 
 #[test]
 fn tres_loader_parses_style_box_fixture_from_disk() {
-    use gdresource::loader::TresLoader;
     use gdcore::math::Color;
+    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -648,12 +673,6 @@ fn tres_loader_parses_animation_fixture_from_disk() {
         res.get_property("resource_name"),
         Some(&Variant::String("test_walk".into()))
     );
-    assert_eq!(
-        res.get_property("length"),
-        Some(&Variant::Float(1.0))
-    );
-    assert_eq!(
-        res.get_property("loop_mode"),
-        Some(&Variant::Int(1))
-    );
+    assert_eq!(res.get_property("length"), Some(&Variant::Float(1.0)));
+    assert_eq!(res.get_property("loop_mode"), Some(&Variant::Int(1)));
 }

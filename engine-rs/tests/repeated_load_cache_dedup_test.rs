@@ -117,8 +117,14 @@ fn load_order_does_not_affect_dedup() {
     let b2 = cache.load("res://b.tres").unwrap();
     let a2 = cache.load("res://a.tres").unwrap();
 
-    assert!(Arc::ptr_eq(&a1, &a2), "A must be same regardless of fetch order");
-    assert!(Arc::ptr_eq(&b1, &b2), "B must be same regardless of fetch order");
+    assert!(
+        Arc::ptr_eq(&a1, &a2),
+        "A must be same regardless of fetch order"
+    );
+    assert!(
+        Arc::ptr_eq(&b1, &b2),
+        "B must be same regardless of fetch order"
+    );
     assert!(!Arc::ptr_eq(&a1, &b1));
     assert_eq!(cache.len(), 2);
 }
@@ -241,7 +247,10 @@ fn failed_load_does_not_cache() {
 
     let result = cache.load("res://bad.tres");
     assert!(result.is_err());
-    assert!(!cache.contains("res://bad.tres"), "error should not be cached");
+    assert!(
+        !cache.contains("res://bad.tres"),
+        "error should not be cached"
+    );
     assert!(cache.is_empty());
 }
 
@@ -387,7 +396,10 @@ fn reloaded_resource_has_fresh_properties() {
         other => panic!("expected Int, got {other:?}"),
     };
 
-    assert_ne!(idx1, idx2, "reload should produce resource with new load_index");
+    assert_ne!(
+        idx1, idx2,
+        "reload should produce resource with new load_index"
+    );
     assert_eq!(idx2, idx1 + 1);
 }
 
@@ -475,7 +487,10 @@ fn clear_then_selective_reload_no_cross_contamination() {
     let a_new = cache.load("res://a.tres").unwrap();
     assert!(!Arc::ptr_eq(&a_old, &a_new));
     assert_eq!(cache.len(), 1);
-    assert!(!cache.contains("res://b.tres"), "B should not magically reappear");
+    assert!(
+        !cache.contains("res://b.tres"),
+        "B should not magically reappear"
+    );
 
     // Old B is still alive but not in cache.
     assert_eq!(Arc::strong_count(&b_old), 1);

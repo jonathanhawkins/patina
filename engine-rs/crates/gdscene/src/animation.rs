@@ -589,10 +589,8 @@ impl AnimationPlayer {
         let from_values = from_anim.sample_all(bs.from_position);
 
         // Build a map of from-animation values by property path.
-        let from_map: HashMap<&str, &Variant> = from_values
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect();
+        let from_map: HashMap<&str, &Variant> =
+            from_values.iter().map(|(k, v)| (k.as_str(), v)).collect();
 
         // Blend matching tracks; for tracks only in "to", use them as-is.
         let mut result = Vec::with_capacity(to_values.len());
@@ -1302,7 +1300,10 @@ mod tests {
         assert!(player.blend_state().is_some());
 
         player.advance(0.6);
-        assert!(player.blend_state().is_none(), "blend should auto-clear after completion");
+        assert!(
+            player.blend_state().is_none(),
+            "blend should auto-clear after completion"
+        );
         assert_eq!(player.current_animation(), Some("b"));
     }
 

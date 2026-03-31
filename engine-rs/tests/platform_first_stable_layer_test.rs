@@ -11,6 +11,7 @@
 //! This test proves that all gdplatform subsystems compose correctly
 //! into a working runtime without requiring any OS window or GPU.
 
+use gdcore::math::Vector2;
 use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
 use gdplatform::clipboard::{Clipboard, HeadlessClipboard};
 use gdplatform::cursor::{CursorManager, CursorShape};
@@ -18,13 +19,12 @@ use gdplatform::display::DisplayServer;
 use gdplatform::input::{ActionBinding, InputEvent, InputMap, InputState, Key, MouseButton};
 use gdplatform::os::{current_platform, get_ticks_msec, get_ticks_usec, is_debug_build, OsInfo};
 use gdplatform::platform_targets::{
-    ci_tested_targets, current_target, supports_capability, validate_current_target,
-    Architecture, PlatformCapability,
+    ci_tested_targets, current_target, supports_capability, validate_current_target, Architecture,
+    PlatformCapability,
 };
 use gdplatform::thread::{GodotMutex, GodotSemaphore, GodotThread, WorkerThreadPool};
 use gdplatform::time::Timer;
 use gdplatform::window::{HeadlessWindow, WindowConfig, WindowEvent, WindowManager};
-use gdcore::math::Vector2;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -95,7 +95,10 @@ fn full_headless_runtime_lifecycle() {
 
     // Phase 4: Validate post-loop state
     assert_eq!(frames_completed, 60, "should run exactly 60 frames");
-    assert!(timer_fired, "timer(0.5s) should fire within 60 frames at 60fps");
+    assert!(
+        timer_fired,
+        "timer(0.5s) should fire within 60 frames at 60fps"
+    );
     assert!(platform.should_quit());
 }
 
@@ -465,7 +468,10 @@ fn deterministic_construction_all_public_types() {
 
     let config1 = WindowConfig::default();
     let config2 = WindowConfig::default();
-    assert_eq!(config1, config2, "WindowConfig::default must be deterministic");
+    assert_eq!(
+        config1, config2,
+        "WindowConfig::default must be deterministic"
+    );
 
     let info1 = OsInfo::detect();
     let info2 = OsInfo::detect();
@@ -473,7 +479,10 @@ fn deterministic_construction_all_public_types() {
 
     let platform1 = current_platform();
     let platform2 = current_platform();
-    assert_eq!(platform1, platform2, "current_platform must be deterministic");
+    assert_eq!(
+        platform1, platform2,
+        "current_platform must be deterministic"
+    );
 
     let target1 = current_target();
     let target2 = current_target();
@@ -495,8 +504,7 @@ fn deterministic_construction_all_public_types() {
 #[test]
 fn stable_layer_documentation_exists_and_covers_subsystems() {
     let doc = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/PLATFORM_STABLE_LAYER.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/PLATFORM_STABLE_LAYER.md"),
     )
     .expect("docs/PLATFORM_STABLE_LAYER.md must exist");
 
@@ -553,8 +561,7 @@ fn stable_layer_documentation_exists_and_covers_subsystems() {
 #[test]
 fn stable_layer_doc_cites_phase7_audit_as_source_of_truth() {
     let doc = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/PLATFORM_STABLE_LAYER.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/PLATFORM_STABLE_LAYER.md"),
     )
     .expect("docs/PLATFORM_STABLE_LAYER.md must exist");
 
@@ -571,8 +578,7 @@ fn stable_layer_doc_cites_phase7_audit_as_source_of_truth() {
 #[test]
 fn stable_layer_doc_documents_coverage_scope() {
     let doc = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/PLATFORM_STABLE_LAYER.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/PLATFORM_STABLE_LAYER.md"),
     )
     .expect("docs/PLATFORM_STABLE_LAYER.md must exist");
 
@@ -580,17 +586,13 @@ fn stable_layer_doc_documents_coverage_scope() {
         doc.contains("Coverage Scope"),
         "doc must have a Coverage Scope section"
     );
-    assert!(
-        doc.contains("headless"),
-        "doc must mention headless scope"
-    );
+    assert!(doc.contains("headless"), "doc must mention headless scope");
 }
 
 #[test]
 fn stable_layer_doc_windowing_input_timing_have_audit_status() {
     let doc = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/PLATFORM_STABLE_LAYER.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/PLATFORM_STABLE_LAYER.md"),
     )
     .expect("docs/PLATFORM_STABLE_LAYER.md must exist");
 

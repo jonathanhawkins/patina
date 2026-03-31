@@ -303,17 +303,24 @@ impl CompiledShader3D {
 
     /// Returns `true` if compilation produced any errors.
     pub fn has_errors(&self) -> bool {
-        self.diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Error)
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error)
     }
 
     /// Returns `true` if compilation produced any warnings.
     pub fn has_warnings(&self) -> bool {
-        self.diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Warning)
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Warning)
     }
 
     /// Returns error diagnostics only.
     pub fn errors(&self) -> Vec<&ShaderDiagnostic> {
-        self.diagnostics.iter().filter(|d| d.severity == DiagnosticSeverity::Error).collect()
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .collect()
     }
 }
 
@@ -340,7 +347,10 @@ impl ShaderCompiler3D {
         let uniforms = parse_uniforms(source);
         let render_modes = parse_render_modes(source);
         let diagnostics = validate_shader(source, shader_type);
-        let wgsl_program = if diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Error) {
+        let wgsl_program = if diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error)
+        {
             None
         } else {
             Some(generate_wgsl(&uniforms, &render_modes, source))
@@ -542,7 +552,10 @@ fn generate_wgsl(
 
     // Generate texture/sampler bindings.
     let mut tex_binding = 1u32;
-    for u in uniforms.iter().filter(|u| u.uniform_type == UniformType::Sampler2D) {
+    for u in uniforms
+        .iter()
+        .filter(|u| u.uniform_type == UniformType::Sampler2D)
+    {
         wgsl.push_str(&format!(
             "@group(3) @binding({})\nvar {}: texture_2d<f32>;\n",
             tex_binding, u.name
@@ -568,7 +581,9 @@ fn generate_wgsl(
     wgsl.push_str("}\n\n");
 
     // Generate the custom_fragment function.
-    wgsl.push_str("fn custom_fragment(in: FragmentInput, base_color: vec4<f32>) -> FragmentOutput {\n");
+    wgsl.push_str(
+        "fn custom_fragment(in: FragmentInput, base_color: vec4<f32>) -> FragmentOutput {\n",
+    );
     wgsl.push_str("    var color = base_color;\n");
 
     // Apply albedo_color override if present.
@@ -1093,32 +1108,36 @@ uniform bool enabled = true;
     fn validate_missing_shader_type_warning() {
         let source = "uniform float speed = 1.0;";
         let diagnostics = validate_shader(source, ShaderType3D::Spatial);
-        assert!(diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Warning
-            && d.message.contains("shader_type")));
+        assert!(diagnostics.iter().any(
+            |d| d.severity == DiagnosticSeverity::Warning && d.message.contains("shader_type")
+        ));
     }
 
     #[test]
     fn validate_type_mismatch_error() {
         let source = "shader_type sky;\nuniform float speed;";
         let diagnostics = validate_shader(source, ShaderType3D::Spatial);
-        assert!(diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Error
-            && d.message.contains("mismatch")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error && d.message.contains("mismatch")));
     }
 
     #[test]
     fn validate_mismatched_braces_error() {
         let source = "shader_type spatial;\nvoid fragment() {";
         let diagnostics = validate_shader(source, ShaderType3D::Spatial);
-        assert!(diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Error
-            && d.message.contains("braces")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error && d.message.contains("braces")));
     }
 
     #[test]
     fn validate_duplicate_uniform_error() {
         let source = "shader_type spatial;\nuniform float x;\nuniform float x;";
         let diagnostics = validate_shader(source, ShaderType3D::Spatial);
-        assert!(diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Error
-            && d.message.contains("Duplicate")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error && d.message.contains("Duplicate")));
     }
 
     #[test]
@@ -1141,14 +1160,18 @@ uniform bool enabled = true;
     #[test]
     fn compiled_shader_no_errors() {
         let compiler = ShaderCompiler3D::new();
-        let compiled = compiler.compile(ShaderType3D::Spatial, "shader_type spatial;\nvoid fragment() {}");
+        let compiled = compiler.compile(
+            ShaderType3D::Spatial,
+            "shader_type spatial;\nvoid fragment() {}",
+        );
         assert!(!compiled.has_errors());
     }
 
     #[test]
     fn compiled_shader_render_modes_preserved() {
         let compiler = ShaderCompiler3D::new();
-        let source = "shader_type spatial;\nrender_mode unshaded, cull_disabled;\nvoid fragment() {}";
+        let source =
+            "shader_type spatial;\nrender_mode unshaded, cull_disabled;\nvoid fragment() {}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
         assert!(compiled.render_modes.unshaded);
         assert!(compiled.render_modes.cull_disabled);
@@ -1164,11 +1187,17 @@ uniform bool enabled = true;
             uniforms: vec![],
             program: String::new(),
             wgsl_program: None,
-            render_modes: RenderModeFlags { unshaded: true, ..Default::default() },
+            render_modes: RenderModeFlags {
+                unshaded: true,
+                ..Default::default()
+            },
             diagnostics: Vec::new(),
         };
         let mut params = HashMap::new();
-        params.insert("albedo_color".to_string(), Variant::Color(Color::new(0.8, 0.2, 0.1, 1.0)));
+        params.insert(
+            "albedo_color".to_string(),
+            Variant::Color(Color::new(0.8, 0.2, 0.1, 1.0)),
+        );
         let ctx = FragmentContext3D::default();
         let result = processor.apply_shader(&compiled, &params, &ctx);
         assert_eq!(result, Color::new(0.8, 0.2, 0.1, 1.0));
@@ -1240,9 +1269,15 @@ uniform bool enabled = true;
     fn processor_color_mix_with_factor() {
         let processor = ShaderProcessor3D::new();
         let compiler = ShaderCompiler3D::new();
-        let compiled = compiler.compile(ShaderType3D::Spatial, "shader_type spatial;\nvoid fragment() {}");
+        let compiled = compiler.compile(
+            ShaderType3D::Spatial,
+            "shader_type spatial;\nvoid fragment() {}",
+        );
         let mut params = HashMap::new();
-        params.insert("color_mix".to_string(), Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)));
+        params.insert(
+            "color_mix".to_string(),
+            Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
         params.insert("color_mix_factor".to_string(), Variant::Float(1.0));
         let ctx = FragmentContext3D {
             albedo: Color::new(0.0, 0.0, 0.0, 1.0),
@@ -1262,7 +1297,10 @@ uniform bool enabled = true;
         let shader = Shader3D::new(ShaderType3D::Spatial, source);
         let mut mat = ShaderMaterial3D::new();
         mat.shader = Some(shader);
-        mat.set_shader_parameter("albedo_color", Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)));
+        mat.set_shader_parameter(
+            "albedo_color",
+            Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0)),
+        );
 
         let compiler = ShaderCompiler3D::new();
         let compiled = compiler.compile(
@@ -1286,7 +1324,10 @@ uniform bool enabled = true;
         let compiler = ShaderCompiler3D::new();
         let source = "shader_type spatial;\nuniform float speed = 1.0;\nuniform vec4 albedo_color : source_color;\nvoid fragment() {}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
-        let wgsl = compiled.wgsl_program.as_ref().expect("WGSL should be generated");
+        let wgsl = compiled
+            .wgsl_program
+            .as_ref()
+            .expect("WGSL should be generated");
 
         assert!(wgsl.contains("struct CustomUniforms"));
         assert!(wgsl.contains("speed: f32"));
@@ -1302,7 +1343,10 @@ uniform bool enabled = true;
         let compiler = ShaderCompiler3D::new();
         let source = "shader_type spatial;\nvoid fragment() {}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
-        let wgsl = compiled.wgsl_program.as_ref().expect("WGSL should be generated");
+        let wgsl = compiled
+            .wgsl_program
+            .as_ref()
+            .expect("WGSL should be generated");
 
         // No CustomUniforms struct when there are no uniforms.
         assert!(!wgsl.contains("struct CustomUniforms"));
@@ -1315,7 +1359,10 @@ uniform bool enabled = true;
         let compiler = ShaderCompiler3D::new();
         let source = "shader_type spatial;\nuniform sampler2D tex;\nvoid fragment() {}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
-        let wgsl = compiled.wgsl_program.as_ref().expect("WGSL should be generated");
+        let wgsl = compiled
+            .wgsl_program
+            .as_ref()
+            .expect("WGSL should be generated");
 
         assert!(wgsl.contains("var tex: texture_2d<f32>"));
         assert!(wgsl.contains("var tex_sampler: sampler"));
@@ -1328,7 +1375,10 @@ uniform bool enabled = true;
         let compiler = ShaderCompiler3D::new();
         let source = "shader_type spatial;\nrender_mode unshaded;\nvoid fragment() {}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
-        let wgsl = compiled.wgsl_program.as_ref().expect("WGSL should be generated");
+        let wgsl = compiled
+            .wgsl_program
+            .as_ref()
+            .expect("WGSL should be generated");
 
         assert!(wgsl.contains("unshaded"));
     }
@@ -1338,7 +1388,10 @@ uniform bool enabled = true;
         let compiler = ShaderCompiler3D::new();
         let source = "shader_type spatial;\nuniform vec4 emission;\nvoid fragment() {}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
-        let wgsl = compiled.wgsl_program.as_ref().expect("WGSL should be generated");
+        let wgsl = compiled
+            .wgsl_program
+            .as_ref()
+            .expect("WGSL should be generated");
 
         assert!(wgsl.contains("custom.emission"));
         assert!(wgsl.contains("min(color.rgb + custom.emission.rgb"));
@@ -1349,7 +1402,10 @@ uniform bool enabled = true;
         let compiler = ShaderCompiler3D::new();
         let source = "shader_type spatial;\nuniform float alpha;\nuniform vec4 color_mix;\nuniform float color_mix_factor;\nvoid fragment() {}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
-        let wgsl = compiled.wgsl_program.as_ref().expect("WGSL should be generated");
+        let wgsl = compiled
+            .wgsl_program
+            .as_ref()
+            .expect("WGSL should be generated");
 
         assert!(wgsl.contains("color.a = custom.alpha"));
         assert!(wgsl.contains("mix(color, custom.color_mix, custom.color_mix_factor)"));
@@ -1417,7 +1473,10 @@ uniform bool enabled = true;
         let shader = Shader3D::new(ShaderType3D::Spatial, source);
         let mut mat = ShaderMaterial3D::new();
         mat.shader = Some(shader);
-        mat.set_shader_parameter("albedo_color", Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)));
+        mat.set_shader_parameter(
+            "albedo_color",
+            Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
         mat.set_shader_parameter("alpha", Variant::Float(0.5));
 
         let compiler = ShaderCompiler3D::new();

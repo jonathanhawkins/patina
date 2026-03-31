@@ -70,7 +70,8 @@ fn makefile_covers_all_render_test_files() {
     for entry in std::fs::read_dir(&tests_dir).unwrap() {
         let entry = entry.unwrap();
         let name = entry.file_name().to_string_lossy().to_string();
-        let is_render_test = (name.starts_with("render_") || name.starts_with("texture_draw_sprite"))
+        let is_render_test = (name.starts_with("render_")
+            || name.starts_with("texture_draw_sprite"))
             && name.ends_with("_test.rs");
         if is_render_test {
             let test_name = name.trim_end_matches(".rs");
@@ -135,10 +136,7 @@ fn ci_workflow_uploads_artifacts_on_failure() {
 #[test]
 fn golden_render_dir_has_png_files() {
     let golden_render = repo_root().join("fixtures/golden/render");
-    assert!(
-        golden_render.is_dir(),
-        "fixtures/golden/render/ must exist"
-    );
+    assert!(golden_render.is_dir(), "fixtures/golden/render/ must exist");
 
     let pngs: Vec<_> = std::fs::read_dir(&golden_render)
         .unwrap()
@@ -168,10 +166,7 @@ fn golden_render_subdirs_exist() {
     let expected_subdirs = ["camera_viewport", "draw_ordering"];
     for subdir in &expected_subdirs {
         let dir = golden_render.join(subdir);
-        assert!(
-            dir.is_dir(),
-            "fixtures/golden/render/{subdir}/ must exist"
-        );
+        assert!(dir.is_dir(), "fixtures/golden/render/{subdir}/ must exist");
 
         let files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -228,7 +223,10 @@ fn ci_render_job_checks_out_submodules() {
     // We check that somewhere after "rust-render-goldens:" and before the next
     // top-level job, "submodules: true" appears.
     let render_section_start = content.find("rust-render-goldens:");
-    assert!(render_section_start.is_some(), "CI must have rust-render-goldens job");
+    assert!(
+        render_section_start.is_some(),
+        "CI must have rust-render-goldens job"
+    );
 
     let section = &content[render_section_start.unwrap()..];
     // Find the next top-level job (indentation level 2) or end of file

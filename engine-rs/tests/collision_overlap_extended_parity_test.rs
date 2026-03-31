@@ -53,7 +53,10 @@ fn segment(ax: f32, ay: f32, bx: f32, by: f32) -> Shape2D {
 }
 
 fn capsule(r: f32, h: f32) -> Shape2D {
-    Shape2D::Capsule { radius: r, height: h }
+    Shape2D::Capsule {
+        radius: r,
+        height: h,
+    }
 }
 
 fn tf(x: f32, y: f32) -> Transform2D {
@@ -160,13 +163,9 @@ fn segment_capsule_returns_none() {
 /// Circle-circle: depth and normal correctness.
 #[test]
 fn circle_circle_collision_depth_and_normal() {
-    let result = collision::test_collision(
-        &circle(10.0),
-        &tf(0.0, 0.0),
-        &circle(10.0),
-        &tf(15.0, 0.0),
-    )
-    .unwrap();
+    let result =
+        collision::test_collision(&circle(10.0), &tf(0.0, 0.0), &circle(10.0), &tf(15.0, 0.0))
+            .unwrap();
 
     assert!(result.colliding, "circles should overlap");
     // Penetration: sum of radii (20) - distance (15) = 5
@@ -217,13 +216,9 @@ fn circle_rect_edge_collision() {
 /// Circle-circle exactly touching (depth = 0 or very small).
 #[test]
 fn circle_circle_exactly_touching() {
-    let result = collision::test_collision(
-        &circle(10.0),
-        &tf(0.0, 0.0),
-        &circle(10.0),
-        &tf(20.0, 0.0),
-    )
-    .unwrap();
+    let result =
+        collision::test_collision(&circle(10.0), &tf(0.0, 0.0), &circle(10.0), &tf(20.0, 0.0))
+            .unwrap();
 
     // At exactly touching distance, depth should be ~0
     assert!(
@@ -236,13 +231,9 @@ fn circle_circle_exactly_touching() {
 /// Circle-circle well separated → no collision.
 #[test]
 fn circle_circle_separated_no_collision() {
-    let result = collision::test_collision(
-        &circle(5.0),
-        &tf(0.0, 0.0),
-        &circle(5.0),
-        &tf(100.0, 0.0),
-    )
-    .unwrap();
+    let result =
+        collision::test_collision(&circle(5.0), &tf(0.0, 0.0), &circle(5.0), &tf(100.0, 0.0))
+            .unwrap();
 
     assert!(!result.colliding, "distant circles should not collide");
 }
@@ -316,7 +307,10 @@ fn collision_exit_event_fires_on_separation() {
             break;
         }
     }
-    assert!(found_exit, "should eventually get Exited event after separation");
+    assert!(
+        found_exit,
+        "should eventually get Exited event after separation"
+    );
 }
 
 // ===========================================================================
@@ -439,10 +433,7 @@ fn ten_bodies_falling_onto_floor() {
     }
 
     // Should have generated some collision events
-    assert!(
-        total_events > 0,
-        "falling bodies should collide with floor"
-    );
+    assert!(total_events > 0, "falling bodies should collide with floor");
 }
 
 // ===========================================================================
@@ -454,11 +445,7 @@ fn ten_bodies_falling_onto_floor() {
 fn area_overlap_full_lifecycle() {
     let mut store = AreaStore::new();
 
-    let area = Area2D::new(
-        AreaId(1),
-        Vector2::new(0.0, 0.0),
-        circle(20.0),
-    );
+    let area = Area2D::new(AreaId(1), Vector2::new(0.0, 0.0), circle(20.0));
     store.add_area(area);
 
     // Body starts far away
@@ -480,7 +467,10 @@ fn area_overlap_full_lifecycle() {
 
     // Frame 3: still inside → no events (stable)
     let events3 = store.detect_overlaps(&bodies);
-    assert!(events3.is_empty(), "stable overlap should produce no events");
+    assert!(
+        events3.is_empty(),
+        "stable overlap should produce no events"
+    );
 
     // Move body out
     bodies.get_mut(&BodyId(100)).unwrap().position = Vector2::new(100.0, 0.0);
@@ -604,7 +594,10 @@ fn monitoring_off_mid_overlap_produces_exit() {
     let events2 = store.detect_overlaps(&bodies);
     // With monitoring off, the area no longer reports this body as inside,
     // so previously-inside body should get an exit event.
-    let exits: Vec<_> = events2.iter().filter(|e| e.state == OverlapState::Exited).collect();
+    let exits: Vec<_> = events2
+        .iter()
+        .filter(|e| e.state == OverlapState::Exited)
+        .collect();
     assert!(
         exits.len() == 1 || events2.is_empty(),
         "disabling monitoring should exit or produce no events"
@@ -752,7 +745,12 @@ fn world_add_remove_body_count() {
     let mut world = PhysicsWorld2D::new();
 
     let id1 = world.add_body(make_body(0, BodyType::Rigid, Vector2::ZERO, circle(5.0)));
-    let id2 = world.add_body(make_body(0, BodyType::Static, Vector2::new(10.0, 0.0), circle(5.0)));
+    let id2 = world.add_body(make_body(
+        0,
+        BodyType::Static,
+        Vector2::new(10.0, 0.0),
+        circle(5.0),
+    ));
     assert_eq!(world.body_count(), 2);
 
     world.remove_body(id1);
@@ -783,5 +781,8 @@ fn world_step_single_body_no_events() {
     let mut world = PhysicsWorld2D::new();
     world.add_body(make_body(0, BodyType::Rigid, Vector2::ZERO, circle(10.0)));
     let events = world.step(1.0 / 60.0);
-    assert!(events.is_empty(), "single body should produce no collisions");
+    assert!(
+        events.is_empty(),
+        "single body should produce no collisions"
+    );
 }

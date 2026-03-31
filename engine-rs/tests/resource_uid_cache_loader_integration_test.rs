@@ -80,10 +80,7 @@ fn register_uid_direct_then_load_by_uid_string() {
     // Construct the uid:// string that hashes to this UID — we can't since
     // register_uid uses a direct ResourceUid. Instead, verify path-based
     // lookup works and the registry is populated.
-    assert_eq!(
-        ul.uid_registry().lookup_uid(uid),
-        Some("res://direct.tres")
-    );
+    assert_eq!(ul.uid_registry().lookup_uid(uid), Some("res://direct.tres"));
     assert_eq!(
         ul.uid_registry().lookup_path("res://direct.tres"),
         Some(uid)
@@ -143,12 +140,8 @@ fn uid_registry_mut_remove_mapping_blocks_uid_load() {
 fn bulk_register_load_invalidate_reload_cycle() {
     let mut ul = UnifiedLoader::new(InstrumentedLoader::new());
 
-    let paths: Vec<String> = (0..10)
-        .map(|i| format!("res://bulk_{i}.tres"))
-        .collect();
-    let uid_strs: Vec<String> = (0..10)
-        .map(|i| format!("uid://bulk_{i}"))
-        .collect();
+    let paths: Vec<String> = (0..10).map(|i| format!("res://bulk_{i}.tres")).collect();
+    let uid_strs: Vec<String> = (0..10).map(|i| format!("uid://bulk_{i}")).collect();
 
     // Register all.
     for (uid_str, path) in uid_strs.iter().zip(paths.iter()) {
@@ -169,10 +162,7 @@ fn bulk_register_load_invalidate_reload_cycle() {
     assert_eq!(ul.cache_len(), 5);
 
     // Reload all by path.
-    let second_arcs: Vec<Arc<Resource>> = paths
-        .iter()
-        .map(|p| ul.load(p).unwrap())
-        .collect();
+    let second_arcs: Vec<Arc<Resource>> = paths.iter().map(|p| ul.load(p).unwrap()).collect();
 
     // Odd-indexed should be same Arc (still cached).
     for i in (1..10).step_by(2) {
@@ -394,7 +384,10 @@ fn parse_uid_string_empty_returns_invalid() {
 fn parse_uid_string_uid_prefix_only_is_valid() {
     // "uid://" with empty suffix — hash of empty string is 0, which is valid.
     let uid = parse_uid_string("uid://");
-    assert!(uid.is_valid(), "hash of empty suffix should be 0, which is valid");
+    assert!(
+        uid.is_valid(),
+        "hash of empty suffix should be 0, which is valid"
+    );
     assert_eq!(uid.raw(), 0);
 }
 
@@ -730,8 +723,7 @@ fn invalidation_preserves_registry_mapping() {
 
     // Registry is untouched by cache invalidation.
     assert_eq!(
-        ul.uid_registry()
-            .lookup_path("res://stable.tres"),
+        ul.uid_registry().lookup_path("res://stable.tres"),
         Some(parse_uid_string("uid://stable_reg"))
     );
 

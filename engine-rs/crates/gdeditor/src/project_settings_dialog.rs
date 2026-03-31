@@ -95,13 +95,31 @@ pub struct SettingsProperty {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsValidationError {
     /// Number out of range.
-    NumberOutOfRange { key: String, value: f64, min: f64, max: f64 },
+    NumberOutOfRange {
+        key: String,
+        value: f64,
+        min: f64,
+        max: f64,
+    },
     /// Integer out of range.
-    IntegerOutOfRange { key: String, value: i64, min: i64, max: i64 },
+    IntegerOutOfRange {
+        key: String,
+        value: i64,
+        min: i64,
+        max: i64,
+    },
     /// Value not in the allowed enum options.
-    InvalidEnumValue { key: String, value: String, options: Vec<String> },
+    InvalidEnumValue {
+        key: String,
+        value: String,
+        options: Vec<String>,
+    },
     /// Type mismatch (expected vs actual).
-    TypeMismatch { key: String, expected: String, actual: String },
+    TypeMismatch {
+        key: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// The type of editor control for a property.
@@ -285,7 +303,10 @@ impl ProjectSettingsDialog {
 
     /// Returns the number of properties in a given category.
     pub fn category_count(&self, category: SettingsCategory) -> usize {
-        self.properties.iter().filter(|p| p.category == category).count()
+        self.properties
+            .iter()
+            .filter(|p| p.category == category)
+            .count()
     }
 
     /// Validates a pending value against its editor constraints.
@@ -487,136 +508,224 @@ impl ProjectSettingsDialog {
         vec![
             // ---- Application ----
             Self::prop(
-                "application/project_name", "Project Name",
-                SettingsCategory::Application, SettingsEditor::Text,
+                "application/project_name",
+                "Project Name",
+                SettingsCategory::Application,
+                SettingsEditor::Text,
                 SettingsValue::Text("New Project".into()),
-                "The name of the project, displayed in the title bar.", false,
+                "The name of the project, displayed in the title bar.",
+                false,
             ),
             Self::prop(
-                "application/main_scene", "Main Scene",
-                SettingsCategory::Application, SettingsEditor::Text,
+                "application/main_scene",
+                "Main Scene",
+                SettingsCategory::Application,
+                SettingsEditor::Text,
                 SettingsValue::Text(String::new()),
-                "The scene to load when the project runs.", false,
+                "The scene to load when the project runs.",
+                false,
             ),
             Self::prop(
-                "application/description", "Description",
-                SettingsCategory::Application, SettingsEditor::Text,
+                "application/description",
+                "Description",
+                SettingsCategory::Application,
+                SettingsEditor::Text,
                 SettingsValue::Text(String::new()),
-                "A short description of the project.", false,
+                "A short description of the project.",
+                false,
             ),
             Self::prop(
-                "application/icon", "Icon Path",
-                SettingsCategory::Application, SettingsEditor::Text,
+                "application/icon",
+                "Icon Path",
+                SettingsCategory::Application,
+                SettingsEditor::Text,
                 SettingsValue::Text(String::new()),
-                "Path to the project icon.", false,
+                "Path to the project icon.",
+                false,
             ),
             // ---- Display ----
             Self::prop(
-                "display/resolution_w", "Resolution Width",
-                SettingsCategory::Display, SettingsEditor::Integer { min: 1, max: 7680 },
+                "display/resolution_w",
+                "Resolution Width",
+                SettingsCategory::Display,
+                SettingsEditor::Integer { min: 1, max: 7680 },
                 SettingsValue::Integer(1152),
-                "Viewport width in pixels.", false,
+                "Viewport width in pixels.",
+                false,
             ),
             Self::prop(
-                "display/resolution_h", "Resolution Height",
-                SettingsCategory::Display, SettingsEditor::Integer { min: 1, max: 4320 },
+                "display/resolution_h",
+                "Resolution Height",
+                SettingsCategory::Display,
+                SettingsEditor::Integer { min: 1, max: 4320 },
                 SettingsValue::Integer(648),
-                "Viewport height in pixels.", false,
+                "Viewport height in pixels.",
+                false,
             ),
             Self::prop(
-                "display/stretch_mode", "Stretch Mode",
+                "display/stretch_mode",
+                "Stretch Mode",
                 SettingsCategory::Display,
-                SettingsEditor::Enum(vec!["disabled".into(), "canvas_items".into(), "viewport".into()]),
+                SettingsEditor::Enum(vec![
+                    "disabled".into(),
+                    "canvas_items".into(),
+                    "viewport".into(),
+                ]),
                 SettingsValue::Text("disabled".into()),
-                "How the viewport scales when the window is resized.", false,
+                "How the viewport scales when the window is resized.",
+                false,
             ),
             Self::prop(
-                "display/stretch_aspect", "Stretch Aspect",
+                "display/stretch_aspect",
+                "Stretch Aspect",
                 SettingsCategory::Display,
-                SettingsEditor::Enum(vec!["ignore".into(), "keep".into(), "keep_width".into(), "keep_height".into(), "expand".into()]),
+                SettingsEditor::Enum(vec![
+                    "ignore".into(),
+                    "keep".into(),
+                    "keep_width".into(),
+                    "keep_height".into(),
+                    "expand".into(),
+                ]),
                 SettingsValue::Text("keep".into()),
-                "Aspect ratio handling when stretching.", true,
+                "Aspect ratio handling when stretching.",
+                true,
             ),
             Self::prop(
-                "display/fullscreen", "Fullscreen",
-                SettingsCategory::Display, SettingsEditor::Bool,
+                "display/fullscreen",
+                "Fullscreen",
+                SettingsCategory::Display,
+                SettingsEditor::Bool,
                 SettingsValue::Bool(false),
-                "Whether the window starts in fullscreen mode.", false,
+                "Whether the window starts in fullscreen mode.",
+                false,
             ),
             Self::prop(
-                "display/vsync", "V-Sync",
-                SettingsCategory::Display, SettingsEditor::Bool,
+                "display/vsync",
+                "V-Sync",
+                SettingsCategory::Display,
+                SettingsEditor::Bool,
                 SettingsValue::Bool(true),
-                "Enable vertical synchronization.", false,
+                "Enable vertical synchronization.",
+                false,
             ),
             // ---- Physics ----
             Self::prop(
-                "physics/fps", "Physics FPS",
-                SettingsCategory::Physics, SettingsEditor::Integer { min: 1, max: 240 },
+                "physics/fps",
+                "Physics FPS",
+                SettingsCategory::Physics,
+                SettingsEditor::Integer { min: 1, max: 240 },
                 SettingsValue::Integer(60),
-                "Number of physics simulation steps per second.", false,
+                "Number of physics simulation steps per second.",
+                false,
             ),
             Self::prop(
-                "physics/gravity", "Default Gravity",
+                "physics/gravity",
+                "Default Gravity",
                 SettingsCategory::Physics,
-                SettingsEditor::Number { min: 0.0, max: 10000.0, step: 0.1 },
+                SettingsEditor::Number {
+                    min: 0.0,
+                    max: 10000.0,
+                    step: 0.1,
+                },
                 SettingsValue::Number(980.0),
-                "Default gravity strength (pixels/s² for 2D, m/s² for 3D).", false,
+                "Default gravity strength (pixels/s² for 2D, m/s² for 3D).",
+                false,
             ),
             Self::prop(
-                "physics/default_linear_damp", "Default Linear Damp",
+                "physics/default_linear_damp",
+                "Default Linear Damp",
                 SettingsCategory::Physics,
-                SettingsEditor::Number { min: 0.0, max: 100.0, step: 0.01 },
+                SettingsEditor::Number {
+                    min: 0.0,
+                    max: 100.0,
+                    step: 0.01,
+                },
                 SettingsValue::Number(0.1),
-                "Default linear damping for rigid bodies.", true,
+                "Default linear damping for rigid bodies.",
+                true,
             ),
             Self::prop(
-                "physics/default_angular_damp", "Default Angular Damp",
+                "physics/default_angular_damp",
+                "Default Angular Damp",
                 SettingsCategory::Physics,
-                SettingsEditor::Number { min: 0.0, max: 100.0, step: 0.01 },
+                SettingsEditor::Number {
+                    min: 0.0,
+                    max: 100.0,
+                    step: 0.01,
+                },
                 SettingsValue::Number(1.0),
-                "Default angular damping for rigid bodies.", true,
+                "Default angular damping for rigid bodies.",
+                true,
             ),
             // ---- Audio ----
             Self::prop(
-                "audio/default_bus_layout", "Default Bus Layout",
-                SettingsCategory::Audio, SettingsEditor::Text,
-                SettingsValue::Text("res://default_bus_layout.tres".into()),
-                "Path to the default audio bus layout resource.", false,
-            ),
-            Self::prop(
-                "audio/master_volume_db", "Master Volume (dB)",
+                "audio/default_bus_layout",
+                "Default Bus Layout",
                 SettingsCategory::Audio,
-                SettingsEditor::Number { min: -80.0, max: 24.0, step: 0.1 },
-                SettingsValue::Number(0.0),
-                "Master output volume in decibels.", false,
+                SettingsEditor::Text,
+                SettingsValue::Text("res://default_bus_layout.tres".into()),
+                "Path to the default audio bus layout resource.",
+                false,
             ),
             Self::prop(
-                "audio/enable_audio_input", "Enable Audio Input",
-                SettingsCategory::Audio, SettingsEditor::Bool,
+                "audio/master_volume_db",
+                "Master Volume (dB)",
+                SettingsCategory::Audio,
+                SettingsEditor::Number {
+                    min: -80.0,
+                    max: 24.0,
+                    step: 0.1,
+                },
+                SettingsValue::Number(0.0),
+                "Master output volume in decibels.",
+                false,
+            ),
+            Self::prop(
+                "audio/enable_audio_input",
+                "Enable Audio Input",
+                SettingsCategory::Audio,
+                SettingsEditor::Bool,
                 SettingsValue::Bool(false),
-                "Allow microphone and audio input capture.", true,
+                "Allow microphone and audio input capture.",
+                true,
             ),
             // ---- Rendering ----
             Self::prop(
-                "rendering/renderer", "Renderer",
+                "rendering/renderer",
+                "Renderer",
                 SettingsCategory::Rendering,
-                SettingsEditor::Enum(vec!["forward_plus".into(), "mobile".into(), "compatibility".into()]),
+                SettingsEditor::Enum(vec![
+                    "forward_plus".into(),
+                    "mobile".into(),
+                    "compatibility".into(),
+                ]),
                 SettingsValue::Text("forward_plus".into()),
-                "Rendering backend to use.", false,
+                "Rendering backend to use.",
+                false,
             ),
             Self::prop(
-                "rendering/anti_aliasing", "Anti-Aliasing",
+                "rendering/anti_aliasing",
+                "Anti-Aliasing",
                 SettingsCategory::Rendering,
-                SettingsEditor::Enum(vec!["disabled".into(), "fxaa".into(), "msaa_2x".into(), "msaa_4x".into(), "msaa_8x".into()]),
+                SettingsEditor::Enum(vec![
+                    "disabled".into(),
+                    "fxaa".into(),
+                    "msaa_2x".into(),
+                    "msaa_4x".into(),
+                    "msaa_8x".into(),
+                ]),
                 SettingsValue::Text("disabled".into()),
-                "Anti-aliasing method.", false,
+                "Anti-aliasing method.",
+                false,
             ),
             Self::prop(
-                "rendering/environment_default", "Default Environment",
-                SettingsCategory::Rendering, SettingsEditor::Text,
+                "rendering/environment_default",
+                "Default Environment",
+                SettingsCategory::Rendering,
+                SettingsEditor::Text,
                 SettingsValue::Text(String::new()),
-                "Path to the default environment resource.", true,
+                "Path to the default environment resource.",
+                true,
             ),
         ]
     }
@@ -800,7 +909,10 @@ mod tests {
         let dialog = ProjectSettingsDialog::new();
         let errors = dialog.validate_value("physics/fps", &SettingsValue::Integer(999));
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], SettingsValidationError::IntegerOutOfRange { .. }));
+        assert!(matches!(
+            errors[0],
+            SettingsValidationError::IntegerOutOfRange { .. }
+        ));
     }
 
     #[test]
@@ -815,16 +927,17 @@ mod tests {
         let dialog = ProjectSettingsDialog::new();
         let errors = dialog.validate_value("physics/gravity", &SettingsValue::Number(-1.0));
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], SettingsValidationError::NumberOutOfRange { .. }));
+        assert!(matches!(
+            errors[0],
+            SettingsValidationError::NumberOutOfRange { .. }
+        ));
     }
 
     #[test]
     fn validate_enum_valid() {
         let dialog = ProjectSettingsDialog::new();
-        let errors = dialog.validate_value(
-            "rendering/renderer",
-            &SettingsValue::Text("mobile".into()),
-        );
+        let errors =
+            dialog.validate_value("rendering/renderer", &SettingsValue::Text("mobile".into()));
         assert!(errors.is_empty());
     }
 
@@ -836,7 +949,10 @@ mod tests {
             &SettingsValue::Text("vulkan_raw".into()),
         );
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], SettingsValidationError::InvalidEnumValue { .. }));
+        assert!(matches!(
+            errors[0],
+            SettingsValidationError::InvalidEnumValue { .. }
+        ));
     }
 
     #[test]
@@ -844,7 +960,10 @@ mod tests {
         let dialog = ProjectSettingsDialog::new();
         let errors = dialog.validate_value("physics/fps", &SettingsValue::Text("sixty".into()));
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], SettingsValidationError::TypeMismatch { .. }));
+        assert!(matches!(
+            errors[0],
+            SettingsValidationError::TypeMismatch { .. }
+        ));
     }
 
     #[test]
@@ -958,12 +1077,20 @@ mod tests {
     fn add_custom_property_duplicate_rejected() {
         let mut dialog = ProjectSettingsDialog::new();
         dialog.add_custom_property(
-            "custom/x", "X", SettingsCategory::Application,
-            SettingsEditor::Bool, SettingsValue::Bool(false), "",
+            "custom/x",
+            "X",
+            SettingsCategory::Application,
+            SettingsEditor::Bool,
+            SettingsValue::Bool(false),
+            "",
         );
         let added = dialog.add_custom_property(
-            "custom/x", "X Again", SettingsCategory::Application,
-            SettingsEditor::Bool, SettingsValue::Bool(true), "",
+            "custom/x",
+            "X Again",
+            SettingsCategory::Application,
+            SettingsEditor::Bool,
+            SettingsValue::Bool(true),
+            "",
         );
         assert!(!added);
     }
@@ -972,9 +1099,12 @@ mod tests {
     fn add_custom_property_conflicting_builtin_rejected() {
         let mut dialog = ProjectSettingsDialog::new();
         let added = dialog.add_custom_property(
-            "physics/fps", "Override FPS", SettingsCategory::Physics,
+            "physics/fps",
+            "Override FPS",
+            SettingsCategory::Physics,
             SettingsEditor::Integer { min: 1, max: 999 },
-            SettingsValue::Integer(30), "",
+            SettingsValue::Integer(30),
+            "",
         );
         assert!(!added);
     }
@@ -983,8 +1113,12 @@ mod tests {
     fn remove_custom_property() {
         let mut dialog = ProjectSettingsDialog::new();
         dialog.add_custom_property(
-            "custom/temp", "Temp", SettingsCategory::Audio,
-            SettingsEditor::Text, SettingsValue::Text("x".into()), "",
+            "custom/temp",
+            "Temp",
+            SettingsCategory::Audio,
+            SettingsEditor::Text,
+            SettingsValue::Text("x".into()),
+            "",
         );
         assert_eq!(dialog.custom_properties().len(), 1);
         let removed = dialog.remove_custom_property("custom/temp");
@@ -998,16 +1132,22 @@ mod tests {
         let count_before = dialog.category_count(SettingsCategory::Physics);
         let removed = dialog.remove_custom_property("physics/fps");
         assert!(!removed);
-        assert_eq!(dialog.category_count(SettingsCategory::Physics), count_before);
+        assert_eq!(
+            dialog.category_count(SettingsCategory::Physics),
+            count_before
+        );
     }
 
     #[test]
     fn custom_property_visible_in_category() {
         let mut dialog = ProjectSettingsDialog::new();
         dialog.add_custom_property(
-            "custom/game_mode", "Game Mode", SettingsCategory::Application,
+            "custom/game_mode",
+            "Game Mode",
+            SettingsCategory::Application,
             SettingsEditor::Enum(vec!["single".into(), "multi".into()]),
-            SettingsValue::Text("single".into()), "Select game mode.",
+            SettingsValue::Text("single".into()),
+            "Select game mode.",
         );
         dialog.set_category(SettingsCategory::Application);
         let props = dialog.visible_properties();
@@ -1018,9 +1158,12 @@ mod tests {
     fn custom_property_searchable() {
         let mut dialog = ProjectSettingsDialog::new();
         dialog.add_custom_property(
-            "custom/difficulty", "Difficulty Level", SettingsCategory::Application,
+            "custom/difficulty",
+            "Difficulty Level",
+            SettingsCategory::Application,
             SettingsEditor::Integer { min: 1, max: 10 },
-            SettingsValue::Integer(5), "",
+            SettingsValue::Integer(5),
+            "",
         );
         dialog.set_search("difficulty");
         let props = dialog.visible_properties();

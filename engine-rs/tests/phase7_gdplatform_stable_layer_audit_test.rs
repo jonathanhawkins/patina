@@ -67,9 +67,18 @@ fn stable_layer_doc_distinguishes_headless_from_native() {
 #[test]
 fn stable_layer_documents_windowing() {
     let doc = read_stable_layer_doc();
-    assert!(doc.contains("Windowing"), "must document windowing subsystem");
-    assert!(doc.contains("WindowConfig"), "must reference WindowConfig type");
-    assert!(doc.contains("WindowManager"), "must reference WindowManager type");
+    assert!(
+        doc.contains("Windowing"),
+        "must document windowing subsystem"
+    );
+    assert!(
+        doc.contains("WindowConfig"),
+        "must reference WindowConfig type"
+    );
+    assert!(
+        doc.contains("WindowManager"),
+        "must reference WindowManager type"
+    );
     assert!(
         doc.contains("HeadlessPlatform") || doc.contains("HeadlessWindow"),
         "must reference headless windowing"
@@ -103,7 +112,10 @@ fn stable_layer_documents_os_integration() {
         doc.contains("OS Integration") || doc.contains("platform_targets"),
         "must document OS integration"
     );
-    assert!(doc.contains("DesktopTarget"), "must reference DesktopTarget type");
+    assert!(
+        doc.contains("DesktopTarget"),
+        "must reference DesktopTarget type"
+    );
     assert!(
         doc.contains("current_platform") || doc.contains("Platform"),
         "must reference platform detection"
@@ -169,7 +181,9 @@ fn windowing_tests_exist() {
 fn platform_target_tests_exist() {
     let tests_dir = repo_root().join("engine-rs/tests");
     assert!(
-        tests_dir.join("platform_targets_validation_test.rs").exists(),
+        tests_dir
+            .join("platform_targets_validation_test.rs")
+            .exists(),
         "platform targets validation test must exist"
     );
     assert!(
@@ -206,7 +220,10 @@ fn gdplatform_module_exists(module: &str) -> bool {
 
 #[test]
 fn gdplatform_has_windowing_modules() {
-    assert!(gdplatform_module_exists("window.rs"), "must have window module");
+    assert!(
+        gdplatform_module_exists("window.rs"),
+        "must have window module"
+    );
     assert!(
         gdplatform_module_exists("display.rs"),
         "must have display module"
@@ -219,7 +236,10 @@ fn gdplatform_has_windowing_modules() {
 
 #[test]
 fn gdplatform_has_input_module() {
-    assert!(gdplatform_module_exists("input.rs"), "must have input module");
+    assert!(
+        gdplatform_module_exists("input.rs"),
+        "must have input module"
+    );
 }
 
 #[test]

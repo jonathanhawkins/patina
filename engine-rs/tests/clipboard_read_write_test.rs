@@ -108,7 +108,9 @@ fn set_image_content() {
     cb.set(ClipboardContent::Image {
         width: 2,
         height: 2,
-        rgba: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255],
+        rgba: vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ],
     });
     assert!(cb.has_content());
     assert!(cb.get().is_image());

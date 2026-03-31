@@ -27,7 +27,7 @@ const ALLOWED_LICENSES: &[&str] = &[
 
 /// Licenses that require review but may be acceptable in certain contexts.
 const REVIEW_REQUIRED: &[&str] = &[
-    "MPL-2.0",          // Weak copyleft — file-level, usually OK
+    "MPL-2.0",           // Weak copyleft — file-level, usually OK
     "LGPL-2.1-or-later", // Weak copyleft — OK for dynamic linking
     "LGPL-3.0-or-later",
 ];
@@ -48,9 +48,7 @@ const REJECTED_LICENSES: &[&str] = &[
 /// Handles OR (choice), AND (both required), and WITH (exception) operators.
 fn parse_license_ids(expr: &str) -> Vec<String> {
     // Normalize separators
-    let normalized = expr
-        .replace(" / ", " OR ")
-        .replace("/", " OR ");
+    let normalized = expr.replace(" / ", " OR ").replace("/", " OR ");
 
     let mut licenses = Vec::new();
 
@@ -77,9 +75,7 @@ fn parse_license_ids(expr: &str) -> Vec<String> {
 /// For OR expressions, at least one alternative must be allowed.
 /// For AND expressions, all parts must be allowed.
 fn is_license_compatible(expr: &str) -> LicenseVerdict {
-    let normalized = expr
-        .replace(" / ", " OR ")
-        .replace("/", " OR ");
+    let normalized = expr.replace(" / ", " OR ").replace("/", " OR ");
 
     // Split on OR — user can choose
     let alternatives: Vec<&str> = normalized.split(" OR ").collect();
@@ -140,8 +136,13 @@ enum LicenseVerdict {
 /// Reads Cargo.lock and extracts package names + versions.
 fn read_lockfile_packages() -> Vec<(String, String)> {
     let lock_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
-    let content = std::fs::read_to_string(&lock_path)
-        .unwrap_or_else(|e| panic!("Failed to read Cargo.lock at {}: {}", lock_path.display(), e));
+    let content = std::fs::read_to_string(&lock_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read Cargo.lock at {}: {}",
+            lock_path.display(),
+            e
+        )
+    });
 
     let mut packages = Vec::new();
     let mut current_name = None;
@@ -198,7 +199,10 @@ fn known_licenses() -> HashMap<&'static str, &'static str> {
     m.insert("leb128fmt", "MIT OR Apache-2.0");
     m.insert("lewton", "MIT OR Apache-2.0");
     m.insert("libc", "MIT OR Apache-2.0");
-    m.insert("linux-raw-sys", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
+    m.insert(
+        "linux-raw-sys",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
     m.insert("log", "MIT OR Apache-2.0");
     m.insert("memchr", "Unlicense OR MIT");
     m.insert("miniz_oxide", "MIT OR Zlib OR Apache-2.0");
@@ -221,7 +225,10 @@ fn known_licenses() -> HashMap<&'static str, &'static str> {
     m.insert("regex", "MIT OR Apache-2.0");
     m.insert("regex-automata", "MIT OR Apache-2.0");
     m.insert("regex-syntax", "MIT OR Apache-2.0");
-    m.insert("rustix", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
+    m.insert(
+        "rustix",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
     m.insert("rusty-fork", "MIT OR Apache-2.0");
     m.insert("semver", "MIT OR Apache-2.0");
     m.insert("serde", "MIT OR Apache-2.0");
@@ -247,19 +254,52 @@ fn known_licenses() -> HashMap<&'static str, &'static str> {
     m.insert("unicode-xid", "MIT OR Apache-2.0");
     m.insert("valuable", "MIT");
     m.insert("wait-timeout", "MIT OR Apache-2.0");
-    m.insert("wasip2", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wasip3", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wasm-encoder", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wasm-metadata", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wasmparser", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
+    m.insert(
+        "wasip2",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wasip3",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wasm-encoder",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wasm-metadata",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wasmparser",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
     m.insert("windows-link", "MIT OR Apache-2.0");
     m.insert("windows-sys", "MIT OR Apache-2.0");
-    m.insert("wit-bindgen", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wit-bindgen-core", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wit-bindgen-rust", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wit-bindgen-rust-macro", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wit-component", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
-    m.insert("wit-parser", "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT");
+    m.insert(
+        "wit-bindgen",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wit-bindgen-core",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wit-bindgen-rust",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wit-bindgen-rust-macro",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wit-component",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
+    m.insert(
+        "wit-parser",
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+    );
     m.insert("zerocopy", "BSD-2-Clause OR Apache-2.0 OR MIT");
     m.insert("zerocopy-derive", "BSD-2-Clause OR Apache-2.0 OR MIT");
     m.insert("zmij", "MIT");
@@ -277,10 +317,23 @@ fn all_dependencies_have_compatible_licenses() {
 
     // Workspace crate names to skip
     let workspace_crates: HashSet<&str> = [
-        "gdaudio", "gdcore", "gdeditor", "gdobject", "gdphysics2d", "gdphysics3d",
-        "gdplatform", "gdrender2d", "gdrender3d", "gdresource", "gdscene",
-        "gdscript-interop", "gdserver2d", "gdserver3d", "gdvariant",
-        "patina-engine", "patina-runner",
+        "gdaudio",
+        "gdcore",
+        "gdeditor",
+        "gdobject",
+        "gdphysics2d",
+        "gdphysics3d",
+        "gdplatform",
+        "gdrender2d",
+        "gdrender3d",
+        "gdresource",
+        "gdscene",
+        "gdscript-interop",
+        "gdserver2d",
+        "gdserver3d",
+        "gdvariant",
+        "patina-engine",
+        "patina-runner",
     ]
     .into_iter()
     .collect();
@@ -342,10 +395,23 @@ fn no_duplicate_dependency_versions() {
     let packages = read_lockfile_packages();
 
     let workspace_crates: HashSet<&str> = [
-        "gdaudio", "gdcore", "gdeditor", "gdobject", "gdphysics2d", "gdphysics3d",
-        "gdplatform", "gdrender2d", "gdrender3d", "gdresource", "gdscene",
-        "gdscript-interop", "gdserver2d", "gdserver3d", "gdvariant",
-        "patina-engine", "patina-runner",
+        "gdaudio",
+        "gdcore",
+        "gdeditor",
+        "gdobject",
+        "gdphysics2d",
+        "gdphysics3d",
+        "gdplatform",
+        "gdrender2d",
+        "gdrender3d",
+        "gdresource",
+        "gdscene",
+        "gdscript-interop",
+        "gdserver2d",
+        "gdserver3d",
+        "gdvariant",
+        "patina-engine",
+        "patina-runner",
     ]
     .into_iter()
     .collect();
@@ -457,7 +523,10 @@ fn verdict_dual_license_allowed() {
 
 #[test]
 fn verdict_bsd3_allowed() {
-    assert_eq!(is_license_compatible("BSD-3-Clause"), LicenseVerdict::Allowed);
+    assert_eq!(
+        is_license_compatible("BSD-3-Clause"),
+        LicenseVerdict::Allowed
+    );
 }
 
 #[test]
@@ -467,7 +536,10 @@ fn verdict_zlib_allowed() {
 
 #[test]
 fn verdict_unlicense_allowed() {
-    assert_eq!(is_license_compatible("Unlicense OR MIT"), LicenseVerdict::Allowed);
+    assert_eq!(
+        is_license_compatible("Unlicense OR MIT"),
+        LicenseVerdict::Allowed
+    );
 }
 
 #[test]

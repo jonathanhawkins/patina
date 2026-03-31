@@ -853,16 +853,10 @@ fn default_stripping_key_set_parity_extended_scenes() {
         for m in &extended_mismatches {
             eprintln!("\n[{}] {}", m.scene, m.node_path);
             if !m.missing_from_patina.is_empty() {
-                eprintln!(
-                    "  Oracle has, Patina missing: {:?}",
-                    m.missing_from_patina
-                );
+                eprintln!("  Oracle has, Patina missing: {:?}", m.missing_from_patina);
             }
             if !m.extra_in_patina.is_empty() {
-                eprintln!(
-                    "  Patina has, Oracle missing: {:?}",
-                    m.extra_in_patina
-                );
+                eprintln!("  Patina has, Oracle missing: {:?}", m.extra_in_patina);
             }
         }
         // Only fail if the mismatch count grows beyond the known baseline.
@@ -1102,9 +1096,9 @@ fn zero_valued_defaults_stripped() {
     // "empty" or "zero" but ARE the class default and must be stripped.
     // Test across all golden scenes.
     let zero_defaults: Vec<(&str, &str)> = vec![
-        ("z_index", "0"),         // CanvasItem default
-        ("rotation", "0"),        // Node2D default
-        ("skew", "0"),            // Node2D default
+        ("z_index", "0"),                // CanvasItem default
+        ("rotation", "0"),               // Node2D default
+        ("skew", "0"),                   // Node2D default
         ("show_behind_parent", "false"), // CanvasItem default
     ];
 
@@ -1383,13 +1377,14 @@ fn known_registry_properties() -> HashMap<&'static str, BTreeSet<&'static str>> 
         .chain(["monitoring", "monitorable"])
         .collect();
     // CollisionShape2D
-    let collision_shape_2d: BTreeSet<&str> =
-        node2d.iter().copied().chain(["disabled"]).collect();
+    let collision_shape_2d: BTreeSet<&str> = node2d.iter().copied().chain(["disabled"]).collect();
     // Sprite2D
     let sprite_2d: BTreeSet<&str> = node2d
         .iter()
         .copied()
-        .chain(["offset", "flip_h", "flip_v", "centered", "frame", "hframes", "vframes"])
+        .chain([
+            "offset", "flip_h", "flip_v", "centered", "frame", "hframes", "vframes",
+        ])
         .collect();
     // AnimatedSprite2D
     let animated_sprite_2d: BTreeSet<&str> = node2d
@@ -1473,24 +1468,13 @@ fn known_registry_properties() -> HashMap<&'static str, BTreeSet<&'static str>> 
     m.insert("ParallaxLayer", parallax_layer);
 
     // -- 3D classes (pat-jby: revalidate under 4.6.1) --
-    let node3d: BTreeSet<&str> = [
-        "visible",
-        "position",
-        "rotation",
-        "scale",
-        "transform",
-    ]
-    .into();
+    let node3d: BTreeSet<&str> = ["visible", "position", "rotation", "scale", "transform"].into();
     let camera_3d: BTreeSet<&str> = node3d
         .iter()
         .copied()
         .chain(["current", "fov", "near", "far", "projection"])
         .collect();
-    let mesh_instance_3d: BTreeSet<&str> = node3d
-        .iter()
-        .copied()
-        .chain(["cast_shadow"])
-        .collect();
+    let mesh_instance_3d: BTreeSet<&str> = node3d.iter().copied().chain(["cast_shadow"]).collect();
     let light_3d: BTreeSet<&str> = node3d
         .iter()
         .copied()
@@ -1523,11 +1507,7 @@ fn known_registry_properties() -> HashMap<&'static str, BTreeSet<&'static str>> 
         .copied()
         .chain(["velocity", "floor_max_angle"])
         .collect();
-    let collision_shape_3d: BTreeSet<&str> = node3d
-        .iter()
-        .copied()
-        .chain(["disabled"])
-        .collect();
+    let collision_shape_3d: BTreeSet<&str> = node3d.iter().copied().chain(["disabled"]).collect();
 
     m.insert("Node3D", node3d);
     m.insert("Camera3D", camera_3d);
@@ -2216,7 +2196,8 @@ fn check_property_ordering(node: &Value, scene: &str, violations: &mut Vec<Strin
                 if keys[i] < keys[i - 1] {
                     violations.push(format!(
                         "[{scene}] {path}: '{}' comes after '{}' (unsorted)",
-                        keys[i], keys[i - 1]
+                        keys[i],
+                        keys[i - 1]
                     ));
                     break; // One violation per node is enough.
                 }
@@ -2279,7 +2260,10 @@ fn per_class_property_exercise_audit() {
         };
         total_registered += n_known;
         total_exercised += n_exercised;
-        eprintln!("{:<25} {:>10} {:>10} {:>7.1}%", class, n_known, n_exercised, pct);
+        eprintln!(
+            "{:<25} {:>10} {:>10} {:>7.1}%",
+            class, n_known, n_exercised, pct
+        );
     }
 
     let overall = if total_registered > 0 {
@@ -2994,8 +2978,8 @@ fn registry_mirror_class_count_matches() {
     let mirror = known_registry_properties();
 
     // Read class_defaults.rs source and count m.insert() calls.
-    let src_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/patina-runner/src/class_defaults.rs");
+    let src_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/patina-runner/src/class_defaults.rs");
     let src = std::fs::read_to_string(&src_path).unwrap();
     let insert_count = src
         .lines()
@@ -3036,14 +3020,8 @@ fn triple_run_stability_all_golden_scenes() {
         let run2 = serde_json::to_string(&run_patina(&tscn)).unwrap();
         let run3 = serde_json::to_string(&run_patina(&tscn)).unwrap();
 
-        assert_eq!(
-            run1, run2,
-            "[{name}] Triple-run stability: run1 != run2"
-        );
-        assert_eq!(
-            run2, run3,
-            "[{name}] Triple-run stability: run2 != run3"
-        );
+        assert_eq!(run1, run2, "[{name}] Triple-run stability: run1 != run2");
+        assert_eq!(run2, run3, "[{name}] Triple-run stability: run2 != run3");
     }
 }
 
@@ -3084,7 +3062,9 @@ fn default_boundary_not_leaked_in_output() {
 
             for prop in &boundary_props {
                 if !ok.contains(*prop) && pk.contains(*prop) {
-                    leaks.push(format!("[{name}] {path}.{prop}: oracle stripped, Patina leaked"));
+                    leaks.push(format!(
+                        "[{name}] {path}.{prop}: oracle stripped, Patina leaked"
+                    ));
                 }
             }
         }
@@ -3167,8 +3147,19 @@ fn stripping_hierarchy_symmetry() {
 
     // Define inheritance chains to check.
     let chains: Vec<(&str, &[&str])> = vec![
-        ("Node2D", &["Sprite2D", "AnimatedSprite2D", "Camera2D", "CollisionShape2D"]),
-        ("Node2D", &["RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D"]),
+        (
+            "Node2D",
+            &[
+                "Sprite2D",
+                "AnimatedSprite2D",
+                "Camera2D",
+                "CollisionShape2D",
+            ],
+        ),
+        (
+            "Node2D",
+            &["RigidBody2D", "StaticBody2D", "CharacterBody2D", "Area2D"],
+        ),
     ];
 
     for (parent, children) in &chains {
@@ -3278,7 +3269,12 @@ fn control_461_layout_properties_in_registry() {
     // grow_vertical for Control-derived nodes when non-default. The registry
     // must include these so they are stripped when at default (0, 0, 1, 1).
     let registry = known_registry_properties();
-    let layout_props = ["layout_mode", "anchors_preset", "grow_horizontal", "grow_vertical"];
+    let layout_props = [
+        "layout_mode",
+        "anchors_preset",
+        "grow_horizontal",
+        "grow_vertical",
+    ];
     let control_classes = [
         "Control",
         "Label",
@@ -3316,7 +3312,12 @@ fn control_461_layout_defaults_stripped_in_output() {
     // For every golden scene with Control-derived nodes: if the oracle does NOT
     // report layout_mode / anchors_preset, Patina must also NOT emit them
     // (they're at default values and must be stripped).
-    let layout_props = ["layout_mode", "anchors_preset", "grow_horizontal", "grow_vertical"];
+    let layout_props = [
+        "layout_mode",
+        "anchors_preset",
+        "grow_horizontal",
+        "grow_vertical",
+    ];
 
     for name in GOLDEN_SCENES {
         let tscn = scenes_dir().join(format!("{name}.tscn"));
@@ -3366,8 +3367,8 @@ fn control_461_layout_defaults_stripped_in_output() {
 fn mirror_covers_all_registry_classes() {
     // Parse class_defaults.rs for all m.insert("ClassName", ...) entries
     // and verify each has a corresponding entry in known_registry_properties().
-    let src_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/patina-runner/src/class_defaults.rs");
+    let src_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/patina-runner/src/class_defaults.rs");
     let src = std::fs::read_to_string(&src_path).unwrap();
 
     let registry = known_registry_properties();

@@ -627,10 +627,7 @@ fn resolve_ext_resource_path_empty_id_returns_none() {
 "#;
     let scene = PackedScene::from_tscn(tscn).unwrap();
     // parse_ext_resource_ref returns None for empty id.
-    assert_eq!(
-        scene.resolve_ext_resource_path("ExtResource(\"\")"),
-        None
-    );
+    assert_eq!(scene.resolve_ext_resource_path("ExtResource(\"\")"), None);
 }
 
 // ===========================================================================
@@ -716,10 +713,7 @@ speed = 100
         Variant::String(r#"ExtResource("scene1")"#.into())
     );
     // Regular property preserved.
-    assert_eq!(
-        enemy.get_property("speed"),
-        Variant::Int(100)
-    );
+    assert_eq!(enemy.get_property("speed"), Variant::Int(100));
 }
 
 // ===========================================================================
@@ -860,8 +854,5 @@ base_value = 42
         Variant::String(r#"ExtResource("s2")"#.into())
     );
     // Property override should replace inner value.
-    assert_eq!(
-        child.get_property("base_value"),
-        Variant::Int(42)
-    );
+    assert_eq!(child.get_property("base_value"), Variant::Int(42));
 }

@@ -14,9 +14,9 @@ use std::path::PathBuf;
 
 use gdcore::id::ResourceUid;
 use gdcore::math::{Color, Vector2, Vector3};
-use gdvariant::Variant;
 use gdobject::{GenericObject, GodotObject, ObjectBase, SignalStore};
 use gdscene::{LifecycleManager, MainLoop, Node, SceneTree};
+use gdvariant::Variant;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -38,7 +38,10 @@ fn gate1_workspace_has_16_crates() {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().unwrap().is_dir() && e.path().join("Cargo.toml").exists())
         .count();
-    assert!(count >= 16, "workspace must have >= 16 crates, found {count}");
+    assert!(
+        count >= 16,
+        "workspace must have >= 16 crates, found {count}"
+    );
 }
 
 #[test]
@@ -99,9 +102,10 @@ fn gate2_signal_system_functional() {
     let mut store = SignalStore::new();
     store.add_signal("hit");
     assert!(store.has_signal("hit"));
-    store.connect("hit", gdobject::Connection::new(
-        gdcore::id::ObjectId::from_raw(1), "on_hit",
-    ));
+    store.connect(
+        "hit",
+        gdobject::Connection::new(gdcore::id::ObjectId::from_raw(1), "on_hit"),
+    );
     let sig = store.get_signal("hit").unwrap();
     assert_eq!(sig.connections().len(), 1);
 }
@@ -213,8 +217,11 @@ fn gate5_physics2d_stepping() {
     let mut world = PhysicsWorld2D::new();
     // Note: PhysicsWorld2D does not yet have configurable gravity.
     let body = PhysicsBody2D::new(
-        BodyId(0), BodyType::Rigid, Vector2::ZERO,
-        Shape2D::Circle { radius: 1.0 }, 1.0,
+        BodyId(0),
+        BodyType::Rigid,
+        Vector2::ZERO,
+        Shape2D::Circle { radius: 1.0 },
+        1.0,
     );
     let id = world.add_body(body);
     world.step(1.0 / 60.0);
@@ -233,8 +240,11 @@ fn gate5_physics2d_deterministic() {
         let mut world = PhysicsWorld2D::new();
         // Note: PhysicsWorld2D does not yet have configurable gravity.
         let body = PhysicsBody2D::new(
-            BodyId(0), BodyType::Rigid, Vector2::new(0.0, 100.0),
-            Shape2D::Circle { radius: 1.0 }, 1.0,
+            BodyId(0),
+            BodyType::Rigid,
+            Vector2::new(0.0, 100.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
         );
         let id = world.add_body(body);
         for _ in 0..60 {
@@ -253,7 +263,10 @@ fn gate5_golden_physics_traces_exist() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
         .count();
-    assert!(count >= 10, "must have >= 10 physics golden traces, found {count}");
+    assert!(
+        count >= 10,
+        "must have >= 10 physics golden traces, found {count}"
+    );
 }
 
 #[test]
@@ -281,8 +294,11 @@ fn gate6_physics3d_stepping() {
 
     let mut world = PhysicsWorld3D::new();
     let body = PhysicsBody3D::new(
-        BodyId3D(0), BodyType3D::Rigid, Vector3::new(0.0, 10.0, 0.0),
-        Shape3D::Sphere { radius: 1.0 }, 1.0,
+        BodyId3D(0),
+        BodyType3D::Rigid,
+        Vector3::new(0.0, 10.0, 0.0),
+        Shape3D::Sphere { radius: 1.0 },
+        1.0,
     );
     let id = world.add_body(body);
     world.step(1.0 / 60.0);
@@ -309,11 +325,17 @@ fn gate7_golden_render_images_exist() {
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            let ext = e.path().extension().map(|e| e.to_string_lossy().to_string());
+            let ext = e
+                .path()
+                .extension()
+                .map(|e| e.to_string_lossy().to_string());
             ext == Some("png".into()) || ext == Some("bmp".into())
         })
         .count();
-    assert!(count >= 5, "must have >= 5 golden render images, found {count}");
+    assert!(
+        count >= 5,
+        "must have >= 5 golden render images, found {count}"
+    );
 }
 
 // ===========================================================================
@@ -324,8 +346,8 @@ fn gate7_golden_render_images_exist() {
 fn gate8_3d_wireframe_renders() {
     use gdcore::math3d::{Basis, Transform3D};
     use gdrender3d::SoftwareRenderer3D;
-    use gdserver3d::mesh::Mesh3D;
     use gdserver3d::material::Material3D;
+    use gdserver3d::mesh::Mesh3D;
     use gdserver3d::server::RenderingServer3D;
     use gdserver3d::viewport::Viewport3D;
 
@@ -333,10 +355,13 @@ fn gate8_3d_wireframe_renders() {
     let id = renderer.create_instance();
     renderer.set_mesh(id, Mesh3D::cube(1.0));
     renderer.set_material(id, Material3D::default());
-    renderer.set_transform(id, Transform3D {
-        basis: Basis::IDENTITY,
-        origin: Vector3::new(0.0, 0.0, -5.0),
-    });
+    renderer.set_transform(
+        id,
+        Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 0.0, -5.0),
+        },
+    );
     let vp = Viewport3D::new(64, 64);
     let frame = renderer.render_frame(&vp);
     let nonblack = frame.pixels.iter().filter(|c| **c != Color::BLACK).count();
@@ -374,15 +399,25 @@ fn gate10_integration_test_count() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
         .count();
-    assert!(count >= 100, "must have >= 100 integration test files, found {count}");
+    assert!(
+        count >= 100,
+        "must have >= 100 integration test files, found {count}"
+    );
 }
 
 #[test]
 fn gate10_subsystem_test_coverage() {
     let tests_dir = workspace_root().join("tests");
     let required_subsystems = [
-        "physics", "scene", "resource", "signal", "render",
-        "node", "lifecycle", "input", "classdb",
+        "physics",
+        "scene",
+        "resource",
+        "signal",
+        "render",
+        "node",
+        "lifecycle",
+        "input",
+        "classdb",
     ];
 
     for sub in &required_subsystems {
@@ -425,7 +460,9 @@ fn gate12_audio_crate_exists() {
 
 #[test]
 fn gate13_gdscript_interop_crate_exists() {
-    assert!(workspace_root().join("crates/gdscript-interop/src/lib.rs").exists());
+    assert!(workspace_root()
+        .join("crates/gdscript-interop/src/lib.rs")
+        .exists());
 }
 
 // ===========================================================================
@@ -451,24 +488,33 @@ fn headless_milestone_report() {
         .count();
 
     let scene_count = fs::read_dir(repo.join("fixtures/scenes"))
-        .map(|d| d.filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "tscn"))
-            .count())
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "tscn"))
+                .count()
+        })
         .unwrap_or(0);
 
     let physics_golden_count = fs::read_dir(repo.join("fixtures/golden/physics"))
-        .map(|d| d.filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
-            .count())
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+                .count()
+        })
         .unwrap_or(0);
 
     let render_golden_count = fs::read_dir(repo.join("fixtures/golden/render"))
-        .map(|d| d.filter_map(|e| e.ok())
-            .filter(|e| {
-                let ext = e.path().extension().map(|e| e.to_string_lossy().to_string());
-                ext == Some("png".into()) || ext == Some("bmp".into())
-            })
-            .count())
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let ext = e
+                        .path()
+                        .extension()
+                        .map(|e| e.to_string_lossy().to_string());
+                    ext == Some("png".into()) || ext == Some("bmp".into())
+                })
+                .count()
+        })
         .unwrap_or(0);
 
     let source_file_count = fs::read_dir(ws.join("crates"))
@@ -494,19 +540,47 @@ fn headless_milestone_report() {
 
     // Gate status.
     let gates: Vec<(&str, &str, bool)> = vec![
-        ("Gate 1", "Foundation (workspace, CI, lock)", crate_count >= 16 && ci_exists),
+        (
+            "Gate 1",
+            "Foundation (workspace, CI, lock)",
+            crate_count >= 16 && ci_exists,
+        ),
         ("Gate 2", "Variant + Object model", true), // verified by gate2_* tests above
-        ("Gate 3", "Scene tree + lifecycle + PackedScene", scene_count >= 10),
+        (
+            "Gate 3",
+            "Scene tree + lifecycle + PackedScene",
+            scene_count >= 10,
+        ),
         ("Gate 4", "Resource loading + UID registry", true),
-        ("Gate 5", "Physics 2D (deterministic, golden traces)", physics_golden_count >= 10),
+        (
+            "Gate 5",
+            "Physics 2D (deterministic, golden traces)",
+            physics_golden_count >= 10,
+        ),
         ("Gate 6", "Physics 3D (stepping, gravity)", true),
-        ("Gate 7", "2D Rendering (framebuffer, goldens)", render_golden_count >= 5),
+        (
+            "Gate 7",
+            "2D Rendering (framebuffer, goldens)",
+            render_golden_count >= 5,
+        ),
         ("Gate 8", "3D Rendering (wireframe)", true),
         ("Gate 9", "Platform + Input", true),
-        ("Gate 10", "Integration test breadth (100+ files)", test_file_count >= 100),
+        (
+            "Gate 10",
+            "Integration test breadth (100+ files)",
+            test_file_count >= 100,
+        ),
         ("Gate 11", "Makefile test tiers", makefile_exists),
-        ("Gate 12", "Audio crate (stub)", ws.join("crates/gdaudio/src/lib.rs").exists()),
-        ("Gate 13", "GDScript interop crate (stub)", ws.join("crates/gdscript-interop/src/lib.rs").exists()),
+        (
+            "Gate 12",
+            "Audio crate (stub)",
+            ws.join("crates/gdaudio/src/lib.rs").exists(),
+        ),
+        (
+            "Gate 13",
+            "GDScript interop crate (stub)",
+            ws.join("crates/gdscript-interop/src/lib.rs").exists(),
+        ),
     ];
 
     println!("\n============================================================");
@@ -522,8 +596,14 @@ fn headless_milestone_report() {
     println!("  Scene fixtures (.tscn):  {scene_count}");
     println!("  Physics golden traces:   {physics_golden_count}");
     println!("  Render golden images:    {render_golden_count}");
-    println!("  CI pipeline:             {}", if ci_exists { "YES" } else { "NO" });
-    println!("  Makefile test tiers:     {}", if makefile_exists { "YES" } else { "NO" });
+    println!(
+        "  CI pipeline:             {}",
+        if ci_exists { "YES" } else { "NO" }
+    );
+    println!(
+        "  Makefile test tiers:     {}",
+        if makefile_exists { "YES" } else { "NO" }
+    );
     println!();
     println!("  GATE STATUS");
     println!("  -----------");
@@ -531,14 +611,21 @@ fn headless_milestone_report() {
     let mut pass = 0;
     for (name, desc, ok) in &gates {
         let status = if *ok { "PASS" } else { "FAIL" };
-        if *ok { pass += 1; }
+        if *ok {
+            pass += 1;
+        }
         println!("  [{status}] {name}: {desc}");
     }
     let total = gates.len();
     println!();
     println!("  SUMMARY: {pass}/{total} gates passing");
-    println!("  Headless runtime milestone: {}",
-        if pass == total { "ACHIEVED" } else { "IN PROGRESS" }
+    println!(
+        "  Headless runtime milestone: {}",
+        if pass == total {
+            "ACHIEVED"
+        } else {
+            "IN PROGRESS"
+        }
     );
     println!("============================================================\n");
 

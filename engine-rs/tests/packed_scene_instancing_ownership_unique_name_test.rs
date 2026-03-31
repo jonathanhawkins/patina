@@ -10,7 +10,9 @@
 //! - Instancing under another instance preserves correct ownership boundaries.
 //! - Nested PackedScene ownership propagation via instance_with_subscenes matches Godot.
 
-use gdscene::packed_scene::{add_packed_scene_to_tree, add_packed_scene_to_tree_with_subscenes, PackedScene};
+use gdscene::packed_scene::{
+    add_packed_scene_to_tree, add_packed_scene_to_tree_with_subscenes, PackedScene,
+};
 use gdscene::scene_tree::SceneTree;
 
 // ===========================================================================
@@ -205,12 +207,18 @@ fn xeup_two_instances_independent_unique_name_scopes() {
     // Each instance resolves %HealthBar to its own copy.
     let hb1 = tree.get_node_relative(hud1, "%HealthBar").unwrap();
     let hb2 = tree.get_node_relative(hud2, "%HealthBar").unwrap();
-    assert_ne!(hb1, hb2, "two instances should have different %HealthBar nodes");
+    assert_ne!(
+        hb1, hb2,
+        "two instances should have different %HealthBar nodes"
+    );
 
     // Each instance resolves %ScoreLabel to its own copy.
     let sl1 = tree.get_node_relative(hud1, "%ScoreLabel").unwrap();
     let sl2 = tree.get_node_relative(hud2, "%ScoreLabel").unwrap();
-    assert_ne!(sl1, sl2, "two instances should have different %ScoreLabel nodes");
+    assert_ne!(
+        sl1, sl2,
+        "two instances should have different %ScoreLabel nodes"
+    );
 
     // Cross-check: looking up from hud1's child should NOT find hud2's nodes.
     let panel1 = tree.get_node_relative(hud1, "Panel").unwrap();
@@ -323,7 +331,10 @@ fn xeup_unique_name_with_path_suffix() {
     // %ScoreLabel resolves, then we can navigate further if there were children.
     // Test that %ScoreLabel itself resolves correctly via the path prefix mechanism.
     let score_label = tree.get_node_relative(hud_id, "%ScoreLabel");
-    assert!(score_label.is_some(), "%ScoreLabel should resolve from scene root");
+    assert!(
+        score_label.is_some(),
+        "%ScoreLabel should resolve from scene root"
+    );
 
     // Non-unique node should NOT resolve via % prefix.
     let panel_via_percent = tree.get_node_relative(hud_id, "%Panel");
@@ -334,7 +345,10 @@ fn xeup_unique_name_with_path_suffix() {
 
     // Non-unique node should still resolve via normal path.
     let panel_normal = tree.get_node_relative(hud_id, "Panel");
-    assert!(panel_normal.is_some(), "Panel should resolve via normal path");
+    assert!(
+        panel_normal.is_some(),
+        "Panel should resolve via normal path"
+    );
 }
 
 // ===========================================================================
@@ -572,7 +586,11 @@ fn xeup_root_only_scene_ownership() {
 
     let node = tree.get_node(scene_root).unwrap();
     assert_eq!(node.name(), "Lonely");
-    assert_eq!(node.owner(), None, "root-only scene root should have owner == None");
+    assert_eq!(
+        node.owner(),
+        None,
+        "root-only scene root should have owner == None"
+    );
 }
 
 // ===========================================================================
@@ -599,7 +617,9 @@ fn xeup_unique_name_sibling_lookup() {
     );
 
     // From %HealthBar, look up %ScoreLabel.
-    let score_from_health = tree.get_node_relative(health_bar_direct, "%ScoreLabel").unwrap();
+    let score_from_health = tree
+        .get_node_relative(health_bar_direct, "%ScoreLabel")
+        .unwrap();
     let score_direct = tree.get_node_relative(hud_id, "%ScoreLabel").unwrap();
 
     assert_eq!(
@@ -743,9 +763,18 @@ fn ahop_same_unique_name_in_nested_scopes_resolves_independently() {
     let h_innermost = tree.get_node_relative(innermost, "%Health").unwrap();
 
     // All three are different nodes.
-    assert_ne!(h_outer, h_inner, "outer and inner %Health must be different nodes");
-    assert_ne!(h_inner, h_innermost, "inner and innermost %Health must be different nodes");
-    assert_ne!(h_outer, h_innermost, "outer and innermost %Health must be different nodes");
+    assert_ne!(
+        h_outer, h_inner,
+        "outer and inner %Health must be different nodes"
+    );
+    assert_ne!(
+        h_inner, h_innermost,
+        "inner and innermost %Health must be different nodes"
+    );
+    assert_ne!(
+        h_outer, h_innermost,
+        "outer and innermost %Health must be different nodes"
+    );
 
     // Lookup from a child within each scope finds the scope's own %Health.
     let outer_slot_health = tree.get_node_relative(outer_slot, "%Health").unwrap();
@@ -836,7 +865,10 @@ fn ahop_lookup_from_deep_child_walks_to_correct_owner() {
 
     // From %Gamma, lookup %Gamma should succeed (same owner scope).
     let gamma_self = tree.get_node_relative(gamma, "%Gamma").unwrap();
-    assert_eq!(gamma_self, gamma, "%Gamma self-lookup should work within its scope");
+    assert_eq!(
+        gamma_self, gamma,
+        "%Gamma self-lookup should work within its scope"
+    );
 
     // From Scene A's Slot (owned by a_root), lookup %Alpha should succeed.
     let alpha_from_slot = tree.get_node_relative(a_slot, "%Alpha").unwrap();
@@ -1174,9 +1206,17 @@ fn d48l_four_level_deep_nested_ownership() {
     // Level 2 child: Blade owned by Sword.
     assert_eq!(blade.owner(), Some(sword.id()), "Blade owned by Sword");
     // Level 3: Socket (Gem root) owned by Sword.
-    assert_eq!(socket.owner(), Some(sword.id()), "Socket (Gem root) owned by Sword");
+    assert_eq!(
+        socket.owner(),
+        Some(sword.id()),
+        "Socket (Gem root) owned by Sword"
+    );
     // Level 3 child: Sparkle owned by Socket.
-    assert_eq!(sparkle.owner(), Some(socket.id()), "Sparkle owned by Socket (Gem root)");
+    assert_eq!(
+        sparkle.owner(),
+        Some(socket.id()),
+        "Sparkle owned by Socket (Gem root)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,12 +1263,19 @@ fn d48l_duplicate_instances_at_multiple_nesting_levels() {
 
     // Tree + BranchLeft + LeafA + Detail + LeafB + Detail
     //      + BranchRight + LeafA + Detail + LeafB + Detail = 11
-    assert_eq!(nodes.len(), 11, "expected 11 nodes for duplicate nested instances");
+    assert_eq!(
+        nodes.len(),
+        11,
+        "expected 11 nodes for duplicate nested instances"
+    );
 
     let tree_id = nodes[0].id();
 
     // Collect all sub-scene roots (the Branch instances).
-    let branches: Vec<_> = nodes.iter().filter(|n| n.owner() == Some(tree_id)).collect();
+    let branches: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.owner() == Some(tree_id))
+        .collect();
     assert_eq!(branches.len(), 2, "two Branch instances owned by Tree");
 
     // For each Branch, its children should be owned by it, and the Leaf
@@ -1567,7 +1614,10 @@ text = "outer_status"
     // Outer scope: %Status resolves to Outer's own %Status
     let outer_status = tree.get_node_relative(outer_id, "%Status").unwrap();
     let outer_text = tree.get_node(outer_status).unwrap().get_property("text");
-    assert_eq!(outer_text, gdvariant::Variant::String("outer_status".into()));
+    assert_eq!(
+        outer_text,
+        gdvariant::Variant::String("outer_status".into())
+    );
 
     // From Nested (scene root, owned by Outer), %Status resolves in Outer's
     // scope, so it finds Outer's %Status — matching Godot's owner-based scoping.
@@ -1591,8 +1641,14 @@ text = "outer_status"
         inner_status_node,
         "From Inner scope, %Status should find Inner's Status node"
     );
-    let inner_text = tree.get_node(inner_status_node).unwrap().get_property("text");
-    assert_eq!(inner_text, gdvariant::Variant::String("inner_status".into()));
+    let inner_text = tree
+        .get_node(inner_status_node)
+        .unwrap()
+        .get_property("text");
+    assert_eq!(
+        inner_text,
+        gdvariant::Variant::String("inner_status".into())
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,8 +1689,7 @@ text = "detail_text"
         }
     };
 
-    let app_id =
-        add_packed_scene_to_tree_with_subscenes(&mut tree, root, &app, &resolver).unwrap();
+    let app_id = add_packed_scene_to_tree_with_subscenes(&mut tree, root, &app, &resolver).unwrap();
     let main_panel = tree.get_node_relative(app_id, "MainPanel").unwrap();
 
     // From a child inside Panel scope, %Header should resolve.
@@ -1645,16 +1700,29 @@ text = "detail_text"
 
     // From Body (owned by MainPanel), %Header should resolve within Panel scope
     let header_unique = tree.get_node_relative(body, "%Header");
-    assert!(header_unique.is_some(), "From inside Panel scope, %Header should resolve");
+    assert!(
+        header_unique.is_some(),
+        "From inside Panel scope, %Header should resolve"
+    );
 
     // %Header/Body should resolve: first find %Header, then navigate to Body
     let header_body = tree.get_node_relative(body, "%Header/Body");
-    assert!(header_body.is_some(), "From Panel scope, %Header/Body should resolve");
-    assert_eq!(header_body.unwrap(), body, "%Header/Body should resolve to the Body node");
+    assert!(
+        header_body.is_some(),
+        "From Panel scope, %Header/Body should resolve"
+    );
+    assert_eq!(
+        header_body.unwrap(),
+        body,
+        "%Header/Body should resolve to the Body node"
+    );
 
     // %Header/Body/Detail should resolve the full path
     let detail = tree.get_node_relative(body, "%Header/Body/Detail");
-    assert!(detail.is_some(), "From Panel scope, %Header/Body/Detail should resolve");
+    assert!(
+        detail.is_some(),
+        "From Panel scope, %Header/Body/Detail should resolve"
+    );
 
     // Verify the detail's property
     let text = tree.get_node(detail.unwrap()).unwrap().get_property("text");
@@ -1789,15 +1857,24 @@ text = "default"
 
     // From inside Card1's scope (e.g., from Title), %Title resolves to Card1's own
     let t1_lookup = tree.get_node_relative(t1_node, "%Title").unwrap();
-    assert_eq!(t1_lookup, t1_node, "From inside Card1 scope, %Title should find Card1's Title");
+    assert_eq!(
+        t1_lookup, t1_node,
+        "From inside Card1 scope, %Title should find Card1's Title"
+    );
 
     let t2_lookup = tree.get_node_relative(t2_node, "%Title").unwrap();
-    assert_eq!(t2_lookup, t2_node, "From inside Card2 scope, %Title should find Card2's Title");
+    assert_eq!(
+        t2_lookup, t2_node,
+        "From inside Card2 scope, %Title should find Card2's Title"
+    );
 
     // From inside Card1, %Icon should also resolve to Card1's own Icon
     let i1 = tree.get_node_relative(t1_node, "%Icon").unwrap();
     let i2 = tree.get_node_relative(t2_node, "%Icon").unwrap();
-    assert_ne!(i1, i2, "Card1 and Card2 %Icon must resolve to different nodes");
+    assert_ne!(
+        i1, i2,
+        "Card1 and Card2 %Icon must resolve to different nodes"
+    );
 
     // Hand scope should NOT see any %Title or %Icon (they're in Card subscopes)
     // Hand root has no owner (or owner is root), so scope is Hand.
@@ -1883,25 +1960,55 @@ fn f5x4_four_level_unique_names_via_subscenes() {
 
     // World scope: from HUD (owned by World), %HUD resolves
     let hud_node = tree.get_node_relative(world_id, "HUD").unwrap();
-    assert!(tree.get_node_relative(hud_node, "%HUD").is_some(), "World scope: %HUD visible");
-    assert!(tree.get_node_relative(hud_node, "%Avatar").is_none(), "%Avatar not in World scope");
+    assert!(
+        tree.get_node_relative(hud_node, "%HUD").is_some(),
+        "World scope: %HUD visible"
+    );
+    assert!(
+        tree.get_node_relative(hud_node, "%Avatar").is_none(),
+        "%Avatar not in World scope"
+    );
 
     // Player scope: from Avatar (owned by Hero), %Avatar resolves
     let avatar_node = tree.get_node_relative(hero, "Avatar").unwrap();
-    assert!(tree.get_node_relative(avatar_node, "%Avatar").is_some(), "Player scope: %Avatar visible");
-    assert!(tree.get_node_relative(avatar_node, "%HUD").is_none(), "%HUD not in Player scope");
-    assert!(tree.get_node_relative(avatar_node, "%Edge").is_none(), "%Edge not in Player scope");
+    assert!(
+        tree.get_node_relative(avatar_node, "%Avatar").is_some(),
+        "Player scope: %Avatar visible"
+    );
+    assert!(
+        tree.get_node_relative(avatar_node, "%HUD").is_none(),
+        "%HUD not in Player scope"
+    );
+    assert!(
+        tree.get_node_relative(avatar_node, "%Edge").is_none(),
+        "%Edge not in Player scope"
+    );
 
     // Sword scope: from Edge (owned by Weapon), %Edge resolves
     let edge_node = tree.get_node_relative(weapon, "Edge").unwrap();
-    assert!(tree.get_node_relative(edge_node, "%Edge").is_some(), "Sword scope: %Edge visible");
-    assert!(tree.get_node_relative(edge_node, "%Avatar").is_none(), "%Avatar not in Sword scope");
+    assert!(
+        tree.get_node_relative(edge_node, "%Edge").is_some(),
+        "Sword scope: %Edge visible"
+    );
+    assert!(
+        tree.get_node_relative(edge_node, "%Avatar").is_none(),
+        "%Avatar not in Sword scope"
+    );
 
     // Gem scope: from Sparkle (owned by GemSlot), %Sparkle resolves
     let sparkle_node = tree.get_node_relative(gem_slot, "Sparkle").unwrap();
-    assert!(tree.get_node_relative(sparkle_node, "%Sparkle").is_some(), "Gem scope: %Sparkle visible");
-    assert!(tree.get_node_relative(sparkle_node, "%Edge").is_none(), "%Edge not in Gem scope");
-    assert!(tree.get_node_relative(sparkle_node, "%HUD").is_none(), "%HUD not in Gem scope");
+    assert!(
+        tree.get_node_relative(sparkle_node, "%Sparkle").is_some(),
+        "Gem scope: %Sparkle visible"
+    );
+    assert!(
+        tree.get_node_relative(sparkle_node, "%Edge").is_none(),
+        "%Edge not in Gem scope"
+    );
+    assert!(
+        tree.get_node_relative(sparkle_node, "%HUD").is_none(),
+        "%HUD not in Gem scope"
+    );
 }
 
 // ===========================================================================
@@ -1957,7 +2064,11 @@ position = Vector2(50, 75)
 
     // Property override should have been applied to Loot.
     let pos = nodes[1].get_property("position");
-    assert_ne!(pos, gdvariant::Variant::Nil, "position override should be applied");
+    assert_ne!(
+        pos,
+        gdvariant::Variant::Nil,
+        "position override should be applied"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2009,18 +2120,39 @@ fn p5jy_three_level_ownership_in_tree() {
     let hero = tree.get_node_by_path("/root/World/Hero").unwrap();
     let body = tree.get_node_by_path("/root/World/Hero/Body").unwrap();
     let weapon = tree.get_node_by_path("/root/World/Hero/Weapon").unwrap();
-    let blade = tree.get_node_by_path("/root/World/Hero/Weapon/Blade").unwrap();
+    let blade = tree
+        .get_node_by_path("/root/World/Hero/Weapon/Blade")
+        .unwrap();
 
     // World root: no owner (it IS the scene owner).
-    assert!(tree.get_node(world_node).unwrap().owner().is_none(), "World root should have no owner");
+    assert!(
+        tree.get_node(world_node).unwrap().owner().is_none(),
+        "World root should have no owner"
+    );
     // Hero (player sub-scene root) owned by World.
-    assert_eq!(tree.get_node(hero).unwrap().owner(), Some(world_node), "Hero owned by World");
+    assert_eq!(
+        tree.get_node(hero).unwrap().owner(),
+        Some(world_node),
+        "Hero owned by World"
+    );
     // Body (player sub-scene child) owned by Hero.
-    assert_eq!(tree.get_node(body).unwrap().owner(), Some(hero), "Body owned by Hero");
+    assert_eq!(
+        tree.get_node(body).unwrap().owner(),
+        Some(hero),
+        "Body owned by Hero"
+    );
     // Weapon (weapon sub-scene root) owned by Hero.
-    assert_eq!(tree.get_node(weapon).unwrap().owner(), Some(hero), "Weapon owned by Hero");
+    assert_eq!(
+        tree.get_node(weapon).unwrap().owner(),
+        Some(hero),
+        "Weapon owned by Hero"
+    );
     // Blade (weapon sub-scene child) owned by Weapon.
-    assert_eq!(tree.get_node(blade).unwrap().owner(), Some(weapon), "Blade owned by Weapon");
+    assert_eq!(
+        tree.get_node(blade).unwrap().owner(),
+        Some(weapon),
+        "Blade owned by Weapon"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2077,7 +2209,10 @@ fn p5jy_duplicate_nested_instances_independent_ownership() {
         "TrailB should be owned by BulletB"
     );
     // Ownership boundaries are independent.
-    assert_ne!(bullet_a_id, bullet_b_id, "BulletA and BulletB should have distinct IDs");
+    assert_ne!(
+        bullet_a_id, bullet_b_id,
+        "BulletA and BulletB should have distinct IDs"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2130,6 +2265,10 @@ fn p5jy_nested_ownership_stable_after_mainloop_stepping() {
     // Ownership should be unchanged after stepping.
     let mob_owner = main_loop.tree().get_node(mob_id).unwrap().owner();
     let ai_owner = main_loop.tree().get_node(ai_id).unwrap().owner();
-    assert_eq!(mob_owner, Some(level_id), "Mob ownership stable after stepping");
+    assert_eq!(
+        mob_owner,
+        Some(level_id),
+        "Mob ownership stable after stepping"
+    );
     assert_eq!(ai_owner, Some(mob_id), "AI ownership stable after stepping");
 }

@@ -281,7 +281,8 @@ impl FogVolume {
                 let half = self.size * 0.5;
                 let dy = half.y - local_point.y.abs();
                 let radius = half.x;
-                let dr = radius - (local_point.x * local_point.x + local_point.z * local_point.z).sqrt();
+                let dr =
+                    radius - (local_point.x * local_point.x + local_point.z * local_point.z).sqrt();
                 dy.min(dr).max(0.0)
             }
         }
@@ -324,7 +325,10 @@ mod tests {
 
     #[test]
     fn shape_unknown_int_defaults_ellipsoid() {
-        assert_eq!(FogVolumeShape::from_godot_int(99), FogVolumeShape::Ellipsoid);
+        assert_eq!(
+            FogVolumeShape::from_godot_int(99),
+            FogVolumeShape::Ellipsoid
+        );
     }
 
     // -- FogMaterial -------------------------------------------------------
@@ -511,7 +515,10 @@ mod tests {
         v.material.edge_fade = 0.0;
         let bottom = v.sample_density(Vector3::new(0.0, -1.9, 0.0));
         let top = v.sample_density(Vector3::new(0.0, 1.9, 0.0));
-        assert!(bottom > top, "Fog should be denser at bottom: bottom={bottom}, top={top}");
+        assert!(
+            bottom > top,
+            "Fog should be denser at bottom: bottom={bottom}, top={top}"
+        );
     }
 
     #[test]
@@ -531,6 +538,9 @@ mod tests {
         v.material.edge_fade = 0.5;
         let center = v.sample_density(Vector3::ZERO);
         let near_edge = v.sample_density(Vector3::new(1.9, 0.0, 0.0));
-        assert!(near_edge < center, "Edge fade should reduce density near boundary: center={center}, edge={near_edge}");
+        assert!(
+            near_edge < center,
+            "Edge fade should reduce density near boundary: center={center}, edge={near_edge}"
+        );
     }
 }

@@ -155,12 +155,16 @@ fn triage_doc_has_triage_flow() {
 #[test]
 fn triage_doc_documents_required_steps() {
     let doc = read_triage_doc();
-    let required_steps = ["Label", "Prioritize", "Assign", "Implement", "Verify", "Close"];
+    let required_steps = [
+        "Label",
+        "Prioritize",
+        "Assign",
+        "Implement",
+        "Verify",
+        "Close",
+    ];
     for step in &required_steps {
-        assert!(
-            doc.contains(step),
-            "triage doc must document step '{step}'"
-        );
+        assert!(doc.contains(step), "triage doc must document step '{step}'");
     }
 }
 
@@ -201,8 +205,7 @@ fn triage_doc_references_br_tracker() {
 
 #[test]
 fn crash_triage_module_exists() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/gdcore/src/crash_triage.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crates/gdcore/src/crash_triage.rs");
     assert!(path.exists(), "gdcore::crash_triage module must exist");
 }
 
@@ -215,7 +218,11 @@ fn crash_triage_evidence_tests_exist() {
     ];
     for file in &expected {
         let path = tests_dir.join(file);
-        assert!(path.exists(), "evidence test must exist: {}", path.display());
+        assert!(
+            path.exists(),
+            "evidence test must exist: {}",
+            path.display()
+        );
     }
 }
 

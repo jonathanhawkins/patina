@@ -93,8 +93,14 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             ScriptError::MethodNotFound(msg) => {
-                assert!(msg.contains("_ready"), "error should mention the method name");
-                assert!(msg.contains("deprecated"), "error should mention deprecation");
+                assert!(
+                    msg.contains("_ready"),
+                    "error should mention the method name"
+                );
+                assert!(
+                    msg.contains("deprecated"),
+                    "error should mention deprecation"
+                );
             }
             other => panic!("expected MethodNotFound, got {other:?}"),
         }

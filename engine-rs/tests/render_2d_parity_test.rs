@@ -114,8 +114,16 @@ fn hidden_parent_hides_all_children() {
     vp.add_canvas_item(child_b);
 
     let frame = renderer.render_frame(&vp);
-    assert_eq!(pixel_at(&frame, 5, 10), Color::BLACK, "child A should be hidden");
-    assert_eq!(pixel_at(&frame, 15, 10), Color::BLACK, "child B should be hidden");
+    assert_eq!(
+        pixel_at(&frame, 5, 10),
+        Color::BLACK,
+        "child A should be hidden"
+    );
+    assert_eq!(
+        pixel_at(&frame, 15, 10),
+        Color::BLACK,
+        "child B should be hidden"
+    );
 }
 
 // ===========================================================================

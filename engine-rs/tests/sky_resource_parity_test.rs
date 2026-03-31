@@ -8,12 +8,10 @@
 use gdresource::loader::TresLoader;
 use gdresource::resource::Resource;
 use gdresource::saver::TresSaver;
+use gdserver3d::environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
 use gdserver3d::sky::{
     PanoramicSkyMaterial, PhysicalSkyMaterial, ProceduralSkyMaterial, Sky, SkyMaterial,
     SkyProcessMode,
-};
-use gdserver3d::environment::{
-    AmbientSource, BackgroundMode, Environment3D, ToneMapper,
 };
 use gdvariant::Variant;
 use std::sync::Arc;
@@ -124,18 +122,12 @@ fog_density = 0.01
 "#,
     );
     assert_eq!(res.class_name, "Environment");
-    assert_eq!(
-        res.get_property("background_mode"),
-        Some(&Variant::Int(2))
-    );
+    assert_eq!(res.get_property("background_mode"), Some(&Variant::Int(2)));
     assert_eq!(
         res.get_property("ambient_light_source"),
         Some(&Variant::Int(3))
     );
-    assert_eq!(
-        res.get_property("tonemap_mode"),
-        Some(&Variant::Int(3))
-    );
+    assert_eq!(res.get_property("tonemap_mode"), Some(&Variant::Int(3)));
     assert_eq!(res.get_property("fog_enabled"), Some(&Variant::Bool(true)));
 }
 
@@ -150,8 +142,14 @@ fn roundtrip_sky_resource() {
     r.set_property("radiance_size", Variant::Int(4));
     let reloaded = roundtrip(&r);
     assert_eq!(reloaded.class_name, "Sky");
-    assert_eq!(reloaded.get_property("process_mode"), Some(&Variant::Int(1)));
-    assert_eq!(reloaded.get_property("radiance_size"), Some(&Variant::Int(4)));
+    assert_eq!(
+        reloaded.get_property("process_mode"),
+        Some(&Variant::Int(1))
+    );
+    assert_eq!(
+        reloaded.get_property("radiance_size"),
+        Some(&Variant::Int(4))
+    );
 }
 
 #[test]
@@ -178,10 +176,7 @@ fn roundtrip_panoramic_sky_material() {
     r.set_property("energy_multiplier", Variant::Float(2.0));
     let reloaded = roundtrip(&r);
     assert_eq!(reloaded.class_name, "PanoramaSkyMaterial");
-    assert_eq!(
-        reloaded.get_property("filter"),
-        Some(&Variant::Bool(false))
-    );
+    assert_eq!(reloaded.get_property("filter"), Some(&Variant::Bool(false)));
 }
 
 #[test]
@@ -322,9 +317,18 @@ fn environment_sky_composition() {
 
 #[test]
 fn unknown_enum_values_fall_back_to_defaults() {
-    assert_eq!(SkyProcessMode::from_godot_int(99), SkyProcessMode::Automatic);
-    assert_eq!(BackgroundMode::from_godot_int(-1), BackgroundMode::ClearColor);
-    assert_eq!(AmbientSource::from_godot_int(100), AmbientSource::Background);
+    assert_eq!(
+        SkyProcessMode::from_godot_int(99),
+        SkyProcessMode::Automatic
+    );
+    assert_eq!(
+        BackgroundMode::from_godot_int(-1),
+        BackgroundMode::ClearColor
+    );
+    assert_eq!(
+        AmbientSource::from_godot_int(100),
+        AmbientSource::Background
+    );
     assert_eq!(ToneMapper::from_godot_int(42), ToneMapper::Linear);
 }
 

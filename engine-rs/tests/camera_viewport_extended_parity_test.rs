@@ -177,7 +177,10 @@ fn item_entirely_outside_viewport_produces_no_pixels() {
 
     let fb = capture_frame(&mut renderer, &vp);
     let red_count = count_color(&fb, red());
-    assert_eq!(red_count, 0, "Off-screen rect should produce zero red pixels");
+    assert_eq!(
+        red_count, 0,
+        "Off-screen rect should produce zero red pixels"
+    );
 }
 
 #[test]
@@ -616,7 +619,10 @@ fn complex_scene_is_deterministic() {
 
     let fb1 = make_frame();
     let fb2 = make_frame();
-    assert_eq!(fb1.pixels, fb2.pixels, "Complex scene must be deterministic");
+    assert_eq!(
+        fb1.pixels, fb2.pixels,
+        "Complex scene must be deterministic"
+    );
 }
 
 #[test]
@@ -785,7 +791,10 @@ fn item_partially_clipped_at_left_edge() {
 
     let red_count = count_color(&fb, red());
     // 3 visible columns * 6 rows = 18 pixels.
-    assert_eq!(red_count, 18, "Expected 18 red pixels from partially clipped rect");
+    assert_eq!(
+        red_count, 18,
+        "Expected 18 red pixels from partially clipped rect"
+    );
 }
 
 #[test]
@@ -802,7 +811,10 @@ fn item_partially_clipped_at_bottom_edge() {
 
     let blue_count = count_color(&fb, blue());
     // 4 columns * 3 visible rows = 12 pixels.
-    assert_eq!(blue_count, 12, "Expected 12 blue pixels from bottom-clipped rect");
+    assert_eq!(
+        blue_count, 12,
+        "Expected 12 blue pixels from bottom-clipped rect"
+    );
 }
 
 #[test]

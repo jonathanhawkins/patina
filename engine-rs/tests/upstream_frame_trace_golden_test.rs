@@ -22,8 +22,7 @@ use oracle_fixture::fixtures_dir;
 use serde_json::Value;
 
 fn load_upstream_golden() -> Value {
-    let path = fixtures_dir()
-        .join("golden/traces/test_scripts_upstream.json");
+    let path = fixtures_dir().join("golden/traces/test_scripts_upstream.json");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read upstream golden: {e}"));
     serde_json::from_str(&content)
@@ -62,13 +61,29 @@ fn events_with_detail<'a>(events: &[&'a Value], detail: &str) -> Vec<&'a Value> 
 fn upstream_golden_exists_and_has_correct_structure() {
     let golden = load_upstream_golden();
 
-    assert!(golden["event_trace"].is_array(), "event_trace should be an array");
-    assert!(golden["frame_count"].is_number(), "frame_count should be a number");
-    assert!(golden["scene_file"].is_string(), "scene_file should be a string");
+    assert!(
+        golden["event_trace"].is_array(),
+        "event_trace should be an array"
+    );
+    assert!(
+        golden["frame_count"].is_number(),
+        "frame_count should be a number"
+    );
+    assert!(
+        golden["scene_file"].is_string(),
+        "scene_file should be a string"
+    );
     assert!(golden["tree"].is_object(), "tree should be an object");
-    assert!(golden["upstream_version"].is_string(), "upstream_version should be present");
+    assert!(
+        golden["upstream_version"].is_string(),
+        "upstream_version should be present"
+    );
 
-    assert_eq!(golden["frame_count"].as_i64().unwrap(), 10, "should have 10 frames");
+    assert_eq!(
+        golden["frame_count"].as_i64().unwrap(),
+        10,
+        "should have 10 frames"
+    );
 }
 
 // ===========================================================================
@@ -213,10 +228,22 @@ fn upstream_golden_process_only_for_scripted_nodes() {
     );
 
     // Mover and VarTest should appear (10 frames each)
-    let mover_count = paths.iter().filter(|&&p| p == "/root/TestScene/Mover").count();
-    let var_count = paths.iter().filter(|&&p| p == "/root/TestScene/VarTest").count();
-    assert_eq!(mover_count, 10, "Mover should have PROCESS in all 10 frames");
-    assert_eq!(var_count, 10, "VarTest should have PROCESS in all 10 frames");
+    let mover_count = paths
+        .iter()
+        .filter(|&&p| p == "/root/TestScene/Mover")
+        .count();
+    let var_count = paths
+        .iter()
+        .filter(|&&p| p == "/root/TestScene/VarTest")
+        .count();
+    assert_eq!(
+        mover_count, 10,
+        "Mover should have PROCESS in all 10 frames"
+    );
+    assert_eq!(
+        var_count, 10,
+        "VarTest should have PROCESS in all 10 frames"
+    );
 }
 
 // ===========================================================================
@@ -232,10 +259,7 @@ fn upstream_golden_internal_processing_only_for_root() {
         &events_of_type(&events, "notification"),
         "INTERNAL_PHYSICS_PROCESS",
     );
-    let int_proc = events_with_detail(
-        &events_of_type(&events, "notification"),
-        "INTERNAL_PROCESS",
-    );
+    let int_proc = events_with_detail(&events_of_type(&events, "notification"), "INTERNAL_PROCESS");
 
     // All should be for /root only
     for event in &int_phys {
@@ -263,10 +287,7 @@ fn upstream_golden_internal_processing_only_for_root() {
 fn upstream_golden_no_physics_process() {
     let golden = load_upstream_golden();
     let events = extract_events(&golden);
-    let phys_proc = events_with_detail(
-        &events_of_type(&events, "notification"),
-        "PHYSICS_PROCESS",
-    );
+    let phys_proc = events_with_detail(&events_of_type(&events, "notification"), "PHYSICS_PROCESS");
 
     assert!(
         phys_proc.is_empty(),
@@ -293,10 +314,7 @@ fn upstream_golden_script_calls_are_paired() {
 
     // Each call should have a matching return with same detail and node_path
     for (call, ret) in calls.iter().zip(returns.iter()) {
-        assert_eq!(
-            call["detail"], ret["detail"],
-            "call/return detail mismatch"
-        );
+        assert_eq!(call["detail"], ret["detail"], "call/return detail mismatch");
         assert_eq!(
             call["node_path"], ret["node_path"],
             "call/return node_path mismatch"
@@ -335,10 +353,7 @@ fn upstream_golden_has_version_metadata() {
     let version = golden["upstream_version"]
         .as_str()
         .expect("upstream_version should be a string");
-    assert!(
-        !version.is_empty(),
-        "upstream_version should not be empty"
-    );
+    assert!(!version.is_empty(), "upstream_version should not be empty");
     assert!(
         version.contains("4."),
         "upstream_version should reference Godot 4.x: {version}"
@@ -401,8 +416,14 @@ fn upstream_golden_tree_has_properties_and_script_vars() {
     let tree = &golden["tree"];
 
     // Root and TestScene have empty properties/script_vars
-    assert!(tree["properties"].is_object(), "root should have properties object");
-    assert!(tree["script_vars"].is_object(), "root should have script_vars object");
+    assert!(
+        tree["properties"].is_object(),
+        "root should have properties object"
+    );
+    assert!(
+        tree["script_vars"].is_object(),
+        "root should have script_vars object"
+    );
 
     let test_scene = &tree["children"][0];
     assert!(test_scene["properties"].is_object());
@@ -410,12 +431,24 @@ fn upstream_golden_tree_has_properties_and_script_vars() {
 
     // Mover and VarTest have populated fields
     let mover = &test_scene["children"][0];
-    assert!(mover["properties"].is_object(), "Mover should have properties");
-    assert!(mover["script_vars"].is_object(), "Mover should have script_vars");
+    assert!(
+        mover["properties"].is_object(),
+        "Mover should have properties"
+    );
+    assert!(
+        mover["script_vars"].is_object(),
+        "Mover should have script_vars"
+    );
 
     let var_test = &test_scene["children"][1];
-    assert!(var_test["properties"].is_object(), "VarTest should have properties");
-    assert!(var_test["script_vars"].is_object(), "VarTest should have script_vars");
+    assert!(
+        var_test["properties"].is_object(),
+        "VarTest should have properties"
+    );
+    assert!(
+        var_test["script_vars"].is_object(),
+        "VarTest should have script_vars"
+    );
 }
 
 // ===========================================================================
@@ -431,7 +464,10 @@ fn upstream_golden_mover_script_vars() {
 
     let vars = &mover["script_vars"];
     assert_eq!(vars["speed"]["value"], 50.0, "Mover speed should be 50.0");
-    assert_eq!(vars["direction"]["value"], 1.0, "Mover direction should be 1.0 (never exceeds 500)");
+    assert_eq!(
+        vars["direction"]["value"], 1.0,
+        "Mover direction should be 1.0 (never exceeds 500)"
+    );
     assert_eq!(vars["speed"]["type"], "Float");
     assert_eq!(vars["direction"]["type"], "Float");
 }
@@ -452,7 +488,10 @@ fn upstream_golden_vartest_script_vars() {
     assert_eq!(vars["health"]["type"], "Int");
     assert_eq!(vars["name_str"]["value"], "Player");
     assert_eq!(vars["name_str"]["type"], "String");
-    assert_eq!(vars["is_alive"]["value"], true, "is_alive should remain true (health > 0)");
+    assert_eq!(
+        vars["is_alive"]["value"], true,
+        "is_alive should remain true (health > 0)"
+    );
     assert_eq!(vars["is_alive"]["type"], "Bool");
 
     // velocity stays at (0,0) — no velocity changes in script
@@ -552,12 +591,11 @@ fn upstream_golden_total_event_count() {
 #[test]
 fn upstream_golden_differs_from_mock() {
     let golden = load_upstream_golden();
-    let mock_path = fixtures_dir()
-        .join("golden/traces/test_scripts_upstream_mock.json");
-    let mock_content = std::fs::read_to_string(&mock_path)
-        .unwrap_or_else(|e| panic!("failed to read mock: {e}"));
-    let mock: Value = serde_json::from_str(&mock_content)
-        .unwrap_or_else(|e| panic!("failed to parse mock: {e}"));
+    let mock_path = fixtures_dir().join("golden/traces/test_scripts_upstream_mock.json");
+    let mock_content =
+        std::fs::read_to_string(&mock_path).unwrap_or_else(|e| panic!("failed to read mock: {e}"));
+    let mock: Value =
+        serde_json::from_str(&mock_content).unwrap_or_else(|e| panic!("failed to parse mock: {e}"));
 
     let golden_event_count = golden["event_trace"].as_array().unwrap().len();
     let mock_event_count = mock["event_trace"].as_array().unwrap().len();

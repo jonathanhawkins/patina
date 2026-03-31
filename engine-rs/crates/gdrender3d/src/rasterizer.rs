@@ -152,10 +152,8 @@ fn edge_function(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shader::{FragmentInput, ShaderUniforms, UnlitFragmentShader, VertexOutput};
     use gdcore::math::{Color, Vector3};
-    use crate::shader::{
-        FragmentInput, ShaderUniforms, UnlitFragmentShader, VertexOutput,
-    };
 
     fn identity_matrix() -> [[f32; 4]; 4] {
         [
@@ -249,10 +247,23 @@ mod tests {
         let fs = UnlitFragmentShader;
         let uniforms = default_uniforms();
 
-        rasterize_triangle(&v0, &v1, &v2, &mut pixels, &mut depth, width, height, &fs, &uniforms);
+        rasterize_triangle(
+            &v0,
+            &v1,
+            &v2,
+            &mut pixels,
+            &mut depth,
+            width,
+            height,
+            &fs,
+            &uniforms,
+        );
 
         let filled = pixels.iter().filter(|c| **c != Color::BLACK).count();
-        assert!(filled > 10, "triangle should fill many pixels, got {filled}");
+        assert!(
+            filled > 10,
+            "triangle should fill many pixels, got {filled}"
+        );
     }
 
     #[test]
@@ -271,7 +282,17 @@ mod tests {
         let mut u1 = default_uniforms();
         u1.albedo = Color::new(1.0, 0.0, 0.0, 1.0);
 
-        rasterize_triangle(&v0, &v1, &v2, &mut pixels, &mut depth, width, height, &fs, &u1);
+        rasterize_triangle(
+            &v0,
+            &v1,
+            &v2,
+            &mut pixels,
+            &mut depth,
+            width,
+            height,
+            &fs,
+            &u1,
+        );
 
         let red_count = pixels.iter().filter(|c| c.r > 0.9 && c.g < 0.1).count();
 
@@ -283,10 +304,23 @@ mod tests {
         let mut u2 = default_uniforms();
         u2.albedo = Color::new(0.0, 0.0, 1.0, 1.0);
 
-        rasterize_triangle(&v0b, &v1b, &v2b, &mut pixels, &mut depth, width, height, &fs, &u2);
+        rasterize_triangle(
+            &v0b,
+            &v1b,
+            &v2b,
+            &mut pixels,
+            &mut depth,
+            width,
+            height,
+            &fs,
+            &u2,
+        );
 
         let still_red = pixels.iter().filter(|c| c.r > 0.9 && c.g < 0.1).count();
-        assert_eq!(red_count, still_red, "farther triangle should not overwrite nearer");
+        assert_eq!(
+            red_count, still_red,
+            "farther triangle should not overwrite nearer"
+        );
     }
 
     #[test]
@@ -305,7 +339,17 @@ mod tests {
         let fs = UnlitFragmentShader;
         let uniforms = default_uniforms();
 
-        rasterize_triangle(&v0, &v1, &v2, &mut pixels, &mut depth, width, height, &fs, &uniforms);
+        rasterize_triangle(
+            &v0,
+            &v1,
+            &v2,
+            &mut pixels,
+            &mut depth,
+            width,
+            height,
+            &fs,
+            &uniforms,
+        );
 
         let filled = pixels.iter().filter(|c| **c != Color::BLACK).count();
         assert_eq!(filled, 0, "degenerate triangle should produce no pixels");
@@ -326,7 +370,17 @@ mod tests {
         let fs = UnlitFragmentShader;
         let uniforms = default_uniforms();
 
-        rasterize_triangle(&v0, &v1, &v2, &mut pixels, &mut depth, width, height, &fs, &uniforms);
+        rasterize_triangle(
+            &v0,
+            &v1,
+            &v2,
+            &mut pixels,
+            &mut depth,
+            width,
+            height,
+            &fs,
+            &uniforms,
+        );
 
         let filled = pixels.iter().filter(|c| **c != Color::BLACK).count();
         assert_eq!(filled, 0);

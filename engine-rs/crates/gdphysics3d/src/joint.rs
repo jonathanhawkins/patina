@@ -478,8 +478,7 @@ mod tests {
     #[test]
     fn hinge_joint_with_axis() {
         let (jid, a, b) = ids();
-        let hinge = HingeJoint3D::new(jid, a, b)
-            .with_axis(Vector3::new(0.0, 0.0, 2.0));
+        let hinge = HingeJoint3D::new(jid, a, b).with_axis(Vector3::new(0.0, 0.0, 2.0));
         // Should be normalized
         assert!((hinge.axis.z - 1.0).abs() < 1e-5);
         assert!(hinge.axis.x.abs() < 1e-5);
@@ -488,8 +487,7 @@ mod tests {
     #[test]
     fn hinge_joint_with_limits() {
         let (jid, a, b) = ids();
-        let hinge = HingeJoint3D::new(jid, a, b)
-            .with_limits(-PI / 4.0, PI / 2.0);
+        let hinge = HingeJoint3D::new(jid, a, b).with_limits(-PI / 4.0, PI / 2.0);
         assert!(hinge.use_limit);
         assert!((hinge.lower_limit + PI / 4.0).abs() < 1e-5);
         assert!((hinge.upper_limit - PI / 2.0).abs() < 1e-5);
@@ -498,8 +496,7 @@ mod tests {
     #[test]
     fn hinge_angle_within_limits() {
         let (jid, a, b) = ids();
-        let hinge = HingeJoint3D::new(jid, a, b)
-            .with_limits(-1.0, 1.0);
+        let hinge = HingeJoint3D::new(jid, a, b).with_limits(-1.0, 1.0);
         assert!(hinge.angle_within_limits(0.0));
         assert!(hinge.angle_within_limits(1.0));
         assert!(!hinge.angle_within_limits(1.5));
@@ -516,8 +513,7 @@ mod tests {
     #[test]
     fn hinge_clamp_angle() {
         let (jid, a, b) = ids();
-        let hinge = HingeJoint3D::new(jid, a, b)
-            .with_limits(-1.0, 1.0);
+        let hinge = HingeJoint3D::new(jid, a, b).with_limits(-1.0, 1.0);
         assert!((hinge.clamp_angle(0.5) - 0.5).abs() < f32::EPSILON);
         assert!((hinge.clamp_angle(2.0) - 1.0).abs() < f32::EPSILON);
         assert!((hinge.clamp_angle(-2.0) + 1.0).abs() < f32::EPSILON);
@@ -526,8 +522,7 @@ mod tests {
     #[test]
     fn hinge_motor() {
         let (jid, a, b) = ids();
-        let hinge = HingeJoint3D::new(jid, a, b)
-            .with_motor(10.0, 5.0);
+        let hinge = HingeJoint3D::new(jid, a, b).with_motor(10.0, 5.0);
         assert!(hinge.motor_enabled);
         let impulse = hinge.compute_motor_impulse(0.0, 1.0 / 60.0);
         assert!(impulse > 0.0);
@@ -544,8 +539,7 @@ mod tests {
     #[test]
     fn hinge_motor_clamped() {
         let (jid, a, b) = ids();
-        let hinge = HingeJoint3D::new(jid, a, b)
-            .with_motor(1000.0, 0.5);
+        let hinge = HingeJoint3D::new(jid, a, b).with_motor(1000.0, 0.5);
         let impulse = hinge.compute_motor_impulse(0.0, 1.0);
         assert!((impulse - 0.5).abs() < f32::EPSILON);
     }
@@ -564,16 +558,14 @@ mod tests {
     #[test]
     fn slider_with_axis() {
         let (jid, a, b) = ids();
-        let slider = SliderJoint3D::new(jid, a, b)
-            .with_axis(Vector3::new(0.0, 3.0, 0.0));
+        let slider = SliderJoint3D::new(jid, a, b).with_axis(Vector3::new(0.0, 3.0, 0.0));
         assert!((slider.axis.y - 1.0).abs() < 1e-5);
     }
 
     #[test]
     fn slider_linear_limits() {
         let (jid, a, b) = ids();
-        let slider = SliderJoint3D::new(jid, a, b)
-            .with_linear_limits(-2.0, 5.0);
+        let slider = SliderJoint3D::new(jid, a, b).with_linear_limits(-2.0, 5.0);
         assert!(slider.use_linear_limit);
         assert!(slider.linear_within_limits(0.0));
         assert!(slider.linear_within_limits(-2.0));
@@ -585,8 +577,7 @@ mod tests {
     #[test]
     fn slider_linear_clamp() {
         let (jid, a, b) = ids();
-        let slider = SliderJoint3D::new(jid, a, b)
-            .with_linear_limits(-1.0, 1.0);
+        let slider = SliderJoint3D::new(jid, a, b).with_linear_limits(-1.0, 1.0);
         assert!((slider.clamp_linear(0.5) - 0.5).abs() < f32::EPSILON);
         assert!((slider.clamp_linear(3.0) - 1.0).abs() < f32::EPSILON);
         assert!((slider.clamp_linear(-3.0) + 1.0).abs() < f32::EPSILON);
@@ -595,8 +586,7 @@ mod tests {
     #[test]
     fn slider_angular_limits() {
         let (jid, a, b) = ids();
-        let slider = SliderJoint3D::new(jid, a, b)
-            .with_angular_limits(-PI, PI);
+        let slider = SliderJoint3D::new(jid, a, b).with_angular_limits(-PI, PI);
         assert!(slider.use_angular_limit);
         assert!(slider.angular_within_limits(0.0));
         assert!(!slider.angular_within_limits(PI + 0.1));
@@ -605,8 +595,7 @@ mod tests {
     #[test]
     fn slider_angular_clamp() {
         let (jid, a, b) = ids();
-        let slider = SliderJoint3D::new(jid, a, b)
-            .with_angular_limits(-1.0, 1.0);
+        let slider = SliderJoint3D::new(jid, a, b).with_angular_limits(-1.0, 1.0);
         assert!((slider.clamp_angular(0.5) - 0.5).abs() < f32::EPSILON);
         assert!((slider.clamp_angular(5.0) - 1.0).abs() < f32::EPSILON);
     }

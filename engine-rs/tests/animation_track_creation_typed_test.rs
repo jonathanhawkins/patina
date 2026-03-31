@@ -67,7 +67,11 @@ fn extract_body(resp: &str) -> &str {
 fn add_property_track_explicitly() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Walk","length":1.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Walk","length":1.0}"#,
+    );
 
     let resp = http_post(
         port,
@@ -96,7 +100,11 @@ fn add_property_track_explicitly() {
 fn add_method_track_explicitly() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Effects","length":2.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Effects","length":2.0}"#,
+    );
 
     let resp = http_post(
         port,
@@ -122,7 +130,11 @@ fn add_method_track_explicitly() {
 fn add_audio_track_explicitly() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Soundtrack","length":5.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Soundtrack","length":5.0}"#,
+    );
 
     let resp = http_post(
         port,
@@ -148,7 +160,11 @@ fn add_audio_track_explicitly() {
 fn duplicate_track_rejected() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Dup","length":1.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Dup","length":1.0}"#,
+    );
 
     http_post(
         port,
@@ -171,7 +187,11 @@ fn duplicate_track_rejected() {
 fn same_node_property_different_types_allowed() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Multi","length":1.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Multi","length":1.0}"#,
+    );
 
     // Property track
     let resp = http_post(
@@ -187,7 +207,10 @@ fn same_node_property_different_types_allowed() {
         "/api/animation/track/add",
         r#"{"animation":"Multi","node_path":"Player","property":"position","track_type":"method"}"#,
     );
-    assert!(resp.contains("200 OK"), "Different track_type should be allowed");
+    assert!(
+        resp.contains("200 OK"),
+        "Different track_type should be allowed"
+    );
 
     let resp = http_get(port, "/api/animation?name=Multi");
     let body = extract_body(&resp);
@@ -202,14 +225,21 @@ fn same_node_property_different_types_allowed() {
 fn invalid_track_type_rejected() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Bad","length":1.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Bad","length":1.0}"#,
+    );
 
     let resp = http_post(
         port,
         "/api/animation/track/add",
         r#"{"animation":"Bad","node_path":"Player","property":"pos","track_type":"banana"}"#,
     );
-    assert!(resp.contains("400"), "Invalid track_type should be rejected");
+    assert!(
+        resp.contains("400"),
+        "Invalid track_type should be rejected"
+    );
 
     handle.stop();
 }
@@ -220,7 +250,11 @@ fn invalid_track_type_rejected() {
 fn add_keyframe_with_method_track_type() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"MethodAnim","length":2.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"MethodAnim","length":2.0}"#,
+    );
 
     // Add keyframe with track_type=method — should auto-create method track
     let resp = http_post(
@@ -248,7 +282,11 @@ fn add_keyframe_with_method_track_type() {
 fn add_keyframe_with_audio_track_type() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"AudioAnim","length":3.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"AudioAnim","length":3.0}"#,
+    );
 
     // Add keyframe with track_type=audio
     let resp = http_post(
@@ -275,7 +313,11 @@ fn add_keyframe_with_audio_track_type() {
 fn add_keyframe_defaults_to_property_track() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Default","length":1.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Default","length":1.0}"#,
+    );
 
     // No track_type specified — should default to property
     let resp = http_post(
@@ -298,7 +340,11 @@ fn add_keyframe_defaults_to_property_track() {
 fn mixed_track_types_in_one_animation() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Full","length":3.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Full","length":3.0}"#,
+    );
 
     // Property track
     http_post(
@@ -325,9 +371,16 @@ fn mixed_track_types_in_one_animation() {
     let body = extract_body(&resp);
     let anim: serde_json::Value = serde_json::from_str(body).unwrap();
     let tracks = anim["tracks"].as_array().unwrap();
-    assert_eq!(tracks.len(), 3, "Should have property, method, and audio tracks");
+    assert_eq!(
+        tracks.len(),
+        3,
+        "Should have property, method, and audio tracks"
+    );
 
-    let types: Vec<&str> = tracks.iter().map(|t| t["track_type"].as_str().unwrap()).collect();
+    let types: Vec<&str> = tracks
+        .iter()
+        .map(|t| t["track_type"].as_str().unwrap())
+        .collect();
     assert!(types.contains(&"property"));
     assert!(types.contains(&"method"));
     assert!(types.contains(&"audio"));
@@ -344,7 +397,10 @@ fn track_add_to_nonexistent_animation_fails() {
         "/api/animation/track/add",
         r#"{"animation":"Ghost","node_path":"Player","property":"pos","track_type":"property"}"#,
     );
-    assert!(resp.contains("404"), "Should fail for nonexistent animation");
+    assert!(
+        resp.contains("404"),
+        "Should fail for nonexistent animation"
+    );
 
     handle.stop();
 }
@@ -353,7 +409,11 @@ fn track_add_to_nonexistent_animation_fails() {
 fn track_add_missing_fields_rejected() {
     let (handle, port) = make_test_server();
 
-    http_post(port, "/api/animation/create", r#"{"name":"Fields","length":1.0}"#);
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"Fields","length":1.0}"#,
+    );
 
     // Missing node_path
     let resp = http_post(

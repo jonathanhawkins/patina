@@ -342,8 +342,7 @@ fn lifecycle_trace_oracle_parity_simple_hierarchy() {
     // The simple_hierarchy oracle tree may or may not have a Window root.
     // Check structure: if "path" is "/root/Root", it's the scene root directly.
     let scene_root = if oracle_tree["path"].as_str() == Some("/root") {
-        scene_subtree(&oracle_tree)
-            .expect("simple_hierarchy oracle should have scene children")
+        scene_subtree(&oracle_tree).expect("simple_hierarchy oracle should have scene children")
     } else {
         // The oracle IS the scene root.
         &oracle_tree

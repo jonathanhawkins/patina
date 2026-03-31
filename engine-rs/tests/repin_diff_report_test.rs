@@ -47,9 +47,11 @@ fn list_json_files(subdir: &str) -> Vec<PathBuf> {
 /// Extracts the nodes array from a golden JSON, supporting both
 /// `{"nodes": [...]}` and `{"data": {"nodes": [...]}}` formats.
 fn extract_nodes(json: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
-    json.get("nodes")
-        .and_then(|n| n.as_array())
-        .or_else(|| json.get("data").and_then(|d| d.get("nodes")).and_then(|n| n.as_array()))
+    json.get("nodes").and_then(|n| n.as_array()).or_else(|| {
+        json.get("data")
+            .and_then(|d| d.get("nodes"))
+            .and_then(|n| n.as_array())
+    })
 }
 
 /// Recursively count nodes and collect property names from a scene golden.
@@ -121,10 +123,7 @@ fn repin_report_scene_goldens_have_valid_structure() {
         );
 
         let nodes = extract_nodes(&json).unwrap();
-        assert!(
-            !nodes.is_empty(),
-            "{fixture}: nodes array is empty"
-        );
+        assert!(!nodes.is_empty(), "{fixture}: nodes array is empty");
     }
 }
 
@@ -144,7 +143,12 @@ fn repin_report_per_fixture_node_and_property_counts() {
         let mut property_names = Vec::new();
 
         for node in nodes {
-            count_nodes_and_properties(node, &mut node_count, &mut property_count, &mut property_names);
+            count_nodes_and_properties(
+                node,
+                &mut node_count,
+                &mut property_count,
+                &mut property_names,
+            );
         }
 
         total_nodes += node_count;
@@ -175,15 +179,15 @@ fn repin_report_per_fixture_property_breakdown() {
     // REPIN_REPORT.md's per-fixture counts include lifecycle trace comparisons,
     // not just scene-tree properties. These thresholds match actual golden data.
     let expected_counts: &[(&str, usize)] = &[
-        ("minimal", 0),          // no explicit properties
-        ("hierarchy", 0),        // structural only
-        ("with_properties", 7),  // typed property values
-        ("platformer", 6),       // position, script, etc.
-        ("signals_complex", 3),  // signal-related properties
-        ("ui_menu", 1),          // UI properties
+        ("minimal", 0),             // no explicit properties
+        ("hierarchy", 0),           // structural only
+        ("with_properties", 7),     // typed property values
+        ("platformer", 6),          // position, script, etc.
+        ("signals_complex", 3),     // signal-related properties
+        ("ui_menu", 1),             // UI properties
         ("physics_playground", 13), // physics body properties
-        ("space_shooter", 9),    // game object properties
-        ("test_scripts", 6),     // script-related properties
+        ("space_shooter", 9),       // game object properties
+        ("test_scripts", 6),        // script-related properties
     ];
 
     for &(fixture, expected_min) in expected_counts {
@@ -196,7 +200,12 @@ fn repin_report_per_fixture_property_breakdown() {
         let mut property_names = Vec::new();
 
         for node in nodes {
-            count_nodes_and_properties(node, &mut node_count, &mut property_count, &mut property_names);
+            count_nodes_and_properties(
+                node,
+                &mut node_count,
+                &mut property_count,
+                &mut property_names,
+            );
         }
 
         assert!(
@@ -267,10 +276,7 @@ fn physics_goldens_valid_json_arrays_or_objects() {
             "physics golden {name} is neither array nor object"
         );
         if let Some(arr) = json.as_array() {
-            assert!(
-                !arr.is_empty(),
-                "physics golden {name} is an empty array"
-            );
+            assert!(!arr.is_empty(), "physics golden {name} is an empty array");
         }
     }
 }
@@ -289,9 +295,9 @@ fn physics_goldens_frame_entries_have_required_fields() {
             continue;
         }
         let json = load_json(&path);
-        let entries = json.as_array().unwrap_or_else(|| {
-            panic!("{filename} should be a JSON array")
-        });
+        let entries = json
+            .as_array()
+            .unwrap_or_else(|| panic!("{filename} should be a JSON array"));
         for (i, entry) in entries.iter().enumerate() {
             assert!(
                 entry.get("frame").is_some(),
@@ -380,7 +386,10 @@ fn render_benchmark_baselines_exist() {
     let path = golden_dir().join("render/benchmark_baselines.json");
     assert!(path.exists(), "render/benchmark_baselines.json must exist");
     let json = load_json(&path);
-    assert!(json.is_object() || json.is_array(), "benchmark_baselines must be valid JSON");
+    assert!(
+        json.is_object() || json.is_array(),
+        "benchmark_baselines must be valid JSON"
+    );
 }
 
 // ===========================================================================
@@ -390,7 +399,10 @@ fn render_benchmark_baselines_exist() {
 #[test]
 fn repin_report_exists_and_references_461() {
     let report_path = repo_root().join("REPIN_REPORT.md");
-    assert!(report_path.exists(), "REPIN_REPORT.md must exist at repo root");
+    assert!(
+        report_path.exists(),
+        "REPIN_REPORT.md must exist at repo root"
+    );
     let content = fs::read_to_string(&report_path).unwrap();
     assert!(
         content.contains("4.6.1"),
@@ -451,7 +463,12 @@ fn repin_diff_full_property_inventory() {
         let mut property_names = Vec::new();
 
         for node in nodes {
-            count_nodes_and_properties(node, &mut node_count, &mut property_count, &mut property_names);
+            count_nodes_and_properties(
+                node,
+                &mut node_count,
+                &mut property_count,
+                &mut property_names,
+            );
         }
 
         fixture_summaries.insert(
@@ -476,10 +493,7 @@ fn repin_diff_full_property_inventory() {
 
     // Each fixture must have a non-empty property list
     for (fixture, (nodes, props, _names)) in &fixture_summaries {
-        assert!(
-            *nodes > 0,
-            "{fixture}: must have at least 1 node"
-        );
+        assert!(*nodes > 0, "{fixture}: must have at least 1 node");
         // minimal and hierarchy are structural-only fixtures with no explicit properties
         assert!(
             *props > 0 || fixture == "minimal" || fixture == "hierarchy",
@@ -510,17 +524,35 @@ fn repin_diff_no_duplicate_fixture_ids() {
 #[test]
 fn repin_diff_report_exists_and_has_required_sections() {
     let diff_path = repo_root().join("prd/GODOT_4_6_1_REPIN_DIFF.md");
-    assert!(diff_path.exists(), "prd/GODOT_4_6_1_REPIN_DIFF.md must exist");
+    assert!(
+        diff_path.exists(),
+        "prd/GODOT_4_6_1_REPIN_DIFF.md must exist"
+    );
     let content = fs::read_to_string(&diff_path).unwrap();
 
     // Must reference both old and new pin versions
-    assert!(content.contains("4.5.1"), "diff report should reference old pin 4.5.1");
-    assert!(content.contains("4.6.1"), "diff report should reference new pin 4.6.1");
+    assert!(
+        content.contains("4.5.1"),
+        "diff report should reference old pin 4.5.1"
+    );
+    assert!(
+        content.contains("4.6.1"),
+        "diff report should reference new pin 4.6.1"
+    );
 
     // Must have the required sections: improved, regressed, unchanged
-    assert!(content.contains("### Improved"), "diff report must have Improved section");
-    assert!(content.contains("### Regressed"), "diff report must have Regressed section");
-    assert!(content.contains("### Unchanged"), "diff report must have Unchanged section");
+    assert!(
+        content.contains("### Improved"),
+        "diff report must have Improved section"
+    );
+    assert!(
+        content.contains("### Regressed"),
+        "diff report must have Regressed section"
+    );
+    assert!(
+        content.contains("### Unchanged"),
+        "diff report must have Unchanged section"
+    );
 }
 
 #[test]
@@ -567,7 +599,9 @@ fn repin_diff_report_has_final_resolution() {
 
     // Must document final resolution section
     assert!(
-        content.contains("Final Resolution") || content.contains("100.0% (71/71)") || content.contains("recovery"),
+        content.contains("Final Resolution")
+            || content.contains("100.0% (71/71)")
+            || content.contains("recovery"),
         "diff report should document final resolution"
     );
 }
@@ -578,8 +612,12 @@ fn repin_diff_report_lists_all_unchanged_fixtures() {
     let content = fs::read_to_string(&diff_path).unwrap();
 
     let unchanged_fixtures = &[
-        "minimal", "hierarchy", "with_properties",
-        "platformer", "signals_complex", "ui_menu",
+        "minimal",
+        "hierarchy",
+        "with_properties",
+        "platformer",
+        "signals_complex",
+        "ui_menu",
     ];
     for fixture in unchanged_fixtures {
         assert!(
@@ -650,7 +688,12 @@ fn scene_goldens_include_3d_fixtures() {
 
 #[test]
 fn scene_goldens_3d_have_valid_structure() {
-    let scenes_3d = &["minimal_3d", "indoor_3d", "multi_light_3d", "physics_3d_playground"];
+    let scenes_3d = &[
+        "minimal_3d",
+        "indoor_3d",
+        "multi_light_3d",
+        "physics_3d_playground",
+    ];
     for fixture in scenes_3d {
         let path = golden_dir().join(format!("scenes/{fixture}.json"));
         if !path.exists() {
@@ -810,10 +853,7 @@ fn physics_goldens_include_extended_scenes() {
             found += 1;
         }
     }
-    assert!(
-        found >= 1,
-        "At least 1 extended physics golden must exist"
-    );
+    assert!(found >= 1, "At least 1 extended physics golden must exist");
 }
 
 #[test]
@@ -952,7 +992,10 @@ fn repin_report_has_3d_gaps_section() {
     );
     // Must document the key gap domains.
     assert!(report.contains("Camera3D"), "Must document Camera3D gaps");
-    assert!(report.contains("Transform3D"), "Must document Transform3D gaps");
+    assert!(
+        report.contains("Transform3D"),
+        "Must document Transform3D gaps"
+    );
     assert!(report.contains("Light3D"), "Must document Light3D gaps");
 }
 
@@ -970,9 +1013,18 @@ fn repin_report_has_parity_trajectory() {
         "REPIN_REPORT.md must have Parity Trajectory section"
     );
     // Must show the progression phases.
-    assert!(report.contains("83.1%"), "Must show initial 4.6.1 parity (83.1%)");
-    assert!(report.contains("100.0%"), "Must show final 2D parity (100.0%)");
-    assert!(report.contains("71/71"), "Must reference 71/71 2D comparisons");
+    assert!(
+        report.contains("83.1%"),
+        "Must show initial 4.6.1 parity (83.1%)"
+    );
+    assert!(
+        report.contains("100.0%"),
+        "Must show final 2D parity (100.0%)"
+    );
+    assert!(
+        report.contains("71/71"),
+        "Must reference 71/71 2D comparisons"
+    );
 }
 
 // ===========================================================================
@@ -1039,7 +1091,11 @@ fn oracle_tree_files_exist_for_all_tscn_fixtures() {
         }
     }
 
-    eprintln!("Oracle tree coverage: {}/{}", total - missing_trees.len(), total);
+    eprintln!(
+        "Oracle tree coverage: {}/{}",
+        total - missing_trees.len(),
+        total
+    );
     assert!(
         missing_trees.is_empty(),
         "All .tscn fixtures must have _tree.json oracle output; missing: {:?}",
@@ -1087,7 +1143,10 @@ fn per_property_diff_counts_across_oracle_outputs() {
     for (name, count) in &per_fixture {
         eprintln!("  {}: {} properties", name, count);
     }
-    eprintln!("  Total: {} properties across {} fixtures", total_properties, fixture_count);
+    eprintln!(
+        "  Total: {} properties across {} fixtures",
+        total_properties, fixture_count
+    );
     eprintln!("=================================================\n");
 
     assert!(
@@ -1213,7 +1272,11 @@ fn repin_diff_461_comprehensive_parity_report() {
     let prop_count = fs::read_dir(&oracle_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with("_properties.json"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .ends_with("_properties.json")
+        })
         .count();
     let scene_count = fs::read_dir(&scenes_dir)
         .unwrap()
@@ -1223,12 +1286,24 @@ fn repin_diff_461_comprehensive_parity_report() {
 
     let has_repin_report = repin_report.as_ref().map_or(false, |r| r.contains("4.6.1"));
     let has_diff_report = diff_report.as_ref().map_or(false, |d| d.contains("4.6.1"));
-    let has_2d_section = repin_report.as_ref().map_or(false, |r| r.contains("2D Fixtures"));
-    let has_3d_section = repin_report.as_ref().map_or(false, |r| r.contains("3D Fixtures"));
-    let has_trajectory = repin_report.as_ref().map_or(false, |r| r.contains("Parity Trajectory"));
-    let has_3d_gaps = repin_report.as_ref().map_or(false, |r| r.contains("Known 3D Gaps"));
-    let has_final_res = diff_report.as_ref().map_or(false, |d| d.contains("100.0% (71/71)"));
-    let has_per_prop = diff_report.as_ref().map_or(false, |d| d.contains("Unmatched Properties"));
+    let has_2d_section = repin_report
+        .as_ref()
+        .map_or(false, |r| r.contains("2D Fixtures"));
+    let has_3d_section = repin_report
+        .as_ref()
+        .map_or(false, |r| r.contains("3D Fixtures"));
+    let has_trajectory = repin_report
+        .as_ref()
+        .map_or(false, |r| r.contains("Parity Trajectory"));
+    let has_3d_gaps = repin_report
+        .as_ref()
+        .map_or(false, |r| r.contains("Known 3D Gaps"));
+    let has_final_res = diff_report
+        .as_ref()
+        .map_or(false, |d| d.contains("100.0% (71/71)"));
+    let has_per_prop = diff_report
+        .as_ref()
+        .map_or(false, |d| d.contains("Unmatched Properties"));
 
     let checks = [
         ("REPIN_REPORT.md references 4.6.1", has_repin_report),
@@ -1252,7 +1327,10 @@ fn repin_diff_461_comprehensive_parity_report() {
     for (name, ok) in &checks {
         eprintln!("  [{}] {}", if *ok { "PASS" } else { "FAIL" }, name);
     }
-    eprintln!("  Oracle infrastructure: {} trees, {} properties, {} scenes", tree_count, prop_count, scene_count);
+    eprintln!(
+        "  Oracle infrastructure: {} trees, {} properties, {} scenes",
+        tree_count, prop_count, scene_count
+    );
     eprintln!("  Coverage: {}/{} ({:.1}%)", passing, total, pct);
     eprintln!("======================================================\n");
 

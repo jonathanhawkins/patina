@@ -267,8 +267,7 @@ fn measured_vertical_slice_end_to_end() {
     let golden_path = golden_dir.join(format!("{GOLDEN_NAME}.png"));
 
     let golden_match_ratio = if golden_path.exists() {
-        let tex = load_png(golden_path.to_str().unwrap())
-            .expect("failed to load golden PNG");
+        let tex = load_png(golden_path.to_str().unwrap()).expect("failed to load golden PNG");
         let golden_fb = FrameBuffer {
             width: tex.width,
             height: tex.height,
@@ -347,9 +346,7 @@ fn measured_vertical_slice_end_to_end() {
         post_run_pos.x,
         post_run_pos.y,
     );
-    eprintln!(
-        "  ║  Render:        {WIDTH}x{HEIGHT} ({non_bg_pixels} visible px)          ║"
-    );
+    eprintln!("  ║  Render:        {WIDTH}x{HEIGHT} ({non_bg_pixels} visible px)          ║");
     eprintln!(
         "  ║  Golden match:  {:.2}% (threshold {:.0}%)              ║",
         golden_match_ratio * 100.0,
@@ -379,14 +376,14 @@ fn measured_vertical_slice_end_to_end() {
     eprintln!();
 
     // Hard assertions
-    assert!(tree_count_match, "node count mismatch: {actual_node_count} != {expected_node_count}");
+    assert!(
+        tree_count_match,
+        "node count mismatch: {actual_node_count} != {expected_node_count}"
+    );
     assert_eq!(class_pct, 100, "class parity must be 100%");
     assert_eq!(prop_pct, 100, "property parity must be 100%");
     assert_eq!(order_pct, 100, "child order parity must be 100%");
-    assert_eq!(
-        frames_completed, FRAMES_TO_RUN,
-        "all frames must complete"
-    );
+    assert_eq!(frames_completed, FRAMES_TO_RUN, "all frames must complete");
     assert!(positions_stable, "positions must be stable without physics");
     assert!(has_visible_content, "render must produce visible pixels");
     assert!(

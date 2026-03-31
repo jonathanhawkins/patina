@@ -159,10 +159,22 @@ fn scene_node_classes_correct() {
     let (tree, ids) = build_minimal_3d_scene();
 
     assert_eq!(tree.get_node(ids.world_id).unwrap().class_name(), "Node3D");
-    assert_eq!(tree.get_node(ids.camera_id).unwrap().class_name(), "Camera3D");
-    assert_eq!(tree.get_node(ids.cube_id).unwrap().class_name(), "MeshInstance3D");
-    assert_eq!(tree.get_node(ids.sun_id).unwrap().class_name(), "DirectionalLight3D");
-    assert_eq!(tree.get_node(ids.floor_id).unwrap().class_name(), "StaticBody3D");
+    assert_eq!(
+        tree.get_node(ids.camera_id).unwrap().class_name(),
+        "Camera3D"
+    );
+    assert_eq!(
+        tree.get_node(ids.cube_id).unwrap().class_name(),
+        "MeshInstance3D"
+    );
+    assert_eq!(
+        tree.get_node(ids.sun_id).unwrap().class_name(),
+        "DirectionalLight3D"
+    );
+    assert_eq!(
+        tree.get_node(ids.floor_id).unwrap().class_name(),
+        "StaticBody3D"
+    );
 }
 
 #[test]
@@ -184,10 +196,7 @@ fn scene_node_names_correct() {
 fn camera_fov_matches_fixture() {
     let (tree, ids) = build_minimal_3d_scene();
     let fov = node3d::get_fov(&tree, ids.camera_id);
-    assert!(
-        (fov - 75.0).abs() < 1e-6,
-        "FOV should be 75.0, got {fov}"
-    );
+    assert!((fov - 75.0).abs() < 1e-6, "FOV should be 75.0, got {fov}");
 }
 
 #[test]
@@ -366,7 +375,11 @@ fn physics_3d_static_body_does_not_move() {
     }
 
     let pos = world.get_body(floor_id).unwrap().position;
-    assert_eq!(pos, Vector3::new(0.0, -1.0, 0.0), "static body must not move");
+    assert_eq!(
+        pos,
+        Vector3::new(0.0, -1.0, 0.0),
+        "static body must not move"
+    );
 }
 
 // ===========================================================================
@@ -510,7 +523,10 @@ fn material_albedo_determines_wireframe_color() {
         .iter()
         .filter(|c| c.g > 0.9 && c.r < 0.1 && c.b < 0.1)
         .count();
-    assert!(green_pixels > 0, "green material should produce green pixels");
+    assert!(
+        green_pixels > 0,
+        "green material should produce green pixels"
+    );
 }
 
 // ===========================================================================
@@ -580,10 +596,16 @@ fn parity_report_summary() {
     let (tree, ids) = build_minimal_3d_scene();
 
     // 1. Scene tree structure: all nodes present
-    let node_count = [ids.world_id, ids.camera_id, ids.cube_id, ids.sun_id, ids.floor_id]
-        .iter()
-        .filter(|id| tree.get_node(**id).is_some())
-        .count();
+    let node_count = [
+        ids.world_id,
+        ids.camera_id,
+        ids.cube_id,
+        ids.sun_id,
+        ids.floor_id,
+    ]
+    .iter()
+    .filter(|id| tree.get_node(**id).is_some())
+    .count();
     assert_eq!(node_count, 5, "all 5 scene nodes present");
 
     // 2. Camera properties match oracle

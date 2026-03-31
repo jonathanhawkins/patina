@@ -62,10 +62,7 @@ impl Occluder3D {
         match self {
             Self::Box { size } => {
                 let half = Vector3::new(size.x * 0.5, size.y * 0.5, size.z * 0.5);
-                Aabb::new(
-                    Vector3::new(-half.x, -half.y, -half.z),
-                    *size,
-                )
+                Aabb::new(Vector3::new(-half.x, -half.y, -half.z), *size)
             }
             Self::Sphere { radius } => {
                 let r = *radius;
@@ -245,11 +242,7 @@ fn aabb_center(aabb: &Aabb) -> Vector3 {
 
 /// Returns the half-extent of an AABB.
 fn aabb_half_extent(aabb: &Aabb) -> Vector3 {
-    Vector3::new(
-        aabb.size.x * 0.5,
-        aabb.size.y * 0.5,
-        aabb.size.z * 0.5,
-    )
+    Vector3::new(aabb.size.x * 0.5, aabb.size.y * 0.5, aabb.size.z * 0.5)
 }
 
 /// Transforms a local-space AABB to world space (conservative, axis-aligned).
@@ -257,13 +250,41 @@ fn transform_aabb(aabb: &Aabb, t: &Transform3D) -> Aabb {
     // Transform all 8 corners and find the enclosing AABB.
     let corners = [
         Vector3::new(aabb.position.x, aabb.position.y, aabb.position.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y, aabb.position.z),
-        Vector3::new(aabb.position.x, aabb.position.y + aabb.size.y, aabb.position.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y + aabb.size.y, aabb.position.z),
-        Vector3::new(aabb.position.x, aabb.position.y, aabb.position.z + aabb.size.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y, aabb.position.z + aabb.size.z),
-        Vector3::new(aabb.position.x, aabb.position.y + aabb.size.y, aabb.position.z + aabb.size.z),
-        Vector3::new(aabb.position.x + aabb.size.x, aabb.position.y + aabb.size.y, aabb.position.z + aabb.size.z),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y,
+            aabb.position.z,
+        ),
+        Vector3::new(
+            aabb.position.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z,
+        ),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z,
+        ),
+        Vector3::new(
+            aabb.position.x,
+            aabb.position.y,
+            aabb.position.z + aabb.size.z,
+        ),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y,
+            aabb.position.z + aabb.size.z,
+        ),
+        Vector3::new(
+            aabb.position.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z + aabb.size.z,
+        ),
+        Vector3::new(
+            aabb.position.x + aabb.size.x,
+            aabb.position.y + aabb.size.y,
+            aabb.position.z + aabb.size.z,
+        ),
     ];
 
     let first = t.xform(corners[0]);
@@ -280,7 +301,10 @@ fn transform_aabb(aabb: &Aabb, t: &Transform3D) -> Aabb {
         max.z = max.z.max(w.z);
     }
 
-    Aabb::new(min, Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z))
+    Aabb::new(
+        min,
+        Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +413,8 @@ mod tests {
 
     #[test]
     fn world_aabb_identity_transform() {
-        let inst = OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(2.0, 2.0, 2.0)));
+        let inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(2.0, 2.0, 2.0)));
         let aabb = inst.get_world_aabb().unwrap();
         assert!(approx_eq(aabb.position.x, -1.0));
         assert!(approx_eq(aabb.size.x, 2.0));
@@ -397,7 +422,8 @@ mod tests {
 
     #[test]
     fn world_aabb_translated() {
-        let mut inst = OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(2.0, 2.0, 2.0)));
+        let mut inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(2.0, 2.0, 2.0)));
         inst.transform.origin = Vector3::new(10.0, 0.0, 0.0);
         let aabb = inst.get_world_aabb().unwrap();
         assert!(approx_eq(aabb.position.x, 9.0));
@@ -408,7 +434,8 @@ mod tests {
 
     #[test]
     fn large_occluder_occludes_small_target_behind() {
-        let mut inst = OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(20.0, 20.0, 1.0)));
+        let mut inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(20.0, 20.0, 1.0)));
         inst.transform.origin = Vector3::new(0.0, 0.0, -5.0);
 
         let camera_pos = Vector3::new(0.0, 0.0, 0.0);
@@ -419,18 +446,23 @@ mod tests {
 
     #[test]
     fn small_occluder_does_not_occlude_large_target() {
-        let mut inst = OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(0.5, 0.5, 0.5)));
+        let mut inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(0.5, 0.5, 0.5)));
         inst.transform.origin = Vector3::new(0.0, 0.0, -5.0);
 
         let camera_pos = Vector3::new(0.0, 0.0, 0.0);
-        let target = Aabb::new(Vector3::new(-10.0, -10.0, -15.0), Vector3::new(20.0, 20.0, 1.0));
+        let target = Aabb::new(
+            Vector3::new(-10.0, -10.0, -15.0),
+            Vector3::new(20.0, 20.0, 1.0),
+        );
 
         assert!(!inst.occludes(camera_pos, target));
     }
 
     #[test]
     fn target_in_front_of_occluder_not_occluded() {
-        let mut inst = OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(20.0, 20.0, 1.0)));
+        let mut inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(20.0, 20.0, 1.0)));
         inst.transform.origin = Vector3::new(0.0, 0.0, -10.0);
 
         let camera_pos = Vector3::new(0.0, 0.0, 0.0);

@@ -61,8 +61,7 @@ fn make_body_area_scene(
 fn body_entered_fires_through_mainloop() {
     // Body starts inside the area — should trigger body_entered on the
     // first physics step.
-    let (mut tree, _body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, _body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     let count = Arc::new(AtomicUsize::new(0));
     let cnt = count.clone();
@@ -92,8 +91,7 @@ fn body_entered_fires_through_mainloop() {
 
 #[test]
 fn body_exited_fires_through_mainloop() {
-    let (mut tree, body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     let entered = Arc::new(AtomicUsize::new(0));
     let exited = Arc::new(AtomicUsize::new(0));
@@ -146,8 +144,7 @@ fn body_exited_fires_through_mainloop() {
 
 #[test]
 fn no_duplicate_signals_while_inside() {
-    let (mut tree, _body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, _body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     let count = Arc::new(AtomicUsize::new(0));
     let cnt = count.clone();
@@ -181,8 +178,7 @@ fn no_duplicate_signals_while_inside() {
 
 #[test]
 fn reentry_fires_body_entered_again() {
-    let (mut tree, body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     let entered = Arc::new(AtomicUsize::new(0));
     let exited = Arc::new(AtomicUsize::new(0));
@@ -240,8 +236,7 @@ fn reentry_fires_body_entered_again() {
 
 #[test]
 fn signal_carries_body_object_id() {
-    let (mut tree, body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     let expected_oid = body_id.object_id();
 
@@ -266,10 +261,7 @@ fn signal_carries_body_object_id() {
         Variant::ObjectId(oid) => {
             assert_eq!(*oid, expected_oid, "argument should be body's ObjectId");
         }
-        other => panic!(
-            "expected Variant::ObjectId, got {:?}",
-            other
-        ),
+        other => panic!("expected Variant::ObjectId, got {:?}", other),
     }
 }
 
@@ -279,8 +271,7 @@ fn signal_carries_body_object_id() {
 
 #[test]
 fn monitoring_false_suppresses_signals() {
-    let (mut tree, _body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, _body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     // Disable monitoring on the area
     tree.get_node_mut(area_id)
@@ -421,12 +412,10 @@ fn body_moving_in_via_velocity() {
         make_body_area_scene(Vector2::new(100.0, 0.0), Vector2::ZERO);
 
     // Give body a velocity toward the area
-    tree.get_node_mut(body_id)
-        .unwrap()
-        .set_property(
-            "linear_velocity",
-            Variant::Vector2(Vector2::new(-200.0, 0.0)),
-        );
+    tree.get_node_mut(body_id).unwrap().set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(-200.0, 0.0)),
+    );
 
     let entered = Arc::new(AtomicUsize::new(0));
     let e = entered.clone();
@@ -617,8 +606,7 @@ fn simultaneous_enter_and_exit() {
 
 #[test]
 fn area_moves_away_triggers_exit() {
-    let (mut tree, _body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, _body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     let entered = Arc::new(AtomicUsize::new(0));
     let exited = Arc::new(AtomicUsize::new(0));
@@ -727,8 +715,7 @@ fn monitoring_toggled_at_runtime() {
 
 #[test]
 fn exit_signal_carries_body_object_id() {
-    let (mut tree, body_id, area_id) =
-        make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
+    let (mut tree, body_id, area_id) = make_body_area_scene(Vector2::new(5.0, 0.0), Vector2::ZERO);
 
     let expected_oid = body_id.object_id();
 
@@ -759,7 +746,10 @@ fn exit_signal_carries_body_object_id() {
     assert_eq!(args.len(), 1, "body_exited should pass one argument");
     match &args[0] {
         Variant::ObjectId(oid) => {
-            assert_eq!(*oid, expected_oid, "exit argument should be body's ObjectId");
+            assert_eq!(
+                *oid, expected_oid,
+                "exit argument should be body's ObjectId"
+            );
         }
         other => panic!("expected Variant::ObjectId in body_exited, got {:?}", other),
     }

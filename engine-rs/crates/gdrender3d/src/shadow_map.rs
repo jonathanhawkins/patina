@@ -175,7 +175,11 @@ fn generate_omni_shadow_cubemap(light: &Light3D, instances: &[Instance3D]) -> Sh
     let size = OMNI_SHADOW_SIZE;
     let mut cubemap = ShadowCubemap::new(size);
     let near = 0.05_f32;
-    let far = if light.range > 0.0 { light.range } else { 100.0 };
+    let far = if light.range > 0.0 {
+        light.range
+    } else {
+        100.0
+    };
 
     for face in CubeFace::ALL {
         let view = omni_face_view_matrix(light.position, face);
@@ -394,12 +398,7 @@ fn generate_directional_shadow_map(light: &Light3D, instances: &[Instance3D]) ->
             }
 
             // Rasterize triangle into shadow map depth buffer.
-            rasterize_shadow_triangle(
-                &screen_pts,
-                &mut depth_buf,
-                size,
-                size,
-            );
+            rasterize_shadow_triangle(&screen_pts, &mut depth_buf, size, size);
         }
     }
 
@@ -515,7 +514,10 @@ mod tests {
         let det = view[0][0] * (view[1][1] * view[2][2] - view[1][2] * view[2][1])
             - view[1][0] * (view[0][1] * view[2][2] - view[0][2] * view[2][1])
             + view[2][0] * (view[0][1] * view[1][2] - view[0][2] * view[1][1]);
-        assert!(det.abs() > 0.01, "view matrix should be non-degenerate, det={det}");
+        assert!(
+            det.abs() > 0.01,
+            "view matrix should be non-degenerate, det={det}"
+        );
     }
 
     #[test]
@@ -543,7 +545,11 @@ mod tests {
         let mut light = Light3D::point(Light3DId(1), Vector3::new(0.0, 5.0, 0.0));
         light.shadow_enabled = true;
         let maps = generate_shadow_maps(&[light], &[]);
-        assert_eq!(maps.len(), 0, "only directional lights get shadow maps for now");
+        assert_eq!(
+            maps.len(),
+            0,
+            "only directional lights get shadow maps for now"
+        );
     }
 
     #[test]
@@ -574,7 +580,10 @@ mod tests {
                 }
             }
         }
-        assert!(written > 0, "occluder cube should write depth values, got 0");
+        assert!(
+            written > 0,
+            "occluder cube should write depth values, got 0"
+        );
     }
 
     #[test]

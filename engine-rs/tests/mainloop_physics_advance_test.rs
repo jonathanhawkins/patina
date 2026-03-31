@@ -119,7 +119,10 @@ fn make_collision_scene() -> (MainLoop, gdscene::node::NodeId, gdscene::node::No
     let mut ball_a = Node::new("BallA", "RigidBody2D");
     ball_a.set_property("position", Variant::Vector2(Vector2::new(0.0, 100.0)));
     ball_a.set_property("mass", Variant::Float(1.0));
-    ball_a.set_property("linear_velocity", Variant::Vector2(Vector2::new(500.0, 0.0)));
+    ball_a.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(500.0, 0.0)),
+    );
     ball_a.set_property("gravity_scale", Variant::Float(0.0)); // no gravity
     let ball_a_id = tree.add_child(root, ball_a).unwrap();
     let mut shape_a = Node::new("Shape", "CollisionShape2D");
@@ -151,7 +154,10 @@ fn make_area_overlap_scene() -> (MainLoop, gdscene::node::NodeId, gdscene::node:
     let mut rigid = Node::new("Player", "RigidBody2D");
     rigid.set_property("position", Variant::Vector2(Vector2::new(0.0, 100.0)));
     rigid.set_property("mass", Variant::Float(1.0));
-    rigid.set_property("linear_velocity", Variant::Vector2(Vector2::new(300.0, 0.0)));
+    rigid.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(300.0, 0.0)),
+    );
     rigid.set_property("gravity_scale", Variant::Float(0.0));
     let rigid_id = tree.add_child(root, rigid).unwrap();
     let mut shape_r = Node::new("Shape", "CollisionShape2D");
@@ -488,7 +494,10 @@ fn area2d_monitoring_false_no_detection() {
     let mut rigid = Node::new("Player", "RigidBody2D");
     rigid.set_property("position", Variant::Vector2(Vector2::new(0.0, 100.0)));
     rigid.set_property("mass", Variant::Float(1.0));
-    rigid.set_property("linear_velocity", Variant::Vector2(Vector2::new(300.0, 0.0)));
+    rigid.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(300.0, 0.0)),
+    );
     rigid.set_property("gravity_scale", Variant::Float(0.0));
     let rigid_id = tree.add_child(root, rigid).unwrap();
     let mut shape_r = Node::new("Shape", "CollisionShape2D");
@@ -582,7 +591,10 @@ fn bounce_coefficient_affects_response() {
     ball.set_property("position", Variant::Vector2(Vector2::new(100.0, 50.0)));
     ball.set_property("mass", Variant::Float(1.0));
     // Give initial downward velocity to ensure fast collision
-    ball.set_property("linear_velocity", Variant::Vector2(Vector2::new(0.0, 200.0)));
+    ball.set_property(
+        "linear_velocity",
+        Variant::Vector2(Vector2::new(0.0, 200.0)),
+    );
     ball.set_property("bounce", Variant::Float(0.9)); // very bouncy
     let ball_id = tree.add_child(root, ball).unwrap();
     let mut shape_b = Node::new("Shape", "CollisionShape2D");
@@ -763,8 +775,14 @@ fn long_run_no_crash_or_nan() {
     let pos = get_pos(&ml, rigid_id);
     let vel = get_vel(&ml, rigid_id);
 
-    assert!(!pos.x.is_nan() && !pos.y.is_nan(), "position must not be NaN");
-    assert!(!vel.x.is_nan() && !vel.y.is_nan(), "velocity must not be NaN");
+    assert!(
+        !pos.x.is_nan() && !pos.y.is_nan(),
+        "position must not be NaN"
+    );
+    assert!(
+        !vel.x.is_nan() && !vel.y.is_nan(),
+        "velocity must not be NaN"
+    );
     assert!(
         pos.y.is_finite() && vel.y.is_finite(),
         "position and velocity must be finite"

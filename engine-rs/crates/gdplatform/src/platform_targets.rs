@@ -275,7 +275,7 @@ pub fn supports_capability(capability: PlatformCapability) -> bool {
         PlatformCapability::GpuRendering => target.gpu_supported,
         PlatformCapability::Windowing => target.windowing_supported,
         PlatformCapability::FileSystem => true, // All desktop targets
-        PlatformCapability::Networking => true,  // All desktop targets
+        PlatformCapability::Networking => true, // All desktop targets
         PlatformCapability::Audio => target.platform != Platform::Web,
         PlatformCapability::GamepadInput => target.windowing_supported,
         PlatformCapability::Threading => target.platform != Platform::Web,
@@ -325,7 +325,11 @@ mod tests {
     #[test]
     fn validate_current_target_succeeds() {
         let result = validate_current_target();
-        assert!(result.is_ok(), "current target validation failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "current target validation failed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -338,7 +342,8 @@ mod tests {
     fn ci_tested_includes_linux_x86_64() {
         let ci = ci_tested_targets();
         assert!(
-            ci.iter().any(|t| t.rust_triple == "x86_64-unknown-linux-gnu"),
+            ci.iter()
+                .any(|t| t.rust_triple == "x86_64-unknown-linux-gnu"),
             "Linux x86_64 must be CI-tested"
         );
     }
@@ -346,10 +351,7 @@ mod tests {
     #[test]
     fn targets_for_platform_linux() {
         let linux = targets_for_platform(Platform::Linux);
-        assert!(
-            linux.len() >= 1,
-            "must define at least one Linux target"
-        );
+        assert!(linux.len() >= 1, "must define at least one Linux target");
         for t in &linux {
             assert_eq!(t.platform, Platform::Linux);
         }
@@ -385,7 +387,10 @@ mod tests {
         assert!(
             matches!(
                 arch,
-                Architecture::X86_64 | Architecture::Aarch64 | Architecture::X86 | Architecture::Wasm32
+                Architecture::X86_64
+                    | Architecture::Aarch64
+                    | Architecture::X86
+                    | Architecture::Wasm32
             ),
             "architecture must be recognized"
         );
@@ -489,7 +494,10 @@ mod tests {
         let target = current_target().unwrap();
         let s = format!("{target}");
         assert!(s.contains(target.name), "Display must include name");
-        assert!(s.contains(target.rust_triple), "Display must include triple");
+        assert!(
+            s.contains(target.rust_triple),
+            "Display must include triple"
+        );
     }
 
     // -- New: find_target_by_triple -------------------------------------------

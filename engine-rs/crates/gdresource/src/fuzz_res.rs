@@ -472,7 +472,9 @@ mod binary_fuzz_tests {
 
     #[test]
     fn fuzz_alternating_bytes() {
-        let data: Vec<u8> = (0..128).map(|i| if i % 2 == 0 { 0x55 } else { 0xAA }).collect();
+        let data: Vec<u8> = (0..128)
+            .map(|i| if i % 2 == 0 { 0x55 } else { 0xAA })
+            .collect();
         feed_parsers(&data);
     }
 

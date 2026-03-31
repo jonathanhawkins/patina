@@ -37,10 +37,7 @@ fn get_ticks_usec_finer_than_msec() {
 fn current_platform_returns_known_value() {
     let p = os::current_platform();
     let name = format!("{:?}", p);
-    assert!(
-        !name.is_empty(),
-        "platform name should not be empty"
-    );
+    assert!(!name.is_empty(), "platform name should not be empty");
 }
 
 #[test]

@@ -46,10 +46,7 @@ fn lifecycle_sequence(tree: &SceneTree) -> Vec<(String, String)> {
         .iter()
         .filter(|e| {
             e.event_type == TraceEventType::Notification
-                && matches!(
-                    e.detail.as_str(),
-                    "ENTER_TREE" | "READY" | "EXIT_TREE"
-                )
+                && matches!(e.detail.as_str(), "ENTER_TREE" | "READY" | "EXIT_TREE")
         })
         .map(|e| (e.node_path.clone(), e.detail.clone()))
         .collect()
@@ -373,9 +370,7 @@ fn deep_to_single_node_transition() {
     let root = tree.root_id();
 
     // Build 4-level deep hierarchy manually.
-    let l0 = tree
-        .add_child(root, Node::new("Deep0", "Node"))
-        .unwrap();
+    let l0 = tree.add_child(root, Node::new("Deep0", "Node")).unwrap();
     let l1 = tree.add_child(l0, Node::new("Deep1", "Node")).unwrap();
     let l2 = tree.add_child(l1, Node::new("Deep2", "Node")).unwrap();
     tree.add_child(l2, Node::new("Deep3", "Node")).unwrap();
@@ -435,9 +430,7 @@ fn enter_and_ready_counts_match_new_scene_size() {
     let enters = notification_paths(&tree, "ENTER_TREE");
     let new_enters: Vec<_> = enters
         .iter()
-        .filter(|p| {
-            p.contains("SceneB") || p.contains("ChildB") || p.contains("GrandchildB")
-        })
+        .filter(|p| p.contains("SceneB") || p.contains("ChildB") || p.contains("GrandchildB"))
         .collect();
     assert_eq!(
         new_enters.len(),
@@ -448,9 +441,7 @@ fn enter_and_ready_counts_match_new_scene_size() {
     let readys = notification_paths(&tree, "READY");
     let new_readys: Vec<_> = readys
         .iter()
-        .filter(|p| {
-            p.contains("SceneB") || p.contains("ChildB") || p.contains("GrandchildB")
-        })
+        .filter(|p| p.contains("SceneB") || p.contains("ChildB") || p.contains("GrandchildB"))
         .collect();
     assert_eq!(
         new_readys.len(),
@@ -594,9 +585,18 @@ fn transition_replaces_all_root_children() {
 
     // All three old children should have exited.
     let exits = notification_paths(&tree, "EXIT_TREE");
-    assert!(exits.iter().any(|p| p.ends_with("TopA")), "TopA should exit");
-    assert!(exits.iter().any(|p| p.ends_with("TopB")), "TopB should exit");
-    assert!(exits.iter().any(|p| p.ends_with("TopC")), "TopC should exit");
+    assert!(
+        exits.iter().any(|p| p.ends_with("TopA")),
+        "TopA should exit"
+    );
+    assert!(
+        exits.iter().any(|p| p.ends_with("TopB")),
+        "TopB should exit"
+    );
+    assert!(
+        exits.iter().any(|p| p.ends_with("TopC")),
+        "TopC should exit"
+    );
 
     // Add new scene.
     tree.event_trace_mut().clear();
@@ -665,7 +665,10 @@ fn full_transition_sequence_invariants() {
     // The key invariant: all EXIT_TREE before first ENTER_TREE.
     let last_exit = seq.iter().rposition(|(_, d)| d == "EXIT_TREE").unwrap();
     let first_enter = seq.iter().position(|(_, d)| d == "ENTER_TREE").unwrap();
-    assert!(last_exit < first_enter, "all exits before first enter: {seq:?}");
+    assert!(
+        last_exit < first_enter,
+        "all exits before first enter: {seq:?}"
+    );
 
     // Within ENTER_TREE: top-down (SceneB before children).
     let enter_paths: Vec<_> = seq

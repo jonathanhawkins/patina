@@ -44,13 +44,16 @@ fn r6sku_audio_fixture_parses_correct_tree_structure() {
     let audio_world = tree
         .get_node_by_path("/root/AudioWorld")
         .expect("AudioWorld root should exist");
-    assert_eq!(tree.get_node(audio_world).unwrap().class_name(),"Node2D");
+    assert_eq!(tree.get_node(audio_world).unwrap().class_name(), "Node2D");
 
     // Player with collision and audio child.
     let player = tree
         .get_node_by_path("/root/AudioWorld/Player")
         .expect("Player should exist");
-    assert_eq!(tree.get_node(player).unwrap().class_name(),"CharacterBody2D");
+    assert_eq!(
+        tree.get_node(player).unwrap().class_name(),
+        "CharacterBody2D"
+    );
 
     tree.get_node_by_path("/root/AudioWorld/Player/FootstepAudio")
         .expect("FootstepAudio should exist");
@@ -142,7 +145,7 @@ fn r6sku_nav_fixture_parses_correct_tree_structure() {
     let nav_world = tree
         .get_node_by_path("/root/NavWorld")
         .expect("NavWorld root should exist");
-    assert_eq!(tree.get_node(nav_world).unwrap().class_name(),"Node2D");
+    assert_eq!(tree.get_node(nav_world).unwrap().class_name(), "Node2D");
 
     // Player with nav agent.
     tree.get_node_by_path("/root/NavWorld/Player/PlayerNavAgent")
@@ -232,7 +235,7 @@ fn r6sku_ui_complex_fixture_parses_correct_tree_structure() {
     let ui_root = tree
         .get_node_by_path("/root/UIRoot")
         .expect("UIRoot should exist");
-    assert_eq!(tree.get_node(ui_root).unwrap().class_name(),"Control");
+    assert_eq!(tree.get_node(ui_root).unwrap().class_name(), "Control");
 
     // Header section.
     tree.get_node_by_path("/root/UIRoot/Header")
@@ -338,9 +341,7 @@ fn r6sku_ui_complex_fixture_button_text_properties() {
 fn r6sku_ui_complex_fixture_anchor_properties() {
     let (tree, _root) = load_scene(UI_COMPLEX_TSCN);
 
-    let ui_root = tree
-        .get_node_by_path("/root/UIRoot")
-        .expect("UIRoot");
+    let ui_root = tree.get_node_by_path("/root/UIRoot").expect("UIRoot");
 
     // UIRoot should have full-rect anchors (right=1.0, bottom=1.0).
     let ar = control::get_anchor_right(&tree, ui_root);
@@ -457,12 +458,10 @@ fn r6sku_fixture_transition_ui_to_gameplay() {
     main_loop.run_frames(30, DT);
 
     // Verify UI is loaded.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/UIRoot/Header/Title")
-            .is_some(),
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/UIRoot/Header/Title")
+        .is_some(),);
 
     // Transition to gameplay.
     main_loop
@@ -471,12 +470,10 @@ fn r6sku_fixture_transition_ui_to_gameplay() {
         .unwrap();
 
     // Old UI gone.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/UIRoot/Header/Title")
-            .is_none(),
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/UIRoot/Header/Title")
+        .is_none(),);
 
     main_loop.run_frames(30, DT);
     assert_eq!(main_loop.frame_count(), 60);
@@ -500,10 +497,7 @@ fn r6sku_fixture_sequential_three_scene_transition() {
     main_loop.run_frames(20, DT);
 
     for (_name, packed) in &scenes[1..] {
-        main_loop
-            .tree_mut()
-            .change_scene_to_packed(packed)
-            .unwrap();
+        main_loop.tree_mut().change_scene_to_packed(packed).unwrap();
         main_loop.run_frames(20, DT);
     }
 

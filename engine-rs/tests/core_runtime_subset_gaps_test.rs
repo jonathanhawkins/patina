@@ -15,14 +15,13 @@ use gdcore::id::{ObjectId, ResourceUid};
 use gdcore::math::{Color, Transform2D, Vector2, Vector3};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
-use gdvariant::Variant;
 use gdobject::{
-    GenericObject, GodotObject, ObjectBase, SignalStore,
-    NOTIFICATION_ENTER_TREE, NOTIFICATION_READY, NOTIFICATION_EXIT_TREE,
-    NOTIFICATION_PROCESS, NOTIFICATION_PHYSICS_PROCESS,
+    GenericObject, GodotObject, ObjectBase, SignalStore, NOTIFICATION_ENTER_TREE,
+    NOTIFICATION_EXIT_TREE, NOTIFICATION_PHYSICS_PROCESS, NOTIFICATION_PROCESS, NOTIFICATION_READY,
 };
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::{LifecycleManager, MainLoop, Node, SceneTree};
+use gdvariant::Variant;
 
 // ===========================================================================
 // 1. Variant type coverage — all 21 variant types round-trip correctly
@@ -249,12 +248,20 @@ fn object_meta_crud() {
     // get_meta with fallback (get_meta returns Nil if absent).
     {
         let v = base.get_meta("missing");
-        let result = if v == Variant::Nil { Variant::Int(99) } else { v };
+        let result = if v == Variant::Nil {
+            Variant::Int(99)
+        } else {
+            v
+        };
         assert_eq!(result, Variant::Int(99));
     }
     {
         let v = base.get_meta("editor_hint");
-        let result = if v == Variant::Nil { Variant::Int(99) } else { v };
+        let result = if v == Variant::Nil {
+            Variant::Int(99)
+        } else {
+            v
+        };
         assert_eq!(result, Variant::Bool(true));
     }
 
@@ -458,7 +465,10 @@ fn signal_store_add_and_connect() {
     store.add_signal("pressed");
     assert!(store.has_signal("pressed"));
 
-    store.connect("pressed", gdobject::Connection::new(ObjectId::from_raw(1), "on_pressed"));
+    store.connect(
+        "pressed",
+        gdobject::Connection::new(ObjectId::from_raw(1), "on_pressed"),
+    );
 
     let sig = store.get_signal("pressed").unwrap();
     assert_eq!(sig.connections().len(), 1);
@@ -469,7 +479,10 @@ fn signal_store_add_and_connect() {
 fn signal_store_disconnect() {
     let mut store = SignalStore::new();
     store.add_signal("clicked");
-    store.connect("clicked", gdobject::Connection::new(ObjectId::from_raw(1), "handler"));
+    store.connect(
+        "clicked",
+        gdobject::Connection::new(ObjectId::from_raw(1), "handler"),
+    );
     assert_eq!(store.get_signal("clicked").unwrap().connections().len(), 1);
 
     store.disconnect("clicked", ObjectId::from_raw(1), "handler");
@@ -482,7 +495,10 @@ fn signal_store_multiple_connections() {
     store.add_signal("damaged");
 
     for i in 0..5u64 {
-        store.connect("damaged", gdobject::Connection::new(ObjectId::from_raw(i + 1), format!("handler_{i}")));
+        store.connect(
+            "damaged",
+            gdobject::Connection::new(ObjectId::from_raw(i + 1), format!("handler_{i}")),
+        );
     }
 
     assert_eq!(store.get_signal("damaged").unwrap().connections().len(), 5);
@@ -550,7 +566,11 @@ fn resource_tres_fixtures_exist() {
         let path = entry.path();
         if path.extension().map_or(false, |e| e == "tres") {
             let content = std::fs::read_to_string(&path).unwrap();
-            assert!(!content.is_empty(), "tres file should not be empty: {}", path.display());
+            assert!(
+                !content.is_empty(),
+                "tres file should not be empty: {}",
+                path.display()
+            );
             return;
         }
     }
@@ -637,7 +657,11 @@ fn physics2d_static_body_does_not_move() {
     }
 
     let b = world.get_body(id).unwrap();
-    assert_eq!(b.position, Vector2::new(5.0, 5.0), "static body must not move");
+    assert_eq!(
+        b.position,
+        Vector2::new(5.0, 5.0),
+        "static body must not move"
+    );
 }
 
 #[test]
@@ -715,7 +739,10 @@ fn node_stores_variant_properties() {
     node.set_property("visible", Variant::Bool(true));
 
     assert_eq!(node.get_property("speed"), Variant::Float(200.0));
-    assert_eq!(node.get_property("name_tag"), Variant::String("Hero".into()));
+    assert_eq!(
+        node.get_property("name_tag"),
+        Variant::String("Hero".into())
+    );
     assert_eq!(node.get_property("visible"), Variant::Bool(true));
 }
 
@@ -768,7 +795,11 @@ fn call_deferred_stub_does_not_panic() {
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();
     // call_deferred is a no-op stub — just verify it doesn't panic.
-    tree.call_deferred(root_id, "set_position", &[Variant::Vector2(Vector2::new(10.0, 20.0))]);
+    tree.call_deferred(
+        root_id,
+        "set_position",
+        &[Variant::Vector2(Vector2::new(10.0, 20.0))],
+    );
 }
 
 // ===========================================================================
@@ -841,7 +872,9 @@ fn node_reparent_moves_to_new_parent() {
     let root = tree.root_id();
     let parent_a = tree.add_child(root, Node::new("ParentA", "Node")).unwrap();
     let parent_b = tree.add_child(root, Node::new("ParentB", "Node")).unwrap();
-    let child = tree.add_child(parent_a, Node::new("Child", "Node")).unwrap();
+    let child = tree
+        .add_child(parent_a, Node::new("Child", "Node"))
+        .unwrap();
 
     // Child starts under ParentA.
     assert!(tree.get_node_by_path("/root/ParentA/Child").is_some());
@@ -864,7 +897,9 @@ fn node_removal_cleans_subtree() {
     let root = tree.root_id();
     let parent = tree.add_child(root, Node::new("Parent", "Node")).unwrap();
     let _child = tree.add_child(parent, Node::new("Child", "Node")).unwrap();
-    let _grandchild = tree.add_child(_child, Node::new("Grandchild", "Node")).unwrap();
+    let _grandchild = tree
+        .add_child(_child, Node::new("Grandchild", "Node"))
+        .unwrap();
 
     let count_before = tree.all_nodes_in_tree_order().len();
     tree.remove_node(parent).unwrap();
@@ -882,8 +917,7 @@ fn node_removal_cleans_subtree() {
 // 18. Unique name resolution in scene tree
 // ===========================================================================
 
-const UNIQUE_NAME_TSCN: &str =
-    include_str!("../../fixtures/scenes/unique_name_resolution.tscn");
+const UNIQUE_NAME_TSCN: &str = include_str!("../../fixtures/scenes/unique_name_resolution.tscn");
 
 #[test]
 fn unique_name_resolution_works() {
@@ -898,20 +932,25 @@ fn unique_name_resolution_works() {
 
     // %HealthBar, %ScoreLabel, %StatusIcon should be resolvable.
     assert!(
-        tree.get_node_by_unique_name(scene_root, "HealthBar").is_some(),
+        tree.get_node_by_unique_name(scene_root, "HealthBar")
+            .is_some(),
         "%HealthBar should resolve"
     );
     assert!(
-        tree.get_node_by_unique_name(scene_root, "ScoreLabel").is_some(),
+        tree.get_node_by_unique_name(scene_root, "ScoreLabel")
+            .is_some(),
         "%ScoreLabel should resolve"
     );
     assert!(
-        tree.get_node_by_unique_name(scene_root, "StatusIcon").is_some(),
+        tree.get_node_by_unique_name(scene_root, "StatusIcon")
+            .is_some(),
         "%StatusIcon should resolve"
     );
 
     // Non-existent unique name returns None.
-    assert!(tree.get_node_by_unique_name(scene_root, "DoesNotExist").is_none());
+    assert!(tree
+        .get_node_by_unique_name(scene_root, "DoesNotExist")
+        .is_none());
 }
 
 // ===========================================================================
@@ -940,12 +979,10 @@ fn mainloop_packed_scene_full_lifecycle() {
     );
 
     // Scene nodes should still be intact.
-    assert!(
-        main_loop
-            .tree()
-            .get_node_by_path("/root/World/Player")
-            .is_some()
-    );
+    assert!(main_loop
+        .tree()
+        .get_node_by_path("/root/World/Player")
+        .is_some());
 }
 
 // ===========================================================================
@@ -1010,7 +1047,9 @@ fn core_runtime_subset_readiness_report() {
     let mut pass_count = 0;
     for (name, ok) in &checks {
         let status = if *ok { "PASS" } else { "FAIL" };
-        if *ok { pass_count += 1; }
+        if *ok {
+            pass_count += 1;
+        }
         println!("  [{status}] {name}");
     }
     let total = checks.len();

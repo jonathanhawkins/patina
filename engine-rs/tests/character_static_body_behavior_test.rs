@@ -58,10 +58,7 @@ fn make_falling_character_scene() -> (SceneTree, gdscene::node::NodeId, gdscene:
 
     let mut player = Node::new("Player", "CharacterBody2D");
     player.set_property("position", Variant::Vector2(Vector2::new(100.0, 175.0)));
-    player.set_property(
-        "velocity",
-        Variant::Vector2(Vector2::new(0.0, 600.0)),
-    );
+    player.set_property("velocity", Variant::Vector2(Vector2::new(0.0, 600.0)));
     player.set_property("collision_layer", Variant::Int(1));
     player.set_property("collision_mask", Variant::Int(1));
     let player_id = tree.add_child(root, player).unwrap();
@@ -90,10 +87,7 @@ fn make_wall_collision_scene() -> (SceneTree, gdscene::node::NodeId, gdscene::no
 
     let mut player = Node::new("Player", "CharacterBody2D");
     player.set_property("position", Variant::Vector2(Vector2::new(125.0, 100.0)));
-    player.set_property(
-        "velocity",
-        Variant::Vector2(Vector2::new(1200.0, 0.0)),
-    );
+    player.set_property("velocity", Variant::Vector2(Vector2::new(1200.0, 0.0)));
     player.set_property("collision_layer", Variant::Int(1));
     player.set_property("collision_mask", Variant::Int(1));
     let player_id = tree.add_child(root, player).unwrap();
@@ -122,10 +116,7 @@ fn make_ceiling_collision_scene() -> (SceneTree, gdscene::node::NodeId) {
 
     let mut player = Node::new("Player", "CharacterBody2D");
     player.set_property("position", Variant::Vector2(Vector2::new(100.0, 45.0)));
-    player.set_property(
-        "velocity",
-        Variant::Vector2(Vector2::new(0.0, -1200.0)),
-    );
+    player.set_property("velocity", Variant::Vector2(Vector2::new(0.0, -1200.0)));
     player.set_property("collision_layer", Variant::Int(1));
     player.set_property("collision_mask", Variant::Int(1));
     let player_id = tree.add_child(root, player).unwrap();

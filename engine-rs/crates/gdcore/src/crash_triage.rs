@@ -1215,10 +1215,7 @@ impl CrashCollector {
                 continue;
             }
             // Find a representative record for message/subsystem.
-            let rep = self
-                .records
-                .iter()
-                .rfind(|r| r.signature == *sig);
+            let rep = self.records.iter().rfind(|r| r.signature == *sig);
             let (message, subsystem) = match rep {
                 Some(r) => (r.trace.message.clone(), r.subsystem),
                 None => continue,
@@ -1239,7 +1236,9 @@ impl CrashCollector {
 
     /// Returns the frequency data for a specific signature.
     pub fn frequency_of(&self, signature: &str) -> Option<CrashFrequency> {
-        self.frequencies().into_iter().find(|f| f.signature == signature)
+        self.frequencies()
+            .into_iter()
+            .find(|f| f.signature == signature)
     }
 
     /// Determines the trend for a given crash signature.
@@ -2500,7 +2499,10 @@ mod tests {
     fn build_triage_queue_with_known_patterns() {
         let mut c = CrashCollector::new();
         c.add_known_fixed("old_bug");
-        c.collect(make_trace("gdscene::node::add_child", "old_bug resurfaced"), 1.0);
+        c.collect(
+            make_trace("gdscene::node::add_child", "old_bug resurfaced"),
+            1.0,
+        );
 
         let queue = c.build_triage_queue();
         let reports = queue.by_severity();

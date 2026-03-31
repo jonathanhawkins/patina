@@ -14,12 +14,12 @@
 //! 9. Empty/missing input map edge cases
 //! 10. flush_frame lifecycle across multiple frames
 
+use gdcore::math::Vector2;
 use gdplatform::input::{
     ActionBinding, GamepadAxis, GamepadButton, InputEvent, InputMap, InputState, Key, MouseButton,
 };
-use gdcore::math::Vector2;
-use gdscene::MainLoop;
 use gdscene::scene_tree::SceneTree;
+use gdscene::MainLoop;
 
 // ===========================================================================
 // Helpers
@@ -270,13 +270,17 @@ fn gamepad_axis_value_tracked() {
 
     state.process_event(gamepad_axis_event(GamepadAxis::LeftStickX, 0.75, 0));
 
-    assert!(
-        (state.get_gamepad_axis_value(0, GamepadAxis::LeftStickX) - 0.75).abs() < 0.001
-    );
+    assert!((state.get_gamepad_axis_value(0, GamepadAxis::LeftStickX) - 0.75).abs() < 0.001);
     // Different gamepad returns 0
-    assert_eq!(state.get_gamepad_axis_value(1, GamepadAxis::LeftStickX), 0.0);
+    assert_eq!(
+        state.get_gamepad_axis_value(1, GamepadAxis::LeftStickX),
+        0.0
+    );
     // Different axis returns 0
-    assert_eq!(state.get_gamepad_axis_value(0, GamepadAxis::LeftStickY), 0.0);
+    assert_eq!(
+        state.get_gamepad_axis_value(0, GamepadAxis::LeftStickY),
+        0.0
+    );
 }
 
 #[test]
@@ -322,7 +326,10 @@ fn gamepad_axis_action_has_analog_strength() {
     let mut state = InputState::new();
     let mut map = InputMap::new();
     map.add_action("throttle", 0.1);
-    map.action_add_event("throttle", ActionBinding::GamepadAxisBinding(GamepadAxis::RightTriggerAnalog));
+    map.action_add_event(
+        "throttle",
+        ActionBinding::GamepadAxisBinding(GamepadAxis::RightTriggerAnalog),
+    );
     state.set_input_map(map);
 
     state.process_event(gamepad_axis_event(GamepadAxis::RightTriggerAnalog, 0.6, 0));
@@ -340,12 +347,18 @@ fn gamepad_axis_below_deadzone_not_pressed() {
     let mut state = InputState::new();
     let mut map = InputMap::new();
     map.add_action("throttle", 0.3); // deadzone = 0.3
-    map.action_add_event("throttle", ActionBinding::GamepadAxisBinding(GamepadAxis::RightTriggerAnalog));
+    map.action_add_event(
+        "throttle",
+        ActionBinding::GamepadAxisBinding(GamepadAxis::RightTriggerAnalog),
+    );
     state.set_input_map(map);
 
     state.process_event(gamepad_axis_event(GamepadAxis::RightTriggerAnalog, 0.2, 0));
 
-    assert!(!state.is_action_pressed("throttle"), "below deadzone should not be pressed");
+    assert!(
+        !state.is_action_pressed("throttle"),
+        "below deadzone should not be pressed"
+    );
     assert_eq!(state.get_action_strength("throttle"), 0.0);
 }
 
@@ -568,7 +581,10 @@ fn input_map_swap_changes_action_routing() {
 
     state.process_event(key_press(Key::Space));
     assert!(state.is_action_pressed("jump"));
-    assert!(!state.is_action_pressed("shoot"), "old action should not be triggered by new map");
+    assert!(
+        !state.is_action_pressed("shoot"),
+        "old action should not be triggered by new map"
+    );
 }
 
 // ===========================================================================
@@ -683,7 +699,10 @@ fn snapshot_pressed_key_names_returns_string_names() {
     let names = snap.pressed_key_names();
 
     assert!(names.contains(&"A".to_string()) || names.contains(&"a".to_string()));
-    assert!(names.contains(&" ".to_string()), "Space key name should be \" \" (literal space)");
+    assert!(
+        names.contains(&" ".to_string()),
+        "Space key name should be \" \" (literal space)"
+    );
     assert_eq!(names.len(), 2);
 }
 
@@ -818,14 +837,19 @@ fn mainloop_mouse_routing_through_push_event() {
     ml.push_event(mouse_press(MouseButton::Left, Vector2::new(100.0, 200.0)));
 
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
-    assert_eq!(ml.input_state().get_mouse_position(), Vector2::new(100.0, 200.0));
+    assert_eq!(
+        ml.input_state().get_mouse_position(),
+        Vector2::new(100.0, 200.0)
+    );
 
     ml.step(DT);
 
     // still held after step
     assert!(ml.input_state().is_mouse_button_pressed(MouseButton::Left));
     // just_pressed flushed
-    assert!(!ml.input_state().is_mouse_button_just_pressed(MouseButton::Left));
+    assert!(!ml
+        .input_state()
+        .is_mouse_button_just_pressed(MouseButton::Left));
 }
 
 #[test]
@@ -834,16 +858,32 @@ fn mainloop_gamepad_routing_through_push_event() {
     let mut ml = MainLoop::new(tree);
 
     ml.push_event(gamepad_button_press(GamepadButton::FaceA, 0));
-    assert!(ml.input_state().is_gamepad_button_pressed(0, GamepadButton::FaceA));
+    assert!(ml
+        .input_state()
+        .is_gamepad_button_pressed(0, GamepadButton::FaceA));
 
     ml.push_event(gamepad_axis_event(GamepadAxis::LeftStickX, 0.8, 0));
-    assert!((ml.input_state().get_gamepad_axis_value(0, GamepadAxis::LeftStickX) - 0.8).abs() < 0.001);
+    assert!(
+        (ml.input_state()
+            .get_gamepad_axis_value(0, GamepadAxis::LeftStickX)
+            - 0.8)
+            .abs()
+            < 0.001
+    );
 
     ml.step(DT);
 
     // Button still held, axis still set
-    assert!(ml.input_state().is_gamepad_button_pressed(0, GamepadButton::FaceA));
-    assert!((ml.input_state().get_gamepad_axis_value(0, GamepadAxis::LeftStickX) - 0.8).abs() < 0.001);
+    assert!(ml
+        .input_state()
+        .is_gamepad_button_pressed(0, GamepadButton::FaceA));
+    assert!(
+        (ml.input_state()
+            .get_gamepad_axis_value(0, GamepadAxis::LeftStickX)
+            - 0.8)
+            .abs()
+            < 0.001
+    );
 }
 
 #[test]

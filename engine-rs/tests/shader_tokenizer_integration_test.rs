@@ -42,7 +42,11 @@ void fragment() {
 #[test]
 fn ffc5b_tokenize_full_spatial_shader() {
     let tokens = tokenize_shader(MINIMAL_SPATIAL_SHADER).expect("should tokenize");
-    assert!(tokens.len() > 20, "full shader should produce many tokens, got {}", tokens.len());
+    assert!(
+        tokens.len() > 20,
+        "full shader should produce many tokens, got {}",
+        tokens.len()
+    );
 
     // First token should be shader_type keyword.
     assert_eq!(tokens[0].token, ShaderToken::ShaderType);
@@ -72,7 +76,10 @@ void fragment() {
 #[test]
 fn ffc5b_extract_shader_type_canvas_item() {
     let tokens = tokenize_shader_no_comments(CANVAS_ITEM_SHADER).unwrap();
-    assert_eq!(extract_shader_type(&tokens), Some("canvas_item".to_string()));
+    assert_eq!(
+        extract_shader_type(&tokens),
+        Some("canvas_item".to_string())
+    );
 }
 
 // ===========================================================================
@@ -220,7 +227,9 @@ fn ffc5b_line_comment() {
     let source = "float x; // this is a comment\nint y;";
     let tokens = tokenize_shader(source).unwrap();
 
-    let has_comment = tokens.iter().any(|t| matches!(&t.token, ShaderToken::LineComment(_)));
+    let has_comment = tokens
+        .iter()
+        .any(|t| matches!(&t.token, ShaderToken::LineComment(_)));
     assert!(has_comment, "should contain a line comment token");
 }
 
@@ -229,7 +238,9 @@ fn ffc5b_block_comment() {
     let source = "float x; /* block comment */ int y;";
     let tokens = tokenize_shader(source).unwrap();
 
-    let has_block = tokens.iter().any(|t| matches!(&t.token, ShaderToken::BlockComment(_)));
+    let has_block = tokens
+        .iter()
+        .any(|t| matches!(&t.token, ShaderToken::BlockComment(_)));
     assert!(has_block, "should contain a block comment token");
 }
 
@@ -240,12 +251,18 @@ fn ffc5b_no_comments_strips_all() {
 
     for t in &tokens {
         assert!(
-            !matches!(&t.token, ShaderToken::LineComment(_) | ShaderToken::BlockComment(_)),
+            !matches!(
+                &t.token,
+                ShaderToken::LineComment(_) | ShaderToken::BlockComment(_)
+            ),
             "no_comments should strip all comment tokens"
         );
     }
     // Should still have the non-comment tokens.
-    assert!(tokens.len() >= 4, "should have float, x, ;, int, y, ; tokens");
+    assert!(
+        tokens.len() >= 4,
+        "should have float, x, ;, int, y, ; tokens"
+    );
 }
 
 // ===========================================================================
@@ -391,7 +408,10 @@ fn ffc5b_multiline_position_tracking() {
     assert_eq!(tokens[0].line, 1);
 
     // void at line 3 (skipping blank line 2)
-    let void_token = tokens.iter().find(|t| t.token == ShaderToken::Void).unwrap();
+    let void_token = tokens
+        .iter()
+        .find(|t| t.token == ShaderToken::Void)
+        .unwrap();
     assert_eq!(void_token.line, 3);
 }
 
@@ -455,7 +475,11 @@ void fragment() {
 #[test]
 fn ffc5b_complex_shader_tokenizes() {
     let tokens = tokenize_shader(COMPLEX_SHADER).unwrap();
-    assert!(tokens.len() > 50, "complex shader should produce many tokens, got {}", tokens.len());
+    assert!(
+        tokens.len() > 50,
+        "complex shader should produce many tokens, got {}",
+        tokens.len()
+    );
 }
 
 #[test]
@@ -478,12 +502,18 @@ fn ffc5b_complex_shader_uniforms() {
     assert!(!albedo.instance);
 
     // albedo_texture — sampler2D, grouped
-    let tex = uniforms.iter().find(|u| u.name == "albedo_texture").unwrap();
+    let tex = uniforms
+        .iter()
+        .find(|u| u.name == "albedo_texture")
+        .unwrap();
     assert_eq!(tex.type_name, "sampler2D");
     assert_eq!(tex.group, Some("material".to_string()));
 
     // emission_strength — instance uniform, grouped
-    let emission = uniforms.iter().find(|u| u.name == "emission_strength").unwrap();
+    let emission = uniforms
+        .iter()
+        .find(|u| u.name == "emission_strength")
+        .unwrap();
     assert!(emission.instance);
     assert_eq!(emission.group, Some("material".to_string()));
 

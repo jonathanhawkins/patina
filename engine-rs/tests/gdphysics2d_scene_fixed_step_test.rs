@@ -64,7 +64,14 @@ fn get_pos(tree: &SceneTree, id: gdscene::node::NodeId) -> Vector2 {
 fn rigid_body_falls_under_gravity() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let ball = add_body(&mut tree, root, "Ball", "RigidBody2D", Vector2::new(100.0, 0.0), 10.0);
+    let ball = add_body(
+        &mut tree,
+        root,
+        "Ball",
+        "RigidBody2D",
+        Vector2::new(100.0, 0.0),
+        10.0,
+    );
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
@@ -155,7 +162,14 @@ fn gravity_scale_zero_disables_gravity() {
 fn gravity_scale_doubles_fall_rate() {
     let mut tree1 = SceneTree::new();
     let root1 = tree1.root_id();
-    let ball1 = add_body(&mut tree1, root1, "Normal", "RigidBody2D", Vector2::new(0.0, 0.0), 5.0);
+    let ball1 = add_body(
+        &mut tree1,
+        root1,
+        "Normal",
+        "RigidBody2D",
+        Vector2::new(0.0, 0.0),
+        5.0,
+    );
 
     let mut tree2 = SceneTree::new();
     let root2 = tree2.root_id();
@@ -257,7 +271,14 @@ fn fixed_step_determinism() {
     fn run_simulation() -> Vec<Vector2> {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let ball = add_body(&mut tree, root, "Ball", "RigidBody2D", Vector2::new(50.0, 0.0), 8.0);
+        let ball = add_body(
+            &mut tree,
+            root,
+            "Ball",
+            "RigidBody2D",
+            Vector2::new(50.0, 0.0),
+            8.0,
+        );
 
         let mut ml = MainLoop::new(tree);
         ml.register_physics_bodies();
@@ -298,13 +319,34 @@ fn multiple_bodies_advance_independently() {
     let root = tree.root_id();
 
     // Ball A: normal gravity
-    let a = add_body(&mut tree, root, "A", "RigidBody2D", Vector2::new(0.0, 0.0), 5.0);
+    let a = add_body(
+        &mut tree,
+        root,
+        "A",
+        "RigidBody2D",
+        Vector2::new(0.0, 0.0),
+        5.0,
+    );
 
     // Ball B: starts at different position
-    let b = add_body(&mut tree, root, "B", "RigidBody2D", Vector2::new(100.0, 50.0), 5.0);
+    let b = add_body(
+        &mut tree,
+        root,
+        "B",
+        "RigidBody2D",
+        Vector2::new(100.0, 50.0),
+        5.0,
+    );
 
     // Static floor (should not move)
-    let c = add_body(&mut tree, root, "C", "StaticBody2D", Vector2::new(50.0, 300.0), 50.0);
+    let c = add_body(
+        &mut tree,
+        root,
+        "C",
+        "StaticBody2D",
+        Vector2::new(50.0, 300.0),
+        50.0,
+    );
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
@@ -344,7 +386,14 @@ fn multiple_bodies_advance_independently() {
 fn mainloop_gravity_per_tick() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let ball = add_body(&mut tree, root, "Ball", "RigidBody2D", Vector2::new(0.0, 0.0), 5.0);
+    let ball = add_body(
+        &mut tree,
+        root,
+        "Ball",
+        "RigidBody2D",
+        Vector2::new(0.0, 0.0),
+        5.0,
+    );
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();

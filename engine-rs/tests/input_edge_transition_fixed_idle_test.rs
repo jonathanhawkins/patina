@@ -76,7 +76,10 @@ fn state_with_actions() -> InputState {
 
 /// Simulates one full frame: process events → snapshot → (physics reads) → (idle reads) → flush.
 /// Returns the snapshot that both physics and idle phases would see.
-fn simulate_frame(state: &mut InputState, events: &[InputEvent]) -> gdplatform::input::InputSnapshot {
+fn simulate_frame(
+    state: &mut InputState,
+    events: &[InputEvent],
+) -> gdplatform::input::InputSnapshot {
     for event in events {
         state.process_event(event.clone());
     }
@@ -266,7 +269,10 @@ fn press_and_release_same_frame() {
     let mut state = state_with_actions();
 
     // Both press and release in one frame.
-    let snap = simulate_frame(&mut state, &[key_press(Key::Space), key_release(Key::Space)]);
+    let snap = simulate_frame(
+        &mut state,
+        &[key_press(Key::Space), key_release(Key::Space)],
+    );
 
     // After press then release in same frame: action not pressed, just_released set.
     assert!(
@@ -351,9 +357,15 @@ fn independent_action_edges() {
 
     // Frame 2: press move_left, jump still held.
     let snap2 = simulate_frame(&mut state, &[key_press(Key::A)]);
-    assert!(!snap2.is_action_just_pressed("jump"), "jump held, not re-pressed");
+    assert!(
+        !snap2.is_action_just_pressed("jump"),
+        "jump held, not re-pressed"
+    );
     assert!(snap2.is_action_pressed("jump"), "jump still held");
-    assert!(snap2.is_action_just_pressed("move_left"), "move_left freshly pressed");
+    assert!(
+        snap2.is_action_just_pressed("move_left"),
+        "move_left freshly pressed"
+    );
     assert!(snap2.is_action_pressed("move_left"));
 
     // Frame 3: release jump, move_left still held.
@@ -361,8 +373,14 @@ fn independent_action_edges() {
     assert!(snap3.is_action_just_released("jump"));
     assert!(!snap3.is_action_pressed("jump"));
     assert!(snap3.is_action_pressed("move_left"), "move_left still held");
-    assert!(!snap3.is_action_just_pressed("move_left"), "move_left not re-pressed");
-    assert!(!snap3.is_action_just_released("move_left"), "move_left not released");
+    assert!(
+        !snap3.is_action_just_pressed("move_left"),
+        "move_left not re-pressed"
+    );
+    assert!(
+        !snap3.is_action_just_released("move_left"),
+        "move_left not released"
+    );
 }
 
 // ===========================================================================
@@ -571,10 +589,7 @@ fn get_axis_reflects_edge_transitions() {
 fn simultaneous_press_two_actions() {
     let mut state = state_with_actions();
 
-    let snap = simulate_frame(
-        &mut state,
-        &[key_press(Key::Space), key_press(Key::F)],
-    );
+    let snap = simulate_frame(&mut state, &[key_press(Key::Space), key_press(Key::F)]);
 
     assert!(snap.is_action_just_pressed("jump"));
     assert!(snap.is_action_just_pressed("shoot"));
@@ -590,10 +605,7 @@ fn simultaneous_release_two_actions() {
     simulate_frame(&mut state, &[key_press(Key::Space), key_press(Key::F)]);
 
     // Frame 2: release both.
-    let snap = simulate_frame(
-        &mut state,
-        &[key_release(Key::Space), key_release(Key::F)],
-    );
+    let snap = simulate_frame(&mut state, &[key_release(Key::Space), key_release(Key::F)]);
 
     assert!(snap.is_action_just_released("jump"));
     assert!(snap.is_action_just_released("shoot"));

@@ -39,8 +39,12 @@ fn make_styled_resource() -> Resource {
 
     let mut parent = Resource::new("Theme");
     parent.uid = ResourceUid::new(99999);
-    parent.subresources.insert("flat_1".to_string(), Arc::new(style_flat));
-    parent.subresources.insert("empty_1".to_string(), Arc::new(style_empty));
+    parent
+        .subresources
+        .insert("flat_1".to_string(), Arc::new(style_flat));
+    parent
+        .subresources
+        .insert("empty_1".to_string(), Arc::new(style_empty));
     parent.set_property("panel", Variant::String("SubResource:flat_1".into()));
     parent.set_property("focus", Variant::String("SubResource:empty_1".into()));
     parent.set_property("name", Variant::String("TestTheme".into()));
@@ -74,8 +78,14 @@ fn saver_emits_subresource_sections_with_properties() {
     assert!(output.contains("visible = true"), "empty_1 visible");
 
     // Parent [resource] section.
-    assert!(output.contains("[resource]"), "must emit [resource] section");
-    assert!(output.contains("name = \"TestTheme\""), "parent name property");
+    assert!(
+        output.contains("[resource]"),
+        "must emit [resource] section"
+    );
+    assert!(
+        output.contains("name = \"TestTheme\""),
+        "parent name property"
+    );
 }
 
 // ===========================================================================
@@ -217,7 +227,9 @@ fn add_subresource_to_map_enables_resolution() {
     // Add the sub-resource.
     let mut sub = Resource::new("NewType");
     sub.set_property("value", Variant::Int(7));
-    parent.subresources.insert("new_sub".to_string(), Arc::new(sub));
+    parent
+        .subresources
+        .insert("new_sub".to_string(), Arc::new(sub));
 
     // Now it resolves.
     let resolved = parent.resolve_subresource("child").unwrap();
@@ -251,9 +263,18 @@ fn sorted_property_keys_includes_subresource_refs() {
     let keys = parent.sorted_property_keys();
     let key_strs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
 
-    assert!(key_strs.contains(&"panel"), "must include SubResource ref 'panel'");
-    assert!(key_strs.contains(&"focus"), "must include SubResource ref 'focus'");
-    assert!(key_strs.contains(&"name"), "must include plain string 'name'");
+    assert!(
+        key_strs.contains(&"panel"),
+        "must include SubResource ref 'panel'"
+    );
+    assert!(
+        key_strs.contains(&"focus"),
+        "must include SubResource ref 'focus'"
+    );
+    assert!(
+        key_strs.contains(&"name"),
+        "must include plain string 'name'"
+    );
 
     // Verify sorted order: focus < name < panel.
     let focus_pos = key_strs.iter().position(|k| *k == "focus").unwrap();
@@ -286,7 +307,9 @@ numeric_ref = SubResource("123")
 #[test]
 fn varied_id_class_prefix_underscore_resolves() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_VARIED_IDS, "res://varied.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_VARIED_IDS, "res://varied.tres")
+        .unwrap();
 
     let flat = res.resolve_subresource("flat_ref").unwrap();
     assert_eq!(flat.class_name, "StyleBoxFlat");
@@ -296,7 +319,9 @@ fn varied_id_class_prefix_underscore_resolves() {
 #[test]
 fn varied_id_snake_case_with_digits_resolves() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_VARIED_IDS, "res://varied.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_VARIED_IDS, "res://varied.tres")
+        .unwrap();
 
     let empty = res.resolve_subresource("empty_ref").unwrap();
     assert_eq!(empty.class_name, "StyleBoxEmpty");
@@ -306,7 +331,9 @@ fn varied_id_snake_case_with_digits_resolves() {
 #[test]
 fn varied_id_pure_numeric_resolves() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_VARIED_IDS, "res://varied.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_VARIED_IDS, "res://varied.tres")
+        .unwrap();
 
     let shape = res.resolve_subresource("numeric_ref").unwrap();
     assert_eq!(shape.class_name, "RectangleShape2D");
@@ -322,7 +349,9 @@ fn varied_id_pure_numeric_resolves() {
 #[test]
 fn varied_ids_total_count() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_VARIED_IDS, "res://varied.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_VARIED_IDS, "res://varied.tres")
+        .unwrap();
     assert_eq!(res.subresources.len(), 3);
 }
 
@@ -333,7 +362,9 @@ fn varied_ids_total_count() {
 #[test]
 fn parsed_subresource_property_count_matches_source() {
     let loader = TresLoader::new();
-    let res = loader.parse_str(TRES_VARIED_IDS, "res://varied.tres").unwrap();
+    let res = loader
+        .parse_str(TRES_VARIED_IDS, "res://varied.tres")
+        .unwrap();
 
     // StyleBoxFlat_x1 has 1 property (border_width).
     let flat = res.resolve_subresource("flat_ref").unwrap();
@@ -398,7 +429,10 @@ fn saver_no_subresources_no_sections() {
     let saver = TresSaver::new();
     let output = saver.save_to_string(&r).unwrap();
 
-    assert!(!output.contains("[sub_resource"), "no sub_resource sections");
+    assert!(
+        !output.contains("[sub_resource"),
+        "no sub_resource sections"
+    );
     assert!(output.contains("[resource]"));
     assert!(output.contains("value = 42"));
 }
@@ -431,7 +465,9 @@ fn saver_preserves_vector2_on_subresource() {
     sub.set_property("size", Variant::Vector2(Vector2::new(64.0, 32.0)));
 
     let mut parent = Resource::new("Resource");
-    parent.subresources.insert("shape_1".to_string(), Arc::new(sub));
+    parent
+        .subresources
+        .insert("shape_1".to_string(), Arc::new(sub));
 
     let saver = TresSaver::new();
     let output = saver.save_to_string(&parent).unwrap();
@@ -448,7 +484,9 @@ fn saver_emits_header_for_empty_subresource() {
     let sub = Resource::new("StyleBoxEmpty");
 
     let mut parent = Resource::new("Theme");
-    parent.subresources.insert("empty".to_string(), Arc::new(sub));
+    parent
+        .subresources
+        .insert("empty".to_string(), Arc::new(sub));
 
     let saver = TresSaver::new();
     let output = saver.save_to_string(&parent).unwrap();

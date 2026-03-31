@@ -387,10 +387,7 @@ pub fn register_3d_classes() {
                 "rotation",
                 Variant::Vector3(Vector3::ZERO),
             ))
-            .property(PropertyInfo::new(
-                "scale",
-                Variant::Vector3(Vector3::ONE),
-            )),
+            .property(PropertyInfo::new("scale", Variant::Vector3(Vector3::ONE))),
     );
 
     // -- Camera3D --
@@ -425,10 +422,7 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("shadow_enabled", Variant::Bool(false)).with_hint(42))
             .property(PropertyInfo::new("shadow_bias", Variant::Float(0.1)))
             .property(PropertyInfo::new("shadow_blur", Variant::Float(1.0)))
-            .property(PropertyInfo::new(
-                "shadow_normal_bias",
-                Variant::Float(2.0),
-            ))
+            .property(PropertyInfo::new("shadow_normal_bias", Variant::Float(2.0)))
             .property(PropertyInfo::new("light_negative", Variant::Bool(false)))
             .property(PropertyInfo::new("light_specular", Variant::Float(0.5)))
             .property(PropertyInfo::new("light_bake_mode", Variant::Int(2))),
@@ -478,13 +472,9 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("collision_mask", Variant::Int(1))),
     );
 
-    register_class(
-        ClassRegistration::new("PhysicsBody3D").parent("CollisionObject3D"),
-    );
+    register_class(ClassRegistration::new("PhysicsBody3D").parent("CollisionObject3D"));
 
-    register_class(
-        ClassRegistration::new("StaticBody3D").parent("PhysicsBody3D"),
-    );
+    register_class(ClassRegistration::new("StaticBody3D").parent("PhysicsBody3D"));
 
     register_class(
         ClassRegistration::new("RigidBody3D")
@@ -501,7 +491,10 @@ pub fn register_3d_classes() {
                 "velocity",
                 Variant::Vector3(Vector3::ZERO),
             ))
-            .property(PropertyInfo::new("floor_max_angle", Variant::Float(0.785398))),
+            .property(PropertyInfo::new(
+                "floor_max_angle",
+                Variant::Float(0.785398),
+            )),
     );
 
     register_class(
@@ -570,7 +563,10 @@ pub fn register_2d_classes() {
             ClassRegistration::new("CanvasItem")
                 .parent("Node")
                 .property(PropertyInfo::new("visible", Variant::Bool(true)))
-                .property(PropertyInfo::new("modulate", Variant::Color(gdcore::math::Color::WHITE)))
+                .property(PropertyInfo::new(
+                    "modulate",
+                    Variant::Color(gdcore::math::Color::WHITE),
+                ))
                 .property(PropertyInfo::new("z_index", Variant::Int(0))),
         );
     }
@@ -580,7 +576,10 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("Node2D")
                 .parent("CanvasItem")
-                .property(PropertyInfo::new("position", Variant::Vector2(Vector2::ZERO)))
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
                 .property(PropertyInfo::new("rotation", Variant::Float(0.0)))
                 .property(PropertyInfo::new("scale", Variant::Vector2(Vector2::ONE))),
         );
@@ -682,8 +681,14 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("CharacterBody2D")
                 .parent("PhysicsBody2D")
-                .property(PropertyInfo::new("velocity", Variant::Vector2(Vector2::ZERO)))
-                .property(PropertyInfo::new("floor_max_angle", Variant::Float(0.785398))),
+                .property(PropertyInfo::new(
+                    "velocity",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "floor_max_angle",
+                    Variant::Float(0.785398),
+                )),
         );
     }
     if !class_exists("Area2D") {

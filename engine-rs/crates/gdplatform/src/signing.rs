@@ -115,7 +115,11 @@ impl MacOsSigningConfig {
     }
 
     /// Builder: enables notarization.
-    pub fn with_notarization(mut self, apple_id: impl Into<String>, team_id: impl Into<String>) -> Self {
+    pub fn with_notarization(
+        mut self,
+        apple_id: impl Into<String>,
+        team_id: impl Into<String>,
+    ) -> Self {
         self.notarize = true;
         self.apple_id = Some(apple_id.into());
         self.team_id = Some(team_id.into());
@@ -437,7 +441,10 @@ mod tests {
     #[test]
     fn macos_config_validate_empty_identity() {
         let cfg = MacOsSigningConfig::new("");
-        assert!(matches!(cfg.validate(), Err(SigningError::IdentityNotFound(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(SigningError::IdentityNotFound(_))
+        ));
     }
 
     #[test]
@@ -445,7 +452,10 @@ mod tests {
         let mut cfg = MacOsSigningConfig::new("Test");
         cfg.notarize = true;
         cfg.team_id = Some("TEAM".into());
-        assert!(matches!(cfg.validate(), Err(SigningError::SigningFailed(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(SigningError::SigningFailed(_))
+        ));
     }
 
     #[test]
@@ -453,7 +463,10 @@ mod tests {
         let mut cfg = MacOsSigningConfig::new("Test");
         cfg.notarize = true;
         cfg.apple_id = Some("dev@test.com".into());
-        assert!(matches!(cfg.validate(), Err(SigningError::SigningFailed(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(SigningError::SigningFailed(_))
+        ));
     }
 
     #[test]
@@ -529,7 +542,10 @@ mod tests {
             timestamp_url: None,
             description: None,
         };
-        assert!(matches!(cfg.validate(), Err(SigningError::IdentityNotFound(_))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(SigningError::IdentityNotFound(_))
+        ));
     }
 
     #[test]
@@ -558,8 +574,7 @@ mod tests {
 
     #[test]
     fn windows_signtool_args_with_description() {
-        let cfg = WindowsSigningConfig::from_pfx("c.pfx", "pw")
-            .with_description("Test App");
+        let cfg = WindowsSigningConfig::from_pfx("c.pfx", "pw").with_description("Test App");
         let args = cfg.signtool_args(Path::new("app.exe"));
         assert!(args.contains(&"/d".to_string()));
         assert!(args.contains(&"Test App".to_string()));
@@ -567,8 +582,7 @@ mod tests {
 
     #[test]
     fn windows_signtool_args_with_thumbprint() {
-        let cfg = WindowsSigningConfig::from_pfx("c.pfx", "pw")
-            .with_thumbprint("AA11BB22");
+        let cfg = WindowsSigningConfig::from_pfx("c.pfx", "pw").with_thumbprint("AA11BB22");
         let args = cfg.signtool_args(Path::new("app.exe"));
         assert!(args.contains(&"/sha1".to_string()));
         assert!(args.contains(&"AA11BB22".to_string()));

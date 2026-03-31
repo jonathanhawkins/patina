@@ -16,8 +16,7 @@ fn repo_root() -> PathBuf {
 
 fn read_report() -> String {
     let path = repo_root().join("docs/3D_DEMO_PARITY_REPORT.md");
-    fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
 #[test]
@@ -123,7 +122,14 @@ fn report_cites_phase6_audit_and_has_three_tier_classification() {
         "report must have Deferred tier"
     );
     // Key measured families from the audit
-    for family in &["Node3D", "Camera3D", "RigidBody3D", "StaticBody3D", "OmniLight3D", "SpotLight3D"] {
+    for family in &[
+        "Node3D",
+        "Camera3D",
+        "RigidBody3D",
+        "StaticBody3D",
+        "OmniLight3D",
+        "SpotLight3D",
+    ] {
         assert!(
             report.contains(family),
             "report classification must include measured family {family}"

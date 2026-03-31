@@ -66,7 +66,10 @@ impl Shape3D {
                     max.y = max.y.max(p.y);
                     max.z = max.z.max(p.z);
                 }
-                Aabb::new(min, Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z))
+                Aabb::new(
+                    min,
+                    Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z),
+                )
             }
             Shape3D::ConcavePolygonShape { ref faces } => {
                 if faces.is_empty() {
@@ -82,7 +85,10 @@ impl Shape3D {
                     max.y = max.y.max(p.y);
                     max.z = max.z.max(p.z);
                 }
-                Aabb::new(min, Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z))
+                Aabb::new(
+                    min,
+                    Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z),
+                )
             }
             Shape3D::WorldBoundaryShape { .. } => {
                 // Infinite plane — return a very large AABB as a sentinel.
@@ -171,7 +177,10 @@ mod tests {
 
     #[test]
     fn capsule_aabb() {
-        let shape = Shape3D::CapsuleShape { radius: 1.0, height: 4.0 };
+        let shape = Shape3D::CapsuleShape {
+            radius: 1.0,
+            height: 4.0,
+        };
         let aabb = shape.bounding_aabb();
         assert_eq!(aabb.position, Vector3::new(-1.0, -2.0, -1.0));
         assert_eq!(aabb.size, Vector3::new(2.0, 4.0, 2.0));
@@ -207,13 +216,19 @@ mod tests {
 
     #[test]
     fn capsule_contains_center() {
-        let shape = Shape3D::CapsuleShape { radius: 1.0, height: 4.0 };
+        let shape = Shape3D::CapsuleShape {
+            radius: 1.0,
+            height: 4.0,
+        };
         assert!(shape.contains_point(Vector3::ZERO));
     }
 
     #[test]
     fn capsule_contains_top_cap() {
-        let shape = Shape3D::CapsuleShape { radius: 1.0, height: 4.0 };
+        let shape = Shape3D::CapsuleShape {
+            radius: 1.0,
+            height: 4.0,
+        };
         // Top hemisphere center at y=1.0 (half_height - radius = 2.0 - 1.0 = 1.0)
         assert!(shape.contains_point(Vector3::new(0.0, 1.5, 0.0)));
     }

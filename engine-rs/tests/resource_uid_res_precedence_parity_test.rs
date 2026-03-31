@@ -42,7 +42,6 @@ impl CountingLoader {
             count: AtomicUsize::new(0),
         }
     }
-
 }
 
 impl ResourceLoader for CountingLoader {
@@ -67,7 +66,6 @@ impl ResourceLoader for HeaderUidLoader {
         Ok(Arc::new(r))
     }
 }
-
 
 // ===========================================================================
 // 1. UID resolves to res:// before cache lookup (resolution precedence)
@@ -109,7 +107,9 @@ fn res_path_loads_without_uid_registration() {
 
     // UID for this path is not registered.
     assert!(
-        ul.uid_registry().lookup_path("res://standalone.tres").is_none(),
+        ul.uid_registry()
+            .lookup_path("res://standalone.tres")
+            .is_none(),
         "res:// load without header UID should not create a registry entry"
     );
 }
@@ -124,7 +124,11 @@ fn unregistered_uid_fails_without_cache_side_effect() {
 
     let result = ul.load("uid://nonexistent");
     assert!(result.is_err(), "unregistered UID must fail");
-    assert_eq!(ul.cache_len(), 0, "failed UID load must not create cache entry");
+    assert_eq!(
+        ul.cache_len(),
+        0,
+        "failed UID load must not create cache entry"
+    );
 }
 
 // ===========================================================================
@@ -169,7 +173,9 @@ fn uid_reregistration_evicts_old_path() {
 
     // Old path mapping is gone.
     assert!(
-        ul.uid_registry().lookup_path("res://old_location.tres").is_none(),
+        ul.uid_registry()
+            .lookup_path("res://old_location.tres")
+            .is_none(),
         "old path mapping must be evicted after UID re-registration"
     );
 
@@ -196,7 +202,10 @@ fn path_reregistration_evicts_old_uid() {
     let uid_b = parse_uid_string("uid://uid_beta");
 
     ul.register_uid_str("uid://uid_alpha", "res://shared.tres");
-    assert_eq!(ul.uid_registry().lookup_path("res://shared.tres"), Some(uid_a));
+    assert_eq!(
+        ul.uid_registry().lookup_path("res://shared.tres"),
+        Some(uid_a)
+    );
 
     // Register a different UID for the same path.
     ul.register_uid_str("uid://uid_beta", "res://shared.tres");
@@ -398,7 +407,10 @@ fn explicit_registration_governs_uid_resolution() {
 
     assert_eq!(a.path, "res://scenes/a.tscn");
     assert_eq!(b.path, "res://scenes/b.tscn");
-    assert!(!Arc::ptr_eq(&a, &b), "different UIDs must load different resources");
+    assert!(
+        !Arc::ptr_eq(&a, &b),
+        "different UIDs must load different resources"
+    );
 
     // Re-register uid://scene_a to point to B's path.
     ul.register_uid_str("uid://scene_a", "res://scenes/b.tscn");

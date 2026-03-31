@@ -140,5 +140,8 @@ fn mixed_visible_and_invisible() {
 
     let frame = renderer.render_frame(&vp);
     assert!(frame.pixels[0].g > 0.9, "green visible item should draw");
-    assert!(frame.pixels[0].r < 0.1, "red invisible item should not draw");
+    assert!(
+        frame.pixels[0].r < 0.1,
+        "red invisible item should not draw"
+    );
 }

@@ -190,7 +190,10 @@ fn classdb_registers_node3d_hierarchy() {
     register_class(
         ClassRegistration::new("Node3D")
             .parent("Node")
-            .property(PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO)))
+            .property(PropertyInfo::new(
+                "position",
+                Variant::Vector3(Vector3::ZERO),
+            ))
             .property(PropertyInfo::new(
                 "rotation",
                 Variant::Vector3(Vector3::ZERO),
@@ -225,7 +228,10 @@ fn classdb_registers_camera3d() {
     register_class(
         ClassRegistration::new("Node3D")
             .parent("Node")
-            .property(PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO))),
+            .property(PropertyInfo::new(
+                "position",
+                Variant::Vector3(Vector3::ZERO),
+            )),
     );
     register_class(
         ClassRegistration::new("Camera3D")
@@ -243,8 +249,14 @@ fn classdb_registers_camera3d() {
     assert!(class_exists("Camera3D"));
     assert!(is_parent_class("Camera3D", "Node3D"));
     // Verify properties exist (includes inherited).
-    assert!(class_has_property("Camera3D", "fov"), "Camera3D should have fov property");
-    assert!(class_has_property("Camera3D", "position"), "Camera3D should inherit position from Node3D");
+    assert!(
+        class_has_property("Camera3D", "fov"),
+        "Camera3D should have fov property"
+    );
+    assert!(
+        class_has_property("Camera3D", "position"),
+        "Camera3D should inherit position from Node3D"
+    );
     assert!(class_has_method("Camera3D", "make_current"));
 }
 
@@ -260,7 +272,10 @@ fn classdb_registers_rigidbody3d() {
     register_class(
         ClassRegistration::new("Node3D")
             .parent("Node")
-            .property(PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO))),
+            .property(PropertyInfo::new(
+                "position",
+                Variant::Vector3(Vector3::ZERO),
+            )),
     );
     register_class(
         ClassRegistration::new("RigidBody3D")
@@ -271,7 +286,10 @@ fn classdb_registers_rigidbody3d() {
                 "linear_velocity",
                 Variant::Vector3(Vector3::ZERO),
             ))
-            .property(PropertyInfo::new("angular_velocity", Variant::Vector3(Vector3::ZERO)))
+            .property(PropertyInfo::new(
+                "angular_velocity",
+                Variant::Vector3(Vector3::ZERO),
+            ))
             .method(MethodInfo::new("apply_force", 1))
             .method(MethodInfo::new("apply_impulse", 1)),
     );
@@ -279,8 +297,14 @@ fn classdb_registers_rigidbody3d() {
     assert!(class_exists("RigidBody3D"));
     assert!(is_parent_class("RigidBody3D", "Node3D"));
     // Verify properties exist (includes inherited).
-    assert!(class_has_property("RigidBody3D", "mass"), "RigidBody3D should have mass property");
-    assert!(class_has_property("RigidBody3D", "position"), "RigidBody3D should inherit position from Node3D");
+    assert!(
+        class_has_property("RigidBody3D", "mass"),
+        "RigidBody3D should have mass property"
+    );
+    assert!(
+        class_has_property("RigidBody3D", "position"),
+        "RigidBody3D should inherit position from Node3D"
+    );
     assert!(class_has_method("RigidBody3D", "apply_force"));
 }
 
@@ -297,7 +321,10 @@ fn classdb_instantiate_node3d_with_defaults() {
     register_class(
         ClassRegistration::new("Node3D")
             .parent("Node")
-            .property(PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO)))
+            .property(PropertyInfo::new(
+                "position",
+                Variant::Vector3(Vector3::ZERO),
+            ))
             .property(PropertyInfo::new("scale", Variant::Vector3(Vector3::ONE)))
             .property(PropertyInfo::new("visible", Variant::Bool(true))),
     );
@@ -325,9 +352,7 @@ fn transform3d_looking_at_produces_valid_basis() {
     let target = Vector3::ZERO;
     let up = Vector3::new(0.0, 1.0, 0.0);
 
-    let t = Transform3D::IDENTITY
-        .translated(eye)
-        .looking_at(target, up);
+    let t = Transform3D::IDENTITY.translated(eye).looking_at(target, up);
     // Origin should still be at eye position after looking_at.
     assert!((t.origin.x - eye.x).abs() < 1e-6);
     assert!((t.origin.y - eye.y).abs() < 1e-6);
@@ -431,8 +456,16 @@ fn gdserver2d_server3d_reexports_from_gdserver3d() {
 fn gdserver2d_mesh_reexports_from_gdserver3d() {
     let cube_a = gdserver3d::mesh::Mesh3D::cube(1.0);
     let cube_b = gdserver2d::Mesh3D::cube(1.0);
-    assert_eq!(cube_a.vertices.len(), cube_b.vertices.len(), "mesh vertex count must match");
-    assert_eq!(cube_a.indices.len(), cube_b.indices.len(), "mesh index count must match");
+    assert_eq!(
+        cube_a.vertices.len(),
+        cube_b.vertices.len(),
+        "mesh vertex count must match"
+    );
+    assert_eq!(
+        cube_a.indices.len(),
+        cube_b.indices.len(),
+        "mesh index count must match"
+    );
 }
 
 /// The gdserver3d crate is a workspace member and builds independently.

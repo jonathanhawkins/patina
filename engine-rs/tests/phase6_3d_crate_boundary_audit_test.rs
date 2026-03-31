@@ -263,10 +263,7 @@ fn audit_evidence_docs_exist() {
 
     for doc in &evidence_docs {
         let path = repo_root().join(doc);
-        assert!(
-            path.exists(),
-            "audit evidence doc must exist: {doc}"
-        );
+        assert!(path.exists(), "audit evidence doc must exist: {doc}");
     }
 }
 

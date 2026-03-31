@@ -134,9 +134,15 @@ pub fn test_box_box(
     };
 
     // Normal should point from A to B.
-    if diff.x < 0.0 && normal.x > 0.0 { normal.x = -1.0; }
-    if diff.y < 0.0 && normal.y > 0.0 { normal.y = -1.0; }
-    if diff.z < 0.0 && normal.z > 0.0 { normal.z = -1.0; }
+    if diff.x < 0.0 && normal.x > 0.0 {
+        normal.x = -1.0;
+    }
+    if diff.y < 0.0 && normal.y > 0.0 {
+        normal.y = -1.0;
+    }
+    if diff.z < 0.0 && normal.z > 0.0 {
+        normal.z = -1.0;
+    }
 
     CollisionResult3D {
         colliding: true,
@@ -183,12 +189,7 @@ mod tests {
 
     #[test]
     fn sphere_sphere_overlap() {
-        let result = test_sphere_sphere(
-            Vector3::ZERO,
-            1.0,
-            Vector3::new(1.5, 0.0, 0.0),
-            1.0,
-        );
+        let result = test_sphere_sphere(Vector3::ZERO, 1.0, Vector3::new(1.5, 0.0, 0.0), 1.0);
         assert!(result.colliding);
         assert!((result.depth - 0.5).abs() < 1e-5);
         assert!((result.normal.x - 1.0).abs() < 1e-5);
@@ -196,23 +197,13 @@ mod tests {
 
     #[test]
     fn sphere_sphere_no_overlap() {
-        let result = test_sphere_sphere(
-            Vector3::ZERO,
-            1.0,
-            Vector3::new(3.0, 0.0, 0.0),
-            1.0,
-        );
+        let result = test_sphere_sphere(Vector3::ZERO, 1.0, Vector3::new(3.0, 0.0, 0.0), 1.0);
         assert!(!result.colliding);
     }
 
     #[test]
     fn sphere_sphere_touching() {
-        let result = test_sphere_sphere(
-            Vector3::ZERO,
-            1.0,
-            Vector3::new(2.0, 0.0, 0.0),
-            1.0,
-        );
+        let result = test_sphere_sphere(Vector3::ZERO, 1.0, Vector3::new(2.0, 0.0, 0.0), 1.0);
         assert!(!result.colliding, "exactly touching should not collide");
     }
 
@@ -220,17 +211,16 @@ mod tests {
     fn test_collision_dispatch() {
         let a = Shape3D::Sphere { radius: 1.0 };
         let b = Shape3D::Sphere { radius: 1.0 };
-        let result = test_collision(
-            Vector3::ZERO, &a,
-            Vector3::new(1.0, 0.0, 0.0), &b,
-        );
+        let result = test_collision(Vector3::ZERO, &a, Vector3::new(1.0, 0.0, 0.0), &b);
         assert!(result.colliding);
     }
 
     #[test]
     fn box_sphere_overlap_at_center() {
         // Sphere centered inside box should collide.
-        let a = Shape3D::BoxShape { half_extents: Vector3::new(1.0, 1.0, 1.0) };
+        let a = Shape3D::BoxShape {
+            half_extents: Vector3::new(1.0, 1.0, 1.0),
+        };
         let b = Shape3D::Sphere { radius: 1.0 };
         let result = test_collision(Vector3::ZERO, &a, Vector3::ZERO, &b);
         assert!(result.colliding, "sphere inside box should collide");
@@ -239,24 +229,26 @@ mod tests {
 
     #[test]
     fn box_box_overlap() {
-        let a = Shape3D::BoxShape { half_extents: Vector3::new(1.0, 1.0, 1.0) };
-        let b = Shape3D::BoxShape { half_extents: Vector3::new(1.0, 1.0, 1.0) };
-        let result = test_collision(
-            Vector3::ZERO, &a,
-            Vector3::new(1.5, 0.0, 0.0), &b,
-        );
+        let a = Shape3D::BoxShape {
+            half_extents: Vector3::new(1.0, 1.0, 1.0),
+        };
+        let b = Shape3D::BoxShape {
+            half_extents: Vector3::new(1.0, 1.0, 1.0),
+        };
+        let result = test_collision(Vector3::ZERO, &a, Vector3::new(1.5, 0.0, 0.0), &b);
         assert!(result.colliding);
         assert!((result.depth - 0.5).abs() < 1e-5);
     }
 
     #[test]
     fn box_box_no_overlap() {
-        let a = Shape3D::BoxShape { half_extents: Vector3::new(1.0, 1.0, 1.0) };
-        let b = Shape3D::BoxShape { half_extents: Vector3::new(1.0, 1.0, 1.0) };
-        let result = test_collision(
-            Vector3::ZERO, &a,
-            Vector3::new(3.0, 0.0, 0.0), &b,
-        );
+        let a = Shape3D::BoxShape {
+            half_extents: Vector3::new(1.0, 1.0, 1.0),
+        };
+        let b = Shape3D::BoxShape {
+            half_extents: Vector3::new(1.0, 1.0, 1.0),
+        };
+        let result = test_collision(Vector3::ZERO, &a, Vector3::new(3.0, 0.0, 0.0), &b);
         assert!(!result.colliding);
     }
 

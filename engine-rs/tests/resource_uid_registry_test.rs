@@ -67,7 +67,10 @@ name = "NoUid"
 "#;
     let loader = TresLoader::new();
     let res = loader.parse_str(source, "res://test.tres").unwrap();
-    assert!(!res.uid.is_valid(), "resource without uid= should be invalid");
+    assert!(
+        !res.uid.is_valid(),
+        "resource without uid= should be invalid"
+    );
 }
 
 #[test]

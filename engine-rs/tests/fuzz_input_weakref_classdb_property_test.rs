@@ -107,7 +107,10 @@ fn setup_hierarchy(depth: usize) -> Vec<String> {
         register_class(
             ClassRegistration::new(&name)
                 .parent(parent)
-                .property(PropertyInfo::new(format!("prop_{i}"), Variant::Int(i as i64)))
+                .property(PropertyInfo::new(
+                    format!("prop_{i}"),
+                    Variant::Int(i as i64),
+                ))
                 .method(MethodInfo::new(format!("method_{i}"), i)),
         );
         names.push(name);
@@ -361,7 +364,13 @@ fn classdb_very_long_name() {
 #[test]
 fn classdb_special_characters_in_name() {
     let _g = setup_classdb();
-    let names = ["Node<T>", "my::class", "hello world", "foo/bar", "emoji\u{1F600}"];
+    let names = [
+        "Node<T>",
+        "my::class",
+        "hello world",
+        "foo/bar",
+        "emoji\u{1F600}",
+    ];
     for name in &names {
         clear_for_testing();
         let id = register_class(ClassRegistration::new(*name));

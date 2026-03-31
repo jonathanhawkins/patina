@@ -24,7 +24,10 @@ use gdeditor::editor_ui::EDITOR_HTML;
 
 #[test]
 fn editor_html_is_valid_document() {
-    assert!(EDITOR_HTML.contains("<!DOCTYPE html>"), "must be an HTML5 document");
+    assert!(
+        EDITOR_HTML.contains("<!DOCTYPE html>"),
+        "must be an HTML5 document"
+    );
     assert!(EDITOR_HTML.contains("<html"), "must have html element");
     assert!(EDITOR_HTML.contains("<head>"), "must have head element");
     assert!(EDITOR_HTML.contains("<body"), "must have body element");
@@ -116,8 +119,12 @@ fn menu_bar_has_core_menus() {
 #[test]
 fn menu_bar_scene_menu_has_actions() {
     let scene_actions = [
-        "scene-new", "scene-open", "scene-save", "scene-save-as",
-        "scene-close", "scene-quit",
+        "scene-new",
+        "scene-open",
+        "scene-save",
+        "scene-save-as",
+        "scene-close",
+        "scene-quit",
     ];
     for action in &scene_actions {
         assert!(
@@ -129,9 +136,7 @@ fn menu_bar_scene_menu_has_actions() {
 
 #[test]
 fn menu_bar_project_menu_has_actions() {
-    let project_actions = [
-        "project-settings", "project-export", "project-refresh",
-    ];
+    let project_actions = ["project-settings", "project-export", "project-refresh"];
     for action in &project_actions {
         assert!(
             EDITOR_HTML.contains(&format!("data-action=\"{action}\"")),
@@ -143,8 +148,12 @@ fn menu_bar_project_menu_has_actions() {
 #[test]
 fn menu_bar_debug_menu_has_actions() {
     let debug_actions = [
-        "debug-run", "debug-run-current", "debug-pause", "debug-stop",
-        "debug-step", "debug-break",
+        "debug-run",
+        "debug-run-current",
+        "debug-pause",
+        "debug-stop",
+        "debug-step",
+        "debug-break",
     ];
     for action in &debug_actions {
         assert!(
@@ -157,8 +166,11 @@ fn menu_bar_debug_menu_has_actions() {
 #[test]
 fn menu_bar_editor_menu_has_actions() {
     let editor_actions = [
-        "editor-settings", "editor-layout-save", "editor-layout-default",
-        "editor-toggle-fullscreen", "editor-toggle-console",
+        "editor-settings",
+        "editor-layout-save",
+        "editor-layout-default",
+        "editor-toggle-fullscreen",
+        "editor-toggle-console",
     ];
     for action in &editor_actions {
         assert!(
@@ -182,7 +194,9 @@ fn menu_bar_help_menu_has_actions() {
 #[test]
 fn menu_bar_has_keyboard_shortcuts() {
     // Key menu actions should display keyboard shortcuts
-    let shortcuts = ["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Q", "F5", "F6", "F7", "F8", "F11"];
+    let shortcuts = [
+        "Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Q", "F5", "F6", "F7", "F8", "F11",
+    ];
     for shortcut in &shortcuts {
         assert!(
             EDITOR_HTML.contains(shortcut),
@@ -226,20 +240,38 @@ fn menu_bar_has_handle_menu_action_js() {
 
 #[test]
 fn toolbar_has_node_management_buttons() {
-    assert!(EDITOR_HTML.contains("id=\"btn-add\""), "toolbar must have Add button");
-    assert!(EDITOR_HTML.contains("id=\"btn-delete\""), "toolbar must have Delete button");
+    assert!(
+        EDITOR_HTML.contains("id=\"btn-add\""),
+        "toolbar must have Add button"
+    );
+    assert!(
+        EDITOR_HTML.contains("id=\"btn-delete\""),
+        "toolbar must have Delete button"
+    );
 }
 
 #[test]
 fn toolbar_has_undo_redo() {
-    assert!(EDITOR_HTML.contains("id=\"btn-undo\""), "toolbar must have Undo button");
-    assert!(EDITOR_HTML.contains("id=\"btn-redo\""), "toolbar must have Redo button");
+    assert!(
+        EDITOR_HTML.contains("id=\"btn-undo\""),
+        "toolbar must have Undo button"
+    );
+    assert!(
+        EDITOR_HTML.contains("id=\"btn-redo\""),
+        "toolbar must have Redo button"
+    );
 }
 
 #[test]
 fn toolbar_has_save_load() {
-    assert!(EDITOR_HTML.contains("id=\"btn-save\""), "toolbar must have Save button");
-    assert!(EDITOR_HTML.contains("id=\"btn-load\""), "toolbar must have Load button");
+    assert!(
+        EDITOR_HTML.contains("id=\"btn-save\""),
+        "toolbar must have Save button"
+    );
+    assert!(
+        EDITOR_HTML.contains("id=\"btn-load\""),
+        "toolbar must have Load button"
+    );
 }
 
 #[test]
@@ -267,9 +299,18 @@ fn play_controls_exist() {
 
 #[test]
 fn play_buttons_have_keyboard_shortcut_titles() {
-    assert!(EDITOR_HTML.contains("title=\"Play (F5)\""), "Play button must show F5 shortcut");
-    assert!(EDITOR_HTML.contains("title=\"Pause (F7)\""), "Pause button must show F7 shortcut");
-    assert!(EDITOR_HTML.contains("title=\"Stop (F8)\""), "Stop button must show F8 shortcut");
+    assert!(
+        EDITOR_HTML.contains("title=\"Play (F5)\""),
+        "Play button must show F5 shortcut"
+    );
+    assert!(
+        EDITOR_HTML.contains("title=\"Pause (F7)\""),
+        "Pause button must show F7 shortcut"
+    );
+    assert!(
+        EDITOR_HTML.contains("title=\"Stop (F8)\""),
+        "Stop button must show F8 shortcut"
+    );
 }
 
 // ===========================================================================
@@ -306,7 +347,10 @@ fn inspector_has_node_dock_tab() {
 
 #[test]
 fn bottom_panel_exists() {
-    assert!(EDITOR_HTML.contains("id=\"bottom-panel\""), "must have bottom panel");
+    assert!(
+        EDITOR_HTML.contains("id=\"bottom-panel\""),
+        "must have bottom panel"
+    );
     assert!(
         EDITOR_HTML.contains("id=\"bottom-panel-header\""),
         "bottom panel must have header"
@@ -528,8 +572,15 @@ fn signal_connect_dialog_exists() {
 #[test]
 fn css_has_theme_variables() {
     let required_vars = [
-        "--bg", "--panel", "--border", "--text", "--text-dim", "--accent",
-        "--selected", "--hover", "--error",
+        "--bg",
+        "--panel",
+        "--border",
+        "--text",
+        "--text-dim",
+        "--accent",
+        "--selected",
+        "--hover",
+        "--error",
     ];
     for var in &required_vars {
         assert!(

@@ -4,10 +4,10 @@
 //! theme detection, overlay icons, and the headless windowing backend.
 
 use gdobject::class_db;
+use gdplatform::window::WindowConfig;
 use gdplatform::windows::{
     DpiAwarenessMode, TaskbarProgressState, WindowsDisplayInfo, WindowsPlatformLayer, WindowsTheme,
 };
-use gdplatform::window::WindowConfig;
 
 // ── ClassDB Registration ─────────────────────────────────────────────────────
 
@@ -44,24 +44,48 @@ fn classdb_has_display_properties() {
 #[test]
 fn classdb_has_taskbar_methods() {
     class_db::register_3d_classes();
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "set_taskbar_progress"));
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "flash_taskbar"));
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "set_overlay_icon"));
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "clear_overlay_icon"));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "set_taskbar_progress"
+    ));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "flash_taskbar"
+    ));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "set_overlay_icon"
+    ));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "clear_overlay_icon"
+    ));
 }
 
 #[test]
 fn classdb_has_dpi_methods() {
     class_db::register_3d_classes();
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "set_dpi_awareness"));
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "get_dpi_awareness"));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "set_dpi_awareness"
+    ));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "get_dpi_awareness"
+    ));
 }
 
 #[test]
 fn classdb_has_theme_and_foreground_methods() {
     class_db::register_3d_classes();
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "set_system_theme"));
-    assert!(class_db::class_has_method("WindowsPlatformLayer", "is_foreground"));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "set_system_theme"
+    ));
+    assert!(class_db::class_has_method(
+        "WindowsPlatformLayer",
+        "is_foreground"
+    ));
 }
 
 // ── DpiAwarenessMode ─────────────────────────────────────────────────────────
@@ -84,7 +108,10 @@ fn dpi_awareness_per_monitor_check() {
 
 #[test]
 fn dpi_awareness_recommended() {
-    assert_eq!(DpiAwarenessMode::recommended(), DpiAwarenessMode::PerMonitorV2);
+    assert_eq!(
+        DpiAwarenessMode::recommended(),
+        DpiAwarenessMode::PerMonitorV2
+    );
 }
 
 // ── TaskbarProgressState ─────────────────────────────────────────────────────

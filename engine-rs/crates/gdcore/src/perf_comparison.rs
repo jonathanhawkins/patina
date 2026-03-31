@@ -729,7 +729,10 @@ mod tests {
     fn overall_verdict_labels() {
         assert_eq!(OverallVerdict::PatinaWins.as_str(), "PATINA WINS");
         assert_eq!(OverallVerdict::Comparable.as_str(), "COMPARABLE");
-        assert_eq!(OverallVerdict::MostlyComparable.as_str(), "MOSTLY COMPARABLE");
+        assert_eq!(
+            OverallVerdict::MostlyComparable.as_str(),
+            "MOSTLY COMPARABLE"
+        );
         assert_eq!(OverallVerdict::NeedsWork.as_str(), "NEEDS WORK");
         assert_eq!(OverallVerdict::NoData.as_str(), "NO DATA");
     }

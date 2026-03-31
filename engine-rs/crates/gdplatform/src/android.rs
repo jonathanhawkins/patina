@@ -81,17 +81,11 @@ pub enum JniError {
     /// JNI environment not available (not running on Android).
     NotAvailable,
     /// Method not found on the Java class.
-    MethodNotFound {
-        class: String,
-        method: String,
-    },
+    MethodNotFound { class: String, method: String },
     /// Exception thrown by Java code.
     JavaException(String),
     /// Type mismatch in return value.
-    TypeMismatch {
-        expected: String,
-        got: String,
-    },
+    TypeMismatch { expected: String, got: String },
 }
 
 impl fmt::Display for JniError {
@@ -145,8 +139,7 @@ impl JniBridge {
 
     /// Register a stubbed return value for a class.method pair.
     pub fn stub_method(&mut self, class: &str, method: &str, value: JniValue) {
-        self.stubs
-            .insert(format!("{}.{}", class, method), value);
+        self.stubs.insert(format!("{}.{}", class, method), value);
     }
 
     /// Call a Java static method. Returns stubbed value or error.
@@ -373,11 +366,7 @@ impl AndroidPlatformLayer {
     }
 
     /// Set permission state (for testing denied/permanently denied flows).
-    pub fn set_permission_state(
-        &mut self,
-        permission: AndroidPermission,
-        state: PermissionState,
-    ) {
+    pub fn set_permission_state(&mut self, permission: AndroidPermission, state: PermissionState) {
         self.permissions.insert(permission, state);
     }
 
@@ -403,11 +392,9 @@ impl AndroidPlatformLayer {
 
     /// Get a system service by name via JNI (stub).
     pub fn get_system_service(&mut self, name: &str) -> Result<JniObjectRef, JniError> {
-        let result = self.jni.call_static(
-            "android/app/Activity",
-            "getSystemService",
-            &[name],
-        )?;
+        let result = self
+            .jni
+            .call_static("android/app/Activity", "getSystemService", &[name])?;
         match result {
             JniValue::Object(obj) => Ok(obj),
             other => Err(JniError::TypeMismatch {
@@ -495,7 +482,10 @@ mod tests {
 
     #[test]
     fn jni_error_display() {
-        assert_eq!(JniError::NotAvailable.to_string(), "JNI environment not available");
+        assert_eq!(
+            JniError::NotAvailable.to_string(),
+            "JNI environment not available"
+        );
         let err = JniError::MethodNotFound {
             class: "Foo".into(),
             method: "bar".into(),
@@ -571,8 +561,14 @@ mod tests {
 
     #[test]
     fn android_permission_display() {
-        assert_eq!(AndroidPermission::Camera.to_string(), "android.permission.CAMERA");
-        assert_eq!(AndroidPermission::Internet.to_string(), "android.permission.INTERNET");
+        assert_eq!(
+            AndroidPermission::Camera.to_string(),
+            "android.permission.CAMERA"
+        );
+        assert_eq!(
+            AndroidPermission::Internet.to_string(),
+            "android.permission.INTERNET"
+        );
         assert_eq!(
             AndroidPermission::Custom("com.foo.BAR".into()).to_string(),
             "com.foo.BAR"
@@ -591,7 +587,9 @@ mod tests {
     fn vibrate_stub() {
         let mut layer = AndroidPlatformLayer::new();
         layer.jni.attach();
-        layer.jni.stub_method("android/os/Vibrator", "vibrate", JniValue::Void);
+        layer
+            .jni
+            .stub_method("android/os/Vibrator", "vibrate", JniValue::Void);
         assert!(layer.vibrate(100).is_ok());
         assert_eq!(layer.jni.call_log().len(), 1);
     }
@@ -614,11 +612,9 @@ mod tests {
     fn get_system_service_type_mismatch() {
         let mut layer = AndroidPlatformLayer::new();
         layer.jni.attach();
-        layer.jni.stub_method(
-            "android/app/Activity",
-            "getSystemService",
-            JniValue::Int(0),
-        );
+        layer
+            .jni
+            .stub_method("android/app/Activity", "getSystemService", JniValue::Int(0));
         let result = layer.get_system_service("sensor");
         assert!(matches!(result, Err(JniError::TypeMismatch { .. })));
     }

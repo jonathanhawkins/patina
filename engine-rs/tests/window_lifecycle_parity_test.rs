@@ -8,9 +8,9 @@
 //! behavioral contract without requiring an actual OS window.
 
 use gdplatform::backend::{HeadlessPlatform, PlatformBackend};
+use gdplatform::input::InputState;
 use gdplatform::window::{HeadlessWindow, WindowConfig, WindowEvent, WindowManager};
 use gdplatform::DisplayServer;
-use gdplatform::input::InputState;
 
 // ---------------------------------------------------------------------------
 // Godot contract: Window starts with the configured size and title.
@@ -101,7 +101,10 @@ fn close_requested_triggers_quit() {
     backend.push_event(WindowEvent::CloseRequested);
     backend.poll_events();
 
-    assert!(backend.should_quit(), "CloseRequested must set the quit flag");
+    assert!(
+        backend.should_quit(),
+        "CloseRequested must set the quit flag"
+    );
 }
 
 // ---------------------------------------------------------------------------

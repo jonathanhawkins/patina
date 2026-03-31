@@ -72,11 +72,7 @@ impl TrackDescriptor {
 
     /// Converts this descriptor to a runtime `AnimationTrack`.
     pub fn to_animation_track(&self) -> AnimationTrack {
-        AnimationTrack::with_type(
-            &self.node_path,
-            &self.target_path,
-            self.track_type,
-        )
+        AnimationTrack::with_type(&self.node_path, &self.target_path, self.track_type)
     }
 
     /// Returns a display label for the track (e.g. `"Player:position"` or `"[Method] Player:play"`).
@@ -98,9 +94,7 @@ pub enum TrackCreationError {
     /// Target path (property/method/label) is empty.
     EmptyTargetPath,
     /// A track with the same node+property already exists.
-    DuplicateTrack {
-        existing_index: usize,
-    },
+    DuplicateTrack { existing_index: usize },
 }
 
 impl std::fmt::Display for TrackCreationError {
@@ -109,7 +103,11 @@ impl std::fmt::Display for TrackCreationError {
             Self::EmptyNodePath => write!(f, "node path cannot be empty"),
             Self::EmptyTargetPath => write!(f, "target path cannot be empty"),
             Self::DuplicateTrack { existing_index } => {
-                write!(f, "duplicate track already exists at index {}", existing_index)
+                write!(
+                    f,
+                    "duplicate track already exists at index {}",
+                    existing_index
+                )
             }
         }
     }
@@ -143,7 +141,7 @@ impl Default for Timeline {
         Self {
             playhead: 0.0,
             length: 1.0,
-            zoom: 100.0,       // 100 px per second
+            zoom: 100.0, // 100 px per second
             scroll_offset: 0.0,
             snap_enabled: true,
             snap_interval: 0.1, // 10 fps grid
@@ -594,7 +592,9 @@ impl AnimationEditor {
 
     /// Returns the track type for a track at the given index.
     pub fn track_type(&self, index: usize) -> Option<TrackType> {
-        self.track_states.get(index).map(|s| s.descriptor.track_type)
+        self.track_states
+            .get(index)
+            .map(|s| s.descriptor.track_type)
     }
 
     /// Returns all tracks of a given type.
@@ -617,7 +617,9 @@ impl AnimationEditor {
 
     /// Returns the display label for a track.
     pub fn track_label(&self, index: usize) -> Option<String> {
-        self.track_states.get(index).map(|s| s.descriptor.display_label())
+        self.track_states
+            .get(index)
+            .map(|s| s.descriptor.display_label())
     }
 
     /// Finds a track by node path and target path.
@@ -650,7 +652,8 @@ impl AnimationEditor {
             if kf.track_index < index {
                 self.selection.add(kf);
             } else if kf.track_index > index {
-                self.selection.add(KeyframeRef::new(kf.track_index - 1, kf.keyframe_index));
+                self.selection
+                    .add(KeyframeRef::new(kf.track_index - 1, kf.keyframe_index));
             }
             // kf.track_index == index: dropped
         }
@@ -674,7 +677,8 @@ impl AnimationEditor {
             } else {
                 kf.track_index
             };
-            self.selection.add(KeyframeRef::new(new_track, kf.keyframe_index));
+            self.selection
+                .add(KeyframeRef::new(new_track, kf.keyframe_index));
         }
         true
     }
@@ -728,11 +732,9 @@ impl AnimationEditor {
 
     /// Advances playback by dt seconds and updates the playhead.
     pub fn advance(&mut self, dt: f64) -> bool {
-        let (new_time, wrapped) = self.playback.advance(
-            self.timeline.playhead,
-            dt,
-            self.timeline.length,
-        );
+        let (new_time, wrapped) =
+            self.playback
+                .advance(self.timeline.playhead, dt, self.timeline.length);
         self.timeline.playhead = new_time;
         wrapped
     }
@@ -916,10 +918,7 @@ mod tests {
     #[test]
     fn keyframe_selection_range() {
         let mut sel = KeyframeSelection::new();
-        let times = vec![
-            vec![0.0, 0.5, 1.0, 1.5],
-            vec![0.3, 0.7, 1.2],
-        ];
+        let times = vec![vec![0.0, 0.5, 1.0, 1.5], vec![0.3, 0.7, 1.2]];
         let counts = vec![4, 3];
         sel.select_range(2, &counts, &times, 0.4, 1.1);
         // Track 0: kf 1 (0.5) and kf 2 (1.0) are in range
@@ -1100,7 +1099,7 @@ mod tests {
         editor.set_track_muted(0, false);
         editor.toggle_solo(1);
         assert!(!editor.is_track_audible(0)); // not soloed
-        assert!(editor.is_track_audible(1));   // soloed
+        assert!(editor.is_track_audible(1)); // soloed
         assert!(!editor.is_track_audible(2)); // not soloed
     }
 
@@ -1246,7 +1245,10 @@ mod tests {
         let mut editor = AnimationEditor::new(2.0, 0);
         editor.create_property_track("Player", "position").unwrap();
         let result = editor.create_property_track("Player", "position");
-        assert_eq!(result, Err(TrackCreationError::DuplicateTrack { existing_index: 0 }));
+        assert_eq!(
+            result,
+            Err(TrackCreationError::DuplicateTrack { existing_index: 0 })
+        );
     }
 
     #[test]
@@ -1280,7 +1282,10 @@ mod tests {
         editor.create_property_track("Player", "position").unwrap();
         editor.create_method_track("Player", "play").unwrap();
         assert_eq!(editor.track_label(0), Some("Player:position".to_string()));
-        assert_eq!(editor.track_label(1), Some("[Method] Player:play".to_string()));
+        assert_eq!(
+            editor.track_label(1),
+            Some("[Method] Player:play".to_string())
+        );
         assert_eq!(editor.track_label(99), None);
     }
 

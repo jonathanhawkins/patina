@@ -168,7 +168,10 @@ fn roundtrip_probe_mismatch_schema() {
     assert_eq!(data["mismatch_count"], 1);
 
     let props = data["properties"].as_array().unwrap();
-    let mismatch = props.iter().find(|p| !p["roundtrip_ok"].as_bool().unwrap()).unwrap();
+    let mismatch = props
+        .iter()
+        .find(|p| !p["roundtrip_ok"].as_bool().unwrap())
+        .unwrap();
     assert_eq!(mismatch["values_match"], false);
 }
 
@@ -239,9 +242,9 @@ fn roundtrip_probe_class_mismatch_error_schema() {
 #[test]
 fn tres_roundtrip_preserves_simple_properties() {
     use gdcore::ResourceUid;
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("TestResource");
@@ -271,9 +274,9 @@ fn tres_roundtrip_preserves_simple_properties() {
 #[test]
 fn tres_roundtrip_preserves_vector_and_color() {
     use gdcore::math::{Color, Vector2, Vector3};
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("SpatialResource");
@@ -305,9 +308,9 @@ fn tres_roundtrip_preserves_vector_and_color() {
 #[test]
 fn tres_roundtrip_preserves_uid() {
     use gdcore::ResourceUid;
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("UidResource");
@@ -331,15 +334,19 @@ fn tres_roundtrip_preserves_uid() {
     // Roundtrip again to verify stability: same saved string → same UID hash
     let saved2 = saver.save_to_string(&original).unwrap();
     let reloaded2 = loader.parse_str(&saved2, &original.path).unwrap();
-    assert_eq!(reloaded.uid.raw(), reloaded2.uid.raw(), "UID must be stable across reloads");
+    assert_eq!(
+        reloaded.uid.raw(),
+        reloaded2.uid.raw(),
+        "UID must be stable across reloads"
+    );
 }
 
 #[test]
 fn tres_roundtrip_preserves_subresources() {
     use gdcore::math::Color;
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("Theme");
@@ -373,9 +380,9 @@ fn tres_roundtrip_preserves_subresources() {
 
 #[test]
 fn tres_roundtrip_preserves_ext_resources() {
+    use gdresource::loader::TresLoader;
     use gdresource::resource::{ExtResource, Resource};
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("PackedScene");
@@ -418,9 +425,9 @@ fn tres_roundtrip_preserves_ext_resources() {
 
 #[test]
 fn tres_roundtrip_empty_resource() {
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
 
     let original = Resource::new("EmptyResource");
 
@@ -438,9 +445,9 @@ fn tres_roundtrip_empty_resource() {
 
 #[test]
 fn tres_roundtrip_string_escaping() {
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("StringResource");
@@ -466,9 +473,9 @@ fn tres_roundtrip_string_escaping() {
 
 #[test]
 fn tres_roundtrip_nil_property() {
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("NilResource");
@@ -481,10 +488,7 @@ fn tres_roundtrip_nil_property() {
     let loader = TresLoader::new();
     let reloaded = loader.parse_str(&saved, &original.path).unwrap();
 
-    assert_eq!(
-        reloaded.get_property("nothing"),
-        Some(&Variant::Nil)
-    );
+    assert_eq!(reloaded.get_property("nothing"), Some(&Variant::Nil));
 }
 
 // ===========================================================================
@@ -527,7 +531,11 @@ fn roundtrip_capture_type_registered() {
         "enum_constants",
         "inheritance_chain",
     ];
-    assert_eq!(capture_types.len(), 10, "should have 10 distinct probe capture types including roundtrip");
+    assert_eq!(
+        capture_types.len(),
+        10,
+        "should have 10 distinct probe capture types including roundtrip"
+    );
     assert!(capture_types.contains(&"resource_roundtrip"));
 }
 
@@ -538,9 +546,9 @@ fn roundtrip_capture_type_registered() {
 #[test]
 fn tres_multiple_roundtrips_stable() {
     use gdcore::math::Vector2;
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut resource = Resource::new("StableResource");
@@ -577,9 +585,9 @@ fn tres_multiple_roundtrips_stable() {
 
 #[test]
 fn tres_roundtrip_property_count_preserved() {
+    use gdresource::loader::TresLoader;
     use gdresource::resource::Resource;
     use gdresource::saver::TresSaver;
-    use gdresource::loader::TresLoader;
     use gdvariant::Variant;
 
     let mut original = Resource::new("CountResource");
@@ -635,12 +643,20 @@ fn roundtrip_property_comparison_fields_complete() {
         "types_match",
         "roundtrip_ok",
     ];
-    assert_eq!(required_fields.len(), 10, "roundtrip property comparison must have 10 fields");
+    assert_eq!(
+        required_fields.len(),
+        10,
+        "roundtrip property comparison must have 10 fields"
+    );
 
     let mut sorted = required_fields.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), required_fields.len(), "all field names must be unique");
+    assert_eq!(
+        sorted.len(),
+        required_fields.len(),
+        "all field names must be unique"
+    );
 }
 
 // ===========================================================================
@@ -649,10 +665,10 @@ fn roundtrip_property_comparison_fields_complete() {
 
 #[test]
 fn tres_roundtrip_style_box_fixture_from_disk() {
+    use gdcore::math::Color;
     use gdresource::loader::TresLoader;
     use gdresource::saver::TresSaver;
     use gdvariant::Variant;
-    use gdcore::math::Color;
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -671,7 +687,9 @@ fn tres_roundtrip_style_box_fixture_from_disk() {
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&original).unwrap();
 
-    let reloaded = loader.parse_str(&saved, "res://fixtures/test_style_box.tres").unwrap();
+    let reloaded = loader
+        .parse_str(&saved, "res://fixtures/test_style_box.tres")
+        .unwrap();
     assert_eq!(reloaded.class_name, "StyleBoxFlat");
     assert_eq!(reloaded.property_count(), orig_count);
     assert_eq!(
@@ -709,7 +727,9 @@ fn tres_roundtrip_animation_fixture_from_disk() {
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&original).unwrap();
 
-    let reloaded = loader.parse_str(&saved, "res://fixtures/test_animation.tres").unwrap();
+    let reloaded = loader
+        .parse_str(&saved, "res://fixtures/test_animation.tres")
+        .unwrap();
     assert_eq!(reloaded.class_name, "Animation");
     assert_eq!(
         reloaded.get_property("resource_name"),
@@ -752,7 +772,9 @@ fn tres_roundtrip_ext_resources_fixture_from_disk() {
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&original).unwrap();
 
-    let reloaded = loader.parse_str(&saved, "res://fixtures/with_ext_refs.tres").unwrap();
+    let reloaded = loader
+        .parse_str(&saved, "res://fixtures/with_ext_refs.tres")
+        .unwrap();
     assert_eq!(reloaded.class_name, "PackedScene");
     assert_eq!(reloaded.ext_resources.len(), original.ext_resources.len());
     assert_eq!(reloaded.subresources.len(), original.subresources.len());
@@ -777,5 +799,9 @@ fn roundtrip_fixture_set_includes_ext_refs() {
         ("res://fixtures/test_animation.tres", "Animation"),
         ("res://fixtures/with_ext_refs.tres", "PackedScene"),
     ];
-    assert_eq!(fixtures.len(), 6, "should have 6 roundtrip fixtures including ext_refs");
+    assert_eq!(
+        fixtures.len(),
+        6,
+        "should have 6 roundtrip fixtures including ext_refs"
+    );
 }

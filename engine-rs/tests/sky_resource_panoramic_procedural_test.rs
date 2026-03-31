@@ -44,8 +44,7 @@ fn procedural_sky_from_properties_custom_colors() {
         ("sky_curve", Variant::Float(0.25)),
         ("sun_angle_max", Variant::Float(45.0)),
     ];
-    let mat =
-        ProceduralSkyMaterial::from_properties(props.iter().map(|(k, v)| (*k, v)));
+    let mat = ProceduralSkyMaterial::from_properties(props.iter().map(|(k, v)| (*k, v)));
     assert_eq!(mat.sky_top_color, top);
     assert_eq!(mat.sky_horizon_color, horizon);
     assert!((mat.sky_curve - 0.25).abs() < 1e-5);
@@ -101,8 +100,7 @@ fn panoramic_sky_from_properties() {
         ("filter", Variant::Bool(false)),
         ("energy_multiplier", Variant::Float(1.5)),
     ];
-    let mat =
-        PanoramicSkyMaterial::from_properties(props.iter().map(|(k, v)| (*k, v)));
+    let mat = PanoramicSkyMaterial::from_properties(props.iter().map(|(k, v)| (*k, v)));
     assert_eq!(mat.panorama_path, "res://sky.hdr");
     assert!(!mat.filter);
     assert!((mat.energy_multiplier - 1.5).abs() < 1e-5);
@@ -145,8 +143,7 @@ fn physical_sky_from_properties() {
         ("turbidity", Variant::Float(5.0)),
         ("mie_eccentricity", Variant::Float(0.9)),
     ];
-    let mat =
-        PhysicalSkyMaterial::from_properties(props.iter().map(|(k, v)| (*k, v)));
+    let mat = PhysicalSkyMaterial::from_properties(props.iter().map(|(k, v)| (*k, v)));
     assert!((mat.rayleigh_coefficient - 3.0).abs() < 1e-5);
     assert!((mat.turbidity - 5.0).abs() < 1e-5);
     assert!((mat.mie_eccentricity - 0.9).abs() < 1e-5);
@@ -162,8 +159,7 @@ fn physical_sky_properties_roundtrip() {
         ..Default::default()
     };
     let props = mat.to_properties();
-    let restored =
-        PhysicalSkyMaterial::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+    let restored = PhysicalSkyMaterial::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
     assert!((restored.rayleigh_coefficient - 1.5).abs() < 1e-5);
     assert!((restored.turbidity - 8.0).abs() < 1e-5);
 }
@@ -279,8 +275,14 @@ fn sky_process_mode_all_variants_roundtrip() {
 
 #[test]
 fn sky_process_mode_unknown_defaults() {
-    assert_eq!(SkyProcessMode::from_godot_int(99), SkyProcessMode::Automatic);
-    assert_eq!(SkyProcessMode::from_godot_int(-1), SkyProcessMode::Automatic);
+    assert_eq!(
+        SkyProcessMode::from_godot_int(99),
+        SkyProcessMode::Automatic
+    );
+    assert_eq!(
+        SkyProcessMode::from_godot_int(-1),
+        SkyProcessMode::Automatic
+    );
 }
 
 // ---------------------------------------------------------------------------

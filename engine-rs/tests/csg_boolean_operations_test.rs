@@ -10,7 +10,7 @@
 //! 7. Winding order inversion for subtraction interior surfaces
 
 use gdcore::math::Vector3;
-use gdserver3d::csg::{CSGBox3D, CSGCombiner3D, CSGOperation, CSGSphere3D, CSGCylinder3D};
+use gdserver3d::csg::{CSGBox3D, CSGCombiner3D, CSGCylinder3D, CSGOperation, CSGSphere3D};
 use gdserver3d::mesh::Mesh3D;
 
 // ── CSGOperation enum ───────────────────────────────────────────────
@@ -83,7 +83,10 @@ fn intersection_overlapping_boxes_produces_triangles() {
     let result = CSGCombiner3D::combine_intersection(&mesh_a, &mesh_b);
 
     // Identical overlapping boxes: all triangles should be inside each other's AABB
-    assert!(!result.vertices.is_empty(), "Intersection of overlapping boxes should produce geometry");
+    assert!(
+        !result.vertices.is_empty(),
+        "Intersection of overlapping boxes should produce geometry"
+    );
     assert!(!result.indices.is_empty());
 }
 
@@ -100,7 +103,10 @@ fn intersection_non_overlapping_produces_empty() {
     let mesh_b = box_b.to_mesh();
 
     let result = CSGCombiner3D::combine_intersection(&mesh_a, &mesh_b);
-    assert!(result.vertices.is_empty(), "Non-overlapping should produce empty intersection");
+    assert!(
+        result.vertices.is_empty(),
+        "Non-overlapping should produce empty intersection"
+    );
 }
 
 #[test]
@@ -213,10 +219,7 @@ fn combine_dispatches_union() {
     let b = CSGBox3D::new(Vector3::new(1.0, 1.0, 1.0)).to_mesh();
 
     let result = CSGCombiner3D::combine(&a, &b, CSGOperation::Union);
-    assert_eq!(
-        result.vertices.len(),
-        a.vertices.len() + b.vertices.len()
-    );
+    assert_eq!(result.vertices.len(), a.vertices.len() + b.vertices.len());
 }
 
 #[test]

@@ -50,14 +50,16 @@ fn variant_add_string_concatenation() {
 #[test]
 fn variant_add_vector2() {
     use gdcore::math::Vector2;
-    let result = Variant::Vector2(Vector2::new(1.0, 2.0)) + Variant::Vector2(Vector2::new(3.0, 4.0));
+    let result =
+        Variant::Vector2(Vector2::new(1.0, 2.0)) + Variant::Vector2(Vector2::new(3.0, 4.0));
     assert_eq!(result, Variant::Vector2(Vector2::new(4.0, 6.0)));
 }
 
 #[test]
 fn variant_add_vector3() {
     use gdcore::math::Vector3;
-    let result = Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)) + Variant::Vector3(Vector3::new(4.0, 5.0, 6.0));
+    let result = Variant::Vector3(Vector3::new(1.0, 2.0, 3.0))
+        + Variant::Vector3(Vector3::new(4.0, 5.0, 6.0));
     assert_eq!(result, Variant::Vector3(Vector3::new(5.0, 7.0, 9.0)));
 }
 
@@ -78,7 +80,10 @@ fn variant_sub_int_int() {
 
 #[test]
 fn variant_sub_float_float() {
-    assert_eq!(Variant::Float(5.5) - Variant::Float(2.5), Variant::Float(3.0));
+    assert_eq!(
+        Variant::Float(5.5) - Variant::Float(2.5),
+        Variant::Float(3.0)
+    );
 }
 
 #[test]
@@ -97,7 +102,10 @@ fn variant_mul_int_int() {
 
 #[test]
 fn variant_mul_float_float() {
-    assert_eq!(Variant::Float(3.0) * Variant::Float(2.0), Variant::Float(6.0));
+    assert_eq!(
+        Variant::Float(3.0) * Variant::Float(2.0),
+        Variant::Float(6.0)
+    );
 }
 
 #[test]
@@ -130,7 +138,10 @@ fn variant_div_int_int() {
 
 #[test]
 fn variant_div_float_float() {
-    assert_eq!(Variant::Float(10.0) / Variant::Float(4.0), Variant::Float(2.5));
+    assert_eq!(
+        Variant::Float(10.0) / Variant::Float(4.0),
+        Variant::Float(2.5)
+    );
 }
 
 #[test]
@@ -184,7 +195,10 @@ fn variant_neg_float() {
 #[test]
 fn variant_neg_vector2() {
     use gdcore::math::Vector2;
-    assert_eq!(-Variant::Vector2(Vector2::new(1.0, -2.0)), Variant::Vector2(Vector2::new(-1.0, 2.0)));
+    assert_eq!(
+        -Variant::Vector2(Vector2::new(1.0, -2.0)),
+        Variant::Vector2(Vector2::new(-1.0, 2.0))
+    );
 }
 
 #[test]
@@ -225,8 +239,12 @@ fn variant_cmp_string_lexicographic() {
 
 #[test]
 fn variant_cmp_incompatible_is_none() {
-    assert!(Variant::Int(1).partial_cmp(&Variant::String("x".into())).is_none());
-    assert!(Variant::String("x".into()).partial_cmp(&Variant::Bool(true)).is_none());
+    assert!(Variant::Int(1)
+        .partial_cmp(&Variant::String("x".into()))
+        .is_none());
+    assert!(Variant::String("x".into())
+        .partial_cmp(&Variant::Bool(true))
+        .is_none());
 }
 
 // ===========================================================================
@@ -306,9 +324,9 @@ fn variant_to_string_lossy() {
 #[test]
 fn variant_expression_workflow() {
     // Simulates: var result = (10 + 5) * 2 - 3
-    let a = Variant::Int(10) + Variant::Int(5);  // 15
-    let b = a * Variant::Int(2);                  // 30
-    let result = b - Variant::Int(3);             // 27
+    let a = Variant::Int(10) + Variant::Int(5); // 15
+    let b = a * Variant::Int(2); // 30
+    let result = b - Variant::Int(3); // 27
     assert_eq!(result, Variant::Int(27));
     assert_eq!(result.to_float(), 27.0);
     assert!(result.to_bool());

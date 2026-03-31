@@ -300,10 +300,7 @@ impl SignalConnectionDialog {
     /// Filters available methods to those compatible with the selected signal's
     /// argument count.
     pub fn compatible_methods(&self) -> Vec<&MethodEntry> {
-        let arg_count = self
-            .selected_signal()
-            .map(|s| s.arg_count)
-            .unwrap_or(0);
+        let arg_count = self.selected_signal().map(|s| s.arg_count).unwrap_or(0);
 
         self.available_methods
             .iter()
@@ -420,7 +417,10 @@ impl SignalConnectionDialog {
         self.source_node.is_some()
             && self.selected_signal.is_some()
             && self.target_node.is_some()
-            && self.selected_method.as_ref().map_or(false, |m| !m.is_empty())
+            && self
+                .selected_method
+                .as_ref()
+                .map_or(false, |m| !m.is_empty())
     }
 }
 

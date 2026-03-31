@@ -24,7 +24,10 @@ fn repo_root() -> PathBuf {
 #[test]
 fn compat_matrix_references_461() {
     let content = fs::read_to_string(repo_root().join("COMPAT_MATRIX.md")).unwrap();
-    assert!(content.contains("4.6.1"), "COMPAT_MATRIX.md must reference 4.6.1");
+    assert!(
+        content.contains("4.6.1"),
+        "COMPAT_MATRIX.md must reference 4.6.1"
+    );
     assert!(
         content.contains("18 scenes") || content.contains("18 oracle"),
         "COMPAT_MATRIX.md must show current expanded parity metrics (18 oracle scenes)"
@@ -34,7 +37,10 @@ fn compat_matrix_references_461() {
 #[test]
 fn compat_dashboard_references_461() {
     let content = fs::read_to_string(repo_root().join("COMPAT_DASHBOARD.md")).unwrap();
-    assert!(content.contains("4.6.1"), "COMPAT_DASHBOARD.md must reference 4.6.1");
+    assert!(
+        content.contains("4.6.1"),
+        "COMPAT_DASHBOARD.md must reference 4.6.1"
+    );
     assert!(
         content.contains("100.0%"),
         "COMPAT_DASHBOARD.md must show current 100% parity"
@@ -57,7 +63,10 @@ fn migration_guide_references_461() {
 #[test]
 fn repin_report_references_461() {
     let content = fs::read_to_string(repo_root().join("REPIN_REPORT.md")).unwrap();
-    assert!(content.contains("4.6.1"), "REPIN_REPORT.md must reference 4.6.1");
+    assert!(
+        content.contains("4.6.1"),
+        "REPIN_REPORT.md must reference 4.6.1"
+    );
     assert!(
         content.contains("81.4%") || content.contains("180/221"),
         "REPIN_REPORT.md must show expanded corpus parity metrics"
@@ -74,7 +83,9 @@ fn compat_matrix_labels_451_as_historical() {
     if content.contains("4.5.1") {
         // Every mention of 4.5.1 should be near "historical" or "pre-repin"
         assert!(
-            content.contains("Historical") || content.contains("historical") || content.contains("pre-repin"),
+            content.contains("Historical")
+                || content.contains("historical")
+                || content.contains("pre-repin"),
             "COMPAT_MATRIX.md mentions 4.5.1 but does not label it as historical"
         );
     }
@@ -85,7 +96,9 @@ fn compat_dashboard_labels_451_as_historical() {
     let content = fs::read_to_string(repo_root().join("COMPAT_DASHBOARD.md")).unwrap();
     if content.contains("4.5.1") {
         assert!(
-            content.contains("Historical") || content.contains("historical") || content.contains("pre-repin"),
+            content.contains("Historical")
+                || content.contains("historical")
+                || content.contains("pre-repin"),
             "COMPAT_DASHBOARD.md mentions 4.5.1 but does not label it as historical"
         );
     }
@@ -96,7 +109,9 @@ fn migration_guide_labels_451_as_historical() {
     let content = fs::read_to_string(repo_root().join("docs/migration-guide.md")).unwrap();
     if content.contains("4.5.1") {
         assert!(
-            content.contains("Historical") || content.contains("historical") || content.contains("Prior to"),
+            content.contains("Historical")
+                || content.contains("historical")
+                || content.contains("Prior to"),
             "migration-guide.md mentions 4.5.1 but does not label it as historical"
         );
     }
@@ -177,11 +192,7 @@ fn compat_dashboard_3d_runtime_not_deferred() {
 #[test]
 fn all_compat_docs_agree_on_oracle_pin() {
     let pin_commit = "14d19694e";
-    let docs = &[
-        "COMPAT_MATRIX.md",
-        "COMPAT_DASHBOARD.md",
-        "REPIN_REPORT.md",
-    ];
+    let docs = &["COMPAT_MATRIX.md", "COMPAT_DASHBOARD.md", "REPIN_REPORT.md"];
     for doc in docs {
         let content = fs::read_to_string(repo_root().join(doc)).unwrap();
         assert!(
@@ -194,8 +205,14 @@ fn all_compat_docs_agree_on_oracle_pin() {
 #[test]
 fn repin_diff_report_has_both_versions() {
     let content = fs::read_to_string(repo_root().join("prd/GODOT_4_6_1_REPIN_DIFF.md")).unwrap();
-    assert!(content.contains("4.5.1"), "repin diff must reference old version 4.5.1");
-    assert!(content.contains("4.6.1"), "repin diff must reference new version 4.6.1");
+    assert!(
+        content.contains("4.5.1"),
+        "repin diff must reference old version 4.5.1"
+    );
+    assert!(
+        content.contains("4.6.1"),
+        "repin diff must reference new version 4.6.1"
+    );
     assert!(
         content.contains("Improved") && content.contains("Regressed"),
         "repin diff must separate improvements from regressions"

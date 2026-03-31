@@ -354,7 +354,10 @@ fn active_filter_base_only() {
     let _g = setup();
     let mut d = CreateNodeDialog::new();
     d.set_base_class(Some("Node".to_string()));
-    assert_eq!(d.active_filter(), ClassFilter::InheritsFrom("Node".to_string()));
+    assert_eq!(
+        d.active_filter(),
+        ClassFilter::InheritsFrom("Node".to_string())
+    );
 }
 
 #[test]
@@ -480,7 +483,10 @@ fn editor_state_dialog_favorites_appear_first_in_results() {
             saw_non_favorite = true;
         }
         if saw_non_favorite && c.is_favorite {
-            panic!("Favorite {} appeared after non-favorite classes", c.class_name);
+            panic!(
+                "Favorite {} appeared after non-favorite classes",
+                c.class_name
+            );
         }
     }
 }

@@ -21,7 +21,11 @@ fn parse_script(source: &str) -> Vec<Stmt> {
 }
 
 fn fixture_path(name: &str) -> String {
-    format!("{}/../fixtures/scripts/{}", env!("CARGO_MANIFEST_DIR"), name)
+    format!(
+        "{}/../fixtures/scripts/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        name
+    )
 }
 
 fn load_fixture(name: &str) -> String {
@@ -44,21 +48,30 @@ fn ck1_player_gd_parses() {
 fn ck1_test_variables_gd_parses() {
     let source = load_fixture("test_variables.gd");
     let stmts = parse_script(&source);
-    assert!(!stmts.is_empty(), "test_variables.gd should produce statements");
+    assert!(
+        !stmts.is_empty(),
+        "test_variables.gd should produce statements"
+    );
 }
 
 #[test]
 fn ck1_enemy_spawner_gd_parses() {
     let source = load_fixture("enemy_spawner.gd");
     let stmts = parse_script(&source);
-    assert!(!stmts.is_empty(), "enemy_spawner.gd should produce statements");
+    assert!(
+        !stmts.is_empty(),
+        "enemy_spawner.gd should produce statements"
+    );
 }
 
 #[test]
 fn ck1_test_movement_gd_parses() {
     let source = load_fixture("test_movement.gd");
     let stmts = parse_script(&source);
-    assert!(!stmts.is_empty(), "test_movement.gd should produce statements");
+    assert!(
+        !stmts.is_empty(),
+        "test_movement.gd should produce statements"
+    );
 }
 
 // ===========================================================================
@@ -301,5 +314,8 @@ fn ck1_all_fixture_scripts_parse() {
             }
         }
     }
-    assert!(count >= 3, "should have parsed at least 3 fixture scripts, got {count}");
+    assert!(
+        count >= 3,
+        "should have parsed at least 3 fixture scripts, got {count}"
+    );
 }

@@ -87,7 +87,8 @@ fn arb_leaf_variant() -> impl Strategy<Value = Variant> {
         any::<i64>().prop_map(Variant::Int),
         finite_f64().prop_map(Variant::Float),
         ".*".prop_map(|s: String| Variant::String(s)),
-        "[a-zA-Z_][a-zA-Z0-9_]{0,20}".prop_map(|s: String| Variant::StringName(StringName::new(&s))),
+        "[a-zA-Z_][a-zA-Z0-9_]{0,20}"
+            .prop_map(|s: String| Variant::StringName(StringName::new(&s))),
         "/[a-zA-Z_/]{0,30}".prop_map(|s: String| Variant::NodePath(NodePath::new(&s))),
         arb_vec2().prop_map(Variant::Vector2),
         arb_vec3().prop_map(Variant::Vector3),
@@ -168,16 +169,12 @@ fn variant_approx_eq(a: &Variant, b: &Variant) -> bool {
                 && f32_approx_eq(a.b, b.b)
                 && f32_approx_eq(a.a, b.a)
         }
-        (Variant::Basis(a), Variant::Basis(b)) => {
-            [a.x, a.y, a.z]
-                .iter()
-                .zip([b.x, b.y, b.z].iter())
-                .all(|(va, vb)| {
-                    f32_approx_eq(va.x, vb.x)
-                        && f32_approx_eq(va.y, vb.y)
-                        && f32_approx_eq(va.z, vb.z)
-                })
-        }
+        (Variant::Basis(a), Variant::Basis(b)) => [a.x, a.y, a.z]
+            .iter()
+            .zip([b.x, b.y, b.z].iter())
+            .all(|(va, vb)| {
+                f32_approx_eq(va.x, vb.x) && f32_approx_eq(va.y, vb.y) && f32_approx_eq(va.z, vb.z)
+            }),
         (Variant::Transform3D(a), Variant::Transform3D(b)) => {
             variant_approx_eq(&Variant::Basis(a.basis), &Variant::Basis(b.basis))
                 && f32_approx_eq(a.origin.x, b.origin.x)
@@ -206,16 +203,12 @@ fn variant_approx_eq(a: &Variant, b: &Variant) -> bool {
         }
         (Variant::ObjectId(a), Variant::ObjectId(b)) => a.raw() == b.raw(),
         (Variant::Array(a), Variant::Array(b)) => {
-            a.len() == b.len()
-                && a.iter().zip(b.iter()).all(|(x, y)| variant_approx_eq(x, y))
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| variant_approx_eq(x, y))
         }
         (Variant::Dictionary(a), Variant::Dictionary(b)) => {
             a.len() == b.len()
-                && a.iter().all(|(k, v)| {
-                    b.get(k)
-                        .map(|bv| variant_approx_eq(v, bv))
-                        .unwrap_or(false)
-                })
+                && a.iter()
+                    .all(|(k, v)| b.get(k).map(|bv| variant_approx_eq(v, bv)).unwrap_or(false))
         }
         _ => false,
     }

@@ -11,12 +11,12 @@
 //! 5. Export configs can be created for all desktop targets
 //! 6. Architecture detection is correct for the current host
 
+use gdplatform::export::ExportConfig;
 use gdplatform::os::{current_platform, OsInfo, Platform};
 use gdplatform::platform_targets::{
     ci_tested_targets, current_target, supports_capability, targets_for_platform,
     validate_current_target, Architecture, PlatformCapability, DESKTOP_TARGETS,
 };
-use gdplatform::export::ExportConfig;
 
 // ===========================================================================
 // 1. Target registry completeness
@@ -27,14 +27,23 @@ fn registry_covers_three_desktop_oses() {
     let platforms: Vec<Platform> = DESKTOP_TARGETS.iter().map(|t| t.platform).collect();
     assert!(platforms.contains(&Platform::Linux), "must include Linux");
     assert!(platforms.contains(&Platform::MacOS), "must include macOS");
-    assert!(platforms.contains(&Platform::Windows), "must include Windows");
+    assert!(
+        platforms.contains(&Platform::Windows),
+        "must include Windows"
+    );
 }
 
 #[test]
 fn registry_covers_both_major_architectures() {
     let arches: Vec<Architecture> = DESKTOP_TARGETS.iter().map(|t| t.arch).collect();
-    assert!(arches.contains(&Architecture::X86_64), "must include x86_64");
-    assert!(arches.contains(&Architecture::Aarch64), "must include aarch64");
+    assert!(
+        arches.contains(&Architecture::X86_64),
+        "must include x86_64"
+    );
+    assert!(
+        arches.contains(&Architecture::Aarch64),
+        "must include aarch64"
+    );
 }
 
 #[test]
@@ -51,8 +60,7 @@ fn all_triples_contain_architecture() {
     for target in DESKTOP_TARGETS {
         let arch_str = target.arch.triple_component();
         assert!(
-            target.rust_triple.starts_with(arch_str)
-                || target.rust_triple.contains(arch_str),
+            target.rust_triple.starts_with(arch_str) || target.rust_triple.contains(arch_str),
             "triple '{}' must contain architecture component '{}'",
             target.rust_triple,
             arch_str
@@ -140,9 +148,18 @@ fn ci_tested_includes_at_least_three_targets() {
 fn ci_tested_covers_all_three_desktop_oses() {
     let ci = ci_tested_targets();
     let ci_platforms: Vec<Platform> = ci.iter().map(|t| t.platform).collect();
-    assert!(ci_platforms.contains(&Platform::Linux), "CI must test Linux");
-    assert!(ci_platforms.contains(&Platform::MacOS), "CI must test macOS");
-    assert!(ci_platforms.contains(&Platform::Windows), "CI must test Windows");
+    assert!(
+        ci_platforms.contains(&Platform::Linux),
+        "CI must test Linux"
+    );
+    assert!(
+        ci_platforms.contains(&Platform::MacOS),
+        "CI must test macOS"
+    );
+    assert!(
+        ci_platforms.contains(&Platform::Windows),
+        "CI must test Windows"
+    );
 }
 
 #[test]
@@ -300,7 +317,10 @@ fn web_targets_are_wasm() {
 #[test]
 fn unknown_platform_has_no_targets() {
     let unknown = targets_for_platform(Platform::Unknown);
-    assert!(unknown.is_empty(), "Unknown platform should have no targets");
+    assert!(
+        unknown.is_empty(),
+        "Unknown platform should have no targets"
+    );
 }
 
 // ===========================================================================
@@ -359,12 +379,9 @@ fn min_rust_version_is_at_least_1_75() {
 /// platforms marked `ci_tested: true` in DESKTOP_TARGETS.
 #[test]
 fn ci_workflow_matrix_covers_all_ci_tested_platforms() {
-    let ci_yml_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
-    let ci_yml = std::fs::read_to_string(ci_yml_path)
-        .expect("should read .github/workflows/ci.yml");
+    let ci_yml_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
+    let ci_yml =
+        std::fs::read_to_string(ci_yml_path).expect("should read .github/workflows/ci.yml");
 
     // Map platform → expected GitHub Actions runner substring.
     let platform_to_runner: Vec<(Platform, &str)> = vec![
@@ -392,12 +409,9 @@ fn ci_workflow_matrix_covers_all_ci_tested_platforms() {
 /// Validates that the CI matrix uses at least 3 OS runners (Linux, macOS, Windows).
 #[test]
 fn ci_workflow_has_three_os_matrix() {
-    let ci_yml_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
-    let ci_yml = std::fs::read_to_string(ci_yml_path)
-        .expect("should read .github/workflows/ci.yml");
+    let ci_yml_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
+    let ci_yml =
+        std::fs::read_to_string(ci_yml_path).expect("should read .github/workflows/ci.yml");
 
     assert!(ci_yml.contains("ubuntu-latest"), "CI must test on Ubuntu");
     assert!(ci_yml.contains("macos-latest"), "CI must test on macOS");
@@ -407,12 +421,9 @@ fn ci_workflow_has_three_os_matrix() {
 /// Validates there are no platforms marked ci_tested that lack a runner.
 #[test]
 fn no_ci_tested_platform_without_runner() {
-    let ci_yml_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../.github/workflows/ci.yml"
-    );
-    let ci_yml = std::fs::read_to_string(ci_yml_path)
-        .expect("should read .github/workflows/ci.yml");
+    let ci_yml_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml");
+    let ci_yml =
+        std::fs::read_to_string(ci_yml_path).expect("should read .github/workflows/ci.yml");
 
     for target in DESKTOP_TARGETS {
         if !target.ci_tested {

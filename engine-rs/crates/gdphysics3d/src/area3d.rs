@@ -147,7 +147,8 @@ impl Area3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            let cr = collision::test_collision(self.position, &self.shape, body.position, &body.shape);
+            let cr =
+                collision::test_collision(self.position, &self.shape, body.position, &body.shape);
             if cr.colliding {
                 result.push(body.id);
             }
@@ -281,19 +282,16 @@ impl AreaStore3D {
         for (i, a) in area_list.iter().enumerate() {
             for b in area_list.iter().skip(i + 1) {
                 // Check if shapes actually overlap (shared for both directions).
-                let a_can_see_b = a.monitoring && b.monitorable
-                    && (a.collision_mask & b.collision_layer) != 0;
-                let b_can_see_a = b.monitoring && a.monitorable
-                    && (b.collision_mask & a.collision_layer) != 0;
+                let a_can_see_b =
+                    a.monitoring && b.monitorable && (a.collision_mask & b.collision_layer) != 0;
+                let b_can_see_a =
+                    b.monitoring && a.monitorable && (b.collision_mask & a.collision_layer) != 0;
 
                 if !a_can_see_b && !b_can_see_a {
                     continue;
                 }
 
-                let result = collision::test_collision(
-                    a.position, &a.shape,
-                    b.position, &b.shape,
-                );
+                let result = collision::test_collision(a.position, &a.shape, b.position, &b.shape);
 
                 if result.colliding {
                     if a_can_see_b {
@@ -557,7 +555,10 @@ mod tests {
         let events = store.detect_area_overlaps();
         // Symmetric — both directions
         assert_eq!(events.len(), 2);
-        let ids: HashSet<_> = events.iter().map(|e| (e.area_id, e.other_area_id)).collect();
+        let ids: HashSet<_> = events
+            .iter()
+            .map(|e| (e.area_id, e.other_area_id))
+            .collect();
         assert!(ids.contains(&(a1, a2)));
         assert!(ids.contains(&(a2, a1)));
     }
@@ -588,7 +589,10 @@ mod tests {
         store.add_area(a2);
 
         let events = store.detect_area_overlaps();
-        assert!(events.is_empty(), "non-monitorable+non-monitoring area should produce no events");
+        assert!(
+            events.is_empty(),
+            "non-monitorable+non-monitoring area should produce no events"
+        );
     }
 
     #[test]
@@ -597,7 +601,7 @@ mod tests {
         let a1 = store.add_area(make_area(Vector3::ZERO, 5.0));
         let mut a2 = make_area(Vector3::new(1.0, 0.0, 0.0), 5.0);
         a2.monitorable = false; // a1 cannot see a2
-        // a2.monitoring remains true, so a2 can see a1
+                                // a2.monitoring remains true, so a2 can see a1
         let a2_id = store.add_area(a2);
 
         let events = store.detect_area_overlaps();
@@ -613,7 +617,7 @@ mod tests {
     fn get_overlapping_bodies_returns_nearby() {
         let area = make_area(Vector3::ZERO, 5.0);
         let bodies = vec![
-            make_body(1, Vector3::new(1.0, 0.0, 0.0)),  // inside
+            make_body(1, Vector3::new(1.0, 0.0, 0.0)),   // inside
             make_body(2, Vector3::new(100.0, 0.0, 0.0)), // outside
         ];
         let result = area.get_overlapping_bodies(bodies.iter());

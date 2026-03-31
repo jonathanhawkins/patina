@@ -82,7 +82,10 @@ fn multimesh_stores_per_instance_transforms() {
         origin: Vector3::new(2.0, 0.0, 0.0),
     };
     mm.set_instance_transform(1, t);
-    assert_eq!(mm.get_instance_transform(1).origin, Vector3::new(2.0, 0.0, 0.0));
+    assert_eq!(
+        mm.get_instance_transform(1).origin,
+        Vector3::new(2.0, 0.0, 0.0)
+    );
     assert_eq!(mm.get_instance_transform(0), Transform3D::IDENTITY);
     assert_eq!(mm.get_instance_transform(2), Transform3D::IDENTITY);
 }
@@ -335,7 +338,10 @@ fn multimesh_no_mesh_produces_no_pixels() {
     let frame = renderer.render_frame(&vp);
 
     let visible = count_pixels(&frame, |p| p.r > 0.05 || p.g > 0.05 || p.b > 0.05);
-    assert_eq!(visible, 0, "MultiMesh without a shared mesh should render nothing");
+    assert_eq!(
+        visible, 0,
+        "MultiMesh without a shared mesh should render nothing"
+    );
 }
 
 #[test]
@@ -390,7 +396,10 @@ fn clear_multimesh_stops_rendering() {
     renderer.clear_multimesh(id);
     let frame2 = renderer.render_frame(&vp);
     let red_after = count_pixels(&frame2, |p| p.r > 0.5);
-    assert_eq!(red_after, 0, "After clearing multimesh, nothing should render");
+    assert_eq!(
+        red_after, 0,
+        "After clearing multimesh, nothing should render"
+    );
 }
 
 #[test]

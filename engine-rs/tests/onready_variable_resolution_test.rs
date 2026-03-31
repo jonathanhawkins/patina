@@ -8,7 +8,9 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
-fn parse_and_instantiate(source: &str) -> (Interpreter, gdscript_interop::interpreter::ClassInstance) {
+fn parse_and_instantiate(
+    source: &str,
+) -> (Interpreter, gdscript_interop::interpreter::ClassInstance) {
     let mut interp = Interpreter::new();
     let class_def = interp.run_class(source).unwrap();
     let instance = interp.instantiate_class(&class_def).unwrap();

@@ -23,7 +23,10 @@ fn menu_bar_has_six_standard_menus() {
 fn menu_titles_in_godot_order() {
     let bar = EditorMenuBar::new();
     let titles: Vec<&str> = bar.menus().iter().map(|m| m.title.as_str()).collect();
-    assert_eq!(titles, ["Scene", "Edit", "Project", "Debug", "Editor", "Help"]);
+    assert_eq!(
+        titles,
+        ["Scene", "Edit", "Project", "Debug", "Editor", "Help"]
+    );
 }
 
 #[test]
@@ -115,7 +118,9 @@ fn project_menu_has_settings_export_reload() {
     let project = bar.get_menu_by_title("Project").unwrap();
     assert!(project.find_action(MenuAction::ProjectSettings).is_some());
     assert!(project.find_action(MenuAction::ProjectExport).is_some());
-    assert!(project.find_action(MenuAction::ProjectReloadCurrentProject).is_some());
+    assert!(project
+        .find_action(MenuAction::ProjectReloadCurrentProject)
+        .is_some());
 }
 
 // ===========================================================================
@@ -128,7 +133,9 @@ fn debug_menu_has_run_and_visibility_toggles() {
     let debug = bar.get_menu_by_title("Debug").unwrap();
     assert!(debug.find_action(MenuAction::DebugRunFile).is_some());
     assert!(debug.find_action(MenuAction::DebugNavigation).is_some());
-    assert!(debug.find_action(MenuAction::DebugCollisionShapes).is_some());
+    assert!(debug
+        .find_action(MenuAction::DebugCollisionShapes)
+        .is_some());
 }
 
 #[test]
@@ -161,7 +168,9 @@ fn editor_menu_has_settings_and_profiles() {
     let bar = EditorMenuBar::new();
     let editor = bar.get_menu_by_title("Editor").unwrap();
     assert!(editor.find_action(MenuAction::EditorSettings).is_some());
-    assert!(editor.find_action(MenuAction::EditorFeatureProfile).is_some());
+    assert!(editor
+        .find_action(MenuAction::EditorFeatureProfile)
+        .is_some());
 }
 
 // ===========================================================================
@@ -199,8 +208,14 @@ fn disable_save_when_no_scene_open() {
     bar.set_action_enabled(MenuAction::SceneSave, false);
     bar.set_action_enabled(MenuAction::SceneSaveAs, false);
     let scene = bar.get_menu_by_title("Scene").unwrap();
-    assert!(!scene.find_action(MenuAction::SceneSave).unwrap().is_enabled());
-    assert!(!scene.find_action(MenuAction::SceneSaveAs).unwrap().is_enabled());
+    assert!(!scene
+        .find_action(MenuAction::SceneSave)
+        .unwrap()
+        .is_enabled());
+    assert!(!scene
+        .find_action(MenuAction::SceneSaveAs)
+        .unwrap()
+        .is_enabled());
 }
 
 // ===========================================================================
@@ -250,12 +265,14 @@ fn undo_redo_state_syncs_with_editor() {
 
     // Execute a command: undo becomes available.
     let root = editor.tree().root_id();
-    editor.execute(EditorCommand::SetProperty {
-        node_id: root,
-        property: "name".to_string(),
-        old_value: Variant::from("root"),
-        new_value: Variant::from("Root"),
-    }).unwrap();
+    editor
+        .execute(EditorCommand::SetProperty {
+            node_id: root,
+            property: "name".to_string(),
+            old_value: Variant::from("root"),
+            new_value: Variant::from("Root"),
+        })
+        .unwrap();
 
     sync_undo_redo_state(&mut bar, editor.undo_depth() > 0, editor.redo_depth() > 0);
     let edit = bar.get_menu_by_title("Edit").unwrap();
@@ -277,9 +294,10 @@ fn undo_redo_state_syncs_with_editor() {
 #[test]
 fn custom_menu_can_be_added() {
     let mut bar = EditorMenuBar::new();
-    let custom = TopMenu::new("Plugins", vec![
-        MenuItem::action(MenuAction::HelpDocs, "My Plugin Action"),
-    ]);
+    let custom = TopMenu::new(
+        "Plugins",
+        vec![MenuItem::action(MenuAction::HelpDocs, "My Plugin Action")],
+    );
     bar.add_menu(custom);
     assert_eq!(bar.menu_count(), 7);
     assert!(bar.get_menu_by_title("Plugins").is_some());
@@ -360,8 +378,14 @@ fn edit_menu_is_second_in_order() {
 #[test]
 fn action_dispatch_undo_redo() {
     let mut bar = EditorMenuBar::new();
-    assert_eq!(bar.handle_action(MenuAction::EditUndo), MenuActionResult::Undo);
-    assert_eq!(bar.handle_action(MenuAction::EditRedo), MenuActionResult::Redo);
+    assert_eq!(
+        bar.handle_action(MenuAction::EditUndo),
+        MenuActionResult::Undo
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::EditRedo),
+        MenuActionResult::Redo
+    );
 }
 
 #[test]
@@ -378,23 +402,47 @@ fn action_dispatch_debug_toggles() {
     let mut bar = EditorMenuBar::new();
     // First toggle: off → on
     let result = bar.handle_action(MenuAction::DebugNavigation);
-    assert_eq!(result, MenuActionResult::ToggleDebugFlag(MenuAction::DebugNavigation, true));
+    assert_eq!(
+        result,
+        MenuActionResult::ToggleDebugFlag(MenuAction::DebugNavigation, true)
+    );
     assert!(bar.is_action_checked(MenuAction::DebugNavigation));
     // Second toggle: on → off
     let result = bar.handle_action(MenuAction::DebugNavigation);
-    assert_eq!(result, MenuActionResult::ToggleDebugFlag(MenuAction::DebugNavigation, false));
+    assert_eq!(
+        result,
+        MenuActionResult::ToggleDebugFlag(MenuAction::DebugNavigation, false)
+    );
     assert!(!bar.is_action_checked(MenuAction::DebugNavigation));
 }
 
 #[test]
 fn action_dispatch_scene_operations() {
     let mut bar = EditorMenuBar::new();
-    assert_eq!(bar.handle_action(MenuAction::SceneNew), MenuActionResult::NewScene);
-    assert_eq!(bar.handle_action(MenuAction::SceneSave), MenuActionResult::SaveScene);
-    assert_eq!(bar.handle_action(MenuAction::SceneClose), MenuActionResult::CloseScene);
-    assert_eq!(bar.handle_action(MenuAction::SceneRun), MenuActionResult::RunScene);
-    assert_eq!(bar.handle_action(MenuAction::SceneStop), MenuActionResult::StopScene);
-    assert_eq!(bar.handle_action(MenuAction::SceneQuit), MenuActionResult::QuitEditor);
+    assert_eq!(
+        bar.handle_action(MenuAction::SceneNew),
+        MenuActionResult::NewScene
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::SceneSave),
+        MenuActionResult::SaveScene
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::SceneClose),
+        MenuActionResult::CloseScene
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::SceneRun),
+        MenuActionResult::RunScene
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::SceneStop),
+        MenuActionResult::StopScene
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::SceneQuit),
+        MenuActionResult::QuitEditor
+    );
 }
 
 #[test]
@@ -405,7 +453,10 @@ fn action_dispatch_project_operations() {
     } else {
         panic!("expected OpenDialog");
     }
-    assert_eq!(bar.handle_action(MenuAction::ProjectReloadCurrentProject), MenuActionResult::ReloadProject);
+    assert_eq!(
+        bar.handle_action(MenuAction::ProjectReloadCurrentProject),
+        MenuActionResult::ReloadProject
+    );
 }
 
 #[test]
@@ -426,12 +477,30 @@ fn action_dispatch_help_opens_urls() {
 #[test]
 fn action_dispatch_edit_clipboard() {
     let mut bar = EditorMenuBar::new();
-    assert_eq!(bar.handle_action(MenuAction::EditCut), MenuActionResult::Cut);
-    assert_eq!(bar.handle_action(MenuAction::EditCopy), MenuActionResult::Copy);
-    assert_eq!(bar.handle_action(MenuAction::EditPaste), MenuActionResult::Paste);
-    assert_eq!(bar.handle_action(MenuAction::EditSelectAll), MenuActionResult::SelectAll);
-    assert_eq!(bar.handle_action(MenuAction::EditDelete), MenuActionResult::DeleteSelected);
-    assert_eq!(bar.handle_action(MenuAction::EditDuplicate), MenuActionResult::DuplicateSelected);
+    assert_eq!(
+        bar.handle_action(MenuAction::EditCut),
+        MenuActionResult::Cut
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::EditCopy),
+        MenuActionResult::Copy
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::EditPaste),
+        MenuActionResult::Paste
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::EditSelectAll),
+        MenuActionResult::SelectAll
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::EditDelete),
+        MenuActionResult::DeleteSelected
+    );
+    assert_eq!(
+        bar.handle_action(MenuAction::EditDuplicate),
+        MenuActionResult::DuplicateSelected
+    );
 }
 
 // ===========================================================================
@@ -446,12 +515,14 @@ fn undo_redo_dispatch_integrates_with_editor() {
 
     // Execute a command.
     let root = editor.tree().root_id();
-    editor.execute(EditorCommand::SetProperty {
-        node_id: root,
-        property: "name".to_string(),
-        old_value: Variant::from("root"),
-        new_value: Variant::from("Root"),
-    }).unwrap();
+    editor
+        .execute(EditorCommand::SetProperty {
+            node_id: root,
+            property: "name".to_string(),
+            old_value: Variant::from("root"),
+            new_value: Variant::from("Root"),
+        })
+        .unwrap();
 
     // Dispatch undo action.
     let result = bar.handle_action(MenuAction::EditUndo);
