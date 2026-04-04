@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
@@ -41,16 +42,32 @@ struct VerifyResult {
     is_stale_recovery: bool,
 }
 
+#[derive(Debug)]
+struct VerifyRequest {
+    bead_id: String,
+    worker: String,
+    msg_id: Option<i64>,
+    ack_required: bool,
+    files_changed: String,
+    tests_run: String,
+    commands: Vec<String>,
+    is_stale_recovery: bool,
+}
+
 pub struct Coordinator {
     pub config: Config,
     mail: MailClient,
     dry_run: bool,
     /// Beads currently being verified in background threads.
     pending_verifications: Arc<Mutex<HashSet<String>>>,
+    /// Completion messages currently queued/running in background verification.
+    pending_completion_msgs: Arc<Mutex<HashSet<i64>>>,
     /// Channel to receive verification results.
     verify_rx: Mutex<mpsc::Receiver<VerifyResult>>,
-    /// Sender cloned into background threads.
+    /// Sender cloned into background verification worker/tests.
     verify_tx: mpsc::Sender<VerifyResult>,
+    /// Sender for serialized verification requests.
+    verify_request_tx: mpsc::Sender<VerifyRequest>,
 }
 
 impl Coordinator {
@@ -59,14 +76,29 @@ impl Coordinator {
         let _db = db::open(&config.project_root)?;
         drop(_db);
         let mail = MailClient::new(&config.mail);
+        let pending_verifications = Arc::new(Mutex::new(HashSet::new()));
+        let pending_completion_msgs = Arc::new(Mutex::new(HashSet::new()));
+        let _ = fs::create_dir_all(config.cache_dir());
         let (verify_tx, verify_rx) = mpsc::channel();
+        let (verify_request_tx, verify_request_rx) = mpsc::channel();
+        spawn_verifier_worker(
+            config.project_root.clone(),
+            Duration::from_secs(config.verify_timeout_seconds),
+            verify_request_rx,
+            verify_tx.clone(),
+            Arc::clone(&pending_verifications),
+            Arc::clone(&pending_completion_msgs),
+            config.cache_dir().join("verifier.log"),
+        );
         Ok(Self {
             config,
             mail,
             dry_run,
-            pending_verifications: Arc::new(Mutex::new(HashSet::new())),
+            pending_verifications,
+            pending_completion_msgs,
             verify_rx: Mutex::new(verify_rx),
             verify_tx,
+            verify_request_tx,
         })
     }
 
@@ -84,12 +116,17 @@ impl Coordinator {
         let mut prompt_tasks = Vec::new();
 
         while let Ok(vr) = rx.try_recv() {
+            if let Some(id) = vr.msg_id {
+                self.pending_completion_msgs.lock().unwrap().remove(&id);
+            }
             if vr.passed {
                 if vr.is_stale_recovery {
                     // Stale-PROG recovery — just close, no worker to reassign
                     tracing::info!(bead = %vr.bead_id, "Stale bead verified PASSED — closing as done");
                     match br::close_bead(&vr.bead_id, "stale-recovery: acceptance tests passed") {
-                        Ok(_) => { processed += 1; }
+                        Ok(_) => {
+                            processed += 1;
+                        }
                         Err(e) => {
                             tracing::error!(
                                 bead = %vr.bead_id,
@@ -141,10 +178,20 @@ impl Coordinator {
                     let _ = br::reopen(&vr.bead_id);
                     let details = format!(
                         "Files changed: {}\nTests run: {}",
-                        if vr.files_changed.is_empty() { "<missing>" } else { &vr.files_changed },
-                        if vr.tests_run.is_empty() { "<missing>" } else { &vr.tests_run },
+                        if vr.files_changed.is_empty() {
+                            "<missing>"
+                        } else {
+                            &vr.files_changed
+                        },
+                        if vr.tests_run.is_empty() {
+                            "<missing>"
+                        } else {
+                            &vr.tests_run
+                        },
                     );
-                    let reason = vr.reject_reason.as_deref()
+                    let reason = vr
+                        .reject_reason
+                        .as_deref()
                         .unwrap_or("reported test commands failed when rerun by the coordinator");
                     let _ = self.send_reopen_message(&vr.worker, &vr.bead_id, reason, &details);
                     self.ack_or_mark_read(vr.msg_id);
@@ -169,15 +216,6 @@ impl Coordinator {
     /// Instead of blindly reopening, check if the acceptance tests pass.
     /// If they pass → close as done. If they fail → reopen for a new worker.
     fn verify_stale_bead(&self, bead_id: &str) {
-        // Skip if already being verified
-        {
-            let pending = self.pending_verifications.lock().unwrap();
-            if pending.contains(bead_id) {
-                tracing::debug!(bead = %bead_id, "stale bead already being verified, skipping");
-                return;
-            }
-        }
-
         // Get acceptance commands from bead description
         let mut commands = match self.open_db() {
             Ok(db) => {
@@ -199,50 +237,60 @@ impl Coordinator {
             commands.push("cargo build --workspace".to_string());
         }
 
-        // Mark as pending
-        {
-            let mut pending = self.pending_verifications.lock().unwrap();
-            pending.insert(bead_id.to_string());
-        }
-
-        let tx = self.verify_tx.clone();
-        let bead_id = bead_id.to_string();
-        let project_root = self.config.project_root.clone();
-        let timeout = Duration::from_secs(self.config.verify_timeout_seconds);
-        let pending = Arc::clone(&self.pending_verifications);
-
-        std::thread::spawn(move || {
-            tracing::info!(bead = %bead_id, commands = commands.len(), "Stale bead verify started");
-            let verify_result = verifier::verify_commands(&project_root, &commands, timeout);
-            let passed = verify_result.is_ok();
-            let reject_reason = verify_result.err().map(|e| format!("{e}"));
-
-            if passed {
-                tracing::info!(bead = %bead_id, "Stale bead verify PASSED");
-            } else {
-                tracing::info!(bead = %bead_id, reason = ?reject_reason, "Stale bead verify FAILED");
-            }
-
-            let _ = tx.send(VerifyResult {
-                bead_id: bead_id.clone(),
-                worker: String::new(),
-                msg_id: None,
-                ack_required: false,
-                files_changed: String::new(),
-                tests_run: String::new(),
-                passed,
-                reject_reason,
-                is_stale_recovery: true,
-            });
-
-            let mut p = pending.lock().unwrap();
-            p.remove(&bead_id);
+        let _ = self.enqueue_verification(VerifyRequest {
+            bead_id: bead_id.to_string(),
+            worker: String::new(),
+            msg_id: None,
+            ack_required: false,
+            files_changed: String::new(),
+            tests_run: String::new(),
+            commands,
+            is_stale_recovery: true,
         });
     }
 
     /// Sweep beads that workers marked "done" or "complete" directly.
     /// In pull mode, workers sometimes use `br update --status done` instead
     /// of `/mail-complete`. This catches those and closes them properly.
+    /// Refresh tmux pane border titles for workers.
+    /// Claude Code overrides pane titles on startup, so we re-set them periodically.
+    /// Rate-limited to once per 30 seconds.
+    fn refresh_pane_titles(&self, session: &str, window: u32) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_RUN: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(LAST_RUN.load(Ordering::Relaxed)) < 30 {
+            return;
+        }
+        LAST_RUN.store(now, Ordering::Relaxed);
+
+        // Set fixed pane titles
+        let _ = tmux::set_pane_title(session, window, 0, "coordinator");
+        let _ = tmux::set_pane_title(session, window, 1, "verifier");
+        let _ = tmux::set_pane_title(session, window, 2, "planner");
+
+        // Set worker pane titles from DB assignments
+        if let Ok(db) = self.open_db() {
+            if let Ok(workers) =
+                worker::worker_info_list_with_config(session, window, &db, &self.config)
+            {
+                for w in &workers {
+                    let title = if let Some(bead) = &w.assigned_bead {
+                        format!("{} | {}", w.worker_name, bead)
+                    } else if !w.worker_name.is_empty() {
+                        format!("{} | idle", w.worker_name)
+                    } else {
+                        continue;
+                    };
+                    let _ = tmux::set_pane_title(session, window, w.pane_index, &title);
+                }
+            }
+        }
+    }
+
     /// Log blocked beads (waiting on dependencies) and stale beads (untouched for 2+ days).
     /// Uses br's built-in `blocked` and `stale` commands for diagnostics.
     /// Runs at most once per minute to avoid spamming br subprocesses.
@@ -300,6 +348,14 @@ impl Coordinator {
         };
 
         for (bead_id, assignee) in &stale {
+            if self
+                .pending_verifications
+                .lock()
+                .unwrap()
+                .contains(bead_id)
+            {
+                continue;
+            }
             tracing::info!(bead = %bead_id, worker = %assignee, "Stale assignment detected (worker missing from session)");
             let is_in_progress = match self.open_db() {
                 Ok(db) => {
@@ -327,13 +383,14 @@ impl Coordinator {
     fn sweep_self_completed(&self) -> usize {
         let ids: Vec<String> = match self.open_db() {
             Ok(conn) => {
-                let mut stmt = match conn.prepare(
-                    "SELECT id FROM issues WHERE status IN ('done', 'complete')"
-                ) {
+                let mut stmt = match conn
+                    .prepare("SELECT id FROM issues WHERE status IN ('done', 'complete')")
+                {
                     Ok(s) => s,
                     Err(_) => return 0,
                 };
-                let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
                     .unwrap_or_else(|_| panic!("query failed"));
                 rows.filter_map(|r| r.ok()).collect()
             }
@@ -382,7 +439,10 @@ impl Coordinator {
         if !self.dry_run {
             let swept = self.sweep_self_completed();
             if swept > 0 {
-                tracing::info!(swept, "Swept self-completed beads (workers used br update --status done)");
+                tracing::info!(
+                    swept,
+                    "Swept self-completed beads (workers used br update --status done)"
+                );
             }
         }
 
@@ -395,6 +455,15 @@ impl Coordinator {
                 if let Err(e) = self.recover_stale_assignments(session, window) {
                     tracing::warn!(error = %e, "stale assignment recovery failed");
                 }
+            }
+        }
+
+        // Refresh pane border titles so they stay correct after Claude Code
+        // overrides them on startup. Sets "worker_name | bead_id" for workers.
+        if !self.dry_run {
+            if let Some(session) = &self.config.session_name {
+                let window = self.config.window_index;
+                self.refresh_pane_titles(session, window);
             }
         }
 
@@ -442,6 +511,20 @@ impl Coordinator {
             if completion.bead_id.is_empty() {
                 tracing::warn!(msg_id = ?completion.msg_id, "SKIP: could not extract bead ID");
                 continue;
+            }
+
+            if self
+                .pending_verifications
+                .lock()
+                .unwrap()
+                .contains(&completion.bead_id)
+            {
+                continue;
+            }
+            if let Some(id) = completion.msg_id {
+                if self.pending_completion_msgs.lock().unwrap().contains(&id) {
+                    continue;
+                }
             }
 
             tracing::info!(
@@ -561,8 +644,16 @@ impl Coordinator {
                     let _ = br::reopen(&completion.bead_id);
                     let details = format!(
                         "Files changed: {}\nTests run: {}",
-                        if completion.files_changed.is_empty() { "<missing>" } else { &completion.files_changed },
-                        if completion.tests_run.is_empty() { "<missing>" } else { &completion.tests_run },
+                        if completion.files_changed.is_empty() {
+                            "<missing>"
+                        } else {
+                            &completion.files_changed
+                        },
+                        if completion.tests_run.is_empty() {
+                            "<missing>"
+                        } else {
+                            &completion.tests_run
+                        },
                     );
                     let _ = self.send_reopen_message(
                         &completion.worker,
@@ -575,50 +666,15 @@ impl Coordinator {
                     continue;
                 }
 
-                // Dispatch verification to background thread
-                {
-                    let mut pending = self.pending_verifications.lock().unwrap();
-                    pending.insert(completion.bead_id.clone());
-                }
-
-                let tx = self.verify_tx.clone();
-                let bead_id = completion.bead_id.clone();
-                let worker_name = completion.worker.clone();
-                let msg_id = completion.msg_id;
-                let ack_required = completion.ack_required;
-                let files_changed = completion.files_changed.clone();
-                let tests_run = completion.tests_run.clone();
-                let project_root = self.config.project_root.clone();
-                let timeout = Duration::from_secs(self.config.verify_timeout_seconds);
-                let pending = Arc::clone(&self.pending_verifications);
-
-                std::thread::spawn(move || {
-                    tracing::info!(bead = %bead_id, commands = commands.len(), "Background verify started");
-                    let verify_result = verifier::verify_commands(&project_root, &commands, timeout);
-                    let passed = verify_result.is_ok();
-                    let reject_reason = verify_result.err().map(|e| format!("{e}"));
-
-                    if passed {
-                        tracing::info!(bead = %bead_id, "Background verify PASSED");
-                    } else {
-                        tracing::info!(bead = %bead_id, reason = ?reject_reason, "Background verify FAILED");
-                    }
-
-                    let _ = tx.send(VerifyResult {
-                        bead_id: bead_id.clone(),
-                        worker: worker_name,
-                        msg_id,
-                        ack_required,
-                        files_changed,
-                        tests_run,
-                        passed,
-                        reject_reason,
-                        is_stale_recovery: false,
-                    });
-
-                    // Remove from pending set
-                    let mut p = pending.lock().unwrap();
-                    p.remove(&bead_id);
+                let _ = self.enqueue_verification(VerifyRequest {
+                    bead_id: completion.bead_id.clone(),
+                    worker: completion.worker.clone(),
+                    msg_id: completion.msg_id,
+                    ack_required: completion.ack_required,
+                    files_changed: completion.files_changed.clone(),
+                    tests_run: completion.tests_run.clone(),
+                    commands,
+                    is_stale_recovery: false,
                 });
 
                 // Do NOT ack here — ack only after drain_verify_results successfully
@@ -638,11 +694,7 @@ impl Coordinator {
                     "[dry-run] would reassign"
                 );
             } else {
-                match self.reassign(
-                    &completion.bead_id,
-                    &completion.worker,
-                    completion.msg_id,
-                ) {
+                match self.reassign(&completion.bead_id, &completion.worker, completion.msg_id) {
                     Ok(rr) => {
                         if let Some(pt) = rr.prompt_task {
                             result.prompt_tasks.push(pt);
@@ -677,7 +729,11 @@ impl Coordinator {
 
     /// Assignment cycle: detect idle workers and assign ready beads.
     /// Returns (assigned_count, prompt_tasks) — caller submits prompts in parallel.
-    pub fn assign_idle_workers(&self, session: &str, window: u32) -> Result<(usize, Vec<tmux::PromptTask>)> {
+    pub fn assign_idle_workers(
+        &self,
+        session: &str,
+        window: u32,
+    ) -> Result<(usize, Vec<tmux::PromptTask>)> {
         self.assign_idle_workers_inner(session, window, None, false)
     }
 
@@ -705,60 +761,15 @@ impl Coordinator {
 
         // Read all DB state upfront, then drop the connection before calling br mutations.
         // This prevents our read connection from blocking br's write lock on macOS.
-        let (workers, stale, extras) = {
+        let workers = {
             let db = self.open_db()?;
             let workers = worker::worker_info_list_with_config(session, window, &db, &self.config)?;
-            let active_names: Vec<String> = workers
-                .iter()
-                .filter(|w| !w.worker_name.is_empty())
-                .map(|w| w.worker_name.clone())
-                .collect();
-            let stale = db::stale_assignments(&db, &active_names)?;
-            let extras = db::extra_assignments(&db)?;
             // db dropped here
-            (workers, stale, extras)
+            workers
         };
 
-        // Reclaim stale assignments (workers not in session).
-        // For IN_PROGRESS beads, validate acceptance tests before reopening —
-        // the dead worker may have finished the work without reporting it.
-        for (bead_id, assignee) in &stale {
-            tracing::info!(
-                bead = %bead_id,
-                worker = %assignee,
-                "Stale assignment detected (worker missing from session)"
-            );
-            if !self.dry_run {
-                let is_in_progress = match self.open_db() {
-                    Ok(db) => {
-                        let state = db::bead_state(&db, bead_id).ok().flatten();
-                        drop(db);
-                        matches!(state, Some((db::BeadStatus::InProgress, _)))
-                    }
-                    Err(_) => false,
-                };
-
-                if is_in_progress && self.config.verify_reported_tests {
-                    self.verify_stale_bead(bead_id);
-                } else {
-                    let _ = br::reopen(bead_id);
-                }
-            }
-        }
-
-        // Reclaim extra assignments (>1 per worker)
-        for (assignee, bead_id) in &extras {
-            tracing::info!(
-                bead = %bead_id,
-                worker = %assignee,
-                "Reclaiming extra assignment"
-            );
-            if !self.dry_run {
-                let _ = br::reopen(bead_id);
-            }
-        }
-
         let mut assigned = 0usize;
+        let prompt_workers = self.config.worker_requires_assignment_prompt();
         let mut selected_beads: Vec<String> = Vec::new();
 
         // Pre-read all per-worker DB state upfront with a single connection,
@@ -776,7 +787,13 @@ impl Coordinator {
                 }
                 let active_count = db::active_assignment_count(&qdb, &w.worker_name)?;
                 let assigned_bead = db::assigned_bead_for_worker(&qdb, &w.worker_name)?;
-                map.insert(w.worker_name.clone(), WorkerDbState { active_count, assigned_bead });
+                map.insert(
+                    w.worker_name.clone(),
+                    WorkerDbState {
+                        active_count,
+                        assigned_bead,
+                    },
+                );
             }
             // qdb dropped here — safe for br mutations below
             map
@@ -879,7 +896,11 @@ impl Coordinator {
                             // Check if already has queued prompt
                             let capture = tmux::capture_pane(session, window, w.pane_index, 120)
                                 .unwrap_or_default();
-                            if worker::has_assignment_prompt_with(&capture, &self.config.queue_prompt_marker, &bead.id) {
+                            if worker::has_assignment_prompt_with(
+                                &capture,
+                                &self.config.queue_prompt_marker,
+                                &bead.id,
+                            ) {
                                 if !self.dry_run {
                                     self.record_reprompt(&w.worker_name, &bead.id);
                                 }
@@ -895,14 +916,27 @@ impl Coordinator {
                             );
                             if !self.dry_run {
                                 let _ = self.send_assignment_mail(&w.worker_name, bead);
-                                prompt_tasks.push(tmux::PromptTask {
-                                    session: session.to_string(),
+                                // Update pane title to show worker + bead
+                                let _ = tmux::set_pane_title(
+                                    session,
                                     window,
-                                    pane: w.pane_index,
-                                    text: self.build_prompt_text(&bead.id, &bead.title, &w.worker_name),
-                                    pcfg: self.prompt_config(),
-                                });
-                                self.record_reprompt(&w.worker_name, &bead.id);
+                                    w.pane_index,
+                                    &format!("{} | {}", w.worker_name, bead.id),
+                                );
+                                if prompt_workers {
+                                    prompt_tasks.push(tmux::PromptTask {
+                                        session: session.to_string(),
+                                        window,
+                                        pane: w.pane_index,
+                                        text: self.build_prompt_text(
+                                            &bead.id,
+                                            &bead.title,
+                                            &w.worker_name,
+                                        ),
+                                        pcfg: self.prompt_config(),
+                                    });
+                                    self.record_reprompt(&w.worker_name, &bead.id);
+                                }
                             }
                             assigned += 1;
                             continue;
@@ -916,9 +950,7 @@ impl Coordinator {
 
             // Worker needs a fresh assignment
             let ready = self.ensure_ready_work()?;
-            let next = ready
-                .iter()
-                .find(|b| !selected_beads.contains(&b.id));
+            let next = ready.iter().find(|b| !selected_beads.contains(&b.id));
 
             let bead = match next {
                 Some(b) => b.clone(),
@@ -947,21 +979,30 @@ impl Coordinator {
                     continue;
                 }
                 let _ = self.send_assignment_mail(&w.worker_name, &bead);
-                // Queue prompt for parallel submission instead of blocking here
-                tracing::info!(
-                    pane = w.pane_index,
-                    worker = %w.worker_name,
-                    bead = %bead.id,
-                    "Queuing prompt for parallel submission"
-                );
-                prompt_tasks.push(tmux::PromptTask {
-                    session: session.to_string(),
+                // Update pane title to show worker + bead
+                let _ = tmux::set_pane_title(
+                    session,
                     window,
-                    pane: w.pane_index,
-                    text: self.build_prompt_text(&bead.id, &bead.title, &w.worker_name),
-                    pcfg: self.prompt_config(),
-                });
-                self.record_reprompt(&w.worker_name, &bead.id);
+                    w.pane_index,
+                    &format!("{} | {}", w.worker_name, bead.id),
+                );
+                if prompt_workers {
+                    // Queue prompt for parallel submission instead of blocking here.
+                    tracing::info!(
+                        pane = w.pane_index,
+                        worker = %w.worker_name,
+                        bead = %bead.id,
+                        "Queuing prompt for parallel submission"
+                    );
+                    prompt_tasks.push(tmux::PromptTask {
+                        session: session.to_string(),
+                        window,
+                        pane: w.pane_index,
+                        text: self.build_prompt_text(&bead.id, &bead.title, &w.worker_name),
+                        pcfg: self.prompt_config(),
+                    });
+                    self.record_reprompt(&w.worker_name, &bead.id);
+                }
             }
             assigned += 1;
         }
@@ -974,6 +1015,32 @@ impl Coordinator {
         Ok((assigned, prompt_tasks))
     }
 
+    fn enqueue_verification(&self, request: VerifyRequest) -> Result<()> {
+        {
+            let mut pending = self.pending_verifications.lock().unwrap();
+            if pending.contains(&request.bead_id) {
+                tracing::debug!(bead = %request.bead_id, "verification already pending");
+                return Ok(());
+            }
+            pending.insert(request.bead_id.clone());
+        }
+        if let Some(id) = request.msg_id {
+            self.pending_completion_msgs.lock().unwrap().insert(id);
+        }
+        if let Err(e) = self.verify_request_tx.send(request) {
+            let failed = e.0;
+            let bead_id = failed.bead_id.clone();
+            self.pending_verifications.lock().unwrap().remove(&bead_id);
+            if let Some(id) = failed.msg_id {
+                self.pending_completion_msgs.lock().unwrap().remove(&id);
+            }
+            return Err(OrchestratorError::Verification(format!(
+                "failed to enqueue verification for {bead_id}: channel closed"
+            )));
+        }
+        Ok(())
+    }
+
     /// Close a completed bead and assign the next ready bead to the same worker.
     /// Returns a `ReassignResult` with the next bead ID and an optional prompt task
     /// for immediate submission to the worker's tmux pane.
@@ -983,7 +1050,10 @@ impl Coordinator {
         worker_name: &str,
         ack_msg_id: Option<i64>,
     ) -> Result<ReassignResult> {
-        let none_result = ReassignResult { next_bead_id: None, prompt_task: None };
+        let none_result = ReassignResult {
+            next_bead_id: None,
+            prompt_task: None,
+        };
         // Check if worker has other active beads (short-lived connection)
         let other_active = {
             let db = self.open_db()?;
@@ -1022,7 +1092,8 @@ impl Coordinator {
                     }
                     let current = {
                         let db = self.open_db()?;
-                        let r = db::worker_active_assignments(&db, worker_name, Some(completed_bead))?;
+                        let r =
+                            db::worker_active_assignments(&db, worker_name, Some(completed_bead))?;
                         drop(db);
                         r
                     };
@@ -1047,7 +1118,10 @@ impl Coordinator {
 
         let t = std::time::Instant::now();
         let ready_beads = self.ensure_ready_work()?;
-        tracing::info!(elapsed_ms = t.elapsed().as_millis() as u64, "reassign: ensure_ready_work");
+        tracing::info!(
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "reassign: ensure_ready_work"
+        );
         let next = ready_beads.into_iter().next();
 
         let next_bead = match next {
@@ -1075,8 +1149,7 @@ impl Coordinator {
                 if !self.config.is_worker_pane(pane) {
                     return None;
                 }
-                if worker::resolve_worker_identity(&self.config.project_root, &pane.id)
-                    .as_deref()
+                if worker::resolve_worker_identity(&self.config.project_root, &pane.id).as_deref()
                     == Some(worker_name)
                 {
                     Some(pane.index)
@@ -1103,7 +1176,10 @@ impl Coordinator {
             }
         }
 
-        tracing::info!(elapsed_ms = t.elapsed().as_millis() as u64, "reassign: worker alive check");
+        tracing::info!(
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "reassign: worker alive check"
+        );
 
         // Step 4: Assign next bead
         tracing::info!(
@@ -1189,7 +1265,11 @@ impl Coordinator {
         let coordinator = self.coordinator_name()?;
         let project_key = self.config.project_root.to_string_lossy().to_string();
 
-        let exec_map = if self.config.project_root.join("prd/POST_REPIN_EXECUTION_MAP.md").exists()
+        let exec_map = if self
+            .config
+            .project_root
+            .join("prd/POST_REPIN_EXECUTION_MAP.md")
+            .exists()
         {
             "prd/POST_REPIN_EXECUTION_MAP.md"
         } else {
@@ -1204,10 +1284,14 @@ impl Coordinator {
              Start this bead now.\n\
              Follow AGENTS.md, {}, and docs/agent-mail-orchestration.md.\n\
              Do not mutate br state. Add tests with the implementation.\n\
+             For Rust builds/tests from the repo root, prefer `./scripts/rust_task.sh <cargo args>` so Cargo-heavy verification stays serialized across workers.\n\
              When complete, use `/skill mail-complete {} --to {} --file <path> --test <command>`.\n\
              Do not send a freehand completion message.\n\
              Include concrete `Files changed:` and `Tests run:` sections \
              plus a JSON payload with `bead_id`, `files_changed`, and `test_commands`.\n\
+             Every `--test` entry must be an exact replayable shell command. \
+             Do not send prose like `python3 direct validation script`, and do not summarize commands with `...`.\n\
+             Prefer single-line commands or checked-in scripts over heredocs.\n\
              Completion reports with placeholder or missing test evidence will be rejected and reopened.",
             bead.id, bead.title, bead.description, exec_map, bead.id, coordinator,
         );
@@ -1246,6 +1330,9 @@ impl Coordinator {
              - resend completion with `/skill mail-complete {bead_id} --to {coordinator} --file <path> --test <command>`\n\
              - include a concrete `Files changed:` section\n\
              - include a concrete `Tests run:` section\n\
+             - every reported test must be an exact replayable shell command\n\
+             - do not use prose placeholders like `python3 direct validation script`\n\
+             - do not summarize commands with `...`\n\
              - do not mark the bead complete until those tests have actually passed\n\n\
              Observed report:\n\
              {details}"
@@ -1306,6 +1393,10 @@ impl Coordinator {
     /// 2. **Queued prompt**: worker has an assignment, appears idle, and pane
     ///    shows "Press up to edit" — Enter didn't go through, just resend it.
     pub fn recover_stuck_workers(&self, session: &str, window: u32) -> Result<usize> {
+        if !self.config.worker_requires_assignment_prompt() {
+            return Ok(0);
+        }
+
         let workers = {
             let db = self.open_db()?;
             worker::worker_info_list_with_config(session, window, &db, &self.config)?
@@ -1344,8 +1435,11 @@ impl Coordinator {
                     }
                 } else {
                     // No tracked assignment — clear stuck text and send Enter.
-                    let _ = tmux::send_keys(session, window, w.pane_index, &self.config.clear_line_key);
-                    std::thread::sleep(std::time::Duration::from_millis(self.config.post_clear_delay_ms));
+                    let _ =
+                        tmux::send_keys(session, window, w.pane_index, &self.config.clear_line_key);
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        self.config.post_clear_delay_ms,
+                    ));
                     let _ = tmux::send_keys(session, window, w.pane_index, &self.config.submit_key);
                 }
 
@@ -1361,8 +1455,8 @@ impl Coordinator {
                 worker::WorkerState::Idle | worker::WorkerState::CompletedWaiting
             );
             if is_idle && w.assigned_bead.is_some() {
-                let capture = tmux::capture_pane(session, window, w.pane_index, 80)
-                    .unwrap_or_default();
+                let capture =
+                    tmux::capture_pane(session, window, w.pane_index, 80).unwrap_or_default();
 
                 if capture.contains(&self.config.queue_prompt_marker) {
                     tracing::warn!(
@@ -1376,7 +1470,12 @@ impl Coordinator {
                         // Send Enter to submit the queued prompt, then verify
                         let mut submitted = false;
                         for attempt in 0..self.config.submit_retry_attempts {
-                            let _ = tmux::send_keys(session, window, w.pane_index, &self.config.submit_key);
+                            let _ = tmux::send_keys(
+                                session,
+                                window,
+                                w.pane_index,
+                                &self.config.submit_key,
+                            );
                             std::thread::sleep(std::time::Duration::from_millis(
                                 self.config.prompt_submit_delay_ms,
                             ));
@@ -1494,7 +1593,9 @@ impl Coordinator {
                 }
             })
             .collect();
-        self.config.cache_dir().join(format!("{sanitized}.last-assignment"))
+        self.config
+            .cache_dir()
+            .join(format!("{sanitized}.last-assignment"))
     }
 
     fn should_skip_reprompt(&self, worker_name: &str, bead_id: &str) -> bool {
@@ -1537,6 +1638,75 @@ impl Coordinator {
             .as_secs();
         let _ = fs::write(&path, format!("{bead_id}\n{now}\n"));
     }
+}
+
+fn verifier_log_append(path: &PathBuf, line: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+fn spawn_verifier_worker(
+    project_root: PathBuf,
+    timeout: Duration,
+    verify_request_rx: mpsc::Receiver<VerifyRequest>,
+    verify_tx: mpsc::Sender<VerifyResult>,
+    pending_verifications: Arc<Mutex<HashSet<String>>>,
+    pending_completion_msgs: Arc<Mutex<HashSet<i64>>>,
+    verifier_log_path: PathBuf,
+) {
+    std::thread::spawn(move || {
+        while let Ok(request) = verify_request_rx.recv() {
+            let bead_id = request.bead_id.clone();
+            let joined = request.commands.join(" && ");
+            verifier_log_append(
+                &verifier_log_path,
+                &format!("START bead={bead_id} stale={} commands={joined}", request.is_stale_recovery),
+            );
+            tracing::info!(
+                bead = %request.bead_id,
+                commands = request.commands.len(),
+                stale = request.is_stale_recovery,
+                "Verification queue started"
+            );
+
+            let verify_result = verifier::verify_commands(&project_root, &request.commands, timeout);
+            let passed = verify_result.is_ok();
+            let reject_reason = verify_result.err().map(|e| format!("{e}"));
+
+            if passed {
+                verifier_log_append(&verifier_log_path, &format!("PASS bead={bead_id}"));
+            } else {
+                verifier_log_append(
+                    &verifier_log_path,
+                    &format!(
+                        "FAIL bead={bead_id} reason={}",
+                        reject_reason.as_deref().unwrap_or("unknown")
+                    ),
+                );
+            }
+
+            let _ = verify_tx.send(VerifyResult {
+                bead_id: request.bead_id.clone(),
+                worker: request.worker,
+                msg_id: request.msg_id,
+                ack_required: request.ack_required,
+                files_changed: request.files_changed,
+                tests_run: request.tests_run,
+                passed,
+                reject_reason,
+                is_stale_recovery: request.is_stale_recovery,
+            });
+
+            pending_verifications.lock().unwrap().remove(&request.bead_id);
+            if let Some(id) = request.msg_id {
+                pending_completion_msgs.lock().unwrap().remove(&id);
+            }
+        }
+    });
 }
 
 /// Check if an idle worker's stale assignment should be reclaimed.
@@ -1597,9 +1767,8 @@ fn should_reclaim_idle(
                     static IDLE_PROMPT_RE: std::sync::OnceLock<regex::Regex> =
                         std::sync::OnceLock::new();
                     let idle_prompt = IDLE_PROMPT_RE.get_or_init(|| {
-                        regex::Regex::new(
-                            r"(?i)❯|waiting\.$|standing by|done\.?$|complete\.?$"
-                        ).unwrap()
+                        regex::Regex::new(r"(?i)❯|waiting\.$|standing by|done\.?$|complete\.?$")
+                            .unwrap()
                     });
                     if idle_prompt.is_match(&capture) {
                         tracing::info!(
@@ -1637,13 +1806,16 @@ mod tests {
     fn test_coordinator_with_config(cfg: Config) -> Coordinator {
         let mail = MailClient::new(&cfg.mail);
         let (verify_tx, verify_rx) = mpsc::channel();
+        let (verify_request_tx, _verify_request_rx) = mpsc::channel();
         Coordinator {
             config: cfg,
             mail,
             dry_run: true,
             pending_verifications: Arc::new(Mutex::new(HashSet::new())),
+            pending_completion_msgs: Arc::new(Mutex::new(HashSet::new())),
             verify_rx: Mutex::new(verify_rx),
             verify_tx,
+            verify_request_tx,
         }
     }
 
@@ -1795,8 +1967,14 @@ mod tests {
         assert!(prompt.contains("pat-abc"), "must contain bead ID");
         assert!(prompt.contains("WorkerA"), "must contain worker name");
         assert!(prompt.contains("Fix the bug"), "must contain bead title");
-        assert!(prompt.contains("flywheel-worker"), "must invoke flywheel-worker skill");
-        assert!(prompt.contains("/skill mail-complete"), "must reference mail-complete skill");
+        assert!(
+            prompt.contains("flywheel-worker"),
+            "must invoke flywheel-worker skill"
+        );
+        assert!(
+            prompt.contains("/skill mail-complete"),
+            "must reference mail-complete skill"
+        );
     }
 
     #[test]
@@ -1810,7 +1988,10 @@ mod tests {
 
     #[test]
     fn test_reassign_result_none() {
-        let r = ReassignResult { next_bead_id: None, prompt_task: None };
+        let r = ReassignResult {
+            next_bead_id: None,
+            prompt_task: None,
+        };
         assert!(r.next_bead_id.is_none());
         assert!(r.prompt_task.is_none());
     }
@@ -1861,7 +2042,10 @@ mod tests {
             state,
             WorkerState::Idle | WorkerState::CompletedWaiting | WorkerState::StuckInput
         );
-        assert!(is_idle, "StuckInput worker should be treated as idle for assignment");
+        assert!(
+            is_idle,
+            "StuckInput worker should be treated as idle for assignment"
+        );
 
         // Active should NOT be idle
         let active = WorkerState::Active;
@@ -1880,11 +2064,15 @@ mod tests {
 
         let prompt = coord.build_prompt_text("pat-abc", "Fix the bug", "WorkerA");
         // Must trigger stuck input detection if it sits unsubmitted
-        assert!(crate::worker::has_stuck_input(&prompt),
-            "prompt text must be detectable as stuck input");
+        assert!(
+            crate::worker::has_stuck_input(&prompt),
+            "prompt text must be detectable as stuck input"
+        );
         // Must trigger tmux post-submit verification
-        assert!(prompt.contains("/skill flywheel-worker") && prompt.contains("Work bead"),
-            "prompt must contain both invariant substrings for post-submit verification");
+        assert!(
+            prompt.contains("/skill flywheel-worker") && prompt.contains("Work bead"),
+            "prompt must contain both invariant substrings for post-submit verification"
+        );
     }
 
     // ========================================================================
@@ -1924,7 +2112,11 @@ mod tests {
         // Test various bead IDs and titles that stress-test wrapping
         let cases = vec![
             ("pat-w1", "Fix bug", "WorkerA"),
-            ("pat-w2", "Implement very long feature name that wraps many times", "PearlFox"),
+            (
+                "pat-w2",
+                "Implement very long feature name that wraps many times",
+                "PearlFox",
+            ),
             ("pat-w3", "X", "W"), // minimal
         ];
 
@@ -1962,10 +2154,7 @@ mod tests {
         }
 
         // These states should NOT be idle
-        let non_idle_states = vec![
-            WorkerState::Active,
-            WorkerState::Dead,
-        ];
+        let non_idle_states = vec![WorkerState::Active, WorkerState::Dead];
         for state in &non_idle_states {
             let is_idle = matches!(
                 state,
@@ -2055,8 +2244,15 @@ mod tests {
             errors: 1,
             ..Default::default()
         };
-        assert_eq!(r.processed + r.errors, 3, "total should be processed + errors");
-        assert!(r.errors > 0, "errors means un-acked messages remain for retry");
+        assert_eq!(
+            r.processed + r.errors,
+            3,
+            "total should be processed + errors"
+        );
+        assert!(
+            r.errors > 0,
+            "errors means un-acked messages remain for retry"
+        );
         assert_ne!(r.processed, r.errors, "processed and errors should differ");
 
         // Default should be all zeros
@@ -2141,8 +2337,11 @@ mod tests {
 
         // "Press up to edit" with no prompt markers → Idle (not StuckInput)
         let queued = "Press up to edit\n❯ ";
-        assert_ne!(detect_pane_state(queued), WorkerState::StuckInput,
-            "queued prompt should NOT be StuckInput — it needs the nudge-Enter path");
+        assert_ne!(
+            detect_pane_state(queued),
+            WorkerState::StuckInput,
+            "queued prompt should NOT be StuckInput — it needs the nudge-Enter path"
+        );
     }
 
     // ========================================================================
@@ -2168,7 +2367,9 @@ mod tests {
 
         // The reassign function must NOT have a return Err(e) right after mail send.
         // Extract the section between "Step 5: Send assignment mail" and "Step 6:"
-        let step5 = source.find("Step 5: Send assignment mail").expect("Step 5 must exist");
+        let step5 = source
+            .find("Step 5: Send assignment mail")
+            .expect("Step 5 must exist");
         let step6 = source[step5..].find("Step 6:").expect("Step 6 must exist");
         let mail_section = &source[step5..step5 + step6];
 
@@ -2326,7 +2527,8 @@ mod tests {
 
         // Use a unique marker in the production code (not test code)
         let marker = "proceeding with verification anyway";
-        let mismatch_pos = source.find(marker)
+        let mismatch_pos = source
+            .find(marker)
             .expect("'proceeding with verification anyway' must exist in poll()");
 
         // Look at 300 chars around the marker — must NOT have continue;
@@ -2387,7 +2589,8 @@ mod tests {
         let after = &source[mismatch_pos..];
 
         // The section between mismatch and the next evidence check must NOT ack+continue.
-        let evidence_check = after.find("Reject if missing evidence")
+        let evidence_check = after
+            .find("Reject if missing evidence")
             .expect("evidence check must follow mismatch");
         let between = &after[..evidence_check];
 
@@ -2406,12 +2609,14 @@ mod tests {
         let main_source = include_str!("main.rs");
 
         // Find the first coord.poll() call
-        let poll_pos = main_source.find("coord.poll()")
+        let poll_pos = main_source
+            .find("coord.poll()")
             .expect("coord.poll() must exist in main.rs");
 
         // Find the idle fill call after poll
         let after_poll = &main_source[poll_pos..];
-        let idle_fill_pos = after_poll.find("run_idle_fill")
+        let idle_fill_pos = after_poll
+            .find("run_idle_fill")
             .expect("run_idle_fill must exist after poll");
 
         // poll must come before idle_fill
@@ -2481,9 +2686,11 @@ mod tests {
         let source = include_str!("coordinator.rs");
 
         // Find the section between "Check bead state" and "Reject if missing evidence"
-        let state_check = source.find("Check bead state in DB")
+        let state_check = source
+            .find("Check bead state in DB")
             .expect("bead state check must exist");
-        let evidence_check = source[state_check..].find("Reject if missing evidence")
+        let evidence_check = source[state_check..]
+            .find("Reject if missing evidence")
             .expect("evidence check must exist");
         let section = &source[state_check..state_check + evidence_check];
 
@@ -2503,7 +2710,8 @@ mod tests {
     fn test_closed_bead_completion_is_acked() {
         let source = include_str!("coordinator.rs");
 
-        let closed_skip = source.find("SKIP: already closed/tombstone")
+        let closed_skip = source
+            .find("SKIP: already closed/tombstone")
             .expect("closed/tombstone skip must exist");
         let after = &source[closed_skip..closed_skip + 200];
 
@@ -2555,7 +2763,9 @@ mod tests {
         let source = include_str!("coordinator.rs");
 
         // Find the reassign function body
-        let fn_start = source.find("pub fn reassign(").expect("reassign must exist");
+        let fn_start = source
+            .find("pub fn reassign(")
+            .expect("reassign must exist");
         // Find the end — next "pub fn" or "fn " at the same indent level
         let fn_body_end = source[fn_start + 10..]
             .find("\n    pub fn ")
@@ -2593,7 +2803,8 @@ mod tests {
             }
             if trimmed.contains(".send_message(") && !trimmed.contains("send_message_best_effort") {
                 // Check if it's in a test
-                let preceding = &source[..source.lines().take(i).map(|l| l.len() + 1).sum::<usize>()];
+                let preceding =
+                    &source[..source.lines().take(i).map(|l| l.len() + 1).sum::<usize>()];
                 if !preceding.ends_with("cfg(test)]") && !preceding.contains("#[test]") {
                     violations.push((i + 1, trimmed.to_string()));
                 }
@@ -2605,7 +2816,11 @@ mod tests {
             .iter()
             .filter(|(line_num, _)| {
                 let test_mod_start = source.find("#[cfg(test)]").unwrap_or(source.len());
-                let line_offset: usize = source.lines().take(*line_num - 1).map(|l| l.len() + 1).sum();
+                let line_offset: usize = source
+                    .lines()
+                    .take(*line_num - 1)
+                    .map(|l| l.len() + 1)
+                    .sum();
                 line_offset < test_mod_start
             })
             .collect();
@@ -2638,12 +2853,15 @@ mod tests {
         let source = include_str!("main.rs");
 
         // The seed check section must have a scoped block that drops conn
-        let seed_start = source.find("Seed check").expect("Seed check section must exist");
+        let seed_start = source
+            .find("Seed check")
+            .expect("Seed check section must exist");
         let seed_section = &source[seed_start..seed_start + 600];
 
         // Must contain IMPORTANT comment about dropping before br subprocess calls
         assert!(
-            seed_section.contains("DROPPED before") || seed_section.contains("dropped here")
+            seed_section.contains("DROPPED before")
+                || seed_section.contains("dropped here")
                 || seed_section.contains("frees the DB"),
             "Seed check must document that the DB connection is dropped before br subprocess calls"
         );
@@ -2687,7 +2905,9 @@ mod tests {
     fn test_mail_server_check_cached() {
         let source = include_str!("main.rs");
 
-        let mail_check = source.find("Ensure mail server").expect("mail check must exist");
+        let mail_check = source
+            .find("Ensure mail server")
+            .expect("mail check must exist");
         let section = &source[mail_check..mail_check + 300];
 
         assert!(
@@ -2700,7 +2920,9 @@ mod tests {
     #[test]
     fn test_reassign_comment_references_end_of_cycle() {
         let source = include_str!("coordinator.rs");
-        let reassign_fn = source.find("pub fn reassign(").expect("reassign must exist");
+        let reassign_fn = source
+            .find("pub fn reassign(")
+            .expect("reassign must exist");
         let fn_end = source[reassign_fn..].find("\n    pub fn ").unwrap_or(8000);
         let fn_section = &source[reassign_fn..reassign_fn + fn_end];
 
@@ -2721,7 +2943,9 @@ mod tests {
     #[test]
     fn test_idle_fill_logs_retry_success() {
         let source = include_str!("main.rs");
-        let idle_fill = source.find("fn run_idle_fill(").expect("run_idle_fill must exist");
+        let idle_fill = source
+            .find("fn run_idle_fill(")
+            .expect("run_idle_fill must exist");
         let fn_section = &source[idle_fill..idle_fill + 500];
 
         assert!(
@@ -2781,7 +3005,9 @@ mod tests {
         let source = include_str!("main.rs");
 
         let seed_start = source.find("Seed check").expect("Seed check must exist");
-        let seed_script = source[seed_start..].find("seed_script.exists()").unwrap_or(0);
+        let seed_script = source[seed_start..]
+            .find("seed_script.exists()")
+            .unwrap_or(0);
 
         if seed_script > 0 {
             // The seed script call is AFTER the initial connection block.
@@ -2832,7 +3058,9 @@ mod tests {
 
         // Find the SECOND "stall detection" (the recovery section, not the seed check comment)
         let first = source.find("stall detection").unwrap_or(0);
-        let second = source[first + 20..].find("stall detection").map(|p| first + 20 + p);
+        let second = source[first + 20..]
+            .find("stall detection")
+            .map(|p| first + 20 + p);
         if let Some(pos) = second {
             let section = &source[pos..pos + 200];
             assert!(
@@ -2851,7 +3079,9 @@ mod tests {
 
         // Find post-poll section (after "poll complete" through end of loop)
         let poll_ok = source.find("if poll_ok").unwrap_or(0);
-        if poll_ok == 0 { return; }
+        if poll_ok == 0 {
+            return;
+        }
 
         let loop_end = source[poll_ok..].find("drop(lock_file)").unwrap_or(5000);
         let post_poll = &source[poll_ok..poll_ok + loop_end];
@@ -2859,7 +3089,9 @@ mod tests {
         // Count lines that have `let conn = db::open(` NOT inside a block
         // The safe pattern is: `let conn = db::open(` inside { }
         // The unsafe pattern is: `let conn = db::open(` at if-block scope
-        let lines: Vec<(usize, &str)> = post_poll.lines().enumerate()
+        let lines: Vec<(usize, &str)> = post_poll
+            .lines()
+            .enumerate()
             .filter(|(_, l)| {
                 let trimmed = l.trim();
                 trimmed.starts_with("let conn = db::open(")
@@ -2897,7 +3129,8 @@ mod tests {
     fn test_assign_idle_workers_returns_prompt_tasks() {
         let source = include_str!("coordinator.rs");
 
-        let fn_start = source.find("pub fn assign_idle_workers(")
+        let fn_start = source
+            .find("pub fn assign_idle_workers(")
             .expect("assign_idle_workers must exist");
         let sig = &source[fn_start..fn_start + 200];
 
@@ -2912,13 +3145,15 @@ mod tests {
     fn test_assign_idle_workers_inner_no_inline_prompts() {
         let source = include_str!("coordinator.rs");
 
-        let fn_start = source.find("fn assign_idle_workers_inner(")
+        let fn_start = source
+            .find("fn assign_idle_workers_inner(")
             .expect("assign_idle_workers_inner must exist");
         let fn_end = source[fn_start..].find("\n    pub fn ").unwrap_or(5000);
         let fn_body = &source[fn_start..fn_start + fn_end];
 
         // Must NOT have inline prompt_worker_pane calls
-        let inline_prompts: Vec<_> = fn_body.lines()
+        let inline_prompts: Vec<_> = fn_body
+            .lines()
             .filter(|l| l.contains("prompt_worker_pane(") && !l.trim_start().starts_with("//"))
             .collect();
 
@@ -2961,7 +3196,8 @@ mod tests {
         let source = include_str!("main.rs");
 
         // Find the outer all_prompts declaration
-        let outer = source.find("let mut all_prompts: Vec<tmux::PromptTask>")
+        let outer = source
+            .find("let mut all_prompts: Vec<tmux::PromptTask>")
             .expect("outer all_prompts declaration must exist");
 
         // After the outer declaration, there must be NO `let mut all_prompts =`
@@ -2982,7 +3218,8 @@ mod tests {
     fn test_submit_prompts_parallel_uses_thread_scope() {
         let source = include_str!("tmux.rs");
 
-        let fn_start = source.find("fn submit_prompts_parallel(")
+        let fn_start = source
+            .find("fn submit_prompts_parallel(")
             .expect("submit_prompts_parallel must exist in tmux.rs");
         let fn_end = source[fn_start..].find("\n}").unwrap_or(1000);
         let fn_body = &source[fn_start..fn_start + fn_end];
@@ -3008,7 +3245,8 @@ mod tests {
     #[test]
     fn test_prompt_task_is_clone() {
         let source = include_str!("tmux.rs");
-        let prompt_task = source.find("pub struct PromptTask")
+        let prompt_task = source
+            .find("pub struct PromptTask")
             .expect("PromptTask must exist");
         let before = &source[prompt_task.saturating_sub(50)..prompt_task];
         assert!(
@@ -3021,7 +3259,8 @@ mod tests {
     #[test]
     fn test_parallel_prompt_logs_per_pane() {
         let source = include_str!("tmux.rs");
-        let fn_start = source.find("fn submit_prompts_parallel(")
+        let fn_start = source
+            .find("fn submit_prompts_parallel(")
             .expect("function must exist");
         let fn_body = &source[fn_start..fn_start + 1500];
 
@@ -3042,7 +3281,8 @@ mod tests {
     #[test]
     fn test_assign_idle_workers_logs_queue_counts() {
         let source = include_str!("coordinator.rs");
-        let fn_start = source.find("fn assign_idle_workers_inner(")
+        let fn_start = source
+            .find("fn assign_idle_workers_inner(")
             .expect("function must exist");
         let fn_end = source[fn_start..].find("\n    pub fn ").unwrap_or(5000);
         let fn_body = &source[fn_start..fn_start + fn_end];
@@ -3062,7 +3302,8 @@ mod tests {
     #[test]
     fn test_submit_prompts_parallel_empty_input() {
         let source = include_str!("tmux.rs");
-        let fn_start = source.find("fn submit_prompts_parallel(")
+        let fn_start = source
+            .find("fn submit_prompts_parallel(")
             .expect("function must exist");
         let fn_body = &source[fn_start..fn_start + 300];
 
@@ -3086,7 +3327,9 @@ mod tests {
         let source = include_str!("coordinator.rs");
         // Find the thread::spawn dispatch and the "continue" after it.
         // Only check BETWEEN spawn and continue — not reject paths above.
-        let spawn_pos = source.find("std::thread::spawn(move ||").expect("thread spawn must exist");
+        let spawn_pos = source
+            .find("std::thread::spawn(move ||")
+            .expect("thread spawn must exist");
         let after_spawn = &source[spawn_pos..];
         let continue_pos = after_spawn.find("continue;").unwrap_or(500);
         let section = &after_spawn[..continue_pos];
@@ -3103,7 +3346,9 @@ mod tests {
     #[test]
     fn test_pending_verification_does_not_ack_duplicate() {
         let source = include_str!("coordinator.rs");
-        let pending_check = source.find("already being verified").expect("pending guard must exist");
+        let pending_check = source
+            .find("already being verified")
+            .expect("pending guard must exist");
         let end = (pending_check + 300).min(source.len());
         let section = &source[pending_check..end];
 
@@ -3128,9 +3373,13 @@ mod tests {
         );
         // The main success-path self.ack_msg (Step 7) must come AFTER br::close_bead (Step 1).
         // There are early-exit ack calls for edge cases (worker not found, etc.) which are fine.
-        let close_pos = fn_body.find("br::close_bead").expect("close_bead must exist in reassign");
+        let close_pos = fn_body
+            .find("br::close_bead")
+            .expect("close_bead must exist in reassign");
         // Find the LAST self.ack_msg — that's the main success-path ack
-        let last_ack_pos = fn_body.rfind("self.ack_msg").expect("self.ack_msg must exist in reassign");
+        let last_ack_pos = fn_body
+            .rfind("self.ack_msg")
+            .expect("self.ack_msg must exist in reassign");
         assert!(
             last_ack_pos > close_pos,
             "REGRESSION: main success-path self.ack_msg must come AFTER br::close_bead. \
@@ -3198,13 +3447,24 @@ mod tests {
     #[test]
     fn test_coordinator_has_verification_infrastructure() {
         let source = include_str!("coordinator.rs");
-        let struct_def = source.find("pub struct Coordinator").expect("Coordinator must exist");
+        let struct_def = source
+            .find("pub struct Coordinator")
+            .expect("Coordinator must exist");
         let struct_end = source[struct_def..].find('}').unwrap_or(500);
         let struct_body = &source[struct_def..struct_def + struct_end];
 
-        assert!(struct_body.contains("pending_verifications"), "must track pending verifications");
-        assert!(struct_body.contains("verify_rx"), "must have verification result receiver");
-        assert!(struct_body.contains("verify_tx"), "must have verification result sender");
+        assert!(
+            struct_body.contains("pending_verifications"),
+            "must track pending verifications"
+        );
+        assert!(
+            struct_body.contains("verify_rx"),
+            "must have verification result receiver"
+        );
+        assert!(
+            struct_body.contains("verify_tx"),
+            "must have verification result sender"
+        );
     }
 
     /// Functional: test_coordinator() creates valid verification channels.
@@ -3223,7 +3483,8 @@ mod tests {
             passed: true,
             reject_reason: None,
             is_stale_recovery: false,
-        }).unwrap();
+        })
+        .unwrap();
 
         let rx = coord.verify_rx.lock().unwrap();
         let result = rx.try_recv().unwrap();
@@ -3271,8 +3532,10 @@ mod tests {
         let source = include_str!("coordinator.rs");
         let poll_fn = source.find("pub fn poll(").unwrap();
         let body = &source[poll_fn..poll_fn + 2000];
-        assert!(body.contains("recover_stale_assignments"),
-            "poll() must call recover_stale_assignments so it runs in pull mode too");
+        assert!(
+            body.contains("recover_stale_assignments"),
+            "poll() must call recover_stale_assignments so it runs in pull mode too"
+        );
     }
 
     #[test]
@@ -3282,24 +3545,30 @@ mod tests {
         let end = source[method + 1..].find("\n    fn ").unwrap_or(1000);
         let body = &source[method..method + end];
         assert!(body.contains("commands.is_empty()"));
-        assert!(body.contains("cargo build --workspace"),
-            "must fall back to workspace build check when no acceptance commands");
+        assert!(
+            body.contains("cargo build --workspace"),
+            "must fall back to workspace build check when no acceptance commands"
+        );
     }
 
     #[test]
     fn test_stale_recovery_verify_result_channel() {
         let coord = test_coordinator();
-        coord.verify_tx.clone().send(VerifyResult {
-            bead_id: "pat-stale".to_string(),
-            worker: String::new(),
-            msg_id: None,
-            ack_required: false,
-            files_changed: String::new(),
-            tests_run: String::new(),
-            passed: true,
-            reject_reason: None,
-            is_stale_recovery: true,
-        }).unwrap();
+        coord
+            .verify_tx
+            .clone()
+            .send(VerifyResult {
+                bead_id: "pat-stale".to_string(),
+                worker: String::new(),
+                msg_id: None,
+                ack_required: false,
+                files_changed: String::new(),
+                tests_run: String::new(),
+                passed: true,
+                reject_reason: None,
+                is_stale_recovery: true,
+            })
+            .unwrap();
         let rx = coord.verify_rx.lock().unwrap();
         let result = rx.try_recv().unwrap();
         assert!(result.is_stale_recovery);
@@ -3310,11 +3579,17 @@ mod tests {
     fn test_verify_stale_bead_skips_if_already_pending() {
         let coord = test_coordinator();
         {
-            coord.pending_verifications.lock().unwrap().insert("pat-already".to_string());
+            coord
+                .pending_verifications
+                .lock()
+                .unwrap()
+                .insert("pat-already".to_string());
         }
         coord.verify_stale_bead("pat-already");
-        assert!(coord.verify_rx.lock().unwrap().try_recv().is_err(),
-            "should not dispatch verification for already-pending bead");
+        assert!(
+            coord.verify_rx.lock().unwrap().try_recv().is_err(),
+            "should not dispatch verification for already-pending bead"
+        );
     }
 
     /// Regression: auto_create_beads_from_planner must check planner keys

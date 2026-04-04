@@ -46,7 +46,15 @@ tmux kill-session -t "=${SESSION}--agent-mail" 2>/dev/null || true
 Also kill any stale orchestrator processes and cargo locks:
 ```bash
 pkill -f "patina-orchestrator run" 2>/dev/null || true
-pkill -f "cargo test.*patina" 2>/dev/null || true
+pkill -9 -f "cargo test" 2>/dev/null || true
+pkill -9 -f "cargo nextest" 2>/dev/null || true
+pkill -9 -f "cargo build" 2>/dev/null || true
+pkill -9 -f "cargo check" 2>/dev/null || true
+pkill -9 -f "cargo-nextest" 2>/dev/null || true
+pkill -f "rust_task" 2>/dev/null || true
+pkill -f "am-run.*rust-build" 2>/dev/null || true
+rm -f /Users/bone/dev/games/patina/.orchestrator/rust-build.lock.info
+rmdir /Users/bone/dev/games/patina/.orchestrator/rust-build.lock 2>/dev/null || true
 ```
 
 Clean up stale CLOSE_WAIT sockets on the agent-mail port:

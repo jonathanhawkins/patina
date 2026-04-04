@@ -131,21 +131,29 @@ If agent mail is unreachable (server already stopped or health check fails), ski
 tmux kill-session -t "=${SESSION}--agent-mail" 2>/dev/null || true
 ```
 
-### 9. Kill ALL stray orchestrator processes
+### 9. Kill ALL stray orchestrator and cargo processes
 
-Use a single broad pattern to catch every subcommand (`run`, `poll`, `assign`, `plan`, `health`, `worker-state`):
+Use broad patterns to catch every subcommand and any orphaned cargo/verifier processes:
 
 ```bash
 pkill -9 -f "patina-orchestrator" 2>/dev/null || true
-pkill -f "cargo test.*patina" 2>/dev/null || true
+pkill -9 -f "cargo test" 2>/dev/null || true
+pkill -9 -f "cargo nextest" 2>/dev/null || true
+pkill -9 -f "cargo build" 2>/dev/null || true
+pkill -9 -f "cargo check" 2>/dev/null || true
+pkill -9 -f "cargo-nextest" 2>/dev/null || true
+pkill -f "rust_task" 2>/dev/null || true
+pkill -f "am-run.*rust-build" 2>/dev/null || true
 ```
 
-### 10. Clean up lock files
+### 10. Clean up lock files and build slot
 
 ```bash
 rm -f /Users/bone/dev/games/patina/.codex/orchestrator/coordinator.lock
 rm -f /Users/bone/dev/games/patina/.beads/ORCH_LOCK
 rm -f /Users/bone/dev/games/patina/.claude/scheduled_tasks.lock
+rm -f /Users/bone/dev/games/patina/.orchestrator/rust-build.lock.info
+rmdir /Users/bone/dev/games/patina/.orchestrator/rust-build.lock 2>/dev/null || true
 ```
 
 ### 11. Clean up stale CLOSE_WAIT sockets

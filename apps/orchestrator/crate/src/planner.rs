@@ -18,7 +18,9 @@ use crate::db;
 use crate::error::Result;
 use crate::gate_map;
 use crate::prd_parser;
-use crate::project_config::{self, AnalysisCommand, CompletionCondition, ParserType, ProjectPlannerConfig};
+use crate::project_config::{
+    self, AnalysisCommand, CompletionCondition, ParserType, ProjectPlannerConfig,
+};
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -109,7 +111,10 @@ pub fn analyze(project_root: &Path) -> Result<PlanReport> {
         // Fallback: try the conventional commands
         let engine_dir = project_root.join("engine-rs");
         if engine_dir.exists() {
-            (run_parity_pass(&engine_dir), run_gate_pass_default(&engine_dir))
+            (
+                run_parity_pass(&engine_dir),
+                run_gate_pass_default(&engine_dir),
+            )
         } else {
             (empty_parity(), empty_gates())
         }
@@ -127,11 +132,8 @@ pub fn analyze(project_root: &Path) -> Result<PlanReport> {
     //   completed work.
     let active_titles = match db::open(project_root) {
         Ok(conn) => {
-            db::bead_titles_by_status(
-                &conn,
-                &[db::BeadStatus::Open, db::BeadStatus::InProgress],
-            )
-            .unwrap_or_default()
+            db::bead_titles_by_status(&conn, &[db::BeadStatus::Open, db::BeadStatus::InProgress])
+                .unwrap_or_default()
         }
         Err(_) => vec![],
     };
@@ -233,7 +235,8 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
             Ok(conn) => db::bead_titles_by_status(
                 &conn,
                 &[db::BeadStatus::Open, db::BeadStatus::InProgress],
-            ).unwrap_or_default(),
+            )
+            .unwrap_or_default(),
             Err(_) => vec![],
         };
         recommendations.extend(generate_next_phase_recommendations(
@@ -262,9 +265,7 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
             .any(|t| t.contains(&spec.description));
 
         let key_pattern = format!("[planner-key: {}]", spec.bead_key);
-        let key_match = existing_keys
-            .iter()
-            .any(|desc| desc.contains(&key_pattern));
+        let key_match = existing_keys.iter().any(|desc| desc.contains(&key_pattern));
 
         if title_match || key_match {
             continue;
@@ -289,7 +290,7 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
             acceptance_command: spec.acceptance_command.clone().unwrap_or_default(),
             gate_key: spec.bead_key.clone(),
             reason: "Execution map bead with no matching existing bead".to_string(),
-            depends_on: vec![],
+            depends_on: spec.depends_on.clone(),
         });
     }
 
@@ -299,9 +300,7 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
             continue;
         }
 
-        let title_match = existing_titles
-            .iter()
-            .any(|t| t.contains(&item.text));
+        let title_match = existing_titles.iter().any(|t| t.contains(&item.text));
 
         if title_match {
             continue;
@@ -319,9 +318,7 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
         let priority = gate_entry.map(|e| e.priority).unwrap_or(2);
 
         let key_pattern = format!("[planner-key: {}]", key);
-        let key_match = existing_keys
-            .iter()
-            .any(|desc| desc.contains(&key_pattern));
+        let key_match = existing_keys.iter().any(|desc| desc.contains(&key_pattern));
 
         if key_match {
             continue;
@@ -352,10 +349,10 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
     // don't mean the deliverable is actually done.
     let all_checked = criteria.iter().all(|c| c.checked);
     let active_titles = match db::open(project_root) {
-        Ok(conn) => db::bead_titles_by_status(
-            &conn,
-            &[db::BeadStatus::Open, db::BeadStatus::InProgress],
-        ).unwrap_or_default(),
+        Ok(conn) => {
+            db::bead_titles_by_status(&conn, &[db::BeadStatus::Open, db::BeadStatus::InProgress])
+                .unwrap_or_default()
+        }
         Err(_) => vec![],
     };
     if all_checked && !criteria.is_empty() {
@@ -375,7 +372,10 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
 
 // ─── PRD file loading ─────────────────────────────────────────────────────
 
-fn load_criteria(project_root: &Path, config: &ProjectPlannerConfig) -> Vec<prd_parser::CriteriaItem> {
+fn load_criteria(
+    project_root: &Path,
+    config: &ProjectPlannerConfig,
+) -> Vec<prd_parser::CriteriaItem> {
     let mut all = Vec::new();
     for file in &config.criteria_files {
         let path = project_root.join(file);
@@ -386,7 +386,10 @@ fn load_criteria(project_root: &Path, config: &ProjectPlannerConfig) -> Vec<prd_
     all
 }
 
-fn load_execution_maps(project_root: &Path, config: &ProjectPlannerConfig) -> Vec<prd_parser::BeadSpec> {
+pub(crate) fn load_execution_maps(
+    project_root: &Path,
+    config: &ProjectPlannerConfig,
+) -> Vec<prd_parser::BeadSpec> {
     let mut all = Vec::new();
     for file in &config.execution_map_files {
         let path = project_root.join(file);
@@ -461,7 +464,11 @@ fn run_shell_command(cmd: &str, workdir: &Path, timeout: Option<std::time::Durat
                 Ok(Some(_)) => break,
                 Ok(None) => {
                     if start.elapsed() > dur {
-                        eprintln!("planner: command '{}' timed out after {}s", cmd, dur.as_secs());
+                        eprintln!(
+                            "planner: command '{}' timed out after {}s",
+                            cmd,
+                            dur.as_secs()
+                        );
                         let _ = child.kill();
                         let _ = child.wait();
                         return String::new();
@@ -546,10 +553,7 @@ fn run_parity_pass(engine_dir: &Path) -> ParityReport {
 /// OVERALL                        221      180    81.4%
 /// ```
 pub fn parse_parity_output(text: &str) -> ParityReport {
-    let re = Regex::new(
-        r"(?m)^\s*(\S+)\s+(\d+)\s+(\d+)\s+(\d+(?:\.\d+)?)%\s*$"
-    )
-    .unwrap();
+    let re = Regex::new(r"(?m)^\s*(\S+)\s+(\d+)\s+(\d+)\s+(\d+(?:\.\d+)?)%\s*$").unwrap();
 
     let mut scenes = Vec::new();
     let mut overall = 0.0;
@@ -577,7 +581,10 @@ pub fn parse_parity_output(text: &str) -> ParityReport {
     }
 
     if scenes.is_empty() {
-        eprintln!("planner: parity parser found no scene data in output ({} bytes)", text.len());
+        eprintln!(
+            "planner: parity parser found no scene data in output ({} bytes)",
+            text.len()
+        );
     }
 
     ParityReport {
@@ -636,7 +643,10 @@ pub fn parse_gate_output(text: &str) -> GateReport {
     }
 
     if passing.is_empty() && failing.is_empty() {
-        eprintln!("planner: gate parser found no test results in output ({} bytes)", text.len());
+        eprintln!(
+            "planner: gate parser found no test results in output ({} bytes)",
+            text.len()
+        );
     }
 
     let total = passing.len() + failing.len();
@@ -667,8 +677,7 @@ fn run_queue_pass(project_root: &Path) -> Result<QueueReport> {
 // ─── Recommendations ──────────────────────────────────────────────────────
 
 fn collect_existing_planner_keys(conn: &rusqlite::Connection) -> Vec<String> {
-    db::bead_descriptions_containing(conn, "[planner-key:")
-        .unwrap_or_default()
+    db::bead_descriptions_containing(conn, "[planner-key:").unwrap_or_default()
 }
 
 /// Collect planner keys only from beads in the given statuses.
@@ -676,8 +685,7 @@ fn collect_existing_planner_keys_by_status(
     conn: &rusqlite::Connection,
     statuses: &[db::BeadStatus],
 ) -> Vec<String> {
-    db::bead_descriptions_containing_by_status(conn, "[planner-key:", statuses)
-        .unwrap_or_default()
+    db::bead_descriptions_containing_by_status(conn, "[planner-key:", statuses).unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -800,9 +808,7 @@ pub fn generate_recommendations(
 
         // Check key dedup
         let key_pattern = format!("[planner-key: {}]", entry.bead_key);
-        let key_match = existing_keys
-            .iter()
-            .any(|desc| desc.contains(&key_pattern));
+        let key_match = existing_keys.iter().any(|desc| desc.contains(&key_pattern));
 
         if title_match || key_match {
             continue;
@@ -811,7 +817,8 @@ pub fn generate_recommendations(
         let title = format!(
             "{} gate: {} — {}",
             "V1", // Could come from config.phase_label in the future
-            entry.criteria_section, entry.criteria_line
+            entry.criteria_section,
+            entry.criteria_line
         );
 
         let description = format!(
@@ -819,10 +826,7 @@ pub fn generate_recommendations(
              Criteria: {}\n\
              Section: {}\n\n\
              [planner-key: {}]",
-            entry.test_name,
-            entry.criteria_line,
-            entry.criteria_section,
-            entry.bead_key,
+            entry.test_name, entry.criteria_line, entry.criteria_section, entry.bead_key,
         );
 
         let acceptance_command = entry.test_name.clone();
@@ -830,17 +834,11 @@ pub fn generate_recommendations(
         recs.push(Recommendation {
             title,
             priority: entry.priority,
-            labels: vec![
-                "gate".to_string(),
-                entry.criteria_section.clone(),
-            ],
+            labels: vec!["gate".to_string(), entry.criteria_section.clone()],
             description,
             acceptance_command,
             gate_key: entry.bead_key.clone(),
-            reason: format!(
-                "Gate {} still fails, no open bead found",
-                entry.test_name
-            ),
+            reason: format!("Gate {} still fails, no open bead found", entry.test_name),
             depends_on: vec![],
         });
     }
@@ -864,10 +862,16 @@ pub fn generate_parity_recommendations(
         if scene.parity >= 100.0 {
             continue;
         }
-        let title = format!("Close parity gap in {} (currently {:.1}%)", scene.name, scene.parity);
+        let title = format!(
+            "Close parity gap in {} (currently {:.1}%)",
+            scene.name, scene.parity
+        );
         let key = format!("parity-gap-{}", scene.name);
 
-        if existing_titles.iter().any(|t| t.contains(&scene.name) && t.contains("parity")) {
+        if existing_titles
+            .iter()
+            .any(|t| t.contains(&scene.name) && t.contains("parity"))
+        {
             continue;
         }
 
@@ -948,6 +952,10 @@ fn generate_next_phase_recommendations(
             let prefix = format!("Phase {}", phase_num);
             let deliverables = prd_parser::parse_phase_deliverables(&content, &prefix);
 
+            // Chain sequential deliverables within the same phase so each
+            // depends on the previous one — mirrors the execution map parser.
+            let mut prev_key_in_phase: Option<String> = None;
+
             for d in deliverables {
                 let template = next_phase_template(&d.title);
                 let title = if template.title.is_empty() {
@@ -961,10 +969,13 @@ fn generate_next_phase_recommendations(
 
                 if seen_titles.contains(&normalized_title)
                     || seen_keys.contains(&key_pattern)
-                    || existing_titles.iter().any(|t| {
-                        t.eq_ignore_ascii_case(&d.title) || t.eq_ignore_ascii_case(&title)
-                    })
+                    || existing_titles
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&d.title) || t.eq_ignore_ascii_case(&title))
                 {
+                    // Even if we skip creating this bead, it's still in the
+                    // chain for dependency purposes.
+                    prev_key_in_phase = Some(key);
                     continue;
                 }
 
@@ -973,6 +984,11 @@ fn generate_next_phase_recommendations(
                 } else {
                     template.labels.iter().map(|l| (*l).to_string()).collect()
                 };
+
+                let depends_on = prev_key_in_phase
+                    .as_ref()
+                    .map(|k| vec![k.clone()])
+                    .unwrap_or_default();
 
                 recs.push(Recommendation {
                     title: title.clone(),
@@ -989,10 +1005,11 @@ fn generate_next_phase_recommendations(
                         key = key,
                     ),
                     acceptance_command: template.acceptance.to_string(),
-                    gate_key: key,
+                    gate_key: key.clone(),
                     reason: format!("Phase {} deliverable from port plan, no existing bead", phase_num),
-                    depends_on: vec![],
+                    depends_on,
                 });
+                prev_key_in_phase = Some(key);
                 seen_titles.insert(normalized_title);
                 seen_keys.insert(key_pattern);
             }
@@ -1003,7 +1020,11 @@ fn generate_next_phase_recommendations(
 
 // ─── Phase determination ──────────────────────────────────────────────────
 
-fn determine_phase(gates: &GateReport, parity: &ParityReport, config: &ProjectPlannerConfig) -> Phase {
+fn determine_phase(
+    gates: &GateReport,
+    parity: &ParityReport,
+    config: &ProjectPlannerConfig,
+) -> Phase {
     if config.completion_conditions.is_empty() {
         // Default behavior: gates all passing + parity >= 98
         return determine_phase_default(gates, parity);
@@ -1103,9 +1124,15 @@ test test_v1_headless_mode ... ok
         assert_eq!(report.total, 5);
         assert_eq!(report.passing.len(), 3);
         assert_eq!(report.failing.len(), 2);
-        assert!(report.passing.contains(&"test_v1_classdb_full_property_enumeration".to_string()));
-        assert!(report.failing.contains(&"test_v1_notification_dispatch_ordering".to_string()));
-        assert!(report.failing.contains(&"test_v1_weakref_auto_invalidates_on_free".to_string()));
+        assert!(report
+            .passing
+            .contains(&"test_v1_classdb_full_property_enumeration".to_string()));
+        assert!(report
+            .failing
+            .contains(&"test_v1_notification_dispatch_ordering".to_string()));
+        assert!(report
+            .failing
+            .contains(&"test_v1_weakref_auto_invalidates_on_free".to_string()));
     }
 
     #[test]
@@ -1138,10 +1165,7 @@ test something_else ... ignored
         let gates = GateReport {
             total: 2,
             passing: vec![],
-            failing: vec![
-                "test_notif".to_string(),
-                "test_weakref".to_string(),
-            ],
+            failing: vec!["test_notif".to_string(), "test_weakref".to_string()],
         };
 
         let dynamic_gates = vec![
@@ -1162,7 +1186,8 @@ test something_else ... ignored
         ];
 
         let existing_titles = vec![
-            "V1 gate: Object Model — Object.notification() dispatch with correct ordering".to_string(),
+            "V1 gate: Object Model — Object.notification() dispatch with correct ordering"
+                .to_string(),
         ];
         let existing_keys: Vec<String> = vec![];
 
@@ -1173,7 +1198,13 @@ test something_else ... ignored
             ready_unassigned: 3,
         };
 
-        let recs = generate_recommendations(&gates, &dynamic_gates, &existing_titles, &existing_keys, &queue);
+        let recs = generate_recommendations(
+            &gates,
+            &dynamic_gates,
+            &existing_titles,
+            &existing_keys,
+            &queue,
+        );
         assert_eq!(recs.len(), 1, "should skip bead with matching title");
         assert!(recs[0].gate_key.contains("weakref"));
     }
@@ -1195,9 +1226,8 @@ test something_else ... ignored
         }];
 
         let existing_titles: Vec<String> = vec![];
-        let existing_keys = vec![
-            "some bead with [planner-key: v1-obj-notif] in description".to_string(),
-        ];
+        let existing_keys =
+            vec!["some bead with [planner-key: v1-obj-notif] in description".to_string()];
 
         let queue = QueueReport {
             open: 5,
@@ -1206,7 +1236,13 @@ test something_else ... ignored
             ready_unassigned: 3,
         };
 
-        let recs = generate_recommendations(&gates, &dynamic_gates, &existing_titles, &existing_keys, &queue);
+        let recs = generate_recommendations(
+            &gates,
+            &dynamic_gates,
+            &existing_titles,
+            &existing_keys,
+            &queue,
+        );
         assert_eq!(recs.len(), 0, "should skip bead with matching planner key");
     }
 
@@ -1344,7 +1380,10 @@ test something_else ... ignored
             completion_conditions: vec![],
             next_sources: vec![],
         };
-        assert_eq!(determine_phase(&gates, &parity, &config), Phase::V1NearlyDone);
+        assert_eq!(
+            determine_phase(&gates, &parity, &config),
+            Phase::V1NearlyDone
+        );
     }
 
     #[test]
@@ -1392,7 +1431,10 @@ test something_else ... ignored
             completion_conditions: vec![],
             next_sources: vec![],
         };
-        assert_eq!(determine_phase(&gates, &parity, &config), Phase::V1NearlyDone);
+        assert_eq!(
+            determine_phase(&gates, &parity, &config),
+            Phase::V1NearlyDone
+        );
     }
 
     #[test]
@@ -1420,7 +1462,10 @@ test something_else ... ignored
             ],
             next_sources: vec![],
         };
-        assert_eq!(determine_phase(&gates, &parity, &config), Phase::V1NearlyDone);
+        assert_eq!(
+            determine_phase(&gates, &parity, &config),
+            Phase::V1NearlyDone
+        );
     }
 
     #[test]
@@ -1471,10 +1516,8 @@ test something_else ... ignored
 
     #[test]
     fn test_generate_next_phase_recommendations_dedupes_across_sources() {
-        let root = std::env::temp_dir().join(format!(
-            "patina-planner-next-phase-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("patina-planner-next-phase-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("prd")).unwrap();
 
@@ -1507,7 +1550,11 @@ test something_else ... ignored
         };
 
         let recs = generate_next_phase_recommendations(&root, &config, &[], &queue);
-        assert_eq!(recs.len(), 2, "duplicate sources should not duplicate beads");
+        assert_eq!(
+            recs.len(),
+            2,
+            "duplicate sources should not duplicate beads"
+        );
         assert_eq!(
             recs.iter()
                 .filter(|r| r.gate_key == "phase9-benchmark-dashboards")
@@ -1515,7 +1562,9 @@ test something_else ... ignored
             1
         );
         assert!(recs.iter().all(|r| !r.acceptance_command.is_empty()));
-        assert!(recs.iter().all(|r| r.labels.iter().any(|l| l.starts_with("phase"))));
+        assert!(recs
+            .iter()
+            .all(|r| r.labels.iter().any(|l| l.starts_with("phase"))));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1556,12 +1605,13 @@ test something_else ... ignored
             closed: 0,
             ready_unassigned: 0,
         };
-        let existing_titles =
-            vec!["Produce the first real 3D demo parity report".to_string()];
+        let existing_titles = vec!["Produce the first real 3D demo parity report".to_string()];
 
-        let recs =
-            generate_next_phase_recommendations(&root, &config, &existing_titles, &queue);
-        assert!(recs.is_empty(), "existing active title should suppress recommendation");
+        let recs = generate_next_phase_recommendations(&root, &config, &existing_titles, &queue);
+        assert!(
+            recs.is_empty(),
+            "existing active title should suppress recommendation"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1588,7 +1638,10 @@ test something_else ... ignored
         let report = parse_parity_output("");
         assert_eq!(report.total, 0, "empty input → total=0");
         assert_eq!(report.matched, 0, "empty input → matched=0");
-        assert!((report.overall - 0.0).abs() < f64::EPSILON, "empty input → 0% parity");
+        assert!(
+            (report.overall - 0.0).abs() < f64::EPSILON,
+            "empty input → 0% parity"
+        );
         assert!(report.scenes.is_empty(), "empty input → no scenes");
     }
 
@@ -1648,7 +1701,8 @@ test test_c ... ignored
     fn test_parity_parser_stress_many_scenes() {
         let mut input = String::new();
         for i in 0..200 {
-            input.push_str(&format!("scene_{i:03}    50    {matched}    {pct:.1}%\n",
+            input.push_str(&format!(
+                "scene_{i:03}    50    {matched}    {pct:.1}%\n",
                 matched = i % 51,
                 pct = (i % 51) as f64 / 50.0 * 100.0,
             ));
@@ -1744,14 +1798,17 @@ OVERALL        101   100    99.0%
             "💥 random unicode garbage 🎮",
             "\0\0\0null bytes\0\0",
             "100% 200% 300%",  // percentage without table format
-            "scene 10 5 50.0",  // missing % sign
-            "OVERALL",  // incomplete OVERALL line
-            "\n\n\n\n",  // only newlines
+            "scene 10 5 50.0", // missing % sign
+            "OVERALL",         // incomplete OVERALL line
+            "\n\n\n\n",        // only newlines
         ];
         for input in &inputs {
             let report = parse_parity_output(input);
             // Must not panic — zero-value report is fine
-            assert!(report.overall >= 0.0, "garbled input must not produce negative parity");
+            assert!(
+                report.overall >= 0.0,
+                "garbled input must not produce negative parity"
+            );
         }
     }
 
@@ -1759,16 +1816,19 @@ OVERALL        101   100    99.0%
     #[test]
     fn test_gate_parser_garbled_input_no_panic() {
         let inputs = [
-            "test ... ok",  // missing test name
-            "test_foo ... maybe",  // unknown status
-            "testing test_bar ... ok",  // wrong prefix
+            "test ... ok",             // missing test name
+            "test_foo ... maybe",      // unknown status
+            "testing test_bar ... ok", // wrong prefix
             "💥\0garbage\n",
-            "test  ... FAILED",  // empty name
+            "test  ... FAILED", // empty name
         ];
         for input in &inputs {
             let report = parse_gate_output(input);
             // Must not panic
-            assert!(report.total < 1000, "garbled input should not produce huge totals");
+            assert!(
+                report.total < 1000,
+                "garbled input should not produce huge totals"
+            );
         }
     }
 
@@ -1780,13 +1840,31 @@ OVERALL        101   100    99.0%
             total: 50,
             matched: 50,
             scenes: vec![
-                SceneParity { name: "perfect".into(), total: 25, matched: 25, parity: 100.0 },
-                SceneParity { name: "also_perfect".into(), total: 25, matched: 25, parity: 100.0 },
+                SceneParity {
+                    name: "perfect".into(),
+                    total: 25,
+                    matched: 25,
+                    parity: 100.0,
+                },
+                SceneParity {
+                    name: "also_perfect".into(),
+                    total: 25,
+                    matched: 25,
+                    parity: 100.0,
+                },
             ],
         };
-        let queue = QueueReport { open: 2, in_progress: 1, closed: 50, ready_unassigned: 1 };
+        let queue = QueueReport {
+            open: 2,
+            in_progress: 1,
+            closed: 50,
+            ready_unassigned: 1,
+        };
         let recs = generate_parity_recommendations(&parity, &[], &queue);
-        assert!(recs.is_empty(), "100% scenes should not generate recommendations");
+        assert!(
+            recs.is_empty(),
+            "100% scenes should not generate recommendations"
+        );
     }
 
     /// Parity recommendations: scenes below 100% SHOULD generate recs.
@@ -1797,11 +1875,26 @@ OVERALL        101   100    99.0%
             total: 100,
             matched: 95,
             scenes: vec![
-                SceneParity { name: "good".into(), total: 50, matched: 50, parity: 100.0 },
-                SceneParity { name: "needs_work".into(), total: 50, matched: 45, parity: 90.0 },
+                SceneParity {
+                    name: "good".into(),
+                    total: 50,
+                    matched: 50,
+                    parity: 100.0,
+                },
+                SceneParity {
+                    name: "needs_work".into(),
+                    total: 50,
+                    matched: 45,
+                    parity: 90.0,
+                },
             ],
         };
-        let queue = QueueReport { open: 2, in_progress: 1, closed: 50, ready_unassigned: 1 };
+        let queue = QueueReport {
+            open: 2,
+            in_progress: 1,
+            closed: 50,
+            ready_unassigned: 1,
+        };
         let recs = generate_parity_recommendations(&parity, &[], &queue);
         assert_eq!(recs.len(), 1);
         assert!(recs[0].title.contains("needs_work"));
@@ -1903,7 +1996,9 @@ OVERALL        101   100    99.0%
     #[test]
     fn test_next_phase_dedup_active_only() {
         let source = include_str!("planner.rs");
-        let next_fn = source.find("fn generate_next_phase_recommendations(").unwrap();
+        let next_fn = source
+            .find("fn generate_next_phase_recommendations(")
+            .unwrap();
         let fn_end = source[next_fn..].find("\n}").unwrap_or(1000);
         let body = &source[next_fn..next_fn + fn_end];
 
@@ -1914,11 +2009,111 @@ OVERALL        101   100    99.0%
         );
 
         // Verify callers pass active_titles, not all_titles
-        let all_callers = source.matches("generate_next_phase_recommendations(").count();
-        let active_callers = source.matches("&active_titles,\n            &queue,").count();
+        let all_callers = source
+            .matches("generate_next_phase_recommendations(")
+            .count();
+        let active_callers = source
+            .matches("&active_titles,\n            &queue,")
+            .count();
         assert!(
             active_callers >= 2,
             "all callers must pass active_titles (open/in-progress only), found {active_callers} of {all_callers}"
+        );
+    }
+
+    /// Verify that port-plan deliverable recommendations chain dependencies
+    /// within the same phase so sequential items depend on the previous one.
+    #[test]
+    fn test_next_phase_recommendations_chain_dependencies() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let plan_path = tmpdir.path().join("PORT_PLAN.md");
+
+        // Minimal port plan with three Phase 6 deliverables in order.
+        // The parser requires a `### Deliverables` subsection under `## Phase 6`.
+        fs::write(
+            &plan_path,
+            r#"# Port Plan
+
+## Phase 6
+
+### Deliverables
+
+- first 3D crate set,
+- 3D fixture corpus,
+- 3D demo parity report
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectPlannerConfig {
+            analysis: vec![],
+            criteria_files: vec![],
+            execution_map_files: vec![],
+            phase_label: "V1".to_string(),
+            completion_conditions: vec![],
+            next_sources: vec![plan_path.clone()],
+        };
+
+        let queue = QueueReport {
+            open: 0,
+            in_progress: 0,
+            closed: 0,
+            ready_unassigned: 0,
+        };
+
+        let recs = generate_next_phase_recommendations(
+            tmpdir.path(),
+            &config,
+            &[], // no existing titles
+            &queue,
+        );
+
+        // We should get at least 2 recommendations (the deliverables)
+        assert!(
+            recs.len() >= 2,
+            "expected at least 2 port-plan recommendations, got {}",
+            recs.len()
+        );
+
+        // The first recommendation should have no dependencies (or only previous
+        // phase deps). Subsequent ones should depend on the previous gate_key.
+        let first = &recs[0];
+        assert!(
+            first.depends_on.is_empty(),
+            "first deliverable in phase should have no intra-phase dependency, got {:?}",
+            first.depends_on
+        );
+
+        for i in 1..recs.len() {
+            let prev_key = &recs[i - 1].gate_key;
+            assert!(
+                recs[i].depends_on.contains(prev_key),
+                "rec[{}] ({}) should depend on rec[{}] ({}), but depends_on = {:?}",
+                i,
+                recs[i].gate_key,
+                i - 1,
+                prev_key,
+                recs[i].depends_on
+            );
+        }
+    }
+
+    /// Regression: verify the planner source code has no `depends_on: vec![]`
+    /// in the port-plan deliverable generator — it must use the chained value.
+    #[test]
+    fn test_port_plan_generator_does_not_hardcode_empty_depends_on() {
+        let source = include_str!("planner.rs");
+        // Find the deliverable loop body (between "for d in deliverables" and closing brace)
+        let marker = "for d in deliverables";
+        let start = source
+            .find(marker)
+            .expect("deliverable loop must exist in planner.rs");
+        // Look at the next 1500 chars which covers the loop body
+        let body = &source[start..std::cmp::min(start + 1500, source.len())];
+        assert!(
+            !body.contains("depends_on: vec![]"),
+            "port-plan deliverable generator must chain dependencies, not hardcode empty vec. \
+             Found 'depends_on: vec![]' in the deliverable loop body."
         );
     }
 }

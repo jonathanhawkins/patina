@@ -11,7 +11,8 @@ use crate::tmux;
 pub struct LaunchConfig {
     pub session_name: String,
     pub worker_count: u32,
-    pub model_command: String,
+    pub worker_model_command: String,
+    pub planner_model_command: String,
     pub project_root: PathBuf,
     pub orch_root: PathBuf,
     pub dry_run: bool,
@@ -55,6 +56,22 @@ pub fn ensure_skip_permissions(model_cmd: &str) -> String {
     } else {
         format!("{model_cmd} --dangerously-skip-permissions")
     }
+}
+
+fn command_program_name(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or(command)
+}
+
+fn agent_type_for_command(command: &str) -> &'static str {
+    if command_program_name(command).contains("codex") {
+        "codex"
+    } else {
+        "claude"
+    }
+}
+
+pub(crate) fn supports_auto_loop(command: &str) -> bool {
+    agent_type_for_command(command) == "claude"
 }
 
 /// Run the launch sequence.
@@ -105,6 +122,9 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
         &config.project_root,
     )?;
 
+    // Enable pane border titles so each worker pane shows agent name + bead
+    enable_pane_border_titles(&config.session_name)?;
+
     // Build layout: [left col ~14%] | [bv ~28%] | [worker grid ~58%]
     //
     // tmux split-window -h -p N: the NEW pane (right) gets N% of the space.
@@ -114,20 +134,34 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
     split_h(&config.session_name, 0, 0, 86)?;
     // Now: pane 0 = left column (~30 cols), pane 1 = right area (~185 cols)
 
-    // Step 2: Split left column (pane 0) vertically — monitor top, planner bottom
-    split_v(&config.session_name, 0, 0, 50)?;
-    // Now: pane 0 = monitor, pane 1 = planner, pane 2 = right area
+    // Step 2: Split left column into 3: coordinator | verifier | planner
+    split_v(&config.session_name, 0, 0, 67)?;
+    // pane 0 = coordinator, pane 1 = (verifier+planner), pane 2 = right area
+    split_v(&config.session_name, 0, 1, 50)?;
+    // pane 0 = coordinator, pane 1 = verifier, pane 2 = planner, pane 3 = right area
 
-    // Step 3: Split right area (pane 2) horizontally — bv (33%) | workers (67%)
-    // -p 67 means the new pane (right/workers) gets 67%, bv keeps 33%.
-    split_h(&config.session_name, 0, 2, 67)?;
-    // Now: pane 0 = monitor, pane 1 = planner, pane 2 = bv (~61 cols), pane 3 = worker area (~124 cols)
+    // Step 3: Split right area (pane 3) — bv (33%) | workers (67%)
+    split_h(&config.session_name, 0, 3, 67)?;
+    // pane 0 = coordinator, pane 1 = verifier, pane 2 = planner, pane 3 = bv, pane 4 = worker
 
-    // Step 4: Create the worker grid in pane 3
-    create_worker_grid(&config.session_name, 0, 3, config.worker_count, grid_cols, grid_rows)?;
+    // Set titles
+    let _ = tmux::set_pane_title(&config.session_name, 0, 0, "coordinator");
+    let _ = tmux::set_pane_title(&config.session_name, 0, 1, "verifier");
+    let _ = tmux::set_pane_title(&config.session_name, 0, 2, "planner");
+    let _ = tmux::set_pane_title(&config.session_name, 0, 3, "bv");
 
-    // Step 2: Start fixed panes
-    // Pane 0: monitor
+    // Step 4: Create the worker grid in pane 4
+    create_worker_grid(
+        &config.session_name,
+        0,
+        4,
+        config.worker_count,
+        grid_cols,
+        grid_rows,
+    )?;
+
+    // Step 5: Start fixed panes
+    // Pane 0: monitor (mirrors coordinator window)
     let monitor_cmd = format!(
         "while true; do clear; tmux capture-pane -t {}:coordinator.0 -p -S -100 2>/dev/null | tail -35; sleep 2; done",
         config.session_name
@@ -135,22 +169,40 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
     tmux::send_literal(&config.session_name, 0, 0, &monitor_cmd)?;
     tmux::send_keys(&config.session_name, 0, 0, "Enter")?;
 
-    // Pane 1: planner (wait for manual start)
-    // Just cd to project root
-    let cd_cmd = format!("cd {}", config.project_root.display());
-    tmux::send_literal(&config.session_name, 0, 1, &cd_cmd)?;
+    // Pane 1: verifier (tail the verifier log)
+    let verifier_log = config
+        .project_root
+        .join(".codex/orchestrator/verifier.log");
+    let verifier_cmd = format!(
+        "cd {} && mkdir -p .codex/orchestrator && touch {} && exec tail -n 50 -f {}",
+        shell_escape(&config.project_root.to_string_lossy()),
+        shell_escape(&verifier_log.to_string_lossy()),
+        shell_escape(&verifier_log.to_string_lossy()),
+    );
+    tmux::send_literal(&config.session_name, 0, 1, &verifier_cmd)?;
     tmux::send_keys(&config.session_name, 0, 1, "Enter")?;
 
-    // Pane 2: bv
-    tmux::send_literal(&config.session_name, 0, 2, "bv")?;
-    tmux::send_keys(&config.session_name, 0, 2, "Enter")?;
+    // Pane 2: planner (shell prompt — cd to project root)
+    {
+        let cd_cmd = format!("cd {}", config.project_root.display());
+        tmux::send_literal(&config.session_name, 0, 2, &cd_cmd)?;
+        tmux::send_keys(&config.session_name, 0, 2, "Enter")?;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Step 3 & 4: Bootstrap identities and launch workers
-    let model_cmd = ensure_skip_permissions(&config.model_command);
+    // Pane 3: bv
+    tmux::send_literal(&config.session_name, 0, 3, "bv")?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    tmux::send_keys(&config.session_name, 0, 3, "Enter")?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Step 6: Bootstrap identities and launch workers
+    let worker_model_cmd = ensure_skip_permissions(&config.worker_model_command);
+    let planner_model_cmd = ensure_skip_permissions(&config.planner_model_command);
     let mut worker_identities = Vec::new();
 
     for i in 0..config.worker_count {
-        let pane_index = 3 + i;
+        let pane_index = 4 + i;
 
         // cd to project root first
         let cd = format!("cd {}", config.project_root.display());
@@ -163,64 +215,62 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
                 // Get the tmux pane ID for identity-write
                 let panes = tmux::list_panes(&config.session_name, 0)?;
                 if let Some(pane_info) = panes.iter().find(|p| p.index == pane_index) {
-                    let _ = write_identity(
-                        &agent_name,
-                        &config.project_root,
-                        &pane_info.id,
-                    );
+                    let _ = write_identity(&agent_name, &config.project_root, &pane_info.id);
                 }
 
+                // Set pane border title with agent name
+                let _ = tmux::set_pane_title(
+                    &config.session_name,
+                    0,
+                    pane_index,
+                    &format!("{agent_name} | idle"),
+                );
+
                 // Launch worker with identity
-                let launch_cmd = format!("AGENT_NAME='{agent_name}' {model_cmd}");
+                let launch_cmd = format!("AGENT_NAME='{agent_name}' {worker_model_cmd}");
                 tmux::send_literal(&config.session_name, 0, pane_index, &launch_cmd)?;
                 tmux::send_keys(&config.session_name, 0, pane_index, "Enter")?;
 
                 worker_identities.push((pane_index, agent_name));
             }
             Err(e) => {
-                eprintln!(
-                    "warning: failed to bootstrap identity for pane {pane_index}: {e}"
-                );
+                eprintln!("warning: failed to bootstrap identity for pane {pane_index}: {e}");
                 // Launch without identity — worker can bootstrap itself
-                tmux::send_literal(&config.session_name, 0, pane_index, &model_cmd)?;
+                tmux::send_literal(&config.session_name, 0, pane_index, &worker_model_cmd)?;
                 tmux::send_keys(&config.session_name, 0, pane_index, "Enter")?;
             }
         }
     }
 
-    // Step 5: Start planner and auto-start the planner loop
-    let planner_cmd = ensure_skip_permissions("claude");
-    tmux::send_literal(&config.session_name, 0, 1, &planner_cmd)?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    tmux::send_keys(&config.session_name, 0, 1, "Enter")?;
-
-    // Give Claude a moment to boot, then queue the planner skill.
-    // Claude Code needs ~10-15s to initialize (load skills, connect MCP).
-    std::thread::sleep(std::time::Duration::from_secs(12));
-    tmux::send_literal(&config.session_name, 0, 1, "/loop 10m /planner")?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    tmux::send_keys(&config.session_name, 0, 1, "Enter")?;
-
-    // Step 5b: Start worker autonomous loops.
-    // Wait for workers to fully boot before sending /loop commands.
-    // Claude Code needs ~10-15s to initialize (load skills, connect MCP).
-    // Workers were launched before the planner, so they've had at least 8s already.
-    // Add another 8s to ensure reliable delivery of the /loop command.
-    if !config.model_command.contains("codex") {
+    // Step 5b: Start worker autonomous loops when supported.
+    // Codex workers rely on explicit coordinator prompts and Agent Mail instead.
+    if supports_auto_loop(&config.worker_model_command) {
+        // Wait for workers to fully boot before sending /loop commands.
+        // Claude Code needs ~10-15s to initialize (load skills, connect MCP).
+        // Workers were launched before the planner, so they've had at least 8s already.
+        // Add another 8s to ensure reliable delivery of the /loop command.
         std::thread::sleep(std::time::Duration::from_secs(8));
-    }
-    for (pane_index, _agent_name) in &worker_identities {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        tmux::send_literal(&config.session_name, 0, *pane_index, "/loop 1m /flywheel-worker")?;
-        // Brief pause between typing and Enter — Claude Code's input buffer
-        // can swallow the Enter if it arrives during the boot splash animation.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        tmux::send_keys(&config.session_name, 0, *pane_index, "Enter")?;
+        for (pane_index, _agent_name) in &worker_identities {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            tmux::send_literal(
+                &config.session_name,
+                0,
+                *pane_index,
+                "/loop 1m /flywheel-worker",
+            )?;
+            // Brief pause between typing and Enter — Claude Code's input buffer
+            // can swallow the Enter if it arrives during the boot splash animation.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            tmux::send_keys(&config.session_name, 0, *pane_index, "Enter")?;
+        }
     }
 
-    // Step 6: Optionally create coordinator window and start run loop
+    // Planner pane (pane 2) is a shell prompt — user can start planner manually.
+
+    // Step 7: Optionally create coordinator window and start run loop
     if config.with_coordinator {
         create_coordinator_window(config)?;
+        // Verifier log is now embedded in pane 1 of the main window (no separate window needed)
     }
 
     // Step 7: Focus on the swarm window (window 0)
@@ -237,8 +287,17 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
     println!("  Workers: {}", config.worker_count);
     println!("  Total panes: {total_panes}");
     println!("  Layout: {grid_cols}x{grid_rows} worker grid");
+    println!("  Worker model: {}", config.worker_model_command);
+    println!("  Planner model: {}", config.planner_model_command);
     if config.with_coordinator {
-        println!("  Coordinator: {}:coordinator ({}s interval)", config.session_name, config.poll_interval);
+        println!(
+            "  Coordinator: {}:coordinator ({}s interval)",
+            config.session_name, config.poll_interval
+        );
+        println!(
+            "  Verifier: {}:0.1 (verifier pane, tailing .codex/orchestrator/verifier.log)",
+            config.session_name
+        );
     }
     println!();
     for (pane, name) in &worker_identities {
@@ -266,11 +325,15 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
 
 /// Print the dry-run plan without executing anything.
 fn print_dry_run_layout(config: &LaunchConfig, grid_cols: u32, grid_rows: u32, total_panes: u32) {
-    let model_cmd = ensure_skip_permissions(&config.model_command);
+    let worker_model_cmd = ensure_skip_permissions(&config.worker_model_command);
+    let planner_model_cmd = ensure_skip_permissions(&config.planner_model_command);
 
     println!("=== Launch Plan (dry-run) ===");
     println!("Session: {}", config.session_name);
-    println!("Terminal: {}x{}", config.terminal_width, config.terminal_height);
+    println!(
+        "Terminal: {}x{}",
+        config.terminal_width, config.terminal_height
+    );
     println!(
         "Workers: {} ({}x{} grid)",
         config.worker_count, grid_cols, grid_rows
@@ -279,11 +342,21 @@ fn print_dry_run_layout(config: &LaunchConfig, grid_cols: u32, grid_rows: u32, t
     println!();
     println!("Layout:");
     println!("  pane 0: monitor  (watch coordinator output)");
-    println!("  pane 1: planner  ({model_cmd} → /loop 10m /planner)");
+    if supports_auto_loop(&config.planner_model_command) {
+        println!("  pane 1: planner  ({planner_model_cmd} → /loop 10m /planner)");
+    } else {
+        println!("  pane 1: planner  ({planner_model_cmd} manual / no auto-loop)");
+    }
     println!("  pane 2: bv       (bv)");
     for i in 0..config.worker_count {
         let pane = 3 + i;
-        println!("  pane {pane}: worker  (AGENT_NAME='<bootstrapped>' {model_cmd})");
+        println!("  pane {pane}: worker  (AGENT_NAME='<bootstrapped>' {worker_model_cmd})");
+    }
+    println!();
+    println!("Worker model: {}", config.worker_model_command);
+    println!("Planner model: {}", config.planner_model_command);
+    if config.with_coordinator {
+        println!("Verifier lane: serialized coordinator-owned verification queue");
     }
     println!();
     println!("Commands:");
@@ -291,15 +364,29 @@ fn print_dry_run_layout(config: &LaunchConfig, grid_cols: u32, grid_rows: u32, t
         "  tmux new-session -d -s {} -x {} -y {}",
         config.session_name, config.terminal_width, config.terminal_height
     );
-    println!("  tmux split-window -h -t {}:0.0 -p 85  # left col | rest", config.session_name);
-    println!("  tmux split-window -v -t {}:0.0 -p 50  # monitor | planner", config.session_name);
+    println!(
+        "  tmux split-window -h -t {}:0.0 -p 85  # left col | rest",
+        config.session_name
+    );
+    println!(
+        "  tmux split-window -v -t {}:0.0 -p 50  # monitor | planner",
+        config.session_name
+    );
     println!(
         "  tmux split-window -h -t {}:0.2 -p 67  # bv | worker area",
         config.session_name
     );
-    println!("  <worker grid: {} splits for {} workers>", grid_rows * grid_cols - 1, config.worker_count);
+    println!(
+        "  <worker grid: {} splits for {} workers>",
+        grid_rows * grid_cols - 1,
+        config.worker_count
+    );
+    if config.with_coordinator {
+        println!("  tmux new-window -t {} -n coordinator", config.session_name);
+        println!("  tmux new-window -t {} -n verifier", config.session_name);
+    }
     println!();
-    println!("All worker commands include: --dangerously-skip-permissions");
+    println!("Planner and worker commands include the appropriate permissions-bypass flag.");
 }
 
 // --- tmux layout helpers ---
@@ -330,6 +417,24 @@ fn create_session(session: &str, width: u32, height: u32, workdir: &Path) -> Res
             "tmux new-session failed: {stderr}"
         )));
     }
+    Ok(())
+}
+
+fn enable_pane_border_titles(session: &str) -> Result<()> {
+    // Show pane titles at the top of each pane border
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session, "pane-border-status", "top"])
+        .output();
+    // Format: just show the pane title (set via select-pane -T)
+    let _ = Command::new("tmux")
+        .args([
+            "set-option",
+            "-t",
+            session,
+            "pane-border-format",
+            " #{pane_title} ",
+        ])
+        .output();
     Ok(())
 }
 
@@ -462,7 +567,10 @@ fn pane_ids_sorted_by_top(session: &str, window: u32, min_index: u32) -> Result<
     let target = format!("{session}:{window}");
     let output = Command::new("tmux")
         .args([
-            "list-panes", "-t", &target, "-F",
+            "list-panes",
+            "-t",
+            &target,
+            "-F",
             "#{pane_index}|#{pane_id}|#{pane_top}",
         ])
         .output()
@@ -472,9 +580,13 @@ fn pane_ids_sorted_by_top(session: &str, window: u32, min_index: u32) -> Result<
     let mut entries: Vec<(u32, String)> = Vec::new(); // (top, id)
     for line in stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, '|').collect();
-        if parts.len() < 3 { continue; }
+        if parts.len() < 3 {
+            continue;
+        }
         let idx: u32 = parts[0].parse().unwrap_or(0);
-        if idx < min_index { continue; }
+        if idx < min_index {
+            continue;
+        }
         let id = parts[1].to_string();
         let top: u32 = parts[2].parse().unwrap_or(0);
         entries.push((top, id));
@@ -530,7 +642,13 @@ fn create_coordinator_window(config: &LaunchConfig) -> Result<()> {
     // Create the coordinator window (if it doesn't already exist)
     let output = Command::new("tmux")
         .args([
-            "new-window", "-t", session, "-n", "coordinator", "-c", &workdir,
+            "new-window",
+            "-t",
+            session,
+            "-n",
+            "coordinator",
+            "-c",
+            &workdir,
         ])
         .output()
         .map_err(|e| OrchestratorError::Tmux(format!("new-window coordinator: {e}")))?;
@@ -549,8 +667,8 @@ fn create_coordinator_window(config: &LaunchConfig) -> Result<()> {
 
     // Build the coordinator command with environment variables.
     // All values are shell-escaped to prevent injection from env vars or paths with spaces.
-    let session_family = std::env::var("ORCH_SESSION_FAMILY")
-        .unwrap_or_else(|_| session.to_string());
+    let session_family =
+        std::env::var("ORCH_SESSION_FAMILY").unwrap_or_else(|_| session.to_string());
     // Register coordinator in Agent Mail with an auto-generated name.
     // Write the name to .beads/coordinator_agent so workers can discover it.
     let coordinator_agent = std::env::var("ORCH_COORDINATOR_AGENT")
@@ -565,19 +683,29 @@ fn create_coordinator_window(config: &LaunchConfig) -> Result<()> {
     // Write coordinator name to a discoverable file
     let coord_file = config.project_root.join(".beads/coordinator_agent");
     if let Err(e) = std::fs::write(&coord_file, &coordinator_agent) {
-        eprintln!("  warning: could not write coordinator name to {}: {e}", coord_file.display());
+        eprintln!(
+            "  warning: could not write coordinator name to {}: {e}",
+            coord_file.display()
+        );
     } else {
         println!("  Coordinator registered as: {coordinator_agent}");
         println!("  Workers discover via: .beads/coordinator_agent");
     }
-    let browser_verify = std::env::var("ORCH_BROWSER_VERIFY_ENABLED").unwrap_or_else(|_| "0".into());
+    let browser_verify =
+        std::env::var("ORCH_BROWSER_VERIFY_ENABLED").unwrap_or_else(|_| "0".into());
     let browser_panes = std::env::var("ORCH_BROWSER_VERIFY_PANES").unwrap_or_default();
+    let worker_program = command_program_name(&config.worker_model_command).to_string();
+    let worker_agent_type = agent_type_for_command(&config.worker_model_command);
 
     let coord_cmd = format!(
         "cd {} && \
          export ORCH_SESSION={} && \
          export ORCH_SESSION_FAMILY={} && \
+         export ORCH_PULL_MODE=false && \
          export AGENT_NAME={} && \
+         export ORCH_AGENT_TYPE={} && \
+         export ORCH_WORKER_COMMAND={} && \
+         export ORCH_PLANNER_COMMAND={} && \
          export ORCH_BROWSER_VERIFY_ENABLED={} && \
          export ORCH_BROWSER_VERIFY_PANES={} && \
          exec {} run --session {} --interval {}",
@@ -585,6 +713,9 @@ fn create_coordinator_window(config: &LaunchConfig) -> Result<()> {
         shell_escape(session),
         shell_escape(&session_family),
         shell_escape(&coordinator_agent),
+        shell_escape(worker_agent_type),
+        shell_escape(&worker_program),
+        shell_escape(&config.planner_model_command),
         shell_escape(&browser_verify),
         shell_escape(&browser_panes),
         shell_escape(&orch_bin_str),
@@ -604,6 +735,60 @@ fn create_coordinator_window(config: &LaunchConfig) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(OrchestratorError::Tmux(format!(
             "failed to start coordinator: {stderr}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn create_verifier_window(config: &LaunchConfig) -> Result<()> {
+    let session = &config.session_name;
+    let workdir = config.project_root.to_string_lossy();
+    let log_path = config.project_root.join(".codex/orchestrator/verifier.log");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| OrchestratorError::Tmux(format!("mkdir verifier log dir: {e}")))?;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    let output = Command::new("tmux")
+        .args([
+            "new-window",
+            "-t",
+            session,
+            "-n",
+            "verifier",
+            "-c",
+            &workdir,
+        ])
+        .output()
+        .map_err(|e| OrchestratorError::Tmux(format!("new-window verifier: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OrchestratorError::Tmux(format!(
+            "failed to create verifier window: {stderr}"
+        )));
+    }
+
+    let tail_cmd = format!(
+        "cd {} && mkdir -p .codex/orchestrator && touch {} && exec tail -n 200 -f {}",
+        shell_escape(&workdir),
+        shell_escape(&log_path.to_string_lossy()),
+        shell_escape(&log_path.to_string_lossy()),
+    );
+    let target = format!("{session}:verifier.0");
+    let shell_cmd = format!("/bin/zsh -lc {}", shell_escape(&tail_cmd));
+    let output = Command::new("tmux")
+        .args(["respawn-pane", "-k", "-t", &target, &shell_cmd])
+        .output()
+        .map_err(|e| OrchestratorError::Tmux(format!("respawn verifier: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OrchestratorError::Tmux(format!(
+            "failed to start verifier window: {stderr}"
         )));
     }
 
@@ -699,8 +884,7 @@ fn write_identity(agent_name: &str, project_root: &Path, pane_id: &str) -> Resul
         digest.chars().take(12).collect::<String>()
     };
 
-    let home = std::env::var("HOME")
-        .map_err(|_| OrchestratorError::Mail("HOME not set".into()))?;
+    let home = std::env::var("HOME").map_err(|_| OrchestratorError::Mail("HOME not set".into()))?;
     let identity_dir = PathBuf::from(&home)
         .join(".local/state/agent-mail/identity")
         .join(&hash);
@@ -709,10 +893,7 @@ fn write_identity(agent_name: &str, project_root: &Path, pane_id: &str) -> Resul
         .map_err(|e| OrchestratorError::Mail(format!("mkdir identity dir: {e}")))?;
 
     // Secure directory permissions (700)
-    let _ = std::fs::set_permissions(
-        &identity_dir,
-        std::fs::Permissions::from_mode(0o700),
-    );
+    let _ = std::fs::set_permissions(&identity_dir, std::fs::Permissions::from_mode(0o700));
 
     let identity_file = identity_dir.join(pane_id);
     let tmp_file = identity_dir.join(format!("{pane_id}.tmp.{}", std::process::id()));
@@ -781,9 +962,12 @@ fn ensure_mail_server(project_root: &Path, mail_session: &str) -> Result<()> {
 
     let output = Command::new("tmux")
         .args([
-            "new-session", "-d",
-            "-s", mail_session,
-            "-c", &mail_dir.to_string_lossy(),
+            "new-session",
+            "-d",
+            "-s",
+            mail_session,
+            "-c",
+            &mail_dir.to_string_lossy(),
             &server_cmd,
         ])
         .output()
@@ -932,7 +1116,10 @@ mod tests {
         // Grid dimensions must have enough cells for each worker count
         for workers in [1u32, 4, 9, 12] {
             let (cols, rows) = compute_grid_dimensions(workers);
-            assert!(cols * rows >= workers, "grid too small for {workers} workers");
+            assert!(
+                cols * rows >= workers,
+                "grid too small for {workers} workers"
+            );
         }
     }
 
@@ -1120,7 +1307,10 @@ mod tests {
     #[test]
     fn test_extract_base_url_no_scheme() {
         // Degenerate case — no "://" present, just strip trailing slashes
-        assert_eq!(extract_base_url("localhost:8765/api/"), "localhost:8765/api");
+        assert_eq!(
+            extract_base_url("localhost:8765/api/"),
+            "localhost:8765/api"
+        );
     }
 
     // --- Bearer token edge cases ---
@@ -1220,29 +1410,38 @@ mod tests {
     //   "Press up to edit queued messages" and never processed.
     //   Fix: delay between each worker's loop command.
 
-    /// Regression: launcher must use `/flywheel-worker` not `/skill flywheel-worker`
+    /// Regression: Claude auto-loop must use `/flywheel-worker` not `/skill flywheel-worker`
     /// in the loop command. The `/loop` command's parser treats the first token
     /// after the interval as the skill name — `/skill` would be parsed as the skill.
     #[test]
-    fn test_worker_loop_uses_correct_skill_format() {
+    fn test_claude_worker_loop_uses_correct_skill_format() {
         let source = include_str!("launcher.rs");
         let step5b = source.find("Step 5b").expect("Step 5b must exist");
         let section_end = source[step5b..].find("Step 6").unwrap_or(500);
         let section = &source[step5b..step5b + section_end];
 
         assert!(
-            section.contains("/loop 2m /flywheel-worker"),
-            "REGRESSION: worker loop must use '/loop 2m /flywheel-worker', \
-             not '/loop 2m /skill flywheel-worker'."
+            section.contains("/loop 1m /flywheel-worker"),
+            "REGRESSION: Claude worker loop must use '/loop 1m /flywheel-worker', \
+             not '/loop ... /skill flywheel-worker'."
         );
-        // Check only the send_literal line (actual command), not comments
-        let send_line = section.lines()
-            .find(|l| l.contains("send_literal") && l.contains("loop"))
-            .expect("must have a send_literal line with loop command");
         assert!(
-            !send_line.contains("/skill flywheel-worker"),
-            "REGRESSION: send_literal must NOT use '/skill flywheel-worker' in loop command. \
+            !section.contains("/skill flywheel-worker"),
+            "REGRESSION: auto-loop path must NOT use '/skill flywheel-worker' in loop command. \
              The /loop parser treats '/skill' as the skill name."
+        );
+    }
+
+    #[test]
+    fn test_codex_launch_disables_auto_loop() {
+        let source = include_str!("launcher.rs");
+        assert!(
+            source.contains("supports_auto_loop(&config.worker_model_command)"),
+            "Codex launch must gate worker auto-loop behind supports_auto_loop()"
+        );
+        assert!(
+            source.contains("supports_auto_loop(&config.planner_model_command)"),
+            "Codex launch must gate planner auto-loop behind supports_auto_loop()"
         );
     }
 
@@ -1269,7 +1468,9 @@ mod tests {
     fn test_monitor_pane_watches_live_coordinator() {
         let source = include_str!("launcher.rs");
         // Check the actual monitor_cmd assignment, not comments/tests
-        let monitor_setup = source.find("Pane 0: monitor").expect("monitor setup must exist");
+        let monitor_setup = source
+            .find("Pane 0: monitor")
+            .expect("monitor setup must exist");
         let section = &source[monitor_setup..monitor_setup + 300];
         assert!(
             !section.contains("\"tail -f"),
@@ -1287,7 +1488,9 @@ mod tests {
     #[test]
     fn test_monitor_pane_does_not_use_watch() {
         let source = include_str!("launcher.rs");
-        let monitor = source.find("Pane 0: monitor").expect("monitor setup must exist");
+        let monitor = source
+            .find("Pane 0: monitor")
+            .expect("monitor setup must exist");
         let section = &source[monitor..monitor + 300];
 
         assert!(
@@ -1302,7 +1505,9 @@ mod tests {
     #[test]
     fn test_flywheel_worker_skill_in_project_dir() {
         // This test checks the ACTUAL filesystem, not source code
-        let project_skill = std::path::Path::new("/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md");
+        let project_skill = std::path::Path::new(
+            "/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md",
+        );
         assert!(
             project_skill.exists(),
             "REGRESSION: flywheel-worker skill must be in project .claude/skills/, \
@@ -1356,7 +1561,9 @@ mod tests {
     #[test]
     fn test_coordinator_uses_auto_registered_name() {
         let source = include_str!("launcher.rs");
-        let coord_section = source.find("fn create_coordinator_window").expect("must exist");
+        let coord_section = source
+            .find("fn create_coordinator_window")
+            .expect("must exist");
         let fn_end = source[coord_section..].find("\n}").unwrap_or(2000);
         let fn_body = &source[coord_section..coord_section + fn_end];
 
@@ -1372,7 +1579,9 @@ mod tests {
     #[test]
     fn test_coordinator_name_written_to_discovery_file() {
         let source = include_str!("launcher.rs");
-        let coord_section = source.find("fn create_coordinator_window").expect("must exist");
+        let coord_section = source
+            .find("fn create_coordinator_window")
+            .expect("must exist");
         let fn_end = source[coord_section..].find("\n}").unwrap_or(2000);
         let fn_body = &source[coord_section..coord_section + fn_end];
 
@@ -1391,7 +1600,9 @@ mod tests {
     #[test]
     fn test_coordinator_name_not_hardcoded_coordinator() {
         let source = include_str!("launcher.rs");
-        let coord_section = source.find("fn create_coordinator_window").expect("must exist");
+        let coord_section = source
+            .find("fn create_coordinator_window")
+            .expect("must exist");
         let fn_end = source[coord_section..].find("\n}").unwrap_or(2000);
         let fn_body = &source[coord_section..coord_section + fn_end];
 
@@ -1432,7 +1643,9 @@ mod tests {
     /// The flywheel-worker skill must check existing in-progress beads first.
     #[test]
     fn test_skill_checks_existing_beads_first() {
-        let skill_path = std::path::Path::new("/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md");
+        let skill_path = std::path::Path::new(
+            "/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md",
+        );
         if skill_path.exists() {
             let content = std::fs::read_to_string(skill_path).unwrap();
             assert!(
@@ -1451,7 +1664,9 @@ mod tests {
     /// The flywheel-worker skill must use /mail-complete, not raw MCP.
     #[test]
     fn test_skill_uses_mail_complete_not_raw_mcp() {
-        let skill_path = std::path::Path::new("/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md");
+        let skill_path = std::path::Path::new(
+            "/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md",
+        );
         if skill_path.exists() {
             let content = std::fs::read_to_string(skill_path).unwrap();
             assert!(
@@ -1470,7 +1685,9 @@ mod tests {
     /// not hardcode "--to Coordinator".
     #[test]
     fn test_skill_reads_coordinator_name_dynamically() {
-        let skill_path = std::path::Path::new("/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md");
+        let skill_path = std::path::Path::new(
+            "/Users/bone/dev/games/patina/.claude/skills/flywheel-worker/SKILL.md",
+        );
         if skill_path.exists() {
             let content = std::fs::read_to_string(skill_path).unwrap();
             assert!(
@@ -1489,13 +1706,15 @@ mod tests {
     #[test]
     fn test_worker_loop_sent_after_boot_delay() {
         let source = include_str!("launcher.rs");
-        let step5b = source.find("Step 5b: Start worker autonomous loops").unwrap();
+        let step5b = source
+            .find("Step 5b: Start worker autonomous loops")
+            .unwrap();
         let end = (step5b + 800).min(source.len());
         let section = &source[step5b..end];
         assert!(
-            section.contains("sleep(std::time::Duration::from_secs(8))")
-                || section.contains("sleep(std::time::Duration::from_secs(10))"),
-            "Must wait for Claude to boot before sending /loop to workers"
+            section.contains("supports_auto_loop(&config.worker_model_command)")
+                && section.contains("sleep(std::time::Duration::from_secs(8))"),
+            "Must only send delayed /loop commands when the agent family supports auto-loop"
         );
     }
 
@@ -1511,5 +1730,94 @@ mod tests {
     fn test_skip_permissions_codex_not_duplicated() {
         let cmd = "codex --dangerously-bypass-approvals-and-sandbox";
         assert_eq!(ensure_skip_permissions(cmd), cmd);
+    }
+
+    #[test]
+    fn test_command_program_name_extracts_binary() {
+        assert_eq!(command_program_name("codex --model gpt-5.4-mini"), "codex");
+        assert_eq!(command_program_name("claude --model opus"), "claude");
+        assert_eq!(command_program_name("codex"), "codex");
+    }
+
+    #[test]
+    fn test_agent_type_for_command_matches_program_family() {
+        assert_eq!(agent_type_for_command("codex --model gpt-5.4"), "codex");
+        assert_eq!(agent_type_for_command("claude --model opus"), "claude");
+    }
+
+    #[test]
+    fn test_coordinator_exports_worker_and_planner_commands() {
+        let source = include_str!("launcher.rs");
+        let coord_section = source
+            .find("fn create_coordinator_window")
+            .expect("must exist");
+        let fn_end = source[coord_section..].find("\n}").unwrap_or(2500);
+        let fn_body = &source[coord_section..coord_section + fn_end];
+
+        assert!(
+            fn_body.contains("ORCH_WORKER_COMMAND"),
+            "coordinator launch must export ORCH_WORKER_COMMAND for worker detection"
+        );
+        assert!(
+            fn_body.contains("ORCH_PULL_MODE"),
+            "coordinator launch must force push-mode for tmux-managed swarms"
+        );
+        assert!(
+            fn_body.contains("ORCH_PLANNER_COMMAND"),
+            "coordinator launch must export ORCH_PLANNER_COMMAND for planner restarts"
+        );
+        assert!(
+            fn_body.contains("ORCH_AGENT_TYPE"),
+            "coordinator launch must export ORCH_AGENT_TYPE for model-family-aware prompts"
+        );
+    }
+
+    // ─── Layout verification tests ─────────────────────────────────────
+
+    /// Verify 5-pane layout: coordinator(0), verifier(1), planner(2), bv(3), worker(4+)
+    #[test]
+    fn test_layout_split_sequence() {
+        let source = include_str!("launcher.rs");
+        let launch_fn = source.find("pub fn launch(").expect("launch function must exist");
+        let body = &source[launch_fn..std::cmp::min(launch_fn + 4000, source.len())];
+
+        // Two vertical splits in left column
+        assert!(body.contains("split_v(&config.session_name, 0, 0,"));
+        assert!(body.contains("split_v(&config.session_name, 0, 1,"));
+        // Horizontal split for bv | workers
+        assert!(body.contains("split_h(&config.session_name, 0, 3,"));
+        // Titles
+        assert!(body.contains("set_pane_title(&config.session_name, 0, 0, \"coordinator\")"));
+        assert!(body.contains("set_pane_title(&config.session_name, 0, 1, \"verifier\")"));
+        assert!(body.contains("set_pane_title(&config.session_name, 0, 2, \"planner\")"));
+        assert!(body.contains("set_pane_title(&config.session_name, 0, 3, \"bv\")"));
+        // Workers at pane 4
+        assert!(body.contains("create_worker_grid(\n        &config.session_name,\n        0,\n        4,"));
+    }
+
+    /// Verify bv goes to pane 3, workers start at pane 4.
+    #[test]
+    fn test_layout_content_pane_indices() {
+        let source = include_str!("launcher.rs");
+        let launch_fn = source.find("pub fn launch(").expect("launch function must exist");
+        let body = &source[launch_fn..std::cmp::min(launch_fn + 8000, source.len())];
+
+        assert!(body.contains("send_literal(&config.session_name, 0, 0, &monitor_cmd)"));
+        assert!(body.contains("send_literal(&config.session_name, 0, 1, &verifier_cmd)"));
+        assert!(body.contains("send_literal(&config.session_name, 0, 3, \"bv\")"));
+        assert!(body.contains("let pane_index = 4 + i;"));
+    }
+
+    /// Verify planner pane is reclaimed via respawn-pane at end of launch.
+    #[test]
+    fn test_planner_pane_respawned_last() {
+        let source = include_str!("launcher.rs");
+        let launch_fn = source.find("pub fn launch(").expect("launch function must exist");
+        let body = &source[launch_fn..std::cmp::min(launch_fn + 12000, source.len())];
+
+        assert!(
+            body.contains("respawn-pane") && body.contains("planner_pane_id"),
+            "planner pane must be respawned at end of launch to reclaim from teammate-mode bv"
+        );
     }
 }

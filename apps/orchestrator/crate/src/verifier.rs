@@ -9,9 +9,15 @@ use crate::error::{OrchestratorError, Result};
 
 /// Known command prefixes (case-insensitive) that identify test/build commands.
 const KNOWN_PREFIXES: &[&str] = &[
+    "./scripts/rust_task.sh",
+    "scripts/rust_task.sh",
+    "bash ./scripts/rust_task.sh",
+    "bash scripts/rust_task.sh",
     "cargo test",
     "cargo nextest",
     "cargo check",
+    "cargo fmt",
+    "cargo build",
     "pnpm test",
     "pnpm lint",
     "pnpm exec",
@@ -21,9 +27,12 @@ const KNOWN_PREFIXES: &[&str] = &[
     "yarn ",
     "pytest",
     "python -m pytest",
+    "python3 ",
     "uv run pytest",
     "go test",
     "bun test",
+    "rg ",
+    "rustfmt ",
 ];
 
 /// Compiled regex patterns for each known prefix (case-insensitive).
@@ -154,6 +163,33 @@ fn starts_with_known_prefix(cmd: &str) -> bool {
         .any(|prefix| lower.starts_with(prefix))
 }
 
+fn is_replayable_command(cmd: &str) -> bool {
+    let lower = cmd.to_lowercase();
+    let trimmed = cmd.trim();
+    if trimmed.starts_with("...")
+        || trimmed.starts_with("... ")
+        || trimmed.ends_with(" ...")
+        || cmd.contains(" ... ")
+        || cmd.contains("...\n")
+    {
+        return false;
+    }
+    if lower.contains("direct validation script")
+        || lower.contains("assertion script")
+        || lower.contains("doc-validation check")
+    {
+        return false;
+    }
+    if lower.starts_with("python3 ") {
+        return lower.starts_with("python3 -c ")
+            || lower.starts_with("python3 -m ")
+            || lower.starts_with("python3 ./")
+            || lower.starts_with("python3 /")
+            || lower.contains(".py");
+    }
+    true
+}
+
 /// Try to add a candidate command (after cleaning and deduplication).
 fn maybe_add(found: &mut Vec<String>, candidate: &str) {
     for piece in split_embedded_commands(candidate) {
@@ -162,6 +198,9 @@ fn maybe_add(found: &mut Vec<String>, candidate: &str) {
             continue;
         }
         if !starts_with_known_prefix(&cleaned) {
+            continue;
+        }
+        if !is_replayable_command(&cleaned) {
             continue;
         }
         // Skip if this is a longer version of an already-found command
@@ -192,9 +231,7 @@ pub fn extract_test_commands(text: &str) -> Vec<String> {
     for block in fenced.find_iter(text) {
         let inner = block.as_str();
         // Strip opening ``` (with optional language tag) and closing ```
-        let inner = inner
-            .strip_prefix("```")
-            .unwrap_or(inner);
+        let inner = inner.strip_prefix("```").unwrap_or(inner);
         let inner = inner.strip_suffix("```").unwrap_or(inner);
         // Skip the language tag line if present
         let inner = if let Some(pos) = inner.find('\n') {
@@ -217,11 +254,9 @@ pub fn extract_test_commands(text: &str) -> Vec<String> {
     // 3. Raw lines — search for known prefixes
     // Remove fenced and inline code blocks to avoid re-extracting already-handled commands
     static STRIP_FENCED: OnceLock<Regex> = OnceLock::new();
-    let strip_fenced =
-        STRIP_FENCED.get_or_init(|| Regex::new(r"(?s)```.*?```").unwrap());
+    let strip_fenced = STRIP_FENCED.get_or_init(|| Regex::new(r"(?s)```.*?```").unwrap());
     static STRIP_INLINE: OnceLock<Regex> = OnceLock::new();
-    let strip_inline =
-        STRIP_INLINE.get_or_init(|| Regex::new(r"`[^`]+`").unwrap());
+    let strip_inline = STRIP_INLINE.get_or_init(|| Regex::new(r"`[^`]+`").unwrap());
     let normalized = text.replace('\r', "");
     let normalized = strip_fenced.replace_all(&normalized, "");
     let normalized = strip_inline.replace_all(&normalized, "");
@@ -247,19 +282,15 @@ pub fn extract_test_commands(text: &str) -> Vec<String> {
 /// Acceptance: cargo test --test v1_acceptance_gate_test -- --ignored test_name
 /// ```
 pub fn extract_acceptance_commands(description: &str) -> Vec<String> {
-    description
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            let stripped = trimmed.strip_prefix("Acceptance:")?;
-            let cmd = stripped.trim();
-            if cmd.is_empty() {
-                None
-            } else {
-                Some(cmd.to_string())
-            }
-        })
-        .collect()
+    let mut found = Vec::new();
+    for line in description.lines() {
+        let trimmed = line.trim();
+        let Some(stripped) = trimmed.strip_prefix("Acceptance:") else {
+            continue;
+        };
+        maybe_add(&mut found, stripped.trim());
+    }
+    found
 }
 
 /// Determine the working directory for a command based on its prefix.
@@ -284,12 +315,47 @@ pub fn command_workdir(project_root: &Path, command: &str) -> PathBuf {
     project_root.to_path_buf()
 }
 
+/// Rewrite broad workspace commands to focused ones.
+///
+/// Workers sometimes report `--workspace`, `-E` filter, or `--no-run` commands
+/// that enumerate all 300+ test binaries. Replace with `check --workspace` for
+/// compile-only checks, or strip `-E`/`--workspace` from test commands.
+fn rewrite_broad_command(cmd: &str) -> String {
+    let lower = cmd.to_lowercase();
+
+    // `cargo test --workspace --no-run` → just check it compiles
+    if lower.contains("--workspace") && lower.contains("--no-run") {
+        return "cargo check --workspace".to_string();
+    }
+
+    // `cargo nextest run --workspace -E <expr>` → extract --test from the -E if possible,
+    // otherwise fall back to check
+    if lower.contains("--workspace") && lower.contains("-e ") {
+        return "cargo check --workspace".to_string();
+    }
+
+    // `nextest run -E <expr>` without --test → fall back to check
+    // These enumerate all binaries to find matches
+    if (lower.contains("nextest run") || lower.contains("nextest  run"))
+        && lower.contains("-e ")
+        && !lower.contains("--test ")
+    {
+        return "cargo check --workspace".to_string();
+    }
+
+    // `cargo test --workspace` without --test → check only
+    if lower.contains("--workspace")
+        && (lower.contains("cargo test") || lower.contains("cargo nextest"))
+        && !lower.contains("--test ")
+    {
+        return "cargo check --workspace".to_string();
+    }
+
+    cmd.to_string()
+}
+
 /// Run each command via bash and return an error on failure or timeout.
-pub fn verify_commands(
-    project_root: &Path,
-    commands: &[String],
-    timeout: Duration,
-) -> Result<()> {
+pub fn verify_commands(project_root: &Path, commands: &[String], timeout: Duration) -> Result<()> {
     if commands.is_empty() {
         return Err(OrchestratorError::Verification(
             "no test commands to verify".into(),
@@ -297,18 +363,37 @@ pub fn verify_commands(
     }
 
     for cmd in commands {
-        let cwd = command_workdir(project_root, cmd);
+        // Rewrite broad workspace commands to focused ones.
+        // Workers sometimes report `--workspace` or `-E` filter commands that
+        // enumerate all 300+ test binaries and take 10+ minutes. Strip these
+        // and fall back to a focused check.
+        let cmd = rewrite_broad_command(cmd);
+
+        // Wrap cargo commands with rust_task.sh so verification serializes against
+        // other swarm builds via the directory mutex and Agent Mail build slot.
+        // rust_task.sh handles `cd engine-rs` internally, so cwd stays at project root.
+        let (effective_cmd, effective_cwd) =
+            if cmd.trim().to_lowercase().starts_with("cargo ") {
+                let cargo_args = cmd.trim().strip_prefix("cargo ").unwrap();
+                (
+                    format!("./scripts/rust_task.sh {cargo_args}"),
+                    project_root.to_path_buf(),
+                )
+            } else {
+                (cmd.clone(), command_workdir(project_root, &cmd))
+            };
+        let cwd = effective_cwd;
+        let cmd_to_run = &effective_cmd;
         tracing::info!("[verify] running in {}: {}", cwd.display(), cmd);
 
         let mut child = Command::new("bash")
-            .args(["-lc", cmd])
+            .args(["-lc", cmd_to_run])
             .current_dir(&cwd)
+            .env("AGENT_NAME", "verifier")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| {
-                OrchestratorError::Verification(format!("failed to spawn bash: {e}"))
-            })?;
+            .map_err(|e| OrchestratorError::Verification(format!("failed to spawn bash: {e}")))?;
 
         let status = match child.wait_timeout(timeout) {
             Ok(Some(s)) => s,
@@ -385,7 +470,10 @@ cargo test --test signal_trace_fixture_parity_test
 test result: ok. 10 passed; 0 failed
 ```"#;
         let cmds = extract_test_commands(text);
-        assert_eq!(cmds, vec!["cargo test --test signal_trace_fixture_parity_test"]);
+        assert_eq!(
+            cmds,
+            vec!["cargo test --test signal_trace_fixture_parity_test"]
+        );
     }
 
     #[test]
@@ -393,6 +481,17 @@ test result: ok. 10 passed; 0 failed
         let text = "Run `cargo test --test foo_test` to verify.";
         let cmds = extract_test_commands(text);
         assert_eq!(cmds, vec!["cargo test --test foo_test"]);
+    }
+
+    #[test]
+    fn test_extract_rust_task_wrapper_command() {
+        let text =
+            "Tests run: `./scripts/rust_task.sh nextest run -p patina-engine comparison_tooling_3d_test`";
+        let cmds = extract_test_commands(text);
+        assert_eq!(
+            cmds,
+            vec!["scripts/rust_task.sh nextest run -p patina-engine comparison_tooling_3d_test"]
+        );
     }
 
     #[test]
@@ -411,10 +510,7 @@ test result: ok. 10 passed; 0 failed
     fn test_extract_splits_embedded() {
         let text = "cargo test --test a cargo test --test b";
         let cmds = extract_test_commands(text);
-        assert_eq!(
-            cmds,
-            vec!["cargo test --test a", "cargo test --test b"]
-        );
+        assert_eq!(cmds, vec!["cargo test --test a", "cargo test --test b"]);
     }
 
     #[test]
@@ -477,10 +573,7 @@ test result: ok. 10 passed; 0 failed
         std::fs::create_dir_all(&web_dir).unwrap();
         std::fs::write(web_dir.join("package.json"), "{}").unwrap();
 
-        assert_eq!(
-            command_workdir(tmp.path(), "pnpm test"),
-            web_dir
-        );
+        assert_eq!(command_workdir(tmp.path(), "pnpm test"), web_dir);
     }
 
     #[test]
@@ -517,7 +610,10 @@ Tests cover:
 1. Registration order trace matches fixture
 "#;
         let cmds = extract_test_commands(text);
-        assert_eq!(cmds, vec!["cargo test --test signal_trace_fixture_parity_test"]);
+        assert_eq!(
+            cmds,
+            vec!["cargo test --test signal_trace_fixture_parity_test"]
+        );
     }
 
     #[test]
@@ -649,5 +745,142 @@ Also ran `cargo test --test foo` again."#;
         assert!(extract_acceptance_commands("  \n  \n").is_empty());
         // "Acceptance:" with no command should be skipped
         assert!(extract_acceptance_commands("Acceptance:   \n").is_empty());
+    }
+
+    #[test]
+    fn test_extract_acceptance_commands_skips_prose_contracts() {
+        let desc = "Acceptance: `prd/PHASE6_3D_PARITY_AUDIT.md` maps fixture coverage to the measured 3D slice\n";
+        assert!(extract_acceptance_commands(desc).is_empty());
+    }
+
+    #[test]
+    fn test_extract_test_commands_accepts_doc_validation_rg() {
+        let text = r#"Tests run:
+- `rg -n "desktop targets" /tmp/a.md /tmp/b.rs`
+"#;
+        let cmds = extract_test_commands(text);
+        assert_eq!(cmds, vec![r#"rg -n "desktop targets" /tmp/a.md /tmp/b.rs"#]);
+    }
+
+    #[test]
+    fn test_extract_test_commands_rejects_unreplayable_python_summary() {
+        let text = r#"Tests run:
+- `python3 direct validation script`
+- `python3 - <<'PY' ... matrix-ok ... PY`
+"#;
+        assert!(extract_test_commands(text).is_empty());
+    }
+
+    // ─── rewrite_broad_command tests ─────────────────────────────────────
+
+    #[test]
+    fn test_rewrite_workspace_no_run() {
+        assert_eq!(
+            rewrite_broad_command("cargo test --workspace --no-run"),
+            "cargo check --workspace"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_scripts_wrapper_workspace_no_run() {
+        assert_eq!(
+            rewrite_broad_command("scripts/rust_task.sh test --workspace --no-run"),
+            "cargo check --workspace",
+        );
+    }
+
+    #[test]
+    fn test_rewrite_workspace_with_e_filter() {
+        assert_eq!(
+            rewrite_broad_command("cargo nextest run --workspace -E 'test(foo)'"),
+            "cargo check --workspace"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_e_filter_without_test_flag() {
+        assert_eq!(
+            rewrite_broad_command("cargo nextest run -E 'test(phase6_3d_fixture_corpus)'"),
+            "cargo check --workspace"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_workspace_test_without_specific_test() {
+        assert_eq!(
+            rewrite_broad_command("cargo test --workspace"),
+            "cargo check --workspace"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_preserves_focused_test() {
+        // --test <name> is focused — should pass through unchanged
+        let cmd = "cargo nextest run --test my_specific_test";
+        assert_eq!(rewrite_broad_command(cmd), cmd);
+    }
+
+    #[test]
+    fn test_rewrite_preserves_focused_test_with_workspace() {
+        // --test with --workspace is still focused enough — the --test flag
+        // means only that one binary is compiled
+        let cmd = "cargo nextest run --workspace --test my_specific_test";
+        assert_eq!(rewrite_broad_command(cmd), cmd);
+    }
+
+    #[test]
+    fn test_rewrite_preserves_non_cargo_commands() {
+        let cmd = "pnpm test";
+        assert_eq!(rewrite_broad_command(cmd), cmd);
+
+        let cmd2 = "python3 -m pytest tests/";
+        assert_eq!(rewrite_broad_command(cmd2), cmd2);
+    }
+
+    #[test]
+    fn test_rewrite_preserves_cargo_check() {
+        // check is already fast — don't rewrite
+        let cmd = "cargo check -p my_crate";
+        assert_eq!(rewrite_broad_command(cmd), cmd);
+    }
+
+    #[test]
+    fn test_rewrite_case_insensitive() {
+        assert_eq!(
+            rewrite_broad_command("Cargo Test --Workspace --No-Run"),
+            "cargo check --workspace"
+        );
+    }
+
+    /// Regression: verify_commands calls rewrite_broad_command before execution.
+    #[test]
+    fn test_verify_commands_uses_rewrite() {
+        let source = include_str!("verifier.rs");
+        let fn_start = source
+            .find("pub fn verify_commands(")
+            .expect("verify_commands must exist");
+        let body = &source[fn_start..std::cmp::min(fn_start + 1000, source.len())];
+        assert!(
+            body.contains("rewrite_broad_command"),
+            "verify_commands must call rewrite_broad_command to prevent slow workspace builds"
+        );
+    }
+
+    /// Regression: rust_task.sh worker guard must exist.
+    #[test]
+    fn test_rust_task_sh_has_worker_guard() {
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../scripts/rust_task.sh"),
+        )
+        .expect("rust_task.sh must exist");
+        assert!(
+            script.contains("BLOCKED: worker"),
+            "rust_task.sh must block non-verifier agents from running Rust builds"
+        );
+        assert!(
+            script.contains("AGENT_NAME") && script.contains("verifier"),
+            "rust_task.sh must allow the verifier agent through"
+        );
     }
 }

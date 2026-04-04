@@ -58,6 +58,13 @@ pub fn send_literal(session: &str, window: u32, pane: u32, text: &str) -> Result
     Ok(())
 }
 
+/// Set the pane border title (shown when pane-border-status is enabled).
+pub fn set_pane_title(session: &str, window: u32, pane: u32, title: &str) -> Result<()> {
+    let target = format!("{session}:{window}.{pane}");
+    run_tmux(&["select-pane", "-t", &target, "-T", title])?;
+    Ok(())
+}
+
 /// List all panes in a window with their metadata.
 pub fn list_panes(session: &str, window: u32) -> Result<Vec<PaneInfo>> {
     let target = format!("{session}:{window}");
@@ -116,13 +123,7 @@ pub fn ensure_bv_alive(session: &str, window: u32, workdir: &str) -> Result<bool
     if needs_restart {
         tracing::info!("bv pane is not running — restarting");
         let bv_cmd = format!("cd {workdir} && exec bv");
-        run_tmux(&[
-            "respawn-pane",
-            "-k",
-            "-t",
-            &format!("{target}.2"),
-            &bv_cmd,
-        ])?;
+        run_tmux(&["respawn-pane", "-k", "-t", &format!("{target}.2"), &bv_cmd])?;
         return Ok(true);
     }
 
@@ -199,7 +200,10 @@ pub fn submit_prompts_parallel(tasks: &[PromptTask]) -> Vec<bool> {
             })
             .collect();
 
-        handles.into_iter().map(|h| h.join().unwrap_or(false)).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(false))
+            .collect()
     })
 }
 
@@ -257,14 +261,19 @@ pub fn prompt_worker_pane(
         tracing::info!(pane = pane, "existing queued prompt found, submitting it");
         for _ in 0..pcfg.submit_retry_attempts {
             send_keys(session, window, pane, &pcfg.submit_key)?;
-            std::thread::sleep(std::time::Duration::from_millis(pcfg.prompt_submit_delay_ms));
+            std::thread::sleep(std::time::Duration::from_millis(
+                pcfg.prompt_submit_delay_ms,
+            ));
             let c = capture_pane(session, window, pane, pcfg.capture_lines)?;
             if !c.contains(queue_pattern.as_str()) {
                 return Ok(true);
             }
         }
         // Enter didn't work — escalate: Escape to dismiss, then re-paste fresh
-        tracing::warn!(pane = pane, "existing queued prompt stuck — Escape + re-paste");
+        tracing::warn!(
+            pane = pane,
+            "existing queued prompt stuck — Escape + re-paste"
+        );
         send_keys(session, window, pane, "Escape")?;
         std::thread::sleep(std::time::Duration::from_millis(300));
         // Fall through to the normal paste-and-submit flow below
@@ -305,7 +314,9 @@ pub fn prompt_worker_pane(
     run_tmux(&["send-keys", "-t", &target, &pcfg.submit_key])?;
 
     // Wait for Claude to process
-    std::thread::sleep(std::time::Duration::from_millis(pcfg.prompt_submit_delay_ms));
+    std::thread::sleep(std::time::Duration::from_millis(
+        pcfg.prompt_submit_delay_ms,
+    ));
 
     // Check if it submitted
     let capture = capture_pane(session, window, pane, pcfg.capture_lines)?;
@@ -316,10 +327,15 @@ pub fn prompt_worker_pane(
             return Ok(true);
         }
         // Prompt text still visible — retry Enter
-        tracing::warn!(pane = pane, "prompt text still visible after submit — retrying Enter");
+        tracing::warn!(
+            pane = pane,
+            "prompt text still visible after submit — retrying Enter"
+        );
         for _ in 0..pcfg.submit_retry_attempts {
             send_keys(session, window, pane, &pcfg.submit_key)?;
-            std::thread::sleep(std::time::Duration::from_millis(pcfg.prompt_submit_delay_ms));
+            std::thread::sleep(std::time::Duration::from_millis(
+                pcfg.prompt_submit_delay_ms,
+            ));
             let c = capture_pane(session, window, pane, pcfg.capture_lines)?;
             if !prompt_text_visible_in_capture(&c) {
                 return Ok(true);
@@ -332,7 +348,9 @@ pub fn prompt_worker_pane(
     // Got queued — try submitting a few more times
     for _ in 0..pcfg.submit_retry_attempts {
         send_keys(session, window, pane, &pcfg.submit_key)?;
-        std::thread::sleep(std::time::Duration::from_millis(pcfg.prompt_submit_delay_ms));
+        std::thread::sleep(std::time::Duration::from_millis(
+            pcfg.prompt_submit_delay_ms,
+        ));
         let c = capture_pane(session, window, pane, pcfg.capture_lines)?;
         if !c.contains(queue_pattern.as_str()) {
             return Ok(true);
@@ -341,7 +359,10 @@ pub fn prompt_worker_pane(
 
     // Enter retries exhausted — escalate: dismiss the queue with Escape,
     // then re-paste and submit the prompt fresh.
-    tracing::warn!(pane = pane, "prompt queued after Enter retries — escalating with Escape + re-paste");
+    tracing::warn!(
+        pane = pane,
+        "prompt queued after Enter retries — escalating with Escape + re-paste"
+    );
     send_keys(session, window, pane, "Escape")?;
     std::thread::sleep(std::time::Duration::from_millis(300));
 
@@ -353,7 +374,9 @@ pub fn prompt_worker_pane(
     run_tmux(&["send-keys", "-t", &target, &pcfg.submit_key])?;
     std::thread::sleep(std::time::Duration::from_millis(200));
     run_tmux(&["send-keys", "-t", &target, &pcfg.submit_key])?;
-    std::thread::sleep(std::time::Duration::from_millis(pcfg.prompt_submit_delay_ms));
+    std::thread::sleep(std::time::Duration::from_millis(
+        pcfg.prompt_submit_delay_ms,
+    ));
 
     let c = capture_pane(session, window, pane, pcfg.capture_lines)?;
     if !c.contains(queue_pattern.as_str()) {
@@ -383,7 +406,8 @@ pub(crate) mod tests {
     #[test]
     fn test_prompt_text_visible_with_garbled_wrapping() {
         // Realistic: tmux wraps the long prompt across lines
-        let capture = "+loa\n+t\" 2069 +\nUse /skill flywheel-worker. Work bead pat-456: Add feature.";
+        let capture =
+            "+loa\n+t\" 2069 +\nUse /skill flywheel-worker. Work bead pat-456: Add feature.";
         assert!(prompt_text_visible_in_capture(capture));
     }
 
@@ -392,16 +416,24 @@ pub(crate) mod tests {
         assert!(!prompt_text_visible_in_capture("Compiling patina v0.1"));
         assert!(!prompt_text_visible_in_capture("❯ "));
         assert!(!prompt_text_visible_in_capture("✢ Searching for files..."));
-        assert!(!prompt_text_visible_in_capture("completion sent via ./apps/orchestrator/mail/complete"));
+        assert!(!prompt_text_visible_in_capture(
+            "completion sent via ./apps/orchestrator/mail/complete"
+        ));
     }
 
     #[test]
     fn test_prompt_text_needs_both_substrings() {
         // Only one substring → not detected
-        assert!(!prompt_text_visible_in_capture("Use /skill flywheel-worker. Do something."));
-        assert!(!prompt_text_visible_in_capture("Work bead pat-123: Fix bug."));
+        assert!(!prompt_text_visible_in_capture(
+            "Use /skill flywheel-worker. Do something."
+        ));
+        assert!(!prompt_text_visible_in_capture(
+            "Work bead pat-123: Fix bug."
+        ));
         // Both present → detected
-        assert!(prompt_text_visible_in_capture("/skill flywheel-worker stuff Work bead pat-123"));
+        assert!(prompt_text_visible_in_capture(
+            "/skill flywheel-worker stuff Work bead pat-123"
+        ));
     }
 
     // ========================================================================
@@ -487,7 +519,11 @@ pub(crate) mod tests {
         // Both functions should detect the same prompts at the same widths.
         let prompts = vec![
             fake_prompt("pat-xm1", "Fix bug", "W1"),
-            fake_prompt("pat-xm2", "Very long title with many words to test wrapping", "LongWorkerName"),
+            fake_prompt(
+                "pat-xm2",
+                "Very long title with many words to test wrapping",
+                "LongWorkerName",
+            ),
             fake_prompt("pat-xm3", "Short", "W"),
         ];
 
@@ -497,7 +533,8 @@ pub(crate) mod tests {
                 let tmux_sees = prompt_text_visible_in_capture(&wrapped);
                 let worker_sees = crate::worker::has_stuck_input(&wrapped);
                 assert_eq!(
-                    tmux_sees, worker_sees,
+                    tmux_sees,
+                    worker_sees,
                     "tmux/worker disagreement at {cols} cols for '{}'",
                     &prompt[..prompt.len().min(40)]
                 );
@@ -534,11 +571,17 @@ pub(crate) mod tests {
         //
         // Outcome A: Enter went through → Claude consumed it, pane shows activity
         let consumed = "✢ Searching for files...\nReading 3 files\nRunning cargo test";
-        assert!(!prompt_text_visible_in_capture(consumed), "consumed prompt should not be visible");
+        assert!(
+            !prompt_text_visible_in_capture(consumed),
+            "consumed prompt should not be visible"
+        );
 
         // Outcome B: Enter didn't go through → raw prompt text still in pane
         let stuck = fake_prompt("pat-ps1", "Fix", "W");
-        assert!(prompt_text_visible_in_capture(&stuck), "stuck prompt should be visible");
+        assert!(
+            prompt_text_visible_in_capture(&stuck),
+            "stuck prompt should be visible"
+        );
     }
 
     #[test]

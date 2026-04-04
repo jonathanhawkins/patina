@@ -38,7 +38,9 @@ fn print_usage() {
          \x20 --window N         tmux window index (default: 0)\n\
          \x20 --interval N       poll interval in seconds (default: 8)\n\
          \x20 --workers N        number of worker panes (launch only, default: 9)\n\
-         \x20 --model CMD        model command (launch only, default: claude)\n\
+         \x20 --model CMD        worker model command (launch only, alias for --worker-model)\n\
+         \x20 --worker-model CMD worker model command (launch only, default: claude)\n\
+         \x20 --planner-model CMD planner model command (launch only, default: worker model)\n\
          \x20 --force            overwrite existing session (launch only)\n\
          \x20 --with-coordinator start coordinator run loop (launch only)\n\
          \x20 --dry-run          print actions without executing\n\
@@ -64,7 +66,8 @@ struct CliArgs {
     window: Option<u32>,
     interval: Option<u64>,
     workers: Option<u32>,
-    model: Option<String>,
+    worker_model: Option<String>,
+    planner_model: Option<String>,
     force: bool,
     dry_run: bool,
     project_root: Option<PathBuf>,
@@ -83,7 +86,8 @@ fn parse_args() -> CliArgs {
     let mut window = None;
     let mut interval = None;
     let mut workers = None;
-    let mut model = None;
+    let mut worker_model = None;
+    let mut planner_model = None;
     let mut force = false;
     let mut dry_run = false;
     let mut project_root = None;
@@ -108,9 +112,13 @@ fn parse_args() -> CliArgs {
                 i += 1;
                 workers = args.get(i).and_then(|v| v.parse().ok());
             }
-            "--model" => {
+            "--model" | "--worker-model" => {
                 i += 1;
-                model = args.get(i).cloned();
+                worker_model = args.get(i).cloned();
+            }
+            "--planner-model" => {
+                i += 1;
+                planner_model = args.get(i).cloned();
             }
             "--force" => {
                 force = true;
@@ -140,7 +148,8 @@ fn parse_args() -> CliArgs {
         window,
         interval,
         workers,
-        model,
+        worker_model,
+        planner_model,
         force,
         dry_run,
         project_root,
@@ -202,10 +211,20 @@ fn cmd_launch(project_root: &Path, cli: &CliArgs) {
 
     let orch_root = project_root.join("apps/orchestrator");
 
+    let worker_model = cli
+        .worker_model
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
+    let planner_model = cli
+        .planner_model
+        .clone()
+        .unwrap_or_else(|| worker_model.clone());
+
     let config = launcher::LaunchConfig {
         session_name: session.to_string(),
         worker_count: cli.workers.unwrap_or(9),
-        model_command: cli.model.clone().unwrap_or_else(|| "claude".to_string()),
+        worker_model_command: worker_model,
+        planner_model_command: planner_model,
         project_root: project_root.to_path_buf(),
         orch_root,
         dry_run: cli.dry_run,
@@ -266,13 +285,16 @@ fn cmd_plan(project_root: &Path, cli: &CliArgs) {
 }
 
 fn cmd_health(project_root: &Path, cli: &CliArgs) {
-    let cfg = match config::Config::from_env(project_root.to_path_buf()) {
+    let mut cfg = match config::Config::from_env(project_root.to_path_buf()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config error: {e}");
             std::process::exit(1);
         }
     };
+    if let Some(session) = &cli.session {
+        apply_session_worker_defaults(&mut cfg, session, cli.window.unwrap_or(0));
+    }
 
     let conn = match db::open(project_root) {
         Ok(c) => c,
@@ -299,15 +321,15 @@ fn cmd_health(project_root: &Path, cli: &CliArgs) {
         match worker::worker_info_list_with_config(session, window, &conn, &cfg) {
             Ok(workers) => match worker::swarm_health(&workers, &conn) {
                 Ok(health) => {
-                println!("worker_panes={}", health.worker_panes);
-                println!("assigned_worker_panes={}", health.assigned_worker_panes);
-                println!("unassigned_worker_panes={}", health.unassigned_worker_panes);
-                println!("idle_assigned_panes={}", health.idle_assigned_panes);
-                println!("active_assigned_panes={}", health.active_assigned_panes);
-                println!(
-                    "missing_worker_assignments={}",
-                    health.missing_worker_assignments
-                );
+                    println!("worker_panes={}", health.worker_panes);
+                    println!("assigned_worker_panes={}", health.assigned_worker_panes);
+                    println!("unassigned_worker_panes={}", health.unassigned_worker_panes);
+                    println!("idle_assigned_panes={}", health.idle_assigned_panes);
+                    println!("active_assigned_panes={}", health.active_assigned_panes);
+                    println!(
+                        "missing_worker_assignments={}",
+                        health.missing_worker_assignments
+                    );
                 }
                 Err(e) => eprintln!("swarm health error: {e}"),
             },
@@ -325,13 +347,14 @@ fn cmd_worker_state(project_root: &Path, cli: &CliArgs) {
     });
     let window = cli.window.unwrap_or(0);
 
-    let cfg = match config::Config::from_env(project_root.to_path_buf()) {
+    let mut cfg = match config::Config::from_env(project_root.to_path_buf()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config error: {e}");
             std::process::exit(1);
         }
     };
+    apply_session_worker_defaults(&mut cfg, session, window);
 
     let conn = match db::open(project_root) {
         Ok(c) => c,
@@ -390,11 +413,17 @@ fn cmd_poll(project_root: &Path, dry_run: bool) {
             println!("=== Poll Complete ===");
             println!(
                 "Processed: {}, Rejected: {}, Errors: {}, Prompts: {}",
-                result.processed, result.rejected, result.errors, result.prompt_tasks.len()
+                result.processed,
+                result.rejected,
+                result.errors,
+                result.prompt_tasks.len()
             );
             // Submit any prompt tasks from reassignments
             if !result.prompt_tasks.is_empty() {
-                println!("Submitting {} prompt(s) from reassignment...", result.prompt_tasks.len());
+                println!(
+                    "Submitting {} prompt(s) from reassignment...",
+                    result.prompt_tasks.len()
+                );
                 tmux::submit_prompts_parallel(&result.prompt_tasks);
             }
         }
@@ -481,11 +510,18 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
         }
     };
 
-    // Startup sync: import JSONL → DB so we start with a complete database.
-    // This catches beads created by other sessions, git pulls, or manual edits.
-    tracing::info!("Startup: importing JSONL → DB");
-    if let Err(e) = br::force_sync() {
-        tracing::warn!(error = %e, "Startup sync failed — DB may be stale");
+    // Startup sync: prefer the live DB state and only import if flush detects staleness.
+    // Import-only at startup can clobber fresh in_progress assignments when JSONL lags DB.
+    tracing::info!("Startup: reconciling DB ↔ JSONL state");
+    if let Err(e) = br::sync() {
+        tracing::warn!(error = %e, "Startup sync failed — DB/JSONL may be stale");
+    }
+    let reconciled_deps = reconcile_active_planner_dependencies(&coord.config.project_root);
+    if reconciled_deps > 0 {
+        tracing::info!(
+            added = reconciled_deps,
+            "Startup: reconciled planner dependency edges"
+        );
     }
 
     let mut stall_counter: usize = 0;
@@ -493,8 +529,7 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
     let mut planner_recovery = PlannerRecoveryState::new();
     let mut last_mail_check = Instant::now(); // Fix #5: cache mail server check
     let deep_cooldown = Duration::from_secs(coord.config.deep_planner_cooldown_secs);
-    let planner_restart_cooldown =
-        Duration::from_secs(coord.config.planner_restart_cooldown_secs);
+    let planner_restart_cooldown = Duration::from_secs(coord.config.planner_restart_cooldown_secs);
     let fast_planner_enabled = coord.config.fast_planner_enabled;
     let deep_planner_enabled = coord.config.deep_planner_enabled;
 
@@ -538,7 +573,9 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
         if !coord.config.pull_mode {
             if let Some(session) = &session_name {
                 match coord.recover_stuck_workers(session, window) {
-                    Ok(n) if n > 0 => tracing::info!(recovered = n, "Recovered stuck input workers"),
+                    Ok(n) if n > 0 => {
+                        tracing::info!(recovered = n, "Recovered stuck input workers")
+                    }
                     Err(e) => tracing::debug!(error = %e, "stuck input recovery skipped"),
                     _ => {}
                 }
@@ -550,7 +587,7 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                 session,
                 window,
                 &coord.config.project_root,
-                coord.config.is_codex(),
+                &coord.config.planner_command,
                 planner_restart_cooldown,
                 &mut planner_recovery,
             );
@@ -596,13 +633,19 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                 // open connection blocks br writes with "database is busy".
                 let (worker_list, open, in_progress, ready, workers) = {
                     let conn = db::open(&coord.config.project_root).ok();
-                    let wl = conn.as_ref()
-                        .and_then(|c| worker::worker_info_list_with_config(session, window, c, &coord.config).ok())
+                    let wl = conn
+                        .as_ref()
+                        .and_then(|c| {
+                            worker::worker_info_list_with_config(session, window, c, &coord.config)
+                                .ok()
+                        })
                         .unwrap_or_default();
-                    let counts = conn.as_ref()
+                    let counts = conn
+                        .as_ref()
                         .map(|c| {
                             let o = db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0);
-                            let ip = db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0);
+                            let ip =
+                                db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0);
                             let r = db::count_ready_unassigned(c).unwrap_or(0);
                             (o, ip, r, wl.len())
                         })
@@ -646,11 +689,15 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                     // Re-check queue after seed (short-lived connection)
                     let (open2, ip2, ready2) = {
                         let c = db::open(&coord.config.project_root).ok();
-                        c.as_ref().map(|c| (
-                            db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0),
-                            db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0),
-                            db::count_ready_unassigned(c).unwrap_or(0),
-                        )).unwrap_or((0, 0, 0))
+                        c.as_ref()
+                            .map(|c| {
+                                (
+                                    db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0),
+                                    db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0),
+                                    db::count_ready_unassigned(c).unwrap_or(0),
+                                )
+                            })
+                            .unwrap_or((0, 0, 0))
                     };
 
                     if planner_replenishment_needed(
@@ -660,7 +707,8 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                         ready_target,
                         open_target,
                         workers,
-                    ) && !bg_planner.pending_recommendations.is_empty() {
+                    ) && !bg_planner.pending_recommendations.is_empty()
+                    {
                         let pending = std::mem::take(&mut bg_planner.pending_recommendations);
                         let created = auto_create_beads_from_planner(&pending);
                         if created > 0 {
@@ -677,7 +725,9 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                         ready_target,
                         open_target,
                         workers,
-                    ) && fast_planner_enabled && !bg_planner.work_exhausted {
+                    ) && fast_planner_enabled
+                        && !bg_planner.work_exhausted
+                    {
                         println!(
                             "queue still low after seed (open={open2}, in_progress={ip2}, ready={ready2}); running Tier 1 fast planner"
                         );
@@ -698,15 +748,22 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                     // Re-check again after Tier 1 (short-lived connection)
                     let (open3, ip3, ready3) = {
                         let c = db::open(&coord.config.project_root).ok();
-                        c.as_ref().map(|c| (
-                            db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0),
-                            db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0),
-                            db::count_ready_unassigned(c).unwrap_or(0),
-                        )).unwrap_or((0, 0, 0))
+                        c.as_ref()
+                            .map(|c| {
+                                (
+                                    db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0),
+                                    db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0),
+                                    db::count_ready_unassigned(c).unwrap_or(0),
+                                )
+                            })
+                            .unwrap_or((0, 0, 0))
                     };
 
                     // Step 3: Tier 2 — spawn deep planner in background thread
-                    let bg_running = bg_planner.handle.as_ref().map_or(false, |h| !h.is_finished());
+                    let bg_running = bg_planner
+                        .handle
+                        .as_ref()
+                        .map_or(false, |h| !h.is_finished());
                     let cooldown_elapsed = bg_planner
                         .last_deep_run
                         .map_or(true, |t| t.elapsed() >= deep_cooldown);
@@ -718,8 +775,7 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                         ready_target,
                         open_target,
                         workers,
-                    )
-                        && deep_planner_enabled
+                    ) && deep_planner_enabled
                         && !bg_running
                         && cooldown_elapsed
                         && !bg_planner.work_exhausted
@@ -763,11 +819,17 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                             Ok(Ok(report)) => {
                                 let (open4, ip4, ready4) = {
                                     let c = db::open(&coord.config.project_root).ok();
-                                    c.as_ref().map(|c| (
-                                        db::count_by_status(c, db::BeadStatus::Open).unwrap_or(0),
-                                        db::count_by_status(c, db::BeadStatus::InProgress).unwrap_or(0),
-                                        db::count_ready_unassigned(c).unwrap_or(0),
-                                    )).unwrap_or((0, 0, 0))
+                                    c.as_ref()
+                                        .map(|c| {
+                                            (
+                                                db::count_by_status(c, db::BeadStatus::Open)
+                                                    .unwrap_or(0),
+                                                db::count_by_status(c, db::BeadStatus::InProgress)
+                                                    .unwrap_or(0),
+                                                db::count_ready_unassigned(c).unwrap_or(0),
+                                            )
+                                        })
+                                        .unwrap_or((0, 0, 0))
                                 };
                                 if planner_replenishment_needed(
                                     open4,
@@ -777,12 +839,15 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                                     open_target,
                                     workers,
                                 ) {
-                                    let created = auto_create_beads_from_planner(&report.recommendations);
+                                    let created =
+                                        auto_create_beads_from_planner(&report.recommendations);
                                     if created > 0 {
                                         println!("Tier 2 deep planner created {created} bead(s)");
                                         all_prompts.extend(run_idle_fill(&coord, session, window));
                                     } else {
-                                        tracing::info!("Tier 2 deep planner returned 0 recommendations");
+                                        tracing::info!(
+                                            "Tier 2 deep planner returned 0 recommendations"
+                                        );
                                     }
                                 } else {
                                     tracing::info!(
@@ -826,8 +891,11 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                             ));
 
                             // Use recovery-specific stale threshold via parameter
-                            let recovery_result =
-                                coord.assign_idle_workers_with_stale_override(session, window, stall_reclaim_secs);
+                            let recovery_result = coord.assign_idle_workers_with_stale_override(
+                                session,
+                                window,
+                                stall_reclaim_secs,
+                            );
 
                             match &recovery_result {
                                 Ok((assigned, prompts)) if *assigned > 0 => {
@@ -892,7 +960,11 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
 
 /// Run idle fill and return prompt tasks for parallel submission.
 /// In pull mode, returns empty — workers discover their own work.
-fn run_idle_fill(coord: &coordinator::Coordinator, session: &str, window: u32) -> Vec<tmux::PromptTask> {
+fn run_idle_fill(
+    coord: &coordinator::Coordinator,
+    session: &str,
+    window: u32,
+) -> Vec<tmux::PromptTask> {
     if coord.config.pull_mode {
         return Vec::new();
     }
@@ -904,7 +976,11 @@ fn run_idle_fill(coord: &coordinator::Coordinator, session: &str, window: u32) -
                     tracing::info!(attempt = attempt + 1, "idle fill succeeded after retry");
                 }
                 if assigned > 0 {
-                    tracing::info!(assigned, prompts = prompts.len(), "idle fill queued prompts");
+                    tracing::info!(
+                        assigned,
+                        prompts = prompts.len(),
+                        "idle fill queued prompts"
+                    );
                 }
                 return prompts;
             }
@@ -917,6 +993,40 @@ fn run_idle_fill(coord: &coordinator::Coordinator, session: &str, window: u32) -
         }
     }
     Vec::new()
+}
+
+fn normalized_worker_command(current_command: &str) -> String {
+    if current_command.contains("codex") {
+        "codex".to_string()
+    } else if current_command.contains("claude") {
+        "claude".to_string()
+    } else {
+        current_command.to_string()
+    }
+}
+
+fn apply_session_worker_defaults(cfg: &mut config::Config, session: &str, window: u32) {
+    if std::env::var("ORCH_WORKER_COMMAND").is_ok() {
+        return;
+    }
+    let Ok(panes) = tmux::list_panes(session, window) else {
+        return;
+    };
+    let Some(worker_pane) = panes
+        .iter()
+        .find(|pane| pane.index >= cfg.min_worker_pane_index && !pane.dead)
+    else {
+        return;
+    };
+    let normalized = normalized_worker_command(&worker_pane.current_command);
+    cfg.worker_command = normalized.clone();
+    if std::env::var("ORCH_AGENT_TYPE").is_err() {
+        cfg.agent_type = if normalized.contains("codex") {
+            "codex".to_string()
+        } else {
+            "claude".to_string()
+        };
+    }
 }
 
 /// Try to acquire an exclusive flock on a file. Returns true if acquired.
@@ -960,16 +1070,16 @@ impl PlannerRecoveryState {
     }
 }
 
-fn planner_loop_command() -> &'static str {
-    "/loop 10m /planner"
+fn planner_loop_command(planner_command: &str) -> Option<&'static str> {
+    if launcher::supports_auto_loop(planner_command) {
+        Some("/loop 10m /planner")
+    } else {
+        None
+    }
 }
 
-fn planner_boot_command(is_codex: bool) -> String {
-    if is_codex {
-        launcher::ensure_skip_permissions("codex")
-    } else {
-        launcher::ensure_skip_permissions("claude")
-    }
+fn planner_boot_command(planner_command: &str) -> String {
+    launcher::ensure_skip_permissions(planner_command)
 }
 
 fn planner_capture_shows_rate_limit(capture: &str) -> bool {
@@ -985,20 +1095,27 @@ fn maintain_planner_pane(
     session: &str,
     window: u32,
     project_root: &Path,
-    is_codex: bool,
+    planner_command: &str,
     restart_cooldown: Duration,
     state: &mut PlannerRecoveryState,
 ) {
     if let Some(when) = state.loop_requeue_at {
         if Instant::now() >= when {
-            if let Err(e) = tmux::send_literal(session, window, 1, planner_loop_command()) {
-                tracing::warn!(error = %e, "planner loop requeue failed");
-            } else if let Err(e) = tmux::send_keys(session, window, 1, "Enter") {
-                tracing::warn!(error = %e, "planner loop submit failed");
+            if let Some(loop_command) = planner_loop_command(planner_command) {
+                if let Err(e) = tmux::send_literal(session, window, 1, loop_command) {
+                    tracing::warn!(error = %e, "planner loop requeue failed");
+                } else if let Err(e) = tmux::send_keys(session, window, 1, "Enter") {
+                    tracing::warn!(error = %e, "planner loop submit failed");
+                } else {
+                    tracing::info!("planner loop requeued after restart");
+                }
             } else {
-                tracing::info!("planner loop requeued after restart");
-                state.loop_requeue_at = None;
+                tracing::debug!(
+                    planner_command,
+                    "planner loop requeue skipped for non-auto-loop planner"
+                );
             }
+            state.loop_requeue_at = None;
         }
     }
 
@@ -1025,13 +1142,14 @@ fn maintain_planner_pane(
         return;
     }
 
-    let planner_cmd = planner_boot_command(is_codex);
+    let planner_cmd = planner_boot_command(planner_command);
     let workdir = project_root.to_string_lossy().to_string();
     match tmux::restart_planner_pane(session, window, &workdir, &planner_cmd) {
         Ok(()) => {
             tracing::warn!("planner pane rate-limited — restarted planner pane");
             state.last_restart = Some(Instant::now());
-            state.loop_requeue_at = Some(Instant::now() + Duration::from_secs(12));
+            state.loop_requeue_at = planner_loop_command(planner_command)
+                .map(|_| Instant::now() + Duration::from_secs(12));
         }
         Err(e) => {
             tracing::warn!(error = %e, "planner pane restart failed");
@@ -1072,7 +1190,8 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
             &conn,
             "[planner-key:",
             &[db::BeadStatus::Open, db::BeadStatus::InProgress],
-        ).unwrap_or_default(),
+        )
+        .unwrap_or_default(),
         Err(_) => {
             // Try from project root
             match db::open(std::path::Path::new("/Users/bone/dev/games/patina")) {
@@ -1080,13 +1199,15 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
                     &conn,
                     "[planner-key:",
                     &[db::BeadStatus::Open, db::BeadStatus::InProgress],
-                ).unwrap_or_default(),
+                )
+                .unwrap_or_default(),
                 Err(_) => vec![],
             }
         }
     };
 
     let mut created = 0;
+    let mut planner_key_index = load_active_planner_key_index();
     for rec in recommendations {
         // Skip if an open/in-progress bead already has this planner key
         let key_pattern = format!("[planner-key: {}]", rec.gate_key);
@@ -1103,18 +1224,28 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
             key = rec.gate_key,
         );
         // Sanitize labels: br only allows alphanumeric, hyphen, underscore, colon
-        let labels: String = rec.labels.iter()
-            .map(|l| l.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ':').collect::<String>())
+        let labels: String = rec
+            .labels
+            .iter()
+            .map(|l| {
+                l.chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ':')
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join(",");
         let priority = rec.priority.to_string();
 
         let mut args = vec![
             "create",
-            "--title", &rec.title,
-            "--type", "task",
-            "--priority", &priority,
-            "--description", &description,
+            "--title",
+            &rec.title,
+            "--type",
+            "task",
+            "--priority",
+            &priority,
+            "--description",
+            &description,
         ];
         if !labels.is_empty() {
             args.push("--labels");
@@ -1127,18 +1258,25 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
                 created += 1;
 
                 // Extract the bead ID from the create output and add dependencies
-                if !rec.depends_on.is_empty() {
-                    // br create output contains the bead ID (e.g., "Created pat-abc123")
-                    if let Some(bead_id) = output.split_whitespace()
-                        .find(|w| w.starts_with("pat-"))
-                    {
-                        for dep_key in &rec.depends_on {
-                            if let Err(e) = br::dep_add(bead_id, dep_key) {
+                if let Some(bead_id) = output.split_whitespace().find(|w| w.starts_with("pat-")) {
+                    planner_key_index.insert(rec.gate_key.clone(), bead_id.to_string());
+                    for dep_key in &rec.depends_on {
+                        if let Some(dep_bead_id) = planner_key_index.get(dep_key) {
+                            if let Err(e) = br::dep_add(bead_id, dep_bead_id) {
                                 tracing::debug!(
-                                    bead = bead_id, dep = dep_key, error = %e,
-                                    "failed to add dependency (dep bead may not exist yet)"
+                                    bead = bead_id,
+                                    blocker = dep_bead_id,
+                                    dep_key = dep_key,
+                                    error = %e,
+                                    "failed to add dependency edge"
                                 );
                             }
+                        } else {
+                            tracing::debug!(
+                                bead = bead_id,
+                                dep_key = dep_key,
+                                "skipping dependency edge because blocker bead is not active"
+                            );
                         }
                     }
                 }
@@ -1158,6 +1296,85 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
     created
 }
 
+fn load_active_planner_key_index() -> std::collections::HashMap<String, String> {
+    let statuses = [db::BeadStatus::Open, db::BeadStatus::InProgress];
+    match db::open(std::path::Path::new(".")) {
+        Ok(conn) => db::planner_key_to_bead_id_by_status(&conn, &statuses).unwrap_or_default(),
+        Err(_) => match db::open(std::path::Path::new("/Users/bone/dev/games/patina")) {
+            Ok(conn) => db::planner_key_to_bead_id_by_status(&conn, &statuses).unwrap_or_default(),
+            Err(_) => std::collections::HashMap::new(),
+        },
+    }
+}
+
+fn reconcile_active_planner_dependencies(project_root: &Path) -> usize {
+    let config = project_config::load(project_root);
+    let specs = planner::load_execution_maps(project_root, &config);
+    if specs.is_empty() {
+        return 0;
+    }
+
+    let statuses = [db::BeadStatus::Open, db::BeadStatus::InProgress];
+    let planner_key_index = match db::open(project_root) {
+        Ok(conn) => db::planner_key_to_bead_id_by_status(&conn, &statuses).unwrap_or_default(),
+        Err(_) => return 0,
+    };
+
+    let mut added = 0;
+    for (blocked_id, blocker_id, blocked_key, dep_key) in
+        resolve_dependency_edges(&specs, &planner_key_index)
+    {
+        match br::dep_add(&blocked_id, &blocker_id) {
+            Ok(_) => {
+                added += 1;
+            }
+            Err(e) => {
+                let msg = format!("{e}").to_ascii_lowercase();
+                if !(msg.contains("already")
+                    || msg.contains("exists")
+                    || msg.contains("duplicate")
+                    || msg.contains("constraint"))
+                {
+                    tracing::debug!(
+                        blocked_id,
+                        blocker_id,
+                        blocked_key,
+                        dep_key,
+                        error = %e,
+                        "failed to reconcile planner dependency edge"
+                    );
+                }
+            }
+        }
+    }
+
+    added
+}
+
+fn resolve_dependency_edges(
+    specs: &[prd_parser::BeadSpec],
+    planner_key_index: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String, String, String)> {
+    let mut edges = Vec::new();
+    for spec in specs {
+        let Some(blocked_id) = planner_key_index.get(&spec.bead_key) else {
+            continue;
+        };
+        for dep_key in &spec.depends_on {
+            let Some(blocker_id) = planner_key_index.get(dep_key) else {
+                continue;
+            };
+            edges.push((
+                blocked_id.clone(),
+                blocker_id.clone(),
+                spec.bead_key.clone(),
+                dep_key.clone(),
+            ));
+        }
+    }
+    edges
+}
+
 fn ensure_mail_server(orch_root: &std::path::Path, mail_session: &str) -> bool {
     let script = orch_root.join("swarm/ensure_mail_server.sh");
     if !script.exists() {
@@ -1174,11 +1391,10 @@ fn ensure_mail_server(orch_root: &std::path::Path, mail_session: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        planner_boot_command,
-        planner_capture_shows_rate_limit,
-        planner_loop_command,
-        planner_replenishment_needed,
+        planner_boot_command, planner_capture_shows_rate_limit, planner_loop_command,
+        planner_replenishment_needed, resolve_dependency_edges,
     };
+    use crate::prd_parser::BeadSpec;
 
     #[test]
     fn planner_skips_when_swarm_is_saturated() {
@@ -1214,7 +1430,9 @@ mod tests {
 
     #[test]
     fn planner_rate_limit_detection_matches_real_signals() {
-        assert!(planner_capture_shows_rate_limit("API Error: Rate limit reached"));
+        assert!(planner_capture_shows_rate_limit(
+            "API Error: Rate limit reached"
+        ));
         assert!(planner_capture_shows_rate_limit("You've hit your limit"));
         assert!(planner_capture_shows_rate_limit("429 Too many requests"));
         assert!(!planner_capture_shows_rate_limit("Running scheduled task"));
@@ -1222,17 +1440,81 @@ mod tests {
 
     #[test]
     fn planner_loop_command_is_stable() {
-        assert_eq!(planner_loop_command(), "/loop 10m /planner");
+        assert_eq!(planner_loop_command("claude"), Some("/loop 10m /planner"));
+        assert_eq!(planner_loop_command("codex --model gpt-5.4"), None);
     }
 
     #[test]
     fn planner_boot_command_adds_permission_flag() {
-        let claude = planner_boot_command(false);
+        let claude = planner_boot_command("claude");
         assert!(claude.contains("claude"));
         assert!(claude.contains("dangerously-skip-permissions"));
 
-        let codex = planner_boot_command(true);
+        let codex = planner_boot_command("codex --model gpt-5.4");
         assert!(codex.contains("codex"));
         assert!(codex.contains("dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn resolve_dependency_edges_uses_planner_keys() {
+        let specs = vec![
+            BeadSpec {
+                section: "Now".to_string(),
+                subsection: Some("Lane A".to_string()),
+                bead_key: "phase6-a".to_string(),
+                description: "A".to_string(),
+                acceptance_command: None,
+                depends_on: vec![],
+                priority: 1,
+            },
+            BeadSpec {
+                section: "Now".to_string(),
+                subsection: Some("Lane A".to_string()),
+                bead_key: "phase6-b".to_string(),
+                description: "B".to_string(),
+                acceptance_command: None,
+                depends_on: vec!["phase6-a".to_string(), "missing".to_string()],
+                priority: 1,
+            },
+        ];
+        let index = std::collections::HashMap::from([
+            ("phase6-a".to_string(), "pat-a".to_string()),
+            ("phase6-b".to_string(), "pat-b".to_string()),
+        ]);
+
+        let edges = resolve_dependency_edges(&specs, &index);
+        assert_eq!(
+            edges,
+            vec![(
+                "pat-b".to_string(),
+                "pat-a".to_string(),
+                "phase6-b".to_string(),
+                "phase6-a".to_string()
+            )]
+        );
+    }
+
+    /// Regression: auto_create_beads_from_planner must call br::dep_add for
+    /// each depends_on entry. Verify the dep-add code path exists.
+    #[test]
+    fn test_auto_create_wires_dependencies() {
+        let source = include_str!("main.rs");
+        let fn_start = source
+            .find("fn auto_create_beads_from_planner")
+            .expect("auto_create_beads_from_planner must exist");
+        let body = &source[fn_start..std::cmp::min(fn_start + 4000, source.len())];
+
+        assert!(
+            body.contains("dep_add"),
+            "auto_create_beads_from_planner must call br::dep_add to wire dependency edges"
+        );
+        assert!(
+            body.contains("depends_on"),
+            "auto_create_beads_from_planner must iterate rec.depends_on"
+        );
+        assert!(
+            body.contains("planner_key_index"),
+            "must maintain a planner_key_index to resolve gate_key → bead_id for dep edges"
+        );
     }
 }

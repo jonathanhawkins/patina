@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+CLAUDE_CODE_TASK_LIST_ID=patina claude --dangerously-skip-permissions --chrome

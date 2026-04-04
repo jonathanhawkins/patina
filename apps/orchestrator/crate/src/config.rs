@@ -55,6 +55,7 @@ pub struct Config {
     // Tmux worker detection
     pub min_worker_pane_index: u32,
     pub worker_command: String,
+    pub planner_command: String,
     pub queue_prompt_marker: String,
     pub shell_prompt_char: char,
     pub mail_server_suffix: String,
@@ -113,15 +114,14 @@ impl Config {
             .or_else(|| env_string("ORCH_COORDINATOR_AGENT"))
             .or_else(|| {
                 let coord_file = project_root.join(".beads/coordinator_agent");
-                std::fs::read_to_string(coord_file).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                std::fs::read_to_string(coord_file)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
             });
 
         let browser_verify_panes: Vec<u32> = env_string("ORCH_BROWSER_VERIFY_PANES")
-            .map(|s| {
-                s.split(',')
-                    .filter_map(|p| p.trim().parse().ok())
-                    .collect()
-            })
+            .map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect())
             .unwrap_or_default();
 
         Ok(Config {
@@ -153,15 +153,20 @@ impl Config {
             browser_verify_panes,
 
             // Agent type (infer from worker command if not set explicitly)
-            agent_type: env_string("ORCH_AGENT_TYPE")
-                .unwrap_or_else(|| {
-                    let wc = env_string("ORCH_WORKER_COMMAND").unwrap_or_default();
-                    if wc.contains("codex") { "codex".to_string() } else { "claude".to_string() }
-                }),
+            agent_type: env_string("ORCH_AGENT_TYPE").unwrap_or_else(|| {
+                let wc = env_string("ORCH_WORKER_COMMAND").unwrap_or_default();
+                if wc.contains("codex") {
+                    "codex".to_string()
+                } else {
+                    "claude".to_string()
+                }
+            }),
 
             // Tmux worker detection
-            min_worker_pane_index: env_or("ORCH_MIN_WORKER_PANE_INDEX", 3),
+            min_worker_pane_index: env_or("ORCH_MIN_WORKER_PANE_INDEX", 4),
             worker_command: env_string("ORCH_WORKER_COMMAND")
+                .unwrap_or_else(|| "claude".to_string()),
+            planner_command: env_string("ORCH_PLANNER_COMMAND")
                 .unwrap_or_else(|| "claude".to_string()),
             queue_prompt_marker: env_string("ORCH_QUEUE_PROMPT_MARKER")
                 .unwrap_or_else(|| "Press up to edit".to_string()),
@@ -181,10 +186,8 @@ impl Config {
             capture_lines: env_or("ORCH_CAPTURE_LINES", 40),
 
             // Tmux key sequences
-            clear_line_key: env_string("ORCH_CLEAR_LINE_KEY")
-                .unwrap_or_else(|| "C-u".to_string()),
-            submit_key: env_string("ORCH_SUBMIT_KEY")
-                .unwrap_or_else(|| "Enter".to_string()),
+            clear_line_key: env_string("ORCH_CLEAR_LINE_KEY").unwrap_or_else(|| "C-u".to_string()),
+            submit_key: env_string("ORCH_SUBMIT_KEY").unwrap_or_else(|| "Enter".to_string()),
 
             idle_fill_retry_attempts: env_or("ORCH_IDLE_FILL_RETRY_ATTEMPTS", 3),
 
@@ -253,15 +256,27 @@ impl Config {
     }
 
     pub fn agent_program_name(&self) -> &str {
-        if self.is_codex() { "codex" } else { "claude-code" }
+        if self.is_codex() {
+            "codex"
+        } else {
+            "claude-code"
+        }
     }
 
     pub fn worker_skill_name(&self) -> &str {
-        if self.is_codex() { "patina-fly-worker" } else { "flywheel-worker" }
+        if self.is_codex() {
+            "patina-fly-worker"
+        } else {
+            "flywheel-worker"
+        }
     }
 
     pub fn completion_skill_name(&self) -> &str {
         "mail-complete"
+    }
+
+    pub fn worker_requires_assignment_prompt(&self) -> bool {
+        self.is_codex()
     }
 
     /// Build a PromptConfig from the orchestrator config.
@@ -306,7 +321,9 @@ pub fn load_mail_config(project_root: &Path) -> Result<MailConfig> {
         .get("mcpServers")
         .and_then(|s| s.get("mcp-agent-mail"))
         .ok_or_else(|| {
-            OrchestratorError::Config("mcpServers.mcp-agent-mail not found in codex.mcp.json".into())
+            OrchestratorError::Config(
+                "mcpServers.mcp-agent-mail not found in codex.mcp.json".into(),
+            )
         })?;
 
     let url = server
@@ -319,11 +336,7 @@ pub fn load_mail_config(project_root: &Path) -> Result<MailConfig> {
         .get("headers")
         .and_then(|h| h.get("Authorization"))
         .and_then(|a| a.as_str())
-        .map(|auth| {
-            auth.strip_prefix("Bearer ")
-                .unwrap_or(auth)
-                .to_string()
-        });
+        .map(|auth| auth.strip_prefix("Bearer ").unwrap_or(auth).to_string());
 
     Ok(MailConfig {
         url,
@@ -363,8 +376,9 @@ pub fn test_config() -> Config {
         browser_verify_enabled: false,
         browser_verify_panes: vec![],
         agent_type: "claude".to_string(),
-        min_worker_pane_index: 3,
+        min_worker_pane_index: 4,
         worker_command: "claude".to_string(),
+        planner_command: "claude".to_string(),
         queue_prompt_marker: "Press up to edit".to_string(),
         shell_prompt_char: '\u{276f}',
         mail_server_suffix: "--agent-mail".to_string(),
@@ -428,7 +442,6 @@ mod tests {
     fn test_desired_backlog() {
         let cfg = test_config();
 
-
         // With 3 workers, min_ready (6) wins
         assert_eq!(cfg.desired_ready_backlog(3), 6);
         // With 9 workers, worker count wins
@@ -442,10 +455,16 @@ mod tests {
     fn test_mail_server_session_uses_suffix() {
         let mut cfg = test_config();
         cfg.session_family = Some("swarm".to_string());
-        assert_eq!(cfg.mail_server_session(), Some("swarm--agent-mail".to_string()));
+        assert_eq!(
+            cfg.mail_server_session(),
+            Some("swarm--agent-mail".to_string())
+        );
 
         cfg.mail_server_suffix = "--custom-mail".to_string();
-        assert_eq!(cfg.mail_server_session(), Some("swarm--custom-mail".to_string()));
+        assert_eq!(
+            cfg.mail_server_session(),
+            Some("swarm--custom-mail".to_string())
+        );
     }
 
     #[test]
@@ -475,7 +494,10 @@ mod tests {
                 dead: false,
                 current_command: "claude".to_string(),
             };
-            assert!(!cfg.is_worker_pane(&reserved), "pane {idx} should not be a worker");
+            assert!(
+                !cfg.is_worker_pane(&reserved),
+                "pane {idx} should not be a worker"
+            );
         }
 
         // Dead pane
@@ -554,13 +576,15 @@ mod tests {
         assert!(cfg.fast_planner_enabled);
         assert!(cfg.deep_planner_enabled);
         assert_eq!(cfg.planner_restart_cooldown_secs, 180);
+        assert_eq!(cfg.planner_command, "claude");
     }
 
     #[test]
     fn test_defaults_match_expected_values() {
         let cfg = test_config();
-        assert_eq!(cfg.min_worker_pane_index, 3);
+        assert_eq!(cfg.min_worker_pane_index, 4);
         assert_eq!(cfg.worker_command, "claude");
+        assert_eq!(cfg.planner_command, "claude");
         assert_eq!(cfg.agent_type, "claude");
         assert_eq!(cfg.queue_prompt_marker, "Press up to edit");
         assert_eq!(cfg.shell_prompt_char, '\u{276f}');
@@ -585,6 +609,7 @@ mod tests {
         assert_eq!(cfg.agent_program_name(), "codex");
         assert_eq!(cfg.worker_skill_name(), "patina-fly-worker");
         assert_eq!(cfg.completion_skill_name(), "mail-complete");
+        assert!(cfg.worker_requires_assignment_prompt());
     }
 
     #[test]
@@ -594,5 +619,6 @@ mod tests {
         assert_eq!(cfg.agent_program_name(), "claude-code");
         assert_eq!(cfg.worker_skill_name(), "flywheel-worker");
         assert_eq!(cfg.completion_skill_name(), "mail-complete");
+        assert!(!cfg.worker_requires_assignment_prompt());
     }
 }

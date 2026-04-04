@@ -19,6 +19,7 @@ Use this for Patina swarm work assigned through Agent Mail.
 - Do not mutate `br` state.
 - Work one bead at a time.
 - Add tests with the implementation.
+- **DO NOT run Rust builds**: Never invoke `cargo`, `rust_task.sh`, or any Rust compilation. The coordinator's verifier lane is the single builder. Report your test command in `/skill mail-complete` and the verifier runs it. Non-Rust checks (docs, scripts, grep) are fine.
 - Keep reported test commands concrete and rerunnable.
 
 ## Completion
