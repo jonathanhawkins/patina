@@ -78,10 +78,15 @@ fn retry_delay_with_jitter(attempt: u32) -> Duration {
         std::thread::current().id().hash(&mut h);
         h.finish()
     };
-    let jitter_ms = (counter.wrapping_mul(6364136223846793005).wrapping_add(thread_hash)) % 500;
+    let jitter_ms = (counter
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(thread_hash))
+        % 500;
     // Exponential backoff capped at 8× base, plus jitter
     let backoff_factor = 1u64 << attempt.min(3); // 1, 2, 4, 8
-    let total_ms = base_ms.saturating_mul(backoff_factor).saturating_add(jitter_ms);
+    let total_ms = base_ms
+        .saturating_mul(backoff_factor)
+        .saturating_add(jitter_ms);
     Duration::from_millis(total_ms)
 }
 
@@ -102,10 +107,7 @@ fn find_db_path(project_root: &Path) -> Result<std::path::PathBuf> {
 /// All queries issued through this connection are SELECTs only.
 pub fn open(project_root: &Path) -> Result<Connection> {
     let db_path = find_db_path(project_root)?;
-    let conn = Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE,
-    )?;
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     conn.busy_timeout(Duration::from_millis(15000))?;
     // Ensure WAL mode and minimal locking footprint
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA query_only=ON;")?;
@@ -138,11 +140,16 @@ where
             Err(e) => return Err(e.into()),
         }
     }
-    Err(OrchestratorError::Config("db max retries exhausted without result".into()))
+    Err(OrchestratorError::Config(
+        "db max retries exhausted without result".into(),
+    ))
 }
 
 /// Get the status and assignee for a bead.
-pub fn bead_state(conn: &Connection, bead_id: &str) -> Result<Option<(BeadStatus, Option<String>)>> {
+pub fn bead_state(
+    conn: &Connection,
+    bead_id: &str,
+) -> Result<Option<(BeadStatus, Option<String>)>> {
     with_retry(|| {
         let mut stmt = conn.prepare_cached(
             "SELECT coalesce(status,''), coalesce(assignee,'') FROM issues WHERE id = ?1 LIMIT 1",
@@ -219,8 +226,7 @@ pub fn assigned_bead_for_worker(conn: &Connection, worker: &str) -> Result<Optio
 /// Count beads with a given status.
 pub fn count_by_status(conn: &Connection, status: BeadStatus) -> Result<usize> {
     with_retry(|| {
-        let mut stmt =
-            conn.prepare_cached("SELECT count(*) FROM issues WHERE status = ?1")?;
+        let mut stmt = conn.prepare_cached("SELECT count(*) FROM issues WHERE status = ?1")?;
         let count: i64 = stmt.query_row([status.as_str()], |row| row.get(0))?;
         Ok(count as usize)
     })
@@ -295,6 +301,23 @@ pub fn stale_assignments(
     })
 }
 
+/// Find beads stuck `in_progress` with no assignee (orphaned).
+///
+/// These arise when a close succeeds but the follow-up reassign fails, or an
+/// assignment is half-applied — the bead is owned by nobody and no worker will
+/// ever complete it. Returns their IDs so the coordinator can reopen them.
+pub fn orphaned_in_progress(conn: &Connection) -> Result<Vec<String>> {
+    with_retry(|| {
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM issues \
+             WHERE status = 'in_progress' \
+             AND (assignee IS NULL OR assignee = '')",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+    })
+}
+
 /// Find workers with more than one in_progress assignment.
 /// Returns (assignee, bead_id) pairs for the extra assignments (keeping the highest-priority one).
 pub fn extra_assignments(conn: &Connection) -> Result<Vec<(String, String)>> {
@@ -354,9 +377,8 @@ pub fn worker_active_assignments(
 /// Read the description field for a bead. Returns None if the bead doesn't exist.
 pub fn bead_description(conn: &Connection, bead_id: &str) -> Result<Option<String>> {
     with_retry(|| {
-        let mut stmt = conn.prepare_cached(
-            "SELECT coalesce(description,'') FROM issues WHERE id = ?1 LIMIT 1",
-        )?;
+        let mut stmt = conn
+            .prepare_cached("SELECT coalesce(description,'') FROM issues WHERE id = ?1 LIMIT 1")?;
         let result = stmt.query_row([bead_id], |row| {
             let desc: String = row.get(0)?;
             Ok(desc)
@@ -416,9 +438,8 @@ pub fn bead_titles_all(conn: &Connection) -> Result<Vec<String>> {
 /// Find bead descriptions containing the given pattern (all statuses).
 pub fn bead_descriptions_containing(conn: &Connection, pattern: &str) -> Result<Vec<String>> {
     with_retry(|| {
-        let mut stmt = conn.prepare(
-            "SELECT coalesce(description,'') FROM issues WHERE description LIKE ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT coalesce(description,'') FROM issues WHERE description LIKE ?1")?;
         let like_pattern = format!("%{}%", pattern);
         let rows = stmt.query_map([&like_pattern], |row| {
             let desc: String = row.get(0)?;
@@ -458,6 +479,103 @@ pub fn bead_descriptions_containing_by_status(
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
     })
+}
+
+/// Find the first bead ID whose description contains the given pattern,
+/// restricted to the specified statuses. Returns None if no match.
+///
+/// Used to detect "closed bead exists for this planner-key" so the
+/// planner auto-create path can reactivate instead of creating a duplicate.
+pub fn bead_id_by_description_and_status(
+    conn: &Connection,
+    pattern: &str,
+    statuses: &[BeadStatus],
+) -> Result<Option<String>> {
+    if statuses.is_empty() {
+        return Ok(None);
+    }
+    with_retry(|| {
+        let placeholders: Vec<&str> = statuses.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT id FROM issues WHERE description LIKE ?1 AND status IN ({}) LIMIT 1",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let like_pattern = format!("%{}%", pattern);
+        let status_strs: Vec<&str> = statuses.iter().map(|s| s.as_str()).collect();
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(1 + statuses.len());
+        params.push(&like_pattern);
+        for s in &status_strs {
+            params.push(s);
+        }
+        let mut rows = stmt.query(params.as_slice())?;
+        if let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            Ok(Some(id))
+        } else {
+            Ok(None)
+        }
+    })
+}
+
+/// Return a map of planner-key -> bead id for all beads whose description
+/// contains a `[planner-key: <key>]` marker and whose status is in
+/// `statuses`.
+///
+/// Used to populate an in-memory index so the planner auto-create loop
+/// can detect "a bead with this planner-key already exists" without
+/// querying SQLite per-record.
+pub fn planner_key_to_bead_id_by_status(
+    conn: &Connection,
+    statuses: &[BeadStatus],
+) -> Result<std::collections::HashMap<String, String>> {
+    if statuses.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    with_retry(|| {
+        let placeholders: Vec<&str> = statuses.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT id, coalesce(description,'') FROM issues \
+             WHERE description LIKE ?1 AND status IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let like_pattern = "%[planner-key: %".to_string();
+        let status_strs: Vec<&str> = statuses.iter().map(|s| s.as_str()).collect();
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(1 + statuses.len());
+        params.push(&like_pattern);
+        for s in &status_strs {
+            params.push(s);
+        }
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let id: String = row.get(0)?;
+            let desc: String = row.get(1)?;
+            Ok((id, desc))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, desc) = row?;
+            if let Some(key) = extract_planner_key(&desc) {
+                map.entry(key).or_insert(id);
+            }
+        }
+        Ok(map)
+    })
+}
+
+/// Extract the `<key>` value from the first `[planner-key: <key>]` marker
+/// found in `desc`, trimming whitespace. Returns None if no marker is
+/// present.
+fn extract_planner_key(desc: &str) -> Option<String> {
+    let start = desc.find("[planner-key:")?;
+    let after = &desc[start + "[planner-key:".len()..];
+    let end = after.find(']')?;
+    let key = after[..end].trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -619,8 +737,14 @@ mod tests {
         let d10 = retry_delay_with_jitter(10);
         let cap_min = Duration::from_millis(base_ms * 8);
         let cap_max = cap_min + Duration::from_millis(500);
-        assert!(d3 >= cap_min && d3 <= cap_max, "attempt 3 not capped: {d3:?}");
-        assert!(d10 >= cap_min && d10 <= cap_max, "attempt 10 not capped: {d10:?}");
+        assert!(
+            d3 >= cap_min && d3 <= cap_max,
+            "attempt 3 not capped: {d3:?}"
+        );
+        assert!(
+            d10 >= cap_min && d10 <= cap_max,
+            "attempt 10 not capped: {d10:?}"
+        );
     }
 
     /// with_retry succeeds immediately when the closure succeeds.
@@ -704,8 +828,14 @@ mod tests {
 
         assert!(is_locked_error(&busy), "SQLITE_BUSY should be locked");
         assert!(is_locked_error(&locked), "SQLITE_LOCKED should be locked");
-        assert!(!is_locked_error(&constraint), "SQLITE_CONSTRAINT should not be locked");
-        assert!(!is_locked_error(&query_err), "QueryReturnedNoRows should not be locked");
+        assert!(
+            !is_locked_error(&constraint),
+            "SQLITE_CONSTRAINT should not be locked"
+        );
+        assert!(
+            !is_locked_error(&query_err),
+            "QueryReturnedNoRows should not be locked"
+        );
     }
 
     /// open() creates a WAL-mode, query-only connection with 15s busy timeout.
@@ -742,7 +872,10 @@ mod tests {
             "INSERT INTO issues (id, status) VALUES ('test', 'open')",
             [],
         );
-        assert!(write_result.is_err(), "query_only connection should reject writes");
+        assert!(
+            write_result.is_err(),
+            "query_only connection should reject writes"
+        );
     }
 
     /// Concurrent readers and a writer don't deadlock with WAL mode.
@@ -778,9 +911,7 @@ mod tests {
             conn.busy_timeout(Duration::from_millis(15000)).unwrap();
 
             // Start a read transaction and hold it
-            let mut stmt = conn
-                .prepare("SELECT id, status FROM issues")
-                .unwrap();
+            let mut stmt = conn.prepare("SELECT id, status FROM issues").unwrap();
             let rows: Vec<(String, String)> = stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .unwrap()
@@ -817,11 +948,9 @@ mod tests {
         // Verify the write landed
         let verify = Connection::open(&db_path).unwrap();
         let status: String = verify
-            .query_row(
-                "SELECT status FROM issues WHERE id = 'pat-1'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT status FROM issues WHERE id = 'pat-1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(status, "in_progress");
     }
@@ -986,6 +1115,117 @@ mod tests {
         assert!(result.is_err(), "open should fail when no .db file exists");
     }
 
+    /// bead_id_by_description_and_status returns the first matching ID
+    /// restricted to the requested statuses — used to detect "closed
+    /// bead exists for this planner-key" so we don't create a duplicate.
+    #[test]
+    fn test_bead_id_by_description_and_status_finds_closed() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, description, status) VALUES
+             ('pat-open1', 'open match', 'body [planner-key: ci-export-matrix]', 'open'),
+             ('pat-closed1', 'closed match', 'body [planner-key: ci-export-matrix]', 'closed'),
+             ('pat-other', 'different key', 'body [planner-key: other-key]', 'closed');",
+        )
+        .unwrap();
+
+        // Find only closed beads with the target planner-key.
+        let id = bead_id_by_description_and_status(
+            &conn,
+            "[planner-key: ci-export-matrix]",
+            &[BeadStatus::Closed],
+        )
+        .unwrap();
+        assert_eq!(id.as_deref(), Some("pat-closed1"));
+
+        // No match for a key that doesn't exist.
+        let none = bead_id_by_description_and_status(
+            &conn,
+            "[planner-key: does-not-exist]",
+            &[BeadStatus::Closed],
+        )
+        .unwrap();
+        assert_eq!(none, None);
+
+        // Empty status list returns None.
+        let empty =
+            bead_id_by_description_and_status(&conn, "[planner-key: ci-export-matrix]", &[])
+                .unwrap();
+        assert_eq!(empty, None);
+    }
+
+    /// planner_key_to_bead_id_by_status indexes active beads keyed by their
+    /// planner-key marker so the auto-create loop can skip duplicates
+    /// without a per-record query.
+    #[test]
+    fn test_planner_key_to_bead_id_by_status_indexes_active() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, description, status) VALUES
+             ('pat-open1', 'open a', 'x [planner-key: key-a] y', 'open'),
+             ('pat-inprog1', 'in progress b', '[planner-key: key-b]', 'in_progress'),
+             ('pat-closed1', 'closed c', '[planner-key: key-c]', 'closed'),
+             ('pat-nokey', 'no key', 'no marker here', 'open');",
+        )
+        .unwrap();
+
+        let active =
+            planner_key_to_bead_id_by_status(&conn, &[BeadStatus::Open, BeadStatus::InProgress])
+                .unwrap();
+        assert_eq!(active.get("key-a").map(String::as_str), Some("pat-open1"));
+        assert_eq!(active.get("key-b").map(String::as_str), Some("pat-inprog1"));
+        assert!(
+            !active.contains_key("key-c"),
+            "closed beads must not appear in the active index"
+        );
+        assert_eq!(active.len(), 2);
+
+        let closed = planner_key_to_bead_id_by_status(&conn, &[BeadStatus::Closed]).unwrap();
+        assert_eq!(closed.get("key-c").map(String::as_str), Some("pat-closed1"));
+        assert_eq!(closed.len(), 1);
+
+        let empty = planner_key_to_bead_id_by_status(&conn, &[]).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    /// extract_planner_key must recover the key from a well-formed marker,
+    /// trim surrounding whitespace, and reject every malformed variant.
+    /// Regression: a broken extractor silently disables the dedupe path
+    /// and the planner burst-creates duplicate beads every 10 minutes.
+    #[test]
+    fn test_extract_planner_key_variants() {
+        // Well-formed: key found, whitespace trimmed.
+        assert_eq!(
+            extract_planner_key("foo [planner-key: ci-export-matrix] bar"),
+            Some("ci-export-matrix".to_string())
+        );
+        assert_eq!(
+            extract_planner_key("[planner-key:key-a]"),
+            Some("key-a".to_string())
+        );
+        assert_eq!(
+            extract_planner_key("[planner-key:   padded-key   ]"),
+            Some("padded-key".to_string())
+        );
+
+        // No marker at all.
+        assert_eq!(extract_planner_key("no marker here"), None);
+        assert_eq!(extract_planner_key(""), None);
+
+        // Marker present but missing closing bracket.
+        assert_eq!(extract_planner_key("prefix [planner-key: oops"), None);
+
+        // Empty key (pure whitespace) must NOT be indexed — would collide
+        // every other key-less marker into a single bucket.
+        assert_eq!(extract_planner_key("[planner-key:]"), None);
+        assert_eq!(extract_planner_key("[planner-key:    ]"), None);
+
+        // Multiple markers: first one wins (matches the current loop semantics).
+        assert_eq!(
+            extract_planner_key("[planner-key: first] then [planner-key: second]"),
+            Some("first".to_string())
+        );
+    }
 }
 
 #[cfg(test)]

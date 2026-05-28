@@ -156,6 +156,30 @@ impl EditorFileSystem {
     pub fn uid_count(&self) -> usize {
         self.uid_map.len()
     }
+
+    /// Lists the immediate children of a `res://` directory.
+    ///
+    /// Stub that satisfies the asset-browser API surface used by the editor
+    /// integration test file. The full implementation (sort order, hidden /
+    /// ignored filtering, error mapping) belongs to the asset-browser bead;
+    /// this entry point exists so the test target compiles for adjacent
+    /// beads (e.g. `viewport_frame_stream`).
+    pub fn list_dir(&self, _res_path: &str) -> EngineResult<Vec<DirChild>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A direct child entry of a directory, surfaced to the asset-browser panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirChild {
+    /// File or directory name (no path component).
+    pub name: String,
+    /// `true` if this entry is a directory.
+    pub is_directory: bool,
+    /// Icon derived from the file's extension (or `Directory`).
+    pub icon: FileIcon,
+    /// Full `res://` path to this entry.
+    pub res_path: String,
 }
 
 // ---------------------------------------------------------------------------

@@ -12,9 +12,10 @@
 use gdcore::compare3d::{
     assert_deterministic, compare_physics_traces, PhysicsTraceEntry3D, RenderCompareResult3D,
 };
-use gdcore::math::Vector3;
+use gdcore::math::{Vector2, Vector3};
 use gdphysics2d::body3d::{BodyId3D, BodyType3D, PhysicsBody3D};
 use gdphysics2d::shape3d::Shape3D;
+use gdphysics2d::vehicle3d::{VehicleBody3D, VehicleBodyId3D, VehicleWheel3D};
 use gdphysics2d::world3d::PhysicsWorld3D;
 
 // ===========================================================================
@@ -893,4 +894,524 @@ fn q6i_tolerance_sweep_monotonic() {
     }
     // Highest tolerance should match all
     assert_eq!(*ratios.last().unwrap(), 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// 31. CollisionPolygon3D shape: bounding volume and point containment
+// ---------------------------------------------------------------------------
+
+fn unit_square_polygon() -> Vec<Vector2> {
+    vec![
+        Vector2::new(-1.0, -1.0),
+        Vector2::new(1.0, -1.0),
+        Vector2::new(1.0, 1.0),
+        Vector2::new(-1.0, 1.0),
+    ]
+}
+
+#[test]
+fn collision_polygon3d_shape_bounding_aabb_matches_prism() {
+    let shape = Shape3D::CollisionPolygon3D {
+        vertices: unit_square_polygon(),
+        depth: 4.0,
+    };
+    let aabb = shape.bounding_aabb();
+    assert!((aabb.position.x - -1.0).abs() < 1e-5);
+    assert!((aabb.position.y - -1.0).abs() < 1e-5);
+    assert!((aabb.position.z - -2.0).abs() < 1e-5);
+    assert!((aabb.size.x - 2.0).abs() < 1e-5);
+    assert!((aabb.size.y - 2.0).abs() < 1e-5);
+    assert!((aabb.size.z - 4.0).abs() < 1e-5);
+}
+
+#[test]
+fn collision_polygon3d_shape_contains_interior_points() {
+    let shape = Shape3D::CollisionPolygon3D {
+        vertices: unit_square_polygon(),
+        depth: 2.0,
+    };
+    assert!(shape.contains_point(Vector3::ZERO));
+    assert!(shape.contains_point(Vector3::new(0.5, -0.5, 0.5)));
+}
+
+#[test]
+fn collision_polygon3d_shape_rejects_outside_xy_and_depth() {
+    let shape = Shape3D::CollisionPolygon3D {
+        vertices: unit_square_polygon(),
+        depth: 2.0,
+    };
+    // Outside XY polygon, inside depth.
+    assert!(!shape.contains_point(Vector3::new(2.0, 0.0, 0.0)));
+    // Inside XY polygon, outside depth.
+    assert!(!shape.contains_point(Vector3::new(0.0, 0.0, 2.0)));
+}
+
+#[test]
+fn collision_polygon3d_shape_rigid_body_integrates_under_gravity() {
+    // A rigid body using a CollisionPolygon3D prism shape must still
+    // integrate under gravity just like any other rigid body (the shape
+    // is not involved in free-fall motion, but constructing a body with
+    // this variant must not panic and the trace must remain deterministic).
+    let mut world = PhysicsWorld3D::new();
+    world.gravity = Vector3::new(0.0, -GOLDEN_GRAVITY, 0.0);
+
+    let shape = Shape3D::CollisionPolygon3D {
+        vertices: unit_square_polygon(),
+        depth: 1.0,
+    };
+    let mut body = PhysicsBody3D::new(
+        BodyId3D(0),
+        BodyType3D::Rigid,
+        Vector3::new(0.0, 10.0, 0.0),
+        shape,
+        1.0,
+    );
+    body.linear_velocity = Vector3::ZERO;
+    let id = world.add_body(body);
+
+    for _ in 0..30 {
+        world.step(DT);
+    }
+    let b = world.get_body(id).unwrap();
+    // Body fell from y=10 under gravity ≈ -9.8 for ~0.5s → should be lower.
+    assert!(b.position.y < 10.0);
+    // Falling velocity should be negative.
+    assert!(b.linear_velocity.y < 0.0);
+}
+
+#[test]
+fn collision_polygon3d_shape_concave_l_polygon_contains_correctly() {
+    // "L"-shaped concave polygon.
+    let shape = Shape3D::CollisionPolygon3D {
+        vertices: vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(2.0, 0.0),
+            Vector2::new(2.0, 1.0),
+            Vector2::new(1.0, 1.0),
+            Vector2::new(1.0, 2.0),
+            Vector2::new(0.0, 2.0),
+        ],
+        depth: 1.0,
+    };
+    // In the horizontal arm.
+    assert!(shape.contains_point(Vector3::new(1.5, 0.5, 0.0)));
+    // In the vertical arm.
+    assert!(shape.contains_point(Vector3::new(0.5, 1.5, 0.0)));
+    // In the concave notch (outside the L).
+    assert!(!shape.contains_point(Vector3::new(1.5, 1.5, 0.0)));
+}
+
+// ===========================================================================
+// pat-xnteb: VehicleBody3D / VehicleWheel3D physics integration tests
+// ===========================================================================
+
+fn make_test_vehicle_with_wheels() -> VehicleBody3D {
+    // Chassis half-extents: 0.9 wide, 0.4 tall, 1.8 long. Mass 800 kg.
+    // Spawn so the wheel bottoms (attach at y=-0.3, rest 0.4, radius 0.3)
+    // land just above ground=0.0 — chassis y = 1.0 puts wheel bottom at y=0.0.
+    let mut v = VehicleBody3D::new(
+        VehicleBodyId3D(1),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.9, 0.4, 1.8),
+        800.0,
+    );
+    let positions = [
+        Vector3::new(-0.8, -0.3, -1.5),
+        Vector3::new(0.8, -0.3, -1.5),
+        Vector3::new(-0.8, -0.3, 1.5),
+        Vector3::new(0.8, -0.3, 1.5),
+    ];
+    for p in positions {
+        v.add_wheel(VehicleWheel3D::new(p));
+    }
+    v
+}
+
+// Falling vehicle in free air does not contact ground; gravity accelerates it
+// downward. Pinning down the no-contact branch ensures suspension forces
+// don't apply when wheels are above the ground plane.
+#[test]
+fn vehicle_in_free_air_falls_under_gravity() {
+    let mut v = VehicleBody3D::new(
+        VehicleBodyId3D(2),
+        Vector3::new(0.0, 50.0, 0.0),
+        Vector3::new(0.9, 0.4, 1.8),
+        800.0,
+    );
+    v.add_wheel(VehicleWheel3D::new(Vector3::new(-0.8, -0.3, -1.5)));
+    let dt = 1.0 / 60.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    let y0 = v.position().y;
+    for _ in 0..30 {
+        v.step(dt, gravity, 0.0);
+    }
+    assert!(v.position().y < y0, "vehicle must fall in free air");
+    assert!(v.linear_velocity().y < 0.0, "downward velocity expected");
+    assert!(!v.wheels[0].in_contact, "wheel must not contact ground");
+}
+
+// A four-wheeled vehicle resting on the ground reaches a stable equilibrium:
+// suspension supports the chassis, all four wheels are in contact, and
+// vertical velocity converges near zero.
+#[test]
+fn vehicle_settles_on_ground_with_all_wheels_contacting() {
+    let mut v = make_test_vehicle_with_wheels();
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    for _ in 0..600 {
+        v.step(dt, gravity, 0.0);
+    }
+    for (i, w) in v.wheels.iter().enumerate() {
+        assert!(w.in_contact, "wheel {i} should contact ground after settle");
+    }
+    assert!(
+        v.position().y > 0.0,
+        "chassis must be above ground, got y={}",
+        v.position().y
+    );
+    assert!(
+        v.linear_velocity().y.abs() < 1.0,
+        "vertical velocity should damp near zero, got vy={}",
+        v.linear_velocity().y
+    );
+}
+
+// Engine force on a settled vehicle drives it forward (along chassis -Z, the
+// FORWARD axis). Confirms the drive coupling between engine_force and
+// forward velocity through driven wheels.
+#[test]
+fn vehicle_engine_force_accelerates_forward() {
+    let mut v = make_test_vehicle_with_wheels();
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    // Settle first.
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    let v0 = v.linear_velocity();
+    v.engine_force = 4000.0;
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    let v1 = v.linear_velocity();
+    let forward_speed = v1.dot(Vector3::FORWARD);
+    assert!(
+        forward_speed > 0.5,
+        "engine force should drive forward speed, got {forward_speed} (v0.z={}, v1.z={})",
+        v0.z,
+        v1.z
+    );
+}
+
+// Brake on a moving vehicle slows forward motion. Validates that the brake
+// force opposes forward velocity and is capped to avoid reversing direction.
+#[test]
+fn vehicle_brake_decelerates_forward_motion() {
+    let mut v = make_test_vehicle_with_wheels();
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    v.engine_force = 5000.0;
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    let speed_before = v.linear_velocity().dot(Vector3::FORWARD).abs();
+    v.engine_force = 0.0;
+    v.brake = 4000.0;
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    let speed_after = v.linear_velocity().dot(Vector3::FORWARD).abs();
+    assert!(
+        speed_after < speed_before,
+        "brake must reduce forward speed: before={speed_before}, after={speed_after}"
+    );
+}
+
+// Steering produces yaw on a moving vehicle. With nonzero forward speed and
+// nonzero steering, angular velocity around Y becomes nonzero (bicycle-model
+// turn rate). Confirms the steering -> yaw coupling.
+#[test]
+fn vehicle_steering_produces_yaw_when_moving() {
+    let mut v = make_test_vehicle_with_wheels();
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    v.engine_force = 4000.0;
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    v.set_steering(0.4);
+    for _ in 0..10 {
+        v.step(dt, gravity, 0.0);
+    }
+    let omega = v.chassis.angular_velocity.y;
+    assert!(
+        omega.abs() > 1e-3,
+        "steering at speed must produce yaw rate, got omega.y={omega}"
+    );
+}
+
+// At zero forward speed, steering produces no yaw — the bicycle model relies
+// on forward velocity. Pins down the parked-car behavior.
+#[test]
+fn vehicle_steering_at_rest_produces_no_yaw() {
+    let mut v = make_test_vehicle_with_wheels();
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    v.set_steering(0.5);
+    for _ in 0..30 {
+        v.step(dt, gravity, 0.0);
+    }
+    assert!(
+        v.chassis.angular_velocity.y.abs() < 1e-3,
+        "no yaw expected at rest, got omega.y={}",
+        v.chassis.angular_velocity.y
+    );
+}
+
+// Lateral tire friction cancels sideways velocity. A vehicle pushed sideways
+// while in contact should have its lateral velocity damped within a few
+// frames.
+#[test]
+fn vehicle_lateral_friction_cancels_sideways_velocity() {
+    let mut v = make_test_vehicle_with_wheels();
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    v.chassis.linear_velocity.x = 5.0;
+    let lateral_before = v.linear_velocity().x.abs();
+    v.step(dt, gravity, 0.0);
+    let lateral_after = v.linear_velocity().x.abs();
+    assert!(
+        lateral_after < lateral_before,
+        "lateral friction must reduce sideways velocity: before={lateral_before}, after={lateral_after}"
+    );
+}
+
+// Vehicle simulation is deterministic — running the same setup twice produces
+// identical position and velocity traces.
+#[test]
+fn vehicle_simulation_is_deterministic() {
+    fn run() -> (Vector3, Vector3) {
+        let mut v = make_test_vehicle_with_wheels();
+        v.engine_force = 3000.0;
+        v.set_steering(0.2);
+        let dt = 1.0 / 120.0;
+        let gravity = Vector3::new(0.0, -9.8, 0.0);
+        for _ in 0..600 {
+            v.step(dt, gravity, 0.0);
+        }
+        (v.position(), v.linear_velocity())
+    }
+    let (p1, v1) = run();
+    let (p2, v2) = run();
+    assert_eq!(p1, p2, "vehicle position must be deterministic");
+    assert_eq!(v1, v2, "vehicle velocity must be deterministic");
+}
+
+// add_wheel returns increasing indices and updates wheel_count. Confirms
+// VehicleWheelId3D allocation is monotonic.
+#[test]
+fn vehicle_add_wheel_returns_increasing_ids() {
+    let mut v = VehicleBody3D::new(
+        VehicleBodyId3D(7),
+        Vector3::ZERO,
+        Vector3::new(1.0, 0.5, 2.0),
+        1000.0,
+    );
+    let id0 = v.add_wheel(VehicleWheel3D::new(Vector3::new(-1.0, 0.0, -1.0)));
+    let id1 = v.add_wheel(VehicleWheel3D::new(Vector3::new(1.0, 0.0, -1.0)));
+    let id2 = v.add_wheel(VehicleWheel3D::new(Vector3::new(0.0, 0.0, 1.0)));
+    assert_eq!(id0.0, 0);
+    assert_eq!(id1.0, 1);
+    assert_eq!(id2.0, 2);
+    assert_eq!(v.wheel_count(), 3);
+}
+
+// Driven and steerable flags route force per-wheel: a vehicle with only
+// front wheels driven should still accelerate (engine force applied to
+// driven contacts).
+#[test]
+fn vehicle_only_driven_wheels_apply_engine_force() {
+    let mut v = make_test_vehicle_with_wheels();
+    // Make only the front two wheels driven (rear wheels free-roll).
+    for w in &mut v.wheels {
+        w.driven = false;
+    }
+    v.wheels[2].driven = true;
+    v.wheels[3].driven = true;
+
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    v.engine_force = 4000.0;
+    for _ in 0..240 {
+        v.step(dt, gravity, 0.0);
+    }
+    let forward_speed = v.linear_velocity().dot(Vector3::FORWARD);
+    assert!(
+        forward_speed > 0.1,
+        "front-driven vehicle must still accelerate, got {forward_speed}"
+    );
+}
+
+// Suspension compression rises when a heavy vehicle settles. Confirms the
+// suspension spring response: ground contact compresses the wheel and the
+// compression value is in [0, 1].
+#[test]
+fn vehicle_suspension_compresses_under_load() {
+    let mut v = make_test_vehicle_with_wheels();
+    let dt = 1.0 / 120.0;
+    let gravity = Vector3::new(0.0, -9.8, 0.0);
+    for _ in 0..600 {
+        v.step(dt, gravity, 0.0);
+    }
+    for (i, w) in v.wheels.iter().enumerate() {
+        assert!(w.in_contact, "wheel {i} should be in contact");
+        assert!(
+            (0.0..=1.0).contains(&w.compression),
+            "wheel {i} compression {} out of [0,1]",
+            w.compression
+        );
+        assert!(
+            w.compression > 0.0,
+            "wheel {i} should compress under static load"
+        );
+    }
+}
+
+// ===========================================================================
+// pat-wq5uu: SpringArm3D integration tests against PhysicsServer3D.
+//
+// These exercise the scene-side `SpringArm3D` helper end-to-end: a scene tree
+// with a static obstacle, the arm is processed against the synced
+// PhysicsServer3D, and we assert the cached hit length, collider, and
+// margin/exclusion behavior match Godot's `SpringArm3D._process` rules.
+// ===========================================================================
+
+mod springarm3d_tests {
+    use gdcore::math::Vector3;
+    use gdscene::node::Node;
+    use gdscene::node3d;
+    use gdscene::physics_server_3d::PhysicsServer3D;
+    use gdscene::scene_tree::SceneTree;
+    use gdscene::springarm3d::{
+        get_collider, get_hit_length, is_colliding, process, set_collision_mask, set_margin,
+        set_spring_length,
+    };
+    use gdvariant::Variant;
+
+    fn build_arm_with_obstacle(
+        obstacle_position: Vector3,
+        obstacle_radius: f32,
+        spring_length: f32,
+    ) -> (
+        SceneTree,
+        PhysicsServer3D,
+        gdscene::node::NodeId,
+        gdscene::node::NodeId,
+    ) {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let body = Node::new("Wall", "StaticBody3D");
+        let body_id = tree.add_child(root, body).unwrap();
+        node3d::set_position(&mut tree, body_id, obstacle_position);
+        let mut shape = Node::new("Shape", "CollisionShape3D");
+        shape.set_property("shape", Variant::String("SphereShape3D".to_owned()));
+        shape.set_property("radius", Variant::Float(obstacle_radius as f64));
+        tree.add_child(body_id, shape).unwrap();
+
+        let arm = Node::new("Arm", "SpringArm3D");
+        let arm_id = tree.add_child(root, arm).unwrap();
+        node3d::set_position(&mut tree, arm_id, Vector3::ZERO);
+        set_spring_length(&mut tree, arm_id, spring_length);
+        set_margin(&mut tree, arm_id, 0.0);
+
+        let mut physics = PhysicsServer3D::new();
+        physics.sync_to_physics(&tree);
+        (tree, physics, arm_id, body_id)
+    }
+
+    #[test]
+    fn springarm3d_retracts_to_obstacle_distance() {
+        // Sphere centered at z=-5 with radius 1: ray from origin along -Z
+        // enters at z=-4, so the arm should retract to length ~4.
+        let (mut tree, physics, arm_id, body_id) =
+            build_arm_with_obstacle(Vector3::new(0.0, 0.0, -5.0), 1.0, 10.0);
+        let hit = process(&mut tree, &physics, arm_id);
+        assert!(hit, "arm must hit the wall");
+        assert!(is_colliding(&tree, arm_id));
+        assert_eq!(get_collider(&tree, arm_id), Some(body_id));
+
+        let length = get_hit_length(&tree, arm_id);
+        assert!(
+            (length - 4.0).abs() < 1e-3,
+            "expected ~4.0 hit length, got {length}"
+        );
+    }
+
+    #[test]
+    fn springarm3d_full_length_when_no_obstacle() {
+        // No obstacle in front of the arm — the cached length must equal the
+        // configured spring_length.
+        let (mut tree, physics, arm_id, _body_id) =
+            build_arm_with_obstacle(Vector3::new(20.0, 0.0, 0.0), 1.0, 7.5);
+        let hit = process(&mut tree, &physics, arm_id);
+        assert!(!hit, "arm must miss the off-axis obstacle");
+        assert!(!is_colliding(&tree, arm_id));
+        let length = get_hit_length(&tree, arm_id);
+        assert!(
+            (length - 7.5).abs() < 1e-4,
+            "expected full spring_length 7.5, got {length}"
+        );
+    }
+
+    #[test]
+    fn springarm3d_margin_subtracts_from_hit_length() {
+        let (mut tree, physics, arm_id, _body_id) =
+            build_arm_with_obstacle(Vector3::new(0.0, 0.0, -5.0), 1.0, 10.0);
+        set_margin(&mut tree, arm_id, 0.5);
+        assert!(process(&mut tree, &physics, arm_id));
+        let length = get_hit_length(&tree, arm_id);
+        // 4.0 - 0.5 = 3.5
+        assert!(
+            (length - 3.5).abs() < 1e-3,
+            "expected margin to subtract, got {length}"
+        );
+    }
+
+    #[test]
+    fn springarm3d_collision_mask_filters_hits() {
+        let (mut tree, _physics, arm_id, body_id) =
+            build_arm_with_obstacle(Vector3::new(0.0, 0.0, -5.0), 1.0, 10.0);
+
+        // Place the obstacle on layer 0b0010 and set the arm's mask to
+        // 0b0001 — the ray must miss because the masks don't intersect.
+        tree.get_node_mut(body_id)
+            .unwrap()
+            .set_property("collision_layer", Variant::Int(0b0010));
+        let mut physics = PhysicsServer3D::new();
+        physics.sync_to_physics(&tree);
+
+        set_collision_mask(&mut tree, arm_id, 0b0001);
+        assert!(!process(&mut tree, &physics, arm_id));
+        assert!((get_hit_length(&tree, arm_id) - 10.0).abs() < 1e-4);
+
+        // Match the layer → hit.
+        set_collision_mask(&mut tree, arm_id, 0b0010);
+        assert!(process(&mut tree, &physics, arm_id));
+    }
 }

@@ -42,6 +42,7 @@ pub mod world;
 pub mod body3d;
 pub mod collision3d;
 pub mod shape3d;
+pub mod vehicle3d;
 pub mod world3d;
 
 // Re-export key types for convenience.
@@ -62,4 +63,5 @@ pub use world::{CollisionEvent, ContactState, PhysicsWorld2D, RaycastHit};
 pub use body3d::{BodyId3D, BodyType3D, PhysicsBody3D};
 pub use collision3d::CollisionResult3D;
 pub use shape3d::Shape3D;
+pub use vehicle3d::{VehicleBody3D, VehicleBodyId3D, VehicleWheel3D, VehicleWheelId3D};
 pub use world3d::{PhysicsWorld3D, RaycastHit3D};

@@ -1,0 +1,9 @@
+[gd_scene format=3]
+
+[node name="World" type="Node2D"]
+
+[node name="Player" type="Node2D" parent="."]
+
+[node name="Enemy" type="Node2D" parent="."]
+
+[node name="Ground" type="Node2D" parent="."]

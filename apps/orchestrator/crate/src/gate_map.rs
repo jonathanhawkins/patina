@@ -71,7 +71,11 @@ fn find_best_criteria_match<'a>(
 ) -> Option<&'a CriteriaItem> {
     let desc_words: Vec<String> = description
         .split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .map(|w| {
+            w.to_lowercase()
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
         .filter(|w| w.len() > 2) // Skip short words like "of", "in", etc.
         .collect();
 
@@ -84,7 +88,10 @@ fn find_best_criteria_match<'a>(
 
     for item in criteria {
         let item_lower = item.text.to_lowercase();
-        let score = desc_words.iter().filter(|w| item_lower.contains(w.as_str())).count();
+        let score = desc_words
+            .iter()
+            .filter(|w| item_lower.contains(w.as_str()))
+            .count();
         if score > best_score {
             best_score = score;
             best_item = Some(item);
@@ -105,30 +112,57 @@ fn find_best_criteria_match<'a>(
 fn legacy_gate_map() -> Vec<(&'static str, &'static str)> {
     // (bead_key, test_name) pairs from the original static table
     vec![
-        ("v1-obj-classdb", "test_v1_classdb_full_property_enumeration"),
+        (
+            "v1-obj-classdb",
+            "test_v1_classdb_full_property_enumeration",
+        ),
         ("v1-obj-notif", "test_v1_notification_dispatch_ordering"),
         ("v1-obj-weakref", "test_v1_weakref_auto_invalidates_on_free"),
         ("v1-obj-free", "test_v1_object_free_use_after_free_guard"),
-        ("v1-res-uid", "test_v1_resource_uid_registry_from_parsed_files"),
+        (
+            "v1-res-uid",
+            "test_v1_resource_uid_registry_from_parsed_files",
+        ),
         ("v1-res-subres", "test_v1_subresource_inline_loading"),
-        ("v1-res-extref", "test_v1_ext_resource_cross_file_resolution"),
+        (
+            "v1-res-extref",
+            "test_v1_ext_resource_cross_file_resolution",
+        ),
         ("v1-res-roundtrip", "test_v1_resource_roundtrip_equivalence"),
         ("v1-res-oracle", "test_v1_resource_oracle_comparison"),
-        ("v1-scene-instance", "test_v1_instance_inheritance_ext_resource"),
-        ("v1-scene-roundtrip", "test_v1_packed_scene_save_restore_roundtrip"),
+        (
+            "v1-scene-instance",
+            "test_v1_instance_inheritance_ext_resource",
+        ),
+        (
+            "v1-scene-roundtrip",
+            "test_v1_packed_scene_save_restore_roundtrip",
+        ),
         ("v1-scene-signals", "test_v1_scene_signal_connections_wired"),
         ("v1-scene-oracle", "test_v1_scene_oracle_golden_comparison"),
         ("v1-script-parser", "test_v1_gdscript_parser_stable_ast"),
         ("v1-script-onready", "test_v1_onready_variable_resolution"),
-        ("v1-script-dispatch", "test_v1_func_dispatch_via_method_table"),
-        ("v1-script-signal-decl", "test_v1_signal_declaration_from_script"),
-        ("v1-script-signal-emit", "test_v1_script_signal_declaration_and_emit"),
+        (
+            "v1-script-dispatch",
+            "test_v1_func_dispatch_via_method_table",
+        ),
+        (
+            "v1-script-signal-decl",
+            "test_v1_signal_declaration_from_script",
+        ),
+        (
+            "v1-script-signal-emit",
+            "test_v1_script_signal_declaration_and_emit",
+        ),
         ("v1-script-oracle", "test_v1_script_fixture_oracle_match"),
         ("v1-phys-api", "test_v1_physics_server_2d_api_surface"),
         ("v1-phys-layers", "test_v1_collision_layers_and_masks"),
         ("v1-phys-kinematic", "test_v1_kinematic_move_and_collide"),
         ("v1-phys-oracle", "test_v1_physics_multi_body_oracle_trace"),
-        ("v1-phys-kinematic-full", "test_v1_kinematic_body_move_and_collide"),
+        (
+            "v1-phys-kinematic-full",
+            "test_v1_kinematic_body_move_and_collide",
+        ),
         ("v1-render-atlas", "test_v1_texture_atlas_sampling"),
         ("v1-render-zindex", "test_v1_canvas_item_z_index_ordering"),
         ("v1-render-visibility", "test_v1_visibility_suppression"),
@@ -139,7 +173,10 @@ fn legacy_gate_map() -> Vec<(&'static str, &'static str)> {
         ("v1-plat-os", "test_v1_os_singleton"),
         ("v1-plat-time", "test_v1_time_singleton"),
         ("v1-plat-headless", "test_v1_headless_mode"),
-        ("v1-scene-packed-roundtrip", "test_v1_packed_scene_roundtrip"),
+        (
+            "v1-scene-packed-roundtrip",
+            "test_v1_packed_scene_roundtrip",
+        ),
     ]
 }
 
@@ -158,6 +195,7 @@ mod tests {
                     "cargo test --test gate -- --ignored test_property_enum".to_string(),
                 ),
                 priority: 1,
+                ..Default::default()
             },
             BeadSpec {
                 section: "Later".to_string(),
@@ -165,6 +203,7 @@ mod tests {
                 description: "No command".to_string(),
                 acceptance_command: None,
                 priority: 3,
+                ..Default::default()
             },
         ];
         let criteria = vec![CriteriaItem {
@@ -190,6 +229,7 @@ mod tests {
             description: "Zephyr quantum vortex handler".to_string(),
             acceptance_command: Some("cargo test -- test_zephyr".to_string()),
             priority: 1,
+            ..Default::default()
         }];
         let criteria = vec![CriteriaItem {
             section: "Other".to_string(),
@@ -201,10 +241,7 @@ mod tests {
         let map = build_gate_map(&specs, &criteria);
         assert_eq!(map.len(), 1);
         assert_eq!(map[0].criteria_section, "Now");
-        assert_eq!(
-            map[0].criteria_line,
-            "Zephyr quantum vortex handler"
-        );
+        assert_eq!(map[0].criteria_line, "Zephyr quantum vortex handler");
     }
 
     #[test]
@@ -215,6 +252,7 @@ mod tests {
             description: "Test description".to_string(),
             acceptance_command: Some("cargo test -- test_func".to_string()),
             priority: 1,
+            ..Default::default()
         }];
         let map = build_gate_map(&specs, &[]);
         for entry in &map {
@@ -234,6 +272,7 @@ mod tests {
                 description: "Desc A".to_string(),
                 acceptance_command: Some("cmd -- test_a".to_string()),
                 priority: 1,
+                ..Default::default()
             },
             BeadSpec {
                 section: "Now".to_string(),
@@ -241,6 +280,7 @@ mod tests {
                 description: "Desc B".to_string(),
                 acceptance_command: Some("cmd -- test_b".to_string()),
                 priority: 1,
+                ..Default::default()
             },
         ];
         let map = build_gate_map(&specs, &[]);
@@ -295,7 +335,8 @@ mod tests {
 
         let dynamic_keys: std::collections::HashSet<&str> =
             dynamic_map.iter().map(|e| e.bead_key.as_str()).collect();
-        let spec_keys: std::collections::HashSet<&str> = specs.iter().map(|s| s.bead_key.as_str()).collect();
+        let spec_keys: std::collections::HashSet<&str> =
+            specs.iter().map(|s| s.bead_key.as_str()).collect();
 
         for key in &spec_keys {
             assert!(

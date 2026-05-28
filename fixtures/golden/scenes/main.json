@@ -1,0 +1,37 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_main",
+  "generated_at": "2026-03-22T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "Player",
+          "path": "/root/World/Player",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "Enemy",
+          "path": "/root/World/Enemy",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "Ground",
+          "path": "/root/World/Ground",
+          "properties": {}
+        }
+      ],
+      "class": "Node2D",
+      "name": "World",
+      "path": "/root/World",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

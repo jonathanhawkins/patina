@@ -170,9 +170,7 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
     tmux::send_keys(&config.session_name, 0, 0, "Enter")?;
 
     // Pane 1: verifier (tail the verifier log)
-    let verifier_log = config
-        .project_root
-        .join(".codex/orchestrator/verifier.log");
+    let verifier_log = config.project_root.join(".codex/orchestrator/verifier.log");
     let verifier_cmd = format!(
         "cd {} && mkdir -p .codex/orchestrator && touch {} && exec tail -n 50 -f {}",
         shell_escape(&config.project_root.to_string_lossy()),
@@ -281,6 +279,23 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
         .args(["select-pane", "-t", &format!("{}:0.0", config.session_name)])
         .output();
 
+    // Step 7c: Respawn the planner pane (pane 2) LAST to reclaim it. In teammate
+    // mode the bv/codex-companion plugin can hijack pane 2 with its own `bv`
+    // during boot; respawning at the very end restores a clean shell there so the
+    // planner can be started cleanly. Done after everything else so any hijack
+    // that happened during worker/bv startup is undone.
+    if let Ok(panes) = tmux::list_panes(&config.session_name, 0) {
+        if let Some(planner_pane_id) = panes.iter().find(|p| p.index == 2).map(|p| p.id.clone()) {
+            let shell_cmd = format!(
+                "cd {} && exec ${{SHELL:-/bin/sh}}",
+                shell_escape(&config.project_root.to_string_lossy())
+            );
+            let _ = Command::new("tmux")
+                .args(["respawn-pane", "-k", "-t", &planner_pane_id, &shell_cmd])
+                .output();
+        }
+    }
+
     // Step 8: Print launch summary
     println!();
     println!("=== Swarm launched: {} ===", config.session_name);
@@ -382,7 +397,10 @@ fn print_dry_run_layout(config: &LaunchConfig, grid_cols: u32, grid_rows: u32, t
         config.worker_count
     );
     if config.with_coordinator {
-        println!("  tmux new-window -t {} -n coordinator", config.session_name);
+        println!(
+            "  tmux new-window -t {} -n coordinator",
+            config.session_name
+        );
         println!("  tmux new-window -t {} -n verifier", config.session_name);
     }
     println!();
@@ -1417,7 +1435,10 @@ mod tests {
     fn test_claude_worker_loop_uses_correct_skill_format() {
         let source = include_str!("launcher.rs");
         let step5b = source.find("Step 5b").expect("Step 5b must exist");
-        let section_end = source[step5b..].find("Step 6").unwrap_or(500);
+        // The worker-loop block (Step 5b) runs AFTER "Step 6: Bootstrap …" in
+        // source order, so bound the section at the next step that actually
+        // follows it ("Step 7"), not "Step 6" (which precedes Step 5b).
+        let section_end = source[step5b..].find("Step 7").unwrap_or(800);
         let section = &source[step5b..step5b + section_end];
 
         assert!(
@@ -1452,7 +1473,10 @@ mod tests {
     fn test_worker_loop_has_delay_between_panes() {
         let source = include_str!("launcher.rs");
         let step5b = source.find("Step 5b").expect("Step 5b must exist");
-        let section_end = source[step5b..].find("Step 6").unwrap_or(500);
+        // The worker-loop block (Step 5b) runs AFTER "Step 6: Bootstrap …" in
+        // source order, so bound the section at the next step that actually
+        // follows it ("Step 7"), not "Step 6" (which precedes Step 5b).
+        let section_end = source[step5b..].find("Step 7").unwrap_or(800);
         let section = &source[step5b..step5b + section_end];
 
         assert!(
@@ -1778,7 +1802,9 @@ mod tests {
     #[test]
     fn test_layout_split_sequence() {
         let source = include_str!("launcher.rs");
-        let launch_fn = source.find("pub fn launch(").expect("launch function must exist");
+        let launch_fn = source
+            .find("pub fn launch(")
+            .expect("launch function must exist");
         let body = &source[launch_fn..std::cmp::min(launch_fn + 4000, source.len())];
 
         // Two vertical splits in left column
@@ -1792,14 +1818,18 @@ mod tests {
         assert!(body.contains("set_pane_title(&config.session_name, 0, 2, \"planner\")"));
         assert!(body.contains("set_pane_title(&config.session_name, 0, 3, \"bv\")"));
         // Workers at pane 4
-        assert!(body.contains("create_worker_grid(\n        &config.session_name,\n        0,\n        4,"));
+        assert!(body.contains(
+            "create_worker_grid(\n        &config.session_name,\n        0,\n        4,"
+        ));
     }
 
     /// Verify bv goes to pane 3, workers start at pane 4.
     #[test]
     fn test_layout_content_pane_indices() {
         let source = include_str!("launcher.rs");
-        let launch_fn = source.find("pub fn launch(").expect("launch function must exist");
+        let launch_fn = source
+            .find("pub fn launch(")
+            .expect("launch function must exist");
         let body = &source[launch_fn..std::cmp::min(launch_fn + 8000, source.len())];
 
         assert!(body.contains("send_literal(&config.session_name, 0, 0, &monitor_cmd)"));
@@ -1812,7 +1842,9 @@ mod tests {
     #[test]
     fn test_planner_pane_respawned_last() {
         let source = include_str!("launcher.rs");
-        let launch_fn = source.find("pub fn launch(").expect("launch function must exist");
+        let launch_fn = source
+            .find("pub fn launch(")
+            .expect("launch function must exist");
         let body = &source[launch_fn..std::cmp::min(launch_fn + 12000, source.len())];
 
         assert!(

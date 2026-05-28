@@ -21,16 +21,20 @@ pub struct CriteriaItem {
 }
 
 /// A bead specification extracted from an execution map.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BeadSpec {
     /// Section header (e.g. "Now", "Next", "Later", or any `##` header).
     pub section: String,
+    /// Optional subsection (e.g. "Lane A" under "Now").
+    pub subsection: Option<String>,
     /// The backtick-delimited key (e.g. `v1-obj-classdb`).
     pub bead_key: String,
     /// Human-readable description.
     pub description: String,
     /// Optional acceptance command (from `Acceptance:` line).
     pub acceptance_command: Option<String>,
+    /// Planner keys this bead depends on (from `Depends on:` lines).
+    pub depends_on: Vec<String>,
     /// Priority derived from section name.
     pub priority: u32,
 }
@@ -87,6 +91,8 @@ pub fn parse_execution_map(content: &str) -> Vec<BeadSpec> {
     // Match: N. `key` description
     let bead_re = Regex::new(r"^\d+\.\s+`([^`]+)`\s+(.+)$").unwrap();
     let acceptance_re = Regex::new(r"(?i)^\s*Acceptance:\s*(.+)$").unwrap();
+    // `Depends on: key1, key2` (or `Depends: …`) — links beads in the dep graph.
+    let depends_re = Regex::new(r"(?i)^\s*Depends(?:\s+on)?:\s*(.+)$").unwrap();
     let section_re = Regex::new(r"^##\s+(.+)$").unwrap();
     // Also match ### sub-headers to track team sections, but use ## for priority
     let subsection_re = Regex::new(r"^###\s+(.+)$").unwrap();
@@ -95,7 +101,7 @@ pub fn parse_execution_map(content: &str) -> Vec<BeadSpec> {
     let mut current_section = String::new();
     let mut pending_acceptance: Option<usize> = None; // index into specs
 
-    for line in content.lines() {
+    for (idx0, line) in content.lines().enumerate() {
         let trimmed = line.trim();
 
         if let Some(cap) = section_re.captures(trimmed) {
@@ -105,15 +111,32 @@ pub fn parse_execution_map(content: &str) -> Vec<BeadSpec> {
             // Sub-headers don't change the priority section
             pending_acceptance = None;
         } else if let Some(cap) = bead_re.captures(trimmed) {
-            let bead_key = cap[1].to_string();
+            let raw_key = cap[1].to_string();
             let description = cap[2].trim().to_string();
+            // B8: planner keys feed substring dedup, so a malformed key (spaces,
+            // punctuation, mixed case) silently breaks dedup or seeds a broken
+            // bead. Normalize + validate at parse time; skip and warn on garbage.
+            let bead_key = match normalize_bead_key(&raw_key) {
+                Some(k) => k,
+                None => {
+                    tracing::warn!(
+                        line = idx0 + 1,
+                        raw_key = %raw_key,
+                        "execution map: skipping bead with malformed planner key (expected [a-z0-9._-])"
+                    );
+                    pending_acceptance = None;
+                    continue;
+                }
+            };
             let priority = section_to_priority(&current_section);
             let idx = specs.len();
             specs.push(BeadSpec {
                 section: current_section.clone(),
+                subsection: None,
                 bead_key,
                 description,
                 acceptance_command: None,
+                depends_on: Vec::new(),
                 priority,
             });
             pending_acceptance = Some(idx);
@@ -121,12 +144,61 @@ pub fn parse_execution_map(content: &str) -> Vec<BeadSpec> {
             if let Some(idx) = pending_acceptance {
                 specs[idx].acceptance_command = Some(cap[1].trim().to_string());
             }
+        } else if let Some(cap) = depends_re.captures(trimmed) {
+            // B6: parse `Depends on:` so the dependency graph the BeadSpec
+            // documents is actually populated (it was silently always-empty).
+            if let Some(idx) = pending_acceptance {
+                let deps: Vec<String> = cap[1]
+                    .split(',')
+                    .filter_map(|d| normalize_bead_key(d.trim_matches(|c| c == '`' || c == ' ')))
+                    .collect();
+                specs[idx].depends_on.extend(deps);
+            }
         } else if !trimmed.is_empty() && !trimmed.starts_with('-') && !trimmed.starts_with('#') {
             // Non-empty non-structural line might be continuation text; don't clear pending
         }
     }
 
     specs
+}
+
+/// Normalize and validate a planner/bead key.
+///
+/// Keys feed substring-based dedup (`[planner-key: <key>]`), so they must be
+/// canonical: lowercased, trimmed, and restricted to `[a-z0-9._-]`. Returns the
+/// normalized key, or `None` when the input is empty or contains disallowed
+/// characters (spaces, brackets, etc.) that would corrupt dedup.
+pub fn normalize_bead_key(raw: &str) -> Option<String> {
+    let key = raw.trim().to_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    if key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        Some(key)
+    } else {
+        None
+    }
+}
+
+/// Return the keys of specs that have no acceptance command (C7).
+///
+/// An empty acceptance command means the planner will seed a bead the verifier
+/// can't prove — a source-document error best surfaced at lint time, by key,
+/// rather than discovered later as a silent skip.
+pub fn specs_missing_acceptance(specs: &[BeadSpec]) -> Vec<String> {
+    specs
+        .iter()
+        .filter(|s| {
+            s.acceptance_command
+                .as_deref()
+                .map(|c| c.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .map(|s| s.bead_key.clone())
+        .collect()
 }
 
 /// Parse deliverables from phase sections in a plan document.
@@ -187,6 +259,22 @@ pub fn section_to_priority(section: &str) -> u32 {
     }
 }
 
+/// Extract the test name embedded in a criteria checkbox line.
+///
+/// Criteria files in the editor-agent style end lines with a parenthesized
+/// `(test: \`some_test_name\`)` marker, e.g.:
+/// ```text
+/// - [ ] Editor HTTP server requires bearer token auth (test: `editor_auth_required_test`)
+/// ```
+/// Returns the test name if present, or `None` if the line has no marker.
+pub fn extract_test_name_from_criteria_line(line: &str) -> Option<String> {
+    // Match `(test:` … then a backtick-quoted name … then `)`.
+    // Tolerate whitespace and case variations.
+    let re = Regex::new(r"(?i)\(\s*test\s*:\s*`([^`]+)`\s*\)").unwrap();
+    re.captures(line)
+        .map(|c| c.get(1).unwrap().as_str().trim().to_string())
+}
+
 /// Extract a test function name from an acceptance command string.
 ///
 /// Looks for the last token after `--ignored` or `--` in a cargo test command.
@@ -211,13 +299,7 @@ pub fn extract_test_name_from_command(cmd: &str) -> Option<String> {
 fn slugify(s: &str) -> String {
     s.to_lowercase()
         .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
@@ -360,7 +442,9 @@ mod tests {
         let sections: std::collections::HashSet<&str> =
             items.iter().map(|i| i.section.as_str()).collect();
         assert!(
-            sections.iter().any(|s| s.contains("gdobject") || s.contains("Object")),
+            sections
+                .iter()
+                .any(|s| s.contains("gdobject") || s.contains("Object")),
             "should have object model section"
         );
     }
@@ -458,9 +542,117 @@ Expand coverage.
     }
 
     #[test]
+    fn test_extract_test_name_from_criteria_line() {
+        assert_eq!(
+            extract_test_name_from_criteria_line(
+                "- [ ] Editor HTTP server requires bearer token auth (test: `editor_auth_required_test`)"
+            ),
+            Some("editor_auth_required_test".to_string())
+        );
+        assert_eq!(
+            extract_test_name_from_criteria_line(
+                "- [x] Filesystem endpoints reject paths outside project root (test: `editor_filesystem_sandbox_test`)"
+            ),
+            Some("editor_filesystem_sandbox_test".to_string())
+        );
+        // Tolerate spacing.
+        assert_eq!(
+            extract_test_name_from_criteria_line("- [ ] some criterion ( test :  `my_test` )"),
+            Some("my_test".to_string())
+        );
+        // No marker → None.
+        assert_eq!(
+            extract_test_name_from_criteria_line("- [ ] criterion without a test marker"),
+            None
+        );
+        // Mid-line marker still extractable (some criteria embed prose around it).
+        assert_eq!(
+            extract_test_name_from_criteria_line(
+                "- [ ] viewport pixel-diff (test: `editor_viewport_golden_parity_test`) within 2% mean"
+            ),
+            Some("editor_viewport_golden_parity_test".to_string())
+        );
+    }
+
+    #[test]
     fn test_slugify() {
         assert_eq!(slugify("Hello World!"), "hello-world");
         assert_eq!(slugify("first 3D crate set"), "first-3d-crate-set");
         assert_eq!(slugify("A -- B"), "a-b");
+    }
+
+    // ─── B8: planner-key normalization/validation ───────────────────────
+
+    #[test]
+    fn test_normalize_bead_key_lowercases_and_trims() {
+        assert_eq!(
+            normalize_bead_key("  V1-OBJ-ClassDB  ").as_deref(),
+            Some("v1-obj-classdb")
+        );
+        assert_eq!(
+            normalize_bead_key("editor_scene.tree").as_deref(),
+            Some("editor_scene.tree")
+        );
+    }
+
+    #[test]
+    fn test_normalize_bead_key_rejects_malformed() {
+        assert_eq!(normalize_bead_key(""), None);
+        assert_eq!(normalize_bead_key("   "), None);
+        assert_eq!(normalize_bead_key("has space"), None);
+        assert_eq!(normalize_bead_key("bad[bracket"), None);
+        assert_eq!(normalize_bead_key("see planner-key: foo"), None);
+    }
+
+    #[test]
+    fn test_parse_execution_map_skips_malformed_key() {
+        // The bead regex requires a backtick key; a key with spaces inside the
+        // backticks is malformed and must be skipped, not seeded.
+        let md = "## Now\n\n1. `good-key` Real work\n2. `bad key with spaces` Should be skipped\n";
+        let specs = parse_execution_map(md);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].bead_key, "good-key");
+    }
+
+    #[test]
+    fn test_parse_execution_map_normalizes_key_case() {
+        let md = "## Now\n\n1. `V1-Obj-Foo` Work\n";
+        let specs = parse_execution_map(md);
+        assert_eq!(specs[0].bead_key, "v1-obj-foo");
+    }
+
+    // ─── B6: Depends on: parsing ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_execution_map_parses_depends_on() {
+        let md = "## Now\n\n\
+                  1. `key-a` Foundation\n\
+                  2. `key-b` Builds on A\n   \
+                  Depends on: key-a\n   \
+                  Acceptance: cargo test --test t\n\
+                  3. `key-c` Builds on both\n   \
+                  Depends on: `key-a`, key-b\n";
+        let specs = parse_execution_map(md);
+        assert_eq!(specs[0].depends_on, Vec::<String>::new());
+        assert_eq!(specs[1].depends_on, vec!["key-a"]);
+        assert_eq!(specs[2].depends_on, vec!["key-a", "key-b"]);
+        // Acceptance on a spec with a dependency still attaches correctly.
+        assert_eq!(
+            specs[1].acceptance_command.as_deref(),
+            Some("cargo test --test t")
+        );
+    }
+
+    // ─── C7: missing-acceptance lint ─────────────────────────────────────
+
+    #[test]
+    fn test_specs_missing_acceptance() {
+        let md = "## Now\n\n\
+                  1. `has-acc` Work\n   Acceptance: cargo test --test t\n\
+                  2. `no-acc` Work\n\
+                  3. `blank-acc` Work\n   Acceptance:   \n";
+        let specs = parse_execution_map(md);
+        let missing = specs_missing_acceptance(&specs);
+        assert_eq!(missing, vec!["no-acc", "blank-acc"]);
     }
 }

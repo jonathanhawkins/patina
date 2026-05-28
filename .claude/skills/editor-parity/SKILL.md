@@ -110,12 +110,18 @@ Categorize each difference as:
 
 ### 6. Create beads for gaps
 
-For each P1 and P2 gap, check if a bead already exists:
+For each P1 and P2 gap, check if a bead already exists. Run this EXACT command and extractor — shell only, no python wrappers, no fuzzy matching:
+
 ```bash
-br search "<keyword>" 2>/dev/null
+br search "TITLE" --status open --status in_progress --status closed --json --no-auto-import --allow-stale | jq -r '.issues | length'
 ```
 
-If no existing bead, create one:
+**Selection rule**: The output is a single integer N (count of matches across all statuses).
+- If `N >= 1` → SKIP this gap. Do NOT create a bead. Do NOT inspect titles. Do NOT decide whether the matches are "close enough" or "really the same".
+- If `N == 0` → create the bead with the command below.
+
+Do NOT pipe `br search` into python. Do NOT define your own match predicate. Do NOT compare titles yourself — `br search` already handles substring/FTS matching, any hit means a duplicate exists.
+
 ```bash
 br sync --rebuild 2>&1 | tail -1
 br create "<title>" -p <priority> --type <bug|feature> --labels editor
@@ -142,6 +148,12 @@ Present a final report:
 ### Next Steps
 - [prioritized list of what to fix first]
 ```
+
+## Hard Rules
+
+- NEVER wrap `br search` (or `br ready`, `br count`, `br list`) in a python (or any) filter that defines its own match/dedup predicate. Use the shown `jq -r '.issues | length'` extractor and apply the integer rule (`>= 1` skip, `== 0` create).
+- NEVER inspect candidate titles to decide if a `br search` hit is "really" a duplicate — any hit is a duplicate, period.
+- NEVER skip the dedup query and create beads based on your own judgment of whether a gap is "new enough".
 
 ## Tips
 

@@ -110,6 +110,37 @@ impl ReflectionProbe {
     }
 }
 
+/// Sums the ambient reflection contribution of every probe whose influence box
+/// contains `world_pos`.
+///
+/// Each probe contributes `intensity * (ambient_color * ambient_color_energy)`
+/// when its `ambient_mode` is `Environment` or `ConstantColor`. `Disabled`
+/// probes skip the ambient term. Probes outside `world_pos` are skipped.
+///
+/// This is the parity oracle used by both the software and wgpu render paths
+/// to fold local probe ambience into the lit color of fragments inside the
+/// probe's AABB. Specular cubemap lookup and box projection are handled by
+/// the renderers themselves at shading time and are not part of this sum.
+pub fn sample_probes_at(probes: &[ReflectionProbe], world_pos: Vector3) -> Color {
+    let mut r = 0.0_f32;
+    let mut g = 0.0_f32;
+    let mut b = 0.0_f32;
+    for probe in probes {
+        if !probe.contains_point(world_pos) {
+            continue;
+        }
+        let energy = match probe.ambient_mode {
+            ReflectionProbeAmbientMode::Disabled => continue,
+            ReflectionProbeAmbientMode::Environment
+            | ReflectionProbeAmbientMode::ConstantColor => probe.ambient_color_energy,
+        };
+        r += probe.ambient_color.r * energy * probe.intensity;
+        g += probe.ambient_color.g * energy * probe.intensity;
+        b += probe.ambient_color.b * energy * probe.intensity;
+    }
+    Color::new(r, g, b, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,6 +20,7 @@
 pub mod animation_editor;
 pub mod asset_drag_drop;
 pub mod command_palette;
+pub mod control_binding;
 pub mod create_dialog;
 pub mod curve_editor;
 pub mod dock;
@@ -61,6 +62,27 @@ use gdscene::node::{Node, NodeId};
 use gdscene::SceneTree;
 use gdvariant::Variant;
 use thiserror::Error;
+
+/// pat-ism62: Identifier for the active viewport rasterizer backend.
+///
+/// The default editor build links wgpu and returns `"wgpu"`. Compiling with
+/// `--no-default-features --features software-render` selects the legacy
+/// CPU rasterizer (and drops wgpu from the dependency graph) and returns
+/// `"software"`. Tests assert this constant to prove that the default
+/// editor build is GPU-backed.
+pub fn viewport_backend() -> &'static str {
+    if cfg!(feature = "gpu-render") {
+        "wgpu"
+    } else if cfg!(feature = "software-render") {
+        "software"
+    } else {
+        // Defensive: both features off should be unreachable because the
+        // crate has `default = ["gpu-render"]`. Returning "software" keeps
+        // the editor functional rather than panicking in a build that
+        // managed to disable every backend.
+        "software"
+    }
+}
 
 // Re-exports for convenience.
 pub use create_dialog::{

@@ -5,12 +5,23 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# pat-ism62: wgpu is the default editor viewport renderer. The GPU pipeline
+# lives in `gdrender3d` behind its own `gpu` feature; we pull it in here so
+# a default `cargo build -p gdeditor` actually links wgpu. The legacy
+# software rasterizer is still reachable, but only by compiling with
+# `--no-default-features --features software-render`.
+[features]
+default = ["gpu-render"]
+gpu-render = ["gdrender3d/gpu"]
+software-render = []
+
 [dependencies]
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdscene = { path = "../gdscene" }
 gdrender2d = { path = "../gdrender2d" }
+gdrender3d = { path = "../gdrender3d" }
 gdplatform = { path = "../gdplatform" }
 gdresource = { path = "../gdresource" }
 gdscript-interop = { path = "../gdscript-interop" }

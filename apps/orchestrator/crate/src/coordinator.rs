@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::error::{OrchestratorError, Result};
@@ -52,14 +52,17 @@ struct VerifyRequest {
     tests_run: String,
     commands: Vec<String>,
     is_stale_recovery: bool,
+    /// When this request entered the queue — used to report queue-wait latency.
+    enqueued_at: Instant,
 }
 
 pub struct Coordinator {
     pub config: Config,
     mail: MailClient,
     dry_run: bool,
-    /// Beads currently being verified in background threads.
-    pending_verifications: Arc<Mutex<HashSet<String>>>,
+    /// Beads currently being verified in background threads, mapped to the
+    /// instant they were enqueued (so a wedged verification can be reaped).
+    pending_verifications: Arc<Mutex<HashMap<String, Instant>>>,
     /// Completion messages currently queued/running in background verification.
     pending_completion_msgs: Arc<Mutex<HashSet<i64>>>,
     /// Channel to receive verification results.
@@ -68,6 +71,12 @@ pub struct Coordinator {
     verify_tx: mpsc::Sender<VerifyResult>,
     /// Sender for serialized verification requests.
     verify_request_tx: mpsc::Sender<VerifyRequest>,
+    /// Per-bead consecutive-orphan strike counts (B4 orphan reaper).
+    orphan_strikes: Mutex<HashMap<String, u32>>,
+    /// Cache of resolved worker identities by pane id, with resolution time (D2).
+    identity_cache: Mutex<HashMap<String, (String, Instant)>>,
+    /// Last time a bead was reclaimed from each worker (D4 reclaim hysteresis).
+    last_reclaim: Mutex<HashMap<String, Instant>>,
 }
 
 impl Coordinator {
@@ -76,7 +85,7 @@ impl Coordinator {
         let _db = db::open(&config.project_root)?;
         drop(_db);
         let mail = MailClient::new(&config.mail);
-        let pending_verifications = Arc::new(Mutex::new(HashSet::new()));
+        let pending_verifications = Arc::new(Mutex::new(HashMap::new()));
         let pending_completion_msgs = Arc::new(Mutex::new(HashSet::new()));
         let _ = fs::create_dir_all(config.cache_dir());
         let (verify_tx, verify_rx) = mpsc::channel();
@@ -99,6 +108,9 @@ impl Coordinator {
             verify_rx: Mutex::new(verify_rx),
             verify_tx,
             verify_request_tx,
+            orphan_strikes: Mutex::new(HashMap::new()),
+            identity_cache: Mutex::new(HashMap::new()),
+            last_reclaim: Mutex::new(HashMap::new()),
         })
     }
 
@@ -107,9 +119,115 @@ impl Coordinator {
         db::open(&self.config.project_root)
     }
 
+    /// Reopen beads whose verification has been pending longer than the
+    /// configured reap threshold (B3). A wedged or panicked verifier would
+    /// otherwise leave a bead in `pending_verifications` forever, silently
+    /// stalling it (and blocking re-dispatch, since the pending set gates that).
+    /// Returns the number of beads reaped.
+    pub fn reap_stale_verifications(&self) -> usize {
+        let threshold = Duration::from_secs(self.config.pending_verification_reap_seconds);
+        let stale: Vec<String> = {
+            let pending = self.pending_verifications.lock().unwrap();
+            pending
+                .iter()
+                .filter(|(_, enqueued)| enqueued.elapsed() >= threshold)
+                .map(|(bead_id, _)| bead_id.clone())
+                .collect()
+        };
+        if stale.is_empty() {
+            return 0;
+        }
+        for bead_id in &stale {
+            tracing::error!(
+                bead = %bead_id,
+                threshold_secs = self.config.pending_verification_reap_seconds,
+                "Verification wedged past reap threshold — reopening bead for a new worker"
+            );
+            if !self.dry_run {
+                let _ = br::reopen(bead_id);
+            }
+            self.pending_verifications.lock().unwrap().remove(bead_id);
+        }
+        stale.len()
+    }
+
+    /// Reopen beads that have been orphaned (in_progress, no assignee) for
+    /// `orphan_reap_consecutive_polls` consecutive polls (B4). The strike
+    /// counter avoids reopening a bead caught in the brief window of a
+    /// mid-flight assignment. Returns the number of beads reopened.
+    pub fn reap_orphaned_beads(&self) -> usize {
+        let orphaned = match self.open_db() {
+            Ok(db) => {
+                let o = db::orphaned_in_progress(&db).unwrap_or_default();
+                drop(db);
+                o
+            }
+            Err(_) => return 0,
+        };
+        // Don't reap a bead that's actively being verified (it legitimately has
+        // no assignee during stale-recovery verification).
+        let pending: HashSet<String> = self
+            .pending_verifications
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let orphaned: Vec<String> = orphaned
+            .into_iter()
+            .filter(|id| !pending.contains(id))
+            .collect();
+
+        let threshold = self.config.orphan_reap_consecutive_polls;
+        let to_reopen = {
+            let mut strikes = self.orphan_strikes.lock().unwrap();
+            update_orphan_strikes(&orphaned, &mut strikes, threshold)
+        };
+        for bead_id in &to_reopen {
+            tracing::error!(
+                bead = %bead_id,
+                strikes = threshold,
+                "Orphaned bead (in_progress, no assignee) across consecutive polls — reopening"
+            );
+            if !self.dry_run {
+                let _ = br::reopen(bead_id);
+            }
+        }
+        to_reopen.len()
+    }
+
+    /// Resolve a worker identity for a pane, caching the result for
+    /// `identity_cache_ttl_seconds` to cut per-poll `identity-resolve.sh`
+    /// syscalls and shrink the resolve→check race window (D2).
+    pub fn resolve_worker_identity_cached(&self, pane_id: &str) -> Option<String> {
+        let ttl = self.config.identity_cache_ttl_seconds;
+        if ttl > 0 {
+            let cache = self.identity_cache.lock().unwrap();
+            if let Some((name, at)) = cache.get(pane_id) {
+                if at.elapsed() < Duration::from_secs(ttl) {
+                    return Some(name.clone());
+                }
+            }
+        }
+        let resolved = worker::resolve_worker_identity(&self.config.project_root, pane_id);
+        if let Some(name) = &resolved {
+            if ttl > 0 {
+                self.identity_cache
+                    .lock()
+                    .unwrap()
+                    .insert(pane_id.to_string(), (name.clone(), Instant::now()));
+            }
+        }
+        resolved
+    }
+
     /// Drain completed background verifications and process results.
     /// Called at the start of each poll cycle so results are handled promptly.
     pub fn drain_verify_results(&self) -> (usize, usize, Vec<tmux::PromptTask>) {
+        // Backstop: reclaim any verification that has been wedged too long
+        // before draining fresh results, and reopen any orphaned beads.
+        self.reap_stale_verifications();
+        self.reap_orphaned_beads();
         let rx = self.verify_rx.lock().unwrap();
         let mut processed = 0usize;
         let mut rejected = 0usize;
@@ -246,6 +364,7 @@ impl Coordinator {
             tests_run: String::new(),
             commands,
             is_stale_recovery: true,
+            enqueued_at: Instant::now(),
         });
     }
 
@@ -352,7 +471,7 @@ impl Coordinator {
                 .pending_verifications
                 .lock()
                 .unwrap()
-                .contains(bead_id)
+                .contains_key(bead_id)
             {
                 continue;
             }
@@ -517,7 +636,7 @@ impl Coordinator {
                 .pending_verifications
                 .lock()
                 .unwrap()
-                .contains(&completion.bead_id)
+                .contains_key(&completion.bead_id)
             {
                 continue;
             }
@@ -559,12 +678,16 @@ impl Coordinator {
                 // The worker who sent the completion did the work, so update the assignee.
                 if let Some(current_assignee) = assignee {
                     if !completion.worker.is_empty() && current_assignee != &completion.worker {
-                        tracing::info!(
+                        tracing::warn!(
                             bead = %completion.bead_id,
                             from = %current_assignee,
                             to = %completion.worker,
-                            "reassigning to actual completer"
+                            "proceeding with verification anyway: assignee mismatch, reassigning to actual completer"
                         );
+                        // WARN (not INFO) so this assignment race is visible in
+                        // monitoring. We do NOT reject/`continue` — the worker
+                        // that sent the completion did the work, so update the
+                        // assignee and keep going; ack only happens after a close.
                         if !self.dry_run {
                             let _ = br::update_bead(
                                 &completion.bead_id,
@@ -616,7 +739,7 @@ impl Coordinator {
                 // Acking before close is confirmed causes orphaned beads if close fails.
                 {
                     let pending = self.pending_verifications.lock().unwrap();
-                    if pending.contains(&completion.bead_id) {
+                    if pending.contains_key(&completion.bead_id) {
                         tracing::debug!(bead = %completion.bead_id, "already being verified, skipping");
                         continue;
                     }
@@ -675,6 +798,7 @@ impl Coordinator {
                     tests_run: completion.tests_run.clone(),
                     commands,
                     is_stale_recovery: false,
+                    enqueued_at: Instant::now(),
                 });
 
                 // Do NOT ack here — ack only after drain_verify_results successfully
@@ -878,8 +1002,35 @@ impl Coordinator {
                             &w.worker_name,
                             &self,
                         ) {
+                            // D4: detect a repeat reclaim from this worker within
+                            // the hysteresis window — that's the reclaim↔reassign
+                            // ping-pong signature of a genuinely stuck worker.
+                            let ping_pong = {
+                                let lr = self.last_reclaim.lock().unwrap();
+                                lr.get(&w.worker_name)
+                                    .map(|t| {
+                                        within_hysteresis(
+                                            t.elapsed(),
+                                            self.config.reclaim_hysteresis_seconds,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                            };
                             if !self.dry_run {
                                 let _ = br::reopen(&bead.id);
+                                self.last_reclaim
+                                    .lock()
+                                    .unwrap()
+                                    .insert(w.worker_name.clone(), Instant::now());
+                            }
+                            if ping_pong {
+                                tracing::warn!(
+                                    worker = %w.worker_name,
+                                    bead = %bead.id,
+                                    "Reclaimed again within hysteresis window — withholding \
+                                     reassignment this cycle to break reclaim/reassign ping-pong"
+                                );
+                                continue;
                             }
                             // Re-check after reclaim (need fresh DB read)
                             let qdb = self.open_db()?;
@@ -1018,11 +1169,23 @@ impl Coordinator {
     fn enqueue_verification(&self, request: VerifyRequest) -> Result<()> {
         {
             let mut pending = self.pending_verifications.lock().unwrap();
-            if pending.contains(&request.bead_id) {
+            if pending.contains_key(&request.bead_id) {
                 tracing::debug!(bead = %request.bead_id, "verification already pending");
                 return Ok(());
             }
-            pending.insert(request.bead_id.clone());
+            pending.insert(request.bead_id.clone(), Instant::now());
+        }
+        // C6: surface verifier-lane backpressure so an operator can see the
+        // single builder backing up before it turns into a silent stall.
+        {
+            let queued = self.pending_verifications.lock().unwrap().len();
+            if queued >= self.config.completion_queue_warn_depth {
+                tracing::warn!(
+                    queued,
+                    threshold = self.config.completion_queue_warn_depth,
+                    "verifier lane backpressure: beads queued for verification"
+                );
+            }
         }
         if let Some(id) = request.msg_id {
             self.pending_completion_msgs.lock().unwrap().insert(id);
@@ -1149,9 +1312,7 @@ impl Coordinator {
                 if !self.config.is_worker_pane(pane) {
                     return None;
                 }
-                if worker::resolve_worker_identity(&self.config.project_root, &pane.id).as_deref()
-                    == Some(worker_name)
-                {
+                if self.resolve_worker_identity_cached(&pane.id).as_deref() == Some(worker_name) {
                     Some(pane.index)
                 } else {
                     None
@@ -1654,59 +1815,155 @@ fn spawn_verifier_worker(
     timeout: Duration,
     verify_request_rx: mpsc::Receiver<VerifyRequest>,
     verify_tx: mpsc::Sender<VerifyResult>,
-    pending_verifications: Arc<Mutex<HashSet<String>>>,
+    pending_verifications: Arc<Mutex<HashMap<String, Instant>>>,
     pending_completion_msgs: Arc<Mutex<HashSet<i64>>>,
     verifier_log_path: PathBuf,
 ) {
     std::thread::spawn(move || {
         while let Ok(request) = verify_request_rx.recv() {
             let bead_id = request.bead_id.clone();
-            let joined = request.commands.join(" && ");
-            verifier_log_append(
-                &verifier_log_path,
-                &format!("START bead={bead_id} stale={} commands={joined}", request.is_stale_recovery),
-            );
-            tracing::info!(
-                bead = %request.bead_id,
-                commands = request.commands.len(),
-                stale = request.is_stale_recovery,
-                "Verification queue started"
-            );
-
-            let verify_result = verifier::verify_commands(&project_root, &request.commands, timeout);
-            let passed = verify_result.is_ok();
-            let reject_reason = verify_result.err().map(|e| format!("{e}"));
-
-            if passed {
-                verifier_log_append(&verifier_log_path, &format!("PASS bead={bead_id}"));
-            } else {
+            let msg_id = request.msg_id;
+            // B1: isolate each verification in catch_unwind so a panic on one
+            // bead can never kill the verifier thread and wedge the whole swarm.
+            // Always remove the bead from the pending sets afterwards — otherwise
+            // a panic would leave it pending forever (the B3 reaper is the
+            // backstop, but we should not rely on it for the common case).
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                process_one_verification(
+                    &project_root,
+                    timeout,
+                    request,
+                    &verify_tx,
+                    &verifier_log_path,
+                )
+            }));
+            if result.is_err() {
                 verifier_log_append(
                     &verifier_log_path,
-                    &format!(
-                        "FAIL bead={bead_id} reason={}",
-                        reject_reason.as_deref().unwrap_or("unknown")
-                    ),
+                    &format!("PANIC bead={bead_id} — verification thread recovered"),
                 );
+                tracing::error!(bead = %bead_id, "verification panicked — thread recovered, bead reopened next cycle");
             }
-
-            let _ = verify_tx.send(VerifyResult {
-                bead_id: request.bead_id.clone(),
-                worker: request.worker,
-                msg_id: request.msg_id,
-                ack_required: request.ack_required,
-                files_changed: request.files_changed,
-                tests_run: request.tests_run,
-                passed,
-                reject_reason,
-                is_stale_recovery: request.is_stale_recovery,
-            });
-
-            pending_verifications.lock().unwrap().remove(&request.bead_id);
-            if let Some(id) = request.msg_id {
+            pending_verifications.lock().unwrap().remove(&bead_id);
+            if let Some(id) = msg_id {
                 pending_completion_msgs.lock().unwrap().remove(&id);
             }
         }
     });
+}
+
+/// Run one verification request and send its result. Separated out so the
+/// verifier loop can wrap it in `catch_unwind` (B1).
+fn process_one_verification(
+    project_root: &std::path::Path,
+    timeout: Duration,
+    request: VerifyRequest,
+    verify_tx: &mpsc::Sender<VerifyResult>,
+    verifier_log_path: &PathBuf,
+) {
+    let bead_id = request.bead_id.clone();
+    let queue_wait_ms = request.enqueued_at.elapsed().as_millis() as u64;
+    let joined = request.commands.join(" && ");
+    verifier_log_append(
+        verifier_log_path,
+        &format!(
+            "START bead={bead_id} stale={} queue_wait_ms={queue_wait_ms} commands={joined}",
+            request.is_stale_recovery
+        ),
+    );
+    tracing::info!(
+        bead = %request.bead_id,
+        commands = request.commands.len(),
+        stale = request.is_stale_recovery,
+        queue_wait_ms,
+        "Verification queue started"
+    );
+
+    let run_start = Instant::now();
+    let verify_result = verifier::verify_commands(project_root, &request.commands, timeout);
+    let run_ms = run_start.elapsed().as_millis() as u64;
+    let passed = verify_result.is_ok();
+    let reject_reason = verify_result.err().map(|e| format!("{e}"));
+
+    // C1: structured per-bead verify latency so an operator can tell a slow
+    // builder (high run_ms) from a backed-up queue (high queue_wait_ms).
+    if passed {
+        verifier_log_append(
+            verifier_log_path,
+            &format!("PASS bead={bead_id} queue_wait_ms={queue_wait_ms} run_ms={run_ms}"),
+        );
+    } else {
+        verifier_log_append(
+            verifier_log_path,
+            &format!(
+                "FAIL bead={bead_id} queue_wait_ms={queue_wait_ms} run_ms={run_ms} reason={}",
+                reject_reason.as_deref().unwrap_or("unknown")
+            ),
+        );
+    }
+
+    let _ = verify_tx.send(VerifyResult {
+        bead_id: request.bead_id.clone(),
+        worker: request.worker,
+        msg_id: request.msg_id,
+        ack_required: request.ack_required,
+        files_changed: request.files_changed,
+        tests_run: request.tests_run,
+        passed,
+        reject_reason,
+        is_stale_recovery: request.is_stale_recovery,
+    });
+}
+
+/// Update per-bead orphan strike counts and return beads that have reached the
+/// reopen threshold (B4). Beads no longer orphaned have their strikes cleared;
+/// a bead reaching `threshold` consecutive strikes is returned and its counter
+/// reset. Pure so it is unit-testable without a DB.
+fn update_orphan_strikes(
+    orphaned_now: &[String],
+    strikes: &mut HashMap<String, u32>,
+    threshold: u32,
+) -> Vec<String> {
+    // Clear strikes for beads that are no longer orphaned (recovered).
+    strikes.retain(|k, _| orphaned_now.contains(k));
+    let mut to_reopen = Vec::new();
+    for id in orphaned_now {
+        let count = strikes.entry(id.clone()).or_insert(0);
+        *count += 1;
+        if *count >= threshold.max(1) {
+            to_reopen.push(id.clone());
+            *count = 0; // reset so we don't reopen every subsequent poll
+        }
+    }
+    to_reopen
+}
+
+/// Deadlock watchdog (D5): given whether this poll made progress and whether
+/// the swarm has work assigned to live workers, advance a zero-progress
+/// counter and decide whether to alert. Returns `(new_counter, should_alert)`.
+///
+/// Alert-only by design — it works in pull mode (where auto-recovery is
+/// disabled) without taking risky automatic action. `should_alert` fires
+/// exactly once when the counter first crosses the threshold.
+pub fn deadlock_watchdog_tick(
+    made_progress: bool,
+    work_in_flight: bool,
+    workers_present: bool,
+    prev_counter: usize,
+    threshold: usize,
+) -> (usize, bool) {
+    if made_progress || !work_in_flight || !workers_present {
+        return (0, false);
+    }
+    let counter = prev_counter + 1;
+    let should_alert = counter == threshold.max(1);
+    (counter, should_alert)
+}
+
+/// D4: whether a worker is still within its post-reclaim hysteresis window.
+/// `window_seconds == 0` disables hysteresis.
+fn within_hysteresis(since_last_reclaim: Duration, window_seconds: u64) -> bool {
+    window_seconds > 0 && since_last_reclaim < Duration::from_secs(window_seconds)
 }
 
 /// Check if an idle worker's stale assignment should be reclaimed.
@@ -1811,12 +2068,122 @@ mod tests {
             config: cfg,
             mail,
             dry_run: true,
-            pending_verifications: Arc::new(Mutex::new(HashSet::new())),
+            pending_verifications: Arc::new(Mutex::new(HashMap::new())),
             pending_completion_msgs: Arc::new(Mutex::new(HashSet::new())),
             verify_rx: Mutex::new(verify_rx),
             verify_tx,
             verify_request_tx,
+            orphan_strikes: Mutex::new(HashMap::new()),
+            identity_cache: Mutex::new(HashMap::new()),
+            last_reclaim: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// B3: a verification held past the reap threshold is reopened and removed
+    /// from the pending set, so a wedged verifier can't stall a bead forever.
+    #[test]
+    fn test_reap_stale_verifications_reopens_over_threshold() {
+        let mut cfg = test_config();
+        cfg.pending_verification_reap_seconds = 0; // everything is "stale"
+        let coord = test_coordinator_with_config(cfg); // dry_run = true (no real br call)
+        {
+            let mut p = coord.pending_verifications.lock().unwrap();
+            p.insert("pat-old1".to_string(), Instant::now());
+            p.insert("pat-old2".to_string(), Instant::now());
+        }
+        let reaped = coord.reap_stale_verifications();
+        assert_eq!(reaped, 2);
+        assert!(coord.pending_verifications.lock().unwrap().is_empty());
+    }
+
+    /// B3: fresh verifications (under the threshold) must be left untouched.
+    #[test]
+    fn test_reap_stale_verifications_keeps_fresh() {
+        let mut cfg = test_config();
+        cfg.pending_verification_reap_seconds = 3600;
+        let coord = test_coordinator_with_config(cfg);
+        {
+            let mut p = coord.pending_verifications.lock().unwrap();
+            p.insert("pat-fresh".to_string(), Instant::now());
+        }
+        let reaped = coord.reap_stale_verifications();
+        assert_eq!(reaped, 0);
+        assert!(coord
+            .pending_verifications
+            .lock()
+            .unwrap()
+            .contains_key("pat-fresh"));
+    }
+
+    // ─── B4: orphan strike counter ──────────────────────────────────────
+
+    #[test]
+    fn test_update_orphan_strikes_reopens_after_threshold() {
+        let mut strikes = HashMap::new();
+        let orphaned = vec!["pat-a".to_string()];
+        assert!(update_orphan_strikes(&orphaned, &mut strikes, 3).is_empty());
+        assert!(update_orphan_strikes(&orphaned, &mut strikes, 3).is_empty());
+        assert_eq!(
+            update_orphan_strikes(&orphaned, &mut strikes, 3),
+            vec!["pat-a".to_string()]
+        );
+        // After reopening, the counter resets (no immediate re-reopen next poll).
+        assert!(update_orphan_strikes(&orphaned, &mut strikes, 3).is_empty());
+    }
+
+    #[test]
+    fn test_update_orphan_strikes_resets_when_recovered() {
+        let mut strikes = HashMap::new();
+        update_orphan_strikes(&["pat-a".to_string()], &mut strikes, 3);
+        // Bead recovered (assigned) this poll → strikes cleared.
+        let none: Vec<String> = vec![];
+        assert!(update_orphan_strikes(&none, &mut strikes, 3).is_empty());
+        assert!(strikes.is_empty());
+        // Re-orphaning starts fresh — does not immediately reopen.
+        assert!(update_orphan_strikes(&["pat-a".to_string()], &mut strikes, 3).is_empty());
+    }
+
+    // ─── D4: reclaim hysteresis ─────────────────────────────────────────
+
+    #[test]
+    fn test_within_hysteresis() {
+        // Just reclaimed → still within a 60s window.
+        assert!(within_hysteresis(Duration::from_secs(5), 60));
+        // Long past the window.
+        assert!(!within_hysteresis(Duration::from_secs(120), 60));
+        // Window of 0 disables hysteresis entirely.
+        assert!(!within_hysteresis(Duration::from_secs(0), 0));
+    }
+
+    // ─── D5: deadlock watchdog ──────────────────────────────────────────
+
+    #[test]
+    fn test_deadlock_watchdog_alerts_once_at_threshold() {
+        let mut c = 0;
+        for _ in 0..2 {
+            let (nc, alert) = deadlock_watchdog_tick(false, true, true, c, 3);
+            c = nc;
+            assert!(!alert);
+        }
+        let (nc, alert) = deadlock_watchdog_tick(false, true, true, c, 3);
+        assert!(alert, "should alert when crossing threshold");
+        assert_eq!(nc, 3);
+        // Past threshold it keeps counting but does not re-alert every poll.
+        let (nc2, alert2) = deadlock_watchdog_tick(false, true, true, nc, 3);
+        assert!(!alert2);
+        assert_eq!(nc2, 4);
+    }
+
+    #[test]
+    fn test_deadlock_watchdog_resets_on_progress() {
+        assert_eq!(deadlock_watchdog_tick(true, true, true, 5, 3), (0, false));
+    }
+
+    #[test]
+    fn test_deadlock_watchdog_idle_is_not_deadlock() {
+        // No work in flight (genuinely idle) or no workers → never a deadlock.
+        assert_eq!(deadlock_watchdog_tick(false, false, true, 5, 3), (0, false));
+        assert_eq!(deadlock_watchdog_tick(false, true, false, 5, 3), (0, false));
     }
 
     #[test]
@@ -2946,7 +3313,10 @@ mod tests {
         let idle_fill = source
             .find("fn run_idle_fill(")
             .expect("run_idle_fill must exist");
-        let fn_section = &source[idle_fill..idle_fill + 500];
+        // Window covers the whole function body; the success-after-retry log sits
+        // ~13 lines in (past the pull_mode early-return guard added later).
+        let end = (idle_fill + 1200).min(source.len());
+        let fn_section = &source[idle_fill..end];
 
         assert!(
             fn_section.contains("idle fill succeeded after retry"),
@@ -3062,7 +3432,11 @@ mod tests {
             .find("stall detection")
             .map(|p| first + 20 + p);
         if let Some(pos) = second {
-            let section = &source[pos..pos + 200];
+            // Widened to 600 chars: the stall-detection block now carries a
+            // multi-line CRITICAL comment documenting the Connection-scoping
+            // invariant, which pushes the `db::open(` call further down.
+            let end = (pos + 600).min(source.len());
+            let section = &source[pos..end];
             assert!(
                 section.contains("db::open("),
                 "Stall/recovery detection must open its own short-lived connection"
@@ -3498,11 +3872,11 @@ mod tests {
         let coord = test_coordinator();
         {
             let mut pending = coord.pending_verifications.lock().unwrap();
-            pending.insert("pat-abc".to_string());
+            pending.insert("pat-abc".to_string(), Instant::now());
         }
         let pending = coord.pending_verifications.lock().unwrap();
-        assert!(pending.contains("pat-abc"));
-        assert!(!pending.contains("pat-xyz"));
+        assert!(pending.contains_key("pat-abc"));
+        assert!(!pending.contains_key("pat-xyz"));
     }
 
     // =========================================================================
@@ -3583,7 +3957,7 @@ mod tests {
                 .pending_verifications
                 .lock()
                 .unwrap()
-                .insert("pat-already".to_string());
+                .insert("pat-already".to_string(), Instant::now());
         }
         coord.verify_stale_bead("pat-already");
         assert!(

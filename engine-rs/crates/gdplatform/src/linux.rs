@@ -386,6 +386,65 @@ impl LinuxPlatformLayer {
 }
 
 // ---------------------------------------------------------------------------
+// AppImage / desktop packaging helpers
+// ---------------------------------------------------------------------------
+
+/// Sanitizes an app name into a lowercase, hyphen-separated identifier
+/// suitable for use as a desktop-entry file stem, AppImage binary name,
+/// or reverse-DNS bundle suffix.
+///
+/// - Unicode letters and ASCII digits are lowercased and preserved.
+/// - Every other character becomes a hyphen.
+/// - Runs of hyphens are collapsed and leading/trailing hyphens trimmed.
+/// - If the result is empty (e.g. all-punctuation input), `"app"` is
+///   returned so callers always get a non-empty identifier.
+pub fn sanitize_desktop_id(app_name: &str) -> String {
+    let mut out = String::with_capacity(app_name.len());
+    let mut prev_hyphen = true;
+    for ch in app_name.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+            prev_hyphen = false;
+        } else if !prev_hyphen {
+            out.push('-');
+            prev_hyphen = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "app".to_string()
+    } else {
+        out
+    }
+}
+
+/// Returns the AppDir directory name for the given app (e.g. `"MyGame.AppDir"`).
+pub fn appdir_name(app_name: &str) -> String {
+    format!("{app_name}.AppDir")
+}
+
+/// Returns the AppImage file name for the given app (e.g. `"MyGame.AppImage"`).
+pub fn appimage_filename(app_name: &str) -> String {
+    format!("{app_name}.AppImage")
+}
+
+/// Returns the `.desktop` file name derived from the sanitized app id
+/// (e.g. `"Patina Demo"` → `"patina-demo.desktop"`).
+pub fn desktop_filename(app_name: &str) -> String {
+    format!("{}.desktop", sanitize_desktop_id(app_name))
+}
+
+/// Returns the PNG icon file name derived from the sanitized app id
+/// (e.g. `"Patina Demo"` → `"patina-demo.png"`).
+pub fn linux_icon_filename(app_name: &str) -> String {
+    format!("{}.png", sanitize_desktop_id(app_name))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -681,5 +740,46 @@ mod tests {
         layer.end_frame();
         assert_eq!(layer.backend().frames_run(), 2);
         assert!(!layer.should_quit());
+    }
+
+    // -- AppImage / desktop helpers ------------------------------------------
+
+    #[test]
+    fn sanitize_desktop_id_lowercases_and_hyphenates() {
+        assert_eq!(sanitize_desktop_id("LinuxGame"), "linuxgame");
+        assert_eq!(sanitize_desktop_id("Patina Demo"), "patina-demo");
+        assert_eq!(sanitize_desktop_id("Hero's Quest!"), "hero-s-quest");
+    }
+
+    #[test]
+    fn sanitize_desktop_id_collapses_and_trims_hyphens() {
+        assert_eq!(sanitize_desktop_id("  spaced   out  "), "spaced-out");
+        assert_eq!(sanitize_desktop_id("--weird--name--"), "weird-name");
+        assert_eq!(sanitize_desktop_id("A___B"), "a-b");
+    }
+
+    #[test]
+    fn sanitize_desktop_id_falls_back_for_empty_input() {
+        assert_eq!(sanitize_desktop_id(""), "app");
+        assert_eq!(sanitize_desktop_id("!!!"), "app");
+    }
+
+    #[test]
+    fn appimage_layout_helpers_format_expected_names() {
+        assert_eq!(appdir_name("LinuxGame"), "LinuxGame.AppDir");
+        assert_eq!(appimage_filename("LinuxGame"), "LinuxGame.AppImage");
+        assert_eq!(desktop_filename("LinuxGame"), "linuxgame.desktop");
+        assert_eq!(linux_icon_filename("LinuxGame"), "linuxgame.png");
+    }
+
+    #[test]
+    fn appimage_helpers_preserve_display_name_in_container_but_sanitize_files() {
+        // The AppDir and AppImage keep the human-visible name; the .desktop
+        // and icon files use the sanitized id so file-system tooling stays
+        // happy with names like "Patina Demo".
+        assert_eq!(appdir_name("Patina Demo"), "Patina Demo.AppDir");
+        assert_eq!(appimage_filename("Patina Demo"), "Patina Demo.AppImage");
+        assert_eq!(desktop_filename("Patina Demo"), "patina-demo.desktop");
+        assert_eq!(linux_icon_filename("Patina Demo"), "patina-demo.png");
     }
 }

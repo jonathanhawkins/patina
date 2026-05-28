@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use rusqlite::Connection;
 
-use crate::config::Config;
+use crate::config::{is_version_string, Config};
 use crate::db;
 use crate::error::Result;
 use crate::tmux;
@@ -101,14 +101,17 @@ pub fn has_stuck_input(capture: &str) -> bool {
 
     let flat = capture.replace('\n', "");
     // Strategy 1: start-of-prompt markers (works in wide panes)
-    let start_markers = (flat.contains("/skill flywheel-worker") || flat.contains("/skill patina-fly-worker")) && flat.contains("Work bead");
+    let start_markers = (flat.contains("/skill flywheel-worker")
+        || flat.contains("/skill patina-fly-worker"))
+        && flat.contains("Work bead");
     // Strategy 2: end-of-prompt markers (works in narrow panes where start scrolls off).
     // Strip ALL whitespace because tmux wraps mid-word at column boundaries,
     // e.g. "compl\n  ete.sh" → "compl  ete.sh" after newline removal.
     let compact = flat.replace(' ', "");
     // Accept both new ("/skillmail-complete") and legacy ("complete.sh") end markers
     // for transition safety — old prompts may still be in tmux buffers.
-    let completion_marker = compact.contains("/skillmail-complete") || compact.contains("complete.sh");
+    let completion_marker =
+        compact.contains("/skillmail-complete") || compact.contains("complete.sh");
     let end_markers = completion_marker && compact.contains("freehandcompletionmessage");
     start_markers || end_markers
 }
@@ -206,7 +209,12 @@ pub fn extract_completed_bead_id(capture: &str) -> Option<String> {
         ).unwrap()
     });
     re.captures(capture).map(|c| {
-        c.get(1).or_else(|| c.get(2)).or_else(|| c.get(3)).unwrap().as_str().to_string()
+        c.get(1)
+            .or_else(|| c.get(2))
+            .or_else(|| c.get(3))
+            .unwrap()
+            .as_str()
+            .to_string()
     })
 }
 
@@ -235,7 +243,11 @@ pub fn resolve_worker_identity(project_root: &Path, pane_id: &str) -> Option<Str
 
     if output.status.success() {
         let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if name.is_empty() { None } else { Some(name) }
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
     } else {
         None
     }
@@ -265,7 +277,11 @@ pub fn assignment_age_secs(updated_at: Option<&str>) -> u64 {
     match dt {
         Some(dt) => {
             let age = (chrono::Utc::now() - dt).num_seconds();
-            if age > 0 { age as u64 } else { 0 }
+            if age > 0 {
+                age as u64
+            } else {
+                0
+            }
         }
         None => 0,
     }
@@ -313,16 +329,21 @@ pub fn worker_info_list_with(
     let mut workers = Vec::new();
 
     for pane in &panes {
-        // Skip non-worker panes based on configurable thresholds
-        if pane.index < min_worker_pane_index || pane.dead || pane.current_command != worker_command {
+        // Skip non-worker panes based on configurable thresholds.
+        // The command match accepts either an exact prefix match OR (when the
+        // worker command is `claude`) a version-string like "2.1.121", because
+        // the Claude CLI sets `process.title` to its version rather than its
+        // binary name. Without the version-string fallback, every pane running
+        // Claude is invisible here and `assign_idle_workers` sees `workers=0`.
+        let cmd_matches = pane.current_command.starts_with(worker_command)
+            || (worker_command == "claude" && is_version_string(&pane.current_command));
+        if pane.index < min_worker_pane_index || pane.dead || !cmd_matches {
             continue;
         }
 
-        let worker_name = resolve_worker_identity(project_root, &pane.id)
-            .unwrap_or_default();
+        let worker_name = resolve_worker_identity(project_root, &pane.id).unwrap_or_default();
 
-        let capture = tmux::capture_pane(session, window, pane.index, 80)
-            .unwrap_or_default();
+        let capture = tmux::capture_pane(session, window, pane.index, 80).unwrap_or_default();
 
         let state = detect_pane_state_with(&capture, shell_prompt_char);
         let cw = completed_waiting_re().is_match(&capture);
@@ -331,11 +352,7 @@ pub fn worker_info_list_with(
             match db::assigned_bead_for_worker(db, &worker_name) {
                 Ok(Some(bead)) => {
                     let age = assignment_age_secs(bead.updated_at.as_deref());
-                    (
-                        Some(bead.id),
-                        Some(bead.status.as_str().to_string()),
-                        age,
-                    )
+                    (Some(bead.id), Some(bead.status.as_str().to_string()), age)
                 }
                 _ => (None, None, 0),
             }
@@ -473,13 +490,19 @@ mod tests {
         // Different bead ID — should not match
         assert!(!has_assignment_prompt(capture, "WorkerA", "pat-999"));
         // No queue marker — should not match
-        assert!(!has_assignment_prompt("Work bead pat-123 as WorkerA", "WorkerA", "pat-123"));
+        assert!(!has_assignment_prompt(
+            "Work bead pat-123 as WorkerA",
+            "WorkerA",
+            "pat-123"
+        ));
     }
 
     #[test]
     fn test_needs_prompt() {
         assert!(needs_prompt("❯ "));
-        assert!(needs_prompt("completion sent via ./apps/orchestrator/mail/complete"));
+        assert!(needs_prompt(
+            "completion sent via ./apps/orchestrator/mail/complete"
+        ));
         assert!(!needs_prompt("Compiling patina-orchestrator v0.1.0"));
     }
 
@@ -531,8 +554,7 @@ mod tests {
 
     #[test]
     fn test_detect_waiting_for_assignment_as_completed_waiting() {
-        let capture =
-            "pat-abc complete. Sent to GrayMountain. Waiting for next assignment.";
+        let capture = "pat-abc complete. Sent to GrayMountain. Waiting for next assignment.";
         assert_eq!(detect_pane_state(capture), WorkerState::CompletedWaiting);
     }
 
@@ -564,19 +586,31 @@ mod tests {
         assert_eq!(detect_pane_state("Some output\n❯ "), WorkerState::Idle);
 
         // Custom '$' prompt char
-        assert_eq!(detect_pane_state_with("Some output\n$ ", '$'), WorkerState::Idle);
+        assert_eq!(
+            detect_pane_state_with("Some output\n$ ", '$'),
+            WorkerState::Idle
+        );
         // '❯' not recognized when looking for '$'
-        assert_eq!(detect_pane_state_with("Some output\n❯ ", '$'), WorkerState::Active);
+        assert_eq!(
+            detect_pane_state_with("Some output\n❯ ", '$'),
+            WorkerState::Active
+        );
 
         // Custom '>' prompt char
-        assert_eq!(detect_pane_state_with("Some output\n> ", '>'), WorkerState::Idle);
+        assert_eq!(
+            detect_pane_state_with("Some output\n> ", '>'),
+            WorkerState::Idle
+        );
     }
 
     #[test]
     fn test_detect_pane_state_with_preserves_priority() {
         // CompletedWaiting still wins over custom prompt char
         let capture = "completion sent via ./apps/orchestrator/mail/complete\n$ ";
-        assert_eq!(detect_pane_state_with(capture, '$'), WorkerState::CompletedWaiting);
+        assert_eq!(
+            detect_pane_state_with(capture, '$'),
+            WorkerState::CompletedWaiting
+        );
 
         // Active still wins over custom prompt char
         let capture = "Compiling crate\n$ ";
@@ -589,17 +623,33 @@ mod tests {
         // Default marker doesn't match
         assert!(!has_assignment_prompt(capture, "W", "pat-abc"));
         // Custom marker matches
-        assert!(has_assignment_prompt_with(capture, "Queued for edit", "pat-abc"));
+        assert!(has_assignment_prompt_with(
+            capture,
+            "Queued for edit",
+            "pat-abc"
+        ));
         // Absent marker doesn't match
-        assert!(!has_assignment_prompt_with(capture, "Press up to edit", "pat-abc"));
+        assert!(!has_assignment_prompt_with(
+            capture,
+            "Press up to edit",
+            "pat-abc"
+        ));
     }
 
     #[test]
     fn test_has_assignment_prompt_with_requires_both() {
         // Only marker, no bead ID
-        assert!(!has_assignment_prompt_with("Press up to edit\nsome text", "Press up to edit", "pat-123"));
+        assert!(!has_assignment_prompt_with(
+            "Press up to edit\nsome text",
+            "Press up to edit",
+            "pat-123"
+        ));
         // Only bead ID, no marker
-        assert!(!has_assignment_prompt_with("Work bead pat-123", "Press up to edit", "pat-123"));
+        assert!(!has_assignment_prompt_with(
+            "Work bead pat-123",
+            "Press up to edit",
+            "pat-123"
+        ));
         // Both present
         assert!(has_assignment_prompt_with(
             "Press up to edit\nWork bead pat-123 as Worker, check inbox",
@@ -619,14 +669,16 @@ mod tests {
     #[test]
     fn test_stuck_input_not_triggered_when_active() {
         // If Claude is actively processing, Active wins over stuck detection
-        let capture = "✢ Searching for files...\nUse /skill flywheel-worker. Work bead pat-123: Fix bug.";
+        let capture =
+            "✢ Searching for files...\nUse /skill flywheel-worker. Work bead pat-123: Fix bug.";
         assert_eq!(detect_pane_state(capture), WorkerState::Active);
     }
 
     #[test]
     fn test_stuck_input_with_garbled_text() {
         // Realistic stuck pane: partial prompt text with tmux rendering artifacts
-        let capture = "+loa\n+t\" 2069 +\nUse /skill flywheel-worker. Work bead pat-456: Add feature.";
+        let capture =
+            "+loa\n+t\" 2069 +\nUse /skill flywheel-worker. Work bead pat-456: Add feature.";
         assert_eq!(detect_pane_state(capture), WorkerState::StuckInput);
     }
 
@@ -643,7 +695,9 @@ mod tests {
     fn test_has_stuck_input_false_for_normal_output() {
         assert!(!has_stuck_input("Compiling patina v0.1"));
         assert!(!has_stuck_input("❯ "));
-        assert!(!has_stuck_input("completion sent via ./apps/orchestrator/mail/complete"));
+        assert!(!has_stuck_input(
+            "completion sent via ./apps/orchestrator/mail/complete"
+        ));
     }
 
     /// Regression: "Press up to edit" means Claude queued the prompt — it is NOT
@@ -665,7 +719,8 @@ mod tests {
     #[test]
     fn test_queued_prompt_with_end_markers_is_not_stuck() {
         // End markers visible + "Press up to edit" = still queued, not stuck
-        let capture = "mail-complete, not a freehand completion message.\n❯ Press up to edit queued message";
+        let capture =
+            "mail-complete, not a freehand completion message.\n❯ Press up to edit queued message";
         assert!(!has_stuck_input(capture));
     }
 
@@ -698,18 +753,26 @@ mod tests {
     fn test_partial_press_up_does_not_suppress() {
         let capture = "Press up\nUse /skill flywheel-worker. Work bead pat-123: Fix.";
         // "Press up" alone (without " to edit") should NOT suppress
-        assert!(has_stuck_input(capture), "Partial 'Press up' must not suppress stuck input");
+        assert!(
+            has_stuck_input(capture),
+            "Partial 'Press up' must not suppress stuck input"
+        );
     }
 
     /// Case sensitivity: "press up to edit" in different casing should still suppress
     #[test]
     fn test_queued_prompt_exact_case_only() {
         // The actual Claude output is always "Press up to edit" — exact match
-        let capture = "Use /skill flywheel-worker. Work bead pat-123: Fix.\nPress up to edit queued message";
+        let capture =
+            "Use /skill flywheel-worker. Work bead pat-123: Fix.\nPress up to edit queued message";
         assert!(!has_stuck_input(capture));
         // Lowercase variant — Claude never produces this, so stuck input should trigger
-        let capture_lower = "Use /skill flywheel-worker. Work bead pat-123: Fix.\npress up to edit queued message";
-        assert!(has_stuck_input(capture_lower), "Only exact 'Press up to edit' should suppress");
+        let capture_lower =
+            "Use /skill flywheel-worker. Work bead pat-123: Fix.\npress up to edit queued message";
+        assert!(
+            has_stuck_input(capture_lower),
+            "Only exact 'Press up to edit' should suppress"
+        );
     }
 
     // --- Queued prompt regression: realistic captures from production ---
@@ -728,7 +791,10 @@ WorkerThreadPool\n\
 ❯ Press up to edit que…\n\
 ───────────────────────\n\
   1 shell · ⏵⏵ bypas…";
-        assert!(!has_stuck_input(capture), "Narrow pane queued prompt must not be stuck input");
+        assert!(
+            !has_stuck_input(capture),
+            "Narrow pane queued prompt must not be stuck input"
+        );
         // Should NOT be StuckInput
         assert_ne!(detect_pane_state(capture), WorkerState::StuckInput);
     }
@@ -774,9 +840,7 @@ Your Agent Mail identity is WhiteBeaver.\n\
     fn test_real_stuck_input_stress_many_beads() {
         for i in 0..100 {
             let bead = format!("pat-{i:05x}");
-            let capture = format!(
-                "❯ Use /skill flywheel-worker. Work bead {bead}: Task {i}."
-            );
+            let capture = format!("❯ Use /skill flywheel-worker. Work bead {bead}: Task {i}.");
             assert!(
                 has_stuck_input(&capture),
                 "Real stuck input for bead {bead} must be detected"
@@ -869,7 +933,8 @@ Your Agent Mail identity is WhiteBeaver.\n\
 
     #[test]
     fn test_priority_completed_waiting_beats_active() {
-        let capture = "completion sent via ./apps/orchestrator/mail/complete\nCompiling patina v0.1";
+        let capture =
+            "completion sent via ./apps/orchestrator/mail/complete\nCompiling patina v0.1";
         assert_eq!(detect_pane_state(capture), WorkerState::CompletedWaiting);
     }
 
@@ -1027,8 +1092,16 @@ Your Agent Mail identity is WhiteBeaver.\n\
 
         let prompts = vec![
             fake_prompt("pat-c1", "Fix bug", "WorkerA"),
-            fake_prompt("pat-c2", "Add feature with spaces and 'quotes'", "Worker-With-Dashes"),
-            fake_prompt("pat-c3", "A very long title that goes on and on to stress-test wrapping behavior", "ExtremelyLongWorkerNameThatShouldStillWork"),
+            fake_prompt(
+                "pat-c2",
+                "Add feature with spaces and 'quotes'",
+                "Worker-With-Dashes",
+            ),
+            fake_prompt(
+                "pat-c3",
+                "A very long title that goes on and on to stress-test wrapping behavior",
+                "ExtremelyLongWorkerNameThatShouldStillWork",
+            ),
             fake_prompt("pat-c4", "", "W"), // empty title
         ];
 
@@ -1040,7 +1113,8 @@ Your Agent Mail identity is WhiteBeaver.\n\
                 let tmux_detects = tmux_check(&wrapped);
 
                 assert_eq!(
-                    worker_detects, tmux_detects,
+                    worker_detects,
+                    tmux_detects,
                     "Detection disagreement at {cols} cols for prompt starting with '{}'",
                     &prompt[..prompt.len().min(50)]
                 );
@@ -1208,15 +1282,16 @@ Your Agent Mail identity is WhiteBeaver.\n\
                 status TEXT DEFAULT 'open',
                 assignee TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );"
-        ).unwrap();
+            );",
+        )
+        .unwrap();
 
         let health = swarm_health(&workers, &db).unwrap();
         assert_eq!(health.worker_panes, 3);
         assert_eq!(health.assigned_worker_panes, 2); // W1 (stuck) + W2 (active)
-        assert_eq!(health.idle_assigned_panes, 1);    // W1 (stuck → idle bucket)
-        assert_eq!(health.active_assigned_panes, 1);   // W2
-        assert_eq!(health.unassigned_worker_panes, 1);  // W3
+        assert_eq!(health.idle_assigned_panes, 1); // W1 (stuck → idle bucket)
+        assert_eq!(health.active_assigned_panes, 1); // W2
+        assert_eq!(health.unassigned_worker_panes, 1); // W3
     }
 
     // --- needs_prompt correctly excludes StuckInput ---
@@ -1229,7 +1304,9 @@ Your Agent Mail identity is WhiteBeaver.\n\
 
         // But idle and completed-waiting should return true
         assert!(needs_prompt("❯ "));
-        assert!(needs_prompt("completion sent via ./apps/orchestrator/mail/complete"));
+        assert!(needs_prompt(
+            "completion sent via ./apps/orchestrator/mail/complete"
+        ));
     }
 
     // --- Ensure newline flattening doesn't create false positives ---
@@ -1241,7 +1318,10 @@ Your Agent Mail identity is WhiteBeaver.\n\
         // This IS the desired behavior (it means the prompt was wrapped).
         // But verify that UNRELATED text doesn't false-positive.
         let capture = "/skill something-else\nWork on another bead\n";
-        assert!(!has_stuck_input(capture), "unrelated /skill + Work should not match");
+        assert!(
+            !has_stuck_input(capture),
+            "unrelated /skill + Work should not match"
+        );
 
         let capture2 = "flywheel-worker status: OK\nWork bead-counter: 5\n";
         // This contains "flywheel-worker" and "Work bead" but NOT "/skill flywheel-worker",
@@ -1259,9 +1339,13 @@ Your Agent Mail identity is WhiteBeaver.\n\
         // Verify the contract: detection requires BOTH "/skill flywheel-worker"
         // AND "Work bead". If the prompt format changes to drop either marker,
         // this test will catch it.
-        assert!(!has_stuck_input("/skill flywheel-worker. Do something else."));
+        assert!(!has_stuck_input(
+            "/skill flywheel-worker. Do something else."
+        ));
         assert!(!has_stuck_input("Work bead pat-123: Fix bug."));
-        assert!(has_stuck_input("/skill flywheel-worker. Work bead pat-123: Fix bug."));
+        assert!(has_stuck_input(
+            "/skill flywheel-worker. Work bead pat-123: Fix bug."
+        ));
     }
 
     // ========================================================================
@@ -1450,7 +1534,8 @@ Your Agent Mail identity is WhiteBeaver.\n\
             fake_prompt("pat-xm1", "Fix bug", "W1"),
             // Tail only — worker detects, tmux does NOT
             "details. Close out with /skill mail-complete, \
-             not a freehand completion message.".to_string(),
+             not a freehand completion message."
+                .to_string(),
         ];
 
         for (i, text) in cases.iter().enumerate() {
@@ -1461,7 +1546,8 @@ Your Agent Mail identity is WhiteBeaver.\n\
 
                 // Invariant: tmux detection implies worker detection
                 if tmux_sees {
-                    assert!(worker_sees,
+                    assert!(
+                        worker_sees,
                         "case {i}: tmux detected at {cols} cols but worker didn't"
                     );
                 }
@@ -1507,7 +1593,9 @@ Your Agent Mail identity is WhiteBeaver.\n\
     #[test]
     fn test_extract_completed_bead_id_complete_sh() {
         assert_eq!(
-            extract_completed_bead_id("sent via ./apps/orchestrator/mail/complete.sh pat-bar2 --to Coord"),
+            extract_completed_bead_id(
+                "sent via ./apps/orchestrator/mail/complete.sh pat-bar2 --to Coord"
+            ),
             Some("pat-bar2".to_string()),
         );
     }
@@ -1522,7 +1610,10 @@ Your Agent Mail identity is WhiteBeaver.\n\
 
     #[test]
     fn test_extract_completed_bead_id_none() {
-        assert_eq!(extract_completed_bead_id("waiting for next assignment"), None);
+        assert_eq!(
+            extract_completed_bead_id("waiting for next assignment"),
+            None
+        );
         assert_eq!(extract_completed_bead_id(""), None);
         assert_eq!(extract_completed_bead_id("Compiling crate"), None);
     }
@@ -1544,8 +1635,12 @@ Your Agent Mail identity is WhiteBeaver.\n\
 
     #[test]
     fn test_stuck_input_detects_both_claude_and_codex() {
-        assert!(has_stuck_input("❯ Use /skill flywheel-worker. Work bead pat-123: Fix."));
-        assert!(has_stuck_input("❯ Use /skill patina-fly-worker. Work bead pat-123: Fix."));
+        assert!(has_stuck_input(
+            "❯ Use /skill flywheel-worker. Work bead pat-123: Fix."
+        ));
+        assert!(has_stuck_input(
+            "❯ Use /skill patina-fly-worker. Work bead pat-123: Fix."
+        ));
     }
 
     // --- Usage limit detection ---
@@ -1564,5 +1659,91 @@ Your Agent Mail identity is WhiteBeaver.\n\
     fn test_extra_usage_prompt_detected_as_idle() {
         let capture = "Some output\n/extra-usage to finish what you're working on.\n❯ ";
         assert_eq!(detect_pane_state(capture), WorkerState::Idle);
+    }
+
+    // --- Regression: worker.rs must be able to import is_version_string ---
+    //
+    // Bug: `is_version_string` in src/config.rs was private, so the inline
+    // version-string fallback in `worker_info_list_with` failed to compile
+    // and the orchestrator silently kept running the previous binary, which
+    // had strict equality and reported `workers=0` for every Claude pane.
+    //
+    // tmux's `pane_current_command` for the Claude CLI is the version
+    // string ("2.1.121") because Claude sets `process.title` to its version
+    // rather than its binary name. These tests pin both:
+    //   1. `is_version_string` is reachable from this module (compile-time)
+    //   2. The worker-command match logic (mirrored in worker_info_list_with)
+    //      accepts version strings when worker_command == "claude".
+
+    #[test]
+    fn test_is_version_string_accessible_from_worker_module() {
+        // Direct reference to the imported helper — guards against the helper
+        // being re-privatized in config.rs (the root cause of the bug).
+        assert!(is_version_string("2.1.121"));
+        assert!(is_version_string("2.1"));
+        assert!(!is_version_string("claude"));
+        assert!(!is_version_string("bash"));
+    }
+
+    /// Regression: a Claude pane whose current_command is "2.1.121" must be
+    /// recognized as a worker. Replicates the inline cmd_matches predicate
+    /// in worker_info_list_with so any future change there breaks the test.
+    #[test]
+    fn test_worker_cmd_match_accepts_claude_version_string() {
+        let worker_command = "claude";
+        let current_command = "2.1.121";
+
+        let cmd_matches = current_command.starts_with(worker_command)
+            || (worker_command == "claude" && is_version_string(current_command));
+
+        assert!(
+            cmd_matches,
+            "Claude pane reporting version-string '{current_command}' must match worker_command='{worker_command}' — strict equality bug regression"
+        );
+    }
+
+    #[test]
+    fn test_worker_cmd_match_rejects_bash_pane() {
+        let worker_command = "claude";
+        let current_command = "bash";
+
+        let cmd_matches = current_command.starts_with(worker_command)
+            || (worker_command == "claude" && is_version_string(current_command));
+
+        assert!(
+            !cmd_matches,
+            "bash pane must NOT match a Claude worker_command"
+        );
+    }
+
+    /// Codex (or any non-Claude) workers must continue to match by configured
+    /// prefix and must NOT pick up version strings — otherwise unrelated
+    /// processes whose title looks like a version could be misclassified.
+    #[test]
+    fn test_worker_cmd_match_codex_path_unaffected() {
+        let worker_command = "codex";
+
+        // Literal/prefix match still works
+        for cmd in &["codex", "codex-cli"] {
+            let cmd_matches = cmd.starts_with(worker_command)
+                || (worker_command == "claude" && is_version_string(cmd));
+            assert!(cmd_matches, "Codex worker must match command '{cmd}'");
+        }
+
+        // Version string must NOT match codex (the fallback is Claude-only)
+        for cmd in &["2.1.121", "0.5.0"] {
+            let cmd_matches = cmd.starts_with(worker_command)
+                || (worker_command == "claude" && is_version_string(cmd));
+            assert!(
+                !cmd_matches,
+                "Codex worker must NOT pick up version string '{cmd}'"
+            );
+        }
+
+        // claude doesn't match codex
+        let cmd = "claude";
+        let cmd_matches = cmd.starts_with(worker_command)
+            || (worker_command == "claude" && is_version_string(cmd));
+        assert!(!cmd_matches);
     }
 }

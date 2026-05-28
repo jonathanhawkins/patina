@@ -27,6 +27,7 @@ use gdvariant::serialize::{from_json, to_json};
 use gdvariant::Variant;
 
 use crate::create_dialog::CreateNodeDialog;
+use crate::filesystem::{EditorFileSystem, FileSystemDock};
 use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
@@ -307,6 +308,15 @@ pub struct EditorState {
     /// Whether the scene has unsaved modifications.
     pub scene_modified: bool,
     pub selected_nodes: Vec<NodeId>,
+    /// pat-didnj: Monotonic per-node version counter for optimistic concurrency
+    /// control on the PATCH endpoint. Missing entries are treated as version 0.
+    pub node_versions: HashMap<NodeId, u64>,
+    /// pat-zzgh5: WebSocket subscribers for `/api/events`. Each entry is a
+    /// channel sender owned by an upgraded connection. `publish_event` clones
+    /// the message into each sender and prunes entries whose receiver has
+    /// hung up. Stored on the state so mutation handlers can broadcast under
+    /// the same lock they already hold.
+    pub event_subscribers: Vec<std::sync::mpsc::Sender<String>>,
     pub clipboard: Vec<ClipboardEntry>,
     pub display_settings: EditorDisplaySettings,
     /// Cache of loaded textures for viewport rendering.
@@ -421,6 +431,10 @@ pub struct EditorState {
     pub active_tab_index: usize,
     /// Node creation dialog with class search and filtering.
     pub create_node_dialog: CreateNodeDialog,
+    /// Filesystem dock backing the asset browser panel. Default points at
+    /// the current working directory; tests replace this with a temp-dir
+    /// fixture before starting the server.
+    pub asset_browser: FileSystemDock,
 }
 
 /// A single scene tab in the editor.
@@ -627,6 +641,8 @@ impl EditorState {
             scene_modified: false,
             texture_cache: TextureCache::default(),
             selected_nodes: Vec::new(),
+            node_versions: HashMap::new(),
+            event_subscribers: Vec::new(),
             clipboard: Vec::new(),
             display_settings: EditorDisplaySettings::default(),
             is_running: false,
@@ -704,6 +720,7 @@ impl EditorState {
                 dlg.add_favorite("Label");
                 dlg
             },
+            asset_browser: FileSystemDock::new(EditorFileSystem::new(".")),
         }
     }
 
@@ -860,21 +877,320 @@ pub struct EditorServerHandle {
     thread: Option<JoinHandle<()>>,
 }
 
+/// pat-vxejb: Per-token rate limiter for the editor HTTP server.
+///
+/// Tracks request counts in a 1-second sliding window keyed by the bearer
+/// token presented by the client (or `"anonymous"` when no Authorization
+/// header is supplied). Requests exceeding `per_second_limit` are rejected
+/// with HTTP 429 and a `Retry-After` header.
+pub struct RateLimiter {
+    buckets: std::sync::Mutex<std::collections::HashMap<String, RateBucket>>,
+    per_second_limit: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RateBucket {
+    window_start_secs: u64,
+    count: u32,
+}
+
+/// Default per-token rate limit (requests / second). Picked to match the bead's
+/// acceptance criteria (">60 requests per second returns HTTP 429").
+pub const DEFAULT_RATE_LIMIT_PER_SECOND: u32 = 60;
+
+const RATE_LIMIT_BODY: &str =
+    r#"{"error":{"code":"rate_limit","message":"rate limit exceeded"}}"#;
+
+/// pat-bof7u: Configurable CORS origin allowlist.
+///
+/// When the allowlist is **empty**, the server runs in legacy open-CORS mode
+/// and emits `Access-Control-Allow-Origin: *` (matches pre-allowlist behavior).
+///
+/// When the allowlist is **non-empty**, requests carrying an `Origin` header
+/// that does **not** match any entry are refused with HTTP 403. Matching
+/// origins receive `Access-Control-Allow-Origin: <that origin>` echoed back
+/// (per the CORS spec — wildcard is never used with a non-empty allowlist).
+#[derive(Default, Clone)]
+pub struct CorsAllowlist {
+    origins: Vec<String>,
+}
+
+impl CorsAllowlist {
+    /// Build an allowlist from any iterable of origin strings. Empty list
+    /// means "open CORS" (legacy `*` behavior).
+    pub fn new<I, S>(origins: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            origins: origins.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.origins.is_empty()
+    }
+
+    fn matches(&self, origin: &str) -> bool {
+        self.origins.iter().any(|o| o == origin)
+    }
+}
+
+// pat-bof7u: per-thread matched CORS origin, set in `handle_connection` after
+// the allowlist check and read by the response helpers when emitting the
+// `Access-Control-Allow-Origin` header. Defaults to "*" so legacy callers see
+// no behavioral change until an allowlist is configured.
+thread_local! {
+    static CORS_ALLOW_ORIGIN: std::cell::RefCell<String> =
+        std::cell::RefCell::new("*".to_string());
+}
+
+fn cors_set_allow_origin(value: &str) {
+    CORS_ALLOW_ORIGIN.with(|c| *c.borrow_mut() = value.to_string());
+}
+
+fn cors_reset_allow_origin() {
+    CORS_ALLOW_ORIGIN.with(|c| *c.borrow_mut() = "*".to_string());
+}
+
+fn cors_current_allow_origin() -> String {
+    CORS_ALLOW_ORIGIN.with(|c| c.borrow().clone())
+}
+
+/// pat-rk3md: Idempotency-key dedupe cache for state-mutating endpoints.
+///
+/// Keyed by `(idempotency_key, method, path)`. When a POST/PUT/PATCH/DELETE
+/// presents an `Idempotency-Key` header, the server caches the full response
+/// bytes plus expiry; a duplicate request within the window replays the
+/// cached response without re-dispatching the handler, so the underlying
+/// mutation is only applied once.
+pub struct IdempotencyCache {
+    entries: std::sync::Mutex<std::collections::HashMap<String, IdempotencyEntry>>,
+    ttl: std::time::Duration,
+}
+
+struct IdempotencyEntry {
+    response: Vec<u8>,
+    expires_at: SystemTime,
+}
+
+/// Default idempotency cache window. Long enough that real client retries
+/// land in it (network blip, redrive) without keeping responses around so
+/// long that operators forget the cache exists.
+pub const DEFAULT_IDEMPOTENCY_TTL_SECS: u64 = 300;
+
+impl Default for IdempotencyCache {
+    fn default() -> Self {
+        Self::new(std::time::Duration::from_secs(DEFAULT_IDEMPOTENCY_TTL_SECS))
+    }
+}
+
+impl IdempotencyCache {
+    pub fn new(ttl: std::time::Duration) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ttl,
+        }
+    }
+
+    fn cache_key(token: &str, method: &str, path: &str) -> String {
+        format!("{token}|{method}|{path}")
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let now = SystemTime::now();
+        if let Some(entry) = entries.get(key) {
+            if entry.expires_at > now {
+                return Some(entry.response.clone());
+            }
+            entries.remove(key);
+        }
+        None
+    }
+
+    fn insert(&self, key: String, response: Vec<u8>) {
+        let expires_at = SystemTime::now() + self.ttl;
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.insert(key, IdempotencyEntry { response, expires_at });
+    }
+}
+
+// pat-rk3md: per-thread response-capture buffer. When `Some`, the `send_*`
+// helpers append their bytes here in addition to writing to the stream so the
+// handler's response can be cached for idempotent replay.
+thread_local! {
+    static RESPONSE_CAPTURE: std::cell::RefCell<Option<Vec<u8>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn capture_start() {
+    RESPONSE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+fn capture_take() -> Option<Vec<u8>> {
+    RESPONSE_CAPTURE.with(|c| c.borrow_mut().take())
+}
+
+fn capture_append(bytes: &[u8]) {
+    RESPONSE_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.extend_from_slice(bytes);
+        }
+    });
+}
+
+/// HTTP 403 response for a request whose Origin header is not in the
+/// configured CORS allowlist.
+fn send_cors_forbidden(stream: &mut TcpStream, origin: &str) {
+    audit_set_status(403);
+    let message = format!("origin not allowed: {}", origin);
+    let body = error_envelope_body("cors_origin", &message);
+    let response = format!(
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body,
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new(DEFAULT_RATE_LIMIT_PER_SECOND)
+    }
+}
+
+impl RateLimiter {
+    pub fn new(per_second_limit: u32) -> Self {
+        Self {
+            buckets: std::sync::Mutex::new(std::collections::HashMap::new()),
+            per_second_limit,
+        }
+    }
+
+    /// Returns `Ok(())` when the request is allowed, or `Err(retry_after)`
+    /// (seconds) when the caller has exceeded its 1-second bucket.
+    fn check(&self, token: &str) -> Result<(), u64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = buckets.entry(token.to_string()).or_insert(RateBucket {
+            window_start_secs: now,
+            count: 0,
+        });
+        if entry.window_start_secs != now {
+            entry.window_start_secs = now;
+            entry.count = 0;
+        }
+        entry.count = entry.count.saturating_add(1);
+        if entry.count > self.per_second_limit {
+            Err(1)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl EditorServerHandle {
-    /// Starts the editor HTTP server on the given port.
+    /// Starts the editor HTTP server on the given port without bearer-token
+    /// authentication. Use [`start_with_auth`] to require a token on `/api/*`.
     pub fn start(port: u16, state: EditorState) -> Self {
+        Self::start_with_auth(port, state, None)
+    }
+
+    /// Starts the editor HTTP server with optional bearer-token auth.
+    ///
+    /// When `auth_token` is `Some`, every request whose path begins with
+    /// `/api/` must present a matching `Authorization: Bearer <token>` header
+    /// or it is rejected with HTTP 401. When `None`, the server runs in
+    /// open-access mode (back-compat).
+    ///
+    /// To source the token from the environment (env var or config file),
+    /// callers can use [`editor_auth_token_from_env`] and pass its result.
+    pub fn start_with_auth(port: u16, state: EditorState, auth_token: Option<String>) -> Self {
+        Self::start_with_auth_and_limiter(port, state, auth_token, RateLimiter::default())
+    }
+
+    /// Starts the editor HTTP server with an explicit rate limiter — useful
+    /// for tests that need a smaller or larger per-token quota than the
+    /// default (60 req/s). The CORS allowlist defaults to "open" (legacy `*`).
+    pub fn start_with_auth_and_limiter(
+        port: u16,
+        state: EditorState,
+        auth_token: Option<String>,
+        rate_limiter: RateLimiter,
+    ) -> Self {
+        Self::start_full(
+            port,
+            state,
+            auth_token,
+            rate_limiter,
+            CorsAllowlist::default(),
+        )
+    }
+
+    /// pat-bof7u: Full constructor that takes every configurable knob,
+    /// including the CORS allowlist. An empty allowlist preserves the legacy
+    /// open-CORS behavior. pat-rk3md: default idempotency cache (5 min TTL).
+    pub fn start_full(
+        port: u16,
+        state: EditorState,
+        auth_token: Option<String>,
+        rate_limiter: RateLimiter,
+        cors_allowlist: CorsAllowlist,
+    ) -> Self {
+        Self::start_with_idempotency(
+            port,
+            state,
+            auth_token,
+            rate_limiter,
+            cors_allowlist,
+            IdempotencyCache::default(),
+        )
+    }
+
+    /// pat-rk3md: Full constructor including the idempotency cache. Tests
+    /// can dial the TTL down to make replay timing easy to assert.
+    pub fn start_with_idempotency(
+        port: u16,
+        state: EditorState,
+        auth_token: Option<String>,
+        rate_limiter: RateLimiter,
+        cors_allowlist: CorsAllowlist,
+        idempotency: IdempotencyCache,
+    ) -> Self {
         let state = Arc::new(Mutex::new(state));
         let viewport_cache = Arc::new(ViewportCache {
             png: Mutex::new(None),
             bmp: Mutex::new(None),
         });
         let running = Arc::new(AtomicBool::new(true));
+        let auth: Arc<Option<String>> = Arc::new(auth_token);
+        let limiter = Arc::new(rate_limiter);
+        let cors = Arc::new(cors_allowlist);
+        let idem = Arc::new(idempotency);
 
         let state_clone = Arc::clone(&state);
         let cache_clone = Arc::clone(&viewport_cache);
         let running_clone = Arc::clone(&running);
+        let auth_clone = Arc::clone(&auth);
+        let limiter_clone = Arc::clone(&limiter);
+        let cors_clone = Arc::clone(&cors);
+        let idem_clone = Arc::clone(&idem);
         let thread = thread::spawn(move || {
-            run_server(state_clone, cache_clone, running_clone, port);
+            run_server(
+                state_clone,
+                cache_clone,
+                auth_clone,
+                limiter_clone,
+                cors_clone,
+                idem_clone,
+                running_clone,
+                port,
+            );
         });
 
         Self {
@@ -917,6 +1233,10 @@ impl EditorServerHandle {
 fn run_server(
     state: Arc<Mutex<EditorState>>,
     viewport_cache: Arc<ViewportCache>,
+    auth_token: Arc<Option<String>>,
+    rate_limiter: Arc<RateLimiter>,
+    cors_allowlist: Arc<CorsAllowlist>,
+    idempotency: Arc<IdempotencyCache>,
     running: Arc<AtomicBool>,
     port: u16,
 ) {
@@ -940,9 +1260,21 @@ fn run_server(
                 Ok((stream, _)) => {
                     let state_clone = Arc::clone(&state);
                     let cache_clone = Arc::clone(&viewport_cache);
+                    let auth_clone = Arc::clone(&auth_token);
+                    let limiter_clone = Arc::clone(&rate_limiter);
+                    let cors_clone = Arc::clone(&cors_allowlist);
+                    let idem_clone = Arc::clone(&idempotency);
                     thread::spawn(move || {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            handle_connection(&state_clone, &cache_clone, stream);
+                            handle_connection(
+                                &state_clone,
+                                &cache_clone,
+                                &auth_clone,
+                                &limiter_clone,
+                                &cors_clone,
+                                &idem_clone,
+                                stream,
+                            );
                         }));
                     });
                 }
@@ -969,6 +1301,50 @@ struct HttpRequest {
     path: String,
     query: String,
     body: String,
+    /// Bearer token extracted from the `Authorization: Bearer <token>` header,
+    /// or `None` if the header is missing/malformed.
+    auth_token: Option<String>,
+    /// pat-bof7u: raw `Origin` header value (without trailing whitespace).
+    /// `None` when the request did not include an Origin (typically same-origin
+    /// or non-browser callers).
+    origin: Option<String>,
+    /// pat-rk3md: `Idempotency-Key` header value, if any. Used to deduplicate
+    /// state-mutating requests within the cache window.
+    idempotency_key: Option<String>,
+    /// pat-zzgh5: `Sec-WebSocket-Key` header value, parsed for the
+    /// `/api/events` WebSocket upgrade. `None` for non-WS requests.
+    sec_websocket_key: Option<String>,
+    /// pat-zzgh5: true when the request carries an `Upgrade: websocket`
+    /// header (case-insensitive). Used to route `/api/events` into the
+    /// WebSocket handler instead of the normal dispatch table.
+    upgrade_websocket: bool,
+}
+
+/// Reads the editor server's expected bearer token from the environment.
+///
+/// Resolution order:
+///   1. `PATINA_EDITOR_TOKEN` — token value inline.
+///   2. `PATINA_EDITOR_TOKEN_FILE` — path to a file whose trimmed contents
+///      are the token (config-file form).
+///
+/// Returns `None` if neither source yields a non-empty token, in which case
+/// the server runs without authentication (back-compat for existing callers).
+pub fn editor_auth_token_from_env() -> Option<String> {
+    if let Ok(tok) = std::env::var("PATINA_EDITOR_TOKEN") {
+        let trimmed = tok.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(path) = std::env::var("PATINA_EDITOR_TOKEN_FILE") {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
@@ -1038,6 +1414,75 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         })
         .unwrap_or(0);
 
+    // Parse Authorization: Bearer <token> header (case-insensitive name,
+    // case-sensitive scheme/token per RFC 6750).
+    let auth_token: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        let value = value.trim();
+        let mut parts = value.splitn(2, char::is_whitespace);
+        let scheme = parts.next()?;
+        let token = parts.next()?.trim();
+        if scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty() {
+            Some(token.to_string())
+        } else {
+            None
+        }
+    });
+
+    // pat-bof7u: parse `Origin` header so the CORS allowlist can match it.
+    let origin: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("origin") {
+            return None;
+        }
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    // pat-rk3md: parse `Idempotency-Key` header for state-mutating dedupe.
+    let idempotency_key: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("idempotency-key") {
+            return None;
+        }
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    // pat-zzgh5: parse `Sec-WebSocket-Key` for the /api/events upgrade.
+    let sec_websocket_key: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("sec-websocket-key") {
+            return None;
+        }
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    // pat-zzgh5: detect `Upgrade: websocket` header (case-insensitive value).
+    let upgrade_websocket: bool = header_str.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.trim().eq_ignore_ascii_case("upgrade")
+            && value.trim().eq_ignore_ascii_case("websocket")
+    });
+
     // Read remaining body bytes if needed.
     let body_start = header_end + 4; // skip \r\n\r\n
     while raw.len() < body_start + content_length {
@@ -1061,6 +1506,11 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         path,
         query,
         body,
+        auth_token,
+        origin,
+        idempotency_key,
+        sec_websocket_key,
+        upgrade_websocket,
     })
 }
 
@@ -1076,23 +1526,137 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 fn handle_connection(
     state: &Arc<Mutex<EditorState>>,
     viewport_cache: &Arc<ViewportCache>,
+    auth_token: &Arc<Option<String>>,
+    rate_limiter: &Arc<RateLimiter>,
+    cors_allowlist: &Arc<CorsAllowlist>,
+    idempotency: &Arc<IdempotencyCache>,
     mut stream: TcpStream,
 ) {
+    // pat-kts88: reset the per-thread audit slot so each request starts fresh.
+    audit_reset_status();
+    // pat-bof7u: reset CORS allow-origin so this request starts at the
+    // legacy default and only opts into a specific value after the allowlist
+    // matches a real Origin header.
+    cors_reset_allow_origin();
     let req = match parse_request(&mut stream) {
         Some(r) => r,
         None => {
             // Always send something so the browser doesn't get ERR_EMPTY_RESPONSE.
-            let _ = stream.write_all(
-                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+            // pat-f23vr: emit the standardized error envelope so clients can
+            // parse a uniform shape even for malformed requests.
+            send_error_coded(&mut stream, 400, "bad_request", "malformed HTTP request");
             return;
         }
     };
+
+    // Bearer-token gate: when the server was started with `Some(token)`,
+    // every `/api/*` request must present a matching Authorization header.
+    // CORS preflight (OPTIONS) is exempt because browsers cannot attach
+    // auth headers to preflights.
+    // pat-bof7u: CORS origin allowlist. When a non-empty allowlist is
+    // configured, a request that carries an `Origin` header outside the list
+    // is refused with HTTP 403 before any handler runs. Matched origins are
+    // echoed back via the per-thread CORS slot so response helpers emit
+    // `Access-Control-Allow-Origin: <origin>` instead of `*`.
+    if !cors_allowlist.is_open() {
+        if let Some(origin) = req.origin.as_deref() {
+            if !cors_allowlist.matches(origin) {
+                send_cors_forbidden(&mut stream, origin);
+                audit_log_request(&req, auth_token.as_ref().as_deref());
+                return;
+            }
+            cors_set_allow_origin(origin);
+        }
+    } else if let Some(origin) = req.origin.as_deref() {
+        // Open mode echoes the origin if one is present; keeps CORS working
+        // for browsers while preserving the wildcard fallback for clients
+        // that don't send Origin.
+        cors_set_allow_origin(origin);
+    }
+
+    if req.method != "OPTIONS" && req.path.starts_with("/api/") {
+        if let Some(expected) = auth_token.as_ref().as_ref() {
+            let provided = req.auth_token.as_deref();
+            if provided != Some(expected.as_str()) {
+                // pat-f23vr: emit the standardized error envelope so clients
+                // can rely on a uniform error shape for 401.
+                let body = error_envelope_body(
+                    "unauthorized",
+                    "missing or invalid Bearer token",
+                );
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"patina-editor\"\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{body}",
+                    len = body.len(),
+                    origin = cors_current_allow_origin(),
+                );
+                let _ = stream.write_all(response.as_bytes());
+                // pat-kts88: still record the auth-rejected mutation so
+                // operators see attempted writes from invalid tokens.
+                audit_set_status(401);
+                audit_log_request(&req, auth_token.as_ref().as_deref());
+                return;
+            }
+        }
+
+        // pat-vxejb: per-token rate limit on /api/*. Keyed by the bearer
+        // token the client presented (or "anonymous" when no Authorization
+        // header is set), so a noisy token can't starve a quiet one.
+        let client_token = req.auth_token.as_deref().unwrap_or("anonymous");
+        if let Err(retry_after) = rate_limiter.check(client_token) {
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\n\
+                 Retry-After: {retry_after}\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {len}\r\n\
+                 Access-Control-Allow-Origin: {origin}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                len = RATE_LIMIT_BODY.len(),
+                body = RATE_LIMIT_BODY,
+                origin = cors_current_allow_origin(),
+            );
+            let _ = stream.write_all(response.as_bytes());
+            audit_set_status(429);
+            audit_log_request(&req, auth_token.as_ref().as_deref());
+            return;
+        }
+    }
+
+    // pat-rk3md: Idempotency-Key dedupe. For state-mutating routes that carry
+    // an Idempotency-Key header, look up the cached response by
+    // (key, method, path). On hit we replay the bytes verbatim and skip
+    // dispatch entirely so the underlying mutation runs exactly once. On
+    // miss we arm the capture buffer so the response we *will* send gets
+    // stored after dispatch completes.
+    let idem_cache_key: Option<String> = if audit_is_mutating(&req.method) {
+        req.idempotency_key.as_deref().map(|key| {
+            IdempotencyCache::cache_key(key, &req.method, &req.path)
+        })
+    } else {
+        None
+    };
+    if let Some(key) = idem_cache_key.as_deref() {
+        if let Some(cached) = idempotency.get(key) {
+            let _ = stream.write_all(&cached);
+            audit_set_status(200);
+            audit_log_request(&req, auth_token.as_ref().as_deref());
+            return;
+        }
+        capture_start();
+    }
+
+    // pat-zzgh5: WebSocket upgrade at /api/events. The handler consumes the
+    // TcpStream and blocks until the client disconnects, so route it before
+    // the normal dispatch table (which expects `&mut stream`).
+    if req.method == "GET" && req.path == "/api/events" && req.upgrade_websocket {
+        api_events_websocket(state, &req, stream);
+        return;
+    }
 
     match (req.method.as_str(), req.path.as_str()) {
         ("OPTIONS", _) => serve_cors_preflight(&mut stream),
         ("GET", "/favicon.ico") => serve_404(&mut stream),
         ("GET", "/editor") => serve_editor_html(&mut stream),
+        ("GET", "/api/capabilities") => api_get_capabilities(&mut stream),
         ("GET", "/api/scene") => api_get_scene(state, &mut stream),
         ("GET", "/api/node/signals") => api_get_node_signals(state, &req.query, &mut stream),
         ("GET", "/api/node/script") => api_get_node_script(state, &req.query, &mut stream),
@@ -1123,6 +1687,7 @@ fn handle_connection(
         }
         ("POST", "/api/node/reorder") => api_reorder_node(state, &req.body, &mut stream),
         ("POST", "/api/property/set") => api_set_property(state, &req.body, &mut stream),
+        ("PATCH", "/api/node/patch") => api_patch_node(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
         ("POST", "/api/redo") => api_redo(state, &mut stream),
         ("POST", "/api/scene/save") => api_save_scene(state, &req.body, &mut stream),
@@ -1138,7 +1703,7 @@ fn handle_connection(
         ("POST", "/api/viewport/pan") => api_set_pan(state, &req.body, &mut stream),
         ("GET", "/api/logs") => api_get_logs(state, &mut stream),
         ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
-        ("GET", "/api/filesystem") => api_get_filesystem(&mut stream),
+        ("GET", "/api/filesystem") => api_get_filesystem(&req.query, &mut stream),
         ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
         ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
         ("POST", "/api/script/save") => api_save_script(&req.body, &mut stream),
@@ -1308,42 +1873,201 @@ fn handle_connection(
         ("POST", "/api/vcs/discard") => api_vcs_discard(&req.body, &mut stream),
         _ => serve_404(&mut stream),
     }
+
+    // pat-rk3md: persist the captured response into the idempotency cache so
+    // a duplicate POST/PUT/PATCH/DELETE with the same Idempotency-Key within
+    // the TTL replays this exact response without re-running the handler.
+    if let Some(key) = idem_cache_key {
+        if let Some(buf) = capture_take() {
+            if !buf.is_empty() {
+                idempotency.insert(key, buf);
+            }
+        }
+    }
+
+    // pat-kts88: append-only audit log for state-mutating routes.
+    audit_log_request(&req, auth_token.as_ref().as_deref());
 }
 
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
 
+// pat-kts88: per-connection response status, recorded by `send_*` helpers and
+// read by the audit-log writer after dispatch. A thread-local fits because
+// each connection is handled on its own thread (`thread::spawn` in
+// `run_server`); the status is reset at the start of each request.
+thread_local! {
+    static LAST_RESPONSE_STATUS: std::cell::Cell<u16> = std::cell::Cell::new(0);
+}
+
+fn audit_set_status(status: u16) {
+    LAST_RESPONSE_STATUS.with(|c| c.set(status));
+}
+
+fn audit_reset_status() {
+    LAST_RESPONSE_STATUS.with(|c| c.set(0));
+}
+
+fn audit_current_status() -> u16 {
+    LAST_RESPONSE_STATUS.with(|c| c.get())
+}
+
 fn send_json(stream: &mut TcpStream, json: &str) {
+    audit_set_status(200);
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        json.len(),
-        json
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{json}",
+        len = json.len(),
+        origin = cors_current_allow_origin(),
     );
+    capture_append(response.as_bytes());
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn send_error(stream: &mut TcpStream, status: u16, message: &str) {
-    let json = format!(r#"{{"error":"{}"}}"#, message.replace('"', "\\\""));
-    let status_text = match status {
+/// pat-f23vr: JSON-escape a string so it can be inlined inside a JSON literal.
+fn escape_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// pat-f23vr: Default machine-readable error code for an HTTP status.
+/// Documented in `prd/editor_error_codes.md`.
+fn default_error_code(status: u16) -> &'static str {
+    match status {
+        400 => "bad_request",
+        401 => "unauthorized",
+        403 => "forbidden",
+        404 => "not_found",
+        409 => "conflict",
+        413 => "payload_too_large",
+        415 => "unsupported_media_type",
+        422 => "unprocessable_entity",
+        429 => "rate_limit",
+        500 => "internal",
+        501 => "not_implemented",
+        503 => "unavailable",
+        _ => "error",
+    }
+}
+
+/// pat-f23vr: Build the standardized error envelope JSON body.
+fn error_envelope_body(code: &str, message: &str) -> String {
+    format!(
+        r#"{{"error":{{"code":"{}","message":"{}"}}}}"#,
+        escape_json_str(code),
+        escape_json_str(message),
+    )
+}
+
+fn status_text(status: u16) -> &'static str {
+    match status {
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
         _ => "Error",
-    };
+    }
+}
+
+fn send_error(stream: &mut TcpStream, status: u16, message: &str) {
+    send_error_coded(stream, status, default_error_code(status), message);
+}
+
+/// pat-f23vr: send a non-2xx response with an explicit machine-readable code.
+/// Use this when the default code from `default_error_code(status)` is too
+/// coarse (e.g. 403 sandbox violation, 429 rate limit, 401 missing bearer).
+fn send_error_coded(stream: &mut TcpStream, status: u16, code: &str, message: &str) {
+    audit_set_status(status);
+    let json = error_envelope_body(code, message);
     let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        json.len(),
-        json
+        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{json}",
+        status_text = status_text(status),
+        len = json.len(),
+        origin = cors_current_allow_origin(),
     );
+    capture_append(response.as_bytes());
     let _ = stream.write_all(response.as_bytes());
+}
+
+/// pat-aivim: Reject paths containing `..` or pointing outside the project root.
+///
+/// Strips `res://` prefix. Returns the resolved absolute path on success.
+/// On failure returns an error string intended for an HTTP 403 sandbox violation.
+fn sandbox_path(input: &str) -> Result<std::path::PathBuf, &'static str> {
+    let raw = input.strip_prefix("res://").unwrap_or(input);
+    if raw.is_empty() {
+        return Err("empty path");
+    }
+    let raw_path = std::path::Path::new(raw);
+    if raw_path.is_absolute() {
+        return Err("absolute path outside project root");
+    }
+    // Reject any `..` segment without touching the filesystem.
+    if raw.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err("path contains traversal segment");
+    }
+    let cwd = std::env::current_dir().map_err(|_| "cwd unavailable")?;
+    let canon_root = cwd.canonicalize().map_err(|_| "cwd not canonicalizable")?;
+    let joined = canon_root.join(raw);
+    let canon = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // Target may not exist yet (mkdir, rename target). Canonicalize
+            // the longest existing prefix and reattach the missing tail.
+            let mut probe = joined.clone();
+            let mut tail: Vec<std::ffi::OsString> = Vec::new();
+            while !probe.exists() {
+                match probe.file_name().map(|n| n.to_owned()) {
+                    Some(name) => tail.push(name),
+                    None => return Err("path resolution failed"),
+                }
+                if !probe.pop() {
+                    return Err("path resolution failed");
+                }
+            }
+            let mut canon = probe.canonicalize().map_err(|_| "canonicalize failed")?;
+            for name in tail.into_iter().rev() {
+                canon.push(name);
+            }
+            canon
+        }
+    };
+    if !canon.starts_with(&canon_root) {
+        return Err("path outside project root");
+    }
+    Ok(canon)
+}
+
+/// pat-aivim: HTTP 403 response with a machine-readable error code.
+fn send_sandbox_violation(stream: &mut TcpStream, message: &str) {
+    send_error_coded(stream, 403, "path_sandbox", message);
 }
 
 fn send_binary(stream: &mut TcpStream, content_type: &str, data: &[u8]) {
     use std::io::BufWriter;
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-        data.len()
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        len = data.len(),
+        origin = cors_current_allow_origin(),
     );
     let mut writer = BufWriter::new(stream);
     let _ = writer.write_all(header.as_bytes());
@@ -1352,23 +2076,332 @@ fn send_binary(stream: &mut TcpStream, content_type: &str, data: &[u8]) {
 }
 
 fn serve_cors_preflight(stream: &mut TcpStream) {
-    let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
+    let response = format!(
+        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nConnection: close\r\n\r\n",
+        origin = cors_current_allow_origin(),
+    );
     let _ = stream.write_all(response.as_bytes());
 }
 
 fn serve_editor_html(stream: &mut TcpStream) {
     let html = crate::editor_ui::EDITOR_HTML;
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        html.len(),
-        html
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{html}",
+        len = html.len(),
+        origin = cors_current_allow_origin(),
     );
     let _ = stream.write_all(response.as_bytes());
 }
 
 fn serve_404(stream: &mut TcpStream) {
-    let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
-    let _ = stream.write_all(response.as_bytes());
+    // pat-f23vr: emit the standardized error envelope so every non-2xx
+    // response has the same shape, including catch-all route misses.
+    send_error_coded(stream, 404, "not_found", "route not found");
+}
+
+// ---------------------------------------------------------------------------
+// pat-zzgh5: WebSocket helpers for `/api/events` mutation broadcast
+// ---------------------------------------------------------------------------
+//
+// We hand-roll a minimal slice of RFC 6455: the SHA-1+base64 accept hash for
+// the upgrade handshake, plus a server→client text-frame encoder. The server
+// never receives frames from `/api/events` clients (the test does not send
+// any), so we omit the masked-frame decoder. Keeping the implementation
+// inline avoids adding a `sha1` or `base64` dependency for this single use
+// site.
+
+const WS_MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// Computes the SHA-1 digest of `data` per FIPS 180-4. Verified against the
+/// RFC 3174 test vector: SHA1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d.
+fn sha1_digest(data: &[u8]) -> [u8; 20] {
+    let mut h0: u32 = 0x6745_2301;
+    let mut h1: u32 = 0xEFCD_AB89;
+    let mut h2: u32 = 0x98BA_DCFE;
+    let mut h3: u32 = 0x1032_5476;
+    let mut h4: u32 = 0xC3D2_E1F0;
+
+    let bit_len: u64 = (data.len() as u64).wrapping_mul(8);
+    let mut msg: Vec<u8> = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        for (i, &word) in w.iter().enumerate() {
+            let (f, k) = if i < 20 {
+                ((b & c) | ((!b) & d), 0x5A82_7999u32)
+            } else if i < 40 {
+                (b ^ c ^ d, 0x6ED9_EBA1)
+            } else if i < 60 {
+                ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC)
+            } else {
+                (b ^ c ^ d, 0xCA62_C1D6)
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    out[0..4].copy_from_slice(&h0.to_be_bytes());
+    out[4..8].copy_from_slice(&h1.to_be_bytes());
+    out[8..12].copy_from_slice(&h2.to_be_bytes());
+    out[12..16].copy_from_slice(&h3.to_be_bytes());
+    out[16..20].copy_from_slice(&h4.to_be_bytes());
+    out
+}
+
+/// Standard base64 encoder (RFC 4648, with `=` padding). Output uses the
+/// `A-Z a-z 0-9 + /` alphabet expected by the WebSocket handshake.
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Computes the `Sec-WebSocket-Accept` value for a given `Sec-WebSocket-Key`
+/// per RFC 6455 §1.3: `base64(SHA1(key || WS_MAGIC))`.
+fn ws_compute_accept(key: &str) -> String {
+    let mut combined = String::with_capacity(key.len() + WS_MAGIC.len());
+    combined.push_str(key);
+    combined.push_str(WS_MAGIC);
+    let hash = sha1_digest(combined.as_bytes());
+    base64_encode(&hash)
+}
+
+/// Encodes a single server→client text frame: FIN=1, RSV=0, opcode=1, MASK=0.
+/// Length is encoded in 7 / 7+16 / 7+64 bits per the spec.
+fn encode_text_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 10);
+    frame.push(0x81); // FIN | opcode=text
+    let n = payload.len();
+    if n <= 125 {
+        frame.push(n as u8);
+    } else if n <= 65535 {
+        frame.push(126);
+        frame.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(n as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Broadcasts a mutation event JSON string to every registered subscriber.
+/// Drops senders whose receiver has hung up (the connection thread exited).
+fn publish_event(state: &mut EditorState, msg: String) {
+    state
+        .event_subscribers
+        .retain(|tx| tx.send(msg.clone()).is_ok());
+}
+
+/// `GET /api/events` with `Upgrade: websocket` — completes the RFC 6455
+/// handshake, registers a subscriber channel, and writes each broadcast
+/// event back to the client as an unfragmented text frame. The function
+/// blocks the connection thread on `recv()` until the receiver hangs up.
+fn api_events_websocket(
+    state: &Arc<Mutex<EditorState>>,
+    req: &HttpRequest,
+    mut stream: TcpStream,
+) {
+    let key = match req.sec_websocket_key.as_deref() {
+        Some(k) => k,
+        None => {
+            send_error(&mut stream, 400, "missing Sec-WebSocket-Key");
+            return;
+        }
+    };
+    let accept = ws_compute_accept(key);
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {accept}\r\n\r\n"
+    );
+    if stream.write_all(response.as_bytes()).is_err() {
+        return;
+    }
+    let _ = stream.flush();
+
+    // Register a subscriber under the shared lock, then release the lock
+    // before sitting in `recv()` so mutation handlers can keep publishing.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    {
+        let mut state = state.lock().unwrap();
+        state.event_subscribers.push(tx);
+    }
+
+    while let Ok(msg) = rx.recv() {
+        let frame = encode_text_frame(msg.as_bytes());
+        if stream.write_all(&frame).is_err() {
+            break;
+        }
+        if stream.flush().is_err() {
+            break;
+        }
+    }
+    // Our sender (held by the state via `event_subscribers`) gets dropped
+    // lazily by `publish_event` on its next failed send. We don't need to
+    // scan and prune it here.
+}
+
+// ---------------------------------------------------------------------------
+// pat-kts88: Append-only audit log for state-mutating REST calls
+// ---------------------------------------------------------------------------
+
+/// Returns true for HTTP methods that mutate server state. GET, HEAD, OPTIONS
+/// are read-only / metadata and are intentionally excluded.
+fn audit_is_mutating(method: &str) -> bool {
+    matches!(method, "POST" | "PUT" | "PATCH" | "DELETE")
+}
+
+/// Stable, non-secret 64-bit identifier derived from the configured auth
+/// token. The raw token never lands in the log; without auth we emit a
+/// dedicated `anonymous` marker so operators can still see attribution.
+fn audit_token_id(token: Option<&str>) -> String {
+    match token {
+        Some(t) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            t.hash(&mut h);
+            format!("tok-{:016x}", h.finish())
+        }
+        None => "anonymous".to_string(),
+    }
+}
+
+/// Hash of the request body. We don't store the body itself (it can contain
+/// secrets or user content); a fingerprint is enough to correlate the audit
+/// entry with the wire payload during incident review.
+fn audit_body_hash(body: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// ISO-8601-ish UTC timestamp with microsecond precision: `YYYY-MM-DDTHH:MM:SS.uuuuuuZ`.
+fn audit_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let micros = now.subsec_micros();
+    // Convert to civil time without pulling in chrono — days since epoch
+    // arithmetic is enough for an audit log.
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+    let (year, month, day) = days_to_ymd(days as i64);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z"
+    )
+}
+
+/// Convert days since 1970-01-01 to (year, month, day) in the proleptic
+/// Gregorian calendar. Algorithm from Howard Hinnant's date library.
+fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d)
+}
+
+/// pat-kts88: returns the configured audit-log path (`.editor/audit.log`)
+/// relative to the project root (cwd). Made `pub(crate)` so the integration
+/// test can read the same canonical location the server writes to.
+pub fn audit_log_path() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    cwd.join(".editor").join("audit.log")
+}
+
+/// Append one JSON-Lines record for a state-mutating call. Read-only routes
+/// (GET, HEAD, OPTIONS) are skipped so the log can't fill up under load.
+fn audit_log_request(req: &HttpRequest, server_token: Option<&str>) {
+    if !audit_is_mutating(&req.method) {
+        return;
+    }
+    let status = audit_current_status();
+    let entry = format!(
+        r#"{{"timestamp":"{ts}","token_id":"{tok}","method":"{m}","path":"{p}","status":{s},"body_hash":"{h}"}}{nl}"#,
+        ts = audit_timestamp(),
+        tok = audit_token_id(server_token),
+        m = req.method,
+        p = req.path.replace('"', "\\\""),
+        s = status,
+        h = audit_body_hash(&req.body),
+        nl = "\n",
+    );
+    let path = audit_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(entry.as_bytes());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2279,7 +3312,117 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.scene_modified = true;
     state.add_log("info", format!("Changed property '{}'", prop_name));
 
+    // pat-zzgh5: broadcast a mutation event to every `/api/events` subscriber.
+    let event = format!(
+        r#"{{"type":"property_changed","node_id":{node},"property":"{prop}"}}"#,
+        node = node_raw,
+        prop = prop_name.replace('"', "\\\""),
+    );
+    publish_event(&mut state, event);
+
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// pat-didnj: `PATCH /api/node/patch` — optimistic concurrency property update.
+///
+/// Body: `{"node_id": <u64>, "version": <u64>, "property": "<name>", "value": <variant>}`.
+/// Returns `409 Conflict` if the supplied `version` does not match the node's
+/// current monotonic version (a stale version indicates a concurrent write
+/// landed first). On success bumps the version and returns
+/// `{"ok":true,"version":<new>}`.
+fn api_patch_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let supplied_version = match parsed.get("version").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing version");
+            return;
+        }
+    };
+    let property = match parsed.get("property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing property");
+            return;
+        }
+    };
+    let value_json = match parsed.get("value") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing value");
+            return;
+        }
+    };
+    let new_value = match from_json(value_json) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid variant value");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let current_version = state.node_versions.get(&node_id).copied().unwrap_or(0);
+    if supplied_version != current_version {
+        send_error(
+            stream,
+            409,
+            &format!(
+                "stale version: supplied {supplied_version} != current {current_version}"
+            ),
+        );
+        return;
+    }
+
+    let prop_name = property.clone();
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property,
+        new_value,
+        old_value: Variant::Nil,
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    let new_version = current_version + 1;
+    state.node_versions.insert(node_id, new_version);
+    state.add_log(
+        "info",
+        format!("PATCH property '{prop_name}' v{current_version}->v{new_version}"),
+    );
+
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"version":{new_version}}}"#),
+    );
 }
 
 /// `POST /api/undo` — undoes the last command.
@@ -2355,6 +3498,52 @@ fn api_get_viewport_png(cache: &Arc<ViewportCache>, stream: &mut TcpStream) {
     }
 }
 
+/// Crash-safe file write: writes `contents` to a sibling temp file,
+/// fsyncs the data, then renames it over `path`. POSIX `rename(2)` is
+/// atomic within a single filesystem, so a SIGKILL injected at any point
+/// leaves either the previous file or the new file on disk — never a
+/// partial or truncated target.
+pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file name")
+        })?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        ".{file_name}.atomic.{}.{unique}.tmp",
+        std::process::id()
+    ));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, contents)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
 /// `POST /api/scene/save` — saves the scene tree to a .tscn file.
 fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
@@ -2385,7 +3574,7 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     let save_root = scene_root.unwrap_or(root_id);
     let tscn = TscnSaver::save_tree(&state.scene_tree, save_root);
 
-    if let Err(e) = std::fs::write(&path, &tscn) {
+    if let Err(e) = atomic_write(std::path::Path::new(&path), tscn.as_bytes()) {
         send_error(stream, 500, &format!("failed to write: {e}"));
         return;
     }
@@ -2890,8 +4079,97 @@ fn scan_directory(
     dirs
 }
 
+// ---------------------------------------------------------------------------
+// pat-r5udv: GET /api/capabilities — machine-readable route schema.
+// ---------------------------------------------------------------------------
+
+/// Static route schema. Each entry is (method, path, params_json,
+/// body_schema_json, response_shape_json). Values are pre-serialized JSON
+/// fragments so the endpoint can stitch them together without pulling in a
+/// schema library, and so the on-wire output is byte-deterministic.
+const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
+    // (method, path, params, body_schema, response_shape)
+    ("GET", "/api/capabilities", "[]", "null", "{\"type\":\"object\",\"properties\":{\"version\":\"number\",\"routes\":\"array\"}}"),
+    ("GET", "/api/scene", "[]", "null", "{\"type\":\"object\",\"properties\":{\"nodes\":\"array\"}}"),
+    ("GET", "/api/selected", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/selected_nodes", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/scene/info", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/viewport", "[]", "null", "{\"type\":\"binary\",\"content_type\":\"image/bmp\"}"),
+    ("GET", "/api/viewport/png", "[]", "null", "{\"type\":\"binary\",\"content_type\":\"image/png\"}"),
+    ("GET", "/api/filesystem", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"root\":\"string\",\"files\":\"array\"}}"),
+    ("GET", "/api/filesystem/tree", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"tree\":\"array\"}}"),
+    ("GET", "/api/filesystem/dir", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"files\":\"array\"}}"),
+    ("GET", "/api/preview/file", "[\"path\"]", "null", "{\"type\":\"object_or_binary\"}"),
+    ("GET", "/api/script", "[\"path\"]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/commands", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/animations", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/animation", "[\"name\"]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/runtime/status", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/runtime/input/state", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/settings", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/plugins", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/keybindings", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/editor/mode", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/scene/tabs", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/viewport/mode", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/output", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/project_settings", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/vcs/status", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/vcs/diff", "[\"path?\"]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/vcs/log", "[\"limit?\"]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/add", "[]", "{\"parent_id\":\"number\",\"name\":\"string\",\"class\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/delete", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/select", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/rename", "[]", "{\"node_id\":\"number\",\"new_name\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/reparent", "[]", "{\"node_id\":\"number\",\"new_parent_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/duplicate", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/property/set", "[]", "{\"node_id\":\"number\",\"name\":\"string\",\"value\":\"any\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/undo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
+    ("POST", "/api/redo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
+    ("POST", "/api/scene/save", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/scene/load", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/filesystem/rename", "[]", "{\"old_path\":\"string\",\"new_name\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/filesystem/delete", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/filesystem/mkdir", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/script/save", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/play", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/stop", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/pause", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/step", "[]", "null", "{\"type\":\"object\"}"),
+];
+
+/// `GET /api/capabilities` — returns a deterministic JSON document listing
+/// every registered route with its method, path, params, request body schema,
+/// and response shape. Entries are emitted in sorted (method, path) order so
+/// the output is byte-stable across runs.
+fn api_get_capabilities(stream: &mut TcpStream) {
+    let mut entries: Vec<(&str, &str, &str, &str, &str)> = CAPABILITIES.to_vec();
+    entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    let routes: Vec<String> = entries
+        .iter()
+        .map(|(method, path, params, body, response)| {
+            format!(
+                r#"{{"method":"{method}","path":"{path}","params":{params},"body_schema":{body},"response_shape":{response}}}"#,
+            )
+        })
+        .collect();
+    let json = format!(
+        r#"{{"version":1,"routes":[{}]}}"#,
+        routes.join(",")
+    );
+    send_json(stream, &json);
+}
+
 /// `GET /api/filesystem` -- returns project files (.tscn, .gd, .tres) as a tree.
-fn api_get_filesystem(stream: &mut TcpStream) {
+fn api_get_filesystem(query: &str, stream: &mut TcpStream) {
+    // pat-aivim: when a `path` query is supplied, sandbox-validate it. Empty
+    // or absent `path` keeps the legacy behavior of scanning from cwd.
+    if let Some(raw) = query_param(query, "path") {
+        if let Err(why) = sandbox_path(raw) {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let entries = scan_directory(&cwd, "", 0, 3);
     let entries_json: Vec<String> = entries.iter().map(|e| e.to_json()).collect();
@@ -2924,7 +4202,7 @@ fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
             decoded.replace("res://", "")
         }
         None => {
-            send_json(stream, r#"{"error":"missing path parameter"}"#);
+            send_error(stream, 400, "missing path parameter");
             return;
         }
     };
@@ -2933,7 +4211,7 @@ fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
     let full_path = cwd.join(&path);
 
     if !full_path.exists() {
-        send_json(stream, r#"{"error":"file not found"}"#);
+        send_error(stream, 404, "file not found");
         return;
     }
 
@@ -3036,17 +4314,17 @@ fn serve_binary_file(stream: &mut TcpStream, path: &std::path::Path, content_typ
     match std::fs::read(path) {
         Ok(data) => {
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n",
-                content_type,
-                data.len()
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n",
+                len = data.len(),
+                origin = cors_current_allow_origin(),
             );
             let _ = stream.write_all(header.as_bytes());
             let _ = stream.write_all(&data);
         }
         Err(_) => {
-            let _ = stream.write_all(
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+            // pat-f23vr: emit the standardized error envelope for thumbnail
+            // misses so every non-2xx response carries the same shape.
+            send_error_coded(stream, 404, "not_found", "thumbnail not found");
         }
     }
 }
@@ -7162,16 +8440,25 @@ fn api_filesystem_rename(body: &str, stream: &mut TcpStream) {
             return;
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let resolved = if let Some(stripped) = old_path.strip_prefix("res://") {
-        cwd.join(stripped)
-    } else {
-        std::path::PathBuf::from(&old_path)
+    // pat-aivim: sandbox the existing path AND reject any `new_name` that
+    // contains path separators or traversal segments — otherwise a caller
+    // could rename a sandboxed file into an arbitrary location.
+    let resolved = match sandbox_path(&old_path) {
+        Ok(p) => p,
+        Err(why) => {
+            send_sandbox_violation(stream, why);
+            return;
+        }
     };
+    if new_name.contains('/') || new_name.contains('\\') || new_name.split('/').any(|s| s == "..") {
+        send_sandbox_violation(stream, "new_name contains path separator or traversal");
+        return;
+    }
     if !resolved.exists() {
         send_error(stream, 404, "file not found");
         return;
     }
+    let cwd = std::env::current_dir().unwrap_or_default();
     let new_path = resolved.parent().unwrap_or(&cwd).join(&new_name);
     match std::fs::rename(&resolved, &new_path) {
         Ok(_) => send_json(stream, r#"{"ok":true}"#),
@@ -7195,11 +8482,13 @@ fn api_filesystem_delete(body: &str, stream: &mut TcpStream) {
             return;
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
-        cwd.join(stripped)
-    } else {
-        std::path::PathBuf::from(&path)
+    // pat-aivim: sandbox the target to the project root.
+    let resolved = match sandbox_path(&path) {
+        Ok(p) => p,
+        Err(why) => {
+            send_sandbox_violation(stream, why);
+            return;
+        }
     };
     if !resolved.exists() {
         send_error(stream, 404, "file not found");
@@ -7232,11 +8521,13 @@ fn api_filesystem_mkdir(body: &str, stream: &mut TcpStream) {
             return;
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let resolved = if let Some(stripped) = path.strip_prefix("res://") {
-        cwd.join(stripped)
-    } else {
-        std::path::PathBuf::from(&path)
+    // pat-aivim: sandbox the target to the project root.
+    let resolved = match sandbox_path(&path) {
+        Ok(p) => p,
+        Err(why) => {
+            send_sandbox_violation(stream, why);
+            return;
+        }
     };
     match std::fs::create_dir_all(&resolved) {
         Ok(_) => send_json(stream, r#"{"ok":true}"#),
@@ -7250,6 +8541,13 @@ fn api_filesystem_mkdir(body: &str, stream: &mut TcpStream) {
 
 /// `GET /api/filesystem/tree` — returns the full directory tree.
 fn api_filesystem_tree(query: &str, stream: &mut TcpStream) {
+    // pat-aivim: sandbox-validate any caller-supplied path query.
+    if let Some(raw) = query_param(query, "path") {
+        if let Err(why) = sandbox_path(raw) {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    }
     // Stub: return empty tree. Full implementation pending.
     send_json(stream, r#"{"tree":[]}"#);
 }
@@ -7284,8 +8582,12 @@ fn api_set_import_settings(body: &str, stream: &mut TcpStream) {
 fn api_vcs_status(stream: &mut TcpStream) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let status = crate::vcs::query_git_status(&cwd);
-    let json = serde_json::to_string(&status).unwrap_or_else(|_| r#"{"error":"serialize"}"#.into());
-    send_json(stream, &json);
+    match serde_json::to_string(&status) {
+        Ok(json) => send_json(stream, &json),
+        // pat-f23vr: route the serialize fallback through the envelope helper
+        // so failure responses keep the standardized shape.
+        Err(_) => send_error(stream, 500, "failed to serialize git status"),
+    }
 }
 
 /// `GET /api/vcs/diff?file=<path>&staged=<bool>` — returns diff for a file.
@@ -10619,26 +11921,36 @@ position = Vector2(10, 20)
 
     #[test]
     fn test_file_preview_endpoint_missing_file() {
+        // pat-f23vr: error responses use the standard envelope shape.
         let (handle, port) = make_server();
         let resp = http_get(port, "/api/preview/file?path=res://nonexistent_xyz.gd");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         assert!(
-            v["error"].is_string(),
-            "should return error for missing file"
+            v["error"]["code"].is_string(),
+            "should return envelope error.code; got {v}"
+        );
+        assert!(
+            v["error"]["message"].is_string(),
+            "should return envelope error.message; got {v}"
         );
         handle.stop();
     }
 
     #[test]
     fn test_file_preview_endpoint_missing_param() {
+        // pat-f23vr: error responses use the standard envelope shape.
         let (handle, port) = make_server();
         let resp = http_get(port, "/api/preview/file");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         assert!(
-            v["error"].is_string(),
-            "should return error for missing param"
+            v["error"]["code"].is_string(),
+            "should return envelope error.code; got {v}"
+        );
+        assert!(
+            v["error"]["message"].is_string(),
+            "should return envelope error.message; got {v}"
         );
         handle.stop();
     }

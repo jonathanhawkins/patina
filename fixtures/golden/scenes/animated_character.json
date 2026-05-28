@@ -1,0 +1,37 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_animated_character",
+  "generated_at": "2026-03-22T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "AnimatedSprite2D",
+          "name": "AnimatedSprite",
+          "path": "/root/Character/AnimatedSprite",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "AnimationPlayer",
+          "name": "AnimationPlayer",
+          "path": "/root/Character/AnimationPlayer",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "Node",
+          "name": "StateMachine",
+          "path": "/root/Character/StateMachine",
+          "properties": {}
+        }
+      ],
+      "class": "Node2D",
+      "name": "Character",
+      "path": "/root/Character",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

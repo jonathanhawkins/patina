@@ -69,8 +69,8 @@ pub fn is_meaningful(value: &str) -> bool {
         .to_lowercase();
 
     const WEAK: &[&str] = &[
-        "...", "n/a", "na", "none", "not run", "not ran", "unknown", "tbd", "todo", "pending",
-        "-", "--",
+        "...", "n/a", "na", "none", "not run", "not ran", "unknown", "tbd", "todo", "pending", "-",
+        "--",
     ];
     if WEAK.contains(&lowered.as_str()) {
         return false;
@@ -89,10 +89,7 @@ pub fn extract_section(body: &str, label: &str) -> String {
     let escaped = regex::escape(label);
 
     // Try "Label: content" first — content runs until next "; Key:" or end
-    let inline_pat = format!(
-        r"(?is){}\s*:\s*(.+?)(?:\s*;\s*[A-Za-z][^:]*:\s|$)",
-        escaped
-    );
+    let inline_pat = format!(r"(?is){}\s*:\s*(.+?)(?:\s*;\s*[A-Za-z][^:]*:\s|$)", escaped);
     if let Ok(re) = Regex::new(&inline_pat) {
         if let Some(caps) = re.captures(body) {
             if let Some(cap) = caps.get(1) {
@@ -106,10 +103,7 @@ pub fn extract_section(body: &str, label: &str) -> String {
 
     // Try markdown heading "## Label\ncontent"
     // Rust regex doesn't support lookahead, so we match up to next heading or end.
-    let heading_pat = format!(
-        r"(?is)(?:^|\n)\s*#+\s*{}\s*\n(.+?)(?:\n\s*#+\s|$)",
-        escaped
-    );
+    let heading_pat = format!(r"(?is)(?:^|\n)\s*#+\s*{}\s*\n(.+?)(?:\n\s*#+\s|$)", escaped);
     if let Ok(re) = Regex::new(&heading_pat) {
         if let Some(m) = re.captures(body) {
             if let Some(cap) = m.get(1) {
@@ -175,8 +169,7 @@ pub fn parse_completions(inbox: &[InboxMessage]) -> CompletionSet {
 
         let subject_is_completion = re_subj.is_match(subject);
         let thread_is_bead = re_thread.is_match(thread_id);
-        let completion_like =
-            topic == "bead-complete" || subject_is_completion || thread_is_bead;
+        let completion_like = topic == "bead-complete" || subject_is_completion || thread_is_bead;
 
         if !completion_like || msg.is_acknowledged() {
             continue;
@@ -337,7 +330,9 @@ mod tests {
         // True for real content
         assert!(is_meaningful("src/main.rs"));
         assert!(is_meaningful("cargo test --workspace"));
-        assert!(is_meaningful("engine-rs/crates/gdcore/src/lib.rs\nengine-rs/Cargo.toml"));
+        assert!(is_meaningful(
+            "engine-rs/crates/gdcore/src/lib.rs\nengine-rs/Cargo.toml"
+        ));
 
         // False for placeholders
         assert!(!is_meaningful(""));
@@ -372,7 +367,10 @@ mod tests {
         // Markdown heading style
         let body2 = "## Files changed\nfoo.rs\nbar.rs\n## Tests run\ncargo test --workspace";
         assert_eq!(extract_section(body2, "Files changed"), "foo.rs\nbar.rs");
-        assert_eq!(extract_section(body2, "Tests run"), "cargo test --workspace");
+        assert_eq!(
+            extract_section(body2, "Tests run"),
+            "cargo test --workspace"
+        );
 
         // Missing section
         assert_eq!(extract_section(body, "Summary"), "");
@@ -439,7 +437,7 @@ mod tests {
                     r#"```json
 {"files_changed": ["src/lib.rs"], "test_commands": ["cargo test"]}
 ```"#
-                    .into(),
+                        .into(),
                 );
             }),
         ];

@@ -13,6 +13,7 @@ pub mod fuzz_gdscript;
 pub mod interpreter;
 pub mod parser;
 pub mod tokenizer;
+pub mod type_checker;
 pub mod visual_script;
 
 pub use bindings::{

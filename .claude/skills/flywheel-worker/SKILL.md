@@ -29,11 +29,31 @@ Read the ACTION line and follow it:
 
 ### 1b. Pull new work
 
+**First, guard against hoarding.** Before claiming anything, check whether you already hold an in-progress bead:
+
 ```bash
-br ready --json --unassigned --limit 5 --no-auto-import --allow-stale 2>/dev/null
+br list --status in_progress --assignee "$AGENT_NAME" --no-auto-import --allow-stale
 ```
 
-Pick P0 first, then P1, P2, P3. If empty, idle.
+If that returns ANY bead, **Do NOT claim a new bead** — finish (or report/resubmit) the one you already hold and go back to **Step 1**. Workers that claim while holding work hoard beads (one worker once claimed 17 beads without finishing any). Only continue below when you hold zero in-progress beads.
+
+Run this EXACT command. Do NOT pipe it into python. Do NOT add a filter. Do NOT wrap it in any script:
+
+```bash
+br ready --json --unassigned --limit 5 --no-auto-import --allow-stale
+```
+
+Then extract the first bead's ID and priority — shell only, no filtering logic:
+
+```bash
+br ready --json --unassigned --limit 5 --no-auto-import --allow-stale | jq -r '.issues[0] | "\(.id) \(.priority)"'
+```
+
+(If `jq` is unavailable, use: `python3 -c 'import json,sys; d=json.load(sys.stdin); i=d["issues"][0] if d["issues"] else None; print(i["id"], i["priority"]) if i else print("")'` — this only prints the first issue, it does NOT filter.)
+
+**Selection rule**: Every bead returned by `br ready --unassigned` IS actionable. Take the FIRST issue from the `issues` array (the list is already priority-ordered: P0 before P1 before P2 before P3). Do NOT inspect labels. Do NOT skip beads based on title content. Do NOT define your own "actionable" predicate.
+
+**Idle ONLY when** the JSON `issues` array is literally empty (`[]`).
 
 ### 1c. Claim the bead
 
@@ -89,6 +109,8 @@ Then use the `/mail-complete` skill:
 
 Use `--test` with focused test names like `--test my_specific_test`. Do NOT use `--workspace` or `-E` filter expressions.
 
+**Do NOT send raw MCP** `send_message` calls to report completion. Always use the `/mail-complete` skill — it tags the message with the `bead-complete` topic the coordinator filters on. A raw MCP message has no topic, so the coordinator never processes it and your bead is never verified or closed.
+
 After reporting, go DIRECTLY to **Step 6**. Do NOT say "idle" or "waiting". Do NOT end the iteration.
 
 ## Step 6: Wait for Verification (MANDATORY after Step 5)
@@ -109,6 +131,8 @@ Read the output:
 - NEVER say "idle" or "waiting for verification" without running the Step 6 bash wait first
 - NEVER assume a bead ID from a previous iteration — always read it from `br list` output
 - NEVER run `cargo` or `rust_task.sh` — the verifier is the sole Rust builder
+- NEVER wrap `br ready` in a python (or any) filter that defines "actionable" beads. Every bead returned by `br ready --unassigned` IS actionable. If `br ready` returns at least one issue, claim it. Only idle when the JSON `issues` array is empty.
+- NEVER check `labels`, title substrings, or any other field to decide whether to skip a bead returned by `br ready` — just take `issues[0]`.
 - Follow `AGENTS.md`
 - Do not create or close beads (coordinator handles lifecycle)
 - If blocked, report the block instead of expanding scope

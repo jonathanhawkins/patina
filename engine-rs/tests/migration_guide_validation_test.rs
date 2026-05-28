@@ -735,3 +735,66 @@ fn limitations_reference_workaround_tools() {
         );
     }
 }
+
+// ===========================================================================
+// 12. pat-0kqn8 — guide explains scope, gaps, upgrade path (runtime-milestones)
+// ===========================================================================
+
+/// pat-0kqn8 acceptance: the migration guide must explain supported runtime
+/// scope, gaps, and an upgrade path. This wraps the three concrete guarantees
+/// the bead asks for into a single named test so a regression to any one of
+/// them fails loudly under the bead's own marker.
+#[test]
+fn pat_0kqn8_guide_covers_scope_gaps_and_upgrade_path() {
+    let guide = read_guide();
+
+    // (a) Supported runtime scope: milestone sections and per-milestone
+    //     "Crates Available" lists describe what is actually shipping per
+    //     phase — that is the supported scope users adopt against.
+    let scope_milestones = [
+        "Headless Runtime",
+        "2D Vertical Slice",
+        "Broader Runtime",
+        "3D Runtime Slice",
+        "Platform Layer",
+        "Editor Support",
+    ];
+    for m in &scope_milestones {
+        assert!(
+            guide.contains(m),
+            "supported runtime scope must list milestone '{m}'"
+        );
+    }
+    let crates_sections = guide.matches("### Crates Available").count();
+    assert!(
+        crates_sections >= 4,
+        "supported runtime scope must enumerate available crates per \
+         milestone (found {crates_sections} 'Crates Available' sections, \
+         need >= 4)"
+    );
+
+    // (b) Gaps: explicit "Known Limitations and Workarounds" and
+    //     "What Is Not Yet Supported" sections.
+    assert!(
+        guide.contains("## Known Limitations and Workarounds"),
+        "gaps must be described in a 'Known Limitations and Workarounds' section"
+    );
+    assert!(
+        guide.contains("Not Yet Supported") || guide.contains("Not yet supported"),
+        "gaps must include an explicit 'Not Yet Supported' classification"
+    );
+
+    // (c) Upgrade path: per-milestone "Migration Steps" plus the end-to-end
+    //     "Porting a Godot 4 Project Step-by-Step" walkthrough.
+    let migration_step_blocks = guide.matches("### Migration Steps").count();
+    assert!(
+        migration_step_blocks >= 5,
+        "upgrade path must give per-milestone migration steps \
+         (found {migration_step_blocks} 'Migration Steps' blocks, need >= 5)"
+    );
+    assert!(
+        guide.contains("Porting a Godot 4 Project Step-by-Step"),
+        "upgrade path must include the end-to-end porting walkthrough"
+    );
+}
+

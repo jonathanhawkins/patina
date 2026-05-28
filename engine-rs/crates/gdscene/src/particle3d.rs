@@ -286,6 +286,33 @@ impl Default for ParticleMaterial3D {
 }
 
 // ---------------------------------------------------------------------------
+// GpuParticleInstance — GPU-instanced particle per-instance buffer row
+// ---------------------------------------------------------------------------
+
+/// Per-instance row a GPU particle pipeline binds for billboarded rendering.
+///
+/// Mirrors the structured-of-arrays layout the wgpu pipeline uploads each
+/// frame: position, colour, scale, velocity (for motion-vector billboarding),
+/// and `age_ratio` (for shader-side colour/scale curve sampling). The CPU
+/// simulator emits the same struct so a CPU rasterizer can issue one batched
+/// draw without expanding to per-particle draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuParticleInstance {
+    /// World-space (or local-space, depending on `local_coords`) position.
+    pub position: Vector3,
+    /// Current display colour (already evaluated through `color_curve`).
+    pub color: Color,
+    /// Current display scale (`base_scale * scale_curve`).
+    pub scale: f32,
+    /// Current world-space velocity, exposed so motion-vector billboards can
+    /// orient quads along the trajectory.
+    pub velocity: Vector3,
+    /// Normalised age in `[0, 1]` (`0` = just born, `1` = dead) for shaders
+    /// that prefer to evaluate curves on-GPU.
+    pub age_ratio: f32,
+}
+
+// ---------------------------------------------------------------------------
 // Particle3D
 // ---------------------------------------------------------------------------
 
@@ -552,6 +579,28 @@ impl ParticleSimulator3D {
         self.active_particles
             .iter()
             .map(|p| (p.position, p.color, p.scale))
+            .collect()
+    }
+
+    /// Flattens the live particle pool into the per-instance buffer that a
+    /// GPU compute-driven particle pipeline would upload.
+    ///
+    /// Each row carries the structured-of-arrays surface a vertex shader
+    /// reads: world-space position, current display colour, scale, velocity
+    /// (for motion-vector billboarding), and `age_ratio` (for shader-side
+    /// curve sampling). The buffer length matches `particle_count()` exactly,
+    /// so the renderer issues one instanced draw of `len()` rather than
+    /// expanding to `len()` per-particle draws.
+    pub fn flatten_gpu_instance_buffer(&self) -> Vec<GpuParticleInstance> {
+        self.active_particles
+            .iter()
+            .map(|p| GpuParticleInstance {
+                position: p.position,
+                color: p.color,
+                scale: p.scale,
+                velocity: p.velocity,
+                age_ratio: p.age_ratio(),
+            })
             .collect()
     }
 

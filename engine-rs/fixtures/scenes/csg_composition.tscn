@@ -1,0 +1,29 @@
+[gd_scene format=3]
+
+[node name="CSGComposition" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 3, 7)
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(3, 8, 3)
+
+[node name="Combiner" type="CSGCombiner3D" parent="."]
+position = Vector3(0, 1, 0)
+
+[node name="Base" type="CSGBox3D" parent="Combiner"]
+position = Vector3(0, 0, 0)
+
+[node name="Dome" type="CSGSphere3D" parent="Combiner"]
+position = Vector3(0, 1, 0)
+
+[node name="Pillar" type="CSGCylinder3D" parent="Combiner"]
+position = Vector3(1.5, 0, 0)
+
+[node name="Probe" type="ReflectionProbe" parent="."]
+position = Vector3(0, 2, 0)
+
+[node name="Floor" type="StaticBody3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="FloorShape" type="CollisionShape3D" parent="Floor"]

@@ -37,9 +37,14 @@ fn br_retry_delay_with_jitter(attempt: u32) -> Duration {
         std::thread::current().id().hash(&mut h);
         h.finish()
     };
-    let jitter_ms = (counter.wrapping_mul(6364136223846793005).wrapping_add(thread_hash)) % 500;
+    let jitter_ms = (counter
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(thread_hash))
+        % 500;
     let backoff_factor = 1u64 << attempt.min(3);
-    let total_ms = base_ms.saturating_mul(backoff_factor).saturating_add(jitter_ms);
+    let total_ms = base_ms
+        .saturating_mul(backoff_factor)
+        .saturating_add(jitter_ms);
     Duration::from_millis(total_ms)
 }
 
@@ -59,6 +64,56 @@ pub fn run_br_public(args: &[&str]) -> Result<String> {
     run_br(args)
 }
 
+/// Fast-path `br` runner for planner reactivate/update calls.
+///
+/// Uses a shorter process-level deadline (default 5s, override via
+/// `ORCH_BR_REACTIVATE_TIMEOUT_SECS`) so that writer contention during
+/// the planner's ~22-bead burst fails fast rather than getting killed
+/// by the 30s guardrail. Callers MUST treat `Err` as "skip this cycle"
+/// and never fall through to `br create`, otherwise duplicate beads
+/// with the same planner-key will be produced.
+pub fn reactivate_bead(args: &[&str]) -> Result<String> {
+    let deadline = br_reactivate_timeout_secs();
+    run_br_with_deadline(args, deadline)
+}
+
+/// Same retry/backoff behavior as `run_br` but with an explicit
+/// per-process deadline.
+fn run_br_with_deadline(args: &[&str], deadline_secs: u64) -> Result<String> {
+    let max_retries = br_max_retries();
+    let mut last_output = String::new();
+
+    for attempt in 0..max_retries {
+        let (stdout, stderr, success) = spawn_br_with_deadline(args, deadline_secs)?;
+
+        if success {
+            return Ok(stdout);
+        }
+
+        let combined = format!("{stdout}{stderr}");
+        last_output = combined.clone();
+
+        let is_locked = combined.to_lowercase().contains("database is locked")
+            || combined.to_lowercase().contains("database is busy");
+
+        if !is_locked || attempt == max_retries - 1 {
+            return Err(OrchestratorError::Br(format!(
+                "br {} failed (exit): {}",
+                args.join(" "),
+                combined.trim()
+            )));
+        }
+
+        thread::sleep(br_retry_delay_with_jitter(attempt));
+    }
+
+    Err(OrchestratorError::Br(format!(
+        "br {} failed after {max_retries} retries: {}",
+        args.join(" "),
+        last_output.trim()
+    )))
+}
+
 /// Process-level timeout for `br` commands. Even though `--lock-timeout`
 /// tells SQLite to timeout internally, a deadlocked `br` process can hang
 /// forever if the SQLite timeout doesn't fire (WAL checkpoint races).
@@ -71,15 +126,39 @@ fn br_process_timeout_secs() -> u64 {
         .unwrap_or(30)
 }
 
+/// Shorter process-level timeout used for "reactivate" writes (planner
+/// reopening closed beads). The planner burst-creates ~22 beads every
+/// 10 minutes, serializing `br update` calls against SQLite writer
+/// contention. A tight 5s ceiling makes failures fail-fast so the
+/// caller can SKIP (rather than fall through to `br create` and
+/// produce duplicates).
+fn br_reactivate_timeout_secs() -> u64 {
+    std::env::var("ORCH_BR_REACTIVATE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5)
+}
+
 /// Spawn a `br` command with a process-level timeout.
 /// Returns (stdout, stderr, success) or kills the child and returns an error.
 fn spawn_br_with_timeout(args: &[&str]) -> Result<(String, String, bool)> {
+    spawn_br_with_deadline(args, br_process_timeout_secs())
+}
+
+/// Spawn a `br` command with an explicit process-level deadline (seconds).
+/// Returns (stdout, stderr, success) or kills the child and returns an error.
+fn spawn_br_with_deadline(args: &[&str], deadline_secs: u64) -> Result<(String, String, bool)> {
     let timeout_str = br_lock_timeout_ms().to_string();
-    let deadline = Duration::from_secs(br_process_timeout_secs());
+    let deadline = Duration::from_secs(deadline_secs);
 
     let mut child = Command::new("br")
         .args(args)
-        .args(["--lock-timeout", &timeout_str, "--no-auto-import", "--no-auto-flush"])
+        .args([
+            "--lock-timeout",
+            &timeout_str,
+            "--no-auto-import",
+            "--no-auto-flush",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -91,11 +170,23 @@ fn spawn_br_with_timeout(args: &[&str]) -> Result<(String, String, bool)> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = child.stdout.take()
-                    .map(|mut r| { let mut s = String::new(); std::io::Read::read_to_string(&mut r, &mut s).ok(); s })
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|mut r| {
+                        let mut s = String::new();
+                        std::io::Read::read_to_string(&mut r, &mut s).ok();
+                        s
+                    })
                     .unwrap_or_default();
-                let stderr = child.stderr.take()
-                    .map(|mut r| { let mut s = String::new(); std::io::Read::read_to_string(&mut r, &mut s).ok(); s })
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut r| {
+                        let mut s = String::new();
+                        std::io::Read::read_to_string(&mut r, &mut s).ok();
+                        s
+                    })
                     .unwrap_or_default();
                 return Ok((stdout, stderr, status.success()));
             }
@@ -199,11 +290,7 @@ pub fn close_bead(bead_id: &str, reason: &str) -> Result<String> {
 /// Update a bead's assignee and/or status.
 ///
 /// If the bead is not found, syncs from JSONL and retries once.
-pub fn update_bead(
-    bead_id: &str,
-    assignee: Option<&str>,
-    status: Option<&str>,
-) -> Result<String> {
+pub fn update_bead(bead_id: &str, assignee: Option<&str>, status: Option<&str>) -> Result<String> {
     let mut args = vec!["update", bead_id];
     if let Some(a) = assignee {
         args.push("--assignee");
@@ -252,7 +339,9 @@ pub fn sync() -> Result<()> {
                 // Workaround for br bug: export_hashes table produces UNIQUE
                 // violations during flush. Clear the table and use --force to
                 // bypass safety guards since the DB is the source of truth here.
-                tracing::warn!("export_hashes constraint error — clearing table and retrying with --force");
+                tracing::warn!(
+                    "export_hashes constraint error — clearing table and retrying with --force"
+                );
                 clear_export_hashes()?;
                 match run_br(&["sync", "--flush-only", "--force"]) {
                     Ok(_) => Ok(()),
@@ -332,14 +421,30 @@ pub fn reopen(bead_id: &str) -> Result<()> {
 /// Get ready unassigned beads as JSON.
 pub fn ready_unassigned_json(limit: usize) -> Result<String> {
     let limit_str = limit.to_string();
-    run_br(&["ready", "--unassigned", "--format", "json", "--limit", &limit_str])
+    run_br(&[
+        "ready",
+        "--unassigned",
+        "--format",
+        "json",
+        "--limit",
+        &limit_str,
+    ])
 }
 
 /// Get ready unassigned beads filtered by label(s) as JSON.
 pub fn ready_unassigned_with_labels(labels: &[&str], limit: usize) -> Result<String> {
     let limit_str = limit.to_string();
     let label_str = labels.join(",");
-    run_br(&["ready", "--unassigned", "--format", "json", "--limit", &limit_str, "--label", &label_str])
+    run_br(&[
+        "ready",
+        "--unassigned",
+        "--format",
+        "json",
+        "--limit",
+        &limit_str,
+        "--label",
+        &label_str,
+    ])
 }
 
 // ─── Dependency management ───────────────────────────────────────────────
@@ -422,7 +527,8 @@ mod tests {
     #[test]
     fn test_stale_db_error_detected_would_lose_variant() {
         let err = OrchestratorError::Br(
-            "br sync --merge failed (exit exit status: 7): Export would lose 5 issue(s)".to_string(),
+            "br sync --merge failed (exit exit status: 7): Export would lose 5 issue(s)"
+                .to_string(),
         );
         assert!(
             is_stale_db_error(&err),
@@ -435,9 +541,7 @@ mod tests {
     /// Boundary: message contains "Refusing to export stale" but no "would lose".
     #[test]
     fn test_stale_db_error_refusing_only() {
-        let err = OrchestratorError::Br(
-            "Refusing to export stale database".to_string(),
-        );
+        let err = OrchestratorError::Br("Refusing to export stale database".to_string());
         assert!(is_stale_db_error(&err));
     }
 
@@ -452,7 +556,10 @@ mod tests {
     #[test]
     fn test_stale_db_error_empty_message() {
         let err = OrchestratorError::Br(String::new());
-        assert!(!is_stale_db_error(&err), "Empty error must not match stale DB");
+        assert!(
+            !is_stale_db_error(&err),
+            "Empty error must not match stale DB"
+        );
     }
 
     /// Boundary: single-character error message.
@@ -524,9 +631,8 @@ mod tests {
     /// Variant: multiline error output (as seen in production logs).
     #[test]
     fn test_stale_db_error_multiline() {
-        let err = OrchestratorError::Br(
-            "line1\nRefusing to export stale database\nline3".to_string(),
-        );
+        let err =
+            OrchestratorError::Br("line1\nRefusing to export stale database\nline3".to_string());
         assert!(is_stale_db_error(&err));
     }
 
@@ -606,7 +712,10 @@ mod tests {
     #[test]
     fn test_br_retry_base_delay_default() {
         let val = br_retry_base_delay_ms();
-        assert!(val >= 1000, "base delay should be at least 1000ms, got {val}");
+        assert!(
+            val >= 1000,
+            "base delay should be at least 1000ms, got {val}"
+        );
     }
 
     /// Different attempt levels produce different base delays (exponential backoff).
@@ -635,13 +744,15 @@ mod tests {
     #[test]
     fn test_spawn_br_passes_no_auto_flush() {
         let source = include_str!("br.rs");
-        let spawn_fn = source.find("fn spawn_br_with_timeout(").expect("spawn_br_with_timeout must exist");
+        let spawn_fn = source
+            .find("fn spawn_br_with_deadline(")
+            .expect("spawn_br_with_deadline must exist");
         let fn_end = source[spawn_fn..].find("\n}").unwrap_or(500);
         let fn_body = &source[spawn_fn..spawn_fn + fn_end];
 
         assert!(
             fn_body.contains("--no-auto-flush"),
-            "REGRESSION: spawn_br_with_timeout must pass --no-auto-flush to prevent WAL lock hangs"
+            "REGRESSION: spawn_br_with_deadline must pass --no-auto-flush to prevent WAL lock hangs"
         );
     }
 
@@ -649,13 +760,15 @@ mod tests {
     #[test]
     fn test_spawn_br_passes_no_auto_import() {
         let source = include_str!("br.rs");
-        let spawn_fn = source.find("fn spawn_br_with_timeout(").expect("spawn_br_with_timeout must exist");
+        let spawn_fn = source
+            .find("fn spawn_br_with_deadline(")
+            .expect("spawn_br_with_deadline must exist");
         let fn_end = source[spawn_fn..].find("\n}").unwrap_or(500);
         let fn_body = &source[spawn_fn..spawn_fn + fn_end];
 
         assert!(
             fn_body.contains("--no-auto-import"),
-            "spawn_br_with_timeout must pass --no-auto-import"
+            "spawn_br_with_deadline must pass --no-auto-import"
         );
     }
 
@@ -693,7 +806,9 @@ mod tests {
     #[test]
     fn test_close_bead_syncs_on_not_found() {
         let source = include_str!("br.rs");
-        let close_fn = source.find("pub fn close_bead(").expect("close_bead must exist");
+        let close_fn = source
+            .find("pub fn close_bead(")
+            .expect("close_bead must exist");
         let fn_end = source[close_fn..].find("\n}").unwrap_or(800);
         let fn_body = &source[close_fn..close_fn + fn_end];
 
@@ -711,7 +826,9 @@ mod tests {
     #[test]
     fn test_update_bead_syncs_on_not_found() {
         let source = include_str!("br.rs");
-        let update_fn = source.find("pub fn update_bead(").expect("update_bead must exist");
+        let update_fn = source
+            .find("pub fn update_bead(")
+            .expect("update_bead must exist");
         let fn_end = source[update_fn..].find("\n}").unwrap_or(500);
         let fn_body = &source[update_fn..update_fn + fn_end];
 
@@ -741,7 +858,8 @@ mod tests {
         for (msg, expected) in cases {
             let e = OrchestratorError::Br(msg.to_string());
             assert_eq!(
-                is_not_found_error(&e), expected,
+                is_not_found_error(&e),
+                expected,
                 "is_not_found_error({msg:?}) should be {expected}"
             );
         }
@@ -835,6 +953,53 @@ mod tests {
         );
     }
 
+    /// Regression: reactivate_bead uses a shorter default timeout (5s) than
+    /// the 30s default for other br commands. The planner burst-creates ~22
+    /// beads every 10 minutes and serialized `br update` calls were getting
+    /// killed by the 30s guardrail, which then caused the caller to fall
+    /// through to `br create` and produce duplicates.
+    #[test]
+    fn test_reactivate_timeout_is_shorter_than_default() {
+        // Remove any test env override so we read the real default.
+        std::env::remove_var("ORCH_BR_REACTIVATE_TIMEOUT_SECS");
+        let reactivate = br_reactivate_timeout_secs();
+        let default = br_process_timeout_secs();
+        assert!(
+            reactivate < default,
+            "reactivate timeout ({reactivate}s) must be shorter than default ({default}s) \
+             so reactivate calls fail fast instead of hitting the 30s guardrail"
+        );
+        assert_eq!(
+            reactivate, 5,
+            "default reactivate timeout should be 5s (override via ORCH_BR_REACTIVATE_TIMEOUT_SECS)"
+        );
+    }
+
+    /// Regression: ORCH_BR_REACTIVATE_TIMEOUT_SECS overrides the default.
+    #[test]
+    fn test_reactivate_timeout_env_override() {
+        std::env::set_var("ORCH_BR_REACTIVATE_TIMEOUT_SECS", "12");
+        let v = br_reactivate_timeout_secs();
+        std::env::remove_var("ORCH_BR_REACTIVATE_TIMEOUT_SECS");
+        assert_eq!(v, 12, "env var must override default");
+    }
+
+    /// Regression: reactivate_bead must exist as a public helper so planner
+    /// callers don't use run_br_public (which has the 30s default that gets
+    /// killed on WAL contention during the 22-bead burst).
+    #[test]
+    fn test_reactivate_bead_public_helper_exists() {
+        let source = include_str!("br.rs");
+        assert!(
+            source.contains("pub fn reactivate_bead("),
+            "pub fn reactivate_bead(args: &[&str]) -> Result<String> must exist"
+        );
+        assert!(
+            source.contains("ORCH_BR_REACTIVATE_TIMEOUT_SECS"),
+            "reactivate path must read ORCH_BR_REACTIVATE_TIMEOUT_SECS env override"
+        );
+    }
+
     /// Functional: spawn_br_with_timeout kills a process that exceeds the deadline.
     #[test]
     fn test_spawn_timeout_kills_slow_process() {
@@ -868,7 +1033,10 @@ mod tests {
             }
         }
 
-        assert!(timed_out, "Process should have been killed after 1s timeout");
+        assert!(
+            timed_out,
+            "Process should have been killed after 1s timeout"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "Kill should happen promptly, not after 60s"

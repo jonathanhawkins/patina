@@ -418,6 +418,90 @@ impl WindowsPlatformLayer {
 }
 
 // ---------------------------------------------------------------------------
+// Export packaging helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the Windows executable filename for the given app
+/// (e.g. `"MyGame"` → `"MyGame.exe"`).
+pub fn windows_exe_filename(app_name: &str) -> String {
+    format!("{app_name}.exe")
+}
+
+/// Returns the side-by-side assembly manifest filename for the given app
+/// (e.g. `"MyGame"` → `"MyGame.exe.manifest"`).
+pub fn windows_manifest_filename(app_name: &str) -> String {
+    format!("{app_name}.exe.manifest")
+}
+
+/// Returns the icon filename for the given app
+/// (e.g. `"MyGame"` → `"MyGame.ico"`).
+pub fn windows_icon_filename(app_name: &str) -> String {
+    format!("{app_name}.ico")
+}
+
+/// Returns the reverse-DNS assembly identity for the given app, mirroring the
+/// macOS bundle identifier convention so packaging metadata stays consistent
+/// across platforms (e.g. `"Patina Demo"` → `"com.patina.patina-demo"`).
+pub fn windows_assembly_id(app_name: &str) -> String {
+    format!("com.patina.{}", crate::linux::sanitize_desktop_id(app_name))
+}
+
+/// Renders the side-by-side assembly manifest XML embedded next to a Windows
+/// `.exe`. The output covers the Common-Controls 6 dependency, `asInvoker`
+/// execution level, `PerMonitorV2` DPI awareness, and `longPathAware` — the
+/// surface modern Patina builds rely on.
+pub fn windows_manifest(app_name: &str) -> String {
+    let identity = windows_assembly_id(app_name);
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n\
+         \t<assemblyIdentity\n\
+         \t\ttype=\"win32\"\n\
+         \t\tname=\"{identity}\"\n\
+         \t\tversion=\"1.0.0.0\"\n\
+         \t\tprocessorArchitecture=\"*\"\n\
+         \t/>\n\
+         \t<dependency>\n\
+         \t\t<dependentAssembly>\n\
+         \t\t\t<assemblyIdentity\n\
+         \t\t\t\ttype=\"win32\"\n\
+         \t\t\t\tname=\"Microsoft.Windows.Common-Controls\"\n\
+         \t\t\t\tversion=\"6.0.0.0\"\n\
+         \t\t\t\tpublicKeyToken=\"6595b64144ccf1df\"\n\
+         \t\t\t\tlanguage=\"*\"\n\
+         \t\t\t\tprocessorArchitecture=\"*\"\n\
+         \t\t\t/>\n\
+         \t\t</dependentAssembly>\n\
+         \t</dependency>\n\
+         \t<trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v3\">\n\
+         \t\t<security>\n\
+         \t\t\t<requestedPrivileges>\n\
+         \t\t\t\t<requestedExecutionLevel level=\"asInvoker\" uiAccess=\"false\"/>\n\
+         \t\t\t</requestedPrivileges>\n\
+         \t\t</security>\n\
+         \t</trustInfo>\n\
+         \t<application xmlns=\"urn:schemas-microsoft-com:asm.v3\">\n\
+         \t\t<windowsSettings xmlns:ws=\"http://schemas.microsoft.com/SMI/2016/WindowsSettings\">\n\
+         \t\t\t<ws:dpiAwareness>PerMonitorV2</ws:dpiAwareness>\n\
+         \t\t\t<ws:longPathAware>true</ws:longPathAware>\n\
+         \t\t</windowsSettings>\n\
+         \t</application>\n\
+         </assembly>\n",
+    )
+}
+
+/// Returns the placeholder body used in lieu of a real PE binary so tests and
+/// downstream tooling can validate layout without invoking a Windows linker.
+/// Starts with the `MZ` magic bytes to match the PE header convention.
+pub fn windows_placeholder_exe(app_name: &str) -> String {
+    format!(
+        "MZ\n# Patina export placeholder for {app_name}\n\
+         # This stub stands in for the compiled Windows binary.\n\
+         echo Patina placeholder: {app_name}\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

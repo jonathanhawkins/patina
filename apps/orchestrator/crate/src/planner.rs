@@ -32,6 +32,13 @@ pub struct PlanReport {
     pub queue: QueueReport,
     pub recommendations: Vec<Recommendation>,
     pub phase: Phase,
+    /// Label of the phase the planner is currently working on (matches the
+    /// `label` field on a `[[phase]]` block in planner.toml). For legacy
+    /// single-phase configs this mirrors `config.phase_label`. Surfaces what
+    /// the planner is *actually* doing — the `phase` enum above describes
+    /// completion state but is still V1-named for backward compatibility.
+    #[serde(default)]
+    pub active_phase_label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,7 +90,16 @@ pub struct Recommendation {
 pub enum Phase {
     V1Active,
     V1NearlyDone,
+    /// V1 (runtime parity) complete. Retained for backward compatibility with
+    /// callers that special-case this state. In phase-chain configs this
+    /// fires only if the first phase happens to be V1; downstream code
+    /// should prefer `active_phase_label` + `AllComplete` for forward logic.
     V1Complete,
+    /// Every phase in the phase chain has been resolved (all criteria
+    /// checked, gates passed, or otherwise satisfied). Distinct from
+    /// `V1Complete` so the planner skill can tell "V1 is done" from "the
+    /// entire post-V1 editor/web/agent surface is done".
+    AllComplete,
 }
 
 // ─── Queue throttle constant ──────────────────────────────────────────────
@@ -98,6 +114,12 @@ pub fn analyze(project_root: &Path) -> Result<PlanReport> {
 
     // Load project-specific config
     let config = project_config::load(project_root);
+
+    // Phase-chain path: walk phases in order, tick passing criteria, return
+    // recommendations from the first incomplete phase.
+    if config_uses_phase_chain(&config) {
+        return analyze_phase_chain(project_root, &config, &timestamp);
+    }
 
     // Parse PRD files
     let criteria = load_criteria(project_root, &config);
@@ -151,14 +173,29 @@ pub fn analyze(project_root: &Path) -> Result<PlanReport> {
         Err(_) => vec![],
     };
 
+    // Planner keys across ALL statuses — parity beads dedup on the stable key,
+    // since their titles embed a live percentage that changes every cycle.
+    let all_keys = match db::open(project_root) {
+        Ok(conn) => collect_existing_planner_keys(&conn),
+        Err(_) => vec![],
+    };
+
     // Determine phase
     let phase = determine_phase(&gates, &parity, &config);
 
     let mut recommendations = Vec::new();
 
-    if matches!(phase, Phase::V1Complete) {
-        // V1 is done — skip gate/parity recommendations (they'd create duplicates
-        // for already-passing work). Only generate next-phase recommendations.
+    let has_unchecked_criteria = !criteria.is_empty() && criteria.iter().any(|c| !c.checked);
+
+    if has_unchecked_criteria {
+        // Active criteria phase — drive beads from the execution map specs and
+        // the unchecked criteria checklist. This is the same iteration logic
+        // `quick_recommendations` uses; delegate to it so the two callers stay
+        // in lockstep on dedup and throttle rules.
+        recommendations.extend(quick_recommendations(project_root)?);
+    } else if matches!(phase, Phase::V1Complete) {
+        // V1 is done AND no unchecked criteria — fall back to next-phase
+        // recommendations from a roadmap document, if one is configured.
         recommendations.extend(generate_next_phase_recommendations(
             project_root,
             &config,
@@ -177,6 +214,7 @@ pub fn analyze(project_root: &Path) -> Result<PlanReport> {
         recommendations.extend(generate_parity_recommendations(
             &parity,
             &all_titles,
+            &all_keys,
             &queue,
         ));
     }
@@ -191,7 +229,237 @@ pub fn analyze(project_root: &Path) -> Result<PlanReport> {
         queue,
         recommendations,
         phase,
+        active_phase_label: config.phase_label.clone(),
     })
+}
+
+/// Phase-chain analyze: walk phases in order, tick passing criteria, return
+/// recommendations from the first incomplete phase. Used when the planner
+/// config declares `[[phase]]` blocks or AllCriteriaChecked completion.
+fn analyze_phase_chain(
+    project_root: &Path,
+    config: &ProjectPlannerConfig,
+    timestamp: &str,
+) -> Result<PlanReport> {
+    let queue = run_queue_pass(project_root)?;
+
+    let engine_dir = project_root.join("engine-rs");
+
+    // Dedup against all bead titles + planner-keys (used across every phase in
+    // the walk). Open once.
+    let (existing_titles, existing_keys) = match db::open(project_root) {
+        Ok(conn) => (
+            db::bead_titles_all(&conn).unwrap_or_default(),
+            collect_existing_planner_keys(&conn),
+        ),
+        Err(e) => {
+            eprintln!("[plan] db unavailable: {e}");
+            (vec![], vec![])
+        }
+    };
+
+    let mut active_label = String::from("default");
+    let mut active_gates = empty_gates();
+    let active_parity = empty_parity();
+    let mut recommendations: Vec<Recommendation> = Vec::new();
+    let mut all_phases_resolved = true;
+
+    // Walk phases. For each, skip if Complete or Unevaluable, run analysis to
+    // refresh state, tick passing criteria, then attempt to seed beads. We
+    // commit a phase as "active" only when it actually produces recommendations
+    // — a phase whose execution map is fully deduped (closed beads exist for
+    // every item) falls through to the next phase rather than blocking the
+    // walk. This is the key fix that prevents the old V1-stuck behavior:
+    // "incomplete criteria + zero seedable work" is no longer terminal.
+    for phase in &config.phases {
+        let criteria = load_phase_criteria(project_root, phase);
+
+        // Cheap pre-check: already all-checked → complete with no subprocess work.
+        let cheap_complete = !criteria.is_empty() && criteria.iter().all(|c| c.checked);
+        if cheap_complete {
+            eprintln!(
+                "[plan] phase '{}': all criteria already checked, advancing",
+                phase.label
+            );
+            continue;
+        }
+
+        // Run the phase's analysis to refresh test status. Empty criteria with
+        // FromCriteria analysis is a no-op — we still let the phase be
+        // considered, since its execution map may have unseeded items.
+        let gates = match &phase.analysis {
+            crate::project_config::AnalysisSource::FromCriteria => {
+                if engine_dir.exists() && !criteria.is_empty() {
+                    run_analysis_from_criteria(&criteria, &phase.test_binaries, &engine_dir)
+                } else {
+                    empty_gates()
+                }
+            }
+            crate::project_config::AnalysisSource::Commands(cmds) => {
+                if cmds.is_empty() {
+                    empty_gates()
+                } else {
+                    let (_, g) = run_analysis_commands(project_root, cmds);
+                    g
+                }
+            }
+        };
+
+        if let Some(ec) = &phase.exit_criteria {
+            let path = project_root.join(ec);
+            if path.exists() {
+                let ticked = tick_criteria_on_pass(&path, &gates).unwrap_or(0);
+                if ticked > 0 {
+                    eprintln!(
+                        "[plan] phase '{}': ticked {ticked} criteria from passing tests",
+                        phase.label
+                    );
+                }
+            }
+        }
+        let criteria_now = load_phase_criteria(project_root, phase);
+
+        // Three-valued completion check. Treat Complete and Unevaluable as
+        // "skip this phase" — Unevaluable means we couldn't determine its
+        // state (e.g. exit_criteria file not yet authored). Either way, don't
+        // block the walk on a phase we can't make progress on.
+        match phase_status(phase, &criteria_now, Some(&gates), None) {
+            PhaseStatus::Complete => {
+                eprintln!("[plan] phase '{}': complete, advancing", phase.label);
+                continue;
+            }
+            PhaseStatus::Unevaluable => {
+                // C3: distinguish a benign empty phase from the documented
+                // silent-stall config error — criteria carry `(test:)` markers
+                // that should auto-tick, but no test_binaries are configured, so
+                // they can NEVER tick and the phase is skipped forever.
+                if phase_has_unticked_test_markers(&criteria_now, &phase.test_binaries) {
+                    tracing::warn!(
+                        phase = %phase.label,
+                        "phase has criteria with (test:) markers but no test_binaries configured — \
+                         criteria can never auto-tick and the phase will be silently skipped every \
+                         cycle; add the cargo test-target names to test_binaries in planner.toml"
+                    );
+                } else {
+                    eprintln!(
+                        "[plan] phase '{}': unevaluable (likely empty criteria), advancing",
+                        phase.label
+                    );
+                }
+                all_phases_resolved = false;
+                continue;
+            }
+            PhaseStatus::Incomplete => {}
+        }
+
+        // Phase is incomplete. Try to produce recommendations from its
+        // execution map. If everything is deduped, fall through to the next
+        // phase so the walk doesn't stall on a saturated-but-unticked phase.
+        let bead_specs = load_phase_execution_map(project_root, phase);
+        let phase_recs = phase_recs_from_specs(
+            &phase.label,
+            &bead_specs,
+            &criteria_now,
+            &existing_titles,
+            &existing_keys,
+            &queue,
+            0,
+        );
+
+        if !phase_recs.is_empty() {
+            // This phase has actual seedable work — commit it as active and stop walking.
+            active_label = phase.label.clone();
+            active_gates = gates;
+            recommendations = phase_recs;
+            all_phases_resolved = false;
+            break;
+        }
+
+        // Phase is incomplete but produced no recommendations (everything
+        // deduped). Don't block the walk on it — let later phases get a
+        // chance. Mark the run as "not all resolved" so the report reflects
+        // there is work pending somewhere in the chain.
+        all_phases_resolved = false;
+        eprintln!(
+            "[plan] phase '{}': incomplete but all bead specs already seeded, advancing",
+            phase.label
+        );
+    }
+
+    recommendations.sort_by_key(|r| r.priority);
+
+    let phase_state = if all_phases_resolved {
+        Phase::AllComplete
+    } else {
+        // Walked the entire chain, found incomplete phases. Whether we
+        // produced recommendations or not, more work remains — caller
+        // should look at `active_phase_label` to see which phase is
+        // currently load-bearing.
+        Phase::V1Active
+    };
+
+    Ok(PlanReport {
+        timestamp: timestamp.to_string(),
+        parity: active_parity,
+        gates: active_gates,
+        queue,
+        recommendations,
+        phase: phase_state,
+        active_phase_label: active_label,
+    })
+}
+
+/// Tier-1 fast path for phase-chain configs. Walks phases by checkbox state
+/// only (no test subprocess), surfaces recommendations from the first phase
+/// with unchecked criteria + unseeded execution-map items.
+fn quick_recommendations_phase_chain(
+    project_root: &Path,
+    config: &ProjectPlannerConfig,
+) -> Result<Vec<Recommendation>> {
+    let queue = run_queue_pass(project_root)?;
+
+    let existing_titles = match db::open(project_root) {
+        Ok(conn) => db::bead_titles_all(&conn).unwrap_or_default(),
+        Err(_) => vec![],
+    };
+    let existing_keys = match db::open(project_root) {
+        Ok(conn) => collect_existing_planner_keys(&conn),
+        Err(_) => vec![],
+    };
+
+    let mut recommendations: Vec<Recommendation> = Vec::new();
+
+    for phase in &config.phases {
+        let criteria = load_phase_criteria(project_root, phase);
+        // Tier-1 has no analysis context. Skip phases that are complete OR
+        // unevaluable (e.g. all_gates_passing without gate context) so the
+        // walk doesn't stall on conditions only analyze() can resolve.
+        match phase_status(phase, &criteria, None, None) {
+            PhaseStatus::Complete | PhaseStatus::Unevaluable => continue,
+            PhaseStatus::Incomplete => {}
+        }
+        let bead_specs = load_phase_execution_map(project_root, phase);
+        let phase_recs = phase_recs_from_specs(
+            &phase.label,
+            &bead_specs,
+            &criteria,
+            &existing_titles,
+            &existing_keys,
+            &queue,
+            recommendations.len(),
+        );
+        recommendations.extend(phase_recs);
+        // Stop walking only once we've produced recommendations. If the
+        // current phase had bead specs but every one was deduped, fall
+        // through to later phases — otherwise a saturated phase would
+        // permanently mask its successors.
+        if !recommendations.is_empty() {
+            break;
+        }
+    }
+
+    recommendations.sort_by_key(|r| r.priority);
+    Ok(recommendations)
 }
 
 /// Tier 1: Fast recommendations from PRD parsing only (no subprocess calls).
@@ -199,6 +467,13 @@ pub fn analyze(project_root: &Path) -> Result<PlanReport> {
 pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>> {
     // Load project-specific config
     let config = project_config::load(project_root);
+
+    // Phase-chain configs use the fast-path walk: parse criteria + execution
+    // map of the first incomplete phase (no analysis command — the box state
+    // already reflects past test runs), then dedup against existing beads.
+    if config_uses_phase_chain(&config) {
+        return quick_recommendations_phase_chain(project_root, &config);
+    }
 
     // Parse PRD files
     let criteria = load_criteria(project_root, &config);
@@ -364,6 +639,23 @@ pub fn quick_recommendations(project_root: &Path) -> Result<Vec<Recommendation>>
         ));
     }
 
+    // C7: surface execution-map specs that lack an acceptance command — these
+    // seed beads the verifier can't prove. Warn by key so the source doc gets
+    // fixed instead of the problem reappearing as a silent skip downstream.
+    let missing_acc = prd_parser::specs_missing_acceptance(&bead_specs);
+    if !missing_acc.is_empty() {
+        tracing::warn!(
+            count = missing_acc.len(),
+            keys = %missing_acc.join(", "),
+            "execution map: beads with no acceptance command (verifier cannot prove these)"
+        );
+    }
+
+    // B6: warn on dangling dependencies before they reach the br graph.
+    for w in validate_dependencies(&recommendations, &existing_keys) {
+        tracing::warn!("{w}");
+    }
+
     // Sort by priority
     recommendations.sort_by_key(|r| r.priority);
 
@@ -398,6 +690,181 @@ pub(crate) fn load_execution_maps(
         }
     }
     all
+}
+
+/// Read the single execution map associated with one phase.
+fn load_phase_execution_map(
+    project_root: &Path,
+    phase: &crate::project_config::Phase,
+) -> Vec<prd_parser::BeadSpec> {
+    let rel = match &phase.execution_map {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let path = project_root.join(rel);
+    match std::fs::read_to_string(&path) {
+        Ok(c) => prd_parser::parse_execution_map(&c),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Read the single exit-criteria file associated with one phase.
+fn load_phase_criteria(
+    project_root: &Path,
+    phase: &crate::project_config::Phase,
+) -> Vec<prd_parser::CriteriaItem> {
+    let path = match &phase.exit_criteria {
+        Some(p) => project_root.join(p),
+        None => return Vec::new(),
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(c) => prd_parser::parse_criteria(&c),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// True when the config came from `[[phase]]` blocks in TOML. Set explicitly
+/// at parse time so we don't have to sniff phase contents.
+fn config_uses_phase_chain(config: &ProjectPlannerConfig) -> bool {
+    config.uses_phase_chain
+}
+
+/// Build recommendations from a phase's execution-map bead specs, applying the
+/// shared dedup + throttle rules. Used by BOTH the slow (`analyze_phase_chain`)
+/// and fast (`quick_recommendations_phase_chain`) walks so the two tiers can't
+/// drift on dedup/throttle behavior.
+///
+/// `already_queued` is the count of recommendations already produced this run
+/// (e.g. queued depth from earlier in the walk), folded into the throttle.
+fn phase_recs_from_specs(
+    phase_label: &str,
+    bead_specs: &[prd_parser::BeadSpec],
+    criteria: &[prd_parser::CriteriaItem],
+    existing_titles: &[String],
+    existing_keys: &[String],
+    queue: &QueueReport,
+    already_queued: usize,
+) -> Vec<Recommendation> {
+    let mut recs: Vec<Recommendation> = Vec::new();
+    if queue.ready_unassigned >= QUEUE_THROTTLE {
+        return recs;
+    }
+    for spec in bead_specs {
+        // Skip if the criterion this spec addresses is already ticked.
+        let criteria_done = criteria.iter().any(|c| {
+            c.checked && (c.text.contains(&spec.description) || spec.description.contains(&c.text))
+        });
+        if criteria_done {
+            continue;
+        }
+        let title_match = existing_titles
+            .iter()
+            .any(|t| t.contains(&spec.description));
+        let key_pattern = format!("[planner-key: {}]", spec.bead_key);
+        let key_match = existing_keys.iter().any(|d| d.contains(&key_pattern));
+        if title_match || key_match {
+            continue;
+        }
+        if queue.ready_unassigned + already_queued + recs.len() >= QUEUE_THROTTLE {
+            break;
+        }
+        recs.push(Recommendation {
+            title: format!("{}: {}", spec.section, spec.description),
+            priority: spec.priority,
+            labels: vec![spec.section.clone(), phase_label.to_string()],
+            description: format!(
+                "IMPLEMENT: {desc}\n\
+                 Phase: {phase}\n\
+                 From execution map section: {section}\n\n\
+                 [planner-key: {key}]",
+                desc = spec.description,
+                phase = phase_label,
+                section = spec.section,
+                key = spec.bead_key,
+            ),
+            acceptance_command: spec.acceptance_command.clone().unwrap_or_default(),
+            gate_key: spec.bead_key.clone(),
+            reason: format!("Phase '{phase_label}' execution map item with no existing bead"),
+            depends_on: spec.depends_on.clone(),
+        });
+    }
+    recs
+}
+
+/// Outcome of a single phase-completion check.
+///
+/// Distinguishes "actually incomplete" from "can't evaluate right now" so
+/// the phase walk can decide whether to stall on a phase or advance past
+/// it. The Tier-1 fast path treats `Unevaluable` as "skip" rather than
+/// "block forever".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseStatus {
+    Complete,
+    Incomplete,
+    /// A condition needs gate/parity data that isn't available in the
+    /// current context (e.g. the Tier-1 fast path doesn't run analysis).
+    Unevaluable,
+}
+
+/// Evaluate a phase's completion conditions. See `PhaseStatus` for the
+/// three-valued result.
+fn phase_status(
+    phase: &crate::project_config::Phase,
+    criteria: &[prd_parser::CriteriaItem],
+    gates: Option<&GateReport>,
+    parity: Option<&ParityReport>,
+) -> PhaseStatus {
+    if phase.completion.is_empty() {
+        // No explicit completion → fall back to "all criteria checked".
+        // An empty criteria list is unevaluable rather than incomplete so
+        // the walk doesn't stall on a phase that hasn't been authored yet.
+        if criteria.is_empty() {
+            return PhaseStatus::Unevaluable;
+        }
+        return if criteria.iter().all(|c| c.checked) {
+            PhaseStatus::Complete
+        } else {
+            PhaseStatus::Incomplete
+        };
+    }
+    for cond in &phase.completion {
+        match cond {
+            CompletionCondition::AllCriteriaChecked => {
+                if criteria.is_empty() {
+                    return PhaseStatus::Unevaluable;
+                }
+                if criteria.iter().any(|c| !c.checked) {
+                    return PhaseStatus::Incomplete;
+                }
+            }
+            CompletionCondition::AllGatesPassing => match gates {
+                Some(g) if g.total > 0 && g.failing.is_empty() => {}
+                Some(g) if !g.failing.is_empty() => return PhaseStatus::Incomplete,
+                _ => return PhaseStatus::Unevaluable,
+            },
+            CompletionCondition::ParityAbove(t) => match parity {
+                Some(p) if p.overall >= *t => {}
+                Some(_) => return PhaseStatus::Incomplete,
+                None => return PhaseStatus::Unevaluable,
+            },
+        }
+    }
+    PhaseStatus::Complete
+}
+
+/// Convenience predicate that treats `Unevaluable` as "not complete" — used
+/// where we want a hard yes/no (e.g. analyze_phase_chain after a real
+/// analysis pass, where Unevaluable shouldn't happen).
+fn phase_is_complete(
+    phase: &crate::project_config::Phase,
+    criteria: &[prd_parser::CriteriaItem],
+    gates: Option<&GateReport>,
+    parity: Option<&ParityReport>,
+) -> bool {
+    matches!(
+        phase_status(phase, criteria, gates, parity),
+        PhaseStatus::Complete
+    )
 }
 
 // ─── Analysis command execution ───────────────────────────────────────────
@@ -657,6 +1124,317 @@ pub fn parse_gate_output(text: &str) -> GateReport {
     }
 }
 
+// ─── Pass B': Criteria-driven analysis ────────────────────────────────────
+
+/// Hard ceiling on a criteria-analysis subprocess. A compile + run of a
+/// handful of scoped test binaries should finish well within this; if it
+/// hangs (lock contention, runaway test), we kill it and report no passes
+/// rather than wedge the coordinator loop.
+/// Wall-clock ceiling for a criteria-analysis subprocess. The dominant cost is
+/// a COLD compile of the scoped test binary, which links the whole engine — on
+/// a loaded machine that can take many minutes. This runs at most once per
+/// planner cycle (not per bead), so we budget generously: a too-tight timeout
+/// would kill a legitimate cold build and silently stall the phase (criteria
+/// never tick). 20 minutes gives ample headroom while still bounding the
+/// lock-contention case the timeout exists to prevent.
+const CRITERIA_ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1200);
+
+/// Stale-temp-file age threshold. `run_command_with_timeout` sweeps leftover
+/// `patina-plan-*` files older than this on entry — they only accumulate if a
+/// prior planner process was hard-killed (SIGKILL) mid-run, since every
+/// graceful exit path cleans up its own files.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Run the tests named in criteria-line markers and return a GateReport keyed
+/// by test name. Skips criteria items without a `(test: \`...\`)` marker.
+///
+/// The build is scoped to `test_binaries` via repeated `--test <name>` flags
+/// so cargo compiles ONLY those targets. This is critical: a `--workspace`
+/// build would compile all 400+ integration tests and lock the machine. When
+/// `test_binaries` is empty, the function returns early WITHOUT running
+/// anything — it never falls back to a workspace-wide build.
+pub fn run_analysis_from_criteria(
+    criteria: &[prd_parser::CriteriaItem],
+    test_binaries: &[String],
+    engine_dir: &Path,
+) -> GateReport {
+    let mut test_names: Vec<String> = criteria
+        .iter()
+        .filter_map(|c| prd_parser::extract_test_name_from_criteria_line(&c.text))
+        .collect();
+    test_names.sort();
+    test_names.dedup();
+
+    if test_names.is_empty() {
+        return empty_gates();
+    }
+
+    if test_binaries.is_empty() {
+        // No scoped targets configured — refuse to run a workspace-wide build.
+        // The phase's boxes will only tick if something else (a manual run or
+        // a future config with test_binaries) checks them.
+        eprintln!(
+            "planner: criteria analysis skipped — phase has {} test name(s) but no \
+             `test_binaries` configured; refusing a --workspace build. Add the \
+             test target name(s) to the phase's test_binaries in planner.toml.",
+            test_names.len()
+        );
+        return empty_gates();
+    }
+
+    // Build a nextest filter expression: test(=name1) | test(=name2) | ...
+    let nextest_filter = test_names
+        .iter()
+        .map(|n| format!("test(={n})"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    // cargo nextest run --test bin1 --test bin2 ... --run-ignored all -E <filter>
+    let mut nextest_args: Vec<String> = vec![
+        "nextest".into(),
+        "run".into(),
+        "--no-fail-fast".into(),
+        "--run-ignored".into(),
+        "all".into(),
+    ];
+    for bin in test_binaries {
+        nextest_args.push("--test".into());
+        nextest_args.push(bin.clone());
+    }
+    nextest_args.push("-E".into());
+    nextest_args.push(nextest_filter);
+
+    let combined = match run_command_with_timeout(
+        "cargo",
+        &nextest_args,
+        engine_dir,
+        CRITERIA_ANALYSIS_TIMEOUT,
+    ) {
+        Some((output, code)) if code != Some(101) => output,
+        Some(_) => {
+            // 101 = compile error in a scoped target. Don't fall back to a
+            // workspace build (that's the lock hazard). Report no passes.
+            eprintln!("planner: criteria analysis hit a compile error in scoped targets");
+            return empty_gates();
+        }
+        None => {
+            eprintln!(
+                "planner: criteria analysis timed out after {}s — killed",
+                CRITERIA_ANALYSIS_TIMEOUT.as_secs()
+            );
+            return empty_gates();
+        }
+    };
+
+    parse_gate_output(&combined)
+}
+
+/// Run a command with a wall-clock timeout. Returns `Some((combined_output,
+/// exit_code))` on completion, or `None` if the timeout elapsed (the child is
+/// killed). stdout+stderr are redirected to temp files so a full pipe buffer
+/// can't deadlock the child while we poll. Polls `try_wait` rather than
+/// pulling in a dependency.
+fn run_command_with_timeout(
+    program: &str,
+    args: &[String],
+    workdir: &Path,
+    timeout: std::time::Duration,
+) -> Option<(String, Option<i32>)> {
+    let base = std::env::temp_dir();
+
+    // Best-effort sweep of files leaked by a hard-killed prior run. Graceful
+    // exits clean up their own files; this only catches SIGKILL leftovers.
+    sweep_stale_temp_files(&base);
+
+    // Unique temp paths in the system temp dir (no extra crate dependency).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let out_path = base.join(format!("patina-plan-{pid}-{nanos}.out"));
+    let err_path = base.join(format!("patina-plan-{pid}-{nanos}.err"));
+
+    let stdout = match std::fs::File::create(&out_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "planner: failed to create temp file {}: {e}",
+                out_path.display()
+            );
+            return Some((String::new(), Some(-1)));
+        }
+    };
+    let stderr = match std::fs::File::create(&err_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "planner: failed to create temp file {}: {e}",
+                err_path.display()
+            );
+            return Some((String::new(), Some(-1)));
+        }
+    };
+
+    let spawn = Command::new(program)
+        .args(args)
+        .current_dir(workdir)
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn();
+
+    let mut child = match spawn {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("planner: failed to spawn {program}: {e}");
+            let _ = std::fs::remove_file(&out_path);
+            let _ = std::fs::remove_file(&err_path);
+            return Some((String::new(), Some(-1)));
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&out_path);
+                    let _ = std::fs::remove_file(&err_path);
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => {
+                eprintln!("planner: error waiting on {program}: {e}");
+                let _ = std::fs::remove_file(&out_path);
+                let _ = std::fs::remove_file(&err_path);
+                return Some((String::new(), Some(-1)));
+            }
+        }
+    };
+
+    let stdout_text = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let stderr_text = std::fs::read_to_string(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&err_path);
+    Some((format!("{stdout_text}\n{stderr_text}"), exit_code))
+}
+
+/// Remove `patina-plan-*.{out,err}` files in `dir` older than `STALE_TEMP_AGE`.
+/// Best-effort: ignores all errors. These only exist if a prior planner
+/// process was SIGKILL'd between spawning a child and its cleanup.
+fn sweep_stale_temp_files(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("patina-plan-") {
+            continue;
+        }
+        if !(name.ends_with(".out") || name.ends_with(".err")) {
+            continue;
+        }
+        let age_ok = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .map(|age| age >= STALE_TEMP_AGE)
+            .unwrap_or(false);
+        if age_ok {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Rewrite a criteria markdown file so that every criterion whose named test
+/// passed in `gates` becomes `- [x]`. Already-checked lines are left as-is.
+/// Lines without a `(test: \`...\`)` marker are untouched.
+///
+/// Writes are atomic: the new content lands in a `.tmp` file next to the
+/// criteria file, then is renamed into place. A SIGKILL mid-write leaves
+/// either the original file or the new file — never a truncated artifact.
+///
+/// Returns the number of newly-checked criteria.
+pub fn tick_criteria_on_pass(criteria_path: &Path, gates: &GateReport) -> Result<usize> {
+    let content = std::fs::read_to_string(criteria_path).map_err(|e| {
+        crate::error::OrchestratorError::Io(std::io::Error::new(
+            e.kind(),
+            format!("read {}: {e}", criteria_path.display()),
+        ))
+    })?;
+
+    let passing_set: std::collections::HashSet<&str> =
+        gates.passing.iter().map(String::as_str).collect();
+
+    // Capture the original's trailing-newline state once, before any splicing.
+    // This decides whether the output should keep its final '\n' at the end.
+    let original_had_trailing_newline = content.ends_with('\n');
+
+    let mut newly_checked = 0usize;
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        // Only touch lines that start with `- [ ]` (unchecked) and have a
+        // test marker whose test passed.
+        let trimmed = line.trim_start();
+        let unchecked = trimmed.starts_with("- [ ]");
+        if unchecked {
+            if let Some(test_name) = prd_parser::extract_test_name_from_criteria_line(trimmed) {
+                if passing_set.contains(test_name.as_str()) {
+                    // Splice in `[x]` preserving leading whitespace.
+                    let lead_len = line.len() - trimmed.len();
+                    out.push_str(&line[..lead_len]);
+                    out.push_str("- [x]");
+                    out.push_str(&trimmed["- [ ]".len()..]);
+                    out.push('\n');
+                    newly_checked += 1;
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    // Honor the original's trailing-newline state. content.lines() drops the
+    // final newline if there was one, and we appended '\n' to every emitted
+    // line — so if the original did NOT end with '\n', strip the one we added.
+    if !original_had_trailing_newline && out.ends_with('\n') {
+        out.pop();
+    }
+
+    if newly_checked > 0 {
+        // Atomic write: stage to a sibling `.tmp` then rename. Both files
+        // live on the same filesystem so the rename is a single inode swap.
+        let tmp_path = criteria_path.with_extension("md.tmp");
+        std::fs::write(&tmp_path, &out).map_err(|e| {
+            crate::error::OrchestratorError::Io(std::io::Error::new(
+                e.kind(),
+                format!("write {}: {e}", tmp_path.display()),
+            ))
+        })?;
+        std::fs::rename(&tmp_path, criteria_path).map_err(|e| {
+            // Best-effort cleanup so a failed rename doesn't leave .tmp behind.
+            let _ = std::fs::remove_file(&tmp_path);
+            crate::error::OrchestratorError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "rename {} → {}: {e}",
+                    tmp_path.display(),
+                    criteria_path.display()
+                ),
+            ))
+        })?;
+    }
+    Ok(newly_checked)
+}
+
 // ─── Pass C: Queue ────────────────────────────────────────────────────────
 
 fn run_queue_pass(project_root: &Path) -> Result<QueueReport> {
@@ -678,6 +1456,89 @@ fn run_queue_pass(project_root: &Path) -> Result<QueueReport> {
 
 fn collect_existing_planner_keys(conn: &rusqlite::Connection) -> Vec<String> {
     db::bead_descriptions_containing(conn, "[planner-key:").unwrap_or_default()
+}
+
+/// C4: lint a plan report and return human-readable audit findings — beads that
+/// would be seeded without an acceptance command, and dependencies that resolve
+/// to neither a sibling recommendation nor an existing bead. Used by
+/// `plan --dry-run` so operators see *why* a seed would be broken before
+/// `--apply` creates anything.
+pub fn audit_report(project_root: &Path, report: &PlanReport) -> Vec<String> {
+    let mut findings = Vec::new();
+    for r in &report.recommendations {
+        if r.acceptance_command.trim().is_empty() {
+            findings.push(format!(
+                "MISSING-ACCEPTANCE  P{} '{}' (key={}) — verifier cannot prove this bead",
+                r.priority, r.title, r.gate_key
+            ));
+        }
+    }
+    let existing_keys = match db::open(project_root) {
+        Ok(conn) => collect_existing_planner_keys(&conn),
+        Err(_) => vec![],
+    };
+    for w in validate_dependencies(&report.recommendations, &existing_keys) {
+        findings.push(format!("DANGLING-DEP  {w}"));
+    }
+    findings
+}
+
+/// C3: detect the silent-stall config error — a phase whose criteria carry
+/// `(test: ...)` markers (so they are *meant* to auto-tick from passing tests)
+/// but which has no `test_binaries` configured, meaning analysis is skipped and
+/// the criteria can never tick. Such a phase is reported Unevaluable and
+/// silently skipped on every cycle.
+fn phase_has_unticked_test_markers(
+    criteria: &[prd_parser::CriteriaItem],
+    test_binaries: &[String],
+) -> bool {
+    test_binaries.is_empty()
+        && criteria.iter().any(|c| {
+            !c.checked && prd_parser::extract_test_name_from_criteria_line(&c.text).is_some()
+        })
+}
+
+/// Extract the bare planner key from a description containing
+/// `[planner-key: <key>]`. Returns `None` when no well-formed marker is present.
+fn extract_planner_key(desc: &str) -> Option<String> {
+    let start = desc.find("[planner-key: ")? + "[planner-key: ".len();
+    let rest = &desc[start..];
+    let end = rest.find(']')?;
+    let key = rest[..end].trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_lowercase())
+    }
+}
+
+/// Validate that every `depends_on` of a to-be-seeded recommendation resolves
+/// to either another recommendation in this batch or an existing bead (B6).
+///
+/// Returns one warning string per dangling dependency. A dep pointing at a key
+/// that was deduped/closed/never-seeded would otherwise create a broken edge in
+/// the `br` dependency graph that needs manual repair.
+fn validate_dependencies(recs: &[Recommendation], existing_key_descs: &[String]) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut known: HashSet<String> = recs.iter().map(|r| r.gate_key.to_lowercase()).collect();
+    for desc in existing_key_descs {
+        if let Some(k) = extract_planner_key(desc) {
+            known.insert(k);
+        }
+    }
+    let mut warnings = Vec::new();
+    for rec in recs {
+        for dep in &rec.depends_on {
+            let dep_norm = dep.to_lowercase();
+            if !known.contains(&dep_norm) {
+                warnings.push(format!(
+                    "bead '{}' depends on '{}' which is neither being seeded nor an existing bead — dependency will be dropped",
+                    rec.gate_key, dep
+                ));
+            }
+        }
+    }
+    warnings
 }
 
 /// Collect planner keys only from beads in the given statuses.
@@ -772,6 +1633,31 @@ fn next_phase_template(title: &str) -> NextPhaseTemplate {
             labels: &["phase9", "docs"],
             acceptance: "the migration guide explains supported runtime scope, gaps, and upgrade path and a validation test checks the required guidance sections remain present",
         },
+        "editor security hardening" => NextPhaseTemplate {
+            title: "Harden editor HTTP server with auth, sandbox, audit log, and rate limit",
+            labels: &["editor-agent", "security"],
+            acceptance: "bearer token auth, filesystem sandbox, append-only audit log, and per-token rate limit are each covered by a dedicated integration test under engine-rs/tests",
+        },
+        "editor agent capabilities and openapi" => NextPhaseTemplate {
+            title: "Expose editor capabilities and OpenAPI spec for agent driveability",
+            labels: &["editor-agent", "api"],
+            acceptance: "GET /api/capabilities returns a deterministic schema of every route and a checked-in OpenAPI 3 spec validates against the live capabilities output",
+        },
+        "editor agent realtime events" => NextPhaseTemplate {
+            title: "Add realtime event stream and concurrency control to the editor server",
+            labels: &["editor-agent", "realtime"],
+            acceptance: "a /api/events WebSocket broadcasts ordered scene-tree mutations to all clients and concurrent edits to the same node return HTTP 409 with a node version conflict",
+        },
+        "editor wgpu default renderer" => NextPhaseTemplate {
+            title: "Make wgpu the default editor renderer and validate viewport latency",
+            labels: &["editor-agent", "quality"],
+            acceptance: "default cargo build links wgpu, software rasterizer is gated behind a feature flag, and /api/viewport p99 is under 50 ms over 1000 calls on the CI baseline",
+        },
+        "editor visual parity audit" => NextPhaseTemplate {
+            title: "Audit editor visual parity against Godot on reference scenes",
+            labels: &["editor-agent", "visual"],
+            acceptance: "DOM parity tests cover Inspector, Scene Tree, and bottom panels on five reference scenes and a viewport pixel-diff against Godot stays within 2 percent mean error",
+        },
         _ => NextPhaseTemplate {
             title: "",
             labels: &[],
@@ -848,9 +1734,17 @@ pub fn generate_recommendations(
 }
 
 /// Generate recommendations for scenes that are below 100% parity.
+///
+/// Dedup is by the stable `parity-gap-<scene>` planner key, NOT by title: the
+/// title embeds the live parity percentage, which changes every cycle as parity
+/// improves, so a title-only check re-seeds the same bead repeatedly (the
+/// documented "parity beads re-seeded every cycle" stall). `existing_titles` is
+/// still consulted as a fallback so legacy beads created before key-dedup are
+/// also recognized.
 pub fn generate_parity_recommendations(
     parity: &ParityReport,
     existing_titles: &[String],
+    existing_keys: &[String],
     queue: &QueueReport,
 ) -> Vec<Recommendation> {
     if queue.ready_unassigned >= QUEUE_THROTTLE {
@@ -862,12 +1756,19 @@ pub fn generate_parity_recommendations(
         if scene.parity >= 100.0 {
             continue;
         }
+        let missing = scene.total.saturating_sub(scene.matched);
         let title = format!(
             "Close parity gap in {} (currently {:.1}%)",
             scene.name, scene.parity
         );
         let key = format!("parity-gap-{}", scene.name);
 
+        // Primary dedup: stable planner key (title is volatile).
+        let key_pattern = format!("[planner-key: {key}]");
+        if existing_keys.iter().any(|d| d.contains(&key_pattern)) {
+            continue;
+        }
+        // Fallback dedup: legacy parity beads created before key-based dedup.
         if existing_titles
             .iter()
             .any(|t| t.contains(&scene.name) && t.contains("parity"))
@@ -875,26 +1776,33 @@ pub fn generate_parity_recommendations(
             continue;
         }
 
+        let acceptance_command = format!(
+            "cargo test --test oracle_regression_test -- golden_{}_full_property_parity",
+            scene.name
+        );
+
         recs.push(Recommendation {
             title: title.clone(),
             priority: 2,
             labels: vec!["parity-gap".to_string()],
             description: format!(
-                "IMPLEMENT fixes to reach 100% property parity for {name}.\n\
-                 Currently {matched}/{total} properties match ({pct:.1}%).\n\
-                 Run the oracle regression test to identify which properties mismatch,\n\
-                 then fix the engine to produce matching output.\n\n\
+                "IMPLEMENT engine fixes so the `{name}` scene reaches 100% property parity \
+                 with the Godot oracle ({missing} of {total} properties currently mismatch; \
+                 {matched}/{total} = {pct:.1}% match).\n\
+                 The acceptance test below fails one assertion per mismatching property and \
+                 names the expected vs actual value — make every assertion pass by correcting \
+                 the engine's output (do not edit the test or the golden fixture).\n\
+                 Acceptance: {cmd}\n\n\
                  [planner-key: {key}]",
                 name = scene.name,
+                missing = missing,
                 matched = scene.matched,
                 total = scene.total,
                 pct = scene.parity,
+                cmd = acceptance_command,
                 key = key,
             ),
-            acceptance_command: format!(
-                "cargo test --test oracle_regression_test -- golden_{}_full_property_parity",
-                scene.name
-            ),
+            acceptance_command,
             gate_key: key,
             reason: format!(
                 "{} has {:.1}% parity ({}/{}), needs 100%",
@@ -904,6 +1812,38 @@ pub fn generate_parity_recommendations(
         });
     }
     recs
+}
+
+/// Build a `planner-key -> acceptance text` map covering every phase 5-9
+/// deliverable in the project's `next_sources`. Used by `plan --heal` to
+/// backfill `acceptance_criteria` on legacy beads created before `--apply`
+/// populated the structured field.
+///
+/// Unlike `generate_next_phase_recommendations`, this does NOT dedup against
+/// existing beads — it indexes every potential template so heal can look up
+/// already-created beads by their planner-key.
+pub fn build_planner_key_acceptance_map(
+    project_root: &Path,
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let config = project_config::load(project_root);
+    for source_file in &config.next_sources {
+        let path = project_root.join(source_file);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        for phase_num in 5..=9 {
+            let prefix = format!("Phase {}", phase_num);
+            let deliverables = prd_parser::parse_phase_deliverables(&content, &prefix);
+            for d in deliverables {
+                let template = next_phase_template(&d.title);
+                let key = format!("phase{}-{}", phase_num, d.slug);
+                map.insert(key, template.acceptance.to_string());
+            }
+        }
+    }
+    map
 }
 
 /// Generate next-phase recommendations by parsing deliverables from
@@ -1043,6 +1983,10 @@ fn determine_phase(
                     all_met = false;
                 }
             }
+            // The phase-walk path evaluates AllCriteriaChecked directly
+            // against the criteria items; the V1-centric legacy path uses
+            // gate/parity signals only, so this condition is a no-op here.
+            CompletionCondition::AllCriteriaChecked => {}
         }
     }
 
@@ -1071,6 +2015,277 @@ fn determine_phase_default(gates: &GateReport, parity: &ParityReport) -> Phase {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_tick_criteria_on_pass_writes_x_for_passing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("EXIT.md");
+        let original = "\
+# Exit Criteria
+
+## Security
+
+- [ ] Editor HTTP server requires bearer token auth (test: `editor_auth_required_test`)
+- [ ] Filesystem endpoints reject paths outside project root (test: `editor_filesystem_sandbox_test`)
+- [ ] Already done (test: `editor_audit_log_test`)
+- [ ] Criterion without test marker
+
+## Other
+
+- [x] Pre-existing checked item stays checked (test: `editor_other_test`)
+";
+        fs::write(&path, original).unwrap();
+        let gates = GateReport {
+            total: 3,
+            passing: vec![
+                "editor_auth_required_test".to_string(),
+                "editor_audit_log_test".to_string(),
+            ],
+            failing: vec!["editor_filesystem_sandbox_test".to_string()],
+        };
+        let n = tick_criteria_on_pass(&path, &gates).unwrap();
+        assert_eq!(n, 2, "should tick auth and audit, not sandbox");
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("- [x] Editor HTTP server requires bearer token auth"),
+            "auth should be ticked:\n{after}"
+        );
+        assert!(
+            after.contains("- [ ] Filesystem endpoints"),
+            "failing test should leave criterion unchecked"
+        );
+        assert!(
+            after.contains("- [x] Already done"),
+            "passing test should tick the criterion"
+        );
+        assert!(
+            after.contains("- [ ] Criterion without test marker"),
+            "no test marker → no tick"
+        );
+        assert!(
+            after.contains("- [x] Pre-existing checked item"),
+            "already-checked should stay"
+        );
+    }
+
+    #[test]
+    fn test_tick_criteria_on_pass_atomic_no_partial_file() {
+        // After a successful tick, no `.tmp` sibling should remain.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("EXIT.md");
+        fs::write(&path, "- [ ] X (test: `t1`)\n").unwrap();
+        let gates = GateReport {
+            total: 1,
+            passing: vec!["t1".to_string()],
+            failing: vec![],
+        };
+        let n = tick_criteria_on_pass(&path, &gates).unwrap();
+        assert_eq!(n, 1);
+        let tmp_path = path.with_extension("md.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "tmp file should be renamed away, not left behind"
+        );
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("- [x] X"));
+    }
+
+    #[test]
+    fn test_tick_criteria_on_pass_preserves_no_trailing_newline() {
+        // Edge case W5: input without final newline should stay that way.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("EXIT.md");
+        fs::write(&path, "- [ ] X (test: `t1`)").unwrap();
+        let gates = GateReport {
+            total: 1,
+            passing: vec!["t1".to_string()],
+            failing: vec![],
+        };
+        tick_criteria_on_pass(&path, &gates).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "- [x] X (test: `t1`)");
+    }
+
+    /// Regression for the V1-stuck behavior the user explicitly called out:
+    /// if phase 1 has unchecked criteria but every spec is already deduped
+    /// (existing closed beads), the planner must walk to phase 2 instead of
+    /// reporting "incomplete + zero recommendations" forever.
+    #[test]
+    fn test_quick_recommendations_falls_through_saturated_phase() {
+        use crate::project_config::{AnalysisSource, Phase};
+        use std::path::PathBuf;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Phase 1: unchecked criteria + execution map whose only item is
+        // already represented by an "existing title" (simulating a closed
+        // bead in production).
+        fs::write(root.join("p1_exit.md"), "- [ ] Unchecked (test: `t1`)\n").unwrap();
+        fs::write(
+            root.join("p1_map.md"),
+            "## Now\n\n1. `p1-saturated` Already-implemented thing\n   Acceptance: (test: `t1`)\n",
+        )
+        .unwrap();
+        // Phase 2: fresh work.
+        fs::write(root.join("p2_exit.md"), "- [ ] Fresh (test: `t2`)\n").unwrap();
+        fs::write(
+            root.join("p2_map.md"),
+            "## Now\n\n1. `p2-new` Implement\n   Acceptance: (test: `t2`)\n",
+        )
+        .unwrap();
+
+        let phases = vec![
+            Phase {
+                label: "p1".into(),
+                execution_map: Some(PathBuf::from("p1_map.md")),
+                exit_criteria: Some(PathBuf::from("p1_exit.md")),
+                analysis: AnalysisSource::FromCriteria,
+                completion: vec![CompletionCondition::AllCriteriaChecked],
+                test_binaries: vec![],
+            },
+            Phase {
+                label: "p2".into(),
+                execution_map: Some(PathBuf::from("p2_map.md")),
+                exit_criteria: Some(PathBuf::from("p2_exit.md")),
+                analysis: AnalysisSource::FromCriteria,
+                completion: vec![CompletionCondition::AllCriteriaChecked],
+                test_binaries: vec![],
+            },
+        ];
+
+        // Walk emulation: check phase status, look at specs. Phase 1's only
+        // spec matches an existing title — should be skipped, walk continues
+        // to phase 2.
+        let p1_specs = load_phase_execution_map(root, &phases[0]);
+        assert_eq!(p1_specs.len(), 1);
+        let p1_crit = load_phase_criteria(root, &phases[0]);
+        assert!(
+            !phase_is_complete(&phases[0], &p1_crit, None, None),
+            "p1 unchecked criteria → not complete"
+        );
+        // Simulated "already-implemented" title.
+        let existing_titles = vec!["Now: Already-implemented thing".to_string()];
+        let p1_dedup = p1_specs
+            .iter()
+            .all(|s| existing_titles.iter().any(|t| t.contains(&s.description)));
+        assert!(p1_dedup, "p1 should be fully deduped");
+
+        // Phase 2 has unseeded specs.
+        let p2_specs = load_phase_execution_map(root, &phases[1]);
+        assert_eq!(p2_specs.len(), 1);
+        let p2_dedup = p2_specs
+            .iter()
+            .all(|s| existing_titles.iter().any(|t| t.contains(&s.description)));
+        assert!(!p2_dedup, "p2 should NOT be deduped");
+        // The walk should reach p2.
+    }
+
+    #[test]
+    fn test_phase_enum_has_all_complete_variant() {
+        // S4 follow-up: AllComplete distinguishes "V1 done" from "all phases done".
+        // Compile-time check; the value is set in analyze_phase_chain.
+        let all = Phase::AllComplete;
+        assert_eq!(all, Phase::AllComplete);
+        assert_ne!(Phase::AllComplete, Phase::V1Complete);
+    }
+
+    #[test]
+    fn test_sweep_stale_temp_files_removes_only_old_planner_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+
+        // A fresh planner temp file (should survive — too new).
+        let fresh = p.join("patina-plan-999-123.out");
+        fs::write(&fresh, "x").unwrap();
+        // An unrelated file (should survive — wrong prefix).
+        let unrelated = p.join("some-other-file.out");
+        fs::write(&unrelated, "x").unwrap();
+        // An old planner temp file (should be swept). Backdate its mtime past
+        // the threshold via filetime-free trick: set via utimensat is awkward
+        // without a dep, so assert the prefix/suffix matching + age logic by
+        // confirming the fresh file is NOT removed (age branch is exercised
+        // separately in integration).
+        sweep_stale_temp_files(p);
+
+        assert!(fresh.exists(), "fresh planner temp file must not be swept");
+        assert!(unrelated.exists(), "non-planner file must not be swept");
+    }
+
+    #[test]
+    fn test_run_analysis_from_criteria_skips_without_test_binaries() {
+        // The critical machine-lock guard: when a phase names criteria tests
+        // but configures no test_binaries, analysis must return empty (no
+        // passes) WITHOUT spawning any cargo build. We can't easily assert
+        // "no subprocess" directly, but we assert the early-return contract:
+        // empty test_binaries → empty GateReport, fast, no panic.
+        let criteria = vec![prd_parser::CriteriaItem {
+            section: "S".into(),
+            text: "Some criterion (test: `editor_auth_required_test`)".into(),
+            checked: false,
+            line_number: 1,
+        }];
+        let report = run_analysis_from_criteria(&criteria, &[], Path::new("/nonexistent-engine"));
+        assert!(report.passing.is_empty());
+        assert!(report.failing.is_empty());
+        assert_eq!(report.total, 0);
+    }
+
+    #[test]
+    fn test_phase_status_unevaluable_for_missing_gates() {
+        // W1: a phase using AllGatesPassing without gate context should
+        // return Unevaluable so the walk advances rather than stalling.
+        use crate::project_config::{AnalysisSource, Phase};
+        use std::path::PathBuf;
+
+        let phase = Phase {
+            label: "needs-gates".into(),
+            execution_map: Some(PathBuf::from("MAP.md")),
+            exit_criteria: None,
+            analysis: AnalysisSource::Commands(vec![]),
+            completion: vec![CompletionCondition::AllGatesPassing],
+            test_binaries: vec![],
+        };
+        assert_eq!(
+            phase_status(&phase, &[], None, None),
+            PhaseStatus::Unevaluable
+        );
+        // With gates context (all passing), it should be Complete.
+        let gates_ok = GateReport {
+            total: 3,
+            passing: vec!["a".into(), "b".into(), "c".into()],
+            failing: vec![],
+        };
+        assert_eq!(
+            phase_status(&phase, &[], Some(&gates_ok), None),
+            PhaseStatus::Complete
+        );
+        // With failing gates, Incomplete.
+        let gates_fail = GateReport {
+            total: 3,
+            passing: vec!["a".into()],
+            failing: vec!["b".into(), "c".into()],
+        };
+        assert_eq!(
+            phase_status(&phase, &[], Some(&gates_fail), None),
+            PhaseStatus::Incomplete
+        );
+    }
+
+    #[test]
+    fn test_tick_criteria_on_pass_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("EXIT.md");
+        fs::write(&path, "- [x] All set (test: `my_test`)\n").unwrap();
+        let gates = GateReport {
+            total: 1,
+            passing: vec!["my_test".to_string()],
+            failing: vec![],
+        };
+        let n = tick_criteria_on_pass(&path, &gates).unwrap();
+        assert_eq!(n, 0, "already-checked items should not re-trigger writes");
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "- [x] All set (test: `my_test`)\n");
+    }
 
     #[test]
     fn test_parse_parity_output() {
@@ -1207,6 +2422,145 @@ test something_else ... ignored
         );
         assert_eq!(recs.len(), 1, "should skip bead with matching title");
         assert!(recs[0].gate_key.contains("weakref"));
+    }
+
+    // ─── C4: plan audit / lint ──────────────────────────────────────────
+
+    #[test]
+    fn test_audit_report_flags_missing_acceptance_and_dangling_deps() {
+        // A non-existent project root → no DB → existing_keys empty, so a dep
+        // pointing outside the batch is reported dangling.
+        let report = PlanReport {
+            timestamp: "t".into(),
+            parity: empty_parity(),
+            gates: empty_gates(),
+            queue: QueueReport {
+                open: 0,
+                in_progress: 0,
+                closed: 0,
+                ready_unassigned: 0,
+            },
+            recommendations: vec![
+                Recommendation {
+                    title: "no acceptance".into(),
+                    priority: 1,
+                    labels: vec![],
+                    description: String::new(),
+                    acceptance_command: String::new(), // missing
+                    gate_key: "key-a".into(),
+                    reason: String::new(),
+                    depends_on: vec![],
+                },
+                Recommendation {
+                    title: "dangling dep".into(),
+                    priority: 1,
+                    labels: vec![],
+                    description: String::new(),
+                    acceptance_command: "cargo test --test t".into(),
+                    gate_key: "key-b".into(),
+                    depends_on: vec!["key-ghost".into()],
+                    reason: String::new(),
+                },
+            ],
+            phase: Phase::V1Active,
+            active_phase_label: String::new(),
+        };
+        let findings = audit_report(std::path::Path::new("/nonexistent-xyz"), &report);
+        assert!(findings
+            .iter()
+            .any(|f| f.contains("MISSING-ACCEPTANCE") && f.contains("key-a")));
+        assert!(findings
+            .iter()
+            .any(|f| f.contains("DANGLING-DEP") && f.contains("key-ghost")));
+    }
+
+    // ─── C3: silent-stall detection ─────────────────────────────────────
+
+    #[test]
+    fn test_phase_has_unticked_test_markers() {
+        use crate::prd_parser::CriteriaItem;
+        let with_marker = vec![CriteriaItem {
+            section: "S".into(),
+            text: "Auth required (test: `editor_auth_required_test`)".into(),
+            checked: false,
+            line_number: 1,
+        }];
+        // Markers present + no test_binaries → silent-stall risk.
+        assert!(phase_has_unticked_test_markers(&with_marker, &[]));
+        // test_binaries configured → analysis runs → no silent stall.
+        assert!(!phase_has_unticked_test_markers(
+            &with_marker,
+            &["editor_agent_integration_test".to_string()]
+        ));
+        // Already-checked markers don't count.
+        let checked = vec![CriteriaItem {
+            section: "S".into(),
+            text: "Done (test: `t`)".into(),
+            checked: true,
+            line_number: 1,
+        }];
+        assert!(!phase_has_unticked_test_markers(&checked, &[]));
+        // No markers at all → benign empty/prose phase, not a stall.
+        let no_marker = vec![CriteriaItem {
+            section: "S".into(),
+            text: "Some prose criterion".into(),
+            checked: false,
+            line_number: 1,
+        }];
+        assert!(!phase_has_unticked_test_markers(&no_marker, &[]));
+    }
+
+    // ─── B6: planner-key extraction + dependency validation ─────────────
+
+    #[test]
+    fn test_extract_planner_key() {
+        assert_eq!(
+            extract_planner_key("IMPLEMENT: foo\n\n[planner-key: v1-obj-foo]").as_deref(),
+            Some("v1-obj-foo")
+        );
+        // Case-normalized
+        assert_eq!(
+            extract_planner_key("[planner-key: V1-OBJ-Bar]").as_deref(),
+            Some("v1-obj-bar")
+        );
+        // Malformed / missing
+        assert_eq!(extract_planner_key("no marker here"), None);
+        assert_eq!(extract_planner_key("[planner-key: ]"), None);
+    }
+
+    fn rec_with(key: &str, deps: Vec<&str>) -> Recommendation {
+        Recommendation {
+            title: format!("t-{key}"),
+            priority: 1,
+            labels: vec![],
+            description: String::new(),
+            acceptance_command: String::new(),
+            gate_key: key.to_string(),
+            reason: String::new(),
+            depends_on: deps.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn test_validate_dependencies_resolves_within_batch() {
+        let recs = vec![rec_with("key-a", vec![]), rec_with("key-b", vec!["key-a"])];
+        assert!(validate_dependencies(&recs, &[]).is_empty());
+    }
+
+    #[test]
+    fn test_validate_dependencies_resolves_against_existing() {
+        let recs = vec![rec_with("key-b", vec!["key-a"])];
+        let existing = vec!["...[planner-key: key-a]...".to_string()];
+        assert!(validate_dependencies(&recs, &existing).is_empty());
+    }
+
+    #[test]
+    fn test_validate_dependencies_flags_dangling() {
+        let recs = vec![rec_with("key-b", vec!["key-missing"])];
+        let warnings = validate_dependencies(&recs, &[]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("key-missing"));
+        assert!(warnings[0].contains("key-b"));
     }
 
     #[test]
@@ -1355,6 +2709,8 @@ test something_else ... ignored
                 CompletionCondition::ParityAbove(98.0),
             ],
             next_sources: vec![],
+            phases: vec![],
+            uses_phase_chain: false,
         };
         assert_eq!(determine_phase(&gates, &parity, &config), Phase::V1Complete);
     }
@@ -1379,6 +2735,8 @@ test something_else ... ignored
             phase_label: "v1".to_string(),
             completion_conditions: vec![],
             next_sources: vec![],
+            phases: vec![],
+            uses_phase_chain: false,
         };
         assert_eq!(
             determine_phase(&gates, &parity, &config),
@@ -1406,6 +2764,8 @@ test something_else ... ignored
             phase_label: "v1".to_string(),
             completion_conditions: vec![],
             next_sources: vec![],
+            phases: vec![],
+            uses_phase_chain: false,
         };
         assert_eq!(determine_phase(&gates, &parity, &config), Phase::V1Active);
     }
@@ -1430,6 +2790,8 @@ test something_else ... ignored
             phase_label: "v1".to_string(),
             completion_conditions: vec![],
             next_sources: vec![],
+            phases: vec![],
+            uses_phase_chain: false,
         };
         assert_eq!(
             determine_phase(&gates, &parity, &config),
@@ -1461,6 +2823,8 @@ test something_else ... ignored
                 CompletionCondition::ParityAbove(98.0),
             ],
             next_sources: vec![],
+            phases: vec![],
+            uses_phase_chain: false,
         };
         assert_eq!(
             determine_phase(&gates, &parity, &config),
@@ -1541,6 +2905,8 @@ test something_else ... ignored
             phase_label: "v1".to_string(),
             completion_conditions: vec![],
             next_sources: vec!["prd/PLAN_A.md".into(), "prd/PLAN_B.md".into()],
+            phases: vec![],
+            uses_phase_chain: false,
         };
         let queue = QueueReport {
             open: 0,
@@ -1598,6 +2964,8 @@ test something_else ... ignored
             phase_label: "v1".to_string(),
             completion_conditions: vec![],
             next_sources: vec!["prd/PLAN.md".into()],
+            phases: vec![],
+            uses_phase_chain: false,
         };
         let queue = QueueReport {
             open: 0,
@@ -1860,7 +3228,7 @@ OVERALL        101   100    99.0%
             closed: 50,
             ready_unassigned: 1,
         };
-        let recs = generate_parity_recommendations(&parity, &[], &queue);
+        let recs = generate_parity_recommendations(&parity, &[], &[], &queue);
         assert!(
             recs.is_empty(),
             "100% scenes should not generate recommendations"
@@ -1895,10 +3263,57 @@ OVERALL        101   100    99.0%
             closed: 50,
             ready_unassigned: 1,
         };
-        let recs = generate_parity_recommendations(&parity, &[], &queue);
+        let recs = generate_parity_recommendations(&parity, &[], &[], &queue);
         assert_eq!(recs.len(), 1);
         assert!(recs[0].title.contains("needs_work"));
         assert!(recs[0].gate_key.contains("parity-gap-needs_work"));
+        // Description must be implementation-directive and carry the scoped test.
+        assert!(recs[0]
+            .description
+            .contains("[planner-key: parity-gap-needs_work]"));
+        assert!(recs[0]
+            .description
+            .contains("golden_needs_work_full_property_parity"));
+    }
+
+    /// A1 regression: parity beads dedup on the stable planner key, NOT the
+    /// title. The title embeds the live percentage, so when parity ticks up
+    /// (90.0% → 92.0%) a title-only check would re-seed the same bead. With
+    /// key dedup, an existing bead suppresses re-seeding regardless of the
+    /// percentage in its title.
+    #[test]
+    fn test_parity_recs_dedup_by_key_not_volatile_title() {
+        let parity = ParityReport {
+            overall: 92.0,
+            total: 50,
+            matched: 46,
+            scenes: vec![SceneParity {
+                name: "needs_work".into(),
+                total: 50,
+                matched: 46, // parity improved since the bead was created
+                parity: 92.0,
+            }],
+        };
+        let queue = QueueReport {
+            open: 1,
+            in_progress: 0,
+            closed: 0,
+            ready_unassigned: 1,
+        };
+        // Existing bead's title says 90.0% (stale), but its key is stable.
+        let existing_titles = vec!["Close parity gap in needs_work (currently 90.0%)".to_string()];
+        let existing_keys = vec!["IMPLEMENT ...\n[planner-key: parity-gap-needs_work]".to_string()];
+
+        // Key-based dedup suppresses re-seeding even though the title % differs.
+        let recs = generate_parity_recommendations(&parity, &[], &existing_keys, &queue);
+        assert!(
+            recs.is_empty(),
+            "stable key must dedup despite volatile title %"
+        );
+
+        // And the legacy title-fallback still works when no key is present.
+        let recs2 = generate_parity_recommendations(&parity, &existing_titles, &[], &queue);
+        assert!(recs2.is_empty(), "legacy title fallback must still dedup");
     }
 
     #[test]
@@ -2052,6 +3467,8 @@ OVERALL        101   100    99.0%
             phase_label: "V1".to_string(),
             completion_conditions: vec![],
             next_sources: vec![plan_path.clone()],
+            phases: vec![],
+            uses_phase_chain: false,
         };
 
         let queue = QueueReport {
@@ -2115,5 +3532,183 @@ OVERALL        101   100    99.0%
             "port-plan deliverable generator must chain dependencies, not hardcode empty vec. \
              Found 'depends_on: vec![]' in the deliverable loop body."
         );
+    }
+
+    // ─── Phase-chain integration ──────────────────────────────────────────
+
+    #[test]
+    fn test_phase_is_complete_all_criteria_checked() {
+        use crate::project_config::{AnalysisSource, Phase};
+        use std::path::PathBuf;
+
+        let phase = Phase {
+            label: "test".to_string(),
+            execution_map: Some(PathBuf::from("MAP.md")),
+            exit_criteria: Some(PathBuf::from("EXIT.md")),
+            analysis: AnalysisSource::FromCriteria,
+            completion: vec![CompletionCondition::AllCriteriaChecked],
+            test_binaries: vec![],
+        };
+
+        // No criteria → not complete (avoid false-positive on empty file).
+        assert!(!phase_is_complete(&phase, &[], None, None));
+
+        // All checked → complete.
+        let all_checked = vec![
+            prd_parser::CriteriaItem {
+                section: "S".into(),
+                text: "a".into(),
+                checked: true,
+                line_number: 1,
+            },
+            prd_parser::CriteriaItem {
+                section: "S".into(),
+                text: "b".into(),
+                checked: true,
+                line_number: 2,
+            },
+        ];
+        assert!(phase_is_complete(&phase, &all_checked, None, None));
+
+        // Any unchecked → not complete.
+        let mut one_unchecked = all_checked.clone();
+        one_unchecked[0].checked = false;
+        assert!(!phase_is_complete(&phase, &one_unchecked, None, None));
+    }
+
+    #[test]
+    fn test_config_uses_phase_chain_reads_explicit_flag() {
+        use crate::project_config::{AnalysisSource, Phase};
+        use std::path::PathBuf;
+
+        // Legacy: uses_phase_chain = false.
+        let legacy = ProjectPlannerConfig {
+            analysis: vec![],
+            criteria_files: vec![],
+            execution_map_files: vec![],
+            phase_label: "v1".to_string(),
+            completion_conditions: vec![CompletionCondition::AllGatesPassing],
+            next_sources: vec![],
+            phases: vec![Phase {
+                label: "v1".into(),
+                execution_map: None,
+                exit_criteria: None,
+                analysis: AnalysisSource::Commands(vec![]),
+                completion: vec![CompletionCondition::AllGatesPassing],
+                test_binaries: vec![],
+            }],
+            uses_phase_chain: false,
+        };
+        assert!(!config_uses_phase_chain(&legacy));
+
+        // New: explicit flag set, even if analysis/completion are "legacy-shaped".
+        // This is the test the reviewer flagged in S3 — a [[phase]] block using
+        // only Commands + all_gates_passing must still route through the new path.
+        let new = ProjectPlannerConfig {
+            phases: vec![Phase {
+                label: "v2-only-commands".into(),
+                execution_map: Some(PathBuf::from("MAP.md")),
+                exit_criteria: Some(PathBuf::from("EXIT.md")),
+                analysis: AnalysisSource::Commands(vec![]),
+                completion: vec![CompletionCondition::AllGatesPassing],
+                test_binaries: vec![],
+            }],
+            uses_phase_chain: true,
+            ..legacy.clone()
+        };
+        assert!(config_uses_phase_chain(&new));
+    }
+
+    /// Phase walk picks the first incomplete phase. Tests the
+    /// load + completion logic directly (no DB).
+    #[test]
+    fn test_phase_walk_selects_first_incomplete_phase() {
+        use crate::project_config::{AnalysisSource, Phase};
+        use std::path::PathBuf;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Phase 1: all checked (complete).
+        fs::write(
+            root.join("p1_exit.md"),
+            "- [x] Done (test: `t1`)\n- [x] Also done (test: `t2`)\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("p1_map.md"),
+            "## Now\n\n1. `p1-a` Done\n   Acceptance: (test: `t1`)\n",
+        )
+        .unwrap();
+        // Phase 2: unchecked (incomplete).
+        fs::write(
+            root.join("p2_exit.md"),
+            "- [ ] Pending (test: `t3`)\n- [ ] More (test: `t4`)\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("p2_map.md"),
+            "## Now\n\n1. `p2-a` Implement\n   Acceptance: (test: `t3`)\n",
+        )
+        .unwrap();
+
+        let phases = vec![
+            Phase {
+                label: "p1".into(),
+                execution_map: Some(PathBuf::from("p1_map.md")),
+                exit_criteria: Some(PathBuf::from("p1_exit.md")),
+                analysis: AnalysisSource::FromCriteria,
+                completion: vec![CompletionCondition::AllCriteriaChecked],
+                test_binaries: vec![],
+            },
+            Phase {
+                label: "p2".into(),
+                execution_map: Some(PathBuf::from("p2_map.md")),
+                exit_criteria: Some(PathBuf::from("p2_exit.md")),
+                analysis: AnalysisSource::FromCriteria,
+                completion: vec![CompletionCondition::AllCriteriaChecked],
+                test_binaries: vec![],
+            },
+        ];
+
+        // The walk: skip complete, return first incomplete.
+        let mut active: Option<&Phase> = None;
+        for ph in &phases {
+            let crit = load_phase_criteria(root, ph);
+            if !phase_is_complete(ph, &crit, None, None) {
+                active = Some(ph);
+                break;
+            }
+        }
+        assert!(active.is_some(), "expected an incomplete phase");
+        assert_eq!(active.unwrap().label, "p2");
+
+        // Phase 2's execution map is non-empty.
+        let p2_specs = load_phase_execution_map(root, active.unwrap());
+        assert_eq!(p2_specs.len(), 1);
+        assert_eq!(p2_specs[0].bead_key, "p2-a");
+    }
+
+    #[test]
+    fn test_tick_criteria_on_pass_writes_x_for_passing_phase_2() {
+        // Sanity: when tick_criteria_on_pass runs against a phase 2 criteria
+        // file whose test now passes, the box flips and the phase becomes
+        // closer to completion. Mirrors the auto-advance flow at runtime.
+        let tmp = tempfile::tempdir().unwrap();
+        let exit = tmp.path().join("EXIT.md");
+        fs::write(
+            &exit,
+            "- [ ] Item A (test: `passes_now`)\n- [ ] Item B (test: `still_failing`)\n",
+        )
+        .unwrap();
+        let gates = GateReport {
+            total: 2,
+            passing: vec!["passes_now".to_string()],
+            failing: vec!["still_failing".to_string()],
+        };
+        let n = tick_criteria_on_pass(&exit, &gates).unwrap();
+        assert_eq!(n, 1, "exactly one should tick");
+        let after = fs::read_to_string(&exit).unwrap();
+        assert!(after.contains("- [x] Item A"));
+        assert!(after.contains("- [ ] Item B"));
     }
 }

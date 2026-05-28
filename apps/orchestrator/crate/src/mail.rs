@@ -89,11 +89,7 @@ impl MailClient {
     }
 
     /// Send a JSON-RPC 2.0 request to the Agent Mail MCP server.
-    pub fn call_tool(
-        &self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    pub fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<serde_json::Value> {
         let request_body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": "1",
@@ -106,7 +102,8 @@ impl MailClient {
 
         let body_str = serde_json::to_string(&request_body)?;
 
-        let mut req = self.agent
+        let mut req = self
+            .agent
             .post(&self.url)
             .set("Content-Type", "application/json");
 
@@ -167,7 +164,9 @@ impl MailClient {
             }
         }
 
-        Err(OrchestratorError::Http("max retries exhausted without result".into()))
+        Err(OrchestratorError::Http(
+            "max retries exhausted without result".into(),
+        ))
     }
 
     /// Fetch the coordinator's inbox.
@@ -204,12 +203,7 @@ impl MailClient {
     }
 
     /// Acknowledge a message (single attempt — acks are idempotent).
-    pub fn acknowledge(
-        &self,
-        msg_id: i64,
-        project_key: &str,
-        agent_name: &str,
-    ) -> Result<()> {
+    pub fn acknowledge(&self, msg_id: i64, project_key: &str, agent_name: &str) -> Result<()> {
         let args = serde_json::json!({
             "message_id": msg_id,
             "project_key": project_key,
@@ -220,12 +214,7 @@ impl MailClient {
     }
 
     /// Mark a message as read.
-    pub fn mark_read(
-        &self,
-        msg_id: i64,
-        project_key: &str,
-        agent_name: &str,
-    ) -> Result<()> {
+    pub fn mark_read(&self, msg_id: i64, project_key: &str, agent_name: &str) -> Result<()> {
         let args = serde_json::json!({
             "message_id": msg_id,
             "project_key": project_key,

@@ -5,8 +5,10 @@
 //! the configuration surface so that scenes using VoxelGI or LightmapGI can
 //! be loaded, saved, and round-tripped without data loss.
 
-use gdcore::math::Vector3;
+use gdcore::math::{Color, Vector3};
 use gdcore::math3d::Transform3D;
+
+use crate::light::{Light3D, LightType};
 
 // ===========================================================================
 // VoxelGI
@@ -60,6 +62,11 @@ pub struct VoxelGI {
     pub interior: bool,
     /// Whether the VoxelGI probe data has been baked.
     pub baked: bool,
+    /// Cached aggregate indirect-light contribution produced by the most
+    /// recent [`VoxelGI::bake`] call. The bake/sample path stores a single
+    /// volume-wide colour rather than a full voxel grid — this is the parity
+    /// oracle used by the renderer to fold GI into fragments inside the AABB.
+    pub baked_indirect: Color,
 }
 
 impl VoxelGI {
@@ -77,7 +84,67 @@ impl VoxelGI {
             propagation: 0.7,
             interior: false,
             baked: false,
+            baked_indirect: Color::BLACK,
         }
+    }
+
+    /// Bakes indirect-light contribution from `lights` into the volume.
+    ///
+    /// Mirrors Godot's voxel-cone-tracing pre-pass at the simplified level
+    /// the parity tests require: each light's reaching contribution is
+    /// summed at the volume centre, modulated by the probe's `propagation`
+    /// factor, and stashed in `baked_indirect`. `interior=true` skips the
+    /// sky term — directional lights are treated as the sky proxy and are
+    /// excluded when interior mode is on, matching Godot's behaviour.
+    ///
+    /// Subsequent calls overwrite the previous bake. Lights with
+    /// `light_type == LightType::Directional` contribute their full energy;
+    /// point and spot lights attenuate by inverse-square distance from the
+    /// volume centre.
+    pub fn bake(&mut self, lights: &[Light3D]) {
+        let mut r = 0.0_f32;
+        let mut g = 0.0_f32;
+        let mut b = 0.0_f32;
+        let centre = self.transform.origin;
+        for light in lights {
+            let attenuation = match light.light_type {
+                LightType::Directional => {
+                    if self.interior {
+                        continue;
+                    }
+                    1.0
+                }
+                LightType::Point | LightType::Spot => {
+                    let d = (light.position - centre).length().max(1.0);
+                    1.0 / (d * d)
+                }
+            };
+            r += light.color.r * light.energy * attenuation;
+            g += light.color.g * light.energy * attenuation;
+            b += light.color.b * light.energy * attenuation;
+        }
+        let prop = self.propagation;
+        self.baked_indirect = Color::new(r * prop, g * prop, b * prop, 1.0);
+        self.baked = true;
+    }
+
+    /// Samples the baked indirect-light contribution at `world_pos`.
+    ///
+    /// Returns `Color::BLACK` when the probe has not been baked or when the
+    /// point lies outside the probe's AABB. Inside the AABB the contribution
+    /// is `baked_indirect * energy` componentwise. Box-projected cone tracing
+    /// across individual voxel cells is left to the renderer; this volume-wide
+    /// constant is the parity surface tests assert against.
+    pub fn sample(&self, world_pos: Vector3) -> Color {
+        if !self.baked || !self.contains_point(world_pos) {
+            return Color::BLACK;
+        }
+        Color::new(
+            self.baked_indirect.r * self.energy,
+            self.baked_indirect.g * self.energy,
+            self.baked_indirect.b * self.energy,
+            1.0,
+        )
     }
 
     /// Returns the axis-aligned bounding box of the VoxelGI volume in world space.

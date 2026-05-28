@@ -396,6 +396,23 @@ pub fn get_custom_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
         .unwrap_or(Vector2::ZERO)
 }
 
+/// Sets the `"position"` property on a Control node.
+pub fn set_position(tree: &mut SceneTree, node_id: NodeId, pos: Vector2) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("position", Variant::Vector2(pos));
+    }
+}
+
+/// Gets the `"position"` property on a Control node, defaulting to [`Vector2::ZERO`].
+pub fn get_position(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("position") {
+            Variant::Vector2(v) => v,
+            _ => Vector2::ZERO,
+        })
+        .unwrap_or(Vector2::ZERO)
+}
+
 // -- Grow direction ---------------------------------------------------------
 
 /// Sets the horizontal grow direction.
@@ -515,6 +532,226 @@ pub fn get_separation(tree: &SceneTree, node_id: NodeId) -> i64 {
             },
         )
         .unwrap_or(0)
+}
+
+/// Sets the `"columns"` property on a GridContainer.
+pub fn set_columns(tree: &mut SceneTree, node_id: NodeId, cols: i64) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("columns", Variant::Int(cols));
+    }
+}
+
+/// Gets the `"columns"` property, defaulting to `1`.
+pub fn get_columns(tree: &SceneTree, node_id: NodeId) -> i64 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("columns") {
+            Variant::Int(i) => i,
+            _ => 1,
+        })
+        .unwrap_or(1)
+}
+
+// ===========================================================================
+// Layout solver
+// ===========================================================================
+
+/// Resolves a Control node's final position and size from its anchors,
+/// offsets, minimum size, and grow direction given the parent rect size.
+///
+/// Mirrors Godot's `Control::_compute_anchors_rect` rules:
+///   x1 = parent.x * anchor_left  + offset_left
+///   x2 = parent.x * anchor_right + offset_right
+/// (and likewise for y). When the resolved width/height is less than the
+/// effective minimum (componentwise max of `custom_minimum_size` and
+/// `min_size`), the rect grows outward per `grow_horizontal`/`grow_vertical`.
+pub fn resolve_control_layout(tree: &mut SceneTree, node_id: NodeId, parent: Vector2) {
+    let al = get_anchor_left(tree, node_id);
+    let at = get_anchor_top(tree, node_id);
+    let ar = get_anchor_right(tree, node_id);
+    let ab = get_anchor_bottom(tree, node_id);
+
+    let ol = get_offset_left(tree, node_id);
+    let ot = get_offset_top(tree, node_id);
+    let or_ = get_offset_right(tree, node_id);
+    let ob = get_offset_bottom(tree, node_id);
+
+    let mut x1 = parent.x * al + ol;
+    let mut y1 = parent.y * at + ot;
+    let mut x2 = parent.x * ar + or_;
+    let mut y2 = parent.y * ab + ob;
+
+    let custom_min = get_custom_minimum_size(tree, node_id);
+    let inner_min = get_min_size(tree, node_id);
+    let min_w = custom_min.x.max(inner_min.x);
+    let min_h = custom_min.y.max(inner_min.y);
+
+    let width = x2 - x1;
+    if width < min_w {
+        let delta = min_w - width;
+        match get_grow_direction_h(tree, node_id) {
+            GrowDirection::End => x2 = x1 + min_w,
+            GrowDirection::Begin => x1 = x2 - min_w,
+            GrowDirection::Both => {
+                x1 -= delta * 0.5;
+                x2 = x1 + min_w;
+            }
+        }
+    }
+
+    let height = y2 - y1;
+    if height < min_h {
+        let delta = min_h - height;
+        match get_grow_direction_v(tree, node_id) {
+            GrowDirection::End => y2 = y1 + min_h,
+            GrowDirection::Begin => y1 = y2 - min_h,
+            GrowDirection::Both => {
+                y1 -= delta * 0.5;
+                y2 = y1 + min_h;
+            }
+        }
+    }
+
+    set_position(tree, node_id, Vector2::new(x1, y1));
+    set_size(tree, node_id, Vector2::new(x2 - x1, y2 - y1));
+}
+
+fn effective_min(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let cm = get_custom_minimum_size(tree, node_id);
+    let mm = get_min_size(tree, node_id);
+    Vector2::new(cm.x.max(mm.x), cm.y.max(mm.y))
+}
+
+fn arrange_vbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32) {
+    let n = children.len();
+    if n == 0 {
+        return;
+    }
+    let mins: Vec<f32> = children.iter().map(|&c| effective_min(tree, c).y).collect();
+    let sum_min: f32 = mins.iter().sum();
+    let total_sep = sep * (n as f32 - 1.0).max(0.0);
+    let extra = (total.y - sum_min - total_sep).max(0.0);
+
+    let expands: Vec<bool> = children
+        .iter()
+        .map(|&c| get_v_size_flags(tree, c) == SizeFlags::Expand)
+        .collect();
+    let expand_count = expands.iter().filter(|&&b| b).count();
+    let per_expand = if expand_count > 0 {
+        extra / expand_count as f32
+    } else {
+        0.0
+    };
+
+    let mut y = 0.0;
+    for (i, &c) in children.iter().enumerate() {
+        let h = mins[i] + if expands[i] { per_expand } else { 0.0 };
+        set_position(tree, c, Vector2::new(0.0, y));
+        set_size(tree, c, Vector2::new(total.x, h));
+        y += h + sep;
+    }
+}
+
+fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32) {
+    let n = children.len();
+    if n == 0 {
+        return;
+    }
+    let mins: Vec<f32> = children.iter().map(|&c| effective_min(tree, c).x).collect();
+    let sum_min: f32 = mins.iter().sum();
+    let total_sep = sep * (n as f32 - 1.0).max(0.0);
+    let extra = (total.x - sum_min - total_sep).max(0.0);
+
+    let expands: Vec<bool> = children
+        .iter()
+        .map(|&c| get_h_size_flags(tree, c) == SizeFlags::Expand)
+        .collect();
+    let expand_count = expands.iter().filter(|&&b| b).count();
+    let per_expand = if expand_count > 0 {
+        extra / expand_count as f32
+    } else {
+        0.0
+    };
+
+    let mut x = 0.0;
+    for (i, &c) in children.iter().enumerate() {
+        let w = mins[i] + if expands[i] { per_expand } else { 0.0 };
+        set_position(tree, c, Vector2::new(x, 0.0));
+        set_size(tree, c, Vector2::new(w, total.y));
+        x += w + sep;
+    }
+}
+
+fn arrange_grid(tree: &mut SceneTree, children: &[NodeId], sep: f32, cols: usize) {
+    if children.is_empty() || cols == 0 {
+        return;
+    }
+    let rows = children.len().div_ceil(cols);
+    let mins: Vec<Vector2> = children.iter().map(|&c| effective_min(tree, c)).collect();
+
+    let mut col_widths = vec![0f32; cols];
+    let mut row_heights = vec![0f32; rows];
+    for (i, m) in mins.iter().enumerate() {
+        let col = i % cols;
+        let row = i / cols;
+        if m.x > col_widths[col] {
+            col_widths[col] = m.x;
+        }
+        if m.y > row_heights[row] {
+            row_heights[row] = m.y;
+        }
+    }
+
+    let mut x_offsets = vec![0f32; cols];
+    for c in 1..cols {
+        x_offsets[c] = x_offsets[c - 1] + col_widths[c - 1] + sep;
+    }
+    let mut y_offsets = vec![0f32; rows];
+    for r in 1..rows {
+        y_offsets[r] = y_offsets[r - 1] + row_heights[r - 1] + sep;
+    }
+
+    for (i, &c) in children.iter().enumerate() {
+        let col = i % cols;
+        let row = i / cols;
+        set_position(tree, c, Vector2::new(x_offsets[col], y_offsets[row]));
+        set_size(
+            tree,
+            c,
+            Vector2::new(col_widths[col], row_heights[row]),
+        );
+    }
+}
+
+/// Arranges the children of a container node (`VBoxContainer`,
+/// `HBoxContainer`, or `GridContainer`) within the given total size.
+///
+/// Uses each child's effective minimum size (componentwise max of
+/// `custom_minimum_size` and `min_size`), the container's `separation`
+/// theme override, and the per-child `size_flags_horizontal` /
+/// `size_flags_vertical` to distribute remaining space among `Expand`
+/// children. GridContainer additionally reads its `columns` property and
+/// sizes each cell to the max of its column's width and its row's height.
+pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vector2) {
+    set_size(tree, container_id, total);
+    let class = tree
+        .get_node(container_id)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    let children: Vec<NodeId> = tree
+        .get_node(container_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    let sep = get_separation(tree, container_id) as f32;
+
+    match class.as_str() {
+        "VBoxContainer" => arrange_vbox(tree, &children, total, sep),
+        "HBoxContainer" => arrange_hbox(tree, &children, total, sep),
+        "GridContainer" => {
+            let cols = get_columns(tree, container_id).max(1) as usize;
+            arrange_grid(tree, &children, sep, cols);
+        }
+        _ => {}
+    }
 }
 
 // ===========================================================================

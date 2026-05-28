@@ -25,32 +25,45 @@ Parse the JSON. Extract `open` and `in_progress` counts from the `groups` array.
   ```
   Then stop — do not run steps 1–6.
 
-1. **Run the planner binary** and capture JSON output:
+1. **Run the planner binary with `--apply --heal`** to analyze, backfill broken legacy beads, AND create new beads in one shot. The binary itself runs `br create` + `br update --acceptance-criteria` per recommendation, and `--heal` scans existing open/in_progress beads, finds ones with missing/null `acceptance_criteria`, and backfills them by mapping their `[planner-key: ...]` markers to template acceptance text:
 ```bash
-/Users/bone/dev/games/patina/apps/orchestrator/crate/target/release/patina-orchestrator plan
+/Users/bone/dev/games/patina/apps/orchestrator/crate/target/release/patina-orchestrator plan --apply --heal 2>&1 | tee /tmp/planner-apply.log
 ```
-Parse the JSON. It contains: `parity_pct`, `phase`, `gates` (array of `{key, title, passing, criteria_line}`), and `recommendations` (array of `{key, title, priority, labels, acceptance, criteria_line}`).
+The `--heal` pass emits `[plan --heal] HEALED <ID> (key=<key>): <title>` lines and a `[plan --heal] summary: healed=N skipped=M failed=K` line. `skipped` covers beads with no `[planner-key:]` marker or whose key has no matching template — these are pre-existing manual beads and are safe to leave alone.
+The binary writes `[plan --apply] CREATED <ID>: <title>`, `[plan --apply] SKIP ...`, and a final `summary: created=N skipped=M failed=K` line to stderr, then prints the full JSON report to stdout. Parse the JSON for the analysis fields (top-level keys: `parity`, `phase`, `gates`, `queue`, `recommendations`, `timestamp`). The bead-creation work is already done by the time `--apply` returns.
 
-2. **Check for dry-run mode**: If `$ARGUMENTS` contains `--dry-run`, skip steps 3 and 4 (analysis and logging only).
+If `$ARGUMENTS` contains `--dry-run`, drop the `--apply` flag instead — the analysis still runs, but no beads are created and you skip steps 3 and 4 (logging only).
 
-3. **Update exit criteria for newly-passing gates**: For each gate where `passing == true`, use the Edit tool on `prd/V1_EXIT_CRITERIA.md` to replace the exact `- [ ]` checkbox line (from `criteria_line`) with `- [x]`. Only edit lines that currently have `- [ ]`.
+2. **Confirm the apply summary**: Read the `[plan --apply] summary:` line from stderr.
+- `failed > 0` → STOP the cycle, log the failure to `prd/planner_log.md`, and surface the failing titles. Do NOT create more beads manually — the binary's two-step `br create` + `br update --acceptance-criteria` pattern is the only supported path.
+- `skipped > 0` → log which recommendations were skipped (the stderr lines name the title and `gate_key`). Skips are usually due to empty `acceptance_command` upstream in `planner.rs` templates and should be reported, not patched around.
 
-4. **Create beads for recommendations**: The binary already deduplicates against ALL existing beads (including closed ones), so its recommendations are safe to create. But as a belt-and-suspenders check, for each recommendation verify no bead exists with `br search --title "TITLE" --json --status all`. If any result is returned (open, closed, or in-progress), skip creation. Only create if truly no bead exists:
+3. **Update exit criteria for newly-passing gates**: When the planner config uses the new phase-chain schema (`[[phase]] analysis = { source = "criteria" }`), the binary auto-ticks `- [ ]` → `- [x]` for every criterion whose `(test: \`name\`)` test passed during this cycle. The stderr log shows `[plan] phase 'NAME': ticked N criteria from passing tests` when this happens — no Edit pass needed.
+
+   For legacy V1-style configs that do not use phase chains, fall back to the old behavior: for each gate in the JSON where `passing == true`, use the Edit tool on `prd/V1_EXIT_CRITERIA.md` to replace the exact `- [ ]` checkbox line (from `criteria_line`) with `- [x]`. Only edit lines that currently have `- [ ]`.
+
+4. **Spot-check one created bead** (cheap sanity verification — the binary already enforces the contract, this just confirms the DB write landed):
 ```bash
-br create --title "TITLE" --type task --priority PRIORITY --labels "LABELS" --description "IMPLEMENT the feature: TITLE\n\nAcceptance: ACCEPTANCE\n\n[planner-key: KEY]" --no-auto-import
+# Pick the first CREATED line from /tmp/planner-apply.log:
+ID=$(grep -m1 '\[plan --apply\] CREATED' /tmp/planner-apply.log | awk '{print $4}' | tr -d ':')
+[ -n "$ID" ] && br show "$ID" --json | jq '.[0] | {description, acceptance_criteria}'
 ```
+If `acceptance_criteria` is null or empty, the binary regressed — STOP the cycle and report the bug.
 
-5. **Log the cycle**: Append to `prd/planner_log.md` using the Edit tool (or create if missing):
+5. **Log the cycle**: Append to `prd/planner_log.md` using the Edit tool (or create if missing). Include the **active phase label** so phase rollover is visible in the log history:
 ```
 ## YYYY-MM-DD HH:MM UTC
+- Active phase: editor-agent | editor-parity-bootstrap | editor-parity | (other)
 - Parity: XX.X%
 - Gates: N passing / M total
 - Phase: PHASE
-- Criteria checked off: [list or "none"]
+- Criteria checked off this cycle: [list or "none"]
 - Beads created: [list or "none"]
 ```
 
-6. **Handle V1 completion**: If `phase == "V1Complete"`, add a `## V1 COMPLETE` entry to the log and print a congratulatory summary. No further beads needed.
+6. **Handle phase rollover**: Phase advancement is now automatic — when all criteria for a phase tick green, the binary moves to the next `[[phase]]` block in `.orchestrator/planner.toml` and starts seeding from there on the next cycle. No manual config edit needed.
+
+   If `phase == "V1Complete"` AND no further phases have unchecked criteria, add a `## ALL PHASES COMPLETE` entry to the log. Otherwise, the planner is still actively driving work in a later phase — keep looping.
 
 ## Editor Parity Phase
 
@@ -89,6 +102,16 @@ Editor work is organized into 18 lanes (see `prd/EDITOR_PARITY_BEADS.md`):
 - Reference the lane number in the description
 - P1 = broken functionality, P2 = missing feature, P3 = visual polish
 - Run `/editor-parity` periodically to measure convergence
+
+## Hard Rules
+
+- NEVER wrap `br search` (or `br ready`, `br count`, `br list`) in a python (or any) filter that defines its own match/dedup predicate. Use the shown `jq -r '.issues | length'` extractor and apply the integer rule (`>= 1` skip, `== 0` create).
+- NEVER inspect candidate titles to decide if a `br search` hit is "really" a duplicate — any hit is a duplicate, period.
+- NEVER run the full Rust test suite (`cargo test`, `cargo nextest`, `rust_task.sh`) from the planner. The verifier lane is the sole builder. The planner reads the bead map + queue counts only.
+- NEVER skip the queue-health gate (Step 0) silently — always append the SKIPPED line to `prd/planner_log.md` so the cycle is auditable.
+- NEVER write a bead with literal placeholder text (`TITLE`, `PRIORITY`, `LABELS`, `KEY`, or `ACCEPTANCE`) appearing verbatim in any field. Always substitute the recommendation's real values from the JSON.
+- NEVER create a bead whose `acceptance_criteria` field is null/empty. If the recommendation's `acceptance_command` is missing, SKIP that recommendation and log the skip — workers without concrete acceptance criteria will invent their own scope and produce broken work (see pat-03sbm root-cause incident).
+- ALWAYS run the post-create verification (`br show $ID --json | jq '.[0] | {description, acceptance_criteria}'`) and abort the cycle if either field is empty/placeholder.
 
 ## Error Handling
 

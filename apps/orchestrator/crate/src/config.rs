@@ -40,10 +40,31 @@ pub struct Config {
     pub stale_assignment_seconds: u64,
     pub idle_reclaim_grace_seconds: u64,
     pub completion_wait_grace_seconds: u64,
+    /// Consecutive polls a bead must be seen orphaned (in_progress, no assignee)
+    /// before it is reopened (B4). Avoids racing a mid-flight assignment.
+    pub orphan_reap_consecutive_polls: u32,
+    /// TTL for cached worker-identity resolutions (D2). 0 disables the cache.
+    pub identity_cache_ttl_seconds: u64,
+    /// After reclaiming a bead from a worker, don't reassign work to that same
+    /// worker for this many seconds (D4) — prevents reclaim↔reassign ping-pong.
+    pub reclaim_hysteresis_seconds: u64,
+    /// Consecutive zero-progress polls (no completions, but work assigned and
+    /// workers present) before the deadlock watchdog alerts (D5).
+    pub deadlock_watchdog_polls: usize,
 
     // Verification
     pub verify_reported_tests: bool,
     pub verify_timeout_seconds: u64,
+    /// Reopen a bead whose verification has been pending longer than this
+    /// (guards against a wedged/dead verifier silently stalling the swarm).
+    pub pending_verification_reap_seconds: u64,
+    /// Warn when this many completion messages are queued for verification
+    /// (the single verifier lane is backed up).
+    pub completion_queue_warn_depth: usize,
+    /// Reject a completion that carries no acceptance/regression command.
+    /// Default off so existing vague beads aren't mass-rejected; operators
+    /// opt in once the planner emits concrete acceptance criteria.
+    pub verify_require_acceptance: bool,
 
     // Browser verification
     pub browser_verify_enabled: bool,
@@ -147,8 +168,15 @@ impl Config {
             stale_assignment_seconds: env_or("ORCH_STALE_ASSIGNMENT_SECONDS", 120),
             idle_reclaim_grace_seconds: env_or("ORCH_IDLE_RECLAIM_GRACE_SECONDS", 30),
             completion_wait_grace_seconds: env_or("ORCH_COMPLETION_WAIT_GRACE_SECONDS", 30),
+            orphan_reap_consecutive_polls: env_or("ORCH_ORPHAN_REAP_CONSECUTIVE_POLLS", 3),
+            identity_cache_ttl_seconds: env_or("ORCH_IDENTITY_CACHE_TTL_SECONDS", 5),
+            reclaim_hysteresis_seconds: env_or("ORCH_RECLAIM_HYSTERESIS_SECONDS", 60),
+            deadlock_watchdog_polls: env_or("ORCH_DEADLOCK_WATCHDOG_POLLS", 6),
             verify_reported_tests: env_or("VERIFY_REPORTED_TESTS", true),
             verify_timeout_seconds: env_or("VERIFY_TIMEOUT_SECONDS", 900),
+            pending_verification_reap_seconds: env_or("ORCH_PENDING_VERIFY_REAP_SECONDS", 1800),
+            completion_queue_warn_depth: env_or("ORCH_COMPLETION_QUEUE_WARN_DEPTH", 5),
+            verify_require_acceptance: env_or("ORCH_VERIFY_REQUIRE_ACCEPTANCE", false),
             browser_verify_enabled: env_or("ORCH_BROWSER_VERIFY_ENABLED", false),
             browser_verify_panes,
 
@@ -300,7 +328,43 @@ impl Config {
     pub fn is_worker_pane(&self, pane: &crate::tmux::PaneInfo) -> bool {
         pane.index >= self.min_worker_pane_index
             && !pane.dead
-            && pane.current_command.starts_with(&self.worker_command)
+            && self.matches_worker_command(&pane.current_command)
+    }
+
+    /// Match a tmux `pane_current_command` value against the configured
+    /// `worker_command`. Accepts either an exact/prefix match (the historical
+    /// behaviour) OR a version-string like "2.1.121" which is what tmux reports
+    /// when the Claude CLI is running, because it sets `process.title` to its
+    /// own version. Without this, every Claude-driven pane is invisible to the
+    /// orchestrator and `assign_idle_workers` reports `workers=0`.
+    pub fn matches_worker_command(&self, current_command: &str) -> bool {
+        if current_command.starts_with(&self.worker_command) {
+            return true;
+        }
+        // Only treat version-strings as a match when the configured worker
+        // command is actually `claude` — otherwise (e.g. when running Codex
+        // workers) we don't want to accidentally pick up unrelated processes.
+        if self.worker_command == "claude" && is_version_string(current_command) {
+            return true;
+        }
+        false
+    }
+}
+
+/// Returns true for strings that look like a dotted version number, e.g.
+/// "2.1.121" or "2.1". Used to detect Claude CLI panes whose `pane_current_command`
+/// is set to the Claude version rather than the literal "claude" binary name.
+pub(crate) fn is_version_string(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let first = parts.next();
+    let second = parts.next();
+    match (first, second) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => {
+            a.chars().all(|c| c.is_ascii_digit())
+                && b.chars().all(|c| c.is_ascii_digit())
+                && parts.all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        }
+        _ => false,
     }
 }
 
@@ -371,8 +435,15 @@ pub fn test_config() -> Config {
         stale_assignment_seconds: 120,
         idle_reclaim_grace_seconds: 30,
         completion_wait_grace_seconds: 300,
+        orphan_reap_consecutive_polls: 3,
+        identity_cache_ttl_seconds: 5,
+        reclaim_hysteresis_seconds: 60,
+        deadlock_watchdog_polls: 6,
         verify_reported_tests: true,
         verify_timeout_seconds: 900,
+        pending_verification_reap_seconds: 1800,
+        completion_queue_warn_depth: 5,
+        verify_require_acceptance: false,
         browser_verify_enabled: false,
         browser_verify_panes: vec![],
         agent_type: "claude".to_string(),
@@ -476,18 +547,20 @@ mod tests {
     #[test]
     fn test_is_worker_pane() {
         let cfg = test_config();
+        // 5-pane layout: 0=coordinator, 1=verifier, 2=planner, 3=bv, 4+=workers
+        // (min_worker_pane_index default = 4).
 
-        // Worker pane: index >= 3, alive, running claude
+        // Worker pane: index >= 4, alive, running claude
         let worker = crate::tmux::PaneInfo {
-            index: 3,
-            id: "%3".to_string(),
+            index: 4,
+            id: "%4".to_string(),
             dead: false,
             current_command: "claude".to_string(),
         };
         assert!(cfg.is_worker_pane(&worker));
 
-        // Reserved panes (0=monitor, 1=boss, 2=bv)
-        for idx in 0..=2 {
+        // Reserved panes (0=coordinator, 1=verifier, 2=planner, 3=bv)
+        for idx in 0..=3 {
             let reserved = crate::tmux::PaneInfo {
                 index: idx,
                 id: format!("%{idx}"),
@@ -502,8 +575,8 @@ mod tests {
 
         // Dead pane
         let dead = crate::tmux::PaneInfo {
-            index: 3,
-            id: "%3".to_string(),
+            index: 4,
+            id: "%4".to_string(),
             dead: true,
             current_command: "claude".to_string(),
         };
@@ -511,8 +584,8 @@ mod tests {
 
         // Non-claude command
         let shell = crate::tmux::PaneInfo {
-            index: 3,
-            id: "%3".to_string(),
+            index: 4,
+            id: "%4".to_string(),
             dead: false,
             current_command: "zsh".to_string(),
         };
@@ -620,5 +693,138 @@ mod tests {
         assert_eq!(cfg.worker_skill_name(), "flywheel-worker");
         assert_eq!(cfg.completion_skill_name(), "mail-complete");
         assert!(!cfg.worker_requires_assignment_prompt());
+    }
+
+    // --- Regression: is_version_string + matches_worker_command ---
+    //
+    // Bug: `worker_info_list_with` reported `workers=0` because tmux's
+    // `pane_current_command` for the Claude CLI is the version string
+    // ("2.1.121"), not the literal "claude". A strict-equality check
+    // dropped every Claude pane. The fallback in `is_version_string`
+    // (and its use in `matches_worker_command` / `worker_info_list_with`)
+    // restores Claude pane visibility. These tests prevent the helper
+    // from being re-privatized or the version-string fallback from being
+    // accidentally removed.
+
+    #[test]
+    fn test_is_version_string_three_part() {
+        assert!(is_version_string("2.1.121"));
+    }
+
+    #[test]
+    fn test_is_version_string_two_part() {
+        assert!(is_version_string("2.1"));
+    }
+
+    #[test]
+    fn test_is_version_string_rejects_claude() {
+        assert!(!is_version_string("claude"));
+    }
+
+    #[test]
+    fn test_is_version_string_rejects_bash() {
+        assert!(!is_version_string("bash"));
+    }
+
+    #[test]
+    fn test_is_version_string_rejects_misc_non_versions() {
+        // Single number (no dot) — not a version
+        assert!(!is_version_string("2"));
+        // Empty string
+        assert!(!is_version_string(""));
+        // Trailing dot
+        assert!(!is_version_string("2.1."));
+        // Leading dot
+        assert!(!is_version_string(".1"));
+        // Non-digit segment
+        assert!(!is_version_string("2.x.1"));
+        // Codex/other binary names
+        assert!(!is_version_string("codex"));
+        assert!(!is_version_string("zsh"));
+        assert!(!is_version_string("node"));
+    }
+
+    #[test]
+    fn test_is_version_string_many_parts() {
+        // Long dotted versions are still versions
+        assert!(is_version_string("2.1.121.4"));
+        assert!(is_version_string("10.20.30.40.50"));
+    }
+
+    /// Regression: a pane whose `current_command` is the Claude version
+    /// string MUST be recognized as a Claude worker when configured
+    /// `worker_command == "claude"`. Strict equality dropped every Claude
+    /// pane and broke `assign_idle_workers` (`workers=0`).
+    #[test]
+    fn test_matches_worker_command_claude_version_string() {
+        let cfg = test_config();
+        assert_eq!(cfg.worker_command, "claude");
+        assert!(cfg.matches_worker_command("2.1.121"));
+        assert!(cfg.matches_worker_command("2.1"));
+        assert!(cfg.matches_worker_command("3.0.5"));
+    }
+
+    #[test]
+    fn test_matches_worker_command_literal_claude() {
+        // Literal "claude" still matches (prefix)
+        let cfg = test_config();
+        assert!(cfg.matches_worker_command("claude"));
+        assert!(cfg.matches_worker_command("claude-code"));
+    }
+
+    #[test]
+    fn test_matches_worker_command_rejects_non_worker() {
+        let cfg = test_config();
+        assert!(!cfg.matches_worker_command("bash"));
+        assert!(!cfg.matches_worker_command("zsh"));
+        assert!(!cfg.matches_worker_command("node"));
+        assert!(!cfg.matches_worker_command(""));
+    }
+
+    /// Non-Claude worker configs must NOT pick up version-strings —
+    /// otherwise unrelated processes whose title happens to look like
+    /// a version could be misclassified as workers.
+    #[test]
+    fn test_matches_worker_command_codex_does_not_match_version_strings() {
+        let mut cfg = test_config();
+        cfg.worker_command = "codex".to_string();
+        // Codex worker: only literal/prefix match, no version-string fallback
+        assert!(cfg.matches_worker_command("codex"));
+        assert!(cfg.matches_worker_command("codex-cli"));
+        // Version strings must NOT match for codex
+        assert!(!cfg.matches_worker_command("2.1.121"));
+        assert!(!cfg.matches_worker_command("0.5.0"));
+        // And claude doesn't match codex either
+        assert!(!cfg.matches_worker_command("claude"));
+    }
+
+    /// Regression: pane with `current_command = "2.1.121"` is recognized
+    /// as a worker pane (the actual production bug — strict equality
+    /// dropped these panes and the orchestrator saw `workers=0`).
+    #[test]
+    fn test_is_worker_pane_accepts_claude_version_string() {
+        let cfg = test_config();
+        let pane = crate::tmux::PaneInfo {
+            index: 4,
+            id: "%4".to_string(),
+            dead: false,
+            current_command: "2.1.121".to_string(),
+        };
+        assert!(
+            cfg.is_worker_pane(&pane),
+            "Claude pane reporting version-string current_command must be a worker"
+        );
+    }
+
+    #[test]
+    fn test_is_worker_pane_rejects_bash_pane() {
+        let cfg = test_config();
+        let pane = crate::tmux::PaneInfo {
+            index: 4,
+            id: "%4".to_string(),
+            dead: false,
+            current_command: "bash".to_string(),
+        };
+        assert!(!cfg.is_worker_pane(&pane));
     }
 }

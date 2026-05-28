@@ -106,19 +106,17 @@ fn test_<name>() {
 
 ### 5. Verify the Tests
 
-Run the new tests and confirm they all pass:
+Run the new tests through the build-slot wrapper (NOT raw `cargo`). The wrapper holds the single build-slot lock so the verifier lane doesn't collide with you:
 
 ```bash
-cd engine-rs && cargo test --test <test_file_name> -- --nocapture 2>&1
+./scripts/rust_task.sh nextest run -p patina-engine --test <test_file_name> 2>&1 | tail -40
 ```
+
+Use `--test <file_name>` (the test BINARY name, file basename without `.rs`). Do NOT use `-E` filter expressions, do NOT use `--workspace`, do NOT use `cargo test`.
 
 If any test fails, fix it. Every test must pass.
 
-Then run the full test suite to make sure nothing was broken:
-
-```bash
-cd engine-rs && cargo test --workspace 2>&1 | tail -20
-```
+Do NOT run the full test suite from this skill. The verifier lane is the sole runner of broad suites — running `--workspace` here (a) takes 5–10 minutes, (b) fights the verifier for the build slot, and (c) duplicates work the verifier will do on the next bead. Trust the focused-test result; the verifier will catch any cross-suite breakage.
 
 ### 6. Summary Report
 
@@ -140,6 +138,12 @@ After all tests pass, output a summary:
 
 ### Coverage: X tests covering Y distinct scenarios
 ```
+
+## Hard Rules
+
+- NEVER run raw `cargo test`, `cargo build`, `cargo nextest`. Always go through `./scripts/rust_task.sh` so the build-slot lock prevents collision with the verifier lane.
+- NEVER run `--workspace` or `-E` filter expressions. Use `--test <test_binary_name>` only — focused single-binary runs.
+- NEVER run a "full test suite to make sure nothing was broken" from this skill. The verifier lane handles broad runs; this skill's job is to add tests, not gate the workspace.
 
 ## Error Handling
 

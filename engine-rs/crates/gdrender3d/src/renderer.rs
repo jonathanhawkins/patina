@@ -13,7 +13,7 @@ use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
 use gdserver3d::mesh::Mesh3D;
 use gdserver3d::projection::perspective_projection_matrix;
-use gdserver3d::reflection_probe::ReflectionProbeId;
+use gdserver3d::reflection_probe::{sample_probes_at, ReflectionProbe, ReflectionProbeId};
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
 use gdserver3d::shader::ShaderMaterial3D;
 use gdserver3d::sky::{PhysicalSkyMaterial, ProceduralSkyMaterial, SkyMaterial};
@@ -108,6 +108,7 @@ impl Default for RenderMode {
 pub struct SoftwareRenderer3D {
     instances: Vec<Instance3D>,
     lights: Vec<Light3D>,
+    reflection_probes: Vec<ReflectionProbe>,
     next_id: u64,
     /// The rendering mode (wireframe or solid).
     pub render_mode: RenderMode,
@@ -119,6 +120,7 @@ impl SoftwareRenderer3D {
         Self {
             instances: Vec::new(),
             lights: Vec::new(),
+            reflection_probes: Vec::new(),
             next_id: 1,
             render_mode: RenderMode::Solid,
         }
@@ -129,9 +131,22 @@ impl SoftwareRenderer3D {
         Self {
             instances: Vec::new(),
             lights: Vec::new(),
+            reflection_probes: Vec::new(),
             next_id: 1,
             render_mode: RenderMode::Wireframe,
         }
+    }
+
+    /// Returns the reflection probes currently registered with the renderer.
+    pub fn reflection_probes(&self) -> &[ReflectionProbe] {
+        &self.reflection_probes
+    }
+
+    /// Samples the combined ambient contribution of all reflection probes
+    /// whose influence box contains `world_pos`. See
+    /// [`gdserver3d::reflection_probe::sample_probes_at`] for the parity rule.
+    pub fn sample_reflection_probes(&self, world_pos: Vector3) -> Color {
+        sample_probes_at(&self.reflection_probes, world_pos)
     }
 
     /// Projects a 3D world-space point to 2D screen coordinates.
@@ -922,11 +937,27 @@ impl RenderingServer3D for SoftwareRenderer3D {
         }
     }
 
-    fn add_reflection_probe(&mut self, _id: ReflectionProbeId) {
-        // Reflection probes are not yet supported.
+    fn add_reflection_probe(&mut self, id: ReflectionProbeId) {
+        if !self.reflection_probes.iter().any(|p| p.id == id) {
+            self.reflection_probes.push(ReflectionProbe::new(id));
+        }
     }
 
-    fn remove_reflection_probe(&mut self, _id: ReflectionProbeId) {}
+    fn update_reflection_probe(&mut self, probe: &ReflectionProbe) {
+        if let Some(existing) = self
+            .reflection_probes
+            .iter_mut()
+            .find(|p| p.id == probe.id)
+        {
+            *existing = probe.clone();
+        } else {
+            self.reflection_probes.push(probe.clone());
+        }
+    }
+
+    fn remove_reflection_probe(&mut self, id: ReflectionProbeId) {
+        self.reflection_probes.retain(|p| p.id != id);
+    }
 
     fn render_frame(&mut self, viewport: &Viewport3D) -> FrameData3D {
         match self.render_mode {

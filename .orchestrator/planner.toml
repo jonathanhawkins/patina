@@ -1,27 +1,68 @@
 # Patina Engine planner configuration.
 #
-# Defines the analysis commands, criteria files, and phase settings
-# used by `patina-orchestrator plan` to generate recommendations.
+# Drives `patina-orchestrator plan`. Phases run in declaration order. The
+# first phase whose `completion` is not yet satisfied becomes the active
+# phase — the planner ticks its criteria from passing tests, then seeds
+# beads from its execution map.
+#
+# When `analysis.source = "criteria"`, the planner extracts test names from
+# the criteria file (lines ending in `(test: \`name\`)`) and runs them via
+# `cargo nextest --test <bin> ...` — scoped to the `test_binaries` listed on
+# the phase. Passing tests auto-tick their `- [ ]` boxes to `- [x]`. When all
+# boxes are checked the phase advances.
+#
+# IMPORTANT: `test_binaries` MUST list the cargo test-target names so the
+# build is scoped to those targets only. With `test_binaries` empty, the
+# planner SKIPS the analysis subprocess entirely — it will never run a
+# `--workspace` build (that compiles 400+ integration tests and locks the
+# machine).
 
-[[analysis.commands]]
-name = "parity"
-cmd = "cargo test --test oracle_regression_test -- --nocapture golden_all_scenes_property_parity_report"
-workdir = "engine-rs"
-parser = "table"
+# ─── Phase 1: editor-agent (security + API + quality) ─────────────────────
+# Fully implemented — the swarm closed all 20 beads for this map. `test_binaries`
+# is intentionally empty: re-running the editor test suite every cycle is pure
+# overhead, and 2 of the 20 criteria tests (bottom_panel/viewport_golden) were
+# never written, so the phase can never reach all-criteria-checked. With no
+# analysis, the planner sees the fully-deduped execution map (every item already
+# has a closed bead), produces zero new beads, and falls through to phase 2.
+# The boxes staying unchecked is cosmetic; the work is done.
+[[phase]]
+label = "editor-agent"
+execution_map = "prd/EDITOR_AGENT_EXECUTION_MAP.md"
+exit_criteria = "prd/EDITOR_AGENT_EXIT.md"
+analysis = { source = "criteria" }
+test_binaries = []
+completion = ["all_criteria_checked"]
 
-[[analysis.commands]]
-name = "gates"
-cmd = "cargo test --test v1_acceptance_gate_test"
-workdir = "engine-rs"
-parser = "test_pass_fail"
+# ─── Phase 2: editor-parity bootstrap ─────────────────────────────────────
+# Meta-phase: each bead asks the swarm to author a per-lane execution map
+# for the editor parity backlog (Scene Tree, Inspector, Viewport, etc.).
+# When complete, the next phase's execution map exists and the planner
+# automatically advances to seed lane-level work.
+#
+# All 19 bootstrap tests live in one integration test target, so analysis
+# compiles only that binary (NOT the whole 400+ test workspace).
+[[phase]]
+label = "editor-parity-bootstrap"
+execution_map = "prd/EDITOR_PARITY_BOOTSTRAP_MAP.md"
+exit_criteria = "prd/EDITOR_PARITY_BOOTSTRAP_EXIT.md"
+analysis = { source = "criteria" }
+test_binaries = ["editor_parity_bootstrap_map_test"]
+completion = ["all_criteria_checked"]
 
-[criteria]
-files = ["prd/V1_EXIT_CRITERIA.md"]
-
-[execution_maps]
-files = ["prd/V1_EXIT_EXECUTION_MAP.md"]
-
-[phases]
-label = "v1"
-completion = ["all_gates_passing", { parity_threshold = 98.0 }]
-next_sources = ["prd/PORT_GODOT_TO_RUST_PLAN.md"]
+# ─── Phase 3: editor-parity (aggregate of per-lane maps) ──────────────────
+# These files are authored by the swarm during phase 2 (they don't exist yet).
+# Until then this phase is Unevaluable and the planner skips past it.
+#
+# ACTION REQUIRED when phase 2 completes: once the per-lane maps name real
+# test targets, populate `test_binaries` below with those cargo test-target
+# names. With it left empty, the planner will SKIP analysis (safe — never a
+# --workspace build) but the criteria will then never auto-tick, silently
+# stalling phase 3. The bead that authors EDITOR_PARITY_EXIT.md should also
+# update this list.
+[[phase]]
+label = "editor-parity"
+execution_map = "prd/EDITOR_PARITY_EXECUTION_MAP.md"
+exit_criteria = "prd/EDITOR_PARITY_EXIT.md"
+analysis = { source = "criteria" }
+test_binaries = []
+completion = ["all_criteria_checked"]

@@ -1,0 +1,29 @@
+[gd_scene format=3]
+
+[node name="SpotlightGallery3D" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 2, 8)
+
+[node name="SpotRed" type="SpotLight3D" parent="."]
+position = Vector3(-3, 4, 0)
+
+[node name="SpotGreen" type="SpotLight3D" parent="."]
+position = Vector3(0, 4, 0)
+
+[node name="SpotBlue" type="SpotLight3D" parent="."]
+position = Vector3(3, 4, 0)
+
+[node name="PedestalLeft" type="MeshInstance3D" parent="."]
+position = Vector3(-3, 0.5, 0)
+
+[node name="PedestalCenter" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0.5, 0)
+
+[node name="PedestalRight" type="MeshInstance3D" parent="."]
+position = Vector3(3, 0.5, 0)
+
+[node name="Floor" type="StaticBody3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="FloorShape" type="CollisionShape3D" parent="Floor"]

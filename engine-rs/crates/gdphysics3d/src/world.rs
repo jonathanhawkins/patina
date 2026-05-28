@@ -70,6 +70,11 @@ impl PhysicsWorld3D {
         self.bodies.len()
     }
 
+    /// Returns an iterator over all bodies in the world.
+    pub fn bodies(&self) -> impl Iterator<Item = &PhysicsBody3D> {
+        self.bodies.values()
+    }
+
     /// Steps the simulation by `dt` seconds.
     pub fn step(&mut self, dt: f32) {
         let gravity = self.gravity;

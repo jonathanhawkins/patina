@@ -108,6 +108,46 @@ impl MultiMesh3D {
             self.instance_colors.resize(count, Color::WHITE);
         }
     }
+
+    /// Flattens this multimesh into the per-instance buffer that a
+    /// GPU-instanced draw call would upload.
+    ///
+    /// Each entry pairs the instance's world-space transform (composed as
+    /// `base * per_instance` so the host node's transform stacks first) with
+    /// the per-instance colour. If `instance_colors` is empty the buffer
+    /// reports `Color::WHITE` for every instance, matching Godot's default.
+    /// The returned `Vec` length always matches `instance_count`, so the
+    /// renderer can issue one instanced draw of `len()` rather than expanding
+    /// to `len()` separate per-instance draws.
+    pub fn flatten_instance_data(&self, base: Transform3D) -> Vec<MultiMeshInstanceData> {
+        let has_colors = !self.instance_colors.is_empty();
+        self.instance_transforms
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| MultiMeshInstanceData {
+                transform: base * t,
+                color: if has_colors {
+                    self.get_instance_color(i)
+                } else {
+                    Color::WHITE
+                },
+            })
+            .collect()
+    }
+}
+
+/// One row of a GPU-instanced draw buffer for a [`MultiMesh3D`].
+///
+/// Mirrors the layout the wgpu pipeline binds as `@vertex` per-instance
+/// inputs: a world-space transform plus a colour. The CPU rasterizer can use
+/// the same struct to issue one batched draw rather than expanding to
+/// `instance_count` per-instance draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultiMeshInstanceData {
+    /// World-space transform for this instance.
+    pub transform: Transform3D,
+    /// Per-instance colour modulation.
+    pub color: Color,
 }
 
 #[cfg(test)]

@@ -314,6 +314,61 @@ impl MacOsPlatformLayer {
 }
 
 // ---------------------------------------------------------------------------
+// .app bundle packaging helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the `.app` bundle directory name for the given app
+/// (e.g. `"MyGame.app"`).
+pub fn app_bundle_name(app_name: &str) -> String {
+    format!("{app_name}.app")
+}
+
+/// Returns the CFBundleIdentifier for the given app using the reverse-DNS
+/// convention `com.patina.<sanitized>`. The sanitization logic is shared
+/// with the Linux AppImage pipeline to keep identifiers consistent across
+/// platforms.
+pub fn macos_bundle_identifier(app_name: &str) -> String {
+    format!("com.patina.{}", crate::linux::sanitize_desktop_id(app_name))
+}
+
+/// Renders the Info.plist XML for a macOS `.app` bundle.
+///
+/// When `icon_file` is `Some(name)` the `CFBundleIconFile` entry points at
+/// that basename (e.g. `"icon.icns"`); when `None` the key is still emitted
+/// but with an empty string value — matching the layout Xcode produces for
+/// bundles without an icon.
+pub fn macos_info_plist(app_name: &str, icon_file: Option<&str>) -> String {
+    let icon = icon_file.unwrap_or("");
+    let identifier = macos_bundle_identifier(app_name);
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n\
+         \t<key>CFBundleExecutable</key>\n\
+         \t<string>{app_name}</string>\n\
+         \t<key>CFBundleIdentifier</key>\n\
+         \t<string>{identifier}</string>\n\
+         \t<key>CFBundleName</key>\n\
+         \t<string>{app_name}</string>\n\
+         \t<key>CFBundlePackageType</key>\n\
+         \t<string>APPL</string>\n\
+         \t<key>CFBundleShortVersionString</key>\n\
+         \t<string>1.0</string>\n\
+         \t<key>CFBundleVersion</key>\n\
+         \t<string>1</string>\n\
+         \t<key>LSMinimumSystemVersion</key>\n\
+         \t<string>10.13</string>\n\
+         \t<key>NSHighResolutionCapable</key>\n\
+         \t<true/>\n\
+         \t<key>CFBundleIconFile</key>\n\
+         \t<string>{icon}</string>\n\
+         </dict>\n\
+         </plist>\n"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -612,5 +667,50 @@ mod tests {
         assert!(!layer.display_info.reduce_transparency);
         layer.display_info.reduce_transparency = true;
         assert!(layer.display_info.reduce_transparency);
+    }
+
+    // -- Bundle packaging helpers --------------------------------------------
+
+    #[test]
+    fn app_bundle_name_appends_dot_app() {
+        assert_eq!(app_bundle_name("PatinaGame"), "PatinaGame.app");
+        assert_eq!(app_bundle_name("Patina Demo"), "Patina Demo.app");
+    }
+
+    #[test]
+    fn macos_bundle_identifier_uses_reverse_dns() {
+        assert_eq!(
+            macos_bundle_identifier("PatinaGame"),
+            "com.patina.patinagame"
+        );
+        assert_eq!(
+            macos_bundle_identifier("Patina Demo"),
+            "com.patina.patina-demo"
+        );
+    }
+
+    #[test]
+    fn macos_info_plist_emits_required_keys() {
+        let plist = macos_info_plist("Patina Demo", Some("icon.icns"));
+        assert!(plist.contains("<?xml"));
+        assert!(plist.contains("<plist version=\"1.0\">"));
+        assert!(plist.contains("<key>CFBundleExecutable</key>"));
+        assert!(plist.contains("<string>Patina Demo</string>"));
+        assert!(plist.contains("<key>CFBundleIdentifier</key>"));
+        assert!(plist.contains("<string>com.patina.patina-demo</string>"));
+        assert!(plist.contains("<key>CFBundlePackageType</key>"));
+        assert!(plist.contains("<string>APPL</string>"));
+        assert!(plist.contains("<key>LSMinimumSystemVersion</key>"));
+        assert!(plist.contains("<key>NSHighResolutionCapable</key>"));
+        assert!(plist.contains("<true/>"));
+        assert!(plist.contains("<key>CFBundleIconFile</key>"));
+        assert!(plist.contains("<string>icon.icns</string>"));
+    }
+
+    #[test]
+    fn macos_info_plist_emits_empty_icon_string_when_missing() {
+        let plist = macos_info_plist("BareApp", None);
+        assert!(plist.contains("<key>CFBundleIconFile</key>"));
+        assert!(plist.contains("<string></string>"));
     }
 }

@@ -18,6 +18,7 @@
 #![warn(clippy::all)]
 
 pub mod animation;
+pub mod animation_tree;
 pub mod collision;
 pub mod control;
 pub mod lifecycle;
@@ -28,12 +29,15 @@ pub mod node2d;
 pub mod node3d;
 pub mod packed_scene;
 pub mod particle;
+pub mod particle3d;
 pub mod physics_server;
 pub mod physics_server_3d;
 pub mod render_server_3d;
 pub mod scene_saver;
 pub mod scene_tree;
 pub mod scripting;
+pub mod skeleton3d;
+pub mod springarm3d;
 pub mod theme;
 pub mod tilemap;
 pub mod trace;

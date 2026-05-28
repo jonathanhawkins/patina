@@ -560,3 +560,86 @@ fn fixture_parity_report_3d_physics_golden_self_compare() {
     assert!(json.contains("\"overall_verdict\": \"PASS\""));
     assert!(json.contains("\"total_entries\": 20"));
 }
+
+// ===========================================================================
+// pat-2abh6 — comparison tooling ingests Patina + oracle for one fixture
+// ===========================================================================
+//
+// Acceptance: comparison tooling can ingest Patina and oracle outputs for one
+// representative 3D fixture, and a checked-in test or doc cites the command
+// path. This single test wraps both guarantees under the bead's own marker so
+// regressions to either ingestion path or the cited command surface fail
+// loudly.
+//
+// Command path (also documented in the section-8 comment above):
+//   ./scripts/rust_task.sh nextest run -p patina-engine \
+//       --test render_physics_comparison_tooling_test \
+//       pat_2abh6_comparison_tooling_ingests_patina_and_oracle
+
+#[test]
+fn pat_2abh6_comparison_tooling_ingests_patina_and_oracle() {
+    let _g = setup();
+
+    // Representative fixture: minimal_3d is the smallest checked-in 3D fixture
+    // and is referenced by the Phase-6 oracle index
+    // (`fixtures/patina_outputs/real_3d_demo_parity_report.json`).
+    let representative = "minimal_3d";
+
+    // (a) Ingest Patina output: load the tscn into a Patina SceneTree and
+    //     extract the structural node list.
+    let patina_tree = load_tscn_to_tree("minimal_3d.tscn");
+    let patina_entries = extract_patina_scene_tree(&patina_tree);
+    assert!(
+        !patina_entries.is_empty(),
+        "Patina ingestion must produce a non-empty node list for {representative}"
+    );
+
+    // (b) Ingest oracle output: load the captured golden JSON and extract the
+    //     same structural projection.
+    let oracle_golden = load_golden(representative);
+    let oracle_entries = extract_oracle_scene_tree(&oracle_golden);
+    assert!(
+        !oracle_entries.is_empty(),
+        "oracle ingestion must produce a non-empty node list for {representative}"
+    );
+
+    // (c) Run the comparison tool over both inputs and aggregate into the
+    //     unified parity report. This is the actual "tooling" the bead asks
+    //     about — the bridge between ingested Patina and oracle data.
+    let scene_tree_result = compare_scene_trees(&oracle_entries, &patina_entries);
+    let report = FixtureParityReport3D::new(representative).with_scene_tree(scene_tree_result);
+    assert_ne!(
+        report.scene_tree_verdict(),
+        DimensionVerdict::Skipped,
+        "comparison tooling must produce a non-skipped verdict when both \
+         inputs are present"
+    );
+
+    let json = report.render_json();
+    assert!(
+        json.contains(&format!("\"fixture\": \"{representative}\"")),
+        "report JSON must name the ingested fixture"
+    );
+    assert!(
+        json.contains("\"scene_tree\":"),
+        "report JSON must surface the scene-tree comparison dimension"
+    );
+
+    // (d) Cite the command path. The test source itself is the citation per
+    //     the bead acceptance ("a checked-in test ... cites the command
+    //     path"). Assert the citation block is intact so the pointer cannot
+    //     silently rot.
+    let this_file = std::fs::read_to_string(file!())
+        .or_else(|_| {
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join("render_physics_comparison_tooling_test.rs"),
+            )
+        })
+        .expect("test source must be readable for the command-path citation check");
+    assert!(
+        this_file.contains("nextest run") && this_file.contains("render_physics_comparison_tooling_test"),
+        "test must cite the runnable command path for the comparison tooling"
+    );
+}

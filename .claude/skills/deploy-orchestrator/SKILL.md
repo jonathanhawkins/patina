@@ -10,32 +10,29 @@ Build, test, and hot-deploy the Rust orchestrator binary. The orchestrator is in
 
 ## Steps
 
-1. **Run tests** to verify changes compile and pass:
+1. **Compile-check via the build-slot wrapper** (NOT raw `cargo`). The wrapper holds the single build-slot lock so a verifier run doesn't collide with this deploy:
    ```bash
-   cd /Users/bone/dev/games/patina/apps/orchestrator/crate && cargo test 2>&1 | tail -5
+   ./scripts/rust_task.sh check -p patina-orchestrator 2>&1 | tail -5
    ```
-   If tests fail, stop and fix before deploying.
+   If `check` fails, stop and fix before deploying. Do NOT run `cargo test` here — the verifier lane is the sole test runner; running the full suite inline would (a) fight the verifier for the build slot and (b) burn 5–10 min before the user sees the binary update.
 
-2. **Build release binary**:
+2. **Build release binary** through the same wrapper:
    ```bash
-   cd /Users/bone/dev/games/patina/apps/orchestrator/crate && cargo build --release 2>&1 | tail -5
-   ```
-
-3. **Find the coordinator identity** — check the orchestrator log or agent mail:
-   ```bash
-   grep "coordinator_agent\|AGENT_NAME" /tmp/patina-orchestrator.log | tail -1
-   ```
-   Common coordinator names: `IvoryTower`, `liveTower`. If unsure, check:
-   ```bash
-   tmux capture-pane -t patina-fly:0.1 -p -S -100 | grep -i "identity\|agent.*name\|ivory\|tower"
+   ./scripts/rust_task.sh build --release -p patina-orchestrator 2>&1 | tail -5
    ```
 
-4. **Trigger an immediate assignment cycle** to prompt idle workers:
+3. **Find the coordinator identity** — read the canonical pointer file (the orchestrator writes this on every coordinator startup):
    ```bash
-   AGENT_NAME=IvoryTower ORCH_SESSION=patina-fly \
+   cat /Users/bone/dev/games/patina/.beads/coordinator_agent 2>/dev/null
+   ```
+   This is the single source of truth. Do NOT grep logs, do NOT guess names like `IvoryTower`/`liveTower`, do NOT inspect tmux pane scrollback. If the file is missing or empty, the coordinator isn't running — surface that and stop, don't fabricate a name.
+
+4. **Trigger an immediate assignment cycle** to prompt idle workers. Read the coordinator name from the file (do not hard-code):
+   ```bash
+   COORDINATOR="$(cat /Users/bone/dev/games/patina/.beads/coordinator_agent)"
+   AGENT_NAME="$COORDINATOR" ORCH_SESSION=patina-fly \
      ./apps/orchestrator/crate/target/release/patina-orchestrator assign --session patina-fly 2>&1
    ```
-   Adjust `AGENT_NAME` if the coordinator uses a different identity.
 
 5. **Verify** workers are picking up work:
    ```bash
@@ -50,3 +47,10 @@ Build, test, and hot-deploy the Rust orchestrator binary. The orchestrator is in
 - No process restart needed — rebuilding the binary is the deployment
 - The `assign` subcommand runs a single idle-fill + prompt submission cycle
 - The `poll` subcommand processes pending completions and reassigns workers
+
+## Hard Rules
+
+- NEVER run raw `cargo test`, `cargo build`, `cargo check`, `cargo nextest` from this skill. Always go through `./scripts/rust_task.sh` so the build-slot lock prevents collision with the verifier lane.
+- NEVER run `cargo test` (full suite) during a deploy. The verifier lane runs tests; this skill ships the binary.
+- NEVER hard-code a coordinator agent name. Always read `.beads/coordinator_agent`. If it's missing, the coordinator isn't running — say so, don't guess.
+- NEVER grep tmux scrollback or log files to "discover" the coordinator name when the canonical pointer file exists.

@@ -24,6 +24,7 @@ pub mod reflection_probe;
 pub mod server;
 pub mod shader;
 pub mod sky;
+pub mod sprite3d;
 pub mod viewport;
 
 pub use csg::{CSGBox3D, CSGCombiner3D, CSGCylinder3D, CSGMesh3D, CSGOperation, CSGSphere3D};

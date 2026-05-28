@@ -19,7 +19,7 @@ use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::{Material3D, ShadingMode};
 use gdserver3d::mesh::Mesh3D;
 use gdserver3d::projection::perspective_projection_matrix;
-use gdserver3d::reflection_probe::ReflectionProbeId;
+use gdserver3d::reflection_probe::{sample_probes_at, ReflectionProbe, ReflectionProbeId};
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
 use gdserver3d::shader::ShaderMaterial3D;
 use gdserver3d::viewport::Viewport3D;
@@ -630,6 +630,7 @@ pub struct GpuRenderer3D {
     pipeline: RenderPipeline3D,
     instances: HashMap<u64, Instance3D>,
     lights: Vec<Light3D>,
+    reflection_probes: Vec<ReflectionProbe>,
     next_id: u64,
     /// The texture format used for color attachments.
     pub target_format: wgpu::TextureFormat,
@@ -658,9 +659,22 @@ impl GpuRenderer3D {
             pipeline,
             instances: HashMap::new(),
             lights: Vec::new(),
+            reflection_probes: Vec::new(),
             next_id: 1,
             target_format: format,
         })
+    }
+
+    /// Returns the reflection probes currently registered with the renderer.
+    pub fn reflection_probes(&self) -> &[ReflectionProbe] {
+        &self.reflection_probes
+    }
+
+    /// Samples the combined ambient contribution of all reflection probes
+    /// whose influence box contains `world_pos`. See
+    /// [`gdserver3d::reflection_probe::sample_probes_at`] for the parity rule.
+    pub fn sample_reflection_probes(&self, world_pos: Vector3) -> Color {
+        sample_probes_at(&self.reflection_probes, world_pos)
     }
 
     /// Returns a reference to the underlying GPU context.
@@ -1020,17 +1034,7 @@ impl RenderingServer3D for GpuRenderer3D {
         let id_val = self.next_id;
         self.next_id += 1;
         let id = Instance3DId(id_val);
-        self.instances.insert(
-            id_val,
-            Instance3D {
-                id,
-                mesh: None,
-                material: None,
-                shader_material: None,
-                transform: Transform3D::IDENTITY,
-                visible: true,
-            },
-        );
+        self.instances.insert(id_val, Instance3D::new(id));
         id
     }
 
@@ -1096,12 +1100,26 @@ impl RenderingServer3D for GpuRenderer3D {
         }
     }
 
-    fn add_reflection_probe(&mut self, _id: ReflectionProbeId) {
-        // Reflection probes not yet supported in GPU pipeline.
+    fn add_reflection_probe(&mut self, id: ReflectionProbeId) {
+        if !self.reflection_probes.iter().any(|p| p.id == id) {
+            self.reflection_probes.push(ReflectionProbe::new(id));
+        }
     }
 
-    fn remove_reflection_probe(&mut self, _id: ReflectionProbeId) {
-        // Reflection probes not yet supported in GPU pipeline.
+    fn update_reflection_probe(&mut self, probe: &ReflectionProbe) {
+        if let Some(existing) = self
+            .reflection_probes
+            .iter_mut()
+            .find(|p| p.id == probe.id)
+        {
+            *existing = probe.clone();
+        } else {
+            self.reflection_probes.push(probe.clone());
+        }
+    }
+
+    fn remove_reflection_probe(&mut self, id: ReflectionProbeId) {
+        self.reflection_probes.retain(|p| p.id != id);
     }
 
     fn render_frame(&mut self, viewport: &Viewport3D) -> FrameData3D {

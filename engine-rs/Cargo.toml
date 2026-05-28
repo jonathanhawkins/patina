@@ -87,6 +87,9 @@ path = "examples/space_shooter_live.rs"
 tempfile = "3"
 serde_json.workspace = true
 proptest = "1"
+# pat-yuyqw: editor OpenAPI 3 spec validation
+openapiv3 = "2"
+serde_yaml = "0.9"
 
 [[example]]
 name = "editor"

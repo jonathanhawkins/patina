@@ -146,6 +146,19 @@ impl PhysicsServer3D {
         &self.world
     }
 
+    /// Returns the physics body id registered for `node_id`, if any.
+    pub fn body_for_node(&self, node_id: NodeId) -> Option<BodyId3D> {
+        self.node_to_body.get(&node_id).copied()
+    }
+
+    /// Returns the scene node that was registered for `body_id`, if any.
+    pub fn node_for_body(&self, body_id: BodyId3D) -> Option<NodeId> {
+        self.node_to_body
+            .iter()
+            .find(|&(_, &b)| b == body_id)
+            .map(|(&n, _)| n)
+    }
+
     /// Syncs scene tree 3D body nodes into the physics world.
     ///
     /// Registers new bodies for untracked nodes and updates positions for
@@ -176,8 +189,13 @@ impl PhysicsServer3D {
                             .find_map(|&child_id| shape_from_node_3d(tree, child_id))
                             .unwrap_or(Shape3D::Sphere { radius: 0.5 });
 
-                        let body =
+                        let mut body =
                             PhysicsBody3D::new(placeholder_id, body_type, position, shape, mass);
+                        body.collision_layer = match node.get_property("collision_layer") {
+                            Variant::Int(i) => i as u32,
+                            Variant::Float(f) => f as u32,
+                            _ => 1,
+                        };
                         let actual_id = self.world.add_body(body);
                         self.node_to_body.insert(nid, actual_id);
                     }

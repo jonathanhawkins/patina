@@ -264,6 +264,135 @@ pub fn archive_extension(platform: &str) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-platform validation (pat-pumyh)
+// ---------------------------------------------------------------------------
+
+/// Returns the expected output-filename extension for a desktop platform.
+///
+/// Mirrors [`ExportTemplate::output_filename`](crate::export::ExportTemplate::output_filename).
+/// Returns an empty string for unknown / non-desktop platforms.
+pub fn expected_artifact_extension(platform: &str) -> &'static str {
+    match platform {
+        "linux" => ".x86_64",
+        "macos" => ".app",
+        "windows" => ".exe",
+        "web" => ".wasm",
+        _ => "",
+    }
+}
+
+/// Validates that a single [`CiArtifact`] is internally consistent.
+///
+/// Checks:
+/// - name and filename are non-empty
+/// - `rust_triple` resolves to a known desktop target
+/// - `platform` matches the triple's platform
+/// - `filename` ends with the expected extension for `platform`
+pub fn validate_artifact_structure(artifact: &CiArtifact) -> Result<(), String> {
+    if artifact.name.is_empty() {
+        return Err("artifact name must not be empty".into());
+    }
+    if artifact.filename.is_empty() {
+        return Err("artifact filename must not be empty".into());
+    }
+    let target = find_target(&artifact.rust_triple)
+        .ok_or_else(|| format!("unknown rust triple '{}'", artifact.rust_triple))?;
+    let expected_platform = format!("{:?}", target.platform).to_lowercase();
+    if expected_platform != artifact.platform {
+        return Err(format!(
+            "rust triple '{}' implies platform '{}' but artifact platform is '{}'",
+            artifact.rust_triple, expected_platform, artifact.platform
+        ));
+    }
+    let ext = expected_artifact_extension(&artifact.platform);
+    if ext.is_empty() {
+        return Err(format!(
+            "platform '{}' has no expected artifact extension",
+            artifact.platform
+        ));
+    }
+    if !artifact.filename.ends_with(ext) {
+        return Err(format!(
+            "filename '{}' does not end with expected extension '{}'",
+            artifact.filename, ext
+        ));
+    }
+    Ok(())
+}
+
+/// Outcome of validating a [`CiArtifactPlan`] for cross-platform coverage.
+#[derive(Debug, Default, Clone)]
+pub struct CrossPlatformReport {
+    /// Errors encountered. Empty when validation passed.
+    pub errors: Vec<String>,
+    /// Number of artifacts that validated successfully.
+    pub validated_count: usize,
+}
+
+impl CrossPlatformReport {
+    /// Returns `true` when no errors were recorded.
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Validates that a plan covers all three desktop OSes (Linux, macOS, Windows)
+/// and that every generated artifact passes [`validate_artifact_structure`].
+pub fn validate_plan_cross_platform(plan: &CiArtifactPlan) -> CrossPlatformReport {
+    let mut report = CrossPlatformReport::default();
+
+    let mut has_linux = false;
+    let mut has_macos = false;
+    let mut has_windows = false;
+    for triple in &plan.targets {
+        if let Some(t) = find_target(triple) {
+            match t.platform {
+                crate::os::Platform::Linux => has_linux = true,
+                crate::os::Platform::MacOS => has_macos = true,
+                crate::os::Platform::Windows => has_windows = true,
+                _ => {}
+            }
+        }
+    }
+    if !has_linux {
+        report
+            .errors
+            .push("plan is missing a Linux artifact".into());
+    }
+    if !has_macos {
+        report
+            .errors
+            .push("plan is missing a macOS artifact".into());
+    }
+    if !has_windows {
+        report
+            .errors
+            .push("plan is missing a Windows artifact".into());
+    }
+
+    for artifact in plan.generate_artifacts() {
+        match validate_artifact_structure(&artifact) {
+            Ok(()) => report.validated_count += 1,
+            Err(e) => report
+                .errors
+                .push(format!("artifact '{}': {}", artifact.name, e)),
+        }
+    }
+
+    report
+}
+
+/// Validates the default cross-platform plan (one release artifact per desktop
+/// OS) for the given application name.
+pub fn validate_default_cross_platform_plan(app_name: &str) -> CrossPlatformReport {
+    let plan = CiArtifactPlan::new(app_name)
+        .with_target("x86_64-unknown-linux-gnu")
+        .with_target("x86_64-apple-darwin")
+        .with_target("x86_64-pc-windows-msvc");
+    validate_plan_cross_platform(&plan)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -476,6 +605,69 @@ mod tests {
             .with_profile(BuildProfile::Release)
             .with_profile(BuildProfile::Release);
         assert_eq!(plan.profiles.len(), 1);
+    }
+
+    #[test]
+    fn expected_extension_covers_all_three_desktop_os() {
+        assert_eq!(expected_artifact_extension("linux"), ".x86_64");
+        assert_eq!(expected_artifact_extension("macos"), ".app");
+        assert_eq!(expected_artifact_extension("windows"), ".exe");
+        assert_eq!(expected_artifact_extension("bsd"), "");
+    }
+
+    #[test]
+    fn validate_artifact_structure_ok_for_generated() {
+        let plan = CiArtifactPlan::new("patina").with_target("x86_64-unknown-linux-gnu");
+        let a = plan.generate_artifacts().pop().unwrap();
+        assert!(validate_artifact_structure(&a).is_ok());
+    }
+
+    #[test]
+    fn validate_artifact_structure_flags_triple_platform_mismatch() {
+        let bad = CiArtifact {
+            name: "bogus".into(),
+            filename: "bogus.macos.release.app".into(),
+            rust_triple: "x86_64-unknown-linux-gnu".into(),
+            profile: BuildProfile::Release,
+            platform: "macos".into(),
+            arch: "x86_64".into(),
+            upload: true,
+            sha256: None,
+            size_bytes: None,
+        };
+        assert!(validate_artifact_structure(&bad).is_err());
+    }
+
+    #[test]
+    fn validate_artifact_structure_flags_wrong_extension() {
+        let bad = CiArtifact {
+            name: "bogus".into(),
+            filename: "bogus.linux.release.exe".into(),
+            rust_triple: "x86_64-unknown-linux-gnu".into(),
+            profile: BuildProfile::Release,
+            platform: "linux".into(),
+            arch: "x86_64".into(),
+            upload: true,
+            sha256: None,
+            size_bytes: None,
+        };
+        assert!(validate_artifact_structure(&bad).is_err());
+    }
+
+    #[test]
+    fn default_cross_platform_plan_is_ok() {
+        let report = validate_default_cross_platform_plan("patina");
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        assert_eq!(report.validated_count, 3);
+    }
+
+    #[test]
+    fn validate_plan_cross_platform_flags_missing_os() {
+        let plan = CiArtifactPlan::new("patina").with_target("x86_64-unknown-linux-gnu");
+        let report = validate_plan_cross_platform(&plan);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.contains("macOS")));
+        assert!(report.errors.iter().any(|e| e.contains("Windows")));
     }
 
     #[test]

@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://test_mover"]
+
+[node name="Root" type="Node2D"]
+
+[node name="Mover" type="Node2D" parent="."]
+script = ExtResource("res://test_mover.gd")

@@ -1,0 +1,71 @@
+{
+  "fixture_id": "scene_outdoor_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "data": {
+    "nodes": [
+      {
+        "name": "Outdoor3D",
+        "class": "Node3D",
+        "path": "/root/Outdoor3D",
+        "children": ["Camera", "Sun", "FillLight", "Terrain", "Rock", "Tree", "Boulder"]
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Outdoor3D/Camera",
+        "children": []
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/Outdoor3D/Sun",
+        "children": []
+      },
+      {
+        "name": "FillLight",
+        "class": "OmniLight3D",
+        "path": "/root/Outdoor3D/FillLight",
+        "children": []
+      },
+      {
+        "name": "Terrain",
+        "class": "MeshInstance3D",
+        "path": "/root/Outdoor3D/Terrain",
+        "children": []
+      },
+      {
+        "name": "Rock",
+        "class": "MeshInstance3D",
+        "path": "/root/Outdoor3D/Rock",
+        "children": []
+      },
+      {
+        "name": "Tree",
+        "class": "MeshInstance3D",
+        "path": "/root/Outdoor3D/Tree",
+        "children": []
+      },
+      {
+        "name": "Boulder",
+        "class": "RigidBody3D",
+        "path": "/root/Outdoor3D/Boulder",
+        "children": ["BoulderShape", "BoulderMesh"]
+      },
+      {
+        "name": "BoulderShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Outdoor3D/Boulder/BoulderShape",
+        "children": []
+      },
+      {
+        "name": "BoulderMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Outdoor3D/Boulder/BoulderMesh",
+        "children": []
+      }
+    ]
+  }
+}

@@ -8,7 +8,7 @@ use crate::light::{Light3D, Light3DId};
 use crate::material::Material3D;
 use crate::mesh::Mesh3D;
 use crate::multimesh::MultiMesh3D;
-use crate::reflection_probe::ReflectionProbeId;
+use crate::reflection_probe::{ReflectionProbe, ReflectionProbeId};
 use crate::shader::ShaderMaterial3D;
 use crate::viewport::Viewport3D;
 
@@ -71,6 +71,13 @@ pub trait RenderingServer3D {
 
     /// Adds a reflection probe to the scene.
     fn add_reflection_probe(&mut self, id: ReflectionProbeId);
+
+    /// Updates a reflection probe's properties (transform, size, intensity,
+    /// ambient mode, etc.). Implementations should match by `probe.id`.
+    ///
+    /// Default implementation is a no-op so non-probe-aware renderers stay
+    /// trait-compatible without behaviour changes.
+    fn update_reflection_probe(&mut self, _probe: &ReflectionProbe) {}
 
     /// Removes a reflection probe from the scene.
     fn remove_reflection_probe(&mut self, id: ReflectionProbeId);

@@ -223,6 +223,8 @@ pub enum PackageError {
     WriteFailed(String),
     /// The target platform is not recognized.
     UnsupportedPlatform(String),
+    /// A platform-specific bundling step failed (e.g. AppImage layout).
+    BundleFailed(String),
 }
 
 impl std::fmt::Display for PackageError {
@@ -233,6 +235,7 @@ impl std::fmt::Display for PackageError {
             Self::OutputDirCreationFailed(p) => write!(f, "failed to create output directory: {p}"),
             Self::WriteFailed(msg) => write!(f, "write failed: {msg}"),
             Self::UnsupportedPlatform(p) => write!(f, "unsupported platform: {p}"),
+            Self::BundleFailed(msg) => write!(f, "bundle failed: {msg}"),
         }
     }
 }
@@ -436,8 +439,18 @@ impl PackageExecutor {
         Ok(marker_path)
     }
 
-    /// Runs the full packaging pipeline: validate, collect, write, return result.
+    /// Runs the full packaging pipeline: validate, collect, write the shared
+    /// staging output, then produce the platform-native artifact with a
+    /// placeholder binary.
     pub fn run(&mut self) -> PackageResult {
+        self.run_with_binary(None)
+    }
+
+    /// Runs the full packaging pipeline, embedding `binary` as the compiled
+    /// executable when provided. When `binary` is `None` a placeholder stub
+    /// is written instead so the pipeline remains testable without a real
+    /// build.
+    pub fn run_with_binary(&mut self, binary: Option<&Path>) -> PackageResult {
         // Step 1: Validate platform.
         if let Err(e) = self.validate_platform() {
             return PackageResult::err(e.to_string());
@@ -454,15 +467,413 @@ impl PackageExecutor {
             self.collected.len(),
         ));
 
-        // Step 3: Write output.
-        match self.write_output() {
-            Ok(output_path) => {
-                let mut result = PackageResult::ok(output_path.display().to_string(), total_size);
-                result.messages = self.messages.clone();
-                result
-            }
-            Err(e) => PackageResult::err(e.to_string()),
+        // Step 3: Write shared staging output (manifest + listing + marker).
+        let marker_path = match self.write_output() {
+            Ok(p) => p,
+            Err(e) => return PackageResult::err(e.to_string()),
+        };
+
+        // Step 4: Dispatch to the platform-specific generator. The
+        // dispatcher is best-effort: platforms without a native bundle
+        // implementation fall back to the staging marker.
+        let final_path = match self.config.target_platform.as_str() {
+            "linux" => match self.generate_linux_appimage(binary) {
+                Ok(p) => p,
+                Err(e) => return PackageResult::err(e.to_string()),
+            },
+            "macos" => match self.generate_macos_bundle(binary) {
+                Ok(p) => p,
+                Err(e) => return PackageResult::err(e.to_string()),
+            },
+            "windows" => match self.generate_windows_exe(binary) {
+                Ok(p) => p,
+                Err(e) => return PackageResult::err(e.to_string()),
+            },
+            _ => marker_path,
+        };
+
+        let mut result = PackageResult::ok(final_path.display().to_string(), total_size);
+        result.messages = self.messages.clone();
+        result
+    }
+
+    /// Generates a Linux AppImage-style layout under the output directory.
+    ///
+    /// On success the returned path points at the `.AppImage` marker which
+    /// lives next to the `.AppDir` tree:
+    ///
+    /// ```text
+    /// <output>/<App>.AppImage           # shell stub pointing at AppRun
+    /// <output>/<App>.AppDir/
+    ///     AppRun                         # shell entry point
+    ///     <sanitized>.desktop            # top-level desktop entry
+    ///     <sanitized>.png                # top-level icon (if configured)
+    ///     usr/bin/<sanitized>            # binary (real or placeholder)
+    ///     usr/share/applications/<sanitized>.desktop
+    ///     usr/share/icons/hicolor/256x256/apps/<sanitized>.png
+    ///     usr/share/<app_name>/...       # staged resources
+    /// ```
+    ///
+    /// Returns `PackageError::BundleFailed` when invoked with a non-`linux`
+    /// target platform.
+    pub fn generate_linux_appimage(
+        &mut self,
+        binary: Option<&Path>,
+    ) -> Result<PathBuf, PackageError> {
+        let platform = self.config.target_platform.as_str();
+        if platform != "linux" {
+            return Err(PackageError::BundleFailed(format!(
+                "Linux AppImage requires platform 'linux', got '{platform}'"
+            )));
         }
+
+        let app_name = self.config.app_name.clone();
+        let sanitized = crate::linux::sanitize_desktop_id(&app_name);
+        let appdir = self.output_dir.join(crate::linux::appdir_name(&app_name));
+        let usr_bin = appdir.join("usr").join("bin");
+        let usr_share_apps = appdir.join("usr").join("share").join("applications");
+        let usr_share_icons = appdir
+            .join("usr")
+            .join("share")
+            .join("icons")
+            .join("hicolor")
+            .join("256x256")
+            .join("apps");
+        let usr_share_app = appdir.join("usr").join("share").join(&app_name);
+
+        for dir in [&usr_bin, &usr_share_apps, &usr_share_icons, &usr_share_app] {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                PackageError::BundleFailed(format!(
+                    "create {}: {e}",
+                    dir.display()
+                ))
+            })?;
+        }
+
+        // AppRun script — executable entry point used by the AppImage stub.
+        let apprun_path = appdir.join("AppRun");
+        let apprun_body = format!(
+            "#!/bin/sh\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"$HERE/usr/bin/{sanitized}\" \"$@\"\n"
+        );
+        write_file(&apprun_path, apprun_body.as_bytes())?;
+        set_executable(&apprun_path)?;
+
+        // .desktop entry — written at the AppDir root and under
+        // usr/share/applications/ so downstream tools can discover either.
+        let desktop_name = crate::linux::desktop_filename(&app_name);
+        let desktop_body = format!(
+            "[Desktop Entry]\nType=Application\nName={app_name}\nExec={sanitized}\nIcon={sanitized}\nCategories=Game;\nTerminal=false\n"
+        );
+        write_file(&appdir.join(&desktop_name), desktop_body.as_bytes())?;
+        write_file(&usr_share_apps.join(&desktop_name), desktop_body.as_bytes())?;
+
+        // Icon — copy the source icon bytes to both the AppDir root and
+        // usr/share/icons/hicolor/256x256/apps/. Icon is optional; skip
+        // when the config has none.
+        if !self.config.icon_path.is_empty() {
+            let icon_source = resolve_resource_path(&self.project_dir, &self.config.icon_path);
+            if icon_source.exists() {
+                let icon_bytes = std::fs::read(&icon_source).map_err(|e| {
+                    PackageError::BundleFailed(format!(
+                        "read icon {}: {e}",
+                        icon_source.display()
+                    ))
+                })?;
+                let icon_name = crate::linux::linux_icon_filename(&app_name);
+                write_file(&appdir.join(&icon_name), &icon_bytes)?;
+                write_file(&usr_share_icons.join(&icon_name), &icon_bytes)?;
+            }
+        }
+
+        // Binary — real payload if supplied, otherwise a shell placeholder
+        // so downstream layout checks still have an executable in place.
+        let binary_target = usr_bin.join(&sanitized);
+        match binary {
+            Some(path) => {
+                let bytes = std::fs::read(path).map_err(|e| {
+                    PackageError::BundleFailed(format!(
+                        "read binary {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                write_file(&binary_target, &bytes)?;
+            }
+            None => {
+                let placeholder = format!(
+                    "#!/bin/sh\n# Patina export placeholder for {app_name}\necho \"Patina placeholder: {app_name}\"\n"
+                );
+                write_file(&binary_target, placeholder.as_bytes())?;
+            }
+        }
+        set_executable(&binary_target)?;
+
+        // Staged resources — copy collected files into usr/share/<app>.
+        for entry in self.collected.clone() {
+            let rel = entry
+                .source_path
+                .strip_prefix(&self.project_dir)
+                .unwrap_or_else(|_| Path::new(&entry.package_path));
+            let dst = usr_share_app.join(rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    PackageError::BundleFailed(format!(
+                        "create {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            std::fs::copy(&entry.source_path, &dst).map_err(|e| {
+                PackageError::BundleFailed(format!(
+                    "copy {} -> {}: {e}",
+                    entry.source_path.display(),
+                    dst.display()
+                ))
+            })?;
+        }
+
+        // AppImage marker — shell stub that execs AppRun. A real AppImage
+        // would be a self-mounting squashfs binary; the staging-only stub
+        // is enough for tooling and tests.
+        let appimage_path = self
+            .output_dir
+            .join(crate::linux::appimage_filename(&app_name));
+        let stub = format!(
+            "#!/bin/sh\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"$HERE/{}/AppRun\" \"$@\"\n",
+            crate::linux::appdir_name(&app_name)
+        );
+        write_file(&appimage_path, stub.as_bytes())?;
+        set_executable(&appimage_path)?;
+
+        self.messages
+            .push(format!("wrote AppImage: {}", appimage_path.display()));
+        Ok(appimage_path)
+    }
+
+    /// Generates a macOS `.app` bundle under the output directory.
+    ///
+    /// On success the returned path points at the `.app` directory which
+    /// follows the standard macOS bundle layout:
+    ///
+    /// ```text
+    /// <output>/<App>.app/
+    ///     Contents/
+    ///         Info.plist                # bundle metadata
+    ///         PkgInfo                   # "APPL????"
+    ///         MacOS/<App>               # binary (real or placeholder)
+    ///         Resources/
+    ///             <icon basename>       # icon, when configured
+    ///             ...                   # staged resources
+    /// ```
+    ///
+    /// Returns `PackageError::BundleFailed` when invoked with a non-`macos`
+    /// target platform.
+    pub fn generate_macos_bundle(
+        &mut self,
+        binary: Option<&Path>,
+    ) -> Result<PathBuf, PackageError> {
+        let platform = self.config.target_platform.as_str();
+        if platform != "macos" {
+            return Err(PackageError::BundleFailed(format!(
+                "macOS bundle requires platform 'macos', got '{platform}'"
+            )));
+        }
+
+        let app_name = self.config.app_name.clone();
+        let bundle = self
+            .output_dir
+            .join(crate::macos::app_bundle_name(&app_name));
+        let contents = bundle.join("Contents");
+        let macos_dir = contents.join("MacOS");
+        let resources = contents.join("Resources");
+
+        for dir in [&contents, &macos_dir, &resources] {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                PackageError::BundleFailed(format!("create {}: {e}", dir.display()))
+            })?;
+        }
+
+        // PkgInfo — fixed 8-byte tag identifying an application bundle.
+        write_file(&contents.join("PkgInfo"), b"APPL????")?;
+
+        // Icon — copy the configured source into Resources/<basename>. The
+        // plist only gets a non-empty CFBundleIconFile when an icon was
+        // actually configured, matching Xcode's behavior.
+        let icon_basename = if self.config.icon_path.is_empty() {
+            None
+        } else {
+            let icon_source = resolve_resource_path(&self.project_dir, &self.config.icon_path);
+            let basename = Path::new(&self.config.icon_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.config.icon_path.clone());
+            if icon_source.exists() {
+                let bytes = std::fs::read(&icon_source).map_err(|e| {
+                    PackageError::BundleFailed(format!(
+                        "read icon {}: {e}",
+                        icon_source.display()
+                    ))
+                })?;
+                write_file(&resources.join(&basename), &bytes)?;
+            }
+            Some(basename)
+        };
+
+        // Info.plist — always emit the CFBundleIconFile key; it's empty
+        // when no icon was configured.
+        let plist = crate::macos::macos_info_plist(&app_name, icon_basename.as_deref());
+        write_file(&contents.join("Info.plist"), plist.as_bytes())?;
+
+        // Binary — real payload if supplied, otherwise a placeholder stub
+        // so downstream layout checks still succeed without a real build.
+        let binary_target = macos_dir.join(&app_name);
+        match binary {
+            Some(path) => {
+                let bytes = std::fs::read(path).map_err(|e| {
+                    PackageError::BundleFailed(format!(
+                        "read binary {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                write_file(&binary_target, &bytes)?;
+            }
+            None => {
+                let placeholder = format!(
+                    "#!/bin/sh\n# Patina export placeholder for {app_name}\necho \"Patina placeholder: {app_name}\"\n"
+                );
+                write_file(&binary_target, placeholder.as_bytes())?;
+            }
+        }
+        set_executable(&binary_target)?;
+
+        // Staged resources — copy collected files under Contents/Resources
+        // preserving their project-relative layout.
+        for entry in self.collected.clone() {
+            let rel = entry
+                .source_path
+                .strip_prefix(&self.project_dir)
+                .unwrap_or_else(|_| Path::new(&entry.package_path));
+            let dst = resources.join(rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    PackageError::BundleFailed(format!("create {}: {e}", parent.display()))
+                })?;
+            }
+            std::fs::copy(&entry.source_path, &dst).map_err(|e| {
+                PackageError::BundleFailed(format!(
+                    "copy {} -> {}: {e}",
+                    entry.source_path.display(),
+                    dst.display()
+                ))
+            })?;
+        }
+
+        self.messages
+            .push(format!("wrote macOS bundle: {}", bundle.display()));
+        Ok(bundle)
+    }
+
+    /// Generates a Windows `.exe` layout under the output directory.
+    ///
+    /// Layout produced for a matching `windows` target:
+    ///
+    /// ```text
+    /// <output>/<App>.exe              # binary (real or MZ-prefixed placeholder)
+    /// <output>/<App>.exe.manifest     # side-by-side assembly manifest XML
+    /// <output>/<App>.ico              # icon copied from `config.icon_path` (when set)
+    /// <output>/resources/...          # staged resources mirroring project layout
+    /// ```
+    ///
+    /// Returns `PackageError::BundleFailed` when invoked with a non-`windows`
+    /// target platform.
+    pub fn generate_windows_exe(
+        &mut self,
+        binary: Option<&Path>,
+    ) -> Result<PathBuf, PackageError> {
+        let platform = self.config.target_platform.as_str();
+        if platform != "windows" {
+            return Err(PackageError::BundleFailed(format!(
+                "Windows exe requires platform 'windows', got '{platform}'"
+            )));
+        }
+
+        let app_name = self.config.app_name.clone();
+        let exe_path = self
+            .output_dir
+            .join(crate::windows::windows_exe_filename(&app_name));
+        let manifest_path = self
+            .output_dir
+            .join(crate::windows::windows_manifest_filename(&app_name));
+        let resources_dir = self.output_dir.join("resources");
+
+        std::fs::create_dir_all(&resources_dir).map_err(|e| {
+            PackageError::BundleFailed(format!("create {}: {e}", resources_dir.display()))
+        })?;
+
+        // Binary — real payload if supplied, otherwise an MZ-prefixed
+        // placeholder so layout checks succeed without invoking a Windows
+        // linker.
+        match binary {
+            Some(path) => {
+                let bytes = std::fs::read(path).map_err(|e| {
+                    PackageError::BundleFailed(format!("read binary {}: {e}", path.display()))
+                })?;
+                write_file(&exe_path, &bytes)?;
+            }
+            None => {
+                let placeholder = crate::windows::windows_placeholder_exe(&app_name);
+                write_file(&exe_path, placeholder.as_bytes())?;
+            }
+        }
+
+        // Side-by-side assembly manifest.
+        let manifest_xml = crate::windows::windows_manifest(&app_name);
+        write_file(&manifest_path, manifest_xml.as_bytes())?;
+
+        // Icon — copy bytes from configured path to <App>.ico when present.
+        // The stored bytes preserve whatever the source contained (the test
+        // fixture supplies real ICO magic), so the destination is a valid
+        // `.ico` for downstream tooling.
+        if !self.config.icon_path.is_empty() {
+            let icon_source = resolve_resource_path(&self.project_dir, &self.config.icon_path);
+            if icon_source.exists() {
+                let icon_bytes = std::fs::read(&icon_source).map_err(|e| {
+                    PackageError::BundleFailed(format!(
+                        "read icon {}: {e}",
+                        icon_source.display()
+                    ))
+                })?;
+                let icon_path = self
+                    .output_dir
+                    .join(crate::windows::windows_icon_filename(&app_name));
+                write_file(&icon_path, &icon_bytes)?;
+            }
+        }
+
+        // Staged resources — copy collected files under <output>/resources/
+        // preserving their project-relative layout.
+        for entry in self.collected.clone() {
+            let rel = entry
+                .source_path
+                .strip_prefix(&self.project_dir)
+                .unwrap_or_else(|_| Path::new(&entry.package_path));
+            let dst = resources_dir.join(rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    PackageError::BundleFailed(format!("create {}: {e}", parent.display()))
+                })?;
+            }
+            std::fs::copy(&entry.source_path, &dst).map_err(|e| {
+                PackageError::BundleFailed(format!(
+                    "copy {} -> {}: {e}",
+                    entry.source_path.display(),
+                    dst.display()
+                ))
+            })?;
+        }
+
+        self.messages
+            .push(format!("wrote Windows exe: {}", exe_path.display()));
+        Ok(exe_path)
     }
 
     // -- Internal helpers ----------------------------------------------------
@@ -531,6 +942,38 @@ fn resolve_resource_path(project_dir: &Path, res_path: &str) -> PathBuf {
 /// Strips the `res://` prefix from a path for use as a package-internal path.
 fn strip_res_prefix(path: &str) -> String {
     path.strip_prefix("res://").unwrap_or(path).to_string()
+}
+
+/// Writes `bytes` to `path`, creating parent directories as needed.
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), PackageError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PackageError::WriteFailed(format!("{}: {e}", parent.display())))?;
+    }
+    std::fs::write(path, bytes)
+        .map_err(|e| PackageError::WriteFailed(format!("{}: {e}", path.display())))
+}
+
+/// Sets the owner-execute bit on `path` when targeting a unix host. On
+/// non-unix hosts (Windows) this is a no-op because AppImage tooling only
+/// needs the permission on the runtime target, and the integration test
+/// suite guards its executable-bit assertions with `#[cfg(unix)]`.
+fn set_executable(path: &Path) -> Result<(), PackageError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)
+            .map_err(|e| PackageError::WriteFailed(format!("metadata {}: {e}", path.display())))?
+            .permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        std::fs::set_permissions(path, perms)
+            .map_err(|e| PackageError::WriteFailed(format!("chmod {}: {e}", path.display())))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -631,6 +1074,74 @@ mod tests {
 
         let err = PackageError::UnsupportedPlatform("gamecube".into());
         assert!(err.to_string().contains("gamecube"));
+
+        let err = PackageError::BundleFailed("AppImage stub".into());
+        let msg = err.to_string();
+        assert!(msg.contains("bundle failed"));
+        assert!(msg.contains("AppImage stub"));
+    }
+
+    #[test]
+    fn generate_linux_appimage_rejects_non_linux_platform() {
+        let tmp = std::env::temp_dir().join("patina_test_appimage_reject");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let cfg = ExportConfig::new("macos", "MacGame").with_resource("main.tscn");
+        std::fs::write(tmp.join("main.tscn"), "scene").unwrap();
+
+        let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
+        exec.validate_and_collect().unwrap();
+        let err = exec.generate_linux_appimage(None).unwrap_err();
+        match err {
+            PackageError::BundleFailed(msg) => {
+                assert!(msg.contains("Linux AppImage requires"));
+                assert!(msg.contains("macos"));
+            }
+            other => panic!("expected BundleFailed, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn generate_macos_bundle_rejects_non_macos_platform() {
+        let tmp = std::env::temp_dir().join("patina_test_macos_reject");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let cfg = ExportConfig::new("linux", "LinuxGame");
+        let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
+        let err = exec.generate_macos_bundle(None).unwrap_err();
+        match err {
+            PackageError::BundleFailed(msg) => {
+                assert!(msg.contains("macOS bundle requires"));
+                assert!(msg.contains("linux"));
+            }
+            other => panic!("expected BundleFailed, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn generate_windows_exe_rejects_non_windows_platform() {
+        let tmp = std::env::temp_dir().join("patina_test_windows_reject");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let cfg = ExportConfig::new("linux", "LinuxGame");
+        let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("out"));
+        let err = exec.generate_windows_exe(None).unwrap_err();
+        match err {
+            PackageError::BundleFailed(msg) => {
+                assert!(msg.contains("Windows exe requires"));
+                assert!(msg.contains("linux"));
+            }
+            other => panic!("expected BundleFailed, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // -- resolve_resource_path tests -----------------------------------------

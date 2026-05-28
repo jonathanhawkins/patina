@@ -1,0 +1,29 @@
+[gd_scene format=3]
+
+[node name="Outdoor3D" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 3, 10)
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(5, 15, 5)
+
+[node name="FillLight" type="OmniLight3D" parent="."]
+position = Vector3(-4, 2, 0)
+
+[node name="Terrain" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0, 0)
+scale = Vector3(20, 1, 20)
+
+[node name="Rock" type="MeshInstance3D" parent="."]
+position = Vector3(3, 0.5, -2)
+
+[node name="Tree" type="MeshInstance3D" parent="."]
+position = Vector3(-3, 1, -4)
+
+[node name="Boulder" type="RigidBody3D" parent="."]
+position = Vector3(1, 4, 0)
+
+[node name="BoulderShape" type="CollisionShape3D" parent="Boulder"]
+
+[node name="BoulderMesh" type="MeshInstance3D" parent="Boulder"]
