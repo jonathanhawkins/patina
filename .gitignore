@@ -68,3 +68,6 @@ storage.sqlite3-wal
 .codex/bead.db-shm
 .codex/bead.db-wal
 .claude/*.lock
+
+# Local agent-mail credential — must never be committed (rotate if it ever was).
+.beads/coordinator_token
