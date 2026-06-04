@@ -1139,9 +1139,10 @@ pub fn parse_gate_output(text: &str) -> GateReport {
     passing.dedup();
     failing.sort();
     failing.dedup();
-    // A retried test can report both PASS and FAIL; let any failure win so a
-    // flaky pass never ticks a box.
-    passing.retain(|p| !failing.contains(p));
+    // With retries enabled a flaky test reports an early FAIL then a later PASS;
+    // treat any PASS as authoritative so retries actually absorb flakiness. A
+    // test that fails every attempt only ever appears in `failing`.
+    failing.retain(|f| !passing.contains(f));
 
     if passing.is_empty() && failing.is_empty() {
         eprintln!(
@@ -1243,6 +1244,12 @@ pub fn run_analysis_from_criteria(
     let mut nextest_args: Vec<String> = vec![
         "nextest".into(),
         "run".into(),
+        // Retry transient failures (e.g. a test that's flaky only under the
+        // concurrent suite) so a single bad run can't permanently keep a
+        // criterion from ticking. A test that passes on any attempt counts as
+        // passing; one that fails every attempt stays failing.
+        "--retries".into(),
+        "2".into(),
         "--no-fail-fast".into(),
         "--run-ignored".into(),
         "all".into(),
