@@ -82,5 +82,6 @@ test_binaries = [
     "viewport_gizmo_scale_test",
     "viewport_smart_snap_test",
     "viewport_zoom_test",
+    "editor_mode_e2e_test",
 ]
 completion = ["all_criteria_checked"]
