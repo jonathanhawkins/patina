@@ -2,6 +2,8 @@
 
 One unchecked checkbox per acceptance test referenced across the per-lane execution maps (`prd/EDITOR_PARITY_EXECUTION_MAP.md`). The planner ticks a box when its named test passes; the phase exits when every box is checked.
 
+> **A criterion is satisfied only when an APP-LEVEL test passes** — one that boots the real editor (`EditorServerHandle::start` / `examples/editor.rs`) and drives it over HTTP the way a user does. A lib unit test that only exercises an isolated model struct (e.g. `MainScreenSwitcher`, `SceneWorkspace`, `InspectorPanel`) is **insufficient**: it can pass while the feature is never wired into the running editor — which is exactly how the main-screen mode switch, New Scene, and selection→inspector all "passed" while being broken in the app. Every user-visible criterion MUST have a test that asserts the assembled app behaves, not merely that a model method returns the right value. See beads labeled `planner-methodology` (e.g. the per-mode e2e smoke test) for the gate that enforces this.
+
 ## Now
 
 - [x] `scene-tree-ops-add-child-node` Add Child Node action inserts a new node of the chosen type as a child of the selected node and selects it (test: `scene_tree_add_child_node`)

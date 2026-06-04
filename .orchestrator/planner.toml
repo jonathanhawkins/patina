@@ -59,6 +59,16 @@ completion = ["all_criteria_checked"]
 # path — see the AMFI launch-wedge note). The planner runs them via
 # `nextest run -p gdeditor -p gdscene --lib --test <5 bins> -E <154 names>`,
 # ticks each `- [ ]` box whose test passes, and seeds rework beads for failures.
+#
+# METHODOLOGY (2026-06-04): these lib unit tests are NECESSARY but NOT SUFFICIENT.
+# A criterion is only truly satisfied by an APP-LEVEL test that boots the editor
+# (EditorServerHandle::start / examples/editor.rs) and drives it over HTTP — a
+# lib-model test (MainScreenSwitcher, SceneWorkspace, InspectorPanel, …) can pass
+# while the feature is never wired into the running app (that is how the mode
+# switch, New Scene, and selection->inspector all "passed" while broken). Add the
+# server-booting e2e tests (editor_beads_test, editor_parity_test, …) to
+# `test_binaries` and reference their fns from EDITOR_PARITY_EXIT.md so the gate
+# actually exercises the assembled editor. See the `planner-methodology` beads.
 [[phase]]
 label = "editor-parity"
 execution_map = "prd/EDITOR_PARITY_EXECUTION_MAP.md"
