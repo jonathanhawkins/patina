@@ -50,19 +50,27 @@ test_binaries = ["editor_parity_bootstrap_map_test"]
 completion = ["all_criteria_checked"]
 
 # ─── Phase 3: editor-parity (aggregate of per-lane maps) ──────────────────
-# These files are authored by the swarm during phase 2 (they don't exist yet).
-# Until then this phase is Unevaluable and the planner skips past it.
-#
-# ACTION REQUIRED when phase 2 completes: once the per-lane maps name real
-# test targets, populate `test_binaries` below with those cargo test-target
-# names. With it left empty, the planner will SKIP analysis (safe — never a
-# --workspace build) but the criteria will then never auto-tick, silently
-# stalling phase 3. The bead that authors EDITOR_PARITY_EXIT.md should also
-# update this list.
+# The 154 acceptance tests in EDITOR_PARITY_EXIT.md are scoped for analysis as:
+#   - 149 LIB unit tests (144 in gdeditor/src, 5 in gdscene/src) → `test_packages`
+#     + `lib = true` builds just those two lib test targets.
+#   - 5 integration-only targets → `test_binaries`.
+# Together they cover all 154 without a --workspace build, and the run
+# re-launches only ~7 distinct binaries (gentle on the macOS code-sign launch
+# path — see the AMFI launch-wedge note). The planner runs them via
+# `nextest run -p gdeditor -p gdscene --lib --test <5 bins> -E <154 names>`,
+# ticks each `- [ ]` box whose test passes, and seeds rework beads for failures.
 [[phase]]
 label = "editor-parity"
 execution_map = "prd/EDITOR_PARITY_EXECUTION_MAP.md"
 exit_criteria = "prd/EDITOR_PARITY_EXIT.md"
 analysis = { source = "criteria" }
-test_binaries = []
+test_packages = ["gdeditor", "gdscene"]
+lib = true
+test_binaries = [
+    "inspector_revert_test",
+    "viewport_gizmo_move_test",
+    "viewport_gizmo_scale_test",
+    "viewport_smart_snap_test",
+    "viewport_zoom_test",
+]
 completion = ["all_criteria_checked"]

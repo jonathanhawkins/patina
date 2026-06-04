@@ -81,6 +81,15 @@ pub struct Phase {
     /// "criteria" }`, the planner skips the analysis subprocess entirely
     /// rather than fall back to a `--workspace` build.
     pub test_binaries: Vec<String>,
+    /// Cargo package names (`-p <pkg>`) to scope the analysis build to. Unlike
+    /// `test_binaries` (which selects only integration `--test` targets), a
+    /// package scope also builds the crate's **lib unit tests**, where most
+    /// editor-parity acceptance tests live. Empty by default.
+    pub test_packages: Vec<String>,
+    /// When true, pass `--lib` so the package scope builds only lib test
+    /// targets — fast, and re-launches one cached binary per package instead of
+    /// ~100 distinct integration binaries (gentler on macOS code-sign launch).
+    pub lib: bool,
 }
 
 /// How to determine whether each criterion is met.
@@ -136,6 +145,10 @@ struct TomlPhaseV2 {
     completion: Option<Vec<toml::Value>>,
     #[serde(default)]
     test_binaries: Vec<String>,
+    #[serde(default)]
+    test_packages: Vec<String>,
+    #[serde(default)]
+    lib: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +263,8 @@ fn load_from_toml(
                     analysis: analysis_source,
                     completion,
                     test_binaries: p.test_binaries,
+                    test_packages: p.test_packages,
+                    lib: p.lib,
                 }
             })
             .collect()
@@ -267,6 +282,8 @@ fn load_from_toml(
             analysis: synth_analysis,
             completion: completion_conditions.clone(),
             test_binaries: vec![],
+            test_packages: vec![],
+            lib: false,
         }]
     };
 
@@ -370,6 +387,8 @@ pub fn convention_fallback(project_root: &Path) -> ProjectPlannerConfig {
         analysis: AnalysisSource::Commands(vec![]),
         completion: vec![],
         test_binaries: vec![],
+        test_packages: vec![],
+        lib: false,
     }];
 
     ProjectPlannerConfig {

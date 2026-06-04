@@ -290,7 +290,13 @@ fn analyze_phase_chain(
         let gates = match &phase.analysis {
             crate::project_config::AnalysisSource::FromCriteria => {
                 if engine_dir.exists() && !criteria.is_empty() {
-                    run_analysis_from_criteria(&criteria, &phase.test_binaries, &engine_dir)
+                    run_analysis_from_criteria(
+                        &criteria,
+                        &phase.test_binaries,
+                        &phase.test_packages,
+                        phase.lib,
+                        &engine_dir,
+                    )
                 } else {
                     empty_gates()
                 }
@@ -333,7 +339,11 @@ fn analyze_phase_chain(
                 // silent-stall config error — criteria carry `(test:)` markers
                 // that should auto-tick, but no test_binaries are configured, so
                 // they can NEVER tick and the phase is skipped forever.
-                if phase_has_unticked_test_markers(&criteria_now, &phase.test_binaries) {
+                if phase_has_unticked_test_markers(
+                    &criteria_now,
+                    &phase.test_binaries,
+                    &phase.test_packages,
+                ) {
                     tracing::warn!(
                         phase = %phase.label,
                         "phase has criteria with (test:) markers but no test_binaries configured — \
@@ -1090,24 +1100,48 @@ fn run_gate_pass_default(engine_dir: &Path) -> GateReport {
     }
 }
 
-/// Parse test pass/fail from cargo test output.
+/// Parse test pass/fail from either `cargo test` or `cargo nextest` output.
 ///
-/// Matches any `test NAME ... ok/FAILED/ignored` line (generic, no prefix requirement).
+/// - cargo test:    `test <name> ... ok|FAILED|ignored`
+/// - cargo nextest: `   PASS|FAIL [   0.0s] (1/1) <pkg> <module::…::name>`
+///
+/// Names are reduced to the bare final `::` segment so they match the bare fn
+/// names that criteria markers carry (the tick set is an exact-match lookup).
 pub fn parse_gate_output(text: &str) -> GateReport {
-    let re = Regex::new(r"(?m)^test\s+(\S+)\s+\.\.\.\s+(ok|FAILED|ignored)").unwrap();
+    let cargo_re = Regex::new(r"(?m)^test\s+(\S+)\s+\.\.\.\s+(ok|FAILED|ignored)").unwrap();
+    // Status word, then the test path is the final whitespace-delimited token.
+    let nextest_re =
+        Regex::new(r"(?m)^\s*(PASS|FAIL|TIMEOUT|ABORT|SIGSEGV|LEAK)\b.*\s(\S+)\s*$").unwrap();
+
+    let bare = |s: &str| s.rsplit("::").next().unwrap_or(s).to_string();
 
     let mut passing = Vec::new();
     let mut failing = Vec::new();
 
-    for cap in re.captures_iter(text) {
-        let name = cap[1].to_string();
-        let status = &cap[2];
-        match status {
+    for cap in cargo_re.captures_iter(text) {
+        let name = bare(&cap[1]);
+        match &cap[2] {
             "ok" => passing.push(name),
             "FAILED" => failing.push(name),
             _ => {} // ignored entries are not counted
         }
     }
+    for cap in nextest_re.captures_iter(text) {
+        let name = bare(&cap[2]);
+        if &cap[1] == "PASS" {
+            passing.push(name);
+        } else {
+            failing.push(name);
+        }
+    }
+
+    passing.sort();
+    passing.dedup();
+    failing.sort();
+    failing.dedup();
+    // A retried test can report both PASS and FAIL; let any failure win so a
+    // flaky pass never ticks a box.
+    passing.retain(|p| !failing.contains(p));
 
     if passing.is_empty() && failing.is_empty() {
         eprintln!(
@@ -1137,7 +1171,11 @@ pub fn parse_gate_output(text: &str) -> GateReport {
 /// would kill a legitimate cold build and silently stall the phase (criteria
 /// never tick). 20 minutes gives ample headroom while still bounding the
 /// lock-contention case the timeout exists to prevent.
-const CRITERIA_ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1200);
+// 3600s, not 1200s: the editor-parity analysis does a cold gdeditor lib-test
+// build (~14 min for the large #[cfg(test)] block) plus 154 test runs on the
+// FIRST cycle, which exceeds 20 min. Incremental compilation keeps every later
+// cycle to seconds, so this high ceiling only ever applies to the first run.
+const CRITERIA_ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Stale-temp-file age threshold. `run_command_with_timeout` sweeps leftover
 /// `patina-plan-*` files older than this on entry — they only accumulate if a
@@ -1156,6 +1194,8 @@ const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600)
 pub fn run_analysis_from_criteria(
     criteria: &[prd_parser::CriteriaItem],
     test_binaries: &[String],
+    test_packages: &[String],
+    lib: bool,
     engine_dir: &Path,
 ) -> GateReport {
     let mut test_names: Vec<String> = criteria
@@ -1169,14 +1209,14 @@ pub fn run_analysis_from_criteria(
         return empty_gates();
     }
 
-    if test_binaries.is_empty() {
+    if test_binaries.is_empty() && test_packages.is_empty() {
         // No scoped targets configured — refuse to run a workspace-wide build.
         // The phase's boxes will only tick if something else (a manual run or
-        // a future config with test_binaries) checks them.
+        // a future config with test_binaries/test_packages) checks them.
         eprintln!(
             "planner: criteria analysis skipped — phase has {} test name(s) but no \
-             `test_binaries` configured; refusing a --workspace build. Add the \
-             test target name(s) to the phase's test_binaries in planner.toml.",
+             `test_binaries`/`test_packages` configured; refusing a --workspace build. \
+             Add the cargo test-target or package names to the phase in planner.toml.",
             test_names.len()
         );
         return empty_gates();
@@ -1185,11 +1225,21 @@ pub fn run_analysis_from_criteria(
     // Build a nextest filter expression: test(=name1) | test(=name2) | ...
     let nextest_filter = test_names
         .iter()
-        .map(|n| format!("test(={n})"))
+        // End-anchored regex, NOT `test(=name)`: nextest's `=` is an exact match
+        // on the FULL test path (`module::…::name`), but criteria carry only the
+        // bare fn name, so `=` matches nothing. `/name$/` matches the test whose
+        // path ends in that fn name (precise even when names share a prefix).
+        .map(|n| format!("test(/{n}$/)"))
         .collect::<Vec<_>>()
         .join(" | ");
 
-    // cargo nextest run --test bin1 --test bin2 ... --run-ignored all -E <filter>
+    // cargo nextest run --no-fail-fast --run-ignored all \
+    //   -p <pkg>... [--lib] --test <bin>... -E <filter>
+    // `-p <pkg>` scopes the build to those packages (lib + their tests); `--lib`
+    // narrows it to just the lib test target (where most editor-parity tests
+    // live), so the run re-launches one cached binary per package instead of
+    // ~100 distinct integration binaries. `--test <bin>` adds the few
+    // integration-only targets on top.
     let mut nextest_args: Vec<String> = vec![
         "nextest".into(),
         "run".into(),
@@ -1197,6 +1247,13 @@ pub fn run_analysis_from_criteria(
         "--run-ignored".into(),
         "all".into(),
     ];
+    for pkg in test_packages {
+        nextest_args.push("-p".into());
+        nextest_args.push(pkg.clone());
+    }
+    if lib {
+        nextest_args.push("--lib".into());
+    }
     for bin in test_binaries {
         nextest_args.push("--test".into());
         nextest_args.push(bin.clone());
@@ -1491,8 +1548,10 @@ pub fn audit_report(project_root: &Path, report: &PlanReport) -> Vec<String> {
 fn phase_has_unticked_test_markers(
     criteria: &[prd_parser::CriteriaItem],
     test_binaries: &[String],
+    test_packages: &[String],
 ) -> bool {
     test_binaries.is_empty()
+        && test_packages.is_empty()
         && criteria.iter().any(|c| {
             !c.checked && prd_parser::extract_test_name_from_criteria_line(&c.text).is_some()
         })
@@ -2142,6 +2201,8 @@ mod tests {
                 analysis: AnalysisSource::FromCriteria,
                 completion: vec![CompletionCondition::AllCriteriaChecked],
                 test_binaries: vec![],
+                test_packages: vec![],
+                lib: false,
             },
             Phase {
                 label: "p2".into(),
@@ -2150,6 +2211,8 @@ mod tests {
                 analysis: AnalysisSource::FromCriteria,
                 completion: vec![CompletionCondition::AllCriteriaChecked],
                 test_binaries: vec![],
+                test_packages: vec![],
+                lib: false,
             },
         ];
 
@@ -2224,7 +2287,8 @@ mod tests {
             checked: false,
             line_number: 1,
         }];
-        let report = run_analysis_from_criteria(&criteria, &[], Path::new("/nonexistent-engine"));
+        let report =
+            run_analysis_from_criteria(&criteria, &[], &[], false, Path::new("/nonexistent-engine"));
         assert!(report.passing.is_empty());
         assert!(report.failing.is_empty());
         assert_eq!(report.total, 0);
@@ -2244,6 +2308,8 @@ mod tests {
             analysis: AnalysisSource::Commands(vec![]),
             completion: vec![CompletionCondition::AllGatesPassing],
             test_binaries: vec![],
+            test_packages: vec![],
+            lib: false,
         };
         assert_eq!(
             phase_status(&phase, &[], None, None),
@@ -2486,11 +2552,12 @@ test something_else ... ignored
             line_number: 1,
         }];
         // Markers present + no test_binaries → silent-stall risk.
-        assert!(phase_has_unticked_test_markers(&with_marker, &[]));
+        assert!(phase_has_unticked_test_markers(&with_marker, &[], &[]));
         // test_binaries configured → analysis runs → no silent stall.
         assert!(!phase_has_unticked_test_markers(
             &with_marker,
-            &["editor_agent_integration_test".to_string()]
+            &["editor_agent_integration_test".to_string()],
+            &[]
         ));
         // Already-checked markers don't count.
         let checked = vec![CriteriaItem {
@@ -2499,7 +2566,7 @@ test something_else ... ignored
             checked: true,
             line_number: 1,
         }];
-        assert!(!phase_has_unticked_test_markers(&checked, &[]));
+        assert!(!phase_has_unticked_test_markers(&checked, &[], &[]));
         // No markers at all → benign empty/prose phase, not a stall.
         let no_marker = vec![CriteriaItem {
             section: "S".into(),
@@ -2507,7 +2574,7 @@ test something_else ... ignored
             checked: false,
             line_number: 1,
         }];
-        assert!(!phase_has_unticked_test_markers(&no_marker, &[]));
+        assert!(!phase_has_unticked_test_markers(&no_marker, &[], &[]));
     }
 
     // ─── B6: planner-key extraction + dependency validation ─────────────
@@ -3548,6 +3615,8 @@ OVERALL        101   100    99.0%
             analysis: AnalysisSource::FromCriteria,
             completion: vec![CompletionCondition::AllCriteriaChecked],
             test_binaries: vec![],
+            test_packages: vec![],
+            lib: false,
         };
 
         // No criteria → not complete (avoid false-positive on empty file).
@@ -3596,6 +3665,8 @@ OVERALL        101   100    99.0%
                 analysis: AnalysisSource::Commands(vec![]),
                 completion: vec![CompletionCondition::AllGatesPassing],
                 test_binaries: vec![],
+                test_packages: vec![],
+                lib: false,
             }],
             uses_phase_chain: false,
         };
@@ -3612,6 +3683,8 @@ OVERALL        101   100    99.0%
                 analysis: AnalysisSource::Commands(vec![]),
                 completion: vec![CompletionCondition::AllGatesPassing],
                 test_binaries: vec![],
+                test_packages: vec![],
+                lib: false,
             }],
             uses_phase_chain: true,
             ..legacy.clone()
@@ -3659,6 +3732,8 @@ OVERALL        101   100    99.0%
                 analysis: AnalysisSource::FromCriteria,
                 completion: vec![CompletionCondition::AllCriteriaChecked],
                 test_binaries: vec![],
+                test_packages: vec![],
+                lib: false,
             },
             Phase {
                 label: "p2".into(),
@@ -3667,6 +3742,8 @@ OVERALL        101   100    99.0%
                 analysis: AnalysisSource::FromCriteria,
                 completion: vec![CompletionCondition::AllCriteriaChecked],
                 test_binaries: vec![],
+                test_packages: vec![],
+                lib: false,
             },
         ];
 
