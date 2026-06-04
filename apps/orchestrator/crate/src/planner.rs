@@ -1110,8 +1110,12 @@ fn run_gate_pass_default(engine_dir: &Path) -> GateReport {
 pub fn parse_gate_output(text: &str) -> GateReport {
     let cargo_re = Regex::new(r"(?m)^test\s+(\S+)\s+\.\.\.\s+(ok|FAILED|ignored)").unwrap();
     // Status word, then the test path is the final whitespace-delimited token.
+    // Horizontal-whitespace classes ([ \t]) only — NOT \s — so a greedy match
+    // can never let `\s`/`\s*` consume a newline and swallow the following
+    // result line, which made captures_iter silently skip lines.
     let nextest_re =
-        Regex::new(r"(?m)^\s*(PASS|FAIL|TIMEOUT|ABORT|SIGSEGV|LEAK)\b.*\s(\S+)\s*$").unwrap();
+        Regex::new(r"(?m)^[ \t]*(PASS|FAIL|TIMEOUT|ABORT|SIGSEGV|LEAK)\b.*[ \t](\S+)[ \t]*$")
+            .unwrap();
 
     let bare = |s: &str| s.rsplit("::").next().unwrap_or(s).to_string();
 
@@ -2421,6 +2425,34 @@ test test_v1_headless_mode ... ok
         assert!(report
             .failing
             .contains(&"test_v1_weakref_auto_invalidates_on_free".to_string()));
+    }
+
+    #[test]
+    fn test_parse_gate_output_nextest_multiline_no_skipped_lines() {
+        // Regression: the parser must capture EVERY nextest result line,
+        // including the last one. A prior regex used `\s` (which matches '\n')
+        // with a greedy `.*`, so captures_iter silently skipped result lines in
+        // the multiline output — dropping e.g. the final test and leaving its
+        // criterion permanently unticked. Names reduce to the bare fn name.
+        let sample = r#"        PASS [   0.010s] (1/3) gdeditor viewport::tests::viewport_pan
+        PASS [   0.012s] (2/3) gdeditor inspector::tests::inspector_revert_to_default
+        PASS [   0.137s] (3/3) gdeditor editor_server::tests::viewport_frame_selection
+     Summary [   0.140s] 3 tests run: 3 passed, 0 skipped
+"#;
+        let report = parse_gate_output(sample);
+        assert_eq!(report.passing.len(), 3, "all three PASS lines parsed");
+        assert!(report.passing.contains(&"viewport_pan".to_string()));
+        assert!(report
+            .passing
+            .contains(&"inspector_revert_to_default".to_string()));
+        // The final result line must not be skipped — this is the bug guard.
+        assert!(
+            report
+                .passing
+                .contains(&"viewport_frame_selection".to_string()),
+            "the final nextest result line must be captured, not skipped"
+        );
+        assert!(report.failing.is_empty());
     }
 
     #[test]

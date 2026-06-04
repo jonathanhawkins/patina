@@ -55,7 +55,7 @@ One unchecked checkbox per acceptance test referenced across the per-lane execut
 - [x] `viewport-select-overlap-cycle` Repeated click / modifier cycles selection through stacked overlapping nodes (test: `viewport_select_overlap_cycle`)
 - [x] `viewport-pan` The viewport can be panned via middle-drag or space-drag (test: `viewport_pan`)
 - [x] `viewport-zoom` Wheel zoom and zoom controls scale the view about the cursor with reset-to-100% (test: `viewport_zoom`)
-- [ ] `viewport-frame-selection` Frame-selection centers and fits the selected node(s) in the viewport (test: `viewport_frame_selection`)
+- [x] `viewport-frame-selection` Frame-selection centers and fits the selected node(s) in the viewport (test: `viewport_frame_selection`)
 - [x] `viewport-locked-node-behavior` Locked and grouped nodes follow Godot selection rules in the viewport (test: `viewport_locked_grouped_selection`)
 - [x] `viewport-mode-toolbar` The viewport toolbar exposes select/pan/ruler modes and a zoom indicator (test: `viewport_mode_toolbar`)
 - [x] `viewport-gizmo-move` Move gizmo drags the selected node's position along axis handles or freely from the center (test: `viewport_gizmo_move`)
