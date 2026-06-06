@@ -96,8 +96,12 @@ fn served_view(port: u16, mode: &str) -> serde_json::Value {
 /// Boots the real editor server once and asserts that each main-screen mode
 /// serves its own central view over HTTP — distinct from the 2D viewport and
 /// mutually distinct — so the mode switch is not cosmetic (pat-3d87y).
+// NOTE: the fn name intentionally contains the binary stem `editor_mode_e2e_test`
+// so a bare nextest positional filter (`cargo nextest run -p gdeditor
+// editor_mode_e2e_test`) matches it. nextest's substring filter matches the test
+// NAME, not the binary id — a name lacking that stem yields "0 tests run" (exit 4).
 #[test]
-fn editor_mode_e2e_modes_serve_distinct_views() {
+fn editor_mode_e2e_test_modes_serve_distinct_views() {
     let (_handle, port) = make_server();
 
     // 2D mode is the baseline: it IS the 2D canvas viewport.

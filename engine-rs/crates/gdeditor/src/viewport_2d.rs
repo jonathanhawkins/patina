@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use gdcore::math::Vector2;
+use gdcore::math::{Color, Vector2};
 
 // ---------------------------------------------------------------------------
 // Tool mode
@@ -448,6 +448,38 @@ impl OverlaySettings {
 }
 
 // ---------------------------------------------------------------------------
+// Origin axes
+// ---------------------------------------------------------------------------
+
+/// Color of the world-origin X axis reference line (red), matching Godot.
+pub const ORIGIN_AXIS_X_COLOR: Color = Color::new(1.0, 0.2, 0.2, 0.3);
+/// Color of the world-origin Y axis reference line (green), matching Godot.
+pub const ORIGIN_AXIS_Y_COLOR: Color = Color::new(0.2, 0.85, 0.2, 0.3);
+
+/// A single world-origin reference axis as a screen-space line segment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OriginAxisLine {
+    /// Start point in screen space.
+    pub start: Vector2,
+    /// End point in screen space.
+    pub end: Vector2,
+    /// The axis color.
+    pub color: Color,
+}
+
+/// The world-origin axes (X/Y reference lines) projected to screen space.
+///
+/// Both lines pass through the screen projection of world `(0, 0)`: the X axis
+/// is horizontal at that screen-y and the Y axis is vertical at that screen-x.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OriginAxes {
+    /// Horizontal X axis (red), spanning the viewport at world y = 0.
+    pub x_axis: OriginAxisLine,
+    /// Vertical Y axis (green), spanning the viewport at world x = 0.
+    pub y_axis: OriginAxisLine,
+}
+
+// ---------------------------------------------------------------------------
 // Ruler
 // ---------------------------------------------------------------------------
 
@@ -499,6 +531,24 @@ impl RulerConfig {
         }
         self.major_interval / self.minor_subdivisions as f32
     }
+}
+
+/// Which ruler axis to compute ticks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulerAxis {
+    /// The top ruler (canvas X coordinates).
+    Horizontal,
+    /// The left ruler (canvas Y coordinates).
+    Vertical,
+}
+
+/// A single ruler tick mark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RulerTick {
+    /// The canvas-space (world) coordinate displayed as the tick's label.
+    pub label: f32,
+    /// The screen-space pixel position of the tick along the ruler axis.
+    pub screen: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -946,6 +996,20 @@ impl Default for GizmoConfig {
     }
 }
 
+/// The reference frame for gizmo handle orientation and transforms.
+///
+/// Mirrors Godot's local/global toolbar toggle: `Global` aligns handles with
+/// the world axes, `Local` aligns them with the node's rotated local frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransformSpace {
+    /// Handles align with the world axes; transforms apply in global space.
+    #[default]
+    Global,
+    /// Handles align with the node's rotated local axes; transforms apply in
+    /// the node's local frame.
+    Local,
+}
+
 /// 2D transform gizmo centered at a world-space pivot point.
 ///
 /// Provides hit-testing and drag-to-transform computation for
@@ -956,6 +1020,10 @@ pub struct Gizmo2D {
     pub pivot: Vector2,
     /// Current gizmo configuration.
     pub config: GizmoConfig,
+    /// Reference frame for handle orientation and axis-constrained transforms.
+    pub space: TransformSpace,
+    /// The node's local rotation (radians) — orients handles in local space.
+    pub node_rotation: f32,
 }
 
 impl Gizmo2D {
@@ -963,7 +1031,71 @@ impl Gizmo2D {
         Self {
             pivot,
             config: GizmoConfig::default(),
+            space: TransformSpace::Global,
+            node_rotation: 0.0,
         }
+    }
+
+    /// Sets the node's local rotation (radians) used to orient handles when in
+    /// local space. Builder-style; returns `self`.
+    pub fn with_node_rotation(mut self, rotation: f32) -> Self {
+        self.node_rotation = rotation;
+        self
+    }
+
+    /// The current transform frame.
+    pub fn space(&self) -> TransformSpace {
+        self.space
+    }
+
+    /// Sets the transform frame.
+    pub fn set_space(&mut self, space: TransformSpace) {
+        self.space = space;
+    }
+
+    /// Toggles between local and global frames, returning the new frame.
+    pub fn toggle_space(&mut self) -> TransformSpace {
+        self.space = match self.space {
+            TransformSpace::Global => TransformSpace::Local,
+            TransformSpace::Local => TransformSpace::Global,
+        };
+        self.space
+    }
+
+    /// Unit direction of the X axis handle in the current frame. Global → world
+    /// X `(1, 0)`; Local → world X rotated by the node's rotation.
+    pub fn handle_axis_x(&self) -> Vector2 {
+        match self.space {
+            TransformSpace::Global => Vector2::new(1.0, 0.0),
+            TransformSpace::Local => {
+                let (s, c) = self.node_rotation.sin_cos();
+                Vector2::new(c, s)
+            }
+        }
+    }
+
+    /// Unit direction of the Y axis handle in the current frame. Global → world
+    /// Y `(0, 1)`; Local → world Y rotated by the node's rotation.
+    pub fn handle_axis_y(&self) -> Vector2 {
+        match self.space {
+            TransformSpace::Global => Vector2::new(0.0, 1.0),
+            TransformSpace::Local => {
+                let (s, c) = self.node_rotation.sin_cos();
+                Vector2::new(-s, c)
+            }
+        }
+    }
+
+    /// Translation of `distance` along an axis handle, expressed in the gizmo's
+    /// current frame. The axis-constrained X/Y moves follow the (possibly
+    /// rotated) local handle directions; free `XY` moves are frame-independent.
+    pub fn translate_along_axis(&self, distance: f32, axis: GizmoAxis) -> Vector2 {
+        let dir = match axis {
+            GizmoAxis::X => self.handle_axis_x(),
+            GizmoAxis::Y => self.handle_axis_y(),
+            GizmoAxis::XY => return Vector2::new(distance, distance),
+        };
+        Vector2::new(dir.x * distance, dir.y * distance)
     }
 
     /// Hit-tests a screen-space point against the gizmo for the given tool mode.
@@ -1114,6 +1246,50 @@ impl Gizmo2D {
                 };
                 (uniform, uniform)
             }
+        }
+    }
+
+    /// Rotates a world-space point about the gizmo's pivot by `angle` radians,
+    /// returning the point's new position as it orbits the pivot. A point that
+    /// coincides with the pivot is returned unchanged.
+    pub fn rotate_point_about_pivot(&self, point: Vector2, angle: f32) -> Vector2 {
+        let (sin, cos) = angle.sin_cos();
+        let dx = point.x - self.pivot.x;
+        let dy = point.y - self.pivot.y;
+        Vector2::new(
+            self.pivot.x + dx * cos - dy * sin,
+            self.pivot.y + dx * sin + dy * cos,
+        )
+    }
+
+    /// Scales a world-space point about the gizmo's pivot by `(sx, sy)`,
+    /// returning the point's new position as it moves away from / toward the
+    /// pivot. A point that coincides with the pivot is returned unchanged.
+    pub fn scale_point_about_pivot(&self, point: Vector2, sx: f32, sy: f32) -> Vector2 {
+        let dx = point.x - self.pivot.x;
+        let dy = point.y - self.pivot.y;
+        Vector2::new(self.pivot.x + dx * sx, self.pivot.y + dy * sy)
+    }
+
+    /// Applies a completed gizmo transform to a world-space point about the
+    /// gizmo's pivot.
+    ///
+    /// This is what makes rotate and scale operate about the *current pivot*
+    /// rather than the node center: when a custom pivot is set (distinct from
+    /// the node's own position), the node orbits the pivot under rotation and
+    /// moves away from / toward it under scale. Translation is applied directly
+    /// and is pivot-independent. When the point coincides with the pivot,
+    /// rotation and scale leave it in place (only the node's intrinsic
+    /// rotation/scale changes).
+    pub fn apply_transform_about_pivot(
+        &self,
+        point: Vector2,
+        transform: GizmoTransform,
+    ) -> Vector2 {
+        match transform {
+            GizmoTransform::Translate(v) => Vector2::new(point.x + v.x, point.y + v.y),
+            GizmoTransform::Rotate(angle) => self.rotate_point_about_pivot(point, angle),
+            GizmoTransform::Scale(sx, sy) => self.scale_point_about_pivot(point, sx, sy),
         }
     }
 }
@@ -1459,6 +1635,71 @@ impl Viewport2D {
     /// Converts world coordinates to screen coordinates.
     pub fn world_to_screen(&self, world: Vector2) -> Vector2 {
         self.camera.world_to_screen(world, self.size())
+    }
+
+    /// Computes the major ruler ticks for one axis, given the current camera.
+    ///
+    /// Each tick carries its canvas-space coordinate (`label`) and its
+    /// screen-space pixel position (`screen`). Because the visible canvas range
+    /// is derived from `screen_to_world`, the ticks automatically **rescale on
+    /// zoom** (tick spacing = `major_interval * zoom`, so fewer labels are
+    /// visible when zoomed in) and **shift on pan** (the labels track the
+    /// camera offset). Returns an empty list when rulers are hidden.
+    pub fn ruler_ticks(&self, axis: RulerAxis) -> Vec<RulerTick> {
+        if !self.ruler_config.visible {
+            return Vec::new();
+        }
+        let size = self.size();
+        // Map the visible screen span to canvas-space along this axis.
+        let (world_start, world_end) = match axis {
+            RulerAxis::Horizontal => (
+                self.screen_to_world(Vector2::new(0.0, 0.0)).x,
+                self.screen_to_world(Vector2::new(size.x, 0.0)).x,
+            ),
+            RulerAxis::Vertical => (
+                self.screen_to_world(Vector2::new(0.0, 0.0)).y,
+                self.screen_to_world(Vector2::new(0.0, size.y)).y,
+            ),
+        };
+        self.ruler_config
+            .major_ticks(world_start, world_end)
+            .into_iter()
+            .map(|(pos, label)| {
+                let screen = match axis {
+                    RulerAxis::Horizontal => self.world_to_screen(Vector2::new(pos, 0.0)).x,
+                    RulerAxis::Vertical => self.world_to_screen(Vector2::new(0.0, pos)).y,
+                };
+                RulerTick { label, screen }
+            })
+            .collect()
+    }
+
+    /// Computes the world-origin axes (X/Y reference lines) for rendering, or
+    /// `None` when the origin-cross overlay is toggled off via the View menu.
+    ///
+    /// Both lines pass through the screen projection of world `(0, 0)`: the X
+    /// axis is horizontal at that screen-y and spans the viewport width; the Y
+    /// axis is vertical at that screen-x and spans the height. The axes carry
+    /// distinct colors (red X, green Y), mirroring Godot.
+    pub fn origin_axes(&self) -> Option<OriginAxes> {
+        if !self.overlays.is_enabled(CanvasOverlay::OriginCross) {
+            return None;
+        }
+        let origin = self.world_to_screen(Vector2::ZERO);
+        let w = self.width as f32;
+        let h = self.height as f32;
+        Some(OriginAxes {
+            x_axis: OriginAxisLine {
+                start: Vector2::new(0.0, origin.y),
+                end: Vector2::new(w, origin.y),
+                color: ORIGIN_AXIS_X_COLOR,
+            },
+            y_axis: OriginAxisLine {
+                start: Vector2::new(origin.x, 0.0),
+                end: Vector2::new(origin.x, h),
+                color: ORIGIN_AXIS_Y_COLOR,
+            },
+        })
     }
 
     /// Hit-tests a screen point against the bounding box handles of a node.
@@ -2327,6 +2568,176 @@ mod tests {
     }
 
     #[test]
+    fn viewport_gizmo_rotate() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+
+        // Rotate gizmo centered on the selection's pivot.
+        let pivot = Vector2::new(0.0, 0.0);
+        let gizmo = Gizmo2D::new(pivot);
+
+        // Dragging the rotate handle a quarter turn around the pivot: the
+        // handle starts at 3 o'clock and the cursor moves to 12 o'clock. The
+        // angle delta tracks the cursor.
+        let start = Vector2::new(100.0, 0.0);
+        let current = Vector2::new(0.0, 100.0);
+        let angle = gizmo.compute_rotation(start, current);
+        assert!(
+            (angle - FRAC_PI_2).abs() < 1e-4,
+            "rotation angle tracks the cursor (quarter turn): {angle}"
+        );
+
+        // A rotate-handle drag yields a Rotate transform carrying that angle.
+        let drag = GizmoDragState {
+            hit: GizmoHit::Rotate,
+            gizmo: gizmo.clone(),
+            start,
+            current,
+        };
+        match drag.current_transform() {
+            GizmoTransform::Rotate(a) => {
+                assert!((a - FRAC_PI_2).abs() < 1e-4, "rotate transform angle: {a}")
+            }
+            other => panic!("expected a Rotate transform, got {other:?}"),
+        }
+
+        // Committing applies the delta to the selection's current rotation
+        // about its pivot.
+        let base_rotation = 0.0_f32;
+        let committed = base_rotation + angle;
+        assert!(
+            (committed - FRAC_PI_2).abs() < 1e-4,
+            "committed rotation about the pivot: {committed}"
+        );
+
+        // Continuing the drag tracks the cursor cumulatively: dragging on to
+        // 9 o'clock is a half turn from the original handle position.
+        let current_half = Vector2::new(-100.0, 0.0);
+        let angle_half = gizmo.compute_rotation(start, current_half);
+        assert!(
+            (angle_half - PI).abs() < 1e-4,
+            "continued drag tracks the cursor (half turn): {angle_half}"
+        );
+    }
+
+    #[test]
+    fn viewport_gizmo_pivot_relative_transform() {
+        use std::f32::consts::FRAC_PI_2;
+
+        // A node sits at (100, 0). A CUSTOM pivot is set at the origin — i.e.
+        // distinct from the node's own center. Rotate and scale must operate
+        // about that pivot so the node orbits / scales around it.
+        let node = Vector2::new(100.0, 0.0);
+        let gizmo = Gizmo2D::new(Vector2::new(0.0, 0.0));
+
+        // Quarter-turn rotation about the pivot orbits the node from 3 o'clock
+        // to 12 o'clock: (100,0) -> (0,100).
+        let rotated = gizmo.apply_transform_about_pivot(node, GizmoTransform::Rotate(FRAC_PI_2));
+        assert!(rotated.x.abs() < 1e-3, "orbit about pivot, x: {}", rotated.x);
+        assert!(
+            (rotated.y - 100.0).abs() < 1e-3,
+            "orbit about pivot, y: {}",
+            rotated.y
+        );
+
+        // Uniform 2x scale about the pivot pushes the node twice as far from
+        // the pivot: (100,0) -> (200,0).
+        let scaled = gizmo.apply_transform_about_pivot(node, GizmoTransform::Scale(2.0, 2.0));
+        assert!(
+            (scaled.x - 200.0).abs() < 1e-3,
+            "scale about pivot, x: {}",
+            scaled.x
+        );
+        assert!(scaled.y.abs() < 1e-3, "scale about pivot, y: {}", scaled.y);
+
+        // When the pivot coincides with the node's own center, rotate and scale
+        // do NOT move the node — only its intrinsic rotation/scale changes.
+        let centered = Gizmo2D::new(node);
+        let r = centered.apply_transform_about_pivot(node, GizmoTransform::Rotate(FRAC_PI_2));
+        assert!(
+            (r.x - node.x).abs() < 1e-3 && (r.y - node.y).abs() < 1e-3,
+            "no orbit when pivot == node center: {:?}",
+            r
+        );
+        let s = centered.apply_transform_about_pivot(node, GizmoTransform::Scale(3.0, 3.0));
+        assert!(
+            (s.x - node.x).abs() < 1e-3 && (s.y - node.y).abs() < 1e-3,
+            "no move when pivot == node center: {:?}",
+            s
+        );
+
+        // Translation is pivot-independent and applies directly.
+        let t = gizmo
+            .apply_transform_about_pivot(node, GizmoTransform::Translate(Vector2::new(5.0, -7.0)));
+        assert!(
+            (t.x - 105.0).abs() < 1e-3 && (t.y + 7.0).abs() < 1e-3,
+            "translate is pivot-independent: {:?}",
+            t
+        );
+    }
+
+    /// Acceptance (pat-c539n): the local/global toggle reorients the gizmo
+    /// handles between the node's rotated local frame and the global frame, and
+    /// axis-constrained transforms apply in the selected frame.
+    #[test]
+    fn viewport_gizmo_local_global_toggle() {
+        use std::f32::consts::FRAC_PI_2;
+
+        // A node rotated a quarter turn: its local axes are the world axes
+        // rotated by +90°.
+        let mut gizmo = Gizmo2D::new(Vector2::ZERO).with_node_rotation(FRAC_PI_2);
+
+        // Default frame is Global: handles align with the world axes.
+        assert_eq!(gizmo.space(), TransformSpace::Global);
+        let gx = gizmo.handle_axis_x();
+        let gy = gizmo.handle_axis_y();
+        assert!(
+            (gx.x - 1.0).abs() < 1e-4 && gx.y.abs() < 1e-4,
+            "global X handle = world X"
+        );
+        assert!(
+            gy.x.abs() < 1e-4 && (gy.y - 1.0).abs() < 1e-4,
+            "global Y handle = world Y"
+        );
+
+        // A global-frame move of 10 along X is purely horizontal.
+        let gmove = gizmo.translate_along_axis(10.0, GizmoAxis::X);
+        assert!(
+            (gmove.x - 10.0).abs() < 1e-4 && gmove.y.abs() < 1e-4,
+            "global move follows world X"
+        );
+
+        // Toggle to Local: handles reorient to the node's rotated frame.
+        assert_eq!(gizmo.toggle_space(), TransformSpace::Local);
+        let lx = gizmo.handle_axis_x();
+        let ly = gizmo.handle_axis_y();
+        // Local X = world X rotated +90° → (0, 1); local Y → (-1, 0).
+        assert!(
+            lx.x.abs() < 1e-4 && (lx.y - 1.0).abs() < 1e-4,
+            "local X handle follows node rotation"
+        );
+        assert!(
+            (ly.x + 1.0).abs() < 1e-4 && ly.y.abs() < 1e-4,
+            "local Y handle follows node rotation"
+        );
+
+        // Transforms now apply in the local frame: a move of 10 along local X
+        // is vertical, not horizontal.
+        let lmove = gizmo.translate_along_axis(10.0, GizmoAxis::X);
+        assert!(
+            lmove.x.abs() < 1e-4 && (lmove.y - 10.0).abs() < 1e-4,
+            "transform applies in the local frame"
+        );
+
+        // Toggling back restores the global frame and orientation.
+        assert_eq!(gizmo.toggle_space(), TransformSpace::Global);
+        let back = gizmo.handle_axis_x();
+        assert!(
+            (back.x - 1.0).abs() < 1e-4 && back.y.abs() < 1e-4,
+            "toggled back to the global frame"
+        );
+    }
+
+    #[test]
     fn gizmo_drag_state_scale() {
         let drag = GizmoDragState {
             hit: GizmoHit::Scale(GizmoAxis::XY),
@@ -2630,6 +3041,86 @@ mod tests {
         assert!(ruler.major_ticks(0.0, 100.0).is_empty());
     }
 
+    /// Acceptance (pat-mi1jx): the rulers display canvas-space tick labels that
+    /// rescale on zoom and shift on pan.
+    #[test]
+    fn viewport_rulers_track_zoom_and_pan() {
+        let mut vp = Viewport2D::new(800, 600);
+        // 100px major interval, zoom 1.0, centered on the origin.
+
+        // Baseline: the canvas-origin label sits at the viewport center (400px)
+        // and ticks are one major interval (100px) apart at zoom 1.0.
+        let base = vp.ruler_ticks(RulerAxis::Horizontal);
+        assert!(!base.is_empty(), "rulers show ticks");
+        let o = base
+            .iter()
+            .find(|t| t.label.abs() < 1e-3)
+            .expect("origin tick");
+        assert!(
+            (o.screen - 400.0).abs() < 1e-3,
+            "canvas 0 sits at viewport center: {}",
+            o.screen
+        );
+        let t100 = base
+            .iter()
+            .find(|t| (t.label - 100.0).abs() < 1e-3)
+            .expect("100 tick");
+        assert!(
+            (t100.screen - o.screen - 100.0).abs() < 1e-3,
+            "tick spacing = 100px at zoom 1.0"
+        );
+
+        // Zoom in to 2x: ticks RESCALE — spacing doubles, fewer labels visible.
+        vp.camera.zoom = 2.0;
+        let zoomed = vp.ruler_ticks(RulerAxis::Horizontal);
+        let z0 = zoomed
+            .iter()
+            .find(|t| t.label.abs() < 1e-3)
+            .expect("origin tick");
+        let z100 = zoomed
+            .iter()
+            .find(|t| (t.label - 100.0).abs() < 1e-3)
+            .expect("100 tick");
+        assert!(
+            (z100.screen - z0.screen - 200.0).abs() < 1e-3,
+            "tick spacing doubles at 2x zoom"
+        );
+        assert!(
+            zoomed.len() < base.len(),
+            "fewer ticks visible when zoomed in"
+        );
+
+        // Pan: SHIFT the camera +x — labels shift and the origin tick moves left.
+        vp.camera.zoom = 1.0;
+        vp.camera.offset.x = 100.0;
+        let panned = vp.ruler_ticks(RulerAxis::Horizontal);
+        let p0 = panned
+            .iter()
+            .find(|t| t.label.abs() < 1e-3)
+            .expect("origin tick");
+        assert!(
+            (p0.screen - 300.0).abs() < 1e-3,
+            "panning +x shifts canvas 0 left on screen: {}",
+            p0.screen
+        );
+        let base_max = base.iter().map(|t| t.label).fold(f32::MIN, f32::max);
+        let panned_max = panned.iter().map(|t| t.label).fold(f32::MIN, f32::max);
+        assert!(
+            panned_max > base_max,
+            "panning toward +x brings larger canvas labels into view"
+        );
+
+        // The vertical ruler also produces canvas-space ticks.
+        assert!(
+            !vp.ruler_ticks(RulerAxis::Vertical).is_empty(),
+            "vertical ruler shows ticks"
+        );
+
+        // Hiding the rulers yields no ticks.
+        vp.ruler_config.visible = false;
+        assert!(vp.ruler_ticks(RulerAxis::Horizontal).is_empty());
+    }
+
     // -- Viewport2D integration with new fields -----------------------------
 
     #[test]
@@ -2655,5 +3146,64 @@ mod tests {
         let vp = Viewport2D::new(800, 600);
         assert!(vp.ruler_config.visible);
         assert!((vp.ruler_config.major_interval - 100.0).abs() < 0.01);
+    }
+
+    /// Acceptance (pat-1jy7k): the world origin axes render through (0,0) in
+    /// distinct axis colors and can be toggled off from the View menu.
+    #[test]
+    fn viewport_origin_axes_render_at_zero() {
+        let mut vp = Viewport2D::new(800, 600);
+
+        // The origin-cross overlay is on by default, so the axes render.
+        assert!(vp.overlays.is_enabled(CanvasOverlay::OriginCross));
+        let axes = vp.origin_axes().expect("origin axes render when enabled");
+
+        // Both axes pass through the screen projection of world (0,0).
+        let origin = vp.world_to_screen(Vector2::ZERO);
+        assert!((axes.x_axis.start.y - origin.y).abs() < 1e-3);
+        assert!((axes.x_axis.end.y - origin.y).abs() < 1e-3);
+        assert!((axes.y_axis.start.x - origin.x).abs() < 1e-3);
+        assert!((axes.y_axis.end.x - origin.x).abs() < 1e-3);
+
+        // The X axis is horizontal and spans the viewport width; the Y axis is
+        // vertical and spans the height.
+        assert!(
+            (axes.x_axis.start.y - axes.x_axis.end.y).abs() < 1e-3,
+            "X axis is horizontal"
+        );
+        assert!(
+            (axes.x_axis.end.x - 800.0).abs() < 1e-3,
+            "X axis spans the viewport width"
+        );
+        assert!(
+            (axes.y_axis.start.x - axes.y_axis.end.x).abs() < 1e-3,
+            "Y axis is vertical"
+        );
+        assert!(
+            (axes.y_axis.end.y - 600.0).abs() < 1e-3,
+            "Y axis spans the viewport height"
+        );
+
+        // The axes use distinct colors (red X, green Y).
+        assert_ne!(
+            axes.x_axis.color, axes.y_axis.color,
+            "axes use distinct colors"
+        );
+        assert!(
+            axes.x_axis.color.r > axes.x_axis.color.g,
+            "X axis is red-dominant"
+        );
+        assert!(
+            axes.y_axis.color.g > axes.y_axis.color.r,
+            "Y axis is green-dominant"
+        );
+
+        // Toggling the origin-cross overlay off (View menu) hides the axes.
+        vp.overlays.toggle(CanvasOverlay::OriginCross);
+        assert!(!vp.overlays.is_enabled(CanvasOverlay::OriginCross));
+        assert!(
+            vp.origin_axes().is_none(),
+            "axes are hidden when toggled off"
+        );
     }
 }

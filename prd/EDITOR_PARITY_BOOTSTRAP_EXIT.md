@@ -12,7 +12,7 @@ its minimum item count.
 - [x] Inspector toolbar map authored (test: `bootstrap_inspector_toolbar_map_authored`)
 - [x] Inspector properties map authored (test: `bootstrap_inspector_properties_map_authored`)
 - [x] Inspector advanced map authored (test: `bootstrap_inspector_advanced_map_authored`)
-- [ ] Viewport selection map authored (test: `bootstrap_viewport_selection_map_authored`)
+- [x] Viewport selection map authored (test: `bootstrap_viewport_selection_map_authored`)
 - [x] Viewport gizmos map authored (test: `bootstrap_viewport_gizmos_map_authored`)
 - [x] Viewport overlays map authored (test: `bootstrap_viewport_overlays_map_authored`)
 - [x] Top bar map authored (test: `bootstrap_top_bar_map_authored`)

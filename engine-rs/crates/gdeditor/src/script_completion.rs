@@ -347,6 +347,35 @@ impl CompletionEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Accepting a completion
+// ---------------------------------------------------------------------------
+
+/// Accepts a completion item into a line of source: replaces the in-progress
+/// identifier — the `prefix_len` bytes immediately before `caret` that the user
+/// had typed — with the item's `label`, and returns the updated line plus the
+/// new caret position (just after the inserted text).
+///
+/// `prefix_len` is normally `ctx.prefix.len()` (the prefix that produced the
+/// suggestions). `caret` is a byte offset into `line`; both it and `prefix_len`
+/// are clamped so out-of-range inputs can't panic. Identifiers are ASCII, so
+/// byte offsets line up with characters.
+pub fn apply_completion(
+    line: &str,
+    caret: usize,
+    prefix_len: usize,
+    item: &CompletionItem,
+) -> (String, usize) {
+    let caret = caret.min(line.len());
+    let start = caret.saturating_sub(prefix_len);
+    let mut out = String::with_capacity(line.len() - (caret - start) + item.label.len());
+    out.push_str(&line[..start]);
+    out.push_str(&item.label);
+    out.push_str(&line[caret..]);
+    let new_caret = start + item.label.len();
+    (out, new_caret)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -733,5 +762,64 @@ mod tests {
         assert!(items.iter().any(|i| i.label == "_ready"));
         assert!(items.iter().any(|i| i.label == "queue_free"));
         assert!(items.iter().any(|i| i.label == "visible"));
+    }
+
+    /// Acceptance (pat-p2jrc): triggering completion offers ranked candidates
+    /// for the current context (locals, members after `.`, keywords), and
+    /// accepting one inserts it at the caret.
+    #[test]
+    fn script_core_autocomplete() {
+        register_test_classes("AC_");
+        let engine = CompletionEngine::new();
+
+        // --- Bare context offers ranked candidates: locals, members, keywords ---
+        let ctx = CompletionContext::bare("AC_Child", "m")
+            .with_locals(vec!["my_speed".into(), "max_health".into()]);
+        let items = engine.complete(&ctx);
+        assert!(!items.is_empty(), "completion offers candidates");
+        // A local matching the prefix is offered and locals rank first.
+        assert!(items
+            .iter()
+            .any(|i| i.label == "my_speed" && i.kind == CompletionKind::Variable));
+        assert_eq!(items[0].kind, CompletionKind::Variable, "locals rank highest");
+        // A class member matching the prefix is offered.
+        assert!(items
+            .iter()
+            .any(|i| i.label == "move_and_slide" && i.kind == CompletionKind::Method));
+        // Candidates are ranked by descending score.
+        let scores: Vec<u32> = items.iter().map(|i| i.score).collect();
+        assert!(
+            scores.windows(2).all(|w| w[0] >= w[1]),
+            "candidates are ranked by score: {scores:?}"
+        );
+
+        // --- Keywords are offered for a bare context ---
+        let kw = engine.complete(&CompletionContext::bare("AC_Child", "fu"));
+        assert!(kw
+            .iter()
+            .any(|i| i.label == "func" && i.kind == CompletionKind::Keyword));
+
+        // --- Members after `.` (and no keywords in dot completion) ---
+        let dot = engine.complete(&CompletionContext::dot_access("AC_Child", "AC_Child", "get"));
+        assert!(dot
+            .iter()
+            .any(|i| i.label == "get_velocity" && i.kind == CompletionKind::Method));
+        assert!(
+            !dot.iter().any(|i| i.kind == CompletionKind::Keyword),
+            "dot completion does not offer keywords"
+        );
+
+        // --- Accepting a candidate inserts it at the caret ---
+        let chosen = items.iter().find(|i| i.label == "move_and_slide").unwrap();
+        // User typed "var v = m" with the caret right after the "m".
+        let line = "var v = m";
+        let (new_line, new_caret) = apply_completion(line, line.len(), ctx.prefix.len(), chosen);
+        assert_eq!(new_line, "var v = move_and_slide", "accepting inserts the label");
+        assert_eq!(new_caret, new_line.len(), "caret lands after the inserted text");
+
+        // Mid-line insertion replaces only the typed prefix, keeping the suffix.
+        let (mid_line, mid_caret) = apply_completion("m + 1", 1, 1, chosen);
+        assert_eq!(mid_line, "move_and_slide + 1");
+        assert_eq!(mid_caret, "move_and_slide".len());
     }
 }

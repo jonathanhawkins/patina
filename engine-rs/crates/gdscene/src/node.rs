@@ -200,6 +200,13 @@ impl Node {
         &self.class_name
     }
 
+    /// Sets the node's Godot class name (used by the editor's "Change Type"
+    /// operation, which converts a node in place while keeping its identity,
+    /// name, children, and properties).
+    pub fn set_class_name(&mut self, class_name: impl Into<String>) {
+        self.class_name = class_name.into();
+    }
+
     // -- hierarchy (low-level, used by SceneTree) ---------------------------
 
     /// Returns the parent ID, if any.

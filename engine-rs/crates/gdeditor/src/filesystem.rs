@@ -186,6 +186,19 @@ pub struct DirChild {
 // FileSystem Dock — file browser with icons, filter, and favorites
 // ---------------------------------------------------------------------------
 
+/// An action offered by the filesystem dock's file context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileContextAction {
+    /// Open the file in its default editor / instance the scene.
+    Open,
+    /// Reveal the file in the OS file manager.
+    ShowInFileManager,
+    /// Open the dependency editor for the file.
+    EditDependencies,
+    /// Show which resources reference (own) this file.
+    ViewOwners,
+}
+
 /// Icon type for a file or directory in the filesystem dock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileIcon {
@@ -334,6 +347,31 @@ impl FileSystemDock {
     /// Check if a path is a favorite.
     pub fn is_favorite(&self, res_path: &str) -> bool {
         self.favorites.iter().any(|f| f == res_path)
+    }
+
+    /// The file context-menu actions available for the currently selected
+    /// entry. Files expose the full set; directories expose only the actions
+    /// that apply to them (open / show in file manager). Returns an empty list
+    /// when nothing is selected.
+    pub fn context_menu_actions(&self) -> Vec<FileContextAction> {
+        match self.selected_entry() {
+            None => Vec::new(),
+            Some(entry) if entry.is_directory => {
+                vec![FileContextAction::Open, FileContextAction::ShowInFileManager]
+            }
+            Some(_) => vec![
+                FileContextAction::Open,
+                FileContextAction::ShowInFileManager,
+                FileContextAction::EditDependencies,
+                FileContextAction::ViewOwners,
+            ],
+        }
+    }
+
+    /// The res:// path the context-menu actions operate on (the selected
+    /// entry's path), or `None` when nothing is selected.
+    pub fn context_action_target(&self) -> Option<&str> {
+        self.selected_entry().map(|e| e.res_path.as_str())
     }
 
     /// Returns the selected entry index.
@@ -743,6 +781,44 @@ mod tests {
         assert_eq!(dock.filter(), "");
     }
 
+    /// Acceptance (pat-a4uyc): typing in the dock filter narrows the listing to
+    /// name matches across the current scope, and clearing it restores the full
+    /// view.
+    #[test]
+    fn fs_dock_search_filter_narrows_listing() {
+        let (_dir, mut dock) = make_dock();
+        dock.refresh().unwrap();
+        dock.expand_dir("scenes");
+        dock.expand_dir("scripts");
+
+        let full = dock.entries().len();
+        assert!(full > 0);
+
+        // Typing a query narrows the listing to matching files.
+        dock.set_filter("player");
+        let narrowed = dock.entries().len();
+        assert!(narrowed < full);
+        // The matching file is present...
+        assert!(dock
+            .entries()
+            .iter()
+            .any(|e| !e.is_directory && e.name == "player.tscn"));
+        // ...and a non-matching file is excluded.
+        assert!(!dock
+            .entries()
+            .iter()
+            .any(|e| !e.is_directory && e.name == "icon.png"));
+
+        // A query that matches nothing leaves no file entries.
+        dock.set_filter("zzzznomatch");
+        assert!(dock.entries().iter().all(|e| e.is_directory));
+
+        // Clearing the filter restores the full view.
+        dock.clear_filter();
+        assert_eq!(dock.filter(), "");
+        assert_eq!(dock.entries().len(), full);
+    }
+
     #[test]
     fn dock_favorites() {
         let (_dir, mut dock) = make_dock();
@@ -790,6 +866,81 @@ mod tests {
         dock.collapse_dir("scenes");
         let entries_collapsed = dock.entries().len();
         assert!(entries_collapsed < entries_after);
+    }
+
+    /// Acceptance (pat-es9i0): expanding/selecting a folder in the tree lists its
+    /// files and subfolders, and the view tracks the on-disk `res://` contents.
+    #[test]
+    fn fs_dock_browser_lists_directory_contents() {
+        let (dir, mut dock) = make_dock();
+        dock.refresh().unwrap();
+
+        // The tree lists the project's top-level folders.
+        let top_names: Vec<&str> = dock.entries().iter().map(|e| e.name.as_str()).collect();
+        assert!(top_names.contains(&"scenes"));
+        assert!(top_names.contains(&"scripts"));
+
+        // Expanding a folder lists the files it contains.
+        dock.expand_dir("scenes");
+        let scene_files: Vec<&str> = dock
+            .entries()
+            .iter()
+            .filter(|e| !e.is_directory)
+            .map(|e| e.res_path.as_str())
+            .collect();
+        assert!(scene_files.contains(&"res://scenes/main.tscn"));
+        assert!(scene_files.contains(&"res://scenes/player.tscn"));
+
+        // The view tracks on-disk `res://` contents: a file added on disk shows
+        // up in the folder after a refresh.
+        std::fs::write(dir.path().join("scenes/extra.tscn"), "[gd_scene]").unwrap();
+        dock.refresh().unwrap();
+        dock.expand_dir("scenes");
+        assert!(dock
+            .entries()
+            .iter()
+            .any(|e| e.res_path == "res://scenes/extra.tscn"));
+    }
+
+    /// Acceptance (pat-ai5tb): favoriting a directory pins it to the Favorites
+    /// section, and the file context menu's actions operate on the selected
+    /// file.
+    #[test]
+    fn fs_dock_favorites_and_context_menu() {
+        let (_dir, mut dock) = make_dock();
+        dock.refresh().unwrap();
+        dock.expand_dir("scenes");
+
+        // Favoriting a directory pins it to the Favorites section.
+        assert!(dock.add_favorite("res://scenes"));
+        assert!(dock.favorites().contains(&"res://scenes".to_string()));
+        assert!(dock.is_favorite("res://scenes"));
+
+        // Selecting a file exposes the full context-menu action set.
+        let idx = dock.find_entry("res://scenes/main.tscn").unwrap();
+        assert!(dock.select(idx));
+        let actions = dock.context_menu_actions();
+        assert!(actions.contains(&FileContextAction::Open));
+        assert!(actions.contains(&FileContextAction::EditDependencies));
+        assert!(actions.contains(&FileContextAction::ViewOwners));
+        // The actions operate on the selected file.
+        assert_eq!(dock.context_action_target(), Some("res://scenes/main.tscn"));
+
+        // A selected directory exposes only the directory-applicable actions.
+        let dir_idx = dock
+            .entries()
+            .iter()
+            .position(|e| e.is_directory && e.name == "scenes")
+            .unwrap();
+        assert!(dock.select(dir_idx));
+        let dir_actions = dock.context_menu_actions();
+        assert!(dir_actions.contains(&FileContextAction::Open));
+        assert!(!dir_actions.contains(&FileContextAction::ViewOwners));
+
+        // With nothing selected there are no actions and no target.
+        dock.deselect();
+        assert!(dock.context_menu_actions().is_empty());
+        assert_eq!(dock.context_action_target(), None);
     }
 
     #[test]

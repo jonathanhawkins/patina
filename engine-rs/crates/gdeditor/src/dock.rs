@@ -77,12 +77,82 @@ pub struct NodeIndicators {
     pub visible: bool,
     /// Whether this node has unique name access (%Name).
     pub is_unique_name: bool,
+    /// Whether this node's unique name collides with another unique name in
+    /// the same owner scope (ambiguous `%Name` resolution).
+    pub unique_name_collision: bool,
     /// Whether the node is locked (cannot be selected in viewport).
     pub locked: bool,
     /// Whether this node is the root of an instanced scene.
     pub is_instance: bool,
     /// Source scene path for instanced nodes.
     pub instance_source: Option<String>,
+}
+
+impl NodeIndicators {
+    /// Whether a configuration-warning triangle should be shown on this row —
+    /// true when the node has any configuration warnings.
+    pub fn has_warning_triangle(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    /// The severity of the configuration-warning triangle on this row: the
+    /// most severe warning attached to the node (`Info < Warning < Error`), or
+    /// `None` when the node has no warnings (no triangle). Mirrors Godot's
+    /// scene-tree warning icon, which reflects the worst warning.
+    pub fn warning_triangle(&self) -> Option<WarningSeverity> {
+        self.warnings.iter().map(|w| w.severity).max()
+    }
+
+    /// The tooltip text for this row's warning triangle: every warning message
+    /// joined by newlines (empty when there are no warnings), matching Godot's
+    /// triangle tooltip that lists all configuration warnings.
+    pub fn warning_tooltip(&self) -> String {
+        self.warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether this row shows the "has attached script" badge.
+    pub fn has_script_badge(&self) -> bool {
+        self.has_script
+    }
+
+    /// The attached script's path, shown in the script badge's tooltip
+    /// (`None` when the node has no script and thus no badge).
+    pub fn script_badge_path(&self) -> Option<&str> {
+        self.script_path.as_deref()
+    }
+
+    /// Whether this row shows the "scene instance" badge — true when the node
+    /// is the root of an instanced scene.
+    pub fn has_instance_badge(&self) -> bool {
+        self.is_instance
+    }
+
+    /// The source scene path shown in the instance badge's tooltip (`None` when
+    /// the node is not an instanced-scene root and thus has no badge).
+    pub fn instance_badge_source(&self) -> Option<&str> {
+        self.instance_source.as_deref()
+    }
+
+    /// Whether this row shows the signal-connection indicator (the node has at
+    /// least one connected signal).
+    pub fn has_signal_indicator(&self) -> bool {
+        self.has_signals
+    }
+
+    /// The number of connected signals shown beside the signal indicator.
+    pub fn signal_indicator_count(&self) -> usize {
+        self.signal_count
+    }
+
+    /// Whether this row shows the unique-name (`%`) access indicator — true when
+    /// the node is accessible as `%Name` in its owner scope.
+    pub fn has_unique_name_indicator(&self) -> bool {
+        self.is_unique_name
+    }
 }
 
 /// A warning attached to a scene tree node.
@@ -95,7 +165,10 @@ pub struct NodeWarning {
 }
 
 /// Severity level for node warnings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordered by escalation (`Info < Warning < Error`), so the most severe warning
+/// on a node — the one the row's warning triangle reflects — is the `max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WarningSeverity {
     /// Informational (blue info icon).
     Info,
@@ -245,7 +318,78 @@ pub fn compute_node_warnings(tree: &SceneTree, node_id: NodeId) -> Vec<NodeWarni
         }
     }
 
+    // Unique-name-in-owner (`%`) collision: another node in the same owner
+    // scope is also flagged "Access as Unique Name" with the same name, so
+    // `%Name` resolution is ambiguous. Surface it as a warning on the row.
+    if tree.unique_name_collision(node_id) {
+        warnings.push(NodeWarning {
+            severity: WarningSeverity::Warning,
+            message: format!(
+                "Another node in this scene already uses the unique name \"%{}\".",
+                node.name()
+            ),
+        });
+    }
+
     warnings
+}
+
+/// Whether a node is currently visible (its `visible` property is not
+/// explicitly `false`) — the source of truth for the row's visibility toggle.
+fn node_visible(tree: &SceneTree, id: NodeId) -> bool {
+    tree.get_node(id)
+        .map(|n| !matches!(n.get_property("visible"), gdvariant::Variant::Bool(false)))
+        .unwrap_or(true)
+}
+
+/// Whether a node is edit-locked (the Godot-canonical `_edit_lock_` meta or the
+/// legacy `_locked` flag) — the source of truth for the row's lock toggle.
+fn node_locked(tree: &SceneTree, id: NodeId) -> bool {
+    tree.get_node(id)
+        .map(|n| {
+            matches!(n.get_property("_edit_lock_"), gdvariant::Variant::Bool(true))
+                || matches!(n.get_property("_locked"), gdvariant::Variant::Bool(true))
+        })
+        .unwrap_or(false)
+}
+
+/// Toggles the node's visibility (the `visible` property) and returns the new
+/// visibility. Mirrors clicking the eye toggle on a scene-tree row — the change
+/// is reflected in [`NodeIndicators::visible`] after the dock refreshes.
+pub fn toggle_node_visibility(tree: &mut SceneTree, id: NodeId) -> bool {
+    let now = !node_visible(tree, id);
+    if let Some(node) = tree.get_node_mut(id) {
+        node.set_property("visible", gdvariant::Variant::Bool(now));
+    }
+    now
+}
+
+/// Toggles the node's edit-lock (the `_edit_lock_` meta) and returns the new
+/// lock state. Mirrors clicking the lock toggle on a scene-tree row — reflected
+/// in [`NodeIndicators::locked`] after the dock refreshes.
+pub fn toggle_node_lock(tree: &mut SceneTree, id: NodeId) -> bool {
+    let now = !node_locked(tree, id);
+    if let Some(node) = tree.get_node_mut(id) {
+        node.set_property("_edit_lock_", gdvariant::Variant::Bool(now));
+    }
+    now
+}
+
+/// Toggles the node's membership in `group` and returns whether the node is now
+/// in the group. Mirrors toggling a group on a scene-tree row — reflected in
+/// [`NodeIndicators::has_groups`] after the dock refreshes.
+pub fn toggle_node_group(tree: &mut SceneTree, id: NodeId, group: &str) -> bool {
+    match tree.get_node_mut(id) {
+        Some(node) if node.is_in_group(group) => {
+            node.remove_from_group(group);
+            false
+        }
+        Some(node) => {
+            node.add_to_group(group);
+            true
+        }
+        None => false,
+    }
 }
 
 /// A dock panel showing the scene tree node hierarchy.
@@ -413,12 +557,17 @@ impl SceneTreeDock {
         let has_groups = !groups.is_empty();
 
         let node_name = node.name().to_string();
-        let is_unique_name = matches!(
-            node.get_property("unique_name_in_owner"),
-            gdvariant::Variant::Bool(true)
-        );
+        // Read the canonical `unique_name` flag (the same source of truth the
+        // scene tree, packed-scene serialization, and `%Name` resolution use)
+        // rather than the loose `unique_name_in_owner` property, so the `%`
+        // badge stays consistent with `set_unique_name_in_owner`.
+        let is_unique_name = tree.is_unique_name_in_owner(id);
+        let unique_name_collision = tree.unique_name_collision(id);
 
-        let locked = matches!(node.get_property("_locked"), gdvariant::Variant::Bool(true));
+        // Edit-lock badge: honor the Godot-canonical `_edit_lock_` meta and the
+        // legacy `_locked` flag.
+        let locked = matches!(node.get_property("_edit_lock_"), gdvariant::Variant::Bool(true))
+            || matches!(node.get_property("_locked"), gdvariant::Variant::Bool(true));
 
         let instance_source = match node.get_property("_instance_source") {
             gdvariant::Variant::String(s) if !s.is_empty() => Some(s.clone()),
@@ -440,6 +589,7 @@ impl SceneTreeDock {
                 gdvariant::Variant::Bool(false)
             ),
             is_unique_name,
+            unique_name_collision,
             locked,
             is_instance,
             instance_source,
@@ -702,6 +852,61 @@ mod tests {
         assert_eq!(dock.entries()[1].depth, 1);
         assert_eq!(dock.entries()[2].name, "Player");
         assert_eq!(dock.entries()[2].depth, 2);
+    }
+
+    #[test]
+    fn scene_tree_dock_unique_name_badge_and_collision() {
+        // The `%` badge and collision warning in the dock must reflect the
+        // canonical `set_unique_name_in_owner` flag, not a stale property.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = tree.add_child(root, Node::new("ContainerA", "Node")).unwrap();
+        let b = tree.add_child(root, Node::new("ContainerB", "Node")).unwrap();
+        let foo1 = tree.add_child(a, Node::new("Foo", "Node")).unwrap();
+        let foo2 = tree.add_child(b, Node::new("Foo", "Node")).unwrap();
+        for n in [a, b, foo1, foo2] {
+            tree.get_node_mut(n).unwrap().set_owner(Some(root));
+        }
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        // No badge before the flag is set.
+        let ind = &dock.find_entry(foo1).unwrap().indicators;
+        assert!(!ind.is_unique_name);
+        assert!(!ind.unique_name_collision);
+
+        // Enabling on a single node shows the badge with no collision.
+        tree.set_unique_name_in_owner(foo1, true);
+        dock.refresh(&tree);
+        let ind = &dock.find_entry(foo1).unwrap().indicators;
+        assert!(ind.is_unique_name);
+        assert!(!ind.unique_name_collision);
+
+        // A duplicate unique name in the same owner flags both rows and adds a
+        // collision warning.
+        tree.set_unique_name_in_owner(foo2, true);
+        dock.refresh(&tree);
+        for n in [foo1, foo2] {
+            let ind = &dock.find_entry(n).unwrap().indicators;
+            assert!(ind.is_unique_name);
+            assert!(ind.unique_name_collision);
+            assert!(ind
+                .warnings
+                .iter()
+                .any(|w| w.severity == WarningSeverity::Warning
+                    && w.message.contains("unique name")));
+        }
+
+        // Clearing one flag resolves the collision on both.
+        tree.set_unique_name_in_owner(foo2, false);
+        dock.refresh(&tree);
+        assert!(!dock.find_entry(foo2).unwrap().indicators.is_unique_name);
+        assert!(!dock
+            .find_entry(foo1)
+            .unwrap()
+            .indicators
+            .unique_name_collision);
     }
 
     #[test]
@@ -1387,5 +1592,254 @@ mod tests {
         assert_eq!(dock.selection_count(), 1);
         assert!(!dock.is_selected(main_id));
         assert!(dock.is_selected(player_id));
+    }
+
+    /// Acceptance (pat-9wup3.1): every scene-tree row carries a per-class type
+    /// icon — the icon name matches the node's class and the color category
+    /// follows Godot's 2D/3D/Control/Default convention. Custom/script classes
+    /// still get a per-class icon, with the category inferred from the class
+    /// naming convention (a `*2D` class is a 2D node).
+    #[test]
+    fn editor_tree_class_type_icons() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let n2d = tree.add_child(root, Node::new("Body", "Node2D")).unwrap();
+        let sprite = tree.add_child(n2d, Node::new("Sprite", "Sprite2D")).unwrap();
+        let cam3d = tree.add_child(root, Node::new("Cam", "Camera3D")).unwrap();
+        let mesh = tree
+            .add_child(root, Node::new("Mesh", "MeshInstance3D"))
+            .unwrap();
+        let button = tree.add_child(root, Node::new("Btn", "Button")).unwrap();
+        let label = tree.add_child(root, Node::new("Txt", "Label")).unwrap();
+        let plain = tree.add_child(root, Node::new("Plain", "Node")).unwrap();
+        // A custom/script class with no built-in icon, named by convention.
+        let custom = tree
+            .add_child(root, Node::new("Hero", "HeroBody2D"))
+            .unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        let expect = |dock: &SceneTreeDock, id: NodeId, class: &str, cat: IconColorCategory| {
+            let entry = dock.find_entry(id).expect("scene tree row present");
+            assert_eq!(entry.class_name, class);
+            assert_eq!(
+                entry.icon.icon_name, class,
+                "the row's icon name matches its node class"
+            );
+            assert_eq!(
+                entry.icon.color_category, cat,
+                "icon color category for {class}"
+            );
+        };
+
+        expect(&dock, n2d, "Node2D", IconColorCategory::Node2D);
+        expect(&dock, sprite, "Sprite2D", IconColorCategory::Node2D);
+        expect(&dock, cam3d, "Camera3D", IconColorCategory::Node3D);
+        expect(&dock, mesh, "MeshInstance3D", IconColorCategory::Node3D);
+        expect(&dock, button, "Button", IconColorCategory::Control);
+        expect(&dock, label, "Label", IconColorCategory::Control);
+        expect(&dock, plain, "Node", IconColorCategory::Default);
+        // Custom *2D class: per-class icon name, 2D category from the convention.
+        expect(&dock, custom, "HeroBody2D", IconColorCategory::Node2D);
+
+        // No row is left iconless: every entry's icon name tracks its class.
+        assert!(dock.entries().len() >= 8, "all nodes (incl. root) get a row");
+        for e in dock.entries() {
+            assert_eq!(
+                e.icon.icon_name, e.class_name,
+                "row {} carries a per-class icon",
+                e.name
+            );
+        }
+    }
+
+    /// Acceptance (pat-9wup3.2): rows with configuration warnings show a warning
+    /// triangle whose severity is the worst warning on the node, with a tooltip
+    /// listing the messages; clean rows show no triangle.
+    #[test]
+    fn editor_tree_config_warning_triangle() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        // CollisionShape2D under a non-body parent → Warning.
+        let shape = tree
+            .add_child(root, Node::new("Shape", "CollisionShape2D"))
+            .unwrap();
+        // Sprite2D with no texture → Info.
+        let sprite = tree.add_child(root, Node::new("Spr", "Sprite2D")).unwrap();
+        // Plain node → no warnings.
+        let plain = tree.add_child(root, Node::new("Plain", "Node")).unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        // The CollisionShape row shows a Warning-severity triangle + tooltip.
+        let shape_row = dock.find_entry(shape).expect("shape row");
+        assert!(shape_row.indicators.has_warning_triangle());
+        assert_eq!(
+            shape_row.indicators.warning_triangle(),
+            Some(WarningSeverity::Warning)
+        );
+        assert!(
+            shape_row
+                .indicators
+                .warning_tooltip()
+                .contains("physics body"),
+            "tooltip carries the warning message"
+        );
+
+        // The textureless Sprite shows an Info-severity triangle.
+        let sprite_row = dock.find_entry(sprite).expect("sprite row");
+        assert!(sprite_row.indicators.has_warning_triangle());
+        assert_eq!(
+            sprite_row.indicators.warning_triangle(),
+            Some(WarningSeverity::Info)
+        );
+
+        // A clean node shows no triangle and an empty tooltip.
+        let plain_row = dock.find_entry(plain).expect("plain row");
+        assert!(!plain_row.indicators.has_warning_triangle());
+        assert_eq!(plain_row.indicators.warning_triangle(), None);
+        assert!(plain_row.indicators.warning_tooltip().is_empty());
+
+        // The "rows with warnings" filter surfaces exactly the warned rows.
+        let warned: Vec<&str> = dock
+            .entries_with_warnings()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(warned.contains(&"Shape"));
+        assert!(warned.contains(&"Spr"));
+        assert!(!warned.contains(&"Plain"));
+    }
+
+    /// Acceptance (pat-9wup3.3): a node with an attached script shows a script
+    /// badge (with its path), the root of an instanced scene shows a
+    /// scene-instance badge (with its source), and a plain node shows neither.
+    #[test]
+    fn editor_tree_script_and_instance_badges() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scripted = tree.add_child(root, Node::new("Player", "Node2D")).unwrap();
+        // An instanced-scene root: tagged via the `_instance_source` property.
+        let mut instanced = Node::new("Enemy", "Node2D");
+        instanced.set_property(
+            "_instance_source",
+            gdvariant::Variant::String("res://enemy.tscn".to_string()),
+        );
+        let instanced = tree.add_child(root, instanced).unwrap();
+        let plain = tree.add_child(root, Node::new("Plain", "Node")).unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.set_node_script(scripted, "res://player.gd");
+        dock.refresh(&tree);
+
+        // Scripted node: script badge with its path, no instance badge.
+        let s = &dock.find_entry(scripted).expect("scripted row").indicators;
+        assert!(s.has_script_badge());
+        assert_eq!(s.script_badge_path(), Some("res://player.gd"));
+        assert!(!s.has_instance_badge());
+        assert_eq!(s.instance_badge_source(), None);
+
+        // Instanced node: instance badge with its source, no script badge.
+        let i = &dock.find_entry(instanced).expect("instanced row").indicators;
+        assert!(i.has_instance_badge());
+        assert_eq!(i.instance_badge_source(), Some("res://enemy.tscn"));
+        assert!(!i.has_script_badge());
+        assert_eq!(i.script_badge_path(), None);
+
+        // Plain node: neither badge.
+        let p = &dock.find_entry(plain).expect("plain row").indicators;
+        assert!(!p.has_script_badge());
+        assert!(!p.has_instance_badge());
+        assert_eq!(p.script_badge_path(), None);
+        assert_eq!(p.instance_badge_source(), None);
+    }
+
+    /// Acceptance (pat-9wup3.4): a node with connected signals shows the signal
+    /// indicator (with its count), a node accessible as `%Name` shows the
+    /// unique-name indicator, and a plain node shows neither.
+    #[test]
+    fn editor_tree_signal_and_unique_name_indicators() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let emitter = tree.add_child(root, Node::new("Emitter", "Node")).unwrap();
+        let unique = tree.add_child(root, Node::new("Hero", "Node")).unwrap();
+        let plain = tree.add_child(root, Node::new("Plain", "Node")).unwrap();
+        // Owners are required for `%`-name resolution.
+        for n in [emitter, unique, plain] {
+            tree.get_node_mut(n).unwrap().set_owner(Some(root));
+        }
+        // `unique` is accessible as `%Hero`.
+        tree.set_unique_name_in_owner(unique, true);
+
+        let mut dock = SceneTreeDock::new();
+        dock.set_node_signal_count(emitter, 2);
+        dock.refresh(&tree);
+
+        // Emitter: signal indicator with count, no unique-name indicator.
+        let e = &dock.find_entry(emitter).expect("emitter row").indicators;
+        assert!(e.has_signal_indicator());
+        assert_eq!(e.signal_indicator_count(), 2);
+        assert!(!e.has_unique_name_indicator());
+
+        // Unique node: `%` indicator (no collision), no signal indicator.
+        let u = &dock.find_entry(unique).expect("unique row").indicators;
+        assert!(u.has_unique_name_indicator());
+        assert!(!u.unique_name_collision);
+        assert!(!u.has_signal_indicator());
+        assert_eq!(u.signal_indicator_count(), 0);
+
+        // Plain node: neither indicator.
+        let p = &dock.find_entry(plain).expect("plain row").indicators;
+        assert!(!p.has_signal_indicator());
+        assert!(!p.has_unique_name_indicator());
+        assert_eq!(p.signal_indicator_count(), 0);
+    }
+
+    /// Acceptance (pat-9wup3.5): the visibility, lock, and group toggles both
+    /// render (the row reflects the node's state) and act (toggling mutates the
+    /// node and the row updates on refresh).
+    #[test]
+    fn editor_tree_visibility_lock_group_toggles() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = tree.add_child(root, Node::new("Sprite", "Node2D")).unwrap();
+
+        let mut dock = SceneTreeDock::new();
+        dock.refresh(&tree);
+
+        // Render: defaults — visible, unlocked, no groups.
+        {
+            let ind = &dock.find_entry(node).expect("row").indicators;
+            assert!(ind.visible);
+            assert!(!ind.locked);
+            assert!(!ind.has_groups);
+        }
+
+        // Act: hide → the eye toggle returns the new (hidden) state and the row
+        // re-renders as not visible; toggling again restores visibility.
+        assert!(!toggle_node_visibility(&mut tree, node));
+        dock.refresh(&tree);
+        assert!(!dock.find_entry(node).unwrap().indicators.visible);
+        assert!(toggle_node_visibility(&mut tree, node));
+        dock.refresh(&tree);
+        assert!(dock.find_entry(node).unwrap().indicators.visible);
+
+        // Act: lock → the row re-renders as locked; toggling again unlocks.
+        assert!(toggle_node_lock(&mut tree, node));
+        dock.refresh(&tree);
+        assert!(dock.find_entry(node).unwrap().indicators.locked);
+        assert!(!toggle_node_lock(&mut tree, node));
+        dock.refresh(&tree);
+        assert!(!dock.find_entry(node).unwrap().indicators.locked);
+
+        // Act: add to a group → the row re-renders with groups; removing clears.
+        assert!(toggle_node_group(&mut tree, node, "enemies"));
+        dock.refresh(&tree);
+        assert!(dock.find_entry(node).unwrap().indicators.has_groups);
+        assert!(!toggle_node_group(&mut tree, node, "enemies"));
+        dock.refresh(&tree);
+        assert!(!dock.find_entry(node).unwrap().indicators.has_groups);
     }
 }

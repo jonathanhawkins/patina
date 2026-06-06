@@ -17,46 +17,140 @@
 
 #![warn(clippy::all)]
 
+pub mod anim_interpolation;
+pub mod anim_keyframes;
+pub mod anim_playback;
+pub mod anim_player_panel;
+pub mod anim_track_types;
+pub mod anim_tree_graph;
 pub mod animation_editor;
 pub mod asset_drag_drop;
+pub mod audio_bus_layout;
+pub mod auto_indent;
+pub mod autoload_manager;
+pub mod bezier_curve;
+pub mod bottom_panel_bar;
+pub mod bracket_match;
+pub mod canvas_overlays;
+pub mod code_folding;
 pub mod command_palette;
+pub mod comment_toggle;
 pub mod control_binding;
 pub mod create_dialog;
+pub mod create_dialog_confirm;
+pub mod create_node_catalog;
+pub mod create_node_description;
+pub mod create_node_insertion;
+pub mod create_node_recent;
 pub mod curve_editor;
+pub mod debug_menu_toggles;
+pub mod debugger_errors;
+pub mod debugger_profiler;
+pub mod debugger_stack;
 pub mod dock;
+pub mod document_history;
 pub mod editor_compat;
 pub mod editor_interface;
 pub mod editor_menu;
+pub mod editor_menu_commands;
 pub mod editor_plugin;
 pub mod editor_server;
 pub mod editor_settings_dialog;
+pub mod editor_settings_store;
 pub mod editor_ui;
 pub mod environment_preview;
 pub mod export_dialog;
 pub mod filesystem;
+pub mod find_in_files;
 pub mod find_replace;
+pub mod fs_file_ops;
+pub mod fs_import_pipeline;
+pub mod fs_thumbnails;
+pub mod gdscript_highlight;
 pub mod group_dialog;
 pub mod import;
 pub mod import_settings;
+pub mod export_groups;
+pub mod export_layout;
+pub mod export_presets;
+pub mod gizmo_multi;
+pub mod gizmo_snap;
+pub mod goto_definition;
+pub mod goto_line;
+pub mod grid_display;
+pub mod grid_snapping;
+pub mod guides;
+pub mod help_menu_commands;
+pub mod indent_block;
+pub mod input_map;
 pub mod inspector;
+pub mod line_ops;
+pub mod linked_proportional;
+pub mod main_screen;
+pub mod menu_enablement;
+pub mod menu_shortcuts;
+pub mod mode_placeholder;
+pub mod monitors_panel;
+pub mod multi_caret;
+pub mod multi_document;
+pub mod multi_node_edit;
+pub mod new_scene;
+pub mod numeric_expression;
+pub mod open_recent;
+pub mod open_scene;
+pub mod open_scripts_panel;
+pub mod pivot_marker;
+pub mod property_undo;
+pub mod subresource_inline;
+pub mod viewport_select;
+pub mod viewport_toolbar;
+pub mod output_console;
 pub mod output_panel;
+pub mod play_custom_scene;
+pub mod plugin_manager;
 pub mod profiler_panel;
+pub mod project_menu_commands;
 pub mod project_settings_dialog;
+pub mod project_settings_store;
+pub mod save_normalize;
 pub mod scene_editor;
+pub mod scene_menu_commands;
 pub mod scene_renderer;
+pub mod scene_tab_bar;
+pub mod scene_tabs;
+pub mod script_bookmarks;
+pub mod script_breakpoints;
 pub mod script_completion;
 pub mod script_editor;
+pub mod script_find_replace;
 pub mod script_gutter;
+pub mod script_main_view;
+pub mod script_outline;
 pub mod settings;
 pub mod shader_editor;
+pub mod snap_config;
+pub mod signal_connect_advanced;
+pub mod signal_connect_dialog;
+pub mod signal_connection_edit;
 pub mod signal_dialog;
+pub mod signal_docs;
+pub mod signal_goto_method;
+pub mod signal_receiver_stub;
+pub mod signals_tree;
 pub mod texture_cache;
 pub mod theme_editor;
 pub mod tilemap_editor;
 pub mod undo_redo;
+pub mod variant_value;
 pub mod vcs;
+pub mod vcs_integration;
 pub mod viewport_2d;
+pub mod viewport_2d_render;
 pub mod viewport_3d;
+pub mod viewport_3d_gizmo;
+pub mod viewport_3d_overlay;
+pub mod viewport_3d_render;
+pub mod viewport_3d_select;
 
 use gdscene::node::{Node, NodeId};
 use gdscene::SceneTree;
@@ -122,8 +216,8 @@ pub use scene_editor::SceneEditor;
 pub use script_editor::{FindMatch, FindOptions, FindReplace, ScriptEditor};
 pub use settings::{EditorSettings, EditorTheme, ProjectSettings};
 pub use shader_editor::{
-    MaterialPreview, PreviewShape, PreviewUniformInfo, ShaderEditor, ShaderHighlightKind,
-    ShaderHighlightSpan, ShaderHighlighter, ShaderTab, UniformValue,
+    MaterialPreview, PreviewShape, PreviewUniformInfo, ShaderCompileStatus, ShaderEditor,
+    ShaderHighlightKind, ShaderHighlightSpan, ShaderHighlighter, ShaderTab, UniformValue,
 };
 pub use theme_editor::{
     OverrideEntry, OverrideKind, PreviewControl, StyleBoxFlat, ThemeColorPalette, ThemeEditor,
@@ -153,6 +247,14 @@ pub enum EditorError {
     /// The redo stack is empty.
     #[error("nothing to redo")]
     NothingToRedo,
+
+    /// The target node has no attached script to open.
+    #[error("node has no attached script")]
+    NoScript,
+
+    /// The target node is not an instanced scene with an openable source.
+    #[error("node is not an instanced scene with an openable source")]
+    NotSceneInstance,
 }
 
 /// Convenience alias for editor results.
@@ -342,6 +444,31 @@ impl RunControls {
     pub fn is_paused(&self) -> bool {
         self.state == PlayState::Paused
     }
+
+    /// Plays the project's main scene (Godot's Run Project / F5).
+    pub fn play_project(&mut self) {
+        self.play(RunTarget::MainScene);
+    }
+
+    /// Plays the currently edited scene (Godot's Run Current Scene / F6).
+    pub fn play_current_scene(&mut self) {
+        self.play(RunTarget::CurrentScene);
+    }
+
+    /// Resolves the concrete scene path of the running instance, given the
+    /// project's `main_scene` and the editor's `current_scene`. Returns the
+    /// path that is (or, when paused, still) running, or `None` when stopped —
+    /// so callers know exactly which scene to launch or terminate.
+    pub fn running_scene(&self, main_scene: &str, current_scene: &str) -> Option<String> {
+        if self.state == PlayState::Stopped {
+            return None;
+        }
+        Some(match &self.target {
+            RunTarget::MainScene => main_scene.to_string(),
+            RunTarget::CurrentScene => current_scene.to_string(),
+            RunTarget::CustomScene(path) => path.clone(),
+        })
+    }
 }
 
 /// An undoable editor command.
@@ -391,6 +518,12 @@ pub enum EditorCommand {
         new_parent_id: NodeId,
         /// The old parent (populated on execute).
         old_parent_id: Option<NodeId>,
+        /// When true, the node's local transform is adjusted after reparenting
+        /// so its global (on-screen) transform is preserved.
+        keep_transform: bool,
+        /// The node's local (position, rotation, scale) captured before a
+        /// keep-transform reparent, so undo can restore it.
+        saved_transform: Option<(gdcore::math::Vector2, f32, gdcore::math::Vector2)>,
     },
     /// Rename a node.
     RenameNode {
@@ -418,6 +551,10 @@ pub enum EditorCommand {
         created_ids: Vec<NodeId>,
         /// The root node of the instanced scene (populated on execute).
         root_id: Option<NodeId>,
+        /// The originating `.tscn` path recorded on the instanced root for the
+        /// scene-tree instance indicator. `None` for in-memory sources (which
+        /// fall back to a generic "instanced" marker).
+        source_path: Option<String>,
     },
     TileMapPaint {
         node_id: NodeId,
@@ -548,9 +685,35 @@ impl EditorCommand {
                 node_id,
                 new_parent_id,
                 old_parent_id,
+                keep_transform,
+                saved_transform,
             } => {
+                use gdscene::node2d;
                 *old_parent_id = tree.get_node(*node_id).and_then(|n| n.parent());
-                tree.reparent(*node_id, *new_parent_id)?;
+                if *keep_transform {
+                    // Capture the local transform for undo, and the global
+                    // transform to re-establish under the new parent.
+                    *saved_transform = Some((
+                        node2d::get_position(tree, *node_id),
+                        node2d::get_rotation(tree, *node_id),
+                        node2d::get_scale(tree, *node_id),
+                    ));
+                    let old_global = node2d::get_global_transform(tree, *node_id);
+                    tree.reparent(*node_id, *new_parent_id)?;
+                    // new_local = inverse(new_parent_global) * old_global keeps
+                    // the node's global transform unchanged.
+                    let parent_global = node2d::get_global_transform(tree, *new_parent_id);
+                    let new_local = parent_global.affine_inverse() * old_global;
+                    node2d::set_position(tree, *node_id, new_local.origin);
+                    node2d::set_rotation(tree, *node_id, new_local.x.y.atan2(new_local.x.x));
+                    node2d::set_scale(
+                        tree,
+                        *node_id,
+                        gdcore::math::Vector2::new(new_local.x.length(), new_local.y.length()),
+                    );
+                } else {
+                    tree.reparent(*node_id, *new_parent_id)?;
+                }
                 tracing::debug!("ReparentNode {:?} -> {:?}", node_id, new_parent_id);
                 Ok(())
             }
@@ -621,8 +784,56 @@ impl EditorCommand {
                     Ok(new_id)
                 }
 
+                // Generate a name not already used by `siblings`.
+                fn unique_sibling_name(base: &str, siblings: &[String]) -> String {
+                    if !siblings.iter().any(|s| s == base) {
+                        return base.to_string();
+                    }
+                    let stem = base.trim_end_matches(|c: char| c.is_ascii_digit());
+                    let stem = if stem.is_empty() { base } else { stem };
+                    let mut n = 2;
+                    loop {
+                        let candidate = format!("{stem}{n}");
+                        if !siblings.iter().any(|s| s == &candidate) {
+                            return candidate;
+                        }
+                        n += 1;
+                    }
+                }
+
                 created_ids.clear();
-                duplicate_subtree(tree, *source_id, parent_id, created_ids)?;
+                let new_top = duplicate_subtree(tree, *source_id, parent_id, created_ids)?;
+
+                // Give the top-level duplicate a unique name among its siblings.
+                let unique = {
+                    let siblings: Vec<String> = tree
+                        .get_node(parent_id)
+                        .map(|p| {
+                            p.children()
+                                .iter()
+                                .filter(|&&c| c != new_top)
+                                .filter_map(|&c| tree.get_node(c).map(|n| n.name().to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let base = tree
+                        .get_node(new_top)
+                        .map(|n| n.name().to_string())
+                        .unwrap_or_default();
+                    unique_sibling_name(&base, &siblings)
+                };
+                if let Some(node) = tree.get_node_mut(new_top) {
+                    node.set_name(unique);
+                }
+
+                // Insert the duplicate immediately after the source (next sibling).
+                if let Some(src_idx) = tree
+                    .get_node(parent_id)
+                    .and_then(|p| p.children().iter().position(|&c| c == *source_id))
+                {
+                    let _ = tree.move_child(parent_id, new_top, src_idx + 1);
+                }
+
                 tracing::debug!("DuplicateNode {:?} -> {:?}", source_id, created_ids);
                 Ok(())
             }
@@ -631,6 +842,7 @@ impl EditorCommand {
                 tscn_source,
                 created_ids,
                 root_id,
+                source_path,
             } => {
                 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
                 let packed = PackedScene::from_tscn(tscn_source).map_err(|e| {
@@ -641,9 +853,15 @@ impl EditorCommand {
                 let scene_root = add_packed_scene_to_tree(tree, *parent_id, &packed)?;
                 *root_id = Some(scene_root);
 
-                // Mark the instanced root with a source indicator for the UI.
+                // Record the originating scene path on the instanced root so
+                // the scene-tree instance indicator can show where the
+                // instance came from. In-memory sources without a path fall
+                // back to a generic marker.
                 if let Some(node) = tree.get_node_mut(scene_root) {
-                    node.set_property("_instance_source", Variant::String("instanced".to_string()));
+                    let marker = source_path
+                        .clone()
+                        .unwrap_or_else(|| "instanced".to_string());
+                    node.set_property("_instance_source", Variant::String(marker));
                 }
 
                 // Collect all created node IDs for undo.
@@ -895,10 +1113,19 @@ impl EditorCommand {
             EditorCommand::ReparentNode {
                 node_id,
                 old_parent_id,
+                saved_transform,
                 ..
             } => {
                 if let Some(old_pid) = old_parent_id {
                     tree.reparent(*node_id, *old_pid)?;
+                }
+                // Restore the local transform captured before a keep-transform
+                // reparent so undo is an exact inverse.
+                if let Some((pos, rot, scl)) = saved_transform {
+                    use gdscene::node2d;
+                    node2d::set_position(tree, *node_id, *pos);
+                    node2d::set_rotation(tree, *node_id, *rot);
+                    node2d::set_scale(tree, *node_id, *scl);
                 }
                 Ok(())
             }
@@ -1028,8 +1255,14 @@ impl EditorCommand {
 pub struct Editor {
     /// The scene tree being edited.
     tree: SceneTree,
-    /// The currently selected node, if any.
-    selected_node: Option<NodeId>,
+    /// The current selection set, in selection order. This is the single
+    /// source of truth shared by the dock, viewport, and inspector; the last
+    /// entry is the active/primary selection. Empty when nothing is selected.
+    selection: Vec<NodeId>,
+    /// When `Some`, the inspector is pinned/locked to this node: it keeps that
+    /// object inspected even as the scene-tree selection changes. `None` means
+    /// the inspector follows the active selection. See [`Editor::pin_inspector`].
+    inspector_pin: Option<NodeId>,
     /// Undo stack (most recent command on top).
     undo_stack: Vec<EditorCommand>,
     /// Redo stack (cleared on new command).
@@ -1041,7 +1274,7 @@ pub struct Editor {
 impl std::fmt::Debug for Editor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Editor")
-            .field("selected_node", &self.selected_node)
+            .field("selection", &self.selection)
             .field("undo_depth", &self.undo_stack.len())
             .field("redo_depth", &self.redo_stack.len())
             .field("plugin_count", &self.plugins.len())
@@ -1054,7 +1287,8 @@ impl Editor {
     pub fn new(tree: SceneTree) -> Self {
         Self {
             tree,
-            selected_node: None,
+            selection: Vec::new(),
+            inspector_pin: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             plugins: Vec::new(),
@@ -1071,20 +1305,124 @@ impl Editor {
         &mut self.tree
     }
 
-    /// Selects a node by ID.
+    /// Selects a single node, replacing any existing selection (a plain click
+    /// in the dock or viewport).
     pub fn select_node(&mut self, id: NodeId) {
-        self.selected_node = Some(id);
+        self.selection = vec![id];
         tracing::debug!("Selected node {:?}", id);
     }
 
-    /// Clears the current selection.
+    /// Clears the entire selection.
     pub fn deselect(&mut self) {
-        self.selected_node = None;
+        self.selection.clear();
     }
 
-    /// Returns the currently selected node ID.
+    /// Returns the active/primary selected node — the most recently added
+    /// entry in the selection set — or `None` when nothing is selected. This
+    /// is what the inspector header and single-node operations act on.
     pub fn selected_node(&self) -> Option<NodeId> {
-        self.selected_node
+        self.selection.last().copied()
+    }
+
+    /// Returns the full selection set in selection order. This is the single
+    /// source of truth the dock, viewport, and inspector all read, so their
+    /// highlighting stays synchronized.
+    pub fn selected_nodes(&self) -> &[NodeId] {
+        &self.selection
+    }
+
+    /// Returns `true` if `id` is part of the current selection.
+    pub fn is_selected(&self, id: NodeId) -> bool {
+        self.selection.contains(&id)
+    }
+
+    /// Replaces the selection with the given set, preserving order and dropping
+    /// duplicates (keeping first occurrence).
+    pub fn select_nodes(&mut self, ids: impl IntoIterator<Item = NodeId>) {
+        let mut next = Vec::new();
+        for id in ids {
+            if !next.contains(&id) {
+                next.push(id);
+            }
+        }
+        self.selection = next;
+    }
+
+    /// Toggles `id` in the selection (ctrl/cmd-click additive semantics):
+    /// removes it if already selected, otherwise appends it as the new active
+    /// selection. Returns `true` if `id` ended up selected.
+    pub fn toggle_select(&mut self, id: NodeId) -> bool {
+        if let Some(pos) = self.selection.iter().position(|&n| n == id) {
+            self.selection.remove(pos);
+            false
+        } else {
+            self.selection.push(id);
+            true
+        }
+    }
+
+    /// Selects the contiguous range between the current active selection (the
+    /// anchor) and `target` within `order` (shift-click range semantics). The
+    /// range replaces the selection. `order` is the visible row ordering (e.g.
+    /// [`SceneTree::all_nodes_in_tree_order`]). When there is no anchor, or
+    /// either endpoint is absent from `order`, falls back to selecting just
+    /// `target`.
+    pub fn select_range(&mut self, target: NodeId, order: &[NodeId]) {
+        let anchor = match self.selected_node() {
+            Some(a) => a,
+            None => {
+                self.select_node(target);
+                return;
+            }
+        };
+        let ai = order.iter().position(|&n| n == anchor);
+        let ti = order.iter().position(|&n| n == target);
+        match (ai, ti) {
+            (Some(a), Some(t)) => {
+                let (lo, hi) = if a <= t { (a, t) } else { (t, a) };
+                // Keep the range ordered so the anchor stays first and `target`
+                // becomes the active (last) selection.
+                let mut range: Vec<NodeId> = order[lo..=hi].to_vec();
+                if a > t {
+                    range.reverse();
+                }
+                self.selection = range;
+            }
+            _ => self.select_node(target),
+        }
+    }
+
+    /// Returns the node the inspector is currently showing. When the inspector
+    /// is pinned (see [`Editor::pin_inspector`]) this is the pinned node and
+    /// stays fixed as the scene-tree selection changes; otherwise it follows
+    /// the active selection ([`Editor::selected_node`]).
+    pub fn inspected_node(&self) -> Option<NodeId> {
+        match self.inspector_pin {
+            Some(id) => Some(id),
+            None => self.selected_node(),
+        }
+    }
+
+    /// Pins/locks the inspector to the currently inspected object so it keeps
+    /// showing that object even as the scene-tree selection moves elsewhere.
+    /// No-op (leaves the inspector unpinned) when nothing is currently
+    /// inspected. Re-pinning while already pinned re-captures the current
+    /// selection as the pin target.
+    pub fn pin_inspector(&mut self) {
+        // Pin the object the inspector is showing right now. When already
+        // pinned this is the pinned node, so the pin stays put; when following
+        // selection it captures the active node.
+        self.inspector_pin = self.inspected_node();
+    }
+
+    /// Unpins the inspector so it resumes following the scene-tree selection.
+    pub fn unpin_inspector(&mut self) {
+        self.inspector_pin = None;
+    }
+
+    /// Whether the inspector is currently pinned/locked to a specific object.
+    pub fn is_inspector_pinned(&self) -> bool {
+        self.inspector_pin.is_some()
     }
 
     /// Executes an editor command and pushes it onto the undo stack.
@@ -1165,7 +1503,7 @@ impl Editor {
     pub fn notify_selection_changed(&mut self) {
         // We need to call plugin methods but can't borrow self mutably
         // while iterating plugins. Collect node id first.
-        let selected = self.selected_node;
+        let selected = self.selected_node();
         for plugin in &mut self.plugins {
             plugin.on_selection_changed(selected);
         }
@@ -1340,6 +1678,46 @@ mod tests {
     }
 
     #[test]
+    fn inspector_pin_lock_holds_selection() {
+        // The pin/lock toggle keeps the current object inspected even as the
+        // scene-tree selection changes; unpinning resumes following selection.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = tree.add_child(root, Node::new("A", "Node2D")).unwrap();
+        let b = tree.add_child(root, Node::new("B", "Node2D")).unwrap();
+        let mut editor = Editor::new(tree);
+
+        // Unpinned, the inspector follows the active selection.
+        editor.select_node(a);
+        assert!(!editor.is_inspector_pinned());
+        assert_eq!(editor.inspected_node(), Some(a));
+
+        // Pinning locks the inspector to A.
+        editor.pin_inspector();
+        assert!(editor.is_inspector_pinned());
+
+        // Selecting B in the scene tree moves the selection but the pinned
+        // inspector keeps showing A.
+        editor.select_node(b);
+        assert_eq!(editor.selected_node(), Some(b), "tree selection follows to B");
+        assert_eq!(
+            editor.inspected_node(),
+            Some(a),
+            "pinned inspector keeps showing A"
+        );
+
+        // Unpinning resumes following the selection, so the inspector now
+        // shows B.
+        editor.unpin_inspector();
+        assert!(!editor.is_inspector_pinned());
+        assert_eq!(
+            editor.inspected_node(),
+            Some(b),
+            "unpinning resumes following selection"
+        );
+    }
+
+    #[test]
     fn set_property_undo_redo() {
         let mut editor = make_editor();
         let root = editor.tree().root_id();
@@ -1440,6 +1818,8 @@ mod tests {
                 node_id: c_id,
                 new_parent_id: b_id,
                 old_parent_id: None,
+                keep_transform: false,
+                saved_transform: None,
             })
             .unwrap();
 
@@ -1448,6 +1828,136 @@ mod tests {
         // Undo.
         editor.undo().unwrap();
         assert_eq!(editor.tree().get_node(c_id).unwrap().parent(), Some(a_id));
+    }
+
+    /// Unit-level coverage for the "Reparent" scene-tree operation
+    /// (bead scene-tree-ops-reparent-node / pat-94ac2): reparenting must
+    /// (1) move the node and its whole subtree under the target parent,
+    /// (2) reject reparenting a node into its own descendant, and
+    /// (3) preserve the node's global transform when requested.
+    ///
+    /// Named distinctly from the crate's HTTP-level `scene_tree_reparent_node`
+    /// acceptance test (in `editor_server`) so a `-p gdeditor
+    /// scene_tree_reparent_node` filter resolves to exactly one test.
+    #[test]
+    fn reparent_command_subtree_cycle_and_keep_transform() {
+        use gdcore::math::Vector2;
+        use gdscene::node2d;
+
+        let mut editor = make_editor();
+        let root = editor.tree().root_id();
+        let main_id = editor.tree().get_node(root).unwrap().children()[0];
+
+        // Build: Main -> A(100,50) -> C ;  Main -> B(10,20)
+        let a = editor
+            .tree_mut()
+            .add_child(main_id, Node::new("A", "Node2D"))
+            .unwrap();
+        let c = editor
+            .tree_mut()
+            .add_child(a, Node::new("C", "Node2D"))
+            .unwrap();
+        let b = editor
+            .tree_mut()
+            .add_child(main_id, Node::new("B", "Node2D"))
+            .unwrap();
+        node2d::set_position(editor.tree_mut(), a, Vector2::new(100.0, 50.0));
+        node2d::set_position(editor.tree_mut(), b, Vector2::new(10.0, 20.0));
+
+        // (1) Subtree preservation: reparent A under B; C stays A's child.
+        editor
+            .execute(EditorCommand::ReparentNode {
+                node_id: a,
+                new_parent_id: b,
+                old_parent_id: None,
+                keep_transform: false,
+                saved_transform: None,
+            })
+            .unwrap();
+        assert_eq!(
+            editor.tree().get_node(a).unwrap().parent(),
+            Some(b),
+            "A is reparented under B"
+        );
+        assert!(
+            editor.tree().get_node(b).unwrap().children().contains(&a),
+            "A is a child of B"
+        );
+        assert_eq!(
+            editor.tree().get_node(c).unwrap().parent(),
+            Some(a),
+            "C subtree is preserved under A"
+        );
+
+        // (2) Reject reparenting a node into its own descendant.
+        let rejected = editor.execute(EditorCommand::ReparentNode {
+            node_id: a,
+            new_parent_id: c,
+            old_parent_id: None,
+            keep_transform: false,
+            saved_transform: None,
+        });
+        assert!(
+            rejected.is_err(),
+            "reparenting A into its descendant C must be rejected"
+        );
+        assert_eq!(
+            editor.tree().get_node(a).unwrap().parent(),
+            Some(b),
+            "A is unchanged after the rejected reparent"
+        );
+
+        // (3) Preserve global transform when requested. Move A back under Main
+        // with a known position, then reparent under B(10,20) keeping its
+        // global transform.
+        editor
+            .execute(EditorCommand::ReparentNode {
+                node_id: a,
+                new_parent_id: main_id,
+                old_parent_id: None,
+                keep_transform: false,
+                saved_transform: None,
+            })
+            .unwrap();
+        node2d::set_position(editor.tree_mut(), a, Vector2::new(100.0, 50.0));
+        let global_before = node2d::get_global_transform(editor.tree(), a).origin;
+
+        editor
+            .execute(EditorCommand::ReparentNode {
+                node_id: a,
+                new_parent_id: b,
+                old_parent_id: None,
+                keep_transform: true,
+                saved_transform: None,
+            })
+            .unwrap();
+
+        let global_after = node2d::get_global_transform(editor.tree(), a).origin;
+        assert!(
+            (global_after.x - global_before.x).abs() < 1e-3
+                && (global_after.y - global_before.y).abs() < 1e-3,
+            "keep_transform preserves A's global position: before {global_before:?} after {global_after:?}"
+        );
+        // A's local position is now offset by B's position (100-10, 50-20).
+        let local_a = node2d::get_position(editor.tree(), a);
+        assert!(
+            (local_a.x - 90.0).abs() < 1e-3 && (local_a.y - 30.0).abs() < 1e-3,
+            "A local position is adjusted relative to B: {local_a:?}"
+        );
+
+        // Undo of the keep-transform reparent restores both parent and local
+        // position.
+        editor.undo().unwrap();
+        assert_eq!(
+            editor.tree().get_node(a).unwrap().parent(),
+            Some(main_id),
+            "undo restores A under Main"
+        );
+        let restored = node2d::get_position(editor.tree(), a);
+        assert!(
+            (restored.x - 100.0).abs() < 1e-3 && (restored.y - 50.0).abs() < 1e-3,
+            "undo restores A's local position: {restored:?}"
+        );
     }
 
     #[test]
@@ -1603,6 +2113,7 @@ position = Vector2(10, 20)
                 tscn_source: INSTANCE_TSCN.to_string(),
                 created_ids: Vec::new(),
                 root_id: None,
+                source_path: None,
             })
             .unwrap();
 
@@ -1621,6 +2132,7 @@ position = Vector2(10, 20)
             tscn_source: INSTANCE_TSCN.to_string(),
             created_ids: Vec::new(),
             root_id: None,
+            source_path: None,
         };
         cmd.execute(editor.tree_mut()).unwrap();
 
@@ -1651,6 +2163,7 @@ position = Vector2(10, 20)
                 tscn_source: INSTANCE_TSCN.to_string(),
                 created_ids: Vec::new(),
                 root_id: None,
+                source_path: None,
             })
             .unwrap();
 
@@ -1673,6 +2186,7 @@ position = Vector2(10, 20)
                 tscn_source: INSTANCE_TSCN.to_string(),
                 created_ids: Vec::new(),
                 root_id: None,
+                source_path: None,
             })
             .unwrap();
 
@@ -1694,6 +2208,7 @@ position = Vector2(10, 20)
             tscn_source: "not valid tscn".to_string(),
             created_ids: Vec::new(),
             root_id: None,
+            source_path: None,
         });
         assert!(result.is_err());
     }
@@ -1709,6 +2224,7 @@ position = Vector2(10, 20)
             tscn_source: INSTANCE_TSCN.to_string(),
             created_ids: Vec::new(),
             root_id: None,
+            source_path: None,
         };
         cmd.execute(editor.tree_mut()).unwrap();
 
@@ -2443,6 +2959,69 @@ position = Vector2(10, 20)
         assert_eq!(
             rc.target,
             RunTarget::CustomScene("res://levels/boss.tscn".into())
+        );
+    }
+
+    /// Acceptance (pat-twbea): the top-bar run controls play the project (main
+    /// scene), play the current scene, pause (toggle), and stop (terminate the
+    /// running instance).
+    #[test]
+    fn top_bar_run_controls() {
+        let main = "res://Main.tscn";
+        let current = "res://levels/Level2.tscn";
+        let mut rc = RunControls::new();
+
+        // Nothing runs until a run control is pressed.
+        assert!(!rc.is_running());
+        assert_eq!(rc.running_scene(main, current), None);
+
+        // Play-project (F5) launches the project's main scene.
+        rc.play_project();
+        assert!(rc.is_playing());
+        assert!(!rc.last_ran_current);
+        assert_eq!(
+            rc.running_scene(main, current).as_deref(),
+            Some(main),
+            "play-project launches the main scene"
+        );
+
+        // Stop terminates the running instance before switching targets.
+        rc.stop();
+        assert!(!rc.is_running());
+        assert_eq!(rc.running_scene(main, current), None);
+
+        // Play-scene (F6) launches the currently edited scene.
+        rc.play_current_scene();
+        assert!(rc.is_playing());
+        assert!(rc.last_ran_current);
+        assert_eq!(
+            rc.running_scene(main, current).as_deref(),
+            Some(current),
+            "play-scene launches the current scene"
+        );
+
+        // Pause toggles the paused state — the instance stays alive.
+        rc.toggle_pause();
+        assert!(rc.is_paused());
+        assert!(rc.is_running());
+        assert_eq!(
+            rc.running_scene(main, current).as_deref(),
+            Some(current),
+            "a paused instance is still the current scene"
+        );
+        // Toggling again resumes play.
+        rc.toggle_pause();
+        assert!(rc.is_playing());
+        assert!(!rc.is_paused());
+
+        // Stop terminates the running instance.
+        rc.stop();
+        assert!(!rc.is_running());
+        assert_eq!(rc.state, PlayState::Stopped);
+        assert_eq!(
+            rc.running_scene(main, current),
+            None,
+            "stop terminates the running instance"
         );
     }
 }

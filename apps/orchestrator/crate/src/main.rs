@@ -1426,7 +1426,12 @@ fn planner_loop_command(planner_command: &str) -> Option<&'static str> {
 }
 
 fn planner_boot_command(planner_command: &str) -> String {
-    launcher::ensure_skip_permissions(planner_command)
+    // Mute the planner's voxherd Stop-hook TTS too (consistent with workers).
+    format!(
+        "{}{}",
+        launcher::voxherd_prefix(),
+        launcher::ensure_skip_permissions(planner_command)
+    )
 }
 
 fn planner_capture_shows_rate_limit(capture: &str) -> bool {
@@ -1941,6 +1946,19 @@ mod tests {
         let codex = planner_boot_command("codex --model gpt-5.4");
         assert!(codex.contains("codex"));
         assert!(codex.contains("dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn planner_boot_command_mutes_voxherd_by_default() {
+        // Default (ORCH_MUTE_VOXHERD unset) → planner is muted with VOXHERD_QUIET=1.
+        // Guarded so it doesn't fail if the env happens to disable muting.
+        match std::env::var("ORCH_MUTE_VOXHERD").ok().as_deref() {
+            None => assert!(planner_boot_command("claude").starts_with("VOXHERD_QUIET=1 ")),
+            Some("0") | Some("false") | Some("no") | Some("off") => {
+                assert!(!planner_boot_command("claude").starts_with("VOXHERD_QUIET="))
+            }
+            Some(_) => assert!(planner_boot_command("claude").starts_with("VOXHERD_QUIET=1 ")),
+        }
     }
 
     #[test]

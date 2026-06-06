@@ -71,3 +71,9 @@ storage.sqlite3-wal
 
 # Local agent-mail credential — must never be committed (rotate if it ever was).
 .beads/coordinator_token
+
+# Editor runtime artifacts (audit logs / session state)
+.editor/
+**/.editor/
+# Orchestrator runtime build lock
+.orchestrator/rust-build.lock*

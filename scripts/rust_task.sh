@@ -128,7 +128,10 @@ export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 # Prefer sccache when present (shared, cross-target object cache) — note that
 # sccache and Cargo incremental are mutually exclusive, so disable incremental
 # in that case. Without sccache, fall back to local incremental rebuilds.
-if [[ -z "${RUSTC_WRAPPER:-}" ]] && command -v sccache >/dev/null 2>&1; then
+# Set RUST_TASK_NO_SCCACHE=1 to force incremental mode even when sccache is
+# installed — useful when the cargo target dir is already warm and switching to
+# a cold sccache cache would needlessly recompile the heavy dependency graph.
+if [[ -z "${RUSTC_WRAPPER:-}" && "${RUST_TASK_NO_SCCACHE:-}" != "1" ]] && command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER="sccache"
 fi
 if [[ -n "${RUSTC_WRAPPER:-}" && "${RUSTC_WRAPPER}" == *sccache* ]]; then

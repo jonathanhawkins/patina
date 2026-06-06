@@ -435,6 +435,18 @@ impl ShaderTab {
     }
 }
 
+/// The compile/error status of the active shader, surfaced in the editor's
+/// status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShaderCompileStatus {
+    /// No shader has been compiled yet (or no shader is open).
+    Idle,
+    /// The active shader compiled cleanly.
+    Ok,
+    /// The active shader failed to compile, with a human-readable reason.
+    Error(String),
+}
+
 /// The shader editor, managing multiple open shader tabs.
 #[derive(Debug)]
 pub struct ShaderEditor {
@@ -444,6 +456,8 @@ pub struct ShaderEditor {
     active_tab: Option<usize>,
     /// The syntax highlighter.
     highlighter: ShaderHighlighter,
+    /// Compile/error status of the most recent compile, for the status line.
+    compile_status: ShaderCompileStatus,
 }
 
 impl ShaderEditor {
@@ -453,6 +467,7 @@ impl ShaderEditor {
             tabs: Vec::new(),
             active_tab: None,
             highlighter: ShaderHighlighter::new(),
+            compile_status: ShaderCompileStatus::Idle,
         }
     }
 
@@ -542,6 +557,44 @@ impl ShaderEditor {
     /// Returns the highlighter.
     pub fn highlighter(&self) -> &ShaderHighlighter {
         &self.highlighter
+    }
+
+    /// Compiles the active shader and records the result for the status line.
+    ///
+    /// Surfaces lexical errors as compile errors, and treats a source with no
+    /// `shader_type` declaration as an error (Godot shaders require one).
+    /// Returns the resulting status. With no shader open, the status is `Idle`.
+    pub fn compile_active(&mut self) -> &ShaderCompileStatus {
+        let status = match self.active() {
+            None => ShaderCompileStatus::Idle,
+            Some(tab) => {
+                if let Err(e) = self.highlighter.highlight(&tab.source) {
+                    ShaderCompileStatus::Error(e.to_string())
+                } else if tab.shader_type().is_none() {
+                    ShaderCompileStatus::Error("expected 'shader_type' declaration".to_string())
+                } else {
+                    ShaderCompileStatus::Ok
+                }
+            }
+        };
+        self.compile_status = status;
+        &self.compile_status
+    }
+
+    /// The current compile/error status (from the last [`Self::compile_active`]).
+    pub fn compile_status(&self) -> &ShaderCompileStatus {
+        &self.compile_status
+    }
+
+    /// Renders the bottom shader panel's status line: the active shader's path
+    /// plus its compile state (not compiled / compiled OK / error: …).
+    pub fn status_line(&self) -> String {
+        let path = self.active().map(|t| t.path.as_str()).unwrap_or("<no shader>");
+        match &self.compile_status {
+            ShaderCompileStatus::Idle => format!("{path} — not compiled"),
+            ShaderCompileStatus::Ok => format!("{path} — compiled OK"),
+            ShaderCompileStatus::Error(msg) => format!("{path} — error: {msg}"),
+        }
     }
 }
 
@@ -967,6 +1020,50 @@ void fragment() {
     ALPHA = albedo_color.a;
 }
 "#;
+
+    /// Acceptance (pat-3tuc0): editing a shader resource opens it in the bottom
+    /// shader panel as a tab, and a compile error is surfaced in the status line.
+    #[test]
+    fn bottom_shader_editor_shell_opens_and_reports() {
+        let mut editor = ShaderEditor::new();
+
+        // Nothing open yet → idle status.
+        assert_eq!(editor.tab_count(), 0);
+        assert_eq!(*editor.compile_status(), ShaderCompileStatus::Idle);
+
+        // Editing a shader resource opens it in the panel as a tab.
+        let path = "res://shaders/broken.gdshader";
+        let idx = editor.open(path, "void fragment() {\n    ALBEDO = vec3(1.0);\n}\n");
+        assert_eq!(editor.tab_count(), 1, "the edited shader opens as a tab");
+        assert_eq!(editor.active_tab_index(), Some(idx), "the new tab is active");
+        assert!(editor.open_paths().contains(&path), "the tab carries the resource path");
+
+        // Compiling surfaces the error (missing shader_type) in the status line.
+        let status = editor.compile_active().clone();
+        assert!(
+            matches!(status, ShaderCompileStatus::Error(_)),
+            "a broken shader reports a compile error, got {status:?}"
+        );
+        let line = editor.status_line();
+        assert!(line.contains(path), "status line names the shader: {line}");
+        assert!(line.contains("error"), "status line flags the error: {line}");
+        assert!(
+            line.contains("shader_type"),
+            "status line explains the error: {line}"
+        );
+
+        // A second resource opens as its own tab; a valid shader compiles clean.
+        let ok_path = "res://shaders/good.gdshader";
+        editor.open(ok_path, SAMPLE_SHADER);
+        assert_eq!(editor.tab_count(), 2, "a second shader opens as another tab");
+        assert_eq!(*editor.compile_active(), ShaderCompileStatus::Ok);
+        let ok_line = editor.status_line();
+        assert!(ok_line.contains(ok_path), "status line names the active shader: {ok_line}");
+        assert!(
+            ok_line.contains("OK") && !ok_line.contains("error"),
+            "valid shader reports success: {ok_line}"
+        );
+    }
 
     #[test]
     fn highlight_empty_source() {

@@ -995,4 +995,78 @@ mod tests {
         dd.cancel();
         assert!(dd.drop_history().is_empty());
     }
+
+    /// Acceptance (pat-kytuk): dragging a `.tscn` from the dock onto a scene-tree
+    /// node instantiates it as a child; a script dropped on a node is a
+    /// compatible assignment (attach); incompatible resources are rejected.
+    #[test]
+    fn fs_dock_drag_to_scene_tree_instances() {
+        let tree = DropTarget::SceneTree {
+            parent_node_id: 1,
+            sibling_index: -1,
+        };
+
+        // Dragging a .tscn onto a node instances it as a child.
+        let mut dd = AssetDragDrop::new();
+        dd.begin_drag_from_path("res://enemy.tscn");
+        dd.update_hover(tree.clone());
+        assert!(dd.can_drop());
+        let done = dd.drop().expect("scene drop should be valid");
+        assert_eq!(done.action, DropAction::InstantiateScene);
+        assert_eq!(done.res_path, "res://enemy.tscn");
+
+        // A script dropped on a node is a compatible assignment (attach).
+        let script = DragPayload::from_res_path("res://player.gd");
+        assert_eq!(
+            validate_drop(&script, &tree),
+            DropValidity::Valid(DropAction::AttachScript)
+        );
+
+        // An incompatible resource (texture) is rejected by the scene tree.
+        let texture = DragPayload::from_res_path("res://icon.png");
+        assert!(matches!(
+            validate_drop(&texture, &tree),
+            DropValidity::Invalid(_)
+        ));
+    }
+
+    /// Acceptance (pat-fp46n): dragging a resource onto a matching-typed Inspector
+    /// property assigns it, and an incompatible slot rejects the drop.
+    #[test]
+    fn fs_dock_drag_to_inspector_assigns_property() {
+        // A texture dropped on a texture-typed property is assigned.
+        let mut dd = AssetDragDrop::new();
+        dd.begin_drag_from_path("res://icon.png");
+        dd.update_hover(DropTarget::InspectorProperty {
+            node_id: 7,
+            property_name: "texture".into(),
+        });
+        assert!(dd.can_drop());
+        let done = dd.drop().expect("texture -> texture property should be valid");
+        assert_eq!(done.action, DropAction::AssignProperty);
+        assert_eq!(done.res_path, "res://icon.png");
+
+        // An incompatible slot (a non-texture property) rejects the drop.
+        let mut dd2 = AssetDragDrop::new();
+        dd2.begin_drag_from_path("res://icon.png");
+        dd2.update_hover(DropTarget::InspectorProperty {
+            node_id: 7,
+            property_name: "position".into(),
+        });
+        assert!(!dd2.can_drop());
+        assert!(dd2.drop().is_none());
+
+        // A generic resource (.tres) is assignable to a resource-typed property.
+        let res = DragPayload::from_res_path("res://data.tres");
+        assert_eq!(
+            validate_drop(
+                &res,
+                &DropTarget::InspectorProperty {
+                    node_id: 7,
+                    property_name: "config".into(),
+                }
+            ),
+            DropValidity::Valid(DropAction::AssignProperty)
+        );
+    }
 }

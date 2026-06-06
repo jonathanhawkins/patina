@@ -10,7 +10,7 @@ These boot the real editor server and drive it over HTTP. They are the gate that
 lib unit tests above cannot provide. They will stay unchecked until the corresponding
 feature is actually wired into the running app.
 
-- [ ] `mode-switch-renders-view-app` The main-screen mode switch serves a distinct central view per mode (2D/3D/Script/Game/AssetLib) over HTTP (`GET /api/editor/main_view`), proving the switch is not cosmetic (test: `editor_mode_e2e_modes_serve_distinct_views`)
+- [ ] `mode-switch-renders-view-app` The main-screen mode switch serves a distinct central view per mode (2D/3D/Script/Game/AssetLib) over HTTP (`GET /api/editor/main_view`), proving the switch is not cosmetic (test: `editor_mode_e2e_test_modes_serve_distinct_views`)
 
 ## Now
 
@@ -92,7 +92,7 @@ feature is actually wired into the running app.
 - [x] `top-bar-run-controls` Run controls play the project, play the current scene, pause, and stop (test: `top_bar_run_controls`)
 - [x] `top-bar-play-custom-scene` A play-custom-scene control runs a chosen scene other than the main scene (test: `top_bar_play_custom_scene`)
 - [x] `top-bar-mode-switch` The main-screen mode switcher toggles between 2D, 3D, Script, and AssetLib views (test: `top_bar_editor_mode_switch`)
-- [x] `main-screen-e2e-modes` (planner-methodology) Booting the real server and driving `POST /api/editor/mode {3d|script|game|assetlib}` makes the SERVED central view (`GET /api/editor/main_view`) actually correspond to that mode — the spatial editor / script editor / game preview / asset library, each distinct from the 2D viewport and mutually distinct — so the main-screen mode switch is not cosmetic (test: `editor_mode_e2e_modes_serve_distinct_views`)
+- [x] `main-screen-e2e-modes` (planner-methodology) Booting the real server and driving `POST /api/editor/mode {3d|script|game|assetlib}` makes the SERVED central view (`GET /api/editor/main_view`) actually correspond to that mode — the spatial editor / script editor / game preview / asset library, each distinct from the 2D viewport and mutually distinct — so the main-screen mode switch is not cosmetic (test: `editor_mode_e2e_test_modes_serve_distinct_views`)
 - [x] `menus-scene-actions` Implement the Scene menu (New Scene, New Inherited Scene, Open Scene, Save, Save As, Save All, Close Scene, Revert Scene, Quit) wired to the scene-document lifecycle. (test: `menus_scene_actions_dispatch`)
 - [x] `menus-project-actions` Implement the Project menu (Project Settings, Version Control, Export, Reload Current Project, Quit to Project List) wired to the corresponding editor subsystems. (test: `menus_project_actions_open_subsystems`)
 - [x] `menus-debug-toggles` Implement the Debug menu toggles (Visible Collision Shapes, Visible Navigation, Visible Paths, Synchronize Scene Changes, Synchronize Script Changes) as persisted checkable items applied to play sessions. (test: `menus_debug_toggles_persist_and_apply`)

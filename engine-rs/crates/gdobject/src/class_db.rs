@@ -607,6 +607,9 @@ pub fn register_2d_classes() {
     if !class_exists("Line2D") {
         register_class(ClassRegistration::new("Line2D").parent("Node2D"));
     }
+    if !class_exists("Polygon2D") {
+        register_class(ClassRegistration::new("Polygon2D").parent("Node2D"));
+    }
     if !class_exists("Path2D") {
         register_class(ClassRegistration::new("Path2D").parent("Node2D"));
     }
@@ -642,6 +645,9 @@ pub fn register_2d_classes() {
     }
     if !class_exists("Panel") {
         register_class(ClassRegistration::new("Panel").parent("Control"));
+    }
+    if !class_exists("ColorRect") {
+        register_class(ClassRegistration::new("ColorRect").parent("Control"));
     }
     if !class_exists("Container") {
         register_class(ClassRegistration::new("Container").parent("Control"));

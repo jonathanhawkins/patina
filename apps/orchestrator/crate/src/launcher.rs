@@ -58,6 +58,26 @@ pub fn ensure_skip_permissions(model_cmd: &str) -> String {
     }
 }
 
+/// Env-var prefix to mute the per-session voxherd Stop-hook TTS for swarm
+/// agents (workers + planner). The spoken summary on every stop is noise with
+/// many workers. Muted by default; set `ORCH_MUTE_VOXHERD=0` (or false/no/off)
+/// to restore narration. Returns `"VOXHERD_QUIET=1 "` (trailing space) or empty.
+pub fn voxherd_prefix() -> String {
+    let muted = std::env::var("ORCH_MUTE_VOXHERD")
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
+    if muted {
+        "VOXHERD_QUIET=1 ".to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn command_program_name(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or(command)
 }
@@ -224,8 +244,12 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
                     &format!("{agent_name} | idle"),
                 );
 
-                // Launch worker with identity
-                let launch_cmd = format!("AGENT_NAME='{agent_name}' {worker_model_cmd}");
+                // Launch worker with identity. The voxherd prefix (VOXHERD_QUIET=1)
+                // mutes the per-stop spoken summary — noise with many workers.
+                let launch_cmd = format!(
+                    "{}AGENT_NAME='{agent_name}' {worker_model_cmd}",
+                    voxherd_prefix()
+                );
                 tmux::send_literal(&config.session_name, 0, pane_index, &launch_cmd)?;
                 tmux::send_keys(&config.session_name, 0, pane_index, "Enter")?;
 
@@ -234,7 +258,8 @@ pub fn launch(config: &LaunchConfig) -> Result<LaunchResult> {
             Err(e) => {
                 eprintln!("warning: failed to bootstrap identity for pane {pane_index}: {e}");
                 // Launch without identity — worker can bootstrap itself
-                tmux::send_literal(&config.session_name, 0, pane_index, &worker_model_cmd)?;
+                let launch_cmd = format!("{}{worker_model_cmd}", voxherd_prefix());
+                tmux::send_literal(&config.session_name, 0, pane_index, &launch_cmd)?;
                 tmux::send_keys(&config.session_name, 0, pane_index, "Enter")?;
             }
         }
@@ -1059,6 +1084,16 @@ fn shell_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_voxherd_prefix_mutes_by_default() {
+        // Default (env unset) mutes; ORCH_MUTE_VOXHERD=0/false/no/off disables.
+        let p = voxherd_prefix();
+        match std::env::var("ORCH_MUTE_VOXHERD").ok().as_deref() {
+            Some("0") | Some("false") | Some("no") | Some("off") => assert_eq!(p, ""),
+            _ => assert_eq!(p, "VOXHERD_QUIET=1 "),
+        }
+    }
 
     #[test]
     fn test_compute_grid_dimensions() {

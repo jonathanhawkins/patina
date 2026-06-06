@@ -308,6 +308,11 @@ pub struct EditorState {
     /// Whether the scene has unsaved modifications.
     pub scene_modified: bool,
     pub selected_nodes: Vec<NodeId>,
+    /// Inspector navigation history: the stack of previously inspected nodes,
+    /// with `inspector_history_index` pointing at the current position. Drives
+    /// the inspector Back/Forward buttons.
+    pub inspector_history: Vec<NodeId>,
+    pub inspector_history_index: usize,
     /// pat-didnj: Monotonic per-node version counter for optimistic concurrency
     /// control on the PATCH endpoint. Missing entries are treated as version 0.
     pub node_versions: HashMap<NodeId, u64>,
@@ -448,6 +453,13 @@ pub struct SceneTab {
     pub name: String,
     /// Whether the scene has unsaved changes.
     pub modified: bool,
+    /// This scene's inspector navigation stack, saved when the tab is
+    /// deactivated and restored when it becomes active again so each open
+    /// scene keeps its own back/forward history. Mirrors
+    /// `EditorState.inspector_history`/`inspector_history_index`.
+    pub inspector_history: Vec<NodeId>,
+    /// Cursor into `inspector_history` for this scene's nav stack.
+    pub inspector_history_index: usize,
 }
 
 /// Viewport tool modes for the editor.
@@ -641,6 +653,8 @@ impl EditorState {
             scene_modified: false,
             texture_cache: TextureCache::default(),
             selected_nodes: Vec::new(),
+            inspector_history: Vec::new(),
+            inspector_history_index: 0,
             node_versions: HashMap::new(),
             event_subscribers: Vec::new(),
             clipboard: Vec::new(),
@@ -709,6 +723,8 @@ impl EditorState {
                 path: String::new(),
                 name: "Untitled".to_string(),
                 modified: false,
+                inspector_history: Vec::new(),
+                inspector_history_index: 0,
             }],
             active_tab_index: 0,
             create_node_dialog: {
@@ -875,6 +891,8 @@ pub struct EditorServerHandle {
     viewport_cache: Arc<ViewportCache>,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Actual TCP port the server bound to (resolved when started with `0`).
+    port: u16,
 }
 
 /// pat-vxejb: Per-token rate limiter for the editor HTTP server.
@@ -1180,24 +1198,43 @@ impl EditorServerHandle {
         let limiter_clone = Arc::clone(&limiter);
         let cors_clone = Arc::clone(&cors);
         let idem_clone = Arc::clone(&idem);
-        let thread = thread::spawn(move || {
-            run_server(
-                state_clone,
-                cache_clone,
-                auth_clone,
-                limiter_clone,
-                cors_clone,
-                idem_clone,
-                running_clone,
-                port,
-            );
+        // Bind synchronously here (not inside the spawned thread) so the port is
+        // claimed before we return — eliminating the probe-then-rebind gap in
+        // which two concurrent tests could grab the same ephemeral port and
+        // cross their HTTP clients onto each other's server. `port == 0` binds an
+        // OS-assigned ephemeral port; the actual port is read back and exposed
+        // via `port()`.
+        let (listener, bound_port) = match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => {
+                let p = l.local_addr().map(|a| a.port()).unwrap_or(port);
+                (Some(l), p)
+            }
+            Err(e) => {
+                tracing::error!("Failed to bind editor server on port {port}: {e}");
+                (None, port)
+            }
+        };
+        let thread = listener.map(move |listener| {
+            thread::spawn(move || {
+                run_server(
+                    state_clone,
+                    cache_clone,
+                    auth_clone,
+                    limiter_clone,
+                    cors_clone,
+                    idem_clone,
+                    running_clone,
+                    listener,
+                );
+            })
         });
 
         Self {
             state,
             viewport_cache,
             running,
-            thread: Some(thread),
+            thread,
+            port: bound_port,
         }
     }
 
@@ -1221,6 +1258,12 @@ impl EditorServerHandle {
         &self.state
     }
 
+    /// The actual TCP port the server bound to. When started with `port == 0`
+    /// this is the OS-assigned ephemeral port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Signals the server to stop and waits for the thread to finish.
     pub fn stop(mut self) {
         self.running.store(false, Ordering::SeqCst);
@@ -1238,15 +1281,8 @@ fn run_server(
     cors_allowlist: Arc<CorsAllowlist>,
     idempotency: Arc<IdempotencyCache>,
     running: Arc<AtomicBool>,
-    port: u16,
+    listener: TcpListener,
 ) {
-    let listener = match TcpListener::bind(format!("127.0.0.1:{port}")) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind editor server on port {port}: {e}");
-            return;
-        }
-    };
     // Non-blocking so we can check the running flag, but we use a tight
     // accept loop with minimal sleep to avoid missing connections.
     listener
@@ -1659,6 +1695,7 @@ fn handle_connection(
         ("GET", "/api/capabilities") => api_get_capabilities(&mut stream),
         ("GET", "/api/scene") => api_get_scene(state, &mut stream),
         ("GET", "/api/node/signals") => api_get_node_signals(state, &req.query, &mut stream),
+        ("GET", "/api/node/warnings") => api_get_node_warnings(state, &req.query, &mut stream),
         ("GET", "/api/node/script") => api_get_node_script(state, &req.query, &mut stream),
         ("GET", p) if p.starts_with("/api/node/") && req.method == "GET" => {
             // Extract node ID from /api/node/<id>
@@ -1666,12 +1703,29 @@ fn handle_connection(
             api_get_node(state, id_str, &mut stream);
         }
         ("GET", "/api/selected") => api_get_selected(state, &mut stream),
+        ("GET", "/api/inspector/header") => api_inspector_header(state, &mut stream),
+        ("POST", "/api/inspector/back") => api_inspector_back(state, &mut stream),
+        ("POST", "/api/inspector/forward") => api_inspector_forward(state, &mut stream),
+        ("GET", "/api/inspector/history") => api_inspector_history_list(state, &mut stream),
+        ("POST", "/api/inspector/history/select") => {
+            api_inspector_history_select(state, &req.body, &mut stream)
+        }
         ("GET", "/api/viewport") => api_get_viewport_bmp(viewport_cache, &mut stream),
         ("GET", "/api/viewport/png") => api_get_viewport_png(viewport_cache, &mut stream),
         ("POST", "/api/node/add") => api_add_node(state, &req.body, &mut stream),
         ("POST", "/api/node/delete") => api_delete_node(state, &req.body, &mut stream),
         ("POST", "/api/node/select") => api_select_node(state, &req.body, &mut stream),
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/change_type") => api_change_node_type(state, &req.body, &mut stream),
+        ("POST", "/api/node/editable_children") => {
+            api_set_editable_children(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/node/make_local") => api_make_local(state, &req.body, &mut stream),
+        ("POST", "/api/node/lock") => api_set_node_lock(state, &req.body, &mut stream),
+        ("POST", "/api/node/open_scene") => api_open_node_scene(state, &req.body, &mut stream),
+        ("POST", "/api/node/open_script") => api_open_node_script(state, &req.body, &mut stream),
+        ("POST", "/api/node/group") => api_set_group(state, &req.body, &mut stream),
+        ("POST", "/api/node/unique_name") => api_set_unique_name(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
         ("POST", "/api/node/create_dialog") => api_create_dialog(state, &req.body, &mut stream),
@@ -1701,11 +1755,15 @@ fn handle_connection(
         ("GET", "/api/viewport/zoom_pan") => api_get_zoom_pan(state, &mut stream),
         ("POST", "/api/viewport/zoom") => api_set_zoom(state, &req.body, &mut stream),
         ("POST", "/api/viewport/pan") => api_set_pan(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/pan_by") => api_pan_by(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/frame_selection") => api_frame_selection(state, &mut stream),
         ("GET", "/api/logs") => api_get_logs(state, &mut stream),
         ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
         ("GET", "/api/filesystem") => api_get_filesystem(&req.query, &mut stream),
         ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
         ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
+        // pat-yxe4s: SCRIPT main-screen view for the selected node.
+        ("GET", "/api/script/main_view") => api_script_main_view(state, &req.query, &mut stream),
         ("POST", "/api/script/save") => api_save_script(&req.body, &mut stream),
         ("POST", "/api/node/signals/connect") => api_connect_signal(state, &req.body, &mut stream),
         ("POST", "/api/node/groups/add") => api_add_group(state, &req.body, &mut stream),
@@ -1830,8 +1888,11 @@ fn handle_connection(
         // pat-dj6: Editor mode
         ("POST", "/api/editor/mode") => api_set_editor_mode(state, &req.body, &mut stream),
         ("GET", "/api/editor/mode") => api_get_editor_mode(state, &mut stream),
+        ("GET", "/api/editor/main_view") => api_editor_main_view(state, &mut stream),
         // pat-e0heb: Scene tabs
         ("GET", "/api/scene/tabs") => api_get_scene_tabs(state, &mut stream),
+        // pat-w1ub4: Scene > New Scene
+        ("POST", "/api/scene/new") => api_new_scene(state, &mut stream),
         ("POST", "/api/scene/tabs/open") => api_open_scene_tab(state, &req.body, &mut stream),
         ("POST", "/api/scene/tabs/close") => api_close_scene_tab(state, &req.body, &mut stream),
         ("POST", "/api/scene/tabs/switch") => api_switch_scene_tab(state, &req.body, &mut stream),
@@ -1847,6 +1908,9 @@ fn handle_connection(
         ("POST", "/api/project_settings") => {
             api_set_project_settings(state, &req.body, &mut stream)
         }
+        // pat-db37w: Project Settings > Input Map tab
+        ("GET", "/api/input_map") => api_get_input_map(state, &mut stream),
+        ("POST", "/api/input_map") => api_set_input_map(state, &req.body, &mut stream),
         // pat-flr: Filesystem operations
         ("POST", "/api/filesystem/rename") => api_filesystem_rename(&req.body, &mut stream),
         ("POST", "/api/filesystem/delete") => api_filesystem_delete(&req.body, &mut stream),
@@ -2434,9 +2498,56 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
     let is_instance = !matches!(node.get_property("_instance_source"), Variant::Nil)
         || !matches!(node.get_property("_instance"), Variant::Nil);
 
+    // The recorded source path of an instanced scene, surfaced so the
+    // scene-tree instance indicator can show where the instance came from.
+    let instance_path = match node.get_property("_instance_source") {
+        Variant::String(ref s) if !s.is_empty() => s.clone(),
+        _ => String::new(),
+    };
+
+    // Whether an instance's internal nodes are exposed for editing
+    // ("Editable Children"). Only meaningful for instanced nodes.
+    let editable_children = matches!(node.get_property("_editable_children"), Variant::Bool(true));
+
+    // Whether the node is edit-locked: locked nodes show the lock badge and
+    // cannot be picked in the viewport. Honor both the Godot-canonical
+    // `_edit_lock_` meta and the legacy `_locked` flag.
+    let locked = matches!(node.get_property("_edit_lock_"), Variant::Bool(true))
+        || matches!(node.get_property("_locked"), Variant::Bool(true));
+
+    // Whether the node groups its children for selection: grouped nodes show the
+    // group badge and a click on any descendant in the viewport selects this
+    // node instead. Stored as the Godot-canonical `_edit_group_` meta.
+    let grouped = matches!(node.get_property("_edit_group_"), Variant::Bool(true));
+
+    // Unique-name-in-owner (`%`) badge: nodes flagged "Access as Unique Name"
+    // (the `_unique_name_in_owner` meta) show the `%` indicator. A duplicate
+    // unique name among nodes in the same owner (this single-scene tree) is
+    // surfaced as a collision warning so the UI can flag it.
+    let unique_name_in_owner =
+        matches!(node.get_property("_unique_name_in_owner"), Variant::Bool(true));
+    let unique_name_collision = unique_name_in_owner && {
+        let my_name = node.name();
+        tree.all_nodes_in_tree_order()
+            .into_iter()
+            .filter(|&other| other != node_id)
+            .any(|other| {
+                tree.get_node(other).map_or(false, |o| {
+                    matches!(o.get_property("_unique_name_in_owner"), Variant::Bool(true))
+                        && o.name() == my_name
+                })
+            })
+    };
+
     // Detect scripts: via _script_path property or attached ScriptInstance.
     let has_script =
         !matches!(node.get_property("_script_path"), Variant::Nil) || tree.has_script(node_id);
+    // The attached script's path, surfaced for the script badge's open-script
+    // action. Empty when the script has no recorded path.
+    let script_path = match node.get_property("_script_path") {
+        Variant::String(p) if !p.is_empty() => p,
+        _ => String::new(),
+    };
 
     // Detect signal connections.
     let has_signals = match node.get_property("signal_connections") {
@@ -2466,7 +2577,14 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
         "path": path,
         "visible": visible,
         "is_instance": is_instance,
+        "instance_path": instance_path,
+        "editable_children": editable_children,
+        "locked": locked,
+        "grouped": grouped,
+        "unique_name_in_owner": unique_name_in_owner,
+        "unique_name_collision": unique_name_collision,
         "has_script": has_script,
+        "script_path": script_path,
         "has_signals": has_signals,
         "groups": all_groups,
         "children": children
@@ -2626,6 +2744,10 @@ fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStr
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
     state.scene_modified = true;
+    // Focus the newly created child in the scene tree, matching Godot's
+    // "Add Child Node" behavior where the new node becomes the selection.
+    state.selected_node = Some(created_id);
+    state.selected_nodes = vec![created_id];
     state.add_log(
         "info",
         format!("Added {} node '{}'", class_name_str, name_str),
@@ -2635,7 +2757,11 @@ fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStr
     send_json(stream, &json);
 }
 
-/// `POST /api/node/delete` — removes a node from the tree.
+/// `POST /api/node/delete` — removes one or more nodes (and their subtrees)
+/// from the tree. Accepts either a single `node_id` or a `node_ids` array for
+/// multi-selection delete. Removing a node also removes its full subtree (see
+/// `SceneTree::remove_node`), so no descendants are left orphaned. The current
+/// selection is cleared, since the selected nodes no longer exist.
 fn api_delete_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -2645,48 +2771,71 @@ fn api_delete_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         }
     };
 
-    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
-        Some(v) => v,
-        None => {
-            send_error(stream, 400, "missing node_id");
-            return;
+    // Collect target raw ids: multi-select via `node_ids`, else a single
+    // `node_id` for backward compatibility.
+    let mut raw_ids: Vec<u64> = Vec::new();
+    if let Some(arr) = parsed.get("node_ids").and_then(|v| v.as_array()) {
+        for iv in arr {
+            if let Some(r) = iv.as_u64() {
+                raw_ids.push(r);
+            }
         }
-    };
+    } else if let Some(r) = parsed.get("node_id").and_then(|v| v.as_u64()) {
+        raw_ids.push(r);
+    }
 
-    let mut state = state.lock().unwrap();
-    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
-        Some(id) => id,
-        None => {
-            send_error(stream, 404, "node not found");
-            return;
-        }
-    };
-
-    // Get node info for undo.
-    let (name, class_name) = {
-        let node = state.scene_tree.get_node(node_id).unwrap();
-        (node.name().to_string(), node.class_name().to_string())
-    };
-
-    let log_name = name.clone();
-    let mut cmd = EditorCommand::RemoveNode {
-        node_id,
-        parent_id: None,
-        name,
-        class_name,
-    };
-
-    if let Err(e) = cmd.execute(&mut state.scene_tree) {
-        send_error(stream, 500, &e.to_string());
+    if raw_ids.is_empty() {
+        send_error(stream, 400, "missing node_id or node_ids");
         return;
     }
 
-    state.undo_stack.push(cmd);
+    let mut state = state.lock().unwrap();
+
+    // Resolve to NodeIds, deduped and order-preserving.
+    let mut targets: Vec<NodeId> = Vec::new();
+    for r in raw_ids {
+        if let Some(id) = find_node_by_raw_id(&state.scene_tree, r) {
+            if !targets.contains(&id) {
+                targets.push(id);
+            }
+        }
+    }
+    if targets.is_empty() {
+        send_error(stream, 404, "node not found");
+        return;
+    }
+
+    let mut deleted = 0usize;
+    for node_id in targets {
+        // With multi-select, a target may already have been removed as part of
+        // an earlier target's subtree (ancestor + descendant both selected).
+        let (name, class_name) = match state.scene_tree.get_node(node_id) {
+            Some(node) => (node.name().to_string(), node.class_name().to_string()),
+            None => continue,
+        };
+        let log_name = name.clone();
+        let mut cmd = EditorCommand::RemoveNode {
+            node_id,
+            parent_id: None,
+            name,
+            class_name,
+        };
+        if let Err(e) = cmd.execute(&mut state.scene_tree) {
+            send_error(stream, 500, &e.to_string());
+            return;
+        }
+        state.undo_stack.push(cmd);
+        deleted += 1;
+        state.add_log("info", format!("Deleted node '{}'", log_name));
+    }
+
     state.redo_stack.clear();
     state.scene_modified = true;
-    state.add_log("info", format!("Deleted node '{}'", log_name));
+    // The deleted nodes no longer exist; clear the selection.
+    state.selected_node = None;
+    state.selected_nodes.clear();
 
-    send_json(stream, r#"{"ok":true}"#);
+    send_json(stream, &format!(r#"{{"ok":true,"deleted":{}}}"#, deleted));
 }
 
 /// `POST /api/node/select` — selects a node.
@@ -2718,7 +2867,48 @@ fn api_select_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
 
     state.selected_node = Some(node_id);
     state.selected_nodes = vec![node_id];
+    push_inspector_history(&mut state, node_id);
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Records `node_id` as the newly inspected object in the inspector navigation
+/// history, dropping any forward entries (a fresh inspection branches from the
+/// current position). Re-inspecting the current node is a no-op.
+fn push_inspector_history(state: &mut EditorState, node_id: NodeId) {
+    if !state.inspector_history.is_empty()
+        && state.inspector_history.get(state.inspector_history_index) == Some(&node_id)
+    {
+        return;
+    }
+    let keep = (state.inspector_history_index + 1).min(state.inspector_history.len());
+    state.inspector_history.truncate(keep);
+    state.inspector_history.push(node_id);
+    state.inspector_history_index = state.inspector_history.len() - 1;
+}
+
+/// Switches the active scene tab to `new_idx`, persisting the outgoing scene's
+/// inspector navigation stack into its tab and restoring the incoming scene's
+/// stack, so each open scene keeps its own back/forward history across tab
+/// switches. A no-op when `new_idx` is already active or out of range.
+fn switch_active_tab(state: &mut EditorState, new_idx: usize) {
+    if new_idx >= state.scene_tabs.len() || new_idx == state.active_tab_index {
+        return;
+    }
+    // Save the currently active scene's nav stack into its tab.
+    let cur_history = state.inspector_history.clone();
+    let cur_index = state.inspector_history_index;
+    if let Some(tab) = state.scene_tabs.get_mut(state.active_tab_index) {
+        tab.inspector_history = cur_history;
+        tab.inspector_history_index = cur_index;
+    }
+    // Activate the target tab and restore its saved nav stack.
+    state.active_tab_index = new_idx;
+    let (history, index) = match state.scene_tabs.get(new_idx) {
+        Some(tab) => (tab.inspector_history.clone(), tab.inspector_history_index),
+        None => (Vec::new(), 0),
+    };
+    state.inspector_history = history;
+    state.inspector_history_index = index;
 }
 
 /// `GET /api/selected` — returns the selected node's info.
@@ -2730,6 +2920,144 @@ fn api_get_selected(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             None => "null".to_string(),
         }
     };
+    send_json(stream, &json);
+}
+
+/// `GET /api/inspector/header` — the inspected-object header row (class icon +
+/// name + class label, matching Godot's EditorInspector). Reports the selected
+/// node's `name`, `class`, and scene `path`; `visible` is false when nothing is
+/// inspected so the header hides.
+fn api_inspector_header(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        match state.selected_node.and_then(|id| {
+            state.scene_tree.get_node(id).map(|n| (n, id))
+        }) {
+            Some((node, id)) => {
+                let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+                let name = esc(node.name());
+                let class = esc(node.class_name());
+                let path = esc(&state.scene_tree.node_path(id).unwrap_or_default());
+                format!(
+                    r#"{{"visible":true,"name":"{name}","class":"{class}","path":"{path}"}}"#
+                )
+            }
+            None => r#"{"visible":false}"#.to_string(),
+        }
+    };
+    send_json(stream, &json);
+}
+
+/// Serializes the inspector navigation state: the current selection and
+/// whether Back/Forward are enabled (i.e. there are entries on either side of
+/// the history cursor).
+fn inspector_nav_json(state: &EditorState) -> String {
+    let len = state.inspector_history.len();
+    let idx = state.inspector_history_index;
+    let can_back = len > 0 && idx > 0;
+    let can_forward = len > 0 && idx + 1 < len;
+    let selected = match state.selected_node {
+        Some(id) => id.raw().to_string(),
+        None => "null".to_string(),
+    };
+    format!(r#"{{"selected":{selected},"can_back":{can_back},"can_forward":{can_forward}}}"#)
+}
+
+/// `POST /api/inspector/back` — re-inspects the previous object in the
+/// navigation history (no-op when already at the start).
+fn api_inspector_back(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.inspector_history.is_empty() && state.inspector_history_index > 0 {
+        state.inspector_history_index -= 1;
+        let id = state.inspector_history[state.inspector_history_index];
+        state.selected_node = Some(id);
+        state.selected_nodes = vec![id];
+    }
+    let json = inspector_nav_json(&state);
+    send_json(stream, &json);
+}
+
+/// `POST /api/inspector/forward` — re-inspects the next object in the
+/// navigation history (no-op when already at the end).
+fn api_inspector_forward(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.inspector_history.is_empty()
+        && state.inspector_history_index + 1 < state.inspector_history.len()
+    {
+        state.inspector_history_index += 1;
+        let id = state.inspector_history[state.inspector_history_index];
+        state.selected_node = Some(id);
+        state.selected_nodes = vec![id];
+    }
+    let json = inspector_nav_json(&state);
+    send_json(stream, &json);
+}
+
+/// `GET /api/inspector/history` — lists recently inspected objects (the
+/// history-dropdown contents), most-recent-first, each with `id`, `name`, and
+/// `class`.
+fn api_inspector_history_list(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let items: Vec<String> = state
+            .inspector_history
+            .iter()
+            .rev()
+            .filter_map(|&id| {
+                state.scene_tree.get_node(id).map(|n| {
+                    format!(
+                        r#"{{"id":{},"name":"{}","class":"{}"}}"#,
+                        id.raw(),
+                        esc(n.name()),
+                        esc(n.class_name())
+                    )
+                })
+            })
+            .collect();
+        format!(r#"{{"history":[{}]}}"#, items.join(","))
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/inspector/history/select` — re-inspects a history entry by id.
+/// If the node is already in the history it moves the cursor there (so Back/
+/// Forward stay coherent); otherwise it records a fresh inspection.
+fn api_inspector_history_select(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.inspector_history.iter().position(|&n| n == node_id) {
+        Some(pos) => state.inspector_history_index = pos,
+        None => push_inspector_history(&mut state, node_id),
+    }
+    state.selected_node = Some(node_id);
+    state.selected_nodes = vec![node_id];
+    let json = inspector_nav_json(&state);
     send_json(stream, &json);
 }
 
@@ -2774,14 +3102,25 @@ fn api_reparent_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         }
     };
 
+    // Optional: preserve the node's global transform across the reparent
+    // (the Reparent dialog's "Keep Global Transform" option). Defaults off.
+    let keep_transform = parsed
+        .get("keep_transform")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let mut cmd = EditorCommand::ReparentNode {
         node_id,
         new_parent_id,
         old_parent_id: None,
+        keep_transform,
+        saved_transform: None,
     };
 
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
-        send_error(stream, 500, &e.to_string());
+        // Reparent execute failures are client errors (e.g. attempting to
+        // reparent a node into its own descendant), not server faults.
+        send_error(stream, 400, &e.to_string());
         return;
     }
 
@@ -2789,6 +3128,436 @@ fn api_reparent_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     state.redo_stack.clear();
 
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/change_type` — converts a node to a different class in
+/// place. The node keeps its identity (id), name, children, and property bag,
+/// so any properties common to both types carry over automatically.
+fn api_change_node_type(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let new_class = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let old_class = match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            let old = n.class_name().to_string();
+            n.set_class_name(&new_class);
+            old
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Changed node type '{}' -> '{}'", old_class, new_class),
+    );
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/editable_children` — toggles whether an instanced node's
+/// internal (child) nodes are exposed for editing. Sets the `_editable_children`
+/// flag, surfaced as `editable_children` in the scene tree JSON.
+fn api_set_editable_children(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    // Default to enabling; callers may pass `enabled: false` to hide again.
+    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_editable_children", Variant::Bool(enabled));
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"editable_children":{enabled}}}"#));
+}
+
+/// `POST /api/node/make_local` — converts an instanced node into an owned local
+/// subtree by clearing its instance markers (`_instance_source` / `_instance`).
+/// The node and its children stay in place; it simply stops being an instance.
+fn api_make_local(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_instance_source", Variant::Nil);
+            n.set_property("_instance", Variant::Nil);
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    state.add_log("info", "Made instanced node local".to_string());
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/lock` — toggle a node's edit-lock. Body:
+/// `{"node_id": <id>, "locked": <bool>}` (defaults to locking when omitted).
+/// Sets the Godot-canonical `_edit_lock_` meta. A locked node renders the lock
+/// badge (surfaced as `locked` in the scene tree JSON) and is unpickable in the
+/// viewport (see `api_viewport_click`).
+fn api_set_node_lock(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let locked = parsed.get("locked").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_edit_lock_", Variant::Bool(locked));
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"locked":{locked}}}"#));
+}
+
+/// `POST /api/node/open_scene` — "activate instance badge": opens the source
+/// `.tscn` of an instanced node in a scene tab (switching to it if already
+/// open). The node must be an instance, i.e. carry a non-empty
+/// `_instance_source` property. Returns the routed source path.
+fn api_open_node_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    // Resolve the instance's source scene path.
+    let source = match state.scene_tree.get_node(node_id) {
+        Some(n) => match n.get_property("_instance_source") {
+            Variant::String(p) if !p.trim().is_empty() => p,
+            _ => {
+                send_error(stream, 400, "node is not an instanced scene");
+                return;
+            }
+        },
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let source_esc = source.replace('\\', "\\\\").replace('"', "\\\"");
+
+    // Switch to the source scene's tab if it's already open.
+    if let Some(idx) = state
+        .scene_tabs
+        .iter()
+        .position(|t| !t.path.is_empty() && t.path == source)
+    {
+        switch_active_tab(&mut state, idx);
+        let tab_id = state.scene_tabs[idx].id;
+        send_json(
+            stream,
+            &format!(
+                r#"{{"ok":true,"path":"{source_esc}","tab_id":{tab_id},"switched":true}}"#
+            ),
+        );
+        return;
+    }
+
+    // Otherwise open a new tab for the source scene.
+    let name = source.rsplit('/').next().unwrap_or(&source).to_string();
+    let tab_id = state.next_tab_id();
+    state.scene_tabs.push(SceneTab {
+        id: tab_id,
+        path: source.clone(),
+        name,
+        modified: false,
+        inspector_history: Vec::new(),
+        inspector_history_index: 0,
+    });
+    let new_idx = state.scene_tabs.len() - 1;
+    switch_active_tab(&mut state, new_idx);
+    state.add_log("info", format!("Opened instanced scene '{}'", source));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"path":"{source_esc}","tab_id":{tab_id}}}"#),
+    );
+}
+
+/// `POST /api/node/open_script` — "activate script badge": routes an
+/// open-script request for the node's attached script (its `_script_path`).
+/// The node must have a non-empty `_script_path`. Returns the routed path.
+fn api_open_node_script(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let script_path = match state.scene_tree.get_node(node_id) {
+        Some(n) => match n.get_property("_script_path") {
+            Variant::String(p) if !p.trim().is_empty() => p,
+            _ => {
+                send_error(stream, 400, "node has no attached script");
+                return;
+            }
+        },
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    state.add_log("info", format!("Opened script '{}'", script_path));
+    let path_esc = script_path.replace('\\', "\\\\").replace('"', "\\\"");
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"path":"{path_esc}"}}"#),
+    );
+}
+
+/// `POST /api/node/group` — toggles whether a node groups its children for
+/// selection. Sets the Godot-canonical `_edit_group_` meta; defaults to
+/// enabling. Surfaced as `grouped` in the scene tree JSON and honored by the
+/// viewport click handler (a click on a grouped node's descendant selects the
+/// grouped ancestor instead).
+fn api_set_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_edit_group_", Variant::Bool(enabled));
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"grouped":{enabled}}}"#));
+}
+
+/// `POST /api/node/unique_name` — toggles a node's "Access as Unique Name"
+/// (`%`) flag. Sets the `_unique_name_in_owner` meta; defaults to enabling.
+/// Surfaced as `unique_name_in_owner` in the scene tree JSON, with a
+/// `unique_name_collision` warning when another unique-named node in the same
+/// owner shares this node's name.
+fn api_set_unique_name(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_unique_name_in_owner", Variant::Bool(enabled));
+            // Keep the canonical `unique_name` flag in sync with the meta so
+            // `%Name` path resolution and packed-scene serialization (both of
+            // which read `is_unique_name()`) reflect the editor toggle.
+            n.set_unique_name(enabled);
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"unique_name_in_owner":{enabled}}}"#));
+}
+
+/// Resolves the selection target for a viewport click: walks up from `node_id`
+/// and returns the topmost ancestor with the `_edit_group_` meta set, so a
+/// click on a grouped node's descendant selects the grouped ancestor. Returns
+/// `node_id` unchanged when no ancestor is grouped.
+fn resolve_group_selection(tree: &SceneTree, node_id: NodeId) -> NodeId {
+    let mut target = node_id;
+    let mut current = tree.get_node(node_id).and_then(|n| n.parent());
+    while let Some(ancestor) = current {
+        if matches!(
+            tree.get_node(ancestor).map(|n| n.get_property("_edit_group_")),
+            Some(Variant::Bool(true))
+        ) {
+            target = ancestor;
+        }
+        current = tree.get_node(ancestor).and_then(|n| n.parent());
+    }
+    target
 }
 
 /// `POST /api/node/rename` — renames a node.
@@ -2816,6 +3585,12 @@ fn api_rename_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         }
     };
 
+    // Reject empty / whitespace-only names.
+    if new_name.trim().is_empty() {
+        send_error(stream, 400, "name cannot be empty");
+        return;
+    }
+
     let mut state = state.lock().unwrap();
     let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
         Some(id) => id,
@@ -2825,10 +3600,32 @@ fn api_rename_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         }
     };
 
-    let new_name_log = new_name.clone();
+    // Collision-safe uniquification: if a sibling already uses the requested
+    // name, auto-suffix it (e.g. `Foo` -> `Foo2`).
+    let unique_name = match state.scene_tree.get_node(node_id).and_then(|n| n.parent()) {
+        Some(parent_id) => {
+            let siblings: Vec<String> = state
+                .scene_tree
+                .get_node(parent_id)
+                .map(|p| {
+                    p.children()
+                        .iter()
+                        .filter(|&&c| c != node_id)
+                        .filter_map(|&c| {
+                            state.scene_tree.get_node(c).map(|n| n.name().to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            unique_sibling_name(&new_name, &siblings)
+        }
+        None => new_name.clone(),
+    };
+
+    let new_name_log = unique_name.clone();
     let mut cmd = EditorCommand::RenameNode {
         node_id,
-        new_name,
+        new_name: unique_name,
         old_name: String::new(),
     };
 
@@ -2898,6 +3695,12 @@ fn api_duplicate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
 
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
+    state.scene_modified = true;
+    // Focus the newly created duplicate.
+    if let Some(id) = find_node_by_raw_id(&state.scene_tree, root_created) {
+        state.selected_node = Some(id);
+        state.selected_nodes = vec![id];
+    }
 
     let json = format!(r#"{{"id":{root_created}}}"#);
     send_json(stream, &json);
@@ -3237,11 +4040,13 @@ fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     };
 
-    // Swap in the parent's children list.
+    // Swap in the parent's children list. (Boundary no-ops returned early
+    // above without reaching here, so they do not mark the scene modified.)
     if let Some(parent) = state.scene_tree.get_node_mut(parent_id) {
         let children = parent.children_mut();
         children.swap(idx, new_idx);
     }
+    state.scene_modified = true;
 
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -3669,6 +4474,19 @@ fn api_viewport_click(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     let hit =
         crate::scene_renderer::hit_test_with_zoom_pan(&state.scene_tree, vw, vh, zoom, pan, x, y);
 
+    // Edit-locked nodes are unpickable in the viewport: drop a locked hit so
+    // clicking it selects nothing (matches Godot's lock behavior).
+    let hit = hit.filter(|&id| {
+        state.scene_tree.get_node(id).map_or(true, |n| {
+            !(matches!(n.get_property("_edit_lock_"), Variant::Bool(true))
+                || matches!(n.get_property("_locked"), Variant::Bool(true)))
+        })
+    });
+
+    // Children-selection lock: a click on a grouped node's descendant selects
+    // the grouped ancestor instead of the descendant.
+    let hit = hit.map(|id| resolve_group_selection(&state.scene_tree, id));
+
     state.selected_node = hit;
     state.selected_nodes = hit.into_iter().collect();
 
@@ -3875,6 +4693,92 @@ fn api_set_pan(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStre
     let json = format!(
         r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
         state.viewport_zoom, x, y
+    );
+    send_json(stream, &json);
+}
+
+/// `POST /api/viewport/pan_by` — pans the viewport by a cursor delta
+/// (middle-drag / space-drag): accumulates `dx`/`dy` onto the current pan
+/// offset. Panning never changes the current selection.
+fn api_pan_by(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let dx = parsed.get("dx").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let dy = parsed.get("dy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut state = state.lock().unwrap();
+    state.viewport_pan = (state.viewport_pan.0 + dx, state.viewport_pan.1 + dy);
+    let json = format!(
+        r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
+        state.viewport_zoom, state.viewport_pan.0, state.viewport_pan.1
+    );
+    send_json(stream, &json);
+}
+
+/// `POST /api/viewport/frame_selection` — frame-selection (F): centers the
+/// current selection in the viewport and adjusts zoom to fit its bounds. With
+/// no selection it frames the scene origin at the default zoom.
+fn api_frame_selection(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    let vw = s.viewport_width as f32;
+    let vh = s.viewport_height as f32;
+
+    // Bounding box of the selected nodes' positions; fall back to the origin
+    // when nothing is selected.
+    let mut found = false;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &nid in &s.selected_nodes {
+        if let Some(n) = s.scene_tree.get_node(nid) {
+            let p = crate::scene_renderer::extract_position(n);
+            found = true;
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+    }
+    let (center_x, center_y, bounds_w, bounds_h) = if found {
+        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, max_x - min_x, max_y - min_y)
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+
+    // Zoom to fit the bounds with a small margin; a point/degenerate bounds
+    // keeps the default zoom.
+    const MARGIN: f32 = 1.2;
+    let zoom = if bounds_w > 0.0 || bounds_h > 0.0 {
+        let zx = if bounds_w > 0.0 {
+            vw / (bounds_w * MARGIN)
+        } else {
+            f32::INFINITY
+        };
+        let zy = if bounds_h > 0.0 {
+            vh / (bounds_h * MARGIN)
+        } else {
+            f32::INFINITY
+        };
+        zx.min(zy).clamp(0.1, 16.0)
+    } else {
+        1.0
+    };
+
+    // Pan so the selection center lands at the viewport center, accounting for
+    // the scene-centered camera offset.
+    let scene_bounds = crate::scene_renderer::compute_scene_bounds(&s.scene_tree);
+    let scene_cx = scene_bounds.position.x + scene_bounds.size.x / 2.0;
+    let scene_cy = scene_bounds.position.y + scene_bounds.size.y / 2.0;
+    let pan_x = ((scene_cx - center_x) * zoom) as f64;
+    let pan_y = ((scene_cy - center_y) * zoom) as f64;
+
+    s.viewport_zoom = zoom as f64;
+    s.viewport_pan = (pan_x, pan_y);
+    let json = format!(
+        r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
+        s.viewport_zoom, pan_x, pan_y
     );
     send_json(stream, &json);
 }
@@ -4118,10 +5022,11 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/api/vcs/diff", "[\"path?\"]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/vcs/log", "[\"limit?\"]", "null", "{\"type\":\"object\"}"),
     ("POST", "/api/node/add", "[]", "{\"parent_id\":\"number\",\"name\":\"string\",\"class\":\"string\"}", "{\"type\":\"object\"}"),
-    ("POST", "/api/node/delete", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/delete", "[]", "{\"node_id\":\"number\",\"node_ids\":\"array\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/select", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/rename", "[]", "{\"node_id\":\"number\",\"new_name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/reparent", "[]", "{\"node_id\":\"number\",\"new_parent_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/change_type", "[]", "{\"node_id\":\"number\",\"class_name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/duplicate", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/property/set", "[]", "{\"node_id\":\"number\",\"name\":\"string\",\"value\":\"any\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/undo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
@@ -4158,6 +5063,41 @@ fn api_get_capabilities(stream: &mut TcpStream) {
         routes.join(",")
     );
     send_json(stream, &json);
+}
+
+/// `GET /api/node/warnings?node_id=<id>` — returns the node's configuration
+/// warnings (from `_get_configuration_warnings`), driving the scene-tree
+/// warning triangle and its hover tooltip. `has_warning` is true when the
+/// list is non-empty.
+fn api_get_node_warnings(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let node_raw: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let warnings = state.scene_tree.node_configuration_warnings(node_id);
+    let items: Vec<String> = warnings
+        .iter()
+        .map(|w| format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"node_id":{node_raw},"has_warning":{},"warnings":[{}]}}"#,
+            !warnings.is_empty(),
+            items.join(",")
+        ),
+    );
 }
 
 /// `GET /api/filesystem` -- returns project files (.tscn, .gd, .tres) as a tree.
@@ -4837,6 +5777,22 @@ fn api_select_multi(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
                 state.selected_nodes.push(nid);
             }
         }
+        "range" => {
+            // Shift-select: select the contiguous span (in scene-tree order)
+            // between the active anchor (current focused node) and the target,
+            // inclusive. Falls back to a single selection if the anchor is gone.
+            let order = state.scene_tree.all_nodes_in_tree_order();
+            let anchor = state.selected_node.unwrap_or(nid);
+            let ai = order.iter().position(|&n| n == anchor);
+            let ti = order.iter().position(|&n| n == nid);
+            match (ai, ti) {
+                (Some(a), Some(t)) => {
+                    let (lo, hi) = if a <= t { (a, t) } else { (t, a) };
+                    state.selected_nodes = order[lo..=hi].to_vec();
+                }
+                _ => state.selected_nodes = vec![nid],
+            }
+        }
         _ => {
             state.selected_nodes = vec![nid];
         }
@@ -4905,6 +5861,24 @@ fn paste_clipboard_entry(
     Ok(new_id)
 }
 
+/// Pick a name not already used by `siblings`, appending/incrementing a numeric
+/// suffix (e.g. `Foo` → `Foo2` → `Foo3`). Used to uniquify pasted nodes.
+fn unique_sibling_name(base: &str, siblings: &[String]) -> String {
+    if !siblings.iter().any(|s| s == base) {
+        return base.to_string();
+    }
+    let stem = base.trim_end_matches(|c: char| c.is_ascii_digit());
+    let stem = if stem.is_empty() { base } else { stem };
+    let mut n = 2;
+    loop {
+        let candidate = format!("{stem}{n}");
+        if !siblings.iter().any(|s| s == &candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 fn api_copy_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = parse_json_body(body);
     let mut state = state.lock().unwrap();
@@ -4965,7 +5939,33 @@ fn api_paste_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     let mut ids = Vec::new();
     for e in &cb {
         match paste_clipboard_entry(&mut state.scene_tree, pid, e) {
-            Ok(i) => ids.push(i),
+            Ok(i) => {
+                // Uniquify the top-level pasted node's name among its new
+                // siblings (children keep their names, matching Godot).
+                let siblings: Vec<String> = state
+                    .scene_tree
+                    .get_node(pid)
+                    .map(|p| {
+                        p.children()
+                            .iter()
+                            .filter(|&&c| c != i)
+                            .filter_map(|&c| {
+                                state.scene_tree.get_node(c).map(|n| n.name().to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let base = state
+                    .scene_tree
+                    .get_node(i)
+                    .map(|n| n.name().to_string())
+                    .unwrap_or_default();
+                let unique = unique_sibling_name(&base, &siblings);
+                if let Some(n) = state.scene_tree.get_node_mut(i) {
+                    n.set_name(unique);
+                }
+                ids.push(i);
+            }
             Err(e) => {
                 send_error(stream, 500, &e.to_string());
                 return;
@@ -6035,6 +7035,7 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         tscn_source: source,
         created_ids: Vec::new(),
         root_id: None,
+        source_path: Some(path.clone()),
     };
 
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
@@ -6130,6 +7131,7 @@ fn api_viewport_drop(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
                 tscn_source: source,
                 created_ids: Vec::new(),
                 root_id: None,
+                source_path: Some(path.clone()),
             };
 
             if let Err(e) = cmd.execute(&mut state.scene_tree) {
@@ -7908,6 +8910,34 @@ fn api_get_editor_mode(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
     send_json(stream, &format!(r#"{{"mode":"{}"}}"#, s.editor_mode));
 }
 
+/// `GET /api/editor/main_view` -- the central main-screen view served for the
+/// CURRENT editor mode.
+///
+/// This is the server side of the main-screen mode switch: it routes the stored
+/// `editor_mode` through the [`MainScreenSwitcher`](crate::main_screen) so the
+/// served central view actually corresponds to the mode — a `Spatial3D`,
+/// `ScriptEditor`, `GamePreview`, or `AssetLibBrowser` component, distinct from
+/// the 2D `canvas_item_editor` — rather than the switch being cosmetic. The
+/// `is_2d_viewport` flag lets clients (and the e2e smoke test) assert that a
+/// non-2D mode is NOT still serving the 2D viewport.
+fn api_editor_main_view(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let mode = crate::EditorMode::from_str_key(&s.editor_mode).unwrap_or(crate::EditorMode::Canvas2D);
+    let component = crate::main_screen::MainScreenSwitcher::view_for(mode)
+        .component()
+        .component_id;
+    let is_2d_viewport = component == "canvas_item_editor";
+    send_json(
+        stream,
+        &format!(
+            r#"{{"mode":"{}","component_id":"{}","is_2d_viewport":{}}}"#,
+            mode.key(),
+            component,
+            is_2d_viewport
+        ),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // pat-e0heb: Scene tabs
 // ---------------------------------------------------------------------------
@@ -7970,7 +9000,7 @@ fn api_open_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         .iter()
         .position(|t| !t.path.is_empty() && t.path == path)
     {
-        s.active_tab_index = idx;
+        switch_active_tab(&mut s, idx);
         send_json(
             stream,
             &format!(
@@ -7986,8 +9016,11 @@ fn api_open_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         path,
         name,
         modified: false,
+        inspector_history: Vec::new(),
+        inspector_history_index: 0,
     });
-    s.active_tab_index = s.scene_tabs.len() - 1;
+    let new_idx = s.scene_tabs.len() - 1;
+    switch_active_tab(&mut s, new_idx);
     send_json(
         stream,
         &format!(
@@ -8019,10 +9052,34 @@ fn api_close_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         return;
     }
     if let Some(idx) = s.scene_tabs.iter().position(|t| t.id == tab_id) {
-        s.scene_tabs.remove(idx);
-        if s.active_tab_index >= s.scene_tabs.len() {
-            s.active_tab_index = s.scene_tabs.len() - 1;
+        // Persist the live nav stack into the active tab so every tab's saved
+        // history is current before we remove one and re-point the cursor.
+        let live_history = s.inspector_history.clone();
+        let live_index = s.inspector_history_index;
+        let active = s.active_tab_index;
+        if let Some(tab) = s.scene_tabs.get_mut(active) {
+            tab.inspector_history = live_history;
+            tab.inspector_history_index = live_index;
         }
+        s.scene_tabs.remove(idx);
+        // Keep the cursor on the same scene where possible: closing a tab
+        // before the active one shifts everything down by one; closing the
+        // active (or last) tab falls back to the new last tab.
+        let new_active = if idx < active {
+            active - 1
+        } else if active >= s.scene_tabs.len() {
+            s.scene_tabs.len() - 1
+        } else {
+            active
+        };
+        s.active_tab_index = new_active;
+        // Restore the now-active scene's nav stack into the live inspector.
+        let (history, index) = match s.scene_tabs.get(new_active) {
+            Some(tab) => (tab.inspector_history.clone(), tab.inspector_history_index),
+            None => (Vec::new(), 0),
+        };
+        s.inspector_history = history;
+        s.inspector_history_index = index;
         send_json(
             stream,
             &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, s.active_tab_index),
@@ -8044,7 +9101,7 @@ fn api_switch_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     let mut s = state.lock().unwrap();
     if let Some(tab_id) = parsed.get("tab_id").and_then(|v| v.as_u64()) {
         if let Some(idx) = s.scene_tabs.iter().position(|t| t.id == tab_id as u32) {
-            s.active_tab_index = idx;
+            switch_active_tab(&mut s, idx);
             send_json(
                 stream,
                 &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
@@ -8055,7 +9112,7 @@ fn api_switch_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     } else if let Some(index) = parsed.get("index").and_then(|v| v.as_u64()) {
         let idx = index as usize;
         if idx < s.scene_tabs.len() {
-            s.active_tab_index = idx;
+            switch_active_tab(&mut s, idx);
             send_json(
                 stream,
                 &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
@@ -8065,6 +9122,70 @@ fn api_switch_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
         }
     } else {
         send_error(stream, 400, "tab_id or index required");
+    }
+}
+
+/// `POST /api/scene/new` — create a fresh empty scene in a new tab.
+///
+/// Mirrors Godot's `Scene > New Scene`: it adds an "Untitled" tab backed by an
+/// empty scene tree (a single bare root with no children) and makes it active.
+/// The outgoing scene's live inspector navigation stack is persisted into its
+/// tab first so its history survives if the user switches back to it.
+fn api_new_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    // Persist the outgoing scene's nav stack into its tab before we swap trees.
+    let cur_history = s.inspector_history.clone();
+    let cur_index = s.inspector_history_index;
+    let active = s.active_tab_index;
+    if let Some(tab) = s.scene_tabs.get_mut(active) {
+        tab.inspector_history = cur_history;
+        tab.inspector_history_index = cur_index;
+    }
+    // Fresh empty scene: a bare root with no children. Drop any selection and
+    // nav history that referenced the previous scene's now-gone nodes.
+    s.scene_tree = SceneTree::new();
+    s.selected_node = None;
+    s.selected_nodes.clear();
+    s.inspector_history = Vec::new();
+    s.inspector_history_index = 0;
+    // A unique "Untitled" label so multiple unsaved scenes don't collide.
+    let name = unique_untitled_name(&s.scene_tabs);
+    let tab_id = s.next_tab_id();
+    s.scene_tabs.push(SceneTab {
+        id: tab_id,
+        path: String::new(),
+        name: name.clone(),
+        modified: false,
+        inspector_history: Vec::new(),
+        inspector_history_index: 0,
+    });
+    let new_idx = s.scene_tabs.len() - 1;
+    s.active_tab_index = new_idx;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"tab_id":{},"name":"{}","active_tab_index":{}}}"#,
+            tab_id,
+            name.replace('\\', "\\\\").replace('"', "\\\""),
+            new_idx
+        ),
+    );
+}
+
+/// Picks an unused `Untitled` label for a new scene tab: `Untitled` first, then
+/// `Untitled 2`, `Untitled 3`, … skipping labels already taken by open tabs.
+fn unique_untitled_name(tabs: &[SceneTab]) -> String {
+    let taken = |n: &str| tabs.iter().any(|t| t.name == n);
+    if !taken("Untitled") {
+        return "Untitled".to_string();
+    }
+    let mut i = 2;
+    loop {
+        let candidate = format!("Untitled {i}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        i += 1;
     }
 }
 
@@ -8147,6 +9268,81 @@ fn api_get_node_script(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mu
     let source = std::fs::read_to_string(&file_path).unwrap_or_default();
     let json = serde_json::json!({ "has_script": true, "path": script_path, "source": source });
     send_json(stream, &json.to_string());
+}
+
+/// `GET /api/script/main_view?node_id=<id>` — the SCRIPT main-screen view for a
+/// node. When the node has an attached script, returns the editable, syntax-
+/// highlighted code pane wired to save: the script's `path`, on-disk `source`,
+/// `editable: true`, the `save_endpoint` edits POST back to, and a `language`
+/// hint so the pane highlights. A node with no script returns `has_script:
+/// false` plus the empty `prompt` the pane shows in place of a code pane
+/// (pat-yxe4s).
+fn api_script_main_view(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw_id: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, raw_id) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = match s.scene_tree.get_node(nid) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let script_path = match node.get_property("_script_path") {
+        Variant::String(sp) if !sp.trim().is_empty() => sp,
+        _ => {
+            // No attached script: the pane shows the empty prompt instead of a
+            // code editor.
+            send_json(
+                stream,
+                &serde_json::json!({
+                    "has_script": false,
+                    "editable": false,
+                    "prompt": crate::script_main_view::EMPTY_PROMPT,
+                })
+                .to_string(),
+            );
+            return;
+        }
+    };
+    // Load the script source from disk (res:// resolves relative to cwd).
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let file_path = if let Some(stripped) = script_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&script_path)
+    };
+    let (source, exists) = match std::fs::read_to_string(&file_path) {
+        Ok(c) => (c, true),
+        Err(_) => (String::new(), false),
+    };
+    let lines = source.lines().count();
+    send_json(
+        stream,
+        &serde_json::json!({
+            "has_script": true,
+            "path": script_path,
+            "source": source,
+            "exists": exists,
+            "lines": lines,
+            "editable": true,
+            "language": "gdscript",
+            "save_endpoint": "/api/script/save",
+        })
+        .to_string(),
+    );
 }
 
 /// `GET /api/search?q=<query>` — searches all .gd script files for a string.
@@ -8409,6 +9605,69 @@ fn api_set_project_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream:
             s.project_environment_default = v.to_string();
         }
         serde_json::json!({ "ok": true }).to_string()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-db37w: Project Settings > Input Map tab (live wiring of systems_input_map)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/input_map` — returns the project's input map as JSON, built from
+/// the live `EditorState::input_map` via the [`InputMap`](crate::input_map::InputMap)
+/// model. This is what the Project Settings > Input Map tab loads.
+fn api_get_input_map(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let state = state.lock().unwrap();
+    let map = crate::input_map::InputMap::from_runtime_map(&state.input_map);
+    send_json(stream, &map.to_json());
+}
+
+/// `POST /api/input_map` — edits the project's input map in the running editor.
+///
+/// Body commands (used by the Input Map dialog):
+///   `{"action":"jump","keys":["Space"]}`  upsert an action bound to these keys
+///   `{"action":"jump","remove":true}`      remove the action
+///
+/// Edits go through the [`InputMap`](crate::input_map::InputMap) model and are
+/// projected back into `EditorState::input_map`, so the change takes effect at
+/// runtime immediately (`is_action_pressed`) and survives subsequent reads.
+fn api_set_input_map(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let action = match p.get("action").and_then(|v| v.as_str()) {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => {
+            send_error(stream, 400, "missing action");
+            return;
+        }
+    };
+
+    let json = {
+        let mut s = state.lock().unwrap();
+        let mut map = crate::input_map::InputMap::from_runtime_map(&s.input_map);
+        let remove = p.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
+        if remove {
+            map.remove_action(&action);
+        } else {
+            // Replace this action's bindings with exactly the requested keys.
+            map.remove_action(&action);
+            map.add_action(action.clone());
+            if let Some(keys) = p.get("keys").and_then(|v| v.as_array()) {
+                for key in keys.iter().filter_map(|k| k.as_str()) {
+                    map.bind(
+                        &action,
+                        crate::input_map::InputEvent::Key(key.to_string()),
+                    );
+                }
+            }
+        }
+        s.input_map = map.to_runtime_map();
+        map.to_json()
     };
     send_json(stream, &json);
 }
@@ -8893,7 +10152,6 @@ mod tests {
     }
 
     fn make_server() -> (EditorServerHandle, u16) {
-        let port = free_port();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut main = Node::new("Main", "Node2D");
@@ -8901,7 +10159,10 @@ mod tests {
         tree.add_child(root, main).unwrap();
 
         let state = EditorState::new(tree);
-        let handle = EditorServerHandle::start(port, state);
+        // port 0 → server binds an ephemeral port atomically (no probe/rebind
+        // race); read the actual bound port back from the handle.
+        let handle = EditorServerHandle::start(0, state);
+        let port = handle.port();
         // Wait for server to be ready.
         thread::sleep(Duration::from_millis(100));
         (handle, port)
@@ -9067,6 +10328,321 @@ mod tests {
         handle.stop();
     }
 
+    /// Acceptance test for the "Add Child Node" scene-tree operation
+    /// (bead scene-tree-ops-add-child-node / pat-r8tne): adding a child to a
+    /// selected parent must (1) create a child of the requested type under it,
+    /// (2) focus the new node in the tree, and (3) mark the scene dirty.
+    #[test]
+    fn scene_tree_add_child_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a child of a specific requested type to the Main node.
+        let add_body = format!(
+            r#"{{"parent_id":{main_id},"name":"NewChild","class_name":"Sprite2D"}}"#
+        );
+        let add_resp = http_post(port, "/api/node/add", &add_body);
+        assert!(add_resp.contains("200 OK"), "add should succeed");
+        let add_json: serde_json::Value =
+            serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let new_id = add_json["id"].as_u64().expect("add returns new node id");
+
+        // (1) The child exists under the requested parent with the requested type.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let main = &scene["nodes"]["children"][0];
+        assert_eq!(
+            main["id"].as_u64(),
+            Some(main_id),
+            "first child of root is the Main parent"
+        );
+        let child = main["children"]
+            .as_array()
+            .expect("main has children")
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(new_id))
+            .expect("new node is a child of the selected parent");
+        assert_eq!(child["name"], "NewChild");
+        assert_eq!(
+            child["class"], "Sprite2D",
+            "child is created of the requested type"
+        );
+
+        // (2) The newly created node is focused (selected) in the tree.
+        let sel_resp = http_get(port, "/api/selected_nodes");
+        let sel: serde_json::Value =
+            serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        let selected: Vec<u64> = sel["selected_nodes"]
+            .as_array()
+            .expect("selected_nodes array")
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .collect();
+        assert_eq!(
+            selected,
+            vec![new_id],
+            "the new child becomes the focused selection"
+        );
+
+        // (3) The scene is marked dirty.
+        let info_resp = http_get(port, "/api/scene/info");
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&info_resp)).unwrap();
+        assert_eq!(
+            info["modified"].as_bool(),
+            Some(true),
+            "adding a node marks the scene modified"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Instance Child Scene" scene-tree operation
+    /// (bead scene-tree-ops-instance-child-scene / pat-8mz00): instancing an
+    /// external `.tscn` as a child must (1) root the instanced subtree at the
+    /// selected parent and (2) record the originating scene path on the
+    /// instanced root so the scene-tree instance indicator can show its
+    /// source.
+    #[test]
+    fn scene_tree_instance_child_scene() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // An external scene to instance as a child.
+        let tscn_content = r#"
+[gd_scene format=3]
+
+[node name="Enemy" type="Node2D"]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+position = Vector2(10, 20)
+"#;
+        let dir = std::env::temp_dir().join("patina_test_instance_child_scene");
+        let _ = std::fs::create_dir_all(&dir);
+        let tscn_path = dir.join("enemy.tscn");
+        std::fs::write(&tscn_path, tscn_content).unwrap();
+        let path_str = tscn_path.to_string_lossy().to_string();
+
+        // Instance it under the selected parent (Main).
+        let body = format!(
+            r#"{{"path":"{}","parent_id":{}}}"#,
+            path_str.replace('\\', "\\\\"),
+            main_id
+        );
+        let resp = http_post(port, "/api/scene/instance", &body);
+        assert!(resp.contains("200 OK"), "instance should succeed: {resp}");
+        let inst_json: serde_json::Value =
+            serde_json::from_str(extract_body(&resp)).unwrap();
+        let root_id = inst_json["id"]
+            .as_u64()
+            .expect("instance returns instanced root id");
+
+        // (1) The instanced root is a child of the selected parent.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let main = &scene["nodes"]["children"][0];
+        assert_eq!(
+            main["id"].as_u64(),
+            Some(main_id),
+            "first child of root is the Main parent"
+        );
+        let instanced = main["children"]
+            .as_array()
+            .expect("main has children")
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(root_id))
+            .expect("instanced root is a child of the selected parent");
+        assert_eq!(instanced["name"], "Enemy", "instanced root keeps its name");
+
+        // (2) The instanced root is flagged as an instance and records its
+        //     source path for the instance indicator.
+        assert_eq!(
+            instanced["is_instance"].as_bool(),
+            Some(true),
+            "instanced root is marked as an instance"
+        );
+        assert_eq!(
+            instanced["instance_path"].as_str(),
+            Some(path_str.as_str()),
+            "instanced root records its source .tscn path"
+        );
+
+        // The instanced subtree is embedded (the child Sprite came along).
+        let sprite = instanced["children"]
+            .as_array()
+            .expect("instanced root has children")
+            .iter()
+            .find(|c| c["name"] == "Sprite");
+        assert!(sprite.is_some(), "instanced subtree is embedded under the root");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Delete node(s)" scene-tree operation
+    /// (bead scene-tree-ops-delete-node / pat-uc2m6): deleting one or more
+    /// selected nodes must remove their full subtrees (no orphaned
+    /// descendants), support multi-selection, and clear the selection.
+    #[test]
+    fn scene_tree_delete_node_subtree() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Helper to add a child and return its new id.
+        let add = |parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+            v["id"].as_u64().unwrap()
+        };
+
+        // Build a subtree under Main: DelParent > DelChild > DelGrandchild,
+        // plus a separate sibling DelSibling for multi-select.
+        let parent_id = add(main_id, "DelParent");
+        let child_id = add(parent_id, "DelChild");
+        let _grandchild_id = add(child_id, "DelGrandchild");
+        let sibling_id = add(main_id, "DelSibling");
+
+        // Sanity: the whole subtree is present before deletion.
+        let before = http_get(port, "/api/scene");
+        for n in ["DelParent", "DelChild", "DelGrandchild", "DelSibling"] {
+            assert!(before.contains(n), "{n} should exist before delete");
+        }
+
+        // Multi-select delete. Include child_id (inside DelParent's subtree)
+        // to exercise the ancestor+descendant skip path.
+        let del_body =
+            format!(r#"{{"node_ids":[{parent_id},{child_id},{sibling_id}]}}"#);
+        let resp = http_post(port, "/api/node/delete", &del_body);
+        assert!(resp.contains("200 OK"), "delete should succeed");
+        let del: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        // DelParent (subtree) + DelSibling = 2 distinct deletions; DelChild was
+        // already removed with its parent's subtree.
+        assert_eq!(
+            del["deleted"].as_u64(),
+            Some(2),
+            "two distinct top-level deletions"
+        );
+
+        // The full subtree and the sibling are gone with no orphans left behind.
+        let after = http_get(port, "/api/scene");
+        for n in ["DelParent", "DelChild", "DelGrandchild", "DelSibling"] {
+            assert!(
+                !after.contains(n),
+                "{n} (and its subtree) should be removed without orphaning"
+            );
+        }
+
+        // Selection is cleared after deletion.
+        let sel_resp = http_get(port, "/api/selected_nodes");
+        let sel: serde_json::Value =
+            serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        assert_eq!(
+            sel["selected_nodes"].as_array().map(|a| a.len()),
+            Some(0),
+            "deleting clears the selection"
+        );
+
+        // Scene is marked dirty.
+        let info_resp = http_get(port, "/api/scene/info");
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&info_resp)).unwrap();
+        assert_eq!(info["modified"].as_bool(), Some(true));
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Duplicate node" scene-tree operation
+    /// (bead scene-tree-ops-duplicate-node / pat-omqpr): duplicating a node
+    /// produces a deep copy of its subtree, inserted as the *next sibling*,
+    /// with a *unique* name and *copied* properties.
+    #[test]
+    fn scene_tree_duplicate_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str, class: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"{class}"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+            v["id"].as_u64().unwrap()
+        };
+
+        // Main > [Orig(Sprite2D) > Kid, After]. Duplicating Orig should yield
+        // Orig2 inserted between Orig and After.
+        let orig_id = add(main_id, "Orig", "Sprite2D");
+        let _kid_id = add(orig_id, "Kid", "Node");
+        let _after_id = add(main_id, "After", "Node");
+
+        // Set a custom property on Orig to verify property copying.
+        let prop_body = format!(
+            r#"{{"node_id":{orig_id},"property":"health","value":{{"type":"Int","value":100}}}}"#
+        );
+        assert!(http_post(port, "/api/property/set", &prop_body).contains("200 OK"));
+
+        // Duplicate Orig.
+        let resp = http_post(port, "/api/node/duplicate", &format!(r#"{{"node_id":{orig_id}}}"#));
+        assert!(resp.contains("200 OK"), "duplicate should succeed");
+        let dup_id = serde_json::from_str::<serde_json::Value>(extract_body(&resp))
+            .unwrap()["id"]
+            .as_u64()
+            .expect("duplicate returns new node id");
+
+        // Inspect Main's children order.
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let main = &scene["nodes"]["children"][0];
+        let kids = main["children"].as_array().expect("Main has children");
+        let names: Vec<&str> = kids.iter().filter_map(|c| c["name"].as_str()).collect();
+
+        // Unique name: the duplicate is "Orig2", original "Orig" remains.
+        assert!(names.contains(&"Orig"), "original remains, got {names:?}");
+        assert!(names.contains(&"Orig2"), "duplicate uniquified, got {names:?}");
+
+        // Next-sibling: Orig2 sits immediately after Orig, before After.
+        let i_orig = names.iter().position(|n| *n == "Orig").unwrap();
+        let i_dup = names.iter().position(|n| *n == "Orig2").unwrap();
+        let i_after = names.iter().position(|n| *n == "After").unwrap();
+        assert_eq!(i_dup, i_orig + 1, "duplicate is the next sibling: {names:?}");
+        assert!(i_after > i_dup, "duplicate inserted before later siblings");
+
+        // Deep subtree copy: Orig2 has its own "Kid" child of the right class.
+        let dup_node = kids.iter().find(|c| c["name"] == "Orig2").unwrap();
+        assert_eq!(dup_node["class"], "Sprite2D", "class copied");
+        let dup_children = dup_node["children"].as_array().unwrap();
+        assert_eq!(dup_children.len(), 1, "subtree deep-copied");
+        assert_eq!(dup_children[0]["name"], "Kid");
+
+        // Copied properties: the duplicate carries the custom `health` property.
+        let dup_detail = http_get(port, &format!("/api/node/{dup_id}"));
+        assert!(
+            extract_body(&dup_detail).contains("health"),
+            "custom property copied to the duplicate"
+        );
+
+        // The duplicate is focused and the scene is dirty.
+        let sel: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+        let selected: Vec<u64> = sel["selected_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .collect();
+        assert_eq!(selected, vec![dup_id], "duplicate becomes the selection");
+
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/info"))).unwrap();
+        assert_eq!(info["modified"].as_bool(), Some(true));
+
+        handle.stop();
+    }
+
     #[test]
     fn test_select_node() {
         let (handle, port) = make_server();
@@ -9136,6 +10712,118 @@ mod tests {
         let root_children = v["nodes"]["children"].as_array().unwrap();
         let a_found = root_children.iter().any(|c| c["name"] == "A");
         assert!(a_found, "A should be a direct child of root after reparent");
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-ops-reparent-node: reparenting moves a node and
+    /// its whole subtree under the target parent, rejects reparenting a node into
+    /// its own descendant, and preserves the global transform when requested.
+    #[test]
+    fn scene_tree_reparent_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Helper: read a node's `position` property as (x, y).
+        let read_pos = |port: u16, id: u64| -> (f64, f64) {
+            let resp = http_get(port, &format!("/api/node/{id}"));
+            let body = extract_body(&resp);
+            let v: serde_json::Value = serde_json::from_str(body).unwrap();
+            let pos = v["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == "position")
+                .expect("position property present");
+            let arr = pos["value"]["value"].as_array().unwrap();
+            (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
+        };
+        let add_child = |port: u16, parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        // Build: main -> Branch -> Leaf, and a separate Target under main.
+        let branch_id = add_child(port, main_id, "Branch");
+        let leaf_id = add_child(port, branch_id, "Leaf");
+        let target_id = add_child(port, main_id, "Target");
+
+        // (1) Reparent Branch under Target: the whole subtree moves with it.
+        let resp = http_post(
+            port,
+            "/api/node/reparent",
+            &format!(r#"{{"node_id":{branch_id},"new_parent_id":{target_id}}}"#),
+        );
+        assert!(resp.contains("200 OK"), "reparent should succeed: {resp}");
+
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let main = scene["nodes"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(main_id))
+            .unwrap();
+        let target = main["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(target_id))
+            .unwrap();
+        let branch = target["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(branch_id))
+            .expect("Branch moved under Target");
+        assert_eq!(
+            branch["children"][0]["id"].as_u64(),
+            Some(leaf_id),
+            "Leaf subtree preserved under Branch after reparent"
+        );
+
+        // (2) Reject reparenting a node into its own descendant (Target -> Leaf).
+        let resp = http_post(
+            port,
+            "/api/node/reparent",
+            &format!(r#"{{"node_id":{target_id},"new_parent_id":{leaf_id}}}"#),
+        );
+        assert!(
+            resp.contains("400"),
+            "reparenting into own descendant must be rejected: {resp}"
+        );
+
+        // (3) Keep-global-transform: position Target globally and move Leaf under
+        // it with keep_transform — Leaf's global position is unchanged.
+        for (id, x, y) in [(target_id, 100.0, 50.0), (leaf_id, 30.0, 20.0)] {
+            let body = format!(
+                r#"{{"node_id":{id},"property":"position","value":{{"type":"Vector2","value":[{x},{y}]}}}}"#
+            );
+            assert!(http_post(port, "/api/property/set", &body).contains("200 OK"));
+        }
+        // Leaf is currently under Branch (global = Target + Branch + Leaf locals,
+        // but Branch sits at origin, so Leaf global == Target + Leaf == (130,70)).
+        // Reparent Leaf directly under main with keep_transform: its new local
+        // must equal its old global so the global position is preserved.
+        let resp = http_post(
+            port,
+            "/api/node/reparent",
+            &format!(
+                r#"{{"node_id":{leaf_id},"new_parent_id":{main_id},"keep_transform":true}}"#
+            ),
+        );
+        assert!(resp.contains("200 OK"), "keep_transform reparent: {resp}");
+        let (lx, ly) = read_pos(port, leaf_id);
+        // Old global of Leaf was Target(100,50) + Leaf(30,20) = (130,70); main is
+        // at the origin, so the preserved local equals that global.
+        assert!(
+            (lx - 130.0).abs() < 1e-3 && (ly - 70.0).abs() < 1e-3,
+            "global transform preserved across reparent: got ({lx},{ly}), want (130,70)"
+        );
 
         handle.stop();
     }
@@ -9562,6 +11250,151 @@ mod tests {
         handle.stop();
     }
 
+    /// Acceptance test for the lock indicator (bead scene-tree-lock-indicator /
+    /// pat-quyck): toggling lock sets the `_edit_lock_` meta and surfaces the
+    /// lock badge, and a locked node is unpickable in the viewport.
+    #[test]
+    fn scene_tree_lock_indicator_blocks_viewport_pick() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Helper: read whether Main's row carries the lock badge.
+        let main_locked = |port: u16| -> bool {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(main_id))
+                .expect("Main present")["locked"]
+                .as_bool()
+                .unwrap_or(false)
+        };
+
+        // Sanity: Main (at scene (10,20)) is pickable at pixel (400,300) and
+        // shows no lock badge.
+        assert!(!main_locked(port), "unlocked by default");
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":400,"y":300}"#);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(
+            v["selected"].as_u64(),
+            Some(main_id),
+            "unlocked node is pickable"
+        );
+
+        // Lock it: badge appears and the node becomes unpickable.
+        let resp = http_post(
+            port,
+            "/api/node/lock",
+            &format!(r#"{{"node_id":{main_id},"locked":true}}"#),
+        );
+        assert!(resp.contains("200 OK"), "lock should succeed: {resp}");
+        assert!(main_locked(port), "lock badge appears after locking");
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":400,"y":300}"#);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert!(
+            v["selected"].is_null(),
+            "locked node is unselectable in the viewport: {v}"
+        );
+
+        // Unlock: badge clears and the node is pickable again.
+        let resp = http_post(
+            port,
+            "/api/node/lock",
+            &format!(r#"{{"node_id":{main_id},"locked":false}}"#),
+        );
+        assert!(resp.contains("200 OK"), "unlock should succeed");
+        assert!(!main_locked(port), "lock badge clears after unlocking");
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":400,"y":300}"#);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(
+            v["selected"].as_u64(),
+            Some(main_id),
+            "node is pickable again after unlock"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for selection-state sync (bead
+    /// scene-tree-selection-state-sync / pat-imbud): the editor keeps a single
+    /// selection set (`EditorState.selected_nodes`) that the dock, viewport,
+    /// and inspector all read via `/api/selected_nodes`, so selecting through
+    /// any path — single (viewport-style), additive (ctrl), range (shift), or
+    /// toggle — yields one identical selection set everywhere.
+    #[test]
+    fn scene_tree_selection_state_stays_synced() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        // The canonical selection set as seen by dock/viewport/inspector.
+        let selection = |port: u16| -> Vec<u64> {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+            v["selected_nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .collect()
+        };
+        let select = |body: &str| http_post(port, "/api/node/select_multi", body);
+
+        let a = add("A");
+        let b = add("B");
+        let c = add("C");
+        let d = add("D");
+
+        // Single select (viewport-style): set the anchor to A.
+        select(&format!(r#"{{"node_id":{a},"mode":"set"}}"#));
+        assert_eq!(selection(port), vec![a], "single select replaces selection");
+
+        // Range (shift) from anchor A to C: spans A,B,C in scene-tree order.
+        select(&format!(r#"{{"node_id":{c},"mode":"range"}}"#));
+        let mut sel = selection(port);
+        sel.sort();
+        let mut want = vec![a, b, c];
+        want.sort();
+        assert_eq!(sel, want, "range select spans A..C inclusive");
+
+        // Additive (ctrl): add D to the existing range selection.
+        select(&format!(r#"{{"node_id":{d},"mode":"add"}}"#));
+        let mut sel = selection(port);
+        sel.sort();
+        let mut want = vec![a, b, c, d];
+        want.sort();
+        assert_eq!(sel, want, "additive select extends the set");
+
+        // Toggle (ctrl on a selected node): remove B.
+        select(&format!(r#"{{"node_id":{b},"mode":"toggle"}}"#));
+        let mut sel = selection(port);
+        sel.sort();
+        let mut want = vec![a, c, d];
+        want.sort();
+        assert_eq!(sel, want, "toggle removes an already-selected node");
+
+        // A plain single-select (the viewport-click path uses the same store)
+        // collapses the multi-selection everywhere.
+        let click = http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#));
+        assert!(click.contains("200 OK"));
+        assert_eq!(
+            selection(port),
+            vec![a],
+            "single-select via the viewport/select path resets the shared set"
+        );
+
+        handle.stop();
+    }
+
     #[test]
     fn test_viewport_drag_updates_position() {
         let (handle, port) = make_server();
@@ -9787,6 +11620,79 @@ mod tests {
         handle.stop();
     }
 
+    /// Acceptance test for the "Rename node" scene-tree operation
+    /// (bead scene-tree-ops-rename-node / pat-53yhs): renaming commits the new
+    /// name, rejects empty names, and auto-suffixes a duplicate sibling name to
+    /// keep sibling names unique.
+    #[test]
+    fn scene_tree_rename_node_unique() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let names = |port: u16| -> Vec<String> {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let _alpha = add("Alpha");
+        let beta = add("Beta");
+
+        // Commit a normal rename.
+        let resp = http_post(
+            port,
+            "/api/node/rename",
+            &format!(r#"{{"node_id":{beta},"new_name":"Gamma"}}"#),
+        );
+        assert!(resp.contains("200 OK"), "rename should succeed");
+        assert!(
+            names(port).contains(&"Gamma".to_string()),
+            "rename committed: {:?}",
+            names(port)
+        );
+
+        // Reject an empty name; the node keeps its current name.
+        let resp = http_post(
+            port,
+            "/api/node/rename",
+            &format!(r#"{{"node_id":{beta},"new_name":""}}"#),
+        );
+        assert!(resp.contains("400"), "empty name should be rejected");
+        assert!(
+            names(port).contains(&"Gamma".to_string()),
+            "name unchanged after rejected empty rename"
+        );
+
+        // Rename to a name that collides with sibling "Alpha" → uniquified.
+        let resp = http_post(
+            port,
+            "/api/node/rename",
+            &format!(r#"{{"node_id":{beta},"new_name":"Alpha"}}"#),
+        );
+        assert!(resp.contains("200 OK"));
+        let ns = names(port);
+        assert!(ns.contains(&"Alpha".to_string()), "original Alpha remains: {ns:?}");
+        assert!(
+            ns.contains(&"Alpha2".to_string()),
+            "collision auto-suffixed to Alpha2: {ns:?}"
+        );
+
+        handle.stop();
+    }
+
     #[test]
     fn test_duplicate_node() {
         let (handle, port) = make_server();
@@ -9817,12 +11723,22 @@ mod tests {
             root_children.len()
         );
 
-        // Both should be named "Main".
-        let main_count = root_children.iter().filter(|c| c["name"] == "Main").count();
-        assert_eq!(main_count, 2, "should have two Main nodes");
+        // The original keeps its name; the duplicate gets a unique name.
+        let names: Vec<&str> = root_children
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert!(names.contains(&"Main"), "original Main remains, got {names:?}");
+        assert!(
+            names.contains(&"Main2"),
+            "duplicate gets a unique name, got {names:?}"
+        );
 
         // The duplicate should also have a Child child.
-        let dup = &root_children[1];
+        let dup = root_children
+            .iter()
+            .find(|c| c["name"] == "Main2")
+            .expect("duplicate Main2 present");
         let dup_children = dup["children"].as_array().unwrap();
         assert_eq!(dup_children.len(), 1, "duplicate should have 1 child");
         assert_eq!(dup_children[0]["name"], "Child");
@@ -9970,6 +11886,1225 @@ mod tests {
             &format!(r#"{{"node_id":{only_id},"direction":"down"}}"#),
         );
         assert!(resp.contains("200 OK"));
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Move Up / Move Down" scene-tree operation
+    /// (bead scene-tree-ops-reorder-siblings / pat-hszip): reordering changes
+    /// a node's index among its siblings, is a no-op at the boundaries, and
+    /// updates child ordering deterministically.
+    #[test]
+    fn scene_tree_reorder_siblings() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        for n in ["A", "B", "C"] {
+            let body = format!(r#"{{"parent_id":{main_id},"name":"{n}","class_name":"Node"}}"#);
+            http_post(port, "/api/node/add", &body);
+        }
+
+        // Read Main's children names in order.
+        let order = |port: u16| -> Vec<String> {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let id_of = |port: u16, name: &str| -> u64 {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let reorder = |port: u16, id: u64, dir: &str| {
+            let body = format!(r#"{{"node_id":{id},"direction":"{dir}"}}"#);
+            assert!(http_post(port, "/api/node/reorder", &body).contains("200 OK"));
+        };
+
+        assert_eq!(order(port), ["A", "B", "C"], "initial order");
+        let a_id = id_of(port, "A");
+
+        // Move A down twice → [B, C, A].
+        reorder(port, a_id, "down");
+        assert_eq!(order(port), ["B", "A", "C"], "A moved down one");
+        reorder(port, a_id, "down");
+        assert_eq!(order(port), ["B", "C", "A"], "A moved down again");
+
+        // Move A up once → [B, A, C].
+        reorder(port, a_id, "up");
+        assert_eq!(order(port), ["B", "A", "C"], "A moved back up");
+
+        // Boundary no-ops: first node up, last node down — order unchanged.
+        let first_id = id_of(port, "B"); // index 0
+        reorder(port, first_id, "up");
+        assert_eq!(order(port), ["B", "A", "C"], "up at top boundary is a no-op");
+        let last_id = id_of(port, "C"); // index 2
+        reorder(port, last_id, "down");
+        assert_eq!(order(port), ["B", "A", "C"], "down at bottom boundary is a no-op");
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Cut / Copy / Paste" scene-tree operation
+    /// (bead scene-tree-ops-cut-copy-paste / pat-b34jb): Copy then Paste
+    /// inserts a clone of the copied subtree under the paste target, Cut then
+    /// Paste moves the original, and Paste uniquifies names.
+    #[test]
+    fn scene_tree_cut_copy_paste_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str| -> u64 {
+            let body = format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let scene = |port: u16| -> serde_json::Value {
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap()
+        };
+        // Names of the children of the node at `path` under Main's subtree.
+        let main_child_names = |port: u16| -> Vec<String> {
+            scene(port)["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Main > [Src > Leaf, Dest].
+        let src_id = add(main_id, "Src");
+        add(src_id, "Leaf");
+        let dest_id = add(main_id, "Dest");
+
+        // Copy Src, then paste under Main. The copy must clone the subtree and,
+        // because "Src" already exists under Main, paste uniquifies to "Src2".
+        assert!(http_post(port, "/api/node/copy", &format!(r#"{{"node_id":{src_id}}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/node/paste", &format!(r#"{{"parent_id":{main_id}}}"#))
+            .contains("200 OK"));
+
+        let names = main_child_names(port);
+        assert!(names.contains(&"Src".to_string()), "original Src remains (copy): {names:?}");
+        assert!(names.contains(&"Src2".to_string()), "paste uniquified to Src2: {names:?}");
+        // The pasted clone carries the subtree (Leaf).
+        let sc = scene(port);
+        let src2 = sc["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Src2")
+            .unwrap();
+        assert_eq!(src2["children"].as_array().unwrap()[0]["name"], "Leaf",
+            "copied subtree includes Leaf");
+
+        // Cut the original Src, then paste under Dest → the original moves.
+        assert!(http_post(port, "/api/node/cut", &format!(r#"{{"node_id":{src_id}}}"#))
+            .contains("200 OK"));
+        let after_cut = main_child_names(port);
+        assert!(!after_cut.contains(&"Src".to_string()),
+            "cut removed the original Src from Main: {after_cut:?}");
+
+        assert!(http_post(port, "/api/node/paste", &format!(r#"{{"parent_id":{dest_id}}}"#))
+            .contains("200 OK"));
+        let sc2 = scene(port);
+        let dest = sc2["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Dest")
+            .unwrap();
+        let dest_children: Vec<&str> = dest["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert!(dest_children.contains(&"Src"),
+            "cut+paste moved Src under Dest: {dest_children:?}");
+        // And its subtree came along.
+        let moved = dest["children"].as_array().unwrap().iter().find(|c| c["name"] == "Src").unwrap();
+        assert_eq!(moved["children"].as_array().unwrap()[0]["name"], "Leaf");
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Change Type" scene-tree operation
+    /// (bead scene-tree-ops-change-type / pat-71ryb): changing a node's type
+    /// replaces it with the chosen type in place, retains its children and
+    /// name, and carries over properties common to both types.
+    #[test]
+    fn scene_tree_change_node_type() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Main > Sub(Node2D) > Leaf, with a custom property on Sub.
+        let sub_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Sub","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        http_post(
+            port,
+            "/api/node/add",
+            &format!(r#"{{"parent_id":{sub_id},"name":"Leaf","class_name":"Node"}}"#),
+        );
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(r#"{{"node_id":{sub_id},"property":"health","value":{{"type":"Int","value":7}}}}"#),
+        )
+        .contains("200 OK"));
+
+        // Change Sub from Node2D to Sprite2D.
+        let resp = http_post(
+            port,
+            "/api/node/change_type",
+            &format!(r#"{{"node_id":{sub_id},"class_name":"Sprite2D"}}"#),
+        );
+        assert!(resp.contains("200 OK"), "change_type should succeed");
+
+        // In place: same node, new class, same name, children retained.
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let sub = scene["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(sub_id))
+            .expect("node retained in place with same id");
+        assert_eq!(sub["class"], "Sprite2D", "type changed to the chosen class");
+        assert_eq!(sub["name"], "Sub", "name retained");
+        let children = sub["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1, "children retained");
+        assert_eq!(children[0]["name"], "Leaf");
+
+        // Shared property carried over.
+        let detail = http_get(port, &format!("/api/node/{sub_id}"));
+        assert!(
+            extract_body(&detail).contains("health"),
+            "common property carried over after type change"
+        );
+
+        // Scene marked dirty.
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/info"))).unwrap();
+        assert_eq!(info["modified"].as_bool(), Some(true));
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-signal-connection-indicator (pat-lc7gk): a
+    /// node's signal badge (`has_signals`) toggles in real time as signal
+    /// connections are added to and removed from the node.
+    #[test]
+    fn scene_tree_signal_indicator_tracks_connections() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // A node to carry the signal connection.
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Emitter","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        // Read the node's `has_signals` badge flag from the scene tree JSON.
+        let has_signals = |port: u16| -> bool {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(node_id))
+                .expect("emitter node present")["has_signals"]
+                .as_bool()
+                .unwrap_or(false)
+        };
+
+        // Baseline: no connections → badge off.
+        assert!(!has_signals(port), "no signal badge before any connection");
+
+        // Connect a signal → badge turns on in real time.
+        assert!(http_post(
+            port,
+            "/api/node/signals/connect",
+            &format!(r#"{{"node_id":{node_id},"signal":"pressed","method":"_on_pressed"}}"#),
+        )
+        .contains("200 OK"));
+        assert!(has_signals(port), "signal badge appears after connecting a signal");
+
+        // Disconnect it → badge clears in real time.
+        assert!(http_post(
+            port,
+            "/api/signal/disconnect",
+            &format!(r#"{{"node_id":{node_id},"signal":"pressed"}}"#),
+        )
+        .contains("200 OK"));
+        assert!(!has_signals(port), "signal badge clears after disconnecting the signal");
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-instance-badge (pat-z9mbg): an instanced-scene
+    /// node shows the instance badge (`is_instance` + `instance_path`), and
+    /// activating it (`/api/node/open_scene`) routes an open-scene request for
+    /// the instance's source `.tscn` path.
+    #[test]
+    fn scene_tree_instance_badge_opens_source_scene() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let source = "res://enemy.tscn";
+
+        // Add a node and mark it as an instance by recording its source scene.
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Enemy","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{node_id},"property":"_instance_source","value":{{"type":"String","value":"{source}"}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+
+        // The scene tree shows the instance badge: is_instance + instance_path.
+        let inst = {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(node_id))
+                .expect("instanced node present")
+                .clone()
+        };
+        assert_eq!(inst["is_instance"].as_bool(), Some(true), "instance badge shown");
+        assert_eq!(
+            inst["instance_path"].as_str(),
+            Some(source),
+            "badge records the source scene path"
+        );
+
+        // Activating the badge routes an open-scene request for the source path.
+        let open_resp = http_post(
+            port,
+            "/api/node/open_scene",
+            &format!(r#"{{"node_id":{node_id}}}"#),
+        );
+        assert!(open_resp.contains("200 OK"), "open_scene should succeed: {open_resp}");
+        let open_body: serde_json::Value =
+            serde_json::from_str(extract_body(&open_resp)).unwrap();
+        assert_eq!(
+            open_body["path"].as_str(),
+            Some(source),
+            "open-scene request targets the instance's source path"
+        );
+
+        // The source scene is now open as a tab (the request was routed).
+        let tabs = {
+            let resp = http_get(port, "/api/scene/tabs");
+            let body = extract_body(&resp);
+            serde_json::from_str::<serde_json::Value>(body).unwrap()
+        };
+        let opened = tabs["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["path"].as_str() == Some(source));
+        assert!(opened, "source scene opened in a tab: {tabs}");
+
+        // A non-instanced node has no badge action → 400.
+        let plain_resp =
+            http_post(port, "/api/node/open_scene", &format!(r#"{{"node_id":{main_id}}}"#));
+        assert!(
+            plain_resp.contains("400"),
+            "open_scene on a non-instanced node is rejected: {plain_resp}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-script-badge (pat-bxv10): a node with an
+    /// attached script shows the script badge (`has_script` + `script_path`),
+    /// and activating it (`/api/node/open_script`) routes an open-script
+    /// request for that node's script path.
+    #[test]
+    fn scene_tree_script_badge_opens_script() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let script = "res://player.gd";
+
+        // Add a node and attach a script to it (recorded via `_script_path`).
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Player","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{node_id},"property":"_script_path","value":{{"type":"String","value":"{script}"}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+
+        // The scene tree shows the script badge: has_script + script_path.
+        let node = {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(node_id))
+                .expect("scripted node present")
+                .clone()
+        };
+        assert_eq!(node["has_script"].as_bool(), Some(true), "script badge shown");
+        assert_eq!(
+            node["script_path"].as_str(),
+            Some(script),
+            "badge records the attached script path"
+        );
+
+        // Activating the badge routes an open-script request for the script path.
+        let open_resp = http_post(
+            port,
+            "/api/node/open_script",
+            &format!(r#"{{"node_id":{node_id}}}"#),
+        );
+        assert!(open_resp.contains("200 OK"), "open_script should succeed: {open_resp}");
+        let open_body: serde_json::Value =
+            serde_json::from_str(extract_body(&open_resp)).unwrap();
+        assert_eq!(
+            open_body["path"].as_str(),
+            Some(script),
+            "open-script request targets the node's script path"
+        );
+
+        // A node without a script has no badge action → 400.
+        let plain_resp =
+            http_post(port, "/api/node/open_script", &format!(r#"{{"node_id":{main_id}}}"#));
+        assert!(
+            plain_resp.contains("400"),
+            "open_script on a script-less node is rejected: {plain_resp}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-group-children-indicator (pat-7jlbl): toggling
+    /// the group button sets `_edit_group_`, shows the group badge, and a
+    /// viewport click on a grouped node's child selects the grouped ancestor.
+    #[test]
+    fn scene_tree_group_indicator_locks_child_selection() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        // Parent (at origin) with a Child positioned at world (100,100). The
+        // camera centers the scene-bounds center (the Child) in the viewport.
+        let parent_id = add(main_id, "Parent");
+        let child_id = add(parent_id, "Child");
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{child_id},"property":"position","value":{{"type":"Vector2","value":[100,100]}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+
+        // Read the `grouped` badge flag for the parent from the scene tree.
+        let parent_grouped = |port: u16| -> bool {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(parent_id))
+                .expect("parent present")["grouped"]
+                .as_bool()
+                .unwrap_or(false)
+        };
+        // Click the child's pixel and return the id the viewport selected.
+        // The editor camera centers the scene-bounds center in the viewport.
+        // Positioned nodes are Main (10,20) and the Child (100,100) → bounds
+        // center (55,60), camera offset (vw/2-55, vh/2-60) = (345,240), so the
+        // Child at world (100,100) renders at pixel (100+345, 100+240) = (445,340).
+        let click_child = |port: u16| -> u64 {
+            let resp = http_post(port, "/api/viewport/click", r#"{"x":445,"y":340}"#);
+            let body = extract_body(&resp);
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["selected"]
+                .as_u64()
+                .expect("a node was selected")
+        };
+
+        // Baseline: not grouped → clicking the child selects the child itself.
+        assert!(!parent_grouped(port), "no group badge before toggling");
+        assert_eq!(click_child(port), child_id, "ungrouped child is directly selectable");
+
+        // Toggle group on the parent → badge shows.
+        assert!(http_post(
+            port,
+            "/api/node/group",
+            &format!(r#"{{"node_id":{parent_id},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        assert!(parent_grouped(port), "group badge shown after toggling on");
+
+        // Now a click on the child selects the grouped ancestor (parent).
+        assert_eq!(
+            click_child(port),
+            parent_id,
+            "viewport click on grouped child selects the grouped ancestor"
+        );
+
+        // Toggle group off → child is directly selectable again.
+        assert!(http_post(
+            port,
+            "/api/node/group",
+            &format!(r#"{{"node_id":{parent_id},"enabled":false}}"#),
+        )
+        .contains("200 OK"));
+        assert!(!parent_grouped(port), "group badge cleared after toggling off");
+        assert_eq!(click_child(port), child_id, "child selectable again once ungrouped");
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-unique-name-indicator (pat-cxide): enabling
+    /// "Access as Unique Name" shows the `%` badge, and two unique-named nodes
+    /// sharing a name in the same owner are flagged as a collision warning.
+    #[test]
+    fn scene_tree_unique_name_indicator_reflects_flag() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        // Two branches each holding a child named "Hero" — the same name is
+        // legal across different parents but shares the one scene owner.
+        let b1 = add(main_id, "Branch1");
+        let b2 = add(main_id, "Branch2");
+        let h1 = add(b1, "Hero");
+        let h2 = add(b2, "Hero");
+
+        // Recursively locate a node by id in the scene tree JSON.
+        fn find(node: &serde_json::Value, id: u64) -> Option<serde_json::Value> {
+            if node["id"].as_u64() == Some(id) {
+                return Some(node.clone());
+            }
+            if let Some(children) = node["children"].as_array() {
+                for c in children {
+                    if let Some(found) = find(c, id) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        let flags = |port: u16, id: u64| -> (bool, bool) {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            let n = find(&scene["nodes"], id).expect("node present in scene tree");
+            (
+                n["unique_name_in_owner"].as_bool().unwrap_or(false),
+                n["unique_name_collision"].as_bool().unwrap_or(false),
+            )
+        };
+
+        // Baseline: no `%` badge, no collision.
+        assert_eq!(flags(port, h1), (false, false), "no unique badge initially");
+
+        // Enable unique on the first Hero → `%` badge, no collision yet.
+        assert!(http_post(
+            port,
+            "/api/node/unique_name",
+            &format!(r#"{{"node_id":{h1},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        assert_eq!(
+            flags(port, h1),
+            (true, false),
+            "% badge shown, no collision with a single unique Hero"
+        );
+
+        // Enable unique on the second Hero → duplicate unique name → both flagged.
+        assert!(http_post(
+            port,
+            "/api/node/unique_name",
+            &format!(r#"{{"node_id":{h2},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        assert_eq!(flags(port, h1), (true, true), "first Hero flagged as colliding");
+        assert_eq!(flags(port, h2), (true, true), "second Hero flagged as colliding");
+
+        // Disable unique on the second Hero → the collision clears on the first.
+        assert!(http_post(
+            port,
+            "/api/node/unique_name",
+            &format!(r#"{{"node_id":{h2},"enabled":false}}"#),
+        )
+        .contains("200 OK"));
+        assert_eq!(
+            flags(port, h1),
+            (true, false),
+            "collision clears once the duplicate unique name is unset"
+        );
+        assert_eq!(flags(port, h2), (false, false), "second Hero no longer unique");
+
+        handle.stop();
+    }
+
+    /// Editor-side surfacing for scene-tree-configuration-warning (pat-q2jvi):
+    /// the `/api/node/warnings` endpoint exposes a node's configuration warnings
+    /// (empty for a script-less node) for the warning triangle/tooltip. The full
+    /// warning round-trip is covered by gdscene's
+    /// `scene_tree_configuration_warning_surfaces_messages`.
+    #[test]
+    fn node_warnings_endpoint_reports_clean_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Plain","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        let resp = http_get(port, &format!("/api/node/warnings?node_id={node_id}"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            v["has_warning"].as_bool(),
+            Some(false),
+            "a node with no script reports no configuration warnings"
+        );
+        assert_eq!(
+            v["warnings"].as_array().map(|a| a.len()),
+            Some(0),
+            "no warning messages for a clean node"
+        );
+
+        // Unknown node → 404.
+        let missing = http_get(port, "/api/node/warnings?node_id=999999");
+        assert!(missing.contains("404"), "unknown node yields 404: {missing}");
+
+        handle.stop();
+    }
+
+
+    /// Acceptance for inspector-object-header (pat-16kt2): inspecting a node
+    /// shows a header line with its class and name; clearing the inspector
+    /// hides it.
+    #[test]
+    fn inspector_object_header_renders_class_and_name() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Hero","class_name":"Sprite2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        let header = |port: u16| -> serde_json::Value {
+            let resp = http_get(port, "/api/inspector/header");
+            let body = extract_body(&resp);
+            serde_json::from_str(body).unwrap()
+        };
+
+        // Clear any auto-selection (adding a node selects it) → header hidden.
+        assert!(http_post(port, "/api/node/select_multi", r#"{"node_ids":[]}"#).contains("200 OK"));
+        assert_eq!(
+            header(port)["visible"].as_bool(),
+            Some(false),
+            "header hidden when nothing is inspected"
+        );
+
+        // Inspect the node → header shows its class label and object name.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{node_id}}}"#))
+            .contains("200 OK"));
+        let h = header(port);
+        assert_eq!(h["visible"].as_bool(), Some(true), "header visible while inspecting");
+        assert_eq!(h["name"].as_str(), Some("Hero"), "header shows the object name");
+        assert_eq!(h["class"].as_str(), Some("Sprite2D"), "header shows the class label");
+        assert!(h["path"].as_str().is_some(), "header includes the scene path");
+
+        // Clear the inspector → header hides again.
+        assert!(http_post(port, "/api/node/select_multi", r#"{"node_ids":[]}"#).contains("200 OK"));
+        assert_eq!(
+            header(port)["visible"].as_bool(),
+            Some(false),
+            "header hides once the inspector is cleared"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for inspector-history-back-forward (pat-67r94): inspecting A
+    /// then B and pressing Back re-selects A and enables Forward; Back at the
+    /// start of the stack is disabled.
+    #[test]
+    fn inspector_history_back_forward_navigates_stack() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add("A");
+        let b = add("B");
+
+        let select = |port: u16, id: u64| {
+            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                .contains("200 OK"));
+        };
+        let nav = |port: u16, dir: &str| -> serde_json::Value {
+            let resp = http_post(port, &format!("/api/inspector/{dir}"), "");
+            let body = extract_body(&resp);
+            serde_json::from_str(body).unwrap()
+        };
+
+        // Inspect A then B (builds the history stack [A, B], cursor at B).
+        select(port, a);
+        select(port, b);
+
+        // Back → re-selects A; Back now disabled (at start), Forward enabled.
+        let back = nav(port, "back");
+        assert_eq!(back["selected"].as_u64(), Some(a), "Back re-selects A");
+        assert_eq!(back["can_back"].as_bool(), Some(false), "Back disabled at the start");
+        assert_eq!(
+            back["can_forward"].as_bool(),
+            Some(true),
+            "Forward enabled after stepping back"
+        );
+
+        // Forward → re-selects B; Forward disabled (at end), Back enabled.
+        let fwd = nav(port, "forward");
+        assert_eq!(fwd["selected"].as_u64(), Some(b), "Forward re-selects B");
+        assert_eq!(fwd["can_back"].as_bool(), Some(true), "Back enabled after stepping forward");
+        assert_eq!(fwd["can_forward"].as_bool(), Some(false), "Forward disabled at the end");
+
+        // Back to A, then Back again is a no-op at the start of the stack.
+        nav(port, "back");
+        let back2 = nav(port, "back");
+        assert_eq!(back2["selected"].as_u64(), Some(a), "Back at the start stays on A");
+        assert_eq!(
+            back2["can_back"].as_bool(),
+            Some(false),
+            "Back remains disabled at the start"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for inspector-history-dropdown (pat-uhctq): after inspecting
+    /// three objects the history dropdown lists all three most-recent-first, and
+    /// selecting an entry re-inspects that object.
+    #[test]
+    fn inspector_history_dropdown_lists_and_selects() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add("A");
+        let b = add("B");
+        let c = add("C");
+
+        let select = |port: u16, id: u64| {
+            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                .contains("200 OK"));
+        };
+        // Inspect A, then B, then C.
+        select(port, a);
+        select(port, b);
+        select(port, c);
+
+        // The dropdown lists all three, most-recent-first: C, B, A.
+        let history = {
+            let resp = http_get(port, "/api/inspector/history");
+            let body = extract_body(&resp);
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["history"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(history.len(), 3, "dropdown lists all three inspected objects");
+        assert_eq!(history[0]["id"].as_u64(), Some(c), "most recent first: C");
+        assert_eq!(history[1]["id"].as_u64(), Some(b), "then B");
+        assert_eq!(history[2]["id"].as_u64(), Some(a), "then A");
+        assert_eq!(history[0]["name"].as_str(), Some("C"), "entry carries the object name");
+
+        // Selecting the oldest entry re-inspects it.
+        let resp = http_post(
+            port,
+            "/api/inspector/history/select",
+            &format!(r#"{{"node_id":{a}}}"#),
+        );
+        assert!(resp.contains("200 OK"), "history select succeeds: {resp}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["selected"]
+                .as_u64(),
+            Some(a),
+            "selecting a history entry re-inspects that object"
+        );
+        // And the inspector reflects it.
+        let sel = {
+            let r = http_get(port, "/api/selected");
+            serde_json::from_str::<serde_json::Value>(extract_body(&r)).unwrap()["id"].as_u64()
+        };
+        assert_eq!(sel, Some(a), "inspector now shows the re-selected object");
+
+        handle.stop();
+    }
+
+    /// Acceptance test for per-scene inspector history (bead
+    /// inspector-history-persists-per-scene / pat-zlsfl): the inspected-object
+    /// navigation stack is saved per open scene tab, so building history in
+    /// scene A, switching to scene B, then back to A restores A's back/forward
+    /// stack while B keeps its own (empty) stack.
+    #[test]
+    fn inspector_history_persists_per_scene() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let select = |id: u64| {
+            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                .contains("200 OK"));
+        };
+        let history_ids = |port: u16| -> Vec<u64> {
+            let resp = http_get(port, "/api/inspector/history");
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e["id"].as_u64())
+                .collect()
+        };
+
+        let a = add("A");
+        let b = add("B");
+        let c = add("C");
+
+        // Scene A is the initial tab. Build a navigation stack: inspect A, B, C.
+        select(a);
+        select(b);
+        select(c);
+        let scene_a_history = history_ids(port);
+        assert_eq!(
+            scene_a_history,
+            vec![c, b, a],
+            "scene A accumulates a history stack, most-recent-first"
+        );
+
+        // Open scene B in a new tab; it becomes active with its own empty stack.
+        let opened = http_post(
+            port,
+            "/api/scene/tabs/open",
+            r#"{"path":"res://scene_b.tscn","name":"B"}"#,
+        );
+        assert!(opened.contains("200 OK"), "opening scene B succeeds: {opened}");
+        assert!(
+            history_ids(port).is_empty(),
+            "a freshly opened scene starts with an empty navigation stack"
+        );
+
+        // Switch back to scene A (tab index 0): its stack is restored.
+        let switched = http_post(port, "/api/scene/tabs/switch", r#"{"index":0}"#);
+        assert!(switched.contains("200 OK"), "switching back to A succeeds: {switched}");
+        assert_eq!(
+            history_ids(port),
+            scene_a_history,
+            "switching back to scene A restores its history stack"
+        );
+
+        // The back/forward cursor is restored too: Back from the current entry
+        // (C) re-inspects the previous entry (B).
+        let back = http_post(port, "/api/inspector/back", "{}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(extract_body(&back)).unwrap()["selected"]
+                .as_u64(),
+            Some(b),
+            "Back navigates within the restored scene-A stack"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for rubber-band box selection (bead viewport-select-box
+    /// / pat-2fzzf): dragging a selection rectangle selects every node whose
+    /// position falls within it, and the `add` modifier extends the existing
+    /// selection.
+    #[test]
+    fn viewport_select_box() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add_node = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node2D"}}"#);
+            serde_json::from_str::<serde_json::Value>(extract_body(&http_post(
+                port,
+                "/api/node/add",
+                &body,
+            )))
+            .unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add_node("A");
+        let b = add_node("B");
+        let c = add_node("C");
+
+        let selection = |port: u16| -> Vec<u64> {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+            v["selected_nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .collect()
+        };
+
+        // A rectangle covering the whole viewport intersects the scene origin
+        // (where the new nodes sit), so every selectable node is selected.
+        let resp = http_post(
+            port,
+            "/api/viewport/box_select",
+            r#"{"x1":0,"y1":0,"x2":800,"y2":600,"add":false}"#,
+        );
+        assert!(resp.contains("200 OK"), "box select succeeds: {resp}");
+        let sel = selection(port);
+        assert!(
+            sel.contains(&a) && sel.contains(&b) && sel.contains(&c),
+            "a box over the origin selects every intersecting node: {sel:?}"
+        );
+
+        // A tiny rectangle in the corner maps far from the origin, so it
+        // intersects nothing and clears the selection.
+        let resp = http_post(
+            port,
+            "/api/viewport/box_select",
+            r#"{"x1":0,"y1":0,"x2":1,"y2":1,"add":false}"#,
+        );
+        assert!(resp.contains("200 OK"));
+        assert!(
+            selection(port).is_empty(),
+            "an off-origin box selects nothing: {:?}",
+            selection(port)
+        );
+
+        // The modifier (add) extends the existing selection rather than
+        // replacing it: start from just A, then box-add over the origin.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
+            .contains("200 OK"));
+        let resp = http_post(
+            port,
+            "/api/viewport/box_select",
+            r#"{"x1":0,"y1":0,"x2":800,"y2":600,"add":true}"#,
+        );
+        assert!(resp.contains("200 OK"));
+        let sel = selection(port);
+        assert!(
+            sel.contains(&a) && sel.contains(&b),
+            "the add modifier keeps the prior selection and adds box nodes: {sel:?}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for viewport panning (bead viewport-pan / pat-hxk0c):
+    /// middle-drag / space-drag pans the viewport by the cursor delta,
+    /// accumulating the scroll offset without changing the selection.
+    #[test]
+    fn viewport_pan() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Establish a selection that panning must not disturb.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{main_id}}}"#))
+            .contains("200 OK"));
+
+        let selected = |port: u16| -> Vec<u64> {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+            v["selected_nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .collect()
+        };
+        let pan = |port: u16| -> (f64, f64) {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/viewport/zoom_pan")))
+                    .unwrap();
+            (v["pan_x"].as_f64().unwrap(), v["pan_y"].as_f64().unwrap())
+        };
+
+        // The viewport starts at the origin.
+        assert_eq!(pan(port), (0.0, 0.0));
+
+        // A middle-drag pans the viewport by the cursor delta.
+        let resp = http_post(port, "/api/viewport/pan_by", r#"{"dx":50.0,"dy":-30.0}"#);
+        assert!(resp.contains("200 OK"), "pan_by succeeds: {resp}");
+        assert_eq!(pan(port), (50.0, -30.0), "pan offset updates by the cursor delta");
+
+        // Continuing the drag accumulates onto the offset.
+        assert!(http_post(port, "/api/viewport/pan_by", r#"{"dx":10.0,"dy":10.0}"#)
+            .contains("200 OK"));
+        assert_eq!(pan(port), (60.0, -20.0), "subsequent drags accumulate the scroll offset");
+
+        // Panning never changes the selection.
+        assert_eq!(
+            selected(port),
+            vec![main_id],
+            "panning leaves the selection unchanged"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for frame-selection (bead viewport-frame-selection /
+    /// pat-c2k88): F centers the selection and adjusts zoom to fit its bounds;
+    /// with no selection it frames the scene origin at the default zoom.
+    #[test]
+    fn viewport_frame_selection() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let zoom_pan = |port: u16| -> (f64, f64, f64) {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/viewport/zoom_pan")))
+                    .unwrap();
+            (
+                v["zoom"].as_f64().unwrap(),
+                v["pan_x"].as_f64().unwrap(),
+                v["pan_y"].as_f64().unwrap(),
+            )
+        };
+
+        // With nothing selected, frame-selection frames the scene origin at the
+        // default zoom (a point keeps zoom 1.0).
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (z, _px, _py) = zoom_pan(port);
+        assert!((z - 1.0).abs() < 1e-9, "no selection frames the origin at zoom 1.0: {z}");
+
+        // Add two nodes with explicit, spread-out positions (a 2000x2000 box).
+        let add_node = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node2D"}}"#);
+            serde_json::from_str::<serde_json::Value>(extract_body(&http_post(
+                port,
+                "/api/node/add",
+                &body,
+            )))
+            .unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add_node("A");
+        let b = add_node("B");
+        let set_pos = |id: u64, x: f64, y: f64| {
+            let body = format!(
+                r#"{{"node_id":{id},"property":"position","value":{{"type":"Vector2","value":[{x},{y}]}}}}"#
+            );
+            assert!(http_post(port, "/api/property/set", &body).contains("200 OK"));
+        };
+        set_pos(a, -1000.0, -1000.0);
+        set_pos(b, 1000.0, 1000.0);
+
+        // Select both, then frame: the 2000x2000 bounds are larger than the
+        // viewport, so zoom is reduced to fit them.
+        assert!(http_post(port, "/api/node/select_multi", &format!(r#"{{"node_id":{a},"mode":"set"}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/node/select_multi", &format!(r#"{{"node_id":{b},"mode":"add"}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (z, _px, _py) = zoom_pan(port);
+        assert!(
+            z < 1.0 && z >= 0.1,
+            "frame-selection adjusts zoom to fit the selection bounds: {z}"
+        );
+
+        // Centering responds to the selection: framing A alone vs. B alone (at
+        // different positions) yields different pans.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (_za, pax, pay) = zoom_pan(port);
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{b}}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (_zb, pbx, pby) = zoom_pan(port);
+        assert!(
+            (pax, pay) != (pbx, pby),
+            "framing different selections centers different points: A={:?} B={:?}",
+            (pax, pay),
+            (pbx, pby)
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for "Editable Children / Make Local"
+    /// (bead scene-tree-ops-editable-children / pat-z3bcj): toggling Editable
+    /// Children reveals an instance's internal nodes as editable, and Make
+    /// Local converts an instanced node into an owned local subtree.
+    #[test]
+    fn scene_tree_editable_children_make_local() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a node and mark it as an instance by setting `_instance_source`.
+        let inst_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Inst","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{inst_id},"property":"_instance_source","value":{{"type":"String","value":"res://inst.tscn"}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+        // An internal node of the instance.
+        http_post(
+            port,
+            "/api/node/add",
+            &format!(r#"{{"parent_id":{inst_id},"name":"Internal","class_name":"Node"}}"#),
+        );
+
+        let find_inst = |port: u16| -> serde_json::Value {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(inst_id))
+                .unwrap()
+                .clone()
+        };
+
+        // Baseline: it is an instance, children not yet exposed for editing.
+        let before = find_inst(port);
+        assert_eq!(before["is_instance"].as_bool(), Some(true), "is an instance");
+        assert_eq!(
+            before["editable_children"].as_bool(),
+            Some(false),
+            "children not editable by default"
+        );
+
+        // Toggle Editable Children on → internal nodes exposed for editing.
+        assert!(http_post(
+            port,
+            "/api/node/editable_children",
+            &format!(r#"{{"node_id":{inst_id},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        let editable = find_inst(port);
+        assert_eq!(
+            editable["editable_children"].as_bool(),
+            Some(true),
+            "editable children revealed"
+        );
+
+        // Make Local → no longer an instance, but its subtree is retained.
+        assert!(http_post(
+            port,
+            "/api/node/make_local",
+            &format!(r#"{{"node_id":{inst_id}}}"#),
+        )
+        .contains("200 OK"));
+        let local = find_inst(port);
+        assert_eq!(
+            local["is_instance"].as_bool(),
+            Some(false),
+            "converted to a local owned subtree"
+        );
+        let children = local["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1, "subtree retained after make-local");
+        assert_eq!(children[0]["name"], "Internal");
 
         handle.stop();
     }
@@ -10438,6 +13573,88 @@ mod tests {
         let resp = http_post(port, "/api/script/save", &json_body.to_string());
         assert!(resp.contains("200 OK"), "should create dirs: {resp}");
         assert!(nested_path.exists());
+        handle.stop();
+    }
+
+    /// Acceptance (pat-yxe4s): choosing a scripted node exposes it through the
+    /// SCRIPT main view as an editable, highlighted code pane wired to save —
+    /// the live-editor side of the `script_main_view` model. The pane reports
+    /// `editable` + a `save_endpoint`, shows the node's on-disk source, and a
+    /// save through that endpoint round-trips back into the view.
+    #[test]
+    fn test_script_main_view_endpoint_editable_and_saves() {
+        let (handle, port) = make_server();
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("player.gd");
+        std::fs::write(&script_path, "extends Node2D\nfunc _ready():\n\tpass\n").unwrap();
+        let path_str = script_path.to_str().unwrap().to_string();
+
+        // Attach the script to the scene's Main node.
+        let main_id = get_main_node_id(port);
+        let set = http_post(
+            port,
+            "/api/property/set",
+            &serde_json::json!({
+                "node_id": main_id,
+                "property": "_script_path",
+                "value": { "type": "String", "value": path_str },
+            })
+            .to_string(),
+        );
+        assert!(set.contains("200 OK"), "attach script via property set: {set}");
+
+        // SCRIPT main view for the scripted node: editable + highlighted + save.
+        let resp = http_get(port, &format!("/api/script/main_view?node_id={main_id}"));
+        assert!(resp.contains("200 OK"), "main_view ok: {resp}");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["has_script"].as_bool(), Some(true));
+        assert_eq!(v["editable"].as_bool(), Some(true), "the pane is editable");
+        assert_eq!(
+            v["save_endpoint"].as_str(),
+            Some("/api/script/save"),
+            "the pane is wired to save"
+        );
+        assert_eq!(v["language"].as_str(), Some("gdscript"), "highlight language hint");
+        assert!(
+            v["source"].as_str().unwrap().contains("extends Node2D"),
+            "the pane shows the node's script source: {v}"
+        );
+
+        // Edit + save through the wired endpoint, then re-open: the main view
+        // reflects the saved edit (a real on-disk round-trip).
+        let edited = "extends Node\nfunc _ready():\n\tprint(\"hi\")\n";
+        let save = http_post(
+            port,
+            "/api/script/save",
+            &serde_json::json!({ "path": path_str, "content": edited }).to_string(),
+        );
+        assert!(save.contains("200 OK"), "save ok: {save}");
+        let resp2 = http_get(port, &format!("/api/script/main_view?node_id={main_id}"));
+        let v2: serde_json::Value = serde_json::from_str(extract_body(&resp2)).unwrap();
+        assert_eq!(
+            v2["source"].as_str(),
+            Some(edited),
+            "the main view reflects the saved edit"
+        );
+
+        handle.stop();
+    }
+
+    /// A node with no attached script shows the empty prompt instead of a code
+    /// pane (pat-yxe4s).
+    #[test]
+    fn test_script_main_view_node_without_script_shows_prompt() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/script/main_view?node_id={main_id}"));
+        assert!(resp.contains("200 OK"), "ok: {resp}");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["has_script"].as_bool(), Some(false));
+        assert_eq!(v["editable"].as_bool(), Some(false));
+        assert!(
+            v["prompt"].as_str().unwrap().contains("script"),
+            "empty state prompts to select a scripted node: {v}"
+        );
         handle.stop();
     }
 
@@ -12790,6 +16007,122 @@ position = Vector2(10, 20)
         );
         let resp = http_post(port, "/api/runtime/stop", "");
         assert!(resp.contains("200 OK"));
+        handle.stop();
+    }
+
+    /// Regression (pat-yl0fg): selecting a scene-tree node end-to-end populates
+    /// the Inspector. Reproduces the front-end flow at the HTTP layer — the tree
+    /// row click POSTs `/api/node/select`, then the status bar + Inspector read
+    /// `/api/selected`. This guards the wire from "click a tree row" to "status
+    /// bar shows the name + Path, Inspector shows properties".
+    #[test]
+    fn test_tree_select_populates_inspector_end_to_end() {
+        let (handle, port) = make_server();
+
+        // The tree-row id, exactly as the front-end reads it from GET /api/scene.
+        let node_id = get_main_node_id(port);
+
+        // Nothing is selected yet: the Inspector shows its empty state.
+        let none = http_get(port, "/api/selected");
+        assert!(none.contains("200 OK"));
+        assert_eq!(
+            extract_body(&none).trim(),
+            "null",
+            "no selection => /api/selected is null (Inspector empty)"
+        );
+
+        // Clicking the tree row selects the node (front-end POSTs this).
+        let sel = http_post(port, "/api/node/select", &format!(r#"{{"node_id":{node_id}}}"#));
+        assert!(sel.contains("200 OK"), "tree-row select succeeds: {sel}");
+        assert!(extract_body(&sel).contains("\"ok\":true"));
+
+        // Now the Inspector is populated: /api/selected returns the node's name
+        // (status bar), a non-empty scene path (Path field), and its properties
+        // (the Inspector body) — i.e. selection is wired through to the Inspector.
+        let resp = http_get(port, "/api/selected");
+        assert!(resp.contains("200 OK"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(
+            v["name"].as_str(),
+            Some("Main"),
+            "status bar shows the selected node's name: {v}"
+        );
+        assert!(
+            v["path"].as_str().map(|p| !p.is_empty()).unwrap_or(false),
+            "the Path field is set for the selected node: {v}"
+        );
+        assert!(
+            v["properties"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "the Inspector shows the node's properties: {v}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance (pat-w1ub4): `Scene > New Scene` adds an "Untitled" tab backed
+    /// by an empty root and makes it active, leaving the previous scene's tab in
+    /// place. This is the live-editor side of multi-scene tab management, on top
+    /// of the `top_bar_scene_tabs_switch` / `top_bar_tab_unsaved_and_close`
+    /// editor-context model.
+    #[test]
+    fn test_new_scene_adds_untitled_tab_with_empty_root() {
+        let (handle, port) = make_server();
+
+        // The server starts with a single tab whose scene has a "Main" child.
+        let before: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/tabs"))).unwrap();
+        assert_eq!(before["tabs"].as_array().unwrap().len(), 1);
+        assert_eq!(before["active_tab_index"].as_u64(), Some(0));
+        let scene_before: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        assert_eq!(
+            scene_before["nodes"]["children"].as_array().unwrap().len(),
+            1,
+            "the initial scene has a Main child"
+        );
+
+        // Scene > New Scene.
+        let resp = http_post(port, "/api/scene/new", "");
+        assert!(resp.contains("200 OK"), "new scene succeeds: {resp}");
+        let body: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(body["ok"].as_bool(), Some(true));
+
+        // A second tab was added and is now the active one.
+        let after: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/tabs"))).unwrap();
+        let tabs = after["tabs"].as_array().unwrap();
+        assert_eq!(tabs.len(), 2, "a new tab was added: {after}");
+        let active = after["active_tab_index"].as_u64().unwrap() as usize;
+        assert_eq!(active, 1, "the new scene tab is active");
+        let new_tab = &tabs[active];
+        assert!(
+            new_tab["name"].as_str().unwrap().starts_with("Untitled"),
+            "the new tab is labeled Untitled: {new_tab}"
+        );
+        assert_eq!(
+            new_tab["path"].as_str(),
+            Some(""),
+            "an unsaved new scene has no path"
+        );
+        assert_eq!(
+            new_tab["modified"].as_bool(),
+            Some(false),
+            "a fresh scene starts unmodified"
+        );
+
+        // The active scene is now an empty root (no children).
+        let scene_after: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let children = scene_after["nodes"]["children"].as_array();
+        assert!(
+            children.map(|c| c.is_empty()).unwrap_or(true),
+            "the new scene's root is empty: {}",
+            scene_after["nodes"]
+        );
+
         handle.stop();
     }
 }

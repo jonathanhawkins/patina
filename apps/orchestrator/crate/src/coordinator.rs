@@ -1217,7 +1217,46 @@ impl Coordinator {
             next_bead_id: None,
             prompt_task: None,
         };
-        // Check if worker has other active beads (short-lived connection)
+
+        // Step 1: Close the completed bead FIRST — unconditionally.
+        //
+        // The close MUST happen before the "other active beads" check below.
+        // Previously the ordering was reversed: if the worker still held any
+        // other active bead, reassign() returned early and the just-verified
+        // bead was never closed — its PASS result silently dropped and the
+        // completion message acked. A worker holding one wedged/orphaned bead
+        // therefore blocked EVERY subsequent bead it completed from ever
+        // closing, a self-sustaining stall. Closing first decouples the two:
+        // the completed bead always closes; only NEW-work assignment is gated
+        // on the worker being otherwise idle (Step 2).
+        tracing::info!(bead = %completed_bead, "Closing completed bead");
+        match br::close_bead(completed_bead, "completed") {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = format!("{e}").to_lowercase();
+                if msg.contains("already closed") || msg.contains("not found") {
+                    // Already closed, or still not found even after br::close_bead's
+                    // automatic sync-and-retry (bead may only exist in agent mail,
+                    // not in any JSONL). Treat as closed and continue.
+                    if msg.contains("not found") {
+                        tracing::warn!(
+                            bead = %completed_bead,
+                            "Bead not found even after sync retry — treating as closed and continuing"
+                        );
+                    }
+                } else {
+                    // Unexpected failure — do NOT ack. The next poll cycle will
+                    // retry the close.
+                    tracing::error!(error = %e, "br close failed with unexpected error");
+                    return Err(e);
+                }
+            }
+        }
+
+        // Step 2: The completed bead is now closed. If the worker still has
+        // other active beads, skip assigning NEW work — but the close above
+        // already happened, so the just-completed bead is not blocked.
+        // (short-lived connection)
         let other_active = {
             let db = self.open_db()?;
             let result = db::worker_active_assignments(&db, worker_name, Some(completed_bead))?;
@@ -1228,52 +1267,12 @@ impl Coordinator {
             tracing::info!(
                 worker = %worker_name,
                 other = ?other_active,
-                "Worker already has other active beads — skipping reassignment"
+                "Completed bead closed; worker has other active beads — skipping new-work assignment"
             );
-            // Still ack
             if let Some(id) = ack_msg_id {
                 self.ack_msg(id);
             }
             return Ok(none_result);
-        }
-
-        // Step 1: Close completed bead
-        tracing::info!(bead = %completed_bead, "Closing completed bead");
-        match br::close_bead(completed_bead, "completed") {
-            Ok(_) => {}
-            Err(e) => {
-                let msg = format!("{e}").to_lowercase();
-                if msg.contains("already closed") || msg.contains("not found") {
-                    // Already closed, or still not found even after br::close_bead's
-                    // automatic sync-and-retry (bead may only exist in agent mail,
-                    // not in any JSONL). Ack and try to reassign the worker.
-                    if msg.contains("not found") {
-                        tracing::warn!(
-                            bead = %completed_bead,
-                            "Bead not found even after sync retry — acking and continuing"
-                        );
-                    }
-                    let current = {
-                        let db = self.open_db()?;
-                        let r =
-                            db::worker_active_assignments(&db, worker_name, Some(completed_bead))?;
-                        drop(db);
-                        r
-                    };
-                    if !current.is_empty() {
-                        if let Some(id) = ack_msg_id {
-                            self.ack_msg(id);
-                        }
-                        return Ok(none_result);
-                    }
-                    // Fall through to reassignment
-                } else {
-                    // Unexpected failure — skip reassignment, do NOT ack.
-                    // The next poll cycle will retry the close.
-                    tracing::error!(error = %e, "br close failed with unexpected error");
-                    return Err(e);
-                }
-            }
         }
 
         // No inline sync here — br::close_bead writes directly to the DB.
@@ -3758,6 +3757,39 @@ mod tests {
             last_ack_pos > close_pos,
             "REGRESSION: main success-path self.ack_msg must come AFTER br::close_bead. \
              Acking before close causes orphaned beads."
+        );
+    }
+
+    /// Regression: reassign() must CLOSE the completed bead BEFORE the
+    /// "worker has other active beads" early-return.
+    ///
+    /// Bug: the active-bead check ran first and returned early (acking the
+    /// message) without closing the just-verified bead. A worker holding any
+    /// other active/orphaned bead then blocked every bead it completed from
+    /// ever closing — PASS results were silently dropped, beads stayed
+    /// in_progress, and the ready queue never drained. The close must happen
+    /// unconditionally; only NEW-work assignment is gated on the worker being
+    /// otherwise idle.
+    #[test]
+    fn test_reassign_closes_before_other_active_check() {
+        let source = include_str!("coordinator.rs");
+        let reassign_fn = source.find("pub fn reassign(").expect("reassign must exist");
+        let fn_body = &source[reassign_fn..(reassign_fn + 4000).min(source.len())];
+
+        let close_pos = fn_body
+            .find("br::close_bead")
+            .expect("close_bead must exist in reassign");
+        // The other-active gate is identified by its worker_active_assignments
+        // lookup; it must come AFTER the close so the completed bead is always
+        // closed regardless of the worker's other active beads.
+        let other_active_pos = fn_body
+            .find("worker_active_assignments")
+            .expect("other-active check must exist in reassign");
+        assert!(
+            close_pos < other_active_pos,
+            "REGRESSION: br::close_bead must come BEFORE the 'other active beads' \
+             check in reassign(). Checking first and returning early skips the \
+             close, orphaning every bead a busy worker completes."
         );
     }
 

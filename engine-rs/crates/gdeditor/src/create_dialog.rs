@@ -337,6 +337,160 @@ pub struct CreateDialogResult {
     pub parent_class: String,
 }
 
+/// A node in the class-type inheritance tree the Create Node dialog renders.
+///
+/// Each node is a class; its `children` are the classes that directly inherit
+/// from it (sorted by name). A node with no children is a leaf type. The tree
+/// is rooted at a requested base type (e.g. `Node`) and nests by inheritance
+/// down to the leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassTreeNode {
+    class_name: String,
+    children: Vec<ClassTreeNode>,
+}
+
+impl ClassTreeNode {
+    /// The class at this node.
+    pub fn class_name(&self) -> &str {
+        &self.class_name
+    }
+
+    /// The direct subclasses of this class, sorted by name.
+    pub fn children(&self) -> &[ClassTreeNode] {
+        &self.children
+    }
+
+    /// Whether this class is a leaf type (no registered subclasses).
+    pub fn is_leaf(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    /// Total number of classes in this subtree, including this node.
+    pub fn node_count(&self) -> usize {
+        1 + self.children.iter().map(ClassTreeNode::node_count).sum::<usize>()
+    }
+
+    /// Finds the node for `class_name` within this subtree (including self).
+    pub fn find(&self, class_name: &str) -> Option<&ClassTreeNode> {
+        if self.class_name == class_name {
+            return Some(self);
+        }
+        self.children.iter().find_map(|c| c.find(class_name))
+    }
+}
+
+/// Builds the inheritance subtree rooted at `name`, given a precomputed
+/// parent→children map. Children are recursed in the map's (sorted) order.
+fn build_class_subtree(
+    name: &str,
+    children_of: &std::collections::BTreeMap<String, Vec<String>>,
+) -> ClassTreeNode {
+    let children = children_of
+        .get(name)
+        .map(|kids| {
+            kids.iter()
+                .map(|child| build_class_subtree(child, children_of))
+                .collect()
+        })
+        .unwrap_or_default();
+    ClassTreeNode {
+        class_name: name.to_string(),
+        children,
+    }
+}
+
+/// A node in the class tree after incremental search filtering. Matching nodes
+/// carry the highlighted span; non-matching ancestors are kept for context with
+/// no span so the match's place in the hierarchy stays visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilteredClassNode {
+    class_name: String,
+    /// The `[start, end)` byte range of the matched query within `class_name`,
+    /// or `None` when this node is kept only as an ancestor of a match.
+    match_span: Option<(usize, usize)>,
+    children: Vec<FilteredClassNode>,
+}
+
+impl FilteredClassNode {
+    /// The class at this node.
+    pub fn class_name(&self) -> &str {
+        &self.class_name
+    }
+
+    /// The highlighted `[start, end)` span within the class name, if this node
+    /// itself matched the search query.
+    pub fn match_span(&self) -> Option<(usize, usize)> {
+        self.match_span
+    }
+
+    /// Whether this node itself matched the query (vs. being a kept ancestor).
+    pub fn is_match(&self) -> bool {
+        self.match_span.is_some()
+    }
+
+    /// The retained subclasses of this class.
+    pub fn children(&self) -> &[FilteredClassNode] {
+        &self.children
+    }
+
+    /// Whether this node has no retained children.
+    pub fn is_leaf(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    /// Total number of nodes in this filtered subtree, including this node.
+    pub fn node_count(&self) -> usize {
+        1 + self
+            .children
+            .iter()
+            .map(FilteredClassNode::node_count)
+            .sum::<usize>()
+    }
+
+    /// Finds the node for `class_name` within this filtered subtree.
+    pub fn find(&self, class_name: &str) -> Option<&FilteredClassNode> {
+        if self.class_name == class_name {
+            return Some(self);
+        }
+        self.children.iter().find_map(|c| c.find(class_name))
+    }
+}
+
+/// The case-insensitive substring span of `query` within `name`, or `None`.
+fn match_span_of(name: &str, query: &str) -> Option<(usize, usize)> {
+    if query.is_empty() {
+        return None;
+    }
+    // Class names are ASCII, so lowercasing preserves byte offsets and length —
+    // the span found in the lowercased name maps directly onto the original.
+    let needle = query.to_lowercase();
+    name.to_lowercase()
+        .find(needle.as_str())
+        .map(|start| (start, start + needle.len()))
+}
+
+/// Filters `node` to the subtree retaining classes that match `query` (by
+/// case-insensitive substring) plus their ancestors for context. A node is kept
+/// if it matches or any descendant is kept; matching nodes carry the highlight
+/// span. Returns `None` when nothing in this subtree matches.
+fn filter_class_subtree(node: &ClassTreeNode, query: &str) -> Option<FilteredClassNode> {
+    let span = match_span_of(node.class_name(), query);
+    let children: Vec<FilteredClassNode> = node
+        .children()
+        .iter()
+        .filter_map(|child| filter_class_subtree(child, query))
+        .collect();
+    if span.is_some() || !children.is_empty() {
+        Some(FilteredClassNode {
+            class_name: node.class_name().to_string(),
+            match_span: span,
+            children,
+        })
+    } else {
+        None
+    }
+}
+
 /// The node creation dialog.
 ///
 /// Displays a searchable, filterable list of all registered classes from ClassDB.
@@ -507,6 +661,25 @@ impl CreateNodeDialog {
         self.favorites.len() < len_before
     }
 
+    /// Toggles the favorite state of a class: favorites it if it isn't already,
+    /// or unfavorites it if it is. Returns the new state — `true` if the class
+    /// is now a favorite, `false` if it was removed.
+    pub fn toggle_favorite(&mut self, class_name: impl Into<String>) -> bool {
+        let name = class_name.into();
+        if self.favorites.contains(&name) {
+            self.favorites.retain(|f| f != &name);
+            false
+        } else {
+            self.favorites.push(name);
+            true
+        }
+    }
+
+    /// Whether a class is currently a favorite.
+    pub fn is_favorite(&self, class_name: &str) -> bool {
+        self.favorites.iter().any(|f| f == class_name)
+    }
+
     /// Returns the favorites list.
     pub fn favorites(&self) -> &[String] {
         &self.favorites
@@ -618,6 +791,38 @@ impl CreateNodeDialog {
             .collect()
     }
 
+    /// Returns the favorited classes as entries, in favorite order (unfiltered).
+    ///
+    /// This backs the persistent Favorites section shown at the top of the
+    /// dialog; entries persist across open/close since `open` does not clear
+    /// favorites. Mirrors [`Self::recent_entries`].
+    pub fn favorite_entries(&self) -> Vec<ClassEntry> {
+        self.favorites
+            .iter()
+            .filter_map(|name| {
+                let info = class_db::get_class_info(name)?;
+                let chain = class_db::inheritance_chain(name);
+                let (description, category) = if let Some(cat) = &self.catalog {
+                    let entry = cat.get(name);
+                    (
+                        entry.map(|e| e.description.clone()),
+                        entry.map(|e| e.category),
+                    )
+                } else {
+                    (None, None)
+                };
+                Some(ClassEntry {
+                    class_name: name.clone(),
+                    parent_class: info.parent_class.clone(),
+                    inheritance_chain: chain,
+                    is_favorite: true,
+                    description,
+                    category,
+                })
+            })
+            .collect()
+    }
+
     /// Returns the number of classes matching the current filter.
     pub fn match_count(&self) -> usize {
         let all = class_db::get_class_list();
@@ -625,6 +830,76 @@ impl CreateNodeDialog {
         all.iter()
             .filter(|name| matches_filter(name, &filter))
             .count()
+    }
+
+    /// Builds the class-type inheritance tree rooted at `base`, nesting each
+    /// class under its parent down to the leaf types. Returns `None` if `base`
+    /// is not a registered class. This is what the dialog renders when opened
+    /// against a base type (e.g. `Node`).
+    pub fn class_tree(&self, base: &str) -> Option<ClassTreeNode> {
+        let all = class_db::get_class_list();
+        if !all.iter().any(|name| name.as_str() == base) {
+            return None;
+        }
+        // Precompute parent → children once; BTreeMap keeps children sorted by
+        // class name for a stable, deterministic tree.
+        let mut children_of: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for name in &all {
+            if let Some(info) = class_db::get_class_info(name) {
+                if !info.parent_class.is_empty() {
+                    children_of
+                        .entry(info.parent_class.clone())
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
+        for kids in children_of.values_mut() {
+            kids.sort();
+        }
+        Some(build_class_subtree(base, &children_of))
+    }
+
+    /// Builds the class tree rooted at this dialog's base class (the type it
+    /// was opened against), or `None` when no base class is set.
+    pub fn base_class_tree(&self) -> Option<ClassTreeNode> {
+        let base = self.base_class.as_deref()?;
+        self.class_tree(base)
+    }
+
+    /// The class tree rooted at `base`, incrementally filtered by `query`:
+    /// retains only classes whose names match the query (case-insensitive
+    /// substring) plus their ancestors so each match keeps its place in the
+    /// hierarchy, and records the highlighted span on each matching node.
+    ///
+    /// An empty `query` is a no-op filter: the full tree is returned with no
+    /// highlight spans. Returns `None` when `base` is unregistered, or when a
+    /// non-empty query matches nothing in the subtree.
+    pub fn filtered_class_tree(&self, base: &str, query: &str) -> Option<FilteredClassNode> {
+        let tree = self.class_tree(base)?;
+        if query.is_empty() {
+            // No filter: mirror the full tree with no matched spans.
+            return Some(no_highlight(&tree));
+        }
+        filter_class_subtree(&tree, query)
+    }
+
+    /// The incrementally filtered tree rooted at this dialog's base class, or
+    /// `None` when no base class is set (or nothing matches `query`).
+    pub fn base_filtered_class_tree(&self, query: &str) -> Option<FilteredClassNode> {
+        let base = self.base_class.as_deref()?;
+        self.filtered_class_tree(base, query)
+    }
+}
+
+/// Mirrors a full class tree into a [`FilteredClassNode`] tree with no match
+/// spans — the unfiltered view shown when the search box is empty.
+fn no_highlight(node: &ClassTreeNode) -> FilteredClassNode {
+    FilteredClassNode {
+        class_name: node.class_name().to_string(),
+        match_span: None,
+        children: node.children().iter().map(no_highlight).collect(),
     }
 }
 
@@ -727,6 +1002,136 @@ mod tests {
         assert_eq!(d.base_class(), Some("Node"));
     }
 
+    /// Acceptance (pat-ib360): opening Create Node renders the class tree rooted
+    /// at the base type (Node) with inheritance nesting, expandable to leaves.
+    #[test]
+    fn create_node_type_tree() {
+        let _g = setup();
+        let mut d = CreateNodeDialog::with_base_class("Node");
+        d.open();
+
+        // The dialog renders a tree rooted at its base type.
+        let tree = d.base_class_tree().expect("base class Node is registered");
+        assert_eq!(tree.class_name(), "Node", "tree is rooted at the base type");
+        assert!(!tree.is_leaf(), "the root has subclasses");
+
+        // Direct children nest by inheritance, sorted by name.
+        let kids: Vec<&str> = tree.children().iter().map(ClassTreeNode::class_name).collect();
+        assert_eq!(kids, vec!["Control", "Node2D", "Node3D"]);
+
+        // Nesting continues: Node2D's subclasses.
+        let node2d = tree.find("Node2D").expect("Node2D is under Node");
+        let n2: Vec<&str> = node2d.children().iter().map(ClassTreeNode::class_name).collect();
+        assert_eq!(n2, vec!["AnimatedSprite2D", "Sprite2D"]);
+
+        // Control's subclasses, and a deeper single-child branch.
+        let control = tree.find("Control").expect("Control is under Node");
+        let c: Vec<&str> = control.children().iter().map(ClassTreeNode::class_name).collect();
+        assert_eq!(c, vec!["Button", "Label"]);
+        let node3d = tree.find("Node3D").expect("Node3D is under Node");
+        let n3: Vec<&str> = node3d.children().iter().map(ClassTreeNode::class_name).collect();
+        assert_eq!(n3, vec!["MeshInstance3D"]);
+
+        // The tree expands all the way to leaf types.
+        assert!(tree.find("Sprite2D").unwrap().is_leaf(), "Sprite2D is a leaf");
+        assert!(tree.find("MeshInstance3D").unwrap().is_leaf());
+        assert!(tree.find("Button").unwrap().is_leaf());
+
+        // The whole Node subtree: Node + 8 descendants.
+        assert_eq!(tree.node_count(), 9);
+
+        // Classes outside the Node hierarchy are not in the tree.
+        assert!(tree.find("Resource").is_none(), "Resource is not a Node");
+        assert!(tree.find("Object").is_none(), "Object is Node's parent, not a child");
+
+        // Rooting at an unregistered base type yields no tree.
+        assert!(d.class_tree("DoesNotExist").is_none());
+
+        // The tree can also be built rooted at an arbitrary registered base.
+        let from_object = d.class_tree("Object").expect("Object is registered");
+        assert_eq!(from_object.class_name(), "Object");
+        assert_eq!(from_object.node_count(), 11, "Object roots the full hierarchy");
+    }
+
+    /// Acceptance (pat-o773t): typing in the search box incrementally filters
+    /// the class tree to matching type names, keeps ancestors visible for
+    /// context, and highlights the matched span.
+    #[test]
+    fn create_node_incremental_search() {
+        let _g = setup();
+        let d = CreateNodeDialog::with_base_class("Node");
+
+        // Typing "sprite" filters the Node tree to the two *Sprite2D types.
+        let tree = d
+            .base_filtered_class_tree("sprite")
+            .expect("'sprite' matches types under Node");
+
+        // The tree stays rooted at the base type and keeps the ancestor chain
+        // (Node → Node2D) so each match keeps its place in the hierarchy.
+        assert_eq!(tree.class_name(), "Node");
+        assert!(!tree.is_match(), "Node is kept as context, not a match");
+        let kids: Vec<&str> = tree
+            .children()
+            .iter()
+            .map(FilteredClassNode::class_name)
+            .collect();
+        assert_eq!(kids, vec!["Node2D"], "only the branch leading to matches is kept");
+        let node2d = tree.find("Node2D").expect("Node2D ancestor kept");
+        assert!(!node2d.is_match(), "Node2D is an ancestor, not a match");
+
+        // Non-matching branches are pruned entirely.
+        assert!(tree.find("Node3D").is_none(), "Node3D has no matching descendant");
+        assert!(tree.find("Control").is_none());
+
+        // Both matches are present, are leaves of the filtered tree, and carry
+        // a highlight span over the matched substring.
+        let leaves: Vec<&str> = node2d
+            .children()
+            .iter()
+            .map(FilteredClassNode::class_name)
+            .collect();
+        assert_eq!(leaves, vec!["AnimatedSprite2D", "Sprite2D"]);
+        assert_eq!(tree.node_count(), 4, "Node + Node2D + 2 sprite leaves");
+
+        // Each matched node highlights the exact span where "sprite" occurs.
+        let sprite = tree.find("Sprite2D").expect("Sprite2D matched");
+        assert!(sprite.is_match());
+        let (s, e) = sprite.match_span().expect("matched node has a span");
+        assert_eq!(&sprite.class_name()[s..e], "Sprite", "highlight covers the match");
+
+        let animated = tree.find("AnimatedSprite2D").expect("AnimatedSprite2D matched");
+        let (s2, e2) = animated.match_span().expect("matched node has a span");
+        assert_eq!(&animated.class_name()[s2..e2], "Sprite");
+        assert_eq!((s2, e2), (8, 14), "span is offset past the 'Animated' prefix");
+
+        // Matching is case-insensitive: "SPRITE" filters the same way.
+        let upper = d.base_filtered_class_tree("SPRITE").expect("case-insensitive match");
+        assert_eq!(upper.node_count(), 4);
+
+        // A match whose own children don't match becomes a filtered leaf, but
+        // its ancestors stay for context.
+        let only_node2d = d
+            .base_filtered_class_tree("node2d")
+            .expect("'node2d' matches Node2D");
+        assert_eq!(only_node2d.node_count(), 2, "Node (context) + Node2D (match)");
+        let m = only_node2d.find("Node2D").unwrap();
+        assert!(m.is_match() && m.is_leaf(), "Node2D matches; its non-matching kids are pruned");
+
+        // An empty query is a no-op filter: the whole tree, with no highlights.
+        let unfiltered = d.base_filtered_class_tree("").expect("empty query keeps the tree");
+        assert_eq!(unfiltered.node_count(), 9, "the full Node subtree");
+        assert!(
+            unfiltered.find("Sprite2D").unwrap().match_span().is_none(),
+            "no highlight without a query"
+        );
+
+        // A query that matches nothing yields no tree.
+        assert!(d.base_filtered_class_tree("zzz").is_none());
+
+        // Unregistered base still yields no tree, even with a query.
+        assert!(d.filtered_class_tree("DoesNotExist", "node").is_none());
+    }
+
     #[test]
     fn select_valid_class() {
         let _g = setup();
@@ -820,6 +1225,61 @@ mod tests {
         assert_eq!(classes[0].class_name, "Sprite2D");
         assert!(classes[0].is_favorite);
         assert!(!classes[1].is_favorite);
+    }
+
+    /// Acceptance (pat-ist39): toggling favorite on a type adds it to the
+    /// persistent Favorites section, toggling off removes it, and favorites
+    /// survive reopening the dialog.
+    #[test]
+    fn create_node_favorites() {
+        let _g = setup();
+        let mut d = CreateNodeDialog::new();
+
+        // No favorites to begin with.
+        assert!(d.favorites().is_empty());
+        assert!(d.favorite_entries().is_empty());
+        assert!(!d.is_favorite("Sprite2D"));
+
+        // Toggling favorite on a type adds it to the Favorites section.
+        assert!(d.toggle_favorite("Sprite2D"), "toggle returns the new (on) state");
+        assert!(d.is_favorite("Sprite2D"));
+        let entries = d.favorite_entries();
+        let favs: Vec<&str> = entries.iter().map(|e| e.class_name.as_str()).collect();
+        assert_eq!(favs, vec!["Sprite2D"], "favorite appears in the section");
+        assert!(
+            d.favorite_entries().iter().all(|e| e.is_favorite),
+            "section entries are flagged as favorites"
+        );
+
+        // Favorited types sort to the top of the dialog's class list.
+        let classes = d.filtered_classes();
+        assert_eq!(classes[0].class_name, "Sprite2D");
+        assert!(classes[0].is_favorite);
+
+        // A second favorite extends the section, preserving favorite order.
+        assert!(d.toggle_favorite("Button"));
+        let entries = d.favorite_entries();
+        let favs: Vec<&str> = entries.iter().map(|e| e.class_name.as_str()).collect();
+        assert_eq!(favs, vec!["Sprite2D", "Button"]);
+
+        // Toggling an already-favorited type off removes it from the section.
+        assert!(!d.toggle_favorite("Sprite2D"), "toggle returns the new (off) state");
+        assert!(!d.is_favorite("Sprite2D"));
+        let entries = d.favorite_entries();
+        let favs: Vec<&str> = entries.iter().map(|e| e.class_name.as_str()).collect();
+        assert_eq!(favs, vec!["Button"], "only the remaining favorite is left");
+
+        // Favorites survive reopening the dialog: open() clears search and
+        // selection but must not clear the persistent Favorites section.
+        d.set_search("xyz");
+        d.select("Node2D");
+        d.open();
+        assert!(d.search_text().is_empty(), "open cleared the search");
+        assert!(d.selected().is_none(), "open cleared the selection");
+        assert!(d.is_favorite("Button"), "favorite survived reopen");
+        let entries = d.favorite_entries();
+        let favs: Vec<&str> = entries.iter().map(|e| e.class_name.as_str()).collect();
+        assert_eq!(favs, vec!["Button"], "Favorites section persisted across reopen");
     }
 
     #[test]

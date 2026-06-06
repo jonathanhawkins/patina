@@ -688,6 +688,35 @@ impl AnimationEditor {
         self.track_states.len()
     }
 
+    /// Returns the onion-skin "ghost" frame times around the playhead: up to
+    /// `onion_skin_count` frames before and after, spaced by the timeline's snap
+    /// interval and clamped to `[0, length]` (out-of-range neighbors are
+    /// dropped). The playhead's own frame is not included. Returns an empty vec
+    /// when onion-skinning is disabled (or the count/step is zero), so the
+    /// editor clears the ghosts. The result is sorted ascending in time.
+    pub fn onion_skin_frames(&self) -> Vec<f64> {
+        let step = self.timeline.snap_interval;
+        if !self.onion_skin || self.onion_skin_count == 0 || step <= 0.0 {
+            return Vec::new();
+        }
+        let playhead = self.timeline.playhead;
+        let length = self.timeline.length;
+        let mut frames = Vec::new();
+        for i in 1..=self.onion_skin_count {
+            let offset = step * i as f64;
+            let past = playhead - offset;
+            if past >= 0.0 {
+                frames.push(past);
+            }
+            let future = playhead + offset;
+            if future <= length {
+                frames.push(future);
+            }
+        }
+        frames.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        frames
+    }
+
     /// Mutes/unmutes a track.
     pub fn set_track_muted(&mut self, index: usize, muted: bool) {
         if let Some(state) = self.track_states.get_mut(index) {
@@ -1352,5 +1381,114 @@ mod tests {
         editor.swap_tracks(0, 1);
         assert_eq!(editor.track_type(0), Some(TrackType::Audio));
         assert_eq!(editor.track_type(1), Some(TrackType::Property));
+    }
+
+    /// Acceptance (pat-gh4ti): dragging the playhead scrubs the animation time,
+    /// the ruler reflects the current zoom, and snapping aligns the playhead to
+    /// the configured time step.
+    #[test]
+    fn anim_timeline_playhead() {
+        let mut tl = Timeline::new(2.0);
+
+        // Dragging the playhead scrubs time: a drop at pixel x maps to a time.
+        let scrubbed = tl.x_to_time(150.0); // zoom 100 px/s, scroll 0 -> 1.5s
+        tl.set_playhead(scrubbed);
+        assert!((tl.playhead - 1.5).abs() < 1e-9);
+
+        // The playhead is clamped to [0, length] while scrubbing.
+        tl.set_playhead(5.0);
+        assert!((tl.playhead - 2.0).abs() < 1e-9);
+        tl.set_playhead(-1.0);
+        assert_eq!(tl.playhead, 0.0);
+
+        // The ruler reflects the current zoom: visible duration = width / zoom.
+        assert!((tl.visible_duration() - 8.0).abs() < 1e-9); // 800 / 100
+        tl.zoom_at(2.0, 0.0); // zoom in 2x -> 200 px/s
+        assert!((tl.zoom - 200.0).abs() < 1e-9);
+        assert!((tl.visible_duration() - 4.0).abs() < 1e-9); // 800 / 200
+
+        // Snapping aligns the playhead to the configured 0.1s grid.
+        tl.set_playhead_snapped(0.37);
+        assert!((tl.playhead - 0.4).abs() < 1e-9);
+        assert!((tl.snap_time(0.44) - 0.4).abs() < 1e-9);
+        assert!((tl.snap_time(0.46) - 0.5).abs() < 1e-9);
+
+        // With snapping disabled the time is used as-is.
+        tl.snap_enabled = false;
+        assert!((tl.snap_time(0.37) - 0.37).abs() < 1e-9);
+    }
+
+    /// Acceptance (pat-7s2yk): adding a track for a node/property creates the
+    /// track, keying that property from the inspector targets the same track,
+    /// and removing a track deletes it (with its keys).
+    #[test]
+    fn anim_track_add_remove() {
+        let mut ed = AnimationEditor::new(1.0, 0);
+        assert_eq!(ed.track_count(), 0);
+
+        // Adding a track for a node/property creates it.
+        let idx = ed.create_property_track("Player", "position").unwrap();
+        assert_eq!(ed.track_count(), 1);
+        assert_eq!(ed.track_type(idx), Some(TrackType::Property));
+
+        // Keying that property from the inspector targets the same track
+        // (it resolves to the existing track rather than duplicating).
+        assert_eq!(ed.find_track("Player", "position"), Some(idx));
+        assert!(matches!(
+            ed.create_property_track("Player", "position"),
+            Err(TrackCreationError::DuplicateTrack { existing_index }) if existing_index == idx
+        ));
+        assert_eq!(ed.track_count(), 1);
+
+        // A different property creates a separate track.
+        let idx2 = ed.create_property_track("Player", "rotation").unwrap();
+        assert_eq!(ed.track_count(), 2);
+        assert_ne!(idx, idx2);
+
+        // Removing a track deletes it (with its keys) from the editor.
+        assert!(ed.remove_track(idx));
+        assert_eq!(ed.track_count(), 1);
+        assert_eq!(ed.find_track("Player", "position"), None);
+
+        // Out-of-range removal is a no-op.
+        assert!(!ed.remove_track(99));
+        assert_eq!(ed.track_count(), 1);
+    }
+
+    /// Acceptance (pat-ufsnm): enabling onion skinning renders ghosted
+    /// past/future frames with a configurable count, and disabling it clears
+    /// the ghosts.
+    #[test]
+    fn anim_onion_skinning() {
+        let mut ed = AnimationEditor::new(2.0, 0); // snap interval 0.1s, length 2.0
+        ed.timeline.set_playhead(1.0);
+
+        // Disabled by default -> no ghost frames.
+        assert!(!ed.onion_skin);
+        assert!(ed.onion_skin_frames().is_empty());
+
+        // Enabling renders ghosted past/future frames at the configured count.
+        ed.onion_skin = true;
+        ed.onion_skin_count = 2; // 2 before + 2 after at 0.1s spacing
+        let ghosts = ed.onion_skin_frames();
+        assert_eq!(ghosts.len(), 4);
+        for (g, expected) in ghosts.iter().zip([0.8, 0.9, 1.1, 1.2]) {
+            assert!((g - expected).abs() < 1e-9);
+        }
+
+        // Near the start, out-of-range past frames are clamped away.
+        ed.timeline.set_playhead(0.05);
+        let near_start = ed.onion_skin_frames();
+        assert_eq!(near_start.len(), 2); // only the two future frames remain
+        assert!(near_start.iter().all(|&t| (0.0..=2.0).contains(&t)));
+
+        // Disabling clears the ghosts.
+        ed.onion_skin = false;
+        assert!(ed.onion_skin_frames().is_empty());
+
+        // A zero count yields no ghosts even when enabled.
+        ed.onion_skin = true;
+        ed.onion_skin_count = 0;
+        assert!(ed.onion_skin_frames().is_empty());
     }
 }

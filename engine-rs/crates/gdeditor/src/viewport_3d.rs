@@ -8,7 +8,8 @@
 //! - **Zoom**: Scroll wheel moves towards/away from the focus point.
 
 use gdcore::math::{Color, Vector3};
-use gdcore::math3d::{Basis, Transform3D};
+use gdcore::math3d::{Aabb, Basis, Transform3D};
+use gdscene::node3d;
 use gdscene::SceneTree;
 use gdserver3d::environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
 #[cfg(test)]
@@ -335,6 +336,32 @@ impl ViewportCamera3D {
     pub fn focus_on_with_distance(&mut self, point: Vector3, distance: f32) {
         self.focus_point = point;
         self.distance = distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
+    }
+
+    /// Frames the camera on `aabb` — Godot's "F" focus-on-selection. The focus
+    /// point moves to the box's center and the view distance (or `ortho_size`
+    /// in orthographic) is set so the box's bounding sphere fits in view for the
+    /// current FOV, with a small margin. The orbit orientation (yaw/pitch) is
+    /// preserved, so framing zooms/recenters without rotating. A zero-size box
+    /// (a single point) frames at a small valid distance.
+    pub fn frame_aabb(&mut self, aabb: Aabb) {
+        self.focus_point = aabb.get_center();
+        // Bounding-sphere radius of the box: half the diagonal length.
+        let radius = (aabb.size * 0.5).length();
+        // A small margin so the selection isn't flush against the frame edges.
+        const FRAME_MARGIN: f32 = 1.2;
+        let effective = (radius * FRAME_MARGIN).max(MIN_DISTANCE);
+        match self.projection {
+            Projection::Perspective => {
+                // distance = r / sin(halfFov) fits a sphere of radius `r`.
+                let half_fov = (self.fov_degrees.to_radians() * 0.5).max(0.01);
+                let dist = effective / half_fov.sin();
+                self.distance = dist.clamp(MIN_DISTANCE, MAX_DISTANCE);
+            }
+            Projection::Orthographic => {
+                self.ortho_size = effective.clamp(0.1, 500.0);
+            }
+        }
     }
 
     /// Toggle between perspective and orthographic projection.
@@ -837,6 +864,85 @@ impl Viewport3D {
         }
 
         Some(env)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scene content collection (Node3D rendering)
+// ---------------------------------------------------------------------------
+
+/// A single `Node3D`-derived node collected from the scene for rendering in the
+/// 3D viewport.
+///
+/// Mirrors what Godot's editor draws in 3D mode: every spatial node with its
+/// global transform, plus mesh info for visual nodes. The viewport renders one
+/// of these per spatial node (a mesh for mesh-bearing nodes, an icon/gizmo for
+/// the rest).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node3DRenderable {
+    /// Raw id of the source node (matches the ids used by selection/picking).
+    pub node_id: u64,
+    /// The node's class name (e.g. `"MeshInstance3D"`, `"DirectionalLight3D"`).
+    pub class_name: String,
+    /// The node's global (world-space) transform.
+    pub global_transform: Transform3D,
+    /// Whether the node is visible.
+    pub visible: bool,
+    /// Mesh resource path for mesh-bearing nodes (`MeshInstance3D`), else `None`.
+    pub mesh_path: Option<String>,
+}
+
+impl Viewport3D {
+    /// Collects every `Node3D`-derived node in `tree` into a flat list of
+    /// renderables, in tree order.
+    ///
+    /// This is the scene content the 3D viewport draws. Previously the viewport
+    /// showed only the grid because nothing gathered the spatial nodes; this
+    /// walks the scene and produces the per-node data (global transform, mesh,
+    /// visibility) the renderer needs. Non-spatial nodes (`Control`, `Node2D`,
+    /// plain `Node`, resources) are skipped via the ClassDB inheritance check.
+    pub fn collect_scene_content(&self, tree: &SceneTree) -> Vec<Node3DRenderable> {
+        let mut out = Vec::new();
+        for nid in tree.all_nodes_in_tree_order() {
+            let node = match tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !node.is_class("Node3D") {
+                continue;
+            }
+            out.push(Node3DRenderable {
+                node_id: nid.raw(),
+                class_name: node.class_name().to_string(),
+                global_transform: node3d::get_global_transform(tree, nid),
+                visible: node3d::is_visible(tree, nid),
+                mesh_path: node3d::get_mesh_path(tree, nid),
+            });
+        }
+        out
+    }
+
+    /// Returns `(node_id, world_position)` pairs for the scene's *visible*
+    /// spatial nodes, suitable for passing to [`Viewport3D::pick_node`].
+    ///
+    /// Hidden nodes are excluded so they can't be clicked in the viewport.
+    pub fn pickable_nodes(&self, tree: &SceneTree) -> Vec<(u64, Vector3)> {
+        self.collect_scene_content(tree)
+            .into_iter()
+            .filter(|r| r.visible)
+            .map(|r| (r.node_id, r.global_transform.origin))
+            .collect()
+    }
+
+    /// Returns `true` if the scene contains any `Node3D`-derived content to
+    /// render. Used to decide whether the 3D viewport shows scene content or
+    /// just the empty grid.
+    pub fn has_scene_content(&self, tree: &SceneTree) -> bool {
+        tree.all_nodes_in_tree_order().into_iter().any(|nid| {
+            tree.get_node(nid)
+                .map(|n| n.is_class("Node3D"))
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -2127,6 +2233,86 @@ mod tests {
         let mut cam = ViewportCamera3D::new();
         cam.focus_on_with_distance(Vector3::new(1.0, 2.0, 3.0), 15.0);
         assert!(approx_eq(cam.distance, 15.0, 1e-6));
+    }
+
+    /// Acceptance (pat-kka71.1): the 3D editor camera supports orbit, pan, zoom,
+    /// and frame-selection. Orbit rotates around the focus (pitch stays
+    /// clamped), pan slides the focus without rotating, zoom changes distance,
+    /// and framing an AABB recenters the focus on the selection at a distance
+    /// that fits it — keeping the orbit orientation.
+    #[test]
+    fn editor3d_camera_navigation() {
+        let mut cam = ViewportCamera3D::new();
+
+        // Orbit: dragging changes yaw + pitch around the focus point.
+        let (yaw0, pitch0) = (cam.yaw, cam.pitch);
+        cam.begin_orbit();
+        cam.orbit(100.0, 50.0);
+        cam.end_orbit();
+        assert!(cam.yaw != yaw0, "orbit changes yaw");
+        assert!(cam.pitch != pitch0, "orbit changes pitch");
+        assert!(
+            cam.pitch <= PITCH_MAX && cam.pitch >= PITCH_MIN,
+            "pitch stays clamped to ±89°"
+        );
+
+        // Pan: slides the focus point without changing the orbit angles.
+        let focus_before = cam.focus_point;
+        let (yaw_p, pitch_p) = (cam.yaw, cam.pitch);
+        cam.begin_pan();
+        cam.pan(40.0, -20.0);
+        cam.end_pan();
+        assert!(
+            !vec3_approx_eq(cam.focus_point, focus_before, 1e-6),
+            "pan moves the focus point"
+        );
+        assert_eq!((cam.yaw, cam.pitch), (yaw_p, pitch_p), "pan does not rotate");
+
+        // Zoom: scrolling in moves closer, out moves farther (within clamps).
+        let dist_before = cam.distance;
+        cam.zoom(1.0);
+        assert!(cam.distance < dist_before, "zoom in decreases distance");
+        let dist_in = cam.distance;
+        cam.zoom(-1.0);
+        assert!(cam.distance > dist_in, "zoom out increases distance");
+
+        // Frame-selection: framing an AABB recenters the focus on the box and
+        // sets a distance that fits it, preserving the orbit orientation.
+        let (yaw_f, pitch_f) = (cam.yaw, cam.pitch);
+        let aabb = Aabb {
+            position: Vector3::new(2.0, 0.0, -4.0),
+            size: Vector3::new(4.0, 2.0, 6.0),
+        };
+        cam.frame_aabb(aabb);
+        assert!(
+            vec3_approx_eq(cam.focus_point, aabb.get_center(), 1e-6),
+            "framing centers the focus on the selection"
+        );
+        let radius = (aabb.size * 0.5).length();
+        assert!(
+            cam.distance >= radius && cam.distance <= 1000.0,
+            "framed distance fits the selection (dist={}, r={})",
+            cam.distance,
+            radius
+        );
+        assert_eq!(
+            (cam.yaw, cam.pitch),
+            (yaw_f, pitch_f),
+            "framing keeps the orbit orientation"
+        );
+
+        // Framing a zero-size selection (a point) still yields a valid distance
+        // and focuses on the point.
+        let point = Vector3::new(1.0, 1.0, 1.0);
+        cam.frame_aabb(Aabb {
+            position: point,
+            size: Vector3::ZERO,
+        });
+        assert!(cam.distance >= MIN_DISTANCE, "framing a point keeps a valid distance");
+        assert!(
+            vec3_approx_eq(cam.focus_point, point, 1e-6),
+            "framing a point focuses on it"
+        );
     }
 
     #[test]
@@ -3760,5 +3946,130 @@ mod tests {
         let ray = Ray3D::new(Vector3::new(0.0, -5.0, 0.0), Vector3::new(0.0, -1.0, 0.0));
         let t = ray_plane_intersect(&ray, Vector3::ZERO, Vector3::new(0.0, 1.0, 0.0));
         assert!(t.is_none(), "Intersection behind ray should return None");
+    }
+
+    // -----------------------------------------------------------------------
+    // collect_scene_content / Node3D rendering tests (pat-kka71)
+    // -----------------------------------------------------------------------
+
+    /// Acceptance (pat-kka71): opening a 3D scene in 3D mode shows the scene's
+    /// `Node3D` content. `collect_scene_content` gathers every spatial node
+    /// with its global transform and mesh; non-spatial nodes are excluded.
+    #[test]
+    fn test_collect_scene_content_gathers_spatial_nodes() {
+        use gdscene::node::Node;
+        gdobject::class_db::register_3d_classes();
+        gdobject::class_db::register_2d_classes();
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mesh_id = tree
+            .add_child(root, Node::new("Mesh", "MeshInstance3D"))
+            .unwrap();
+        let cam_id = tree.add_child(root, Node::new("Cam", "Camera3D")).unwrap();
+        let light_id = tree
+            .add_child(root, Node::new("Sun", "DirectionalLight3D"))
+            .unwrap();
+        // A non-spatial (2D) node must be excluded from the 3D viewport content.
+        let sprite2d_id = tree
+            .add_child(root, Node::new("Sprite", "Sprite2D"))
+            .unwrap();
+
+        node3d::set_position(&mut tree, mesh_id, Vector3::new(1.0, 2.0, 3.0));
+        node3d::set_mesh_path(&mut tree, mesh_id, "res://crate.obj");
+
+        let vp = Viewport3D::default();
+        let content = vp.collect_scene_content(&tree);
+        let ids: Vec<u64> = content.iter().map(|r| r.node_id).collect();
+
+        assert!(ids.contains(&mesh_id.raw()), "MeshInstance3D collected");
+        assert!(ids.contains(&cam_id.raw()), "Camera3D collected");
+        assert!(ids.contains(&light_id.raw()), "DirectionalLight3D collected");
+        assert!(
+            !ids.contains(&sprite2d_id.raw()),
+            "Sprite2D (non-spatial) excluded from 3D content"
+        );
+
+        // The mesh node carries its global transform and mesh path for rendering.
+        let mesh = content
+            .iter()
+            .find(|r| r.node_id == mesh_id.raw())
+            .expect("mesh renderable present");
+        assert_eq!(mesh.class_name, "MeshInstance3D");
+        assert!(approx_eq(mesh.global_transform.origin.x, 1.0, 1e-4));
+        assert!(approx_eq(mesh.global_transform.origin.y, 2.0, 1e-4));
+        assert!(approx_eq(mesh.global_transform.origin.z, 3.0, 1e-4));
+        assert_eq!(mesh.mesh_path.as_deref(), Some("res://crate.obj"));
+        assert!(mesh.visible);
+    }
+
+    /// Hidden spatial nodes are still part of the rendered content but are
+    /// excluded from picking so they can't be clicked through.
+    #[test]
+    fn test_pickable_nodes_excludes_hidden() {
+        use gdscene::node::Node;
+        gdobject::class_db::register_3d_classes();
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let visible_id = tree
+            .add_child(root, Node::new("A", "MeshInstance3D"))
+            .unwrap();
+        let hidden_id = tree
+            .add_child(root, Node::new("B", "MeshInstance3D"))
+            .unwrap();
+        node3d::set_visible(&mut tree, hidden_id, false);
+
+        let vp = Viewport3D::default();
+        let pickable: Vec<u64> = vp
+            .pickable_nodes(&tree)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        assert!(pickable.contains(&visible_id.raw()), "visible node pickable");
+        assert!(
+            !pickable.contains(&hidden_id.raw()),
+            "hidden node not pickable"
+        );
+
+        // The hidden node is still collected for rendering (drawn dimmed).
+        let content_ids: Vec<u64> = vp
+            .collect_scene_content(&tree)
+            .iter()
+            .map(|r| r.node_id)
+            .collect();
+        assert!(content_ids.contains(&hidden_id.raw()));
+    }
+
+    /// `has_scene_content` distinguishes a 3D scene from an empty/2D-only one,
+    /// so the viewport knows whether to show content or just the grid.
+    #[test]
+    fn test_has_scene_content_detects_3d_nodes() {
+        use gdscene::node::Node;
+        gdobject::class_db::register_3d_classes();
+        gdobject::class_db::register_2d_classes();
+
+        let vp = Viewport3D::default();
+
+        // A tree whose only non-root node is 2D has no 3D content (unless the
+        // default root itself happens to be spatial).
+        let mut tree_2d = SceneTree::new();
+        let root2 = tree_2d.root_id();
+        tree_2d
+            .add_child(root2, Node::new("S", "Sprite2D"))
+            .unwrap();
+        if !tree_2d.get_node(root2).unwrap().is_class("Node3D") {
+            assert!(!vp.has_scene_content(&tree_2d));
+        }
+
+        // Adding a Node3D makes the scene report 3D content.
+        let mut tree_3d = SceneTree::new();
+        let root3 = tree_3d.root_id();
+        tree_3d
+            .add_child(root3, Node::new("N", "Node3D"))
+            .unwrap();
+        assert!(vp.has_scene_content(&tree_3d));
     }
 }
