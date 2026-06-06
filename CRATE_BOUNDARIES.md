@@ -99,6 +99,7 @@ These crates build on core crates to provide scene management and resource handl
 - Group membership
 - Node2D, Control, and derived node types
 - Scene-level notifications
+- `%UniqueName` NodePath resolution within scene-owner scope (`get_node_by_unique_name`)
 
 **May depend on**: `gdcore`, `gdvariant`, `gdobject`, `gdresource`
 

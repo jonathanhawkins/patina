@@ -1,0 +1,86 @@
+name: Export Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'engine-rs/crates/gdplatform/**'
+      - '.github/workflows/export-validation.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'engine-rs/crates/gdplatform/**'
+      - '.github/workflows/export-validation.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: export-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Validates that the Patina export pipeline produces structurally-correct
+  # CI artifacts for all three desktop targets (Linux, macOS, Windows).
+  # Runs the gdplatform export validation helpers on the native toolchain of
+  # each OS to catch platform-specific export regressions early.
+  export-validation:
+    name: Export validation (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: macos
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-export-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-export-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-export-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-export-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-export-target-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-export-target-
+
+      - name: Build gdplatform crate
+        working-directory: engine-rs
+        run: cargo build -p gdplatform
+
+      - name: Run gdplatform export validation unit tests
+        working-directory: engine-rs
+        run: cargo test -p gdplatform -- 'ci_artifact::'
+
+      - name: Run cross-platform export validation integration test
+        working-directory: engine-rs
+        run: cargo test --test export_validation_workflow_test

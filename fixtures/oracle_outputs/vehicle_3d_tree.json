@@ -1,0 +1,155 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/Track",
+					"path": "/root/Track/Camera"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "Sun",
+					"owner": "/root/Track",
+					"path": "/root/Track/Sun"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "ChassisShape",
+							"owner": "/root/Track",
+							"path": "/root/Track/Chassis/ChassisShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "ChassisMesh",
+							"owner": "/root/Track",
+							"path": "/root/Track/Chassis/ChassisMesh"
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"groups": [],
+									"name": "WheelFLShape",
+									"owner": "/root/Track",
+									"path": "/root/Track/Chassis/WheelFL/WheelFLShape"
+								}
+							],
+							"class": "RigidBody3D",
+							"groups": [],
+							"name": "WheelFL",
+							"owner": "/root/Track",
+							"path": "/root/Track/Chassis/WheelFL"
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"groups": [],
+									"name": "WheelFRShape",
+									"owner": "/root/Track",
+									"path": "/root/Track/Chassis/WheelFR/WheelFRShape"
+								}
+							],
+							"class": "RigidBody3D",
+							"groups": [],
+							"name": "WheelFR",
+							"owner": "/root/Track",
+							"path": "/root/Track/Chassis/WheelFR"
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"groups": [],
+									"name": "WheelRLShape",
+									"owner": "/root/Track",
+									"path": "/root/Track/Chassis/WheelRL/WheelRLShape"
+								}
+							],
+							"class": "RigidBody3D",
+							"groups": [],
+							"name": "WheelRL",
+							"owner": "/root/Track",
+							"path": "/root/Track/Chassis/WheelRL"
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"groups": [],
+									"name": "WheelRRShape",
+									"owner": "/root/Track",
+									"path": "/root/Track/Chassis/WheelRR/WheelRRShape"
+								}
+							],
+							"class": "RigidBody3D",
+							"groups": [],
+							"name": "WheelRR",
+							"owner": "/root/Track",
+							"path": "/root/Track/Chassis/WheelRR"
+						}
+					],
+					"class": "RigidBody3D",
+					"groups": [],
+					"name": "Chassis",
+					"owner": "/root/Track",
+					"path": "/root/Track/Chassis"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "GroundShape",
+							"owner": "/root/Track",
+							"path": "/root/Track/Ground/GroundShape"
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"groups": [],
+							"name": "GroundMesh",
+							"owner": "/root/Track",
+							"path": "/root/Track/Ground/GroundMesh"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Ground",
+					"owner": "/root/Track",
+					"path": "/root/Track/Ground"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "Track",
+			"owner": "/root",
+			"path": "/root/Track"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

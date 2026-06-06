@@ -1,0 +1,363 @@
+name: Repin Validation
+
+# Manually triggered — repins are infrequent events.
+# Dispatch with a Godot version string (e.g. "4.6.1-stable") to record which
+# target was validated.  The version is surfaced in job names and the summary
+# artifact so the audit trail is clear.
+on:
+  workflow_dispatch:
+    inputs:
+      godot_version:
+        description: "Godot version being repinned to (e.g. 4.6.1-stable)"
+        required: true
+        default: "4.6.1-stable"
+      run_gdextension_lab:
+        description: "Build the GDExtension lab (requires Godot binary on PATH)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: repin-${{ github.ref }}-${{ inputs.godot_version }}
+  cancel-in-progress: true
+
+# ── Job 1: Oracle parity tests ─────────────────────────────────────────────
+# Runs the full cargo test suite filtered to parity / oracle / trace /
+# golden-staleness checks.  These are the tests that verify Patina's runtime
+# behaviour matches Godot's oracle outputs.
+jobs:
+  oracle-parity:
+    name: "Oracle parity (${{ inputs.godot_version }})"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-repin-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-repin-
+
+      # Tier 1 — fast unit/integration tests (excludes heavy golden/stress)
+      - name: Run fast parity tests (Tier 1)
+        working-directory: engine-rs
+        run: |
+          cargo test --workspace -- \
+            --skip golden \
+            --skip stress \
+            --skip render_golden \
+            --skip staleness \
+            --skip bench_ \
+            2>&1 | tee /tmp/tier1.txt
+          echo "::notice::Tier 1 (fast) parity tests complete"
+
+      # Tier 2 — golden comparison tests (~30 s, no stress/render)
+      - name: Run golden comparison tests (Tier 2)
+        working-directory: engine-rs
+        run: |
+          cargo test --workspace -- \
+            --skip stress \
+            --skip render_golden \
+            --skip bench_ \
+            2>&1 | tee /tmp/tier2.txt
+          echo "::notice::Tier 2 (golden) tests complete"
+
+      # Targeted parity test files
+      - name: Run oracle-specific tests
+        working-directory: engine-rs
+        run: |
+          cargo test --workspace \
+            --test godot_compat_test \
+            --test classdb_parity_test \
+            --test trace_parity_test \
+            --test lifecycle_trace_parity_test \
+            --test multi_scene_trace_parity_test \
+            --test signal_trace_parity_test \
+            --test signal_dispatch_parity_test \
+            --test frame_trace_test \
+            2>&1 | tee /tmp/oracle_specific.txt
+          echo "::notice::Oracle-specific tests complete"
+
+      - name: Upload oracle parity logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-parity-logs-${{ inputs.godot_version }}
+          path: |
+            /tmp/tier1.txt
+            /tmp/tier2.txt
+            /tmp/oracle_specific.txt
+          retention-days: 30
+
+# ── Job 2: Render golden tests ─────────────────────────────────────────────
+# CPU-only pixel and golden-image tests — no GPU or display server required.
+  render-goldens:
+    name: "Render golden tests (${{ inputs.godot_version }})"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-repin-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-repin-
+
+      - name: Run render golden tests (make test-render)
+        working-directory: engine-rs
+        run: |
+          make test-render 2>&1 | tee /tmp/render_goldens.txt
+          echo "::notice::Render golden tests complete"
+
+      - name: Upload render golden logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-golden-logs-${{ inputs.godot_version }}
+          path: /tmp/render_goldens.txt
+          retention-days: 30
+
+# ── Job 3: GDExtension lab build (optional) ───────────────────────────────
+# Only runs when `run_gdextension_lab` is "true".  Builds the Rust GDExtension
+# crate inside apps/godot.  This does NOT require a Godot binary because the
+# cargo build step only produces the shared library; the import step is skipped.
+  gdextension-lab:
+    name: "GDExtension lab build (${{ inputs.godot_version }})"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run_gdextension_lab == 'true' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-gdext-${{ hashFiles('apps/godot/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-gdext-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-gdext-${{ hashFiles('apps/godot/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-gdext-
+
+      - name: Cache target directory (gdext)
+        uses: actions/cache@v4
+        with:
+          path: apps/godot/target
+          key: ${{ runner.os }}-cargo-target-gdext-${{ hashFiles('apps/godot/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-gdext-
+
+      - name: Build GDExtension library
+        working-directory: apps/godot
+        run: |
+          cargo build 2>&1 | tee /tmp/gdext_build.txt
+          echo "::notice::GDExtension lab build complete"
+
+      - name: Upload GDExtension build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdext-build-log-${{ inputs.godot_version }}
+          path: /tmp/gdext_build.txt
+          retention-days: 30
+
+# ── Job 4: Parity summary ─────────────────────────────────────────────────
+# Collects results from upstream jobs and writes a human-readable Markdown
+# summary to the GitHub Actions job summary page.
+  parity-summary:
+    name: "Parity summary (${{ inputs.godot_version }})"
+    runs-on: ubuntu-latest
+    needs: [oracle-parity, render-goldens]
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download oracle parity logs
+        uses: actions/download-artifact@v4
+        with:
+          name: oracle-parity-logs-${{ inputs.godot_version }}
+          path: /tmp/parity-logs
+        continue-on-error: true
+
+      - name: Download render golden logs
+        uses: actions/download-artifact@v4
+        with:
+          name: render-golden-logs-${{ inputs.godot_version }}
+          path: /tmp/render-logs
+        continue-on-error: true
+
+      - name: Generate parity summary
+        env:
+          GODOT_VERSION: ${{ inputs.godot_version }}
+          ORACLE_RESULT: ${{ needs.oracle-parity.result }}
+          RENDER_RESULT: ${{ needs.render-goldens.result }}
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          import re
+          import datetime
+
+          godot_ver   = os.environ.get("GODOT_VERSION", "unknown")
+          oracle_res  = os.environ.get("ORACLE_RESULT", "unknown")
+          render_res  = os.environ.get("RENDER_RESULT", "unknown")
+          now         = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+          def status_badge(result):
+              if result == "success":
+                  return "PASS"
+              elif result == "skipped":
+                  return "SKIP"
+              else:
+                  return "FAIL"
+
+          def count_tests_from_log(path):
+              """Parse 'X passed; Y failed' style cargo test summary lines."""
+              passed = 0
+              failed = 0
+              try:
+                  with open(path) as f:
+                      text = f.read()
+                  # cargo test: "test result: ok. N passed; M failed; ..."
+                  for m in re.finditer(r"(\d+) passed.*?(\d+) failed", text):
+                      passed += int(m.group(1))
+                      failed += int(m.group(2))
+              except FileNotFoundError:
+                  pass
+              return passed, failed
+
+          tier1_pass, tier1_fail   = count_tests_from_log("/tmp/parity-logs/tier1.txt")
+          tier2_pass, tier2_fail   = count_tests_from_log("/tmp/parity-logs/tier2.txt")
+          oracle_pass, oracle_fail = count_tests_from_log("/tmp/parity-logs/oracle_specific.txt")
+          render_pass, render_fail = count_tests_from_log("/tmp/render-logs/render_goldens.txt")
+
+          total_pass = tier2_pass + render_pass  # tier2 is a superset of tier1
+          total_fail = tier2_fail + render_fail
+          total      = total_pass + total_fail
+          pct        = f"{100 * total_pass / total:.1f}%" if total else "n/a"
+
+          lines = [
+              f"# Repin Validation: Godot {godot_ver}",
+              f"",
+              f"Generated: {now}  |  Triggered by: ${{{{ github.actor }}}}",
+              f"",
+              f"## Gate Results",
+              f"",
+              f"| Gate | Status |",
+              f"|------|--------|",
+              f"| Oracle parity tests | {status_badge(oracle_res)} |",
+              f"| Render golden tests | {status_badge(render_res)} |",
+              f"",
+              f"## Test Counts",
+              f"",
+              f"| Suite | Passed | Failed |",
+              f"|-------|--------|--------|",
+              f"| Tier 1 (fast) | {tier1_pass} | {tier1_fail} |",
+              f"| Tier 2 (golden) | {tier2_pass} | {tier2_fail} |",
+              f"| Oracle-specific | {oracle_pass} | {oracle_fail} |",
+              f"| Render goldens | {render_pass} | {render_fail} |",
+              f"| **Total** | **{total_pass}** | **{total_fail}** |",
+              f"",
+              f"**Parity rate (Tier 2 + render): {pct}**",
+              f"",
+              f"## Next steps",
+              f"",
+              f"- If all gates pass: update `upstream/godot` submodule pin and bump",
+              f"  `GODOT_VERSION` in `COMPAT_DASHBOARD.md`.",
+              f"- If any gate fails: investigate failing tests, fix parity gaps, and",
+              f"  re-run this workflow.",
+              f"- Render diff artifacts are available under this workflow run for",
+              f"  visual inspection.",
+          ]
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "/tmp/summary.md")
+          with open(summary_path, "w") as f:
+              f.write("\n".join(lines) + "\n")
+
+          print("Summary written.")
+          for line in lines:
+              print(line)
+          PYEOF
+
+      - name: Write parity summary artifact
+        run: |
+          cp "$GITHUB_STEP_SUMMARY" /tmp/repin-summary.md 2>/dev/null || \
+            cp /tmp/summary.md /tmp/repin-summary.md 2>/dev/null || true
+
+      - name: Upload summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repin-summary-${{ inputs.godot_version }}
+          path: /tmp/repin-summary.md
+          retention-days: 90
+
+      - name: Fail if any required gate failed
+        if: >
+          needs.oracle-parity.result == 'failure' ||
+          needs.render-goldens.result == 'failure'
+        run: |
+          echo "::error::One or more repin validation gates failed."
+          echo "Review the job logs and summary above before updating the pin."
+          exit 1

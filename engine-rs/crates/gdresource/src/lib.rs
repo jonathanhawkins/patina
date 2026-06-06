@@ -21,12 +21,15 @@
 #![warn(clippy::all)]
 
 pub mod cache;
+pub mod fuzz_res;
 pub mod importers;
 pub mod loader;
+pub mod pck;
 pub mod project;
 pub mod res_loader;
 pub mod resource;
 pub mod saver;
+pub mod shader_tokenizer;
 pub mod uid;
 pub mod unified;
 
@@ -45,6 +48,15 @@ pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::UidRegistry;
 pub use unified::UnifiedLoader;
+
+/// Stub glTF importer — returns an error since glTF import is not yet implemented.
+pub fn import_gltf(
+    _path: &std::path::Path,
+) -> gdcore::error::EngineResult<std::sync::Arc<Resource>> {
+    Err(gdcore::error::EngineError::NotFound(
+        "glTF import not yet implemented".to_string(),
+    ))
+}
 
 #[cfg(test)]
 mod integration_tests {

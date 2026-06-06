@@ -151,6 +151,52 @@ pub fn is_visible_in_tree(tree: &SceneTree, node_id: NodeId) -> bool {
     }
 }
 
+/// The visibility state a Scene Tree row's eye indicator should display.
+///
+/// Mirrors Godot's three-way visibility presentation for CanvasItem / Node3D
+/// rows: a node that is itself visible may still be hidden because an ancestor
+/// is hidden ("inherited" hidden), which the dock distinguishes from a node the
+/// user explicitly hid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilityState {
+    /// The node and all of its ancestors are visible (open eye).
+    Visible,
+    /// The node's own `visible` flag is `false` (closed/slashed eye).
+    Hidden,
+    /// The node's own `visible` flag is `true`, but an ancestor is hidden so it
+    /// is not drawn (greyed/inherited-hidden eye).
+    InheritedHidden,
+}
+
+/// Computes the Scene Tree visibility indicator for `node_id`.
+///
+/// - [`VisibilityState::Hidden`] when the node's own `visible` property is off.
+/// - [`VisibilityState::Visible`] when the node and every ancestor are visible.
+/// - [`VisibilityState::InheritedHidden`] when the node is itself visible but an
+///   ancestor is hidden.
+pub fn visibility_state(tree: &SceneTree, node_id: NodeId) -> VisibilityState {
+    if !is_visible(tree, node_id) {
+        VisibilityState::Hidden
+    } else if is_visible_in_tree(tree, node_id) {
+        VisibilityState::Visible
+    } else {
+        VisibilityState::InheritedHidden
+    }
+}
+
+/// Toggles the node's own `visible` flag (the click action behind the eye
+/// indicator) and returns the new value.
+///
+/// Only the clicked node's `visible` property is written; visibility propagates
+/// to descendants implicitly via [`is_visible_in_tree`] / [`visibility_state`],
+/// matching Godot: hiding a parent leaves each child's own `visible` flag
+/// untouched but renders the child inherited-hidden.
+pub fn toggle_visible(tree: &mut SceneTree, node_id: NodeId) -> bool {
+    let new_value = !is_visible(tree, node_id);
+    set_visible(tree, node_id, new_value);
+    new_value
+}
+
 /// Sets the `"z_index"` property on a node.
 pub fn set_z_index(tree: &mut SceneTree, node_id: NodeId, z: i64) {
     if let Some(node) = tree.get_node_mut(node_id) {
@@ -491,6 +537,40 @@ mod tests {
         assert!(!is_visible_in_tree(&tree, c_id));
         // The child itself is still "visible", but not "visible in tree".
         assert!(is_visible(&tree, c_id));
+    }
+
+    #[test]
+    fn scene_tree_visibility_toggle_reflects_state() {
+        // root -> A -> B (a CanvasItem-style chain; the logic is class-agnostic).
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let a_id = tree.add_child(root, Node::new("A", "Node2D")).unwrap();
+        let b_id = tree.add_child(a_id, Node::new("B", "Sprite2D")).unwrap();
+
+        // Everything visible by default -> both rows show Visible.
+        assert_eq!(visibility_state(&tree, a_id), VisibilityState::Visible);
+        assert_eq!(visibility_state(&tree, b_id), VisibilityState::Visible);
+
+        // Clicking the eye on A flips A.visible to false and returns it.
+        assert!(!toggle_visible(&mut tree, a_id));
+        assert!(!is_visible(&tree, a_id));
+
+        // A's own row now reads Hidden; B is itself still visible but an
+        // ancestor is hidden, so its row reads InheritedHidden (propagation).
+        assert_eq!(visibility_state(&tree, a_id), VisibilityState::Hidden);
+        assert_eq!(visibility_state(&tree, b_id), VisibilityState::InheritedHidden);
+        // B's own `visible` flag was NOT modified by hiding the ancestor.
+        assert!(is_visible(&tree, b_id));
+
+        // Toggling A back makes both rows Visible again.
+        assert!(toggle_visible(&mut tree, a_id));
+        assert_eq!(visibility_state(&tree, a_id), VisibilityState::Visible);
+        assert_eq!(visibility_state(&tree, b_id), VisibilityState::Visible);
+
+        // Hiding B directly reads Hidden on B while A stays Visible.
+        assert!(!toggle_visible(&mut tree, b_id));
+        assert_eq!(visibility_state(&tree, b_id), VisibilityState::Hidden);
+        assert_eq!(visibility_state(&tree, a_id), VisibilityState::Visible);
     }
 
     // -- Z-index ------------------------------------------------------------

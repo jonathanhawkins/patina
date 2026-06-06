@@ -98,7 +98,7 @@ impl PhysicsWorld3D {
                 let (shape_a, pos_a, shape_b, pos_b) = {
                     let a = &self.bodies[&id_a];
                     let b = &self.bodies[&id_b];
-                    (a.shape, a.position, b.shape, b.position)
+                    (a.shape.clone(), a.position, b.shape.clone(), b.position)
                 };
 
                 if let Some(result) =
@@ -157,16 +157,16 @@ fn raycast_shape_3d(
     max_distance: f32,
     body: &PhysicsBody3D,
 ) -> Option<RaycastHit3D> {
-    match body.shape {
+    match &body.shape {
         Shape3D::Sphere { radius } => {
-            ray_sphere(origin, dir, max_distance, body.position, radius, body.id)
+            ray_sphere(origin, dir, max_distance, body.position, *radius, body.id)
         }
         Shape3D::BoxShape { half_extents } => ray_aabb_3d(
             origin,
             dir,
             max_distance,
             body.position,
-            half_extents,
+            *half_extents,
             body.id,
         ),
         _ => None,

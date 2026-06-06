@@ -1,0 +1,166 @@
+{
+  "report_id": "real_3d_demo_parity_report",
+  "bead_id": "pat-zdesy",
+  "phase": "Phase 6: 3D Runtime Slice",
+  "status": "implemented",
+  "upstream_version": "4.6.1-stable",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "audit_source": "prd/PHASE6_3D_PARITY_AUDIT.md",
+
+  "classification": {
+    "measured": [
+      { "family": "Node3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "node3d_transform_propagation_parity_test.rs"] },
+      { "family": "Camera3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "transform3d_camera_light_contract_test.rs"] },
+      { "family": "MeshInstance3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "render_3d_parity_test.rs"] },
+      { "family": "DirectionalLight3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "render_3d_parity_test.rs"] },
+      { "family": "OmniLight3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "render_3d_parity_test.rs"] },
+      { "family": "SpotLight3D", "evidence": ["real_3d_demo_unified_parity_test.rs", "render_3d_parity_test.rs"] },
+      { "family": "CollisionShape3D", "evidence": ["physics3d_trace_comparison_test.rs", "real_3d_demo_unified_parity_test.rs"] },
+      { "family": "RigidBody3D", "evidence": ["physics3d_trace_comparison_test.rs", "real_3d_demo_unified_parity_test.rs"] },
+      { "family": "StaticBody3D", "evidence": ["physics3d_trace_comparison_test.rs", "real_3d_demo_unified_parity_test.rs"] },
+      { "family": "CharacterBody3D", "evidence": ["characterbody3d_move_and_slide_3d_test.rs"] },
+      { "family": "PhysicsRayQuery3D", "evidence": ["physics_ray_shape_query3d_test.rs"] },
+      { "family": "PhysicsShapeQuery3D", "evidence": ["physics_ray_shape_query3d_test.rs"] },
+      { "family": "RenderingServer3D", "evidence": ["render_3d_parity_test.rs", "real_3d_demo_unified_parity_test.rs"] }
+    ],
+    "implemented_not_yet_measured": [
+      { "family": "Area3D", "reason": "Overlap storage exists, no runtime signal parity test" },
+      { "family": "Decal", "reason": "Model and registry exist, no upstream parity fixture" },
+      { "family": "NavigationRegion3D", "reason": "Mesh baking model exists, runtime pathfinding deferred" },
+      { "family": "FogVolume", "reason": "Fog-volume fixture evidence exists, broad runtime parity not yet measured" },
+      { "family": "WorldEnvironment", "reason": "Environment model and foggy terrain evidence exist, broad runtime parity not yet measured" },
+      { "family": "ReflectionProbe", "reason": "CSG composition fixture evidence exists, broad reflected-scene parity not yet measured" },
+      { "family": "Skeleton3D", "reason": "Animated scene fixture evidence exists, broad runtime parity not yet measured" },
+      { "family": "AnimationPlayer", "reason": "Animated scene fixture evidence exists, broad runtime parity not yet measured" },
+      { "family": "CSGCombiner3D", "reason": "CSG composition fixture evidence exists, broad runtime parity not yet measured" },
+      { "family": "CSGBox3D", "reason": "CSG composition fixture evidence exists, broad runtime parity not yet measured" },
+      { "family": "CSGSphere3D", "reason": "CSG composition fixture evidence exists, broad runtime parity not yet measured" },
+      { "family": "CSGCylinder3D", "reason": "CSG composition fixture evidence exists, broad runtime parity not yet measured" },
+      { "family": "MultiMeshInstance3D", "reason": "Implementation exists, no parity measurement" },
+      { "family": "StandardMaterial3D", "reason": "Albedo and shading tested, not broad property parity" },
+      { "family": "ShaderMaterial3D", "reason": "Custom shader override tested, broad property parity is partial" },
+      { "family": "Sky", "reason": "Procedural/panoramic/physical handling, resource semantics only" },
+      { "family": "PhysicsJoints", "reason": "Data types exist (Pin/Hinge/Slider), no runtime integration" }
+    ],
+    "deferred": [
+      { "family": "VehicleBody3D", "reason": "Outside bounded Phase 6 slice" },
+      { "family": "SoftBody3D", "reason": "Outside bounded Phase 6 slice" },
+      { "family": "SpringArm3D", "reason": "Not implemented" },
+      { "family": "RayCast3D", "reason": "Low-level query support only, no node parity" },
+      { "family": "ShapeCast3D", "reason": "Low-level query support only, no node parity" },
+      { "family": "NavigationAgent3D", "reason": "Runtime pathfinding outside Phase 6 scope" },
+      { "family": "GPUPostProcessing", "reason": "Broad GPU/post-processing parity deferred" }
+    ]
+  },
+
+  "scene_fixtures": [
+    {
+      "name": "minimal_3d",
+      "scene_path": "engine-rs/fixtures/scenes/minimal_3d.tscn",
+      "golden_path": "engine-rs/fixtures/golden/scenes/minimal_3d.json",
+      "expected_node_count": 6,
+      "camera_count": 1,
+      "light_count": 1,
+      "physics_body_count": 1
+    },
+    {
+      "name": "hierarchy_3d",
+      "scene_path": "engine-rs/fixtures/scenes/hierarchy_3d.tscn",
+      "golden_path": "engine-rs/fixtures/golden/scenes/hierarchy_3d.json",
+      "expected_node_count": 12,
+      "camera_count": 1,
+      "light_count": 1,
+      "physics_body_count": 0
+    },
+    {
+      "name": "indoor_3d",
+      "scene_path": "engine-rs/fixtures/scenes/indoor_3d.tscn",
+      "golden_path": "engine-rs/fixtures/golden/scenes/indoor_3d.json",
+      "expected_node_count": 12,
+      "camera_count": 1,
+      "light_count": 1,
+      "physics_body_count": 3
+    },
+    {
+      "name": "multi_light_3d",
+      "scene_path": "engine-rs/fixtures/scenes/multi_light_3d.tscn",
+      "golden_path": "engine-rs/fixtures/golden/scenes/multi_light_3d.json",
+      "expected_node_count": 10,
+      "camera_count": 1,
+      "light_count": 3,
+      "physics_body_count": 1
+    },
+    {
+      "name": "physics_3d_playground",
+      "scene_path": "engine-rs/fixtures/scenes/physics_3d_playground.tscn",
+      "golden_path": "engine-rs/fixtures/golden/scenes/physics_3d_playground.json",
+      "expected_node_count": 14,
+      "camera_count": 1,
+      "light_count": 1,
+      "physics_body_count": 4
+    }
+  ],
+
+  "physics_goldens": [
+    {
+      "name": "minimal_3d_10frames",
+      "golden_path": "engine-rs/fixtures/golden/physics/minimal_3d_10frames.json",
+      "frame_count": 10
+    },
+    {
+      "name": "multi_body_3d_20frames",
+      "golden_path": "engine-rs/fixtures/golden/physics/multi_body_3d_20frames.json",
+      "frame_count": 40
+    },
+    {
+      "name": "rigid_sphere_bounce_3d_20frames",
+      "golden_path": "engine-rs/fixtures/golden/physics/rigid_sphere_bounce_3d_20frames.json",
+      "frame_count": 20
+    }
+  ],
+
+  "summary": {
+    "scene_fixture_count": 5,
+    "total_scene_nodes": 54,
+    "total_cameras": 5,
+    "total_lights": 7,
+    "total_physics_bodies": 9,
+    "physics_trace_count": 3,
+    "physics_trace_frames": 70
+  },
+
+  "evidence": {
+    "test_files": [
+      "engine-rs/tests/real_3d_demo_unified_parity_test.rs",
+      "engine-rs/tests/real_3d_demo_aggregate_parity_test.rs",
+      "engine-rs/tests/real_3d_demo_parity_report_artifact_test.rs",
+      "engine-rs/tests/publish_3d_parity_report_test.rs",
+      "engine-rs/tests/demo_3d_parity_report_test.rs",
+      "engine-rs/tests/representative_3d_fixtures_test.rs",
+      "engine-rs/tests/demo_3d_report_doc_test.rs"
+    ],
+    "tests": [
+      "cargo test -p patina-engine --test real_3d_demo_unified_parity_test",
+      "cargo test -p patina-engine --test real_3d_demo_aggregate_parity_test",
+      "cargo test -p patina-engine --test real_3d_demo_parity_report_artifact_test",
+      "cargo test -p patina-engine --test publish_3d_parity_report_test",
+      "cargo test -p patina-engine --test demo_3d_parity_report_test",
+      "cargo test -p patina-engine --test representative_3d_fixtures_test",
+      "cargo test -p patina-engine --test demo_3d_report_doc_test"
+    ]
+  },
+
+  "comparison_tooling": {
+    "dimensions": ["scene_tree", "physics", "render"],
+    "test_files": [
+      "engine-rs/tests/comparison_tooling_3d_test.rs",
+      "engine-rs/tests/audited_3d_comparison_tooling_test.rs",
+      "engine-rs/tests/render_physics_comparison_tooling_test.rs",
+      "engine-rs/tests/publish_3d_parity_report_test.rs"
+    ],
+    "api_modules": [
+      "gdcore::compare3d",
+      "gdcore::comparison_tooling"
+    ]
+  }
+}

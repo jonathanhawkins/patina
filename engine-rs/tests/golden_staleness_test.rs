@@ -170,6 +170,10 @@ fn scene_goldens_are_fresh() {
         ("ui_menu.json", "scenes/ui_menu.tscn"),
         ("physics_playground.json", "scenes/physics_playground.tscn"),
         ("signals_complex.json", "scenes/signals_complex.tscn"),
+        (
+            "unique_name_resolution.json",
+            "scenes/unique_name_resolution.tscn",
+        ),
         // character_body_test, space_shooter, test_scripts goldens are oracle-generated
         // (different property set) — validated by oracle_parity_test instead.
     ];
@@ -365,4 +369,97 @@ fn all_golden_json_files_parse() {
         failures.len(),
         failures.join("\n  - ")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Golden files match the pinned upstream version (pat-3h6a)
+// ---------------------------------------------------------------------------
+//
+// When the upstream Godot submodule is repinned to a new commit, golden files
+// may need regeneration. This test compares the commit recorded in
+// `fixtures/golden/UPSTREAM_VERSION` against the actual submodule HEAD.
+// If they diverge, the test fails with instructions to regenerate goldens.
+
+#[test]
+fn upstream_version_matches_golden_stamp() {
+    let root = repo_root();
+    let stamp_path = golden_dir().join("UPSTREAM_VERSION");
+    let submodule_dir = root.join("upstream").join("godot");
+
+    // Read the recorded version stamp.
+    let stamp = match std::fs::read_to_string(&stamp_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            panic!(
+                "fixtures/golden/UPSTREAM_VERSION is missing.\n\
+                 After regenerating goldens, write the upstream commit hash to this file:\n  \
+                 git -C upstream/godot rev-parse HEAD > fixtures/golden/UPSTREAM_VERSION"
+            );
+        }
+    };
+
+    // Resolve the current submodule HEAD via .git file or directory.
+    let current_commit = resolve_submodule_head(&submodule_dir);
+
+    let current = match &current_commit {
+        Some(c) => c.as_str(),
+        None => {
+            // Submodule not checked out (e.g., shallow clone in CI). Skip gracefully.
+            eprintln!(
+                "WARNING: upstream/godot submodule not available — \
+                 skipping version staleness check"
+            );
+            return;
+        }
+    };
+
+    assert_eq!(
+        stamp, current,
+        "Golden files were generated against upstream commit:\n  {stamp}\n\
+         but the upstream/godot submodule is now at:\n  {current}\n\n\
+         Goldens are likely stale. Regenerate them:\n  \
+         1. cargo test --workspace  (regenerates physics/render/scene goldens)\n  \
+         2. Run patina-runner --event-trace on each fixture scene (trace goldens)\n  \
+         3. Update the stamp:  git -C upstream/godot rev-parse HEAD > fixtures/golden/UPSTREAM_VERSION"
+    );
+}
+
+/// Resolve the HEAD commit of a git submodule directory.
+///
+/// Handles both regular `.git` directories and submodule `.git` files
+/// that contain a `gitdir:` pointer.
+fn resolve_submodule_head(submodule_dir: &Path) -> Option<String> {
+    if !submodule_dir.exists() {
+        return None;
+    }
+
+    // Try reading HEAD directly via git plumbing files.
+    // First check if .git is a file (submodule) pointing to the real git dir.
+    let dot_git = submodule_dir.join(".git");
+    let git_dir = if dot_git.is_file() {
+        // Parse "gitdir: <path>" and resolve relative to submodule_dir.
+        let content = std::fs::read_to_string(&dot_git).ok()?;
+        let gitdir_line = content.trim();
+        let rel = gitdir_line.strip_prefix("gitdir: ")?;
+        submodule_dir.join(rel).canonicalize().ok()?
+    } else if dot_git.is_dir() {
+        dot_git
+    } else {
+        return None;
+    };
+
+    // Read HEAD — could be a ref or a detached commit hash.
+    let head_content = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head_content.trim();
+
+    if let Some(ref_path) = head.strip_prefix("ref: ") {
+        // Symbolic ref — resolve it.
+        let ref_file = git_dir.join(ref_path);
+        std::fs::read_to_string(ref_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+    } else {
+        // Detached HEAD — commit hash directly.
+        Some(head.to_string())
+    }
 }

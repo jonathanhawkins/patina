@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Migration Guide
+    url: https://github.com/nicholasgasior/patina/blob/main/docs/migration-guide.md
+    about: Read the migration guide before filing a porting issue
+  - name: GDScript Compatibility
+    url: https://github.com/nicholasgasior/patina/blob/main/docs/GDSCRIPT_COMPATIBILITY.md
+    about: Check GDScript feature support before reporting a script issue

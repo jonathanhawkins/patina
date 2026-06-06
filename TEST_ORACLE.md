@@ -18,6 +18,7 @@ For every fixture class, the oracle system must produce machine-readable outputs
 - Full node hierarchy (parent-child relationships)
 - Node types and class names
 - Node names and paths
+- `%UniqueName` resolution within scene-owner scope (implemented — `get_node("%Foo")` searches the owner's subtree for `unique_name_in_owner` nodes)
 - Group memberships
 - Scene instancing relationships
 
@@ -260,9 +261,9 @@ When upgrading the pinned upstream version:
 
 ### Current Pin
 
-- **Upstream version**: `4.5.1-stable`
-- **Upstream commit**: `f62fdbde15035c5576dad93e586201f4d41ef0cb`
-- **Pin date**: `2026-03-19`
+- **Upstream version**: `4.6.1-stable`
+- **Upstream commit**: `14d19694e0c88a3f9e82d899a0400f27a24c176e`
+- **Pin date**: `2026-03-20`
 - **Submodule path**: `upstream/godot`
 - **Source remote**: `https://github.com/godotengine/godot.git`
 

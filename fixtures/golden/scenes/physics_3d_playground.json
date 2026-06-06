@@ -1,0 +1,171 @@
+{
+  "fixture_id": "scene_physics_3d_playground",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "note": "3D physics playground \u2014 mixed rigid bodies, static platform, ramp with rotation",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-22T06:57:54+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "World",
+        "class": "Node3D",
+        "path": "/root/World",
+        "children": [
+          "Camera",
+          "Sun",
+          "Ball",
+          "Cube",
+          "HeavyBlock",
+          "Platform",
+          "Ramp"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/World/Camera",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5, 12)",
+          "fov": 60.0,
+          "near": 0.1,
+          "far": 500.0
+        }
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/World/Sun",
+        "children": [],
+        "properties": {
+          "light_energy": 1.2,
+          "shadow_enabled": true
+        }
+      },
+      {
+        "name": "Ball",
+        "class": "RigidBody3D",
+        "path": "/root/World/Ball",
+        "children": [
+          "BallShape",
+          "BallMesh"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 8, 0)",
+          "mass": 2.0,
+          "gravity_scale": 1.0
+        }
+      },
+      {
+        "name": "BallShape",
+        "class": "CollisionShape3D",
+        "path": "/root/World/Ball/BallShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "BallMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/World/Ball/BallMesh",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "Cube",
+        "class": "RigidBody3D",
+        "path": "/root/World/Cube",
+        "children": [
+          "CubeShape",
+          "CubeMesh"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 5, 0)",
+          "mass": 1.0,
+          "gravity_scale": 1.0
+        }
+      },
+      {
+        "name": "CubeShape",
+        "class": "CollisionShape3D",
+        "path": "/root/World/Cube/CubeShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "CubeMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/World/Cube/CubeMesh",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "HeavyBlock",
+        "class": "RigidBody3D",
+        "path": "/root/World/HeavyBlock",
+        "children": [
+          "HeavyShape"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 12, 1)",
+          "mass": 10.0,
+          "gravity_scale": 1.0
+        }
+      },
+      {
+        "name": "HeavyShape",
+        "class": "CollisionShape3D",
+        "path": "/root/World/HeavyBlock/HeavyShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "Platform",
+        "class": "StaticBody3D",
+        "path": "/root/World/Platform",
+        "children": [
+          "PlatformShape",
+          "PlatformMesh"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "PlatformShape",
+        "class": "CollisionShape3D",
+        "path": "/root/World/Platform/PlatformShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "PlatformMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/World/Platform/PlatformMesh",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "Ramp",
+        "class": "StaticBody3D",
+        "path": "/root/World/Ramp",
+        "children": [
+          "RampShape"
+        ],
+        "properties": {
+          "transform": "Transform3D(0.866, 0.5, 0, -0.5, 0.866, 0, 0, 0, 1, 5, 1, 0)"
+        }
+      },
+      {
+        "name": "RampShape",
+        "class": "CollisionShape3D",
+        "path": "/root/World/Ramp/RampShape",
+        "children": [],
+        "properties": {}
+      }
+    ]
+  }
+}

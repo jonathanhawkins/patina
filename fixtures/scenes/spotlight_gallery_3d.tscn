@@ -1,0 +1,44 @@
+[gd_scene format=3 uid="uid://spotgallery3d"]
+
+[node name="Gallery" type="Node3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 8)
+fov = 55.0
+near = 0.1
+far = 100.0
+
+[node name="SpotRed" type="SpotLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.7, -0.7, 0, 0.7, 0.7, -3, 5, 0)
+light_energy = 2.0
+spot_range = 15.0
+spot_angle = 30.0
+
+[node name="SpotGreen" type="SpotLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.7, -0.7, 0, 0.7, 0.7, 0, 5, 0)
+light_energy = 1.5
+spot_range = 12.0
+spot_angle = 25.0
+
+[node name="SpotBlue" type="SpotLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.7, -0.7, 0, 0.7, 0.7, 3, 5, 0)
+light_energy = 1.8
+spot_range = 10.0
+spot_angle = 35.0
+
+[node name="Statue1" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 0, 0)
+
+[node name="Statue2" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+
+[node name="Statue3" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0, 0)
+
+[node name="Floor" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+
+[node name="FloorShape" type="CollisionShape3D" parent="Floor"]
+
+[node name="FloorMesh" type="MeshInstance3D" parent="Floor"]

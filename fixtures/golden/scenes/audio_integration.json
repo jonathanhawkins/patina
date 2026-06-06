@@ -1,0 +1,89 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_audio_integration",
+  "generated_at": "2026-03-28T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "PlayerCollision",
+              "path": "/root/AudioWorld/Player/PlayerCollision",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "AudioStreamPlayer2D",
+              "name": "FootstepAudio",
+              "path": "/root/AudioWorld/Player/FootstepAudio",
+              "properties": {}
+            }
+          ],
+          "class": "CharacterBody2D",
+          "name": "Player",
+          "path": "/root/AudioWorld/Player",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [100.0, 200.0]
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "AudioStreamPlayer2D",
+          "name": "BGM",
+          "path": "/root/AudioWorld/BGM",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "AudioStreamPlayer2D",
+          "name": "SFXEmitter",
+          "path": "/root/AudioWorld/SFXEmitter",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [400.0, 300.0]
+            }
+          }
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "EnemyCollision",
+              "path": "/root/AudioWorld/Enemy/EnemyCollision",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "AudioStreamPlayer2D",
+              "name": "EnemyAudio",
+              "path": "/root/AudioWorld/Enemy/EnemyAudio",
+              "properties": {}
+            }
+          ],
+          "class": "CharacterBody2D",
+          "name": "Enemy",
+          "path": "/root/AudioWorld/Enemy",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [500.0, 200.0]
+            }
+          }
+        }
+      ],
+      "class": "Node2D",
+      "name": "AudioWorld",
+      "path": "/root/AudioWorld",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

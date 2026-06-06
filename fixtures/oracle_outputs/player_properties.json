@@ -53,8 +53,8 @@
 			"hint": 0,
 			"type": "Vector2i",
 			"value": {
-				"x": 1152,
-				"y": 648
+				"x": 640,
+				"y": 480
 			}
 		},
 		"gui_embed_subwindows": {
@@ -109,7 +109,7 @@
 			"class_type": "",
 			"hint": 0,
 			"type": "String",
-			"value": "Patina Fixtures"
+			"value": "Sample Game"
 		},
 		"world_3d": {
 			"class_type": "World3D",

@@ -1,0 +1,122 @@
+{
+  "fixture_id": "scene_multi_light_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "note": "Multi-light 3D scene \u2014 key/fill/rim/accent lighting setup with mesh subject",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-22T06:57:54+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "Stage",
+        "class": "Node3D",
+        "path": "/root/Stage",
+        "children": [
+          "Camera",
+          "Sphere",
+          "Pedestal",
+          "KeyLight",
+          "FillLight",
+          "RimLight",
+          "AccentSpot",
+          "Floor"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Stage/Camera",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 8)",
+          "fov": 65.0,
+          "near": 0.05,
+          "far": 200.0
+        }
+      },
+      {
+        "name": "Sphere",
+        "class": "MeshInstance3D",
+        "path": "/root/Stage/Sphere",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)"
+        }
+      },
+      {
+        "name": "Pedestal",
+        "class": "MeshInstance3D",
+        "path": "/root/Stage/Pedestal",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "KeyLight",
+        "class": "DirectionalLight3D",
+        "path": "/root/Stage/KeyLight",
+        "children": [],
+        "properties": {
+          "light_energy": 1.0,
+          "shadow_enabled": true,
+          "light_color": "Color(1, 1, 0.95, 1)"
+        }
+      },
+      {
+        "name": "FillLight",
+        "class": "OmniLight3D",
+        "path": "/root/Stage/FillLight",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 2, 2)",
+          "light_energy": 0.6,
+          "light_color": "Color(0.7, 0.85, 1, 1)"
+        }
+      },
+      {
+        "name": "RimLight",
+        "class": "OmniLight3D",
+        "path": "/root/Stage/RimLight",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 3, -2)",
+          "light_energy": 0.8,
+          "light_color": "Color(1, 0.8, 0.6, 1)"
+        }
+      },
+      {
+        "name": "AccentSpot",
+        "class": "OmniLight3D",
+        "path": "/root/Stage/AccentSpot",
+        "children": [],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 0)",
+          "light_energy": 0.4,
+          "light_color": "Color(0.5, 1, 0.5, 1)"
+        }
+      },
+      {
+        "name": "Floor",
+        "class": "StaticBody3D",
+        "path": "/root/Stage/Floor",
+        "children": [
+          "FloorShape"
+        ],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)"
+        }
+      },
+      {
+        "name": "FloorShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Stage/Floor/FloorShape",
+        "children": [],
+        "properties": {}
+      }
+    ]
+  }
+}

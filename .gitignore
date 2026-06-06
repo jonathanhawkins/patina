@@ -47,3 +47,33 @@ cline.mcp.json
 windsurf.mcp.json
 .claude/settings.local.json
 .codex/hooks/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# beads recovery backups (SQLite WAL/SHM snapshots)
+.beads/.br_recovery/
+
+# Claude Code worktrees (agent-spawned isolated checkouts)
+.claude/worktrees/
+
+# Orchestrator / swarm runtime state (logs, locks, assignments, local DBs).
+# Regenerated every run — never meant to be committed.
+storage.sqlite3
+storage.sqlite3-shm
+storage.sqlite3-wal
+.codex/orchestrator/
+.codex/orchestrator-notices.log
+.codex/bead.db
+.codex/bead.db-shm
+.codex/bead.db-wal
+.claude/*.lock
+
+# Local agent-mail credential — must never be committed (rotate if it ever was).
+.beads/coordinator_token
+
+# Editor runtime artifacts (audit logs / session state)
+.editor/
+**/.editor/
+# Orchestrator runtime build lock
+.orchestrator/rust-build.lock*

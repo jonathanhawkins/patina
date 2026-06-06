@@ -8,7 +8,8 @@
 					"groups": [],
 					"name": "Mover",
 					"owner": "/root/TestScene",
-					"path": "/root/TestScene/Mover"
+					"path": "/root/TestScene/Mover",
+					"script": "res://scripts/test_movement.gd"
 				},
 				{
 					"children": [],
@@ -16,7 +17,8 @@
 					"groups": [],
 					"name": "VarTest",
 					"owner": "/root/TestScene",
-					"path": "/root/TestScene/VarTest"
+					"path": "/root/TestScene/VarTest",
+					"script": "res://scripts/test_variables.gd"
 				}
 			],
 			"class": "Node2D",

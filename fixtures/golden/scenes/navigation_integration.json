@@ -1,0 +1,153 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_navigation_integration",
+  "generated_at": "2026-03-28T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "PlayerCollision",
+              "path": "/root/NavWorld/Player/PlayerCollision",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "NavigationAgent2D",
+              "name": "PlayerNavAgent",
+              "path": "/root/NavWorld/Player/PlayerNavAgent",
+              "properties": {}
+            }
+          ],
+          "class": "CharacterBody2D",
+          "name": "Player",
+          "path": "/root/NavWorld/Player",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [50.0, 100.0]
+            }
+          }
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "Enemy1Collision",
+              "path": "/root/NavWorld/Enemy1/Enemy1Collision",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "NavigationAgent2D",
+              "name": "Enemy1NavAgent",
+              "path": "/root/NavWorld/Enemy1/Enemy1NavAgent",
+              "properties": {}
+            }
+          ],
+          "class": "CharacterBody2D",
+          "name": "Enemy1",
+          "path": "/root/NavWorld/Enemy1",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [400.0, 100.0]
+            }
+          }
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "Enemy2Collision",
+              "path": "/root/NavWorld/Enemy2/Enemy2Collision",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "NavigationAgent2D",
+              "name": "Enemy2NavAgent",
+              "path": "/root/NavWorld/Enemy2/Enemy2NavAgent",
+              "properties": {}
+            }
+          ],
+          "class": "CharacterBody2D",
+          "name": "Enemy2",
+          "path": "/root/NavWorld/Enemy2",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [300.0, 300.0]
+            }
+          }
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "Marker2D",
+              "name": "Waypoint1",
+              "path": "/root/NavWorld/Patrol/Waypoint1",
+              "properties": {
+                "position": {
+                  "type": "Vector2",
+                  "value": [100.0, 50.0]
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Marker2D",
+              "name": "Waypoint2",
+              "path": "/root/NavWorld/Patrol/Waypoint2",
+              "properties": {
+                "position": {
+                  "type": "Vector2",
+                  "value": [500.0, 50.0]
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Marker2D",
+              "name": "Waypoint3",
+              "path": "/root/NavWorld/Patrol/Waypoint3",
+              "properties": {
+                "position": {
+                  "type": "Vector2",
+                  "value": [500.0, 350.0]
+                }
+              }
+            },
+            {
+              "children": [],
+              "class": "Marker2D",
+              "name": "Waypoint4",
+              "path": "/root/NavWorld/Patrol/Waypoint4",
+              "properties": {
+                "position": {
+                  "type": "Vector2",
+                  "value": [100.0, 350.0]
+                }
+              }
+            }
+          ],
+          "class": "Node2D",
+          "name": "Patrol",
+          "path": "/root/NavWorld/Patrol",
+          "properties": {}
+        }
+      ],
+      "class": "Node2D",
+      "name": "NavWorld",
+      "path": "/root/NavWorld",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

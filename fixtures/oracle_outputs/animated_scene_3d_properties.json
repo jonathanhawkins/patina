@@ -1,0 +1,278 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"name": "Camera",
+					"path": "/root/Scene/Camera",
+					"properties": {
+						"far": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 200.0
+						},
+						"fov": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 65.0
+						},
+						"near": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.0500000007450581
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": 0.0, "y": 2.0, "z": 5.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"name": "Sun",
+					"path": "/root/Scene/Sun",
+					"properties": {
+						"light_energy": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.899999976158142
+						},
+						"shadow_enabled": {
+							"class_type": "",
+							"hint": 42,
+							"type": "bool",
+							"value": true
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"name": "FillLight",
+					"path": "/root/Scene/FillLight",
+					"properties": {
+						"light_energy": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.400000005960464
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": -3.0, "y": 4.0, "z": 2.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Skeleton3D",
+							"name": "Skeleton",
+							"path": "/root/Scene/Character/Skeleton",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"name": "BodyMesh",
+							"path": "/root/Scene/Character/BodyMesh",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "AnimationPlayer",
+							"name": "AnimPlayer",
+							"path": "/root/Scene/Character/AnimPlayer",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "Node3D",
+					"name": "Character",
+					"path": "/root/Scene/Character",
+					"properties": {
+
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"name": "PlatformShape",
+							"path": "/root/Scene/Platform/PlatformShape",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"name": "PlatformMesh",
+							"path": "/root/Scene/Platform/PlatformMesh",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "StaticBody3D",
+					"name": "Platform",
+					"path": "/root/Scene/Platform",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": 0.0, "y": -0.5, "z": 0.0 }
+							}
+						}
+					}
+				}
+			],
+			"class": "Node3D",
+			"name": "Scene",
+			"path": "/root/Scene",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

@@ -9,9 +9,12 @@
 
 pub mod bindings;
 pub mod bridge;
+pub mod fuzz_gdscript;
 pub mod interpreter;
 pub mod parser;
 pub mod tokenizer;
+pub mod type_checker;
+pub mod visual_script;
 
 pub use bindings::{
     MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
@@ -23,3 +26,4 @@ pub use parser::{
     UnaryOp,
 };
 pub use tokenizer::{tokenize, LexError, Token, TokenSpan};
+pub use visual_script::VisualScriptStub;

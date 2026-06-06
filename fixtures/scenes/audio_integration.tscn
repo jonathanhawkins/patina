@@ -1,0 +1,22 @@
+[gd_scene format=3 uid="uid://audio_integration"]
+
+[node name="AudioWorld" type="Node2D"]
+
+[node name="Player" type="CharacterBody2D" parent="."]
+position = Vector2(100, 200)
+
+[node name="PlayerCollision" type="CollisionShape2D" parent="Player"]
+
+[node name="FootstepAudio" type="AudioStreamPlayer2D" parent="Player"]
+
+[node name="BGM" type="AudioStreamPlayer2D" parent="."]
+
+[node name="SFXEmitter" type="AudioStreamPlayer2D" parent="."]
+position = Vector2(400, 300)
+
+[node name="Enemy" type="CharacterBody2D" parent="."]
+position = Vector2(500, 200)
+
+[node name="EnemyCollision" type="CollisionShape2D" parent="Enemy"]
+
+[node name="EnemyAudio" type="AudioStreamPlayer2D" parent="Enemy"]

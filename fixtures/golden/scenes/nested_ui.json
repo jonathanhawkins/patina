@@ -1,0 +1,162 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_nested_ui",
+  "generated_at": "2026-03-28T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "children": [],
+                  "class": "Label",
+                  "name": "Title",
+                  "path": "/root/UIRoot/MainVBox/Header/Title",
+                  "properties": {
+                    "text": {
+                      "type": "String",
+                      "value": "Settings"
+                    }
+                  }
+                },
+                {
+                  "children": [],
+                  "class": "Button",
+                  "name": "CloseBtn",
+                  "path": "/root/UIRoot/MainVBox/Header/CloseBtn",
+                  "properties": {
+                    "text": {
+                      "type": "String",
+                      "value": "X"
+                    }
+                  }
+                }
+              ],
+              "class": "HBoxContainer",
+              "name": "Header",
+              "path": "/root/UIRoot/MainVBox/Header",
+              "properties": {}
+            },
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "class": "Label",
+                      "name": "NameLabel",
+                      "path": "/root/UIRoot/MainVBox/Body/NameRow/NameLabel",
+                      "properties": {
+                        "text": {
+                          "type": "String",
+                          "value": "Name:"
+                        }
+                      }
+                    },
+                    {
+                      "children": [],
+                      "class": "LineEdit",
+                      "name": "NameInput",
+                      "path": "/root/UIRoot/MainVBox/Body/NameRow/NameInput",
+                      "properties": {
+                        "placeholder_text": {
+                          "type": "String",
+                          "value": "Enter name"
+                        }
+                      }
+                    }
+                  ],
+                  "class": "HBoxContainer",
+                  "name": "NameRow",
+                  "path": "/root/UIRoot/MainVBox/Body/NameRow",
+                  "properties": {}
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "class": "Label",
+                      "name": "DescLabel",
+                      "path": "/root/UIRoot/MainVBox/Body/DescRow/DescLabel",
+                      "properties": {
+                        "text": {
+                          "type": "String",
+                          "value": "Description:"
+                        }
+                      }
+                    },
+                    {
+                      "children": [],
+                      "class": "TextEdit",
+                      "name": "DescInput",
+                      "path": "/root/UIRoot/MainVBox/Body/DescRow/DescInput",
+                      "properties": {}
+                    }
+                  ],
+                  "class": "HBoxContainer",
+                  "name": "DescRow",
+                  "path": "/root/UIRoot/MainVBox/Body/DescRow",
+                  "properties": {}
+                }
+              ],
+              "class": "VBoxContainer",
+              "name": "Body",
+              "path": "/root/UIRoot/MainVBox/Body",
+              "properties": {}
+            },
+            {
+              "children": [
+                {
+                  "children": [],
+                  "class": "Button",
+                  "name": "CancelBtn",
+                  "path": "/root/UIRoot/MainVBox/Footer/CancelBtn",
+                  "properties": {
+                    "text": {
+                      "type": "String",
+                      "value": "Cancel"
+                    }
+                  }
+                },
+                {
+                  "children": [],
+                  "class": "Button",
+                  "name": "SaveBtn",
+                  "path": "/root/UIRoot/MainVBox/Footer/SaveBtn",
+                  "properties": {
+                    "text": {
+                      "type": "String",
+                      "value": "Save"
+                    }
+                  }
+                }
+              ],
+              "class": "HBoxContainer",
+              "name": "Footer",
+              "path": "/root/UIRoot/MainVBox/Footer",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "Panel",
+              "name": "StatusPanel",
+              "path": "/root/UIRoot/MainVBox/StatusPanel",
+              "properties": {}
+            }
+          ],
+          "class": "VBoxContainer",
+          "name": "MainVBox",
+          "path": "/root/UIRoot/MainVBox",
+          "properties": {}
+        }
+      ],
+      "class": "Control",
+      "name": "UIRoot",
+      "path": "/root/UIRoot",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

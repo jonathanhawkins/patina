@@ -1,0 +1,478 @@
+openapi: "3.0.3"
+info:
+  title: Patina Editor HTTP API
+  version: "1.0.0"
+  description: >-
+    pat-yuyqw: Machine-readable OpenAPI 3 spec for the editor HTTP server.
+    Routes are kept in sync with the live `/api/capabilities` endpoint.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Default loopback editor server
+components:
+  responses:
+    ObjectResponse:
+      description: JSON object response.
+      content:
+        application/json:
+          schema:
+            type: object
+    BinaryResponse:
+      description: Binary blob (image/png, image/bmp).
+      content:
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+paths:
+  /api/capabilities:
+    get:
+      summary: Return machine-readable route schema.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/scene:
+    get:
+      summary: Return the full scene tree.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/selected:
+    get:
+      summary: Return the currently selected node.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/selected_nodes:
+    get:
+      summary: Return all selected nodes.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/scene/info:
+    get:
+      summary: Return scene metadata (node count, root type).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/viewport:
+    get:
+      summary: Return the viewport framebuffer as BMP.
+      responses:
+        "200":
+          $ref: "#/components/responses/BinaryResponse"
+  /api/viewport/png:
+    get:
+      summary: Return the viewport framebuffer as PNG.
+      responses:
+        "200":
+          $ref: "#/components/responses/BinaryResponse"
+  /api/filesystem:
+    get:
+      summary: Return project files tree.
+      parameters:
+        - in: query
+          name: path
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+        "403":
+          description: Path outside the project sandbox.
+  /api/filesystem/tree:
+    get:
+      summary: Return the full directory tree.
+      parameters:
+        - in: query
+          name: path
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+        "403":
+          description: Path outside the project sandbox.
+  /api/filesystem/dir:
+    get:
+      summary: Return directory listing.
+      parameters:
+        - in: query
+          name: path
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/preview/file:
+    get:
+      summary: Return a preview for the given file.
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: JSON metadata or raw bytes depending on file type.
+  /api/script:
+    get:
+      summary: Return script source.
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/commands:
+    get:
+      summary: Return the editor command palette catalog.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/animations:
+    get:
+      summary: Return all animations.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/animation:
+    get:
+      summary: Return a single animation by name.
+      parameters:
+        - in: query
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/runtime/status:
+    get:
+      summary: Return runtime play/stop status.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/runtime/input/state:
+    get:
+      summary: Return current input state.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/settings:
+    get:
+      summary: Return editor display settings.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/plugins:
+    get:
+      summary: Return installed plugin registry.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/keybindings:
+    get:
+      summary: Return keybinding table.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/editor/mode:
+    get:
+      summary: Return current editor mode.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/scene/tabs:
+    get:
+      summary: Return open scene tabs.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/viewport/mode:
+    get:
+      summary: Return viewport rendering mode.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/output:
+    get:
+      summary: Return editor output log buffer.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/project_settings:
+    get:
+      summary: Return project settings document.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/vcs/status:
+    get:
+      summary: Return version control status.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/vcs/diff:
+    get:
+      summary: Return VCS diff for a path.
+      parameters:
+        - in: query
+          name: path
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/vcs/log:
+    get:
+      summary: Return VCS commit log.
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/node/add:
+    post:
+      summary: Add a node to the scene tree.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                parent_id: { type: integer }
+                name: { type: string }
+                class: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/node/delete:
+    post:
+      summary: Delete a node from the scene tree.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_id: { type: integer }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/node/select:
+    post:
+      summary: Select a node.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_id: { type: integer }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/node/rename:
+    post:
+      summary: Rename a node.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_id: { type: integer }
+                new_name: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/node/reparent:
+    post:
+      summary: Move a node under a new parent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_id: { type: integer }
+                new_parent_id: { type: integer }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/node/duplicate:
+    post:
+      summary: Duplicate a node.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_id: { type: integer }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/property/set:
+    post:
+      summary: Set a node property.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                node_id: { type: integer }
+                name: { type: string }
+                value: {}
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/undo:
+    post:
+      summary: Undo the last action.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/redo:
+    post:
+      summary: Redo the last undone action.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/scene/save:
+    post:
+      summary: Save current scene to a path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/scene/load:
+    post:
+      summary: Load a scene from a path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/filesystem/rename:
+    post:
+      summary: Rename a file or directory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                old_path: { type: string }
+                new_name: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+        "403":
+          description: Path outside the project sandbox.
+  /api/filesystem/delete:
+    post:
+      summary: Delete a file or empty directory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+        "403":
+          description: Path outside the project sandbox.
+  /api/filesystem/mkdir:
+    post:
+      summary: Create a directory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+        "403":
+          description: Path outside the project sandbox.
+  /api/script/save:
+    post:
+      summary: Save a script file.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+                source: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/runtime/play:
+    post:
+      summary: Start the runtime.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/runtime/stop:
+    post:
+      summary: Stop the runtime.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/runtime/pause:
+    post:
+      summary: Pause the runtime.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  /api/runtime/step:
+    post:
+      summary: Step the runtime one frame.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"

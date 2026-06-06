@@ -1,0 +1,98 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_physics_scene",
+  "generated_at": "2026-03-22T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "Sprite2D",
+              "name": "Sprite",
+              "path": "/root/PhysicsWorld/DynamicCrate/Sprite",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "CollisionShape",
+              "path": "/root/PhysicsWorld/DynamicCrate/CollisionShape",
+              "properties": {}
+            }
+          ],
+          "class": "RigidBody2D",
+          "name": "DynamicCrate",
+          "path": "/root/PhysicsWorld/DynamicCrate",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "CollisionShape",
+              "path": "/root/PhysicsWorld/BouncyBall/CollisionShape",
+              "properties": {}
+            }
+          ],
+          "class": "RigidBody2D",
+          "name": "BouncyBall",
+          "path": "/root/PhysicsWorld/BouncyBall",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "CollisionShape",
+              "path": "/root/PhysicsWorld/StaticPlatform/CollisionShape",
+              "properties": {}
+            }
+          ],
+          "class": "StaticBody2D",
+          "name": "StaticPlatform",
+          "path": "/root/PhysicsWorld/StaticPlatform",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "CollisionShape",
+              "path": "/root/PhysicsWorld/KillZone/CollisionShape",
+              "properties": {}
+            }
+          ],
+          "class": "Area2D",
+          "name": "KillZone",
+          "path": "/root/PhysicsWorld/KillZone",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "CollisionShape2D",
+              "name": "CollisionShape",
+              "path": "/root/PhysicsWorld/Ground/CollisionShape",
+              "properties": {}
+            }
+          ],
+          "class": "StaticBody2D",
+          "name": "Ground",
+          "path": "/root/PhysicsWorld/Ground",
+          "properties": {}
+        }
+      ],
+      "class": "Node2D",
+      "name": "PhysicsWorld",
+      "path": "/root/PhysicsWorld",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

@@ -1,39 +1,72 @@
 {
-  "fixture_id": "scene_with_properties",
   "capture_type": "scene_tree",
-  "upstream_version": "pending",
+  "fixture_id": "scene_with_properties",
+  "generated_at": "2026-03-22T08:00:00+00:00",
   "nodes": [
     {
-      "name": "Root",
-      "class": "Node",
-      "path": "/root/Root",
       "children": [
         {
-          "name": "Player",
-          "class": "Node2D",
-          "path": "/root/Root/Player",
           "children": [],
+          "class": "Node2D",
+          "name": "Player",
+          "path": "/root/Root/Player",
           "properties": {
-            "label": { "type": "String", "value": "Hero" },
-            "position": { "type": "Vector2", "value": [100.0, 200.0] },
-            "speed": { "type": "Int", "value": 350 }
+            "label": {
+              "type": "String",
+              "value": "Hero"
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                100.0,
+                200.0
+              ]
+            },
+            "speed": {
+              "type": "Int",
+              "value": 350
+            }
           }
         },
         {
-          "name": "Background",
-          "class": "Node2D",
-          "path": "/root/Root/Background",
           "children": [],
+          "class": "Node2D",
+          "name": "Background",
+          "path": "/root/Root/Background",
           "properties": {
-            "modulate": { "type": "Color", "value": [0.20000000298023224, 0.4000000059604645, 0.6000000238418579, 1.0] },
-            "offset": { "type": "Vector2", "value": [0.0, -50.0] },
-            "visible": { "type": "Bool", "value": true }
+            "modulate": {
+              "type": "Color",
+              "value": [
+                0.20000000298023224,
+                0.4000000059604645,
+                0.6000000238418579,
+                1.0
+              ]
+            },
+            "offset": {
+              "type": "Vector2",
+              "value": [
+                0.0,
+                -50.0
+              ]
+            },
+            "visible": {
+              "type": "Bool",
+              "value": true
+            }
           }
         }
       ],
+      "class": "Node",
+      "name": "Root",
+      "path": "/root/Root",
       "properties": {
-        "name_tag": { "type": "String", "value": "main_scene" }
+        "name_tag": {
+          "type": "String",
+          "value": "main_scene"
+        }
       }
     }
-  ]
+  ],
+  "upstream_version": "4.6.1-stable"
 }

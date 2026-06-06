@@ -5,9 +5,11 @@
 
 pub mod bus;
 pub mod decode;
+pub mod import;
 pub mod mixer;
 pub mod sample;
 pub mod server;
+pub mod spatial;
 pub mod stream;
 pub mod wav;
 

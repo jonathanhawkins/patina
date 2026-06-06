@@ -85,6 +85,7 @@ Execution order and parallel-lane guidance live in [prd/BEAD_EXECUTION_MAP.md](/
 - Every compatibility test must state what observable behavior it checks
 - Do not start reimplementing third-party code until classification is recorded in `THIRDPARTY_STRATEGY.md`
 - No new editor feature work until runtime parity exits are met (98%+ oracle parity across all supported scenes). Editor maintenance (bug fixes, server stability, smoke tests) is allowed and encouraged.
+- **Workers must not run Rust builds**: Workers MUST NOT run `cargo`, `rust_task.sh`, or any Rust compilation commands. The coordinator's verifier lane is the single Rust builder — it keeps the compile cache hot and avoids build-slot queue stalls. Workers implement code, read tests, and report the specific test command (e.g. `--test my_test_name`) in their `/mail-complete` message. The verifier compiles and runs it. Non-Rust checks (docs, scripts, grep, file reads) are fine to run directly.
 
 ## Editor Feature Gate (Explicit)
 

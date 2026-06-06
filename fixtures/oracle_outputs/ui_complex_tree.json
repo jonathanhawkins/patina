@@ -1,0 +1,136 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Label",
+							"groups": [],
+							"name": "Title",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/Header/Title"
+						},
+						{
+							"children": [],
+							"class": "Label",
+							"groups": [],
+							"name": "ScoreLabel",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/Header/ScoreLabel"
+						},
+						{
+							"children": [],
+							"class": "Label",
+							"groups": [],
+							"name": "HealthLabel",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/Header/HealthLabel"
+						}
+					],
+					"class": "Control",
+					"groups": [],
+					"name": "Header",
+					"owner": "/root/UIRoot",
+					"path": "/root/UIRoot/Header"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Label",
+							"groups": [],
+							"name": "InventoryLabel",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/Sidebar/InventoryLabel"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "Slot1",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/Sidebar/Slot1"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "Slot2",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/Sidebar/Slot2"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "Slot3",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/Sidebar/Slot3"
+						}
+					],
+					"class": "Control",
+					"groups": [],
+					"name": "Sidebar",
+					"owner": "/root/UIRoot",
+					"path": "/root/UIRoot/Sidebar"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Label",
+							"groups": [],
+							"name": "SpeakerName",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/DialogBox/SpeakerName"
+						},
+						{
+							"children": [],
+							"class": "Label",
+							"groups": [],
+							"name": "DialogText",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/DialogBox/DialogText"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "NextButton",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/DialogBox/NextButton"
+						},
+						{
+							"children": [],
+							"class": "Button",
+							"groups": [],
+							"name": "SkipButton",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/DialogBox/SkipButton"
+						}
+					],
+					"class": "Control",
+					"groups": [],
+					"name": "DialogBox",
+					"owner": "/root/UIRoot",
+					"path": "/root/UIRoot/DialogBox"
+				}
+			],
+			"class": "Control",
+			"groups": [],
+			"name": "UIRoot",
+			"owner": "/root",
+			"path": "/root/UIRoot"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

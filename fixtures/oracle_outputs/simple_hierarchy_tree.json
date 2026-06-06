@@ -1,0 +1,58 @@
+{
+	"children": [
+		{
+			"children": [],
+			"class": "Node",
+			"groups": [],
+			"name": "Oracle",
+			"owner": "",
+			"path": "/root/Oracle",
+			"script": "res://oracle_autoload.gd"
+		},
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Node2D",
+							"groups": [],
+							"name": "GrandChild",
+							"owner": "/root/Root",
+							"path": "/root/Root/Child1/GrandChild"
+						}
+					],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Child1",
+					"owner": "/root/Root",
+					"path": "/root/Root/Child1"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Child2",
+					"owner": "/root/Root",
+					"path": "/root/Root/Child2"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "Root",
+			"owner": "/root",
+			"path": "/root/Root",
+			"script": "res://scripts/hierarchy_test.gd"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

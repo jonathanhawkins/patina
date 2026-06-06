@@ -1,0 +1,143 @@
+# AGENTS.md - Patina Engine Operating Manual
+
+## Project Purpose
+
+Patina is a monorepo containing:
+
+1. **Patina Engine** (`engine-rs/`) — A Rust-native, behavior-compatible Godot runtime built in staged vertical slices.
+2. **Website** (`apps/web/`) — The patinaengine.com marketing/docs site built with Next.js, Tailwind CSS, and shadcn/ui, deployed to Cloudflare Workers.
+3. **Godot Lab** (`apps/godot/`) — GDExtension compatibility lab using godot-rust for validation.
+4. **Tools** (`tools/`) — Oracle dumpers, API extraction, fixture generation, render diffing, benchmarks.
+5. **Fixtures** (`fixtures/`) — Scene, resource, physics, and render golden data.
+6. **Tests** (`tests/`) — Compatibility, integration, golden, and performance test suites.
+7. **Docs** (`docs/`) — Architecture docs, flywheel methodology, guides.
+
+## Technology Stack
+
+- **Engine**: Rust (2021 edition), Cargo workspace
+- **Website**: Next.js 15, React 19, TypeScript, Tailwind CSS v4, shadcn/ui, Cloudflare Workers (via @cloudflare/next-on-pages)
+- **Godot Lab**: Godot 4.x, godot-rust (GDExtension)
+- **CI**: GitHub Actions
+- **Package Manager**: pnpm (for JS/TS), Cargo (for Rust)
+- **Monorepo Orchestrator**: Turborepo
+
+## Safety Rules (Non-Negotiable)
+
+1. **No destructive git commands**: Never run `git reset --hard`, `git clean -f`, `git push --force`, `git checkout .`, or `git branch -D` without explicit human approval.
+2. **No file deletion without permission**: Do not delete files unless the bead explicitly authorizes it.
+3. **No secrets in commits**: Never commit `.env`, credentials, API keys, or secrets.
+4. **Unsafe Rust policy**: Every `unsafe` block must have a `// SAFETY:` comment explaining the invariant. Prefer safe abstractions.
+5. **No skipping hooks**: Never use `--no-verify` or `--no-gpg-sign`.
+
+## Coding Conventions
+
+### Rust
+- Use `rustfmt` defaults
+- Use `clippy` with `#![warn(clippy::all)]`
+- Prefer `thiserror` for error types
+- Prefer `tracing` over `log`
+- Keep crate boundaries strict — no circular dependencies
+- Every public API must have a doc comment
+
+### TypeScript/React
+- Use TypeScript strict mode
+- Use functional components with hooks
+- Use shadcn/ui components — do not reinvent UI primitives
+- Use Tailwind utility classes — no custom CSS unless absolutely necessary
+- Use `next/image` for images, `next/link` for navigation
+
+### General
+- Prefer small, focused commits
+- Every commit message should reference the bead it implements (if applicable)
+- Write tests alongside implementation
+- Keep PRs focused on a single bead or logical unit
+
+## File Reservation Policy
+
+- Before editing shared files (AGENTS.md, package.json, Cargo.toml workspace), announce intent via commit message or PR description.
+- Crate-internal files do not require reservation.
+- Website component files do not require reservation unless they are shared layout/config files.
+
+## MCP Agent Mail (Required)
+
+Patina uses Agent Mail as the coordination layer for multi-agent work. `br`
+tracks dependencies and status; Agent Mail carries handoffs, blocker reports,
+and advisory file reservations.
+
+- Start the local mail server before launching teams:
+  `cd /Users/bone/dev/games/patina/mcp_agent_mail && ./scripts/run_server_with_token.sh`
+- Bootstrap each session identity before touching beads:
+  `cd /Users/bone/dev/games/patina && ./scripts/agent_mail_bootstrap.sh`
+- If you want a specific identity instead of an auto-generated one:
+  `./scripts/agent_mail_bootstrap.sh BrightRiver`
+- **The server may assign a different name** if the requested name is already
+  taken. Always use the name printed by bootstrap, not the one you requested.
+- Export `AGENT_NAME` in the active shell after bootstrap if the script prints one.
+- Codex inbox reminders are wired through the repo-local notify hook. Do not
+  leave `YOUR_AGENT_NAME` placeholders in any active session.
+- Every worker report must go through Agent Mail and include the bead ID in the
+  subject or first line.
+- The main coordinator owns `br`; worker agents do not mutate tracker state
+  unless explicitly assigned that role.
+- Reserve shared surfaces through Agent Mail before editing them. Shared repo
+  policy from the section above still applies.
+
+Detailed operating instructions live in
+[docs/agent-mail-orchestration.md](/Users/bone/dev/games/patina/docs/agent-mail-orchestration.md).
+
+## Recovery After Compaction
+
+After every context compaction or session restart:
+1. Re-read this file (`AGENTS.md`)
+2. Re-run `./scripts/agent_mail_bootstrap.sh` if your agent identity is not already active
+3. Check your inbox / pending Agent Mail threads before editing files
+4. Read [prd/BEAD_EXECUTION_MAP.md](/Users/bone/dev/games/patina/prd/BEAD_EXECUTION_MAP.md) for current claim order and lane rules
+5. Check `git status` and `git log --oneline -10` to understand current state
+6. Check task list or bead status for current assignments
+7. Resume work on the current bead or claim a new one
+
+## Bead Workflow
+
+1. Check available beads/tasks
+2. Claim one bead at a time with `br update <id> --claim`
+3. Implement with tests
+4. Self-review ("fresh eyes") after completion
+5. Mark bead as complete with `br close <id> --reason completed`
+6. Move to next priority bead
+
+Execution order and parallel-lane guidance live in [prd/BEAD_EXECUTION_MAP.md](/Users/bone/dev/games/patina/prd/BEAD_EXECUTION_MAP.md). Agents should follow that file for `Now`, `Next`, `Later`, and `Do Not Touch Yet` claim order instead of inferring priority from `br list` alone.
+
+## Project-Specific Rules
+
+- The Rust engine ports **behavior and contracts**, not C++ source files
+- Upstream Godot is the behavioral oracle — never guess at behavior, verify against upstream
+- Every compatibility test must state what observable behavior it checks
+- Do not start reimplementing third-party code until classification is recorded in `THIRDPARTY_STRATEGY.md`
+- No new editor feature work until runtime parity exits are met (98%+ oracle parity across all supported scenes). Editor maintenance (bug fixes, server stability, smoke tests) is allowed and encouraged.
+
+## Editor Feature Gate (Explicit)
+
+**Gate**: No new `gdeditor` features may be added until all runtime parity exit
+criteria in `EXIT_CRITERIA.md` Gates 1–8 are green.
+
+**What is allowed** (maintenance-only):
+- Bug fixes for existing editor functionality
+- Server stability improvements (crash fixes, connection handling)
+- Smoke tests that verify existing behavior does not regress
+
+**What is blocked**:
+- New editor UI panels, tools, or workflows
+- New API endpoints that expose new editing capabilities
+- Expanding editor node support beyond what the runtime already covers
+
+**Current status**: Gate is **met** as of 2026-03-19 — all runtime parity exits
+(Gates 1–8) are passing. Editor maintenance work may proceed; new feature work
+requires explicit approval from the project lead.
+
+**Editor repin validation policy** (pat-wgjm, 2026-03-20): Editor parity
+validation is secondary to runtime oracle parity. After a repin, runtime
+fallout (oracle regression recovery) must reach the 98% exit threshold before
+editor-specific repin claims are validated. Runtime is currently at 97.2%
+(69/71) against Godot 4.6.1 with 2 bounded drifts remaining. Editor tests
+pass against the repinned runtime but editor-specific parity claims should not
+be made until runtime parity is fully resolved.

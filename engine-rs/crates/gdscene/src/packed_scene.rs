@@ -739,6 +739,11 @@ pub fn add_packed_scene_to_tree(
     // Wire any signal connections from the packed scene.
     wire_connections(tree, new_root_id, &scene.connections);
 
+    // Auto-assign `current = true` to the first Camera3D in the instanced
+    // scene if no camera already has it set. Godot does this automatically
+    // when a Camera3D enters the viewport.
+    auto_assign_current_camera(tree, new_root_id);
+
     Ok(new_root_id)
 }
 
@@ -806,7 +811,43 @@ where
 
     wire_connections(tree, new_root_id, &scene.connections);
 
+    auto_assign_current_camera(tree, new_root_id);
+
     Ok(new_root_id)
+}
+
+/// Automatically assigns `current = true` to the first Camera3D in the
+/// subtree rooted at `root_id`, if no Camera3D already has `current` set.
+///
+/// This matches Godot's behavior where the first Camera3D entering the
+/// viewport becomes the active camera.
+fn auto_assign_current_camera(tree: &mut crate::scene_tree::SceneTree, root_id: NodeId) {
+    let mut subtree = Vec::new();
+    tree.collect_subtree_top_down(root_id, &mut subtree);
+
+    // Check if any camera already has current=true.
+    let any_current = subtree.iter().any(|&nid| {
+        tree.get_node(nid)
+            .map(|n| {
+                n.class_name() == "Camera3D"
+                    && matches!(n.get_property("current"), Variant::Bool(true))
+            })
+            .unwrap_or(false)
+    });
+
+    if any_current {
+        return;
+    }
+
+    // Find the first Camera3D and make it current.
+    for &nid in &subtree {
+        if let Some(node) = tree.get_node_mut(nid) {
+            if node.class_name() == "Camera3D" {
+                node.set_property("current", Variant::Bool(true));
+                return;
+            }
+        }
+    }
 }
 
 /// Wires signal connections from a packed scene into the scene tree.
@@ -2376,5 +2417,112 @@ position = Vector2(200, 0)
         let entry = ext.get("1_player").unwrap();
         assert_eq!(entry.res_type, "PackedScene");
         assert_eq!(entry.path, "res://player.tscn");
+    }
+
+    // -- Camera3D current auto-assignment tests ---------------------------------
+
+    const CAMERA3D_SCENE: &str = r#"
+[gd_scene format=3 uid="uid://cam3d"]
+
+[node name="World" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 8)
+fov = 70.0
+
+[node name="Mesh" type="MeshInstance3D" parent="."]
+"#;
+
+    #[test]
+    fn auto_assign_camera_current_on_load() {
+        let scene = PackedScene::from_tscn(CAMERA3D_SCENE).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        // Find the Camera3D node.
+        let mut subtree = Vec::new();
+        tree.collect_subtree_top_down(scene_root, &mut subtree);
+        let cam_id = subtree
+            .iter()
+            .find(|&&nid| {
+                tree.get_node(nid)
+                    .map(|n| n.class_name() == "Camera3D")
+                    .unwrap_or(false)
+            })
+            .copied()
+            .expect("Camera3D should exist");
+
+        // Camera should have been auto-assigned current=true.
+        assert_eq!(
+            tree.get_node(cam_id).unwrap().get_property("current"),
+            Variant::Bool(true),
+            "first Camera3D should be auto-assigned current=true"
+        );
+    }
+
+    const CAMERA3D_EXPLICIT_CURRENT: &str = r#"
+[gd_scene format=3 uid="uid://cam3dc"]
+
+[node name="World" type="Node3D"]
+
+[node name="CamA" type="Camera3D" parent="."]
+fov = 60.0
+
+[node name="CamB" type="Camera3D" parent="."]
+current = true
+fov = 90.0
+"#;
+
+    #[test]
+    fn explicit_current_not_overridden() {
+        let scene = PackedScene::from_tscn(CAMERA3D_EXPLICIT_CURRENT).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let mut subtree = Vec::new();
+        tree.collect_subtree_top_down(scene_root, &mut subtree);
+
+        let cam_a = subtree
+            .iter()
+            .find(|&&nid| {
+                tree.get_node(nid)
+                    .map(|n| n.name() == "CamA")
+                    .unwrap_or(false)
+            })
+            .copied()
+            .expect("CamA");
+        let cam_b = subtree
+            .iter()
+            .find(|&&nid| {
+                tree.get_node(nid)
+                    .map(|n| n.name() == "CamB")
+                    .unwrap_or(false)
+            })
+            .copied()
+            .expect("CamB");
+
+        // CamB has explicit current=true; CamA should NOT have been auto-assigned.
+        assert_eq!(
+            tree.get_node(cam_b).unwrap().get_property("current"),
+            Variant::Bool(true),
+            "CamB should keep explicit current=true"
+        );
+        assert_ne!(
+            tree.get_node(cam_a).unwrap().get_property("current"),
+            Variant::Bool(true),
+            "CamA should not be auto-assigned when CamB is already current"
+        );
+    }
+
+    #[test]
+    fn no_camera_no_panic() {
+        // Scene with no Camera3D — auto_assign should be a no-op.
+        let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let _scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+        // Just verify it didn't panic.
     }
 }

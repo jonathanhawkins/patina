@@ -786,3 +786,529 @@ fn load_second_fixture_replaces_first() {
 
     handle.stop();
 }
+
+// ---------------------------------------------------------------------------
+// pat-b0o: Viewport selection modes (box select, selection persistence)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn box_select_finds_nodes_in_region() {
+    let (handle, port) = make_test_server();
+    let resp = http_post(
+        port,
+        "/api/viewport/box_select",
+        r#"{"x1":0,"y1":0,"x2":800,"y2":600,"add":false}"#,
+    );
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(
+        v["count"].as_u64().unwrap() > 0,
+        "box select should find nodes"
+    );
+    assert!(!v["selected_nodes"].as_array().unwrap().is_empty());
+    handle.stop();
+}
+
+#[test]
+fn box_select_additive_preserves_previous() {
+    let (handle, port) = make_test_server();
+    http_post(
+        port,
+        "/api/viewport/box_select",
+        r#"{"x1":0,"y1":0,"x2":10,"y2":10,"add":false}"#,
+    );
+    let resp = http_post(
+        port,
+        "/api/viewport/box_select",
+        r#"{"x1":0,"y1":0,"x2":800,"y2":600,"add":true}"#,
+    );
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(v["count"].as_u64().unwrap() > 0);
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-r5p: Transform gizmo improvements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn axis_constrained_drag_moves_only_x() {
+    let (handle, port) = make_test_server();
+    let player_id = get_player_node_id(port);
+    http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{player_id}}}"#),
+    );
+
+    let node_resp = http_get(port, &format!("/api/node/{player_id}"));
+    let body = extract_body(&node_resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let orig_pos = v["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "position")
+        .unwrap();
+    let orig_y = orig_pos["value"]["value"][1].as_f64().unwrap();
+
+    let resp = http_post(
+        port,
+        "/api/viewport/drag_axis",
+        r#"{"dx":50,"dy":50,"axis":"x"}"#,
+    );
+    assert!(resp.contains("200 OK"));
+
+    let node_resp = http_get(port, &format!("/api/node/{player_id}"));
+    let body = extract_body(&node_resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let pos = v["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "position")
+        .unwrap();
+    let new_y = pos["value"]["value"][1].as_f64().unwrap();
+    assert!(
+        (new_y - orig_y).abs() < 0.01,
+        "Y should be unchanged for x-axis drag"
+    );
+    handle.stop();
+}
+
+#[test]
+fn rotate_node_changes_rotation() {
+    let (handle, port) = make_test_server();
+    let player_id = get_player_node_id(port);
+    http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{player_id}}}"#),
+    );
+    let resp = http_post(port, "/api/viewport/rotate_node", r#"{"delta":0.5}"#);
+    assert!(resp.contains("200 OK"));
+
+    let node_resp = http_get(port, &format!("/api/node/{player_id}"));
+    let body = extract_body(&node_resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let rot = v["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "rotation")
+        .unwrap();
+    let rotation = rot["value"]["value"].as_f64().unwrap();
+    assert!(
+        (rotation - 0.5).abs() < 0.01,
+        "rotation should be ~0.5, got {rotation}"
+    );
+    handle.stop();
+}
+
+#[test]
+fn scale_node_changes_scale() {
+    let (handle, port) = make_test_server();
+    let player_id = get_player_node_id(port);
+    http_post(
+        port,
+        "/api/node/select",
+        &format!(r#"{{"node_id":{player_id}}}"#),
+    );
+    let body = format!(
+        r#"{{"node_id":{player_id},"property":"scale","value":{{"type":"Vector2","value":[1,1]}}}}"#
+    );
+    http_post(port, "/api/property/set", &body);
+
+    let resp = http_post(port, "/api/viewport/scale_node", r#"{"sx":2.0,"sy":1.5}"#);
+    assert!(resp.contains("200 OK"));
+
+    let node_resp = http_get(port, &format!("/api/node/{player_id}"));
+    let body = extract_body(&node_resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let scale = v["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "scale")
+        .unwrap();
+    let sx = scale["value"]["value"][0].as_f64().unwrap();
+    let sy = scale["value"]["value"][1].as_f64().unwrap();
+    assert!((sx - 2.0).abs() < 0.01, "sx should be ~2.0, got {sx}");
+    assert!((sy - 1.5).abs() < 0.01, "sy should be ~1.5, got {sy}");
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-zlv: Snapping improvements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snap_info_returns_current_settings() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/api/viewport/snap_info");
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["snap_size"], 8);
+    assert_eq!(v["snap_enabled"], false);
+    handle.stop();
+}
+
+#[test]
+fn configurable_snap_size_via_settings() {
+    let (handle, port) = make_test_server();
+    http_post(
+        port,
+        "/api/settings",
+        r#"{"grid_snap_enabled":true,"grid_snap_size":16,"grid_visible":true,"rulers_visible":true,"font_size":"medium"}"#,
+    );
+    let resp = http_get(port, "/api/viewport/snap_info");
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["snap_size"], 16);
+    assert_eq!(v["snap_enabled"], true);
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-cgc: Script editor core (find/replace)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn script_find_returns_matches() {
+    let (handle, port) = make_test_server();
+    let resp = http_post(
+        port,
+        "/api/script/find",
+        r#"{"content":"line1 print\nline2 print\nline3","query":"print","case_sensitive":true}"#,
+    );
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["count"], 2);
+    handle.stop();
+}
+
+#[test]
+fn script_find_case_insensitive() {
+    let (handle, port) = make_test_server();
+    let resp = http_post(
+        port,
+        "/api/script/find",
+        r#"{"content":"Ready ready READY","query":"ready","case_sensitive":false}"#,
+    );
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["count"], 3);
+    handle.stop();
+}
+
+#[test]
+fn script_replace_all_occurrences() {
+    let (handle, port) = make_test_server();
+    let resp = http_post(
+        port,
+        "/api/script/replace",
+        r#"{"content":"var x = 1\nvar y = x + x","query":"x","replacement":"z","replace_all":true}"#,
+    );
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["replacements"], 3);
+    assert!(v["content"].as_str().unwrap().contains("var z = 1"));
+    handle.stop();
+}
+
+#[test]
+fn script_replace_first_only() {
+    let (handle, port) = make_test_server();
+    let resp = http_post(
+        port,
+        "/api/script/replace",
+        r#"{"content":"aaa","query":"a","replacement":"b","replace_all":false}"#,
+    );
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["replacements"], 1);
+    assert_eq!(v["content"], "baa");
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-1v3: Script editor advanced (breakpoints, error highlighting)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn toggle_breakpoint_adds_and_removes() {
+    let (handle, port) = make_test_server();
+    let resp = http_post(
+        port,
+        "/api/script/breakpoint/toggle",
+        r#"{"path":"test.gd","line":5}"#,
+    );
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["added"], true);
+    assert!(v["breakpoints"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(5)));
+
+    let resp = http_post(
+        port,
+        "/api/script/breakpoint/toggle",
+        r#"{"path":"test.gd","line":5}"#,
+    );
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["added"], false);
+    assert!(!v["breakpoints"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(5)));
+    handle.stop();
+}
+
+#[test]
+fn get_breakpoints_returns_all_for_path() {
+    let (handle, port) = make_test_server();
+    http_post(
+        port,
+        "/api/script/breakpoint/toggle",
+        r#"{"path":"test.gd","line":3}"#,
+    );
+    http_post(
+        port,
+        "/api/script/breakpoint/toggle",
+        r#"{"path":"test.gd","line":10}"#,
+    );
+    http_post(
+        port,
+        "/api/script/breakpoint/toggle",
+        r#"{"path":"other.gd","line":1}"#,
+    );
+
+    let resp = http_get(port, "/api/script/breakpoints?path=test.gd");
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["breakpoints"].as_array().unwrap().len(), 2);
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-2hs: Signals dock improvements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signals_include_connection_count_and_details() {
+    let (handle, port) = make_test_server();
+    let world_id = get_world_node_id(port);
+
+    let body = format!(r#"{{"parent_id":{world_id},"name":"TestBtn","class_name":"Button"}}"#);
+    let add_resp = http_post(port, "/api/node/add", &body);
+    let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
+    let btn_id = add_json["id"].as_u64().unwrap();
+
+    http_post(
+        port,
+        "/api/node/signals/connect",
+        &format!(r#"{{"node_id":{btn_id},"signal":"pressed","method":"_on_pressed"}}"#),
+    );
+
+    let resp = http_get(port, &format!("/api/node/signals?node_id={btn_id}"));
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+
+    assert!(v["connected_count"].as_u64().unwrap() >= 1);
+    let signals = v["signals"].as_array().unwrap();
+    let pressed = signals.iter().find(|s| s["name"] == "pressed").unwrap();
+    assert_eq!(pressed["connected"], true);
+    assert!(pressed["connection_count"].as_u64().unwrap() >= 1);
+    assert!(!pressed["connections"].as_array().unwrap().is_empty());
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-2s1: Animation editor improvements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn animation_track_reorder_swaps() {
+    let (handle, port) = make_test_server();
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"walk","length":1.0}"#,
+    );
+    http_post(
+        port,
+        "/api/animation/keyframe/add",
+        r#"{"animation":"walk","track_node":"Player","track_property":"position","time":0.0,"value":{"type":"Vector2","value":[0,0]}}"#,
+    );
+    http_post(
+        port,
+        "/api/animation/keyframe/add",
+        r#"{"animation":"walk","track_node":"Player","track_property":"rotation","time":0.0,"value":{"type":"Float","value":0}}"#,
+    );
+
+    let resp = http_post(
+        port,
+        "/api/animation/track/reorder",
+        r#"{"animation":"walk","from":0,"to":1}"#,
+    );
+    assert!(resp.contains("200 OK"));
+
+    let resp = http_get(port, "/api/animation?name=walk");
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["tracks"][0]["property"], "rotation");
+    assert_eq!(v["tracks"][1]["property"], "position");
+    handle.stop();
+}
+
+#[test]
+fn animation_keyframe_copy_paste() {
+    let (handle, port) = make_test_server();
+    http_post(
+        port,
+        "/api/animation/create",
+        r#"{"name":"run","length":2.0}"#,
+    );
+    http_post(
+        port,
+        "/api/animation/keyframe/add",
+        r#"{"animation":"run","track_node":"Player","track_property":"position","time":0.0,"value":{"type":"Vector2","value":[0,0]}}"#,
+    );
+    http_post(
+        port,
+        "/api/animation/keyframe/add",
+        r#"{"animation":"run","track_node":"Player","track_property":"position","time":0.5,"value":{"type":"Vector2","value":[100,0]}}"#,
+    );
+
+    let resp = http_post(
+        port,
+        "/api/animation/keyframe/copy",
+        r#"{"animation":"run","track_index":0,"keyframe_indices":[0]}"#,
+    );
+    assert!(resp.contains("200 OK"));
+
+    let resp = http_post(
+        port,
+        "/api/animation/keyframe/paste",
+        r#"{"animation":"run","track_index":0,"time_offset":1.0}"#,
+    );
+    assert!(resp.contains("200 OK"));
+
+    let resp = http_get(port, "/api/animation?name=run");
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["tracks"][0]["keyframes"].as_array().unwrap().len(), 3);
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-lbu: Bottom panels (debugger, monitors)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn debug_stack_trace_returns_json() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/api/debug/stack_trace");
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(v["frames"].as_array().is_some());
+    handle.stop();
+}
+
+#[test]
+fn monitors_frame_times_returns_stats() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/api/monitors/frame_times");
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert!(v["times"].as_array().is_some());
+    assert!(v["avg"].is_number());
+    assert!(v["fps"].is_number());
+    handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// pat-dj6: Top bar (editor mode buttons, scene tab)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_editor_mode_2d_3d_script() {
+    let (handle, port) = make_test_server();
+
+    let resp = http_get(port, "/api/editor/mode");
+    assert!(resp.contains("200 OK"));
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["mode"], "2d");
+
+    let resp = http_post(port, "/api/editor/mode", r#"{"mode":"3d"}"#);
+    assert!(resp.contains("200 OK"));
+
+    http_post(port, "/api/editor/mode", r#"{"mode":"script"}"#);
+    let resp = http_get(port, "/api/editor/mode");
+    let body = extract_body(&resp);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["mode"], "script");
+
+    let resp = http_post(port, "/api/editor/mode", r#"{"mode":"invalid"}"#);
+    assert!(resp.contains("400"));
+    handle.stop();
+}
+
+#[test]
+fn editor_html_contains_mode_buttons() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/editor");
+    assert!(resp.contains("mode-btn"));
+    assert!(resp.contains("data-mode=\"2d\""));
+    assert!(resp.contains("data-mode=\"3d\""));
+    assert!(resp.contains("data-mode=\"script\""));
+    handle.stop();
+}
+
+#[test]
+fn editor_html_contains_debugger_monitors_tabs() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/editor");
+    assert!(resp.contains("data-tab=\"debugger\""));
+    assert!(resp.contains("data-tab=\"monitors\""));
+    assert!(resp.contains("monitor-graph-canvas"));
+    assert!(resp.contains("debug-stack-frames"));
+    handle.stop();
+}
+
+#[test]
+fn editor_html_contains_scene_tab_close() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/editor");
+    assert!(resp.contains("scene-tab-close"));
+    handle.stop();
+}
+
+#[test]
+fn editor_html_contains_box_select_overlay() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/editor");
+    assert!(resp.contains("box-select-overlay"));
+    handle.stop();
+}
+
+#[test]
+fn editor_html_contains_snap_indicator() {
+    let (handle, port) = make_test_server();
+    let resp = http_get(port, "/editor");
+    assert!(resp.contains("snap-indicator"));
+    handle.stop();
+}

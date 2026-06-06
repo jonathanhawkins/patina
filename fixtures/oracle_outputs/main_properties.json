@@ -8,11 +8,11 @@
 					"name": "Player",
 					"path": "/root/World/Player",
 					"properties": {
-						"can_shoot": {
+						"health": {
 							"class_type": "",
 							"hint": 0,
-							"type": "bool",
-							"value": true
+							"type": "int",
+							"value": 100
 						},
 						"position": {
 							"class_type": "",
@@ -22,12 +22,6 @@
 								"x": 100.0,
 								"y": 200.0
 							}
-						},
-						"shoot_cooldown": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 0.0
 						},
 						"speed": {
 							"class_type": "",
@@ -43,6 +37,12 @@
 					"name": "Enemy",
 					"path": "/root/World/Enemy",
 					"properties": {
+						"alive": {
+							"class_type": "",
+							"hint": 0,
+							"type": "bool",
+							"value": true
+						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
@@ -113,8 +113,8 @@
 			"hint": 0,
 			"type": "Vector2i",
 			"value": {
-				"x": 1152,
-				"y": 648
+				"x": 640,
+				"y": 480
 			}
 		},
 		"gui_embed_subwindows": {
@@ -169,7 +169,7 @@
 			"class_type": "",
 			"hint": 0,
 			"type": "String",
-			"value": "Patina Fixtures"
+			"value": "Sample Game"
 		},
 		"world_3d": {
 			"class_type": "World3D",

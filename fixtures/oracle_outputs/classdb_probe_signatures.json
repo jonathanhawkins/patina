@@ -1,0 +1,760 @@
+[
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Node",
+      "parent": "Object",
+      "method_count": 85,
+      "methods": [
+        {"name": "_ready", "args": [], "return_type": 0},
+        {"name": "_process", "args": [{"name": "delta", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "_physics_process", "args": [{"name": "delta", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "_enter_tree", "args": [], "return_type": 0},
+        {"name": "_exit_tree", "args": [], "return_type": 0},
+        {"name": "_input", "args": [{"name": "event", "type": 24, "class_name": "InputEvent"}], "return_type": 0},
+        {"name": "_unhandled_input", "args": [{"name": "event", "type": 24, "class_name": "InputEvent"}], "return_type": 0},
+        {"name": "add_child", "args": [{"name": "node", "type": 24, "class_name": "Node"}], "return_type": 0},
+        {"name": "remove_child", "args": [{"name": "node", "type": 24, "class_name": "Node"}], "return_type": 0},
+        {"name": "get_child", "args": [{"name": "idx", "type": 2, "class_name": ""}], "return_type": 24},
+        {"name": "get_child_count", "args": [], "return_type": 2},
+        {"name": "get_children", "args": [], "return_type": 28},
+        {"name": "get_parent", "args": [], "return_type": 24},
+        {"name": "get_node", "args": [{"name": "path", "type": 22, "class_name": ""}], "return_type": 24},
+        {"name": "get_node_or_null", "args": [{"name": "path", "type": 22, "class_name": ""}], "return_type": 24},
+        {"name": "get_path", "args": [], "return_type": 22},
+        {"name": "get_tree", "args": [], "return_type": 24},
+        {"name": "is_inside_tree", "args": [], "return_type": 1},
+        {"name": "queue_free", "args": [], "return_type": 0},
+        {"name": "set_process", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "set_physics_process", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "add_to_group", "args": [{"name": "group", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "remove_from_group", "args": [{"name": "group", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "is_in_group", "args": [{"name": "group", "type": 21, "class_name": ""}], "return_type": 1},
+        {"name": "get_groups", "args": [], "return_type": 28},
+        {"name": "reparent", "args": [{"name": "new_parent", "type": 24, "class_name": "Node"}], "return_type": 0},
+        {"name": "set_name", "args": [{"name": "name", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_name", "args": [], "return_type": 21},
+        {"name": "get_index", "args": [], "return_type": 2},
+        {"name": "move_child", "args": [{"name": "child_node", "type": 24, "class_name": "Node"}, {"name": "to_index", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "duplicate", "args": [], "return_type": 24},
+        {"name": "replace_by", "args": [{"name": "node", "type": 24, "class_name": "Node"}], "return_type": 0},
+        {"name": "propagate_notification", "args": [{"name": "what", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "propagate_call", "args": [{"name": "method", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "set_owner", "args": [{"name": "owner", "type": 24, "class_name": "Node"}], "return_type": 0},
+        {"name": "get_owner", "args": [], "return_type": 24},
+        {"name": "get_window", "args": [], "return_type": 24},
+        {"name": "find_child", "args": [{"name": "pattern", "type": 4, "class_name": ""}], "return_type": 24},
+        {"name": "find_children", "args": [{"name": "pattern", "type": 4, "class_name": ""}], "return_type": 28},
+        {"name": "set_process_mode", "args": [{"name": "mode", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_process_mode", "args": [], "return_type": 2},
+        {"name": "set_process_priority", "args": [{"name": "priority", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_process_priority", "args": [], "return_type": 2},
+        {"name": "is_processing", "args": [], "return_type": 1},
+        {"name": "is_physics_processing", "args": [], "return_type": 1},
+        {"name": "set_unique_name_in_owner", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_unique_name_in_owner", "args": [], "return_type": 1},
+        {"name": "set_editor_description", "args": [{"name": "editor_description", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_editor_description", "args": [], "return_type": 4}
+      ],
+      "property_count": 8,
+      "properties": [
+        {"name": "name", "type": 21, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "unique_name_in_owner", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "scene_file_path", "type": 4, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "owner", "type": 24, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "process_mode", "type": 2, "hint": 2, "hint_string": "Inherit,Pausable,WhenPaused,Always,Disabled", "usage": 4102},
+        {"name": "process_priority", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "process_physics_priority", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "editor_description", "type": 4, "hint": 13, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 3,
+      "signals": [
+        {"name": "ready", "args": []},
+        {"name": "tree_entered", "args": []},
+        {"name": "tree_exited", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Node2D",
+      "parent": "CanvasItem",
+      "method_count": 22,
+      "methods": [
+        {"name": "get_position", "args": [], "return_type": 5},
+        {"name": "set_position", "args": [{"name": "position", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_rotation", "args": [], "return_type": 3},
+        {"name": "set_rotation", "args": [{"name": "radians", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_scale", "args": [], "return_type": 5},
+        {"name": "set_scale", "args": [{"name": "scale", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "rotate", "args": [{"name": "radians", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "translate", "args": [{"name": "offset", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "global_translate", "args": [{"name": "offset", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "look_at", "args": [{"name": "point", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_global_position", "args": [], "return_type": 5},
+        {"name": "set_global_position", "args": [{"name": "position", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_global_rotation", "args": [], "return_type": 3},
+        {"name": "set_global_rotation", "args": [{"name": "radians", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "to_local", "args": [{"name": "global_point", "type": 5, "class_name": ""}], "return_type": 5},
+        {"name": "to_global", "args": [{"name": "local_point", "type": 5, "class_name": ""}], "return_type": 5},
+        {"name": "apply_scale", "args": [{"name": "ratio", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_skew", "args": [], "return_type": 3},
+        {"name": "set_skew", "args": [{"name": "radians", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_global_scale", "args": [], "return_type": 5},
+        {"name": "set_global_scale", "args": [{"name": "scale", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_global_skew", "args": [], "return_type": 3}
+      ],
+      "property_count": 5,
+      "properties": [
+        {"name": "position", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "rotation", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "scale", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "skew", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "global_position", "type": 5, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 0,
+      "signals": []
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Sprite2D",
+      "parent": "Node2D",
+      "method_count": 18,
+      "methods": [
+        {"name": "get_texture", "args": [], "return_type": 24},
+        {"name": "set_texture", "args": [{"name": "texture", "type": 24, "class_name": "Texture2D"}], "return_type": 0},
+        {"name": "get_rect", "args": [], "return_type": 7},
+        {"name": "is_flipped_h", "args": [], "return_type": 1},
+        {"name": "is_flipped_v", "args": [], "return_type": 1},
+        {"name": "set_flip_h", "args": [{"name": "flip_h", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "set_flip_v", "args": [{"name": "flip_v", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "set_frame", "args": [{"name": "frame", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_frame", "args": [], "return_type": 2},
+        {"name": "set_region_enabled", "args": [{"name": "enabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_region_enabled", "args": [], "return_type": 1},
+        {"name": "set_centered", "args": [{"name": "centered", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_centered", "args": [], "return_type": 1},
+        {"name": "set_offset", "args": [{"name": "offset", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_offset", "args": [], "return_type": 5},
+        {"name": "set_hframes", "args": [{"name": "hframes", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_hframes", "args": [], "return_type": 2},
+        {"name": "set_vframes", "args": [{"name": "vframes", "type": 2, "class_name": ""}], "return_type": 0}
+      ],
+      "property_count": 10,
+      "properties": [
+        {"name": "texture", "type": 24, "hint": 17, "hint_string": "Texture2D", "usage": 4102},
+        {"name": "centered", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "offset", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "flip_h", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "flip_v", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "hframes", "type": 2, "hint": 1, "hint_string": "1,16384,1", "usage": 4102},
+        {"name": "vframes", "type": 2, "hint": 1, "hint_string": "1,16384,1", "usage": 4102},
+        {"name": "frame", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "frame_coords", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "region_enabled", "type": 1, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 1,
+      "signals": [
+        {"name": "frame_changed", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Camera2D",
+      "parent": "Node2D",
+      "method_count": 15,
+      "methods": [
+        {"name": "get_zoom", "args": [], "return_type": 5},
+        {"name": "set_zoom", "args": [{"name": "zoom", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_offset", "args": [], "return_type": 5},
+        {"name": "set_offset", "args": [{"name": "offset", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "make_current", "args": [], "return_type": 0},
+        {"name": "is_current", "args": [], "return_type": 1},
+        {"name": "get_screen_center_position", "args": [], "return_type": 5},
+        {"name": "reset_smoothing", "args": [], "return_type": 0},
+        {"name": "force_update_scroll", "args": [], "return_type": 0},
+        {"name": "set_anchor_mode", "args": [{"name": "anchor_mode", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_anchor_mode", "args": [], "return_type": 2},
+        {"name": "set_enabled", "args": [{"name": "enabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_enabled", "args": [], "return_type": 1},
+        {"name": "set_limit_smoothing_enabled", "args": [{"name": "enabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_limit_smoothing_enabled", "args": [], "return_type": 1}
+      ],
+      "property_count": 12,
+      "properties": [
+        {"name": "offset", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "zoom", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "anchor_mode", "type": 2, "hint": 2, "hint_string": "Fixed TopLeft,Drag Center", "usage": 4102},
+        {"name": "enabled", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "limit_smoothed", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "ignore_rotation", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "process_callback", "type": 2, "hint": 2, "hint_string": "Physics,Idle", "usage": 4102},
+        {"name": "limit_left", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "limit_top", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "limit_right", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "limit_bottom", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "position_smoothing_enabled", "type": 1, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 0,
+      "signals": []
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "AnimatedSprite2D",
+      "parent": "Node2D",
+      "method_count": 16,
+      "methods": [
+        {"name": "play", "args": [{"name": "name", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "stop", "args": [], "return_type": 0},
+        {"name": "pause", "args": [], "return_type": 0},
+        {"name": "is_playing", "args": [], "return_type": 1},
+        {"name": "set_animation", "args": [{"name": "name", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "get_animation", "args": [], "return_type": 21},
+        {"name": "set_frame", "args": [{"name": "frame", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_frame", "args": [], "return_type": 2},
+        {"name": "set_speed_scale", "args": [{"name": "speed_scale", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_speed_scale", "args": [], "return_type": 3},
+        {"name": "set_sprite_frames", "args": [{"name": "sprite_frames", "type": 24, "class_name": "SpriteFrames"}], "return_type": 0},
+        {"name": "get_sprite_frames", "args": [], "return_type": 24},
+        {"name": "set_autoplay", "args": [{"name": "name", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_autoplay", "args": [], "return_type": 4},
+        {"name": "set_flip_h", "args": [{"name": "flip_h", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "set_flip_v", "args": [{"name": "flip_v", "type": 1, "class_name": ""}], "return_type": 0}
+      ],
+      "property_count": 9,
+      "properties": [
+        {"name": "sprite_frames", "type": 24, "hint": 17, "hint_string": "SpriteFrames", "usage": 4102},
+        {"name": "animation", "type": 21, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "autoplay", "type": 4, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "frame", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "speed_scale", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "playing", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "flip_h", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "flip_v", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "frame_progress", "type": 3, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 3,
+      "signals": [
+        {"name": "sprite_frames_changed", "args": []},
+        {"name": "animation_changed", "args": []},
+        {"name": "frame_changed", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "RigidBody2D",
+      "parent": "PhysicsBody2D",
+      "method_count": 20,
+      "methods": [
+        {"name": "apply_force", "args": [{"name": "force", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "apply_impulse", "args": [{"name": "impulse", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "apply_central_force", "args": [{"name": "force", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "apply_central_impulse", "args": [{"name": "impulse", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "apply_torque", "args": [{"name": "torque", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "apply_torque_impulse", "args": [{"name": "torque", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "set_mass", "args": [{"name": "mass", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_mass", "args": [], "return_type": 3},
+        {"name": "set_linear_velocity", "args": [{"name": "linear_velocity", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_linear_velocity", "args": [], "return_type": 5},
+        {"name": "set_angular_velocity", "args": [{"name": "angular_velocity", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_angular_velocity", "args": [], "return_type": 3},
+        {"name": "set_gravity_scale", "args": [{"name": "gravity_scale", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_gravity_scale", "args": [], "return_type": 3},
+        {"name": "set_can_sleep", "args": [{"name": "able_to_sleep", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_able_to_sleep", "args": [], "return_type": 1},
+        {"name": "set_lock_rotation_enabled", "args": [{"name": "lock_rotation", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_lock_rotation_enabled", "args": [], "return_type": 1},
+        {"name": "set_freeze_enabled", "args": [{"name": "freeze_mode", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_freeze_enabled", "args": [], "return_type": 1}
+      ],
+      "property_count": 12,
+      "properties": [
+        {"name": "mass", "type": 3, "hint": 1, "hint_string": "0.001,1000,0.001,or_greater", "usage": 4102},
+        {"name": "gravity_scale", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "linear_velocity", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "angular_velocity", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "can_sleep", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "lock_rotation", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "freeze", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "continuous_cd", "type": 2, "hint": 2, "hint_string": "Disabled,Cast Ray,Cast Shape", "usage": 4102},
+        {"name": "contact_monitor", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "max_contacts_reported", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "inertia", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "center_of_mass_mode", "type": 2, "hint": 2, "hint_string": "Auto,Custom", "usage": 4102}
+      ],
+      "signal_count": 2,
+      "signals": [
+        {"name": "body_entered", "args": [{"name": "body", "type": 24}]},
+        {"name": "body_exited", "args": [{"name": "body", "type": 24}]}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "StaticBody2D",
+      "parent": "PhysicsBody2D",
+      "method_count": 8,
+      "methods": [
+        {"name": "set_constant_linear_velocity", "args": [{"name": "vel", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_constant_linear_velocity", "args": [], "return_type": 5},
+        {"name": "set_constant_angular_velocity", "args": [{"name": "vel", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_constant_angular_velocity", "args": [], "return_type": 3},
+        {"name": "set_physics_material_override", "args": [{"name": "physics_material_override", "type": 24, "class_name": "PhysicsMaterial"}], "return_type": 0},
+        {"name": "get_physics_material_override", "args": [], "return_type": 24},
+        {"name": "set_friction", "args": [{"name": "friction", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "set_bounce", "args": [{"name": "bounce", "type": 3, "class_name": ""}], "return_type": 0}
+      ],
+      "property_count": 3,
+      "properties": [
+        {"name": "constant_linear_velocity", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "constant_angular_velocity", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "physics_material_override", "type": 24, "hint": 17, "hint_string": "PhysicsMaterial", "usage": 4102}
+      ],
+      "signal_count": 0,
+      "signals": []
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "CharacterBody2D",
+      "parent": "PhysicsBody2D",
+      "method_count": 18,
+      "methods": [
+        {"name": "move_and_slide", "args": [], "return_type": 1},
+        {"name": "get_velocity", "args": [], "return_type": 5},
+        {"name": "set_velocity", "args": [{"name": "velocity", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "is_on_floor", "args": [], "return_type": 1},
+        {"name": "is_on_wall", "args": [], "return_type": 1},
+        {"name": "is_on_ceiling", "args": [], "return_type": 1},
+        {"name": "get_slide_collision_count", "args": [], "return_type": 2},
+        {"name": "get_slide_collision", "args": [{"name": "slide_idx", "type": 2, "class_name": ""}], "return_type": 24},
+        {"name": "get_floor_normal", "args": [], "return_type": 5},
+        {"name": "get_wall_normal", "args": [], "return_type": 5},
+        {"name": "get_last_motion", "args": [], "return_type": 5},
+        {"name": "get_real_velocity", "args": [], "return_type": 5},
+        {"name": "set_motion_mode", "args": [{"name": "mode", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_motion_mode", "args": [], "return_type": 2},
+        {"name": "set_up_direction", "args": [{"name": "up_direction", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_up_direction", "args": [], "return_type": 5},
+        {"name": "set_floor_max_angle", "args": [{"name": "radians", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_floor_max_angle", "args": [], "return_type": 3}
+      ],
+      "property_count": 10,
+      "properties": [
+        {"name": "velocity", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "motion_mode", "type": 2, "hint": 2, "hint_string": "Grounded,Floating", "usage": 4102},
+        {"name": "floor_max_angle", "type": 3, "hint": 1, "hint_string": "0,180,0.1,radians_as_degrees", "usage": 4102},
+        {"name": "up_direction", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "slide_on_ceiling", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "max_slides", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "wall_min_slide_angle", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "floor_stop_on_slope", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "floor_constant_speed", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "floor_block_on_wall", "type": 1, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 0,
+      "signals": []
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Area2D",
+      "parent": "CollisionObject2D",
+      "method_count": 14,
+      "methods": [
+        {"name": "get_overlapping_bodies", "args": [], "return_type": 28},
+        {"name": "get_overlapping_areas", "args": [], "return_type": 28},
+        {"name": "has_overlapping_bodies", "args": [], "return_type": 1},
+        {"name": "has_overlapping_areas", "args": [], "return_type": 1},
+        {"name": "set_monitoring", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_monitoring", "args": [], "return_type": 1},
+        {"name": "set_monitorable", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_monitorable", "args": [], "return_type": 1},
+        {"name": "set_gravity_space_override_mode", "args": [{"name": "space_override_mode", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_gravity_space_override_mode", "args": [], "return_type": 2},
+        {"name": "set_gravity", "args": [{"name": "gravity", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_gravity", "args": [], "return_type": 3},
+        {"name": "set_gravity_direction", "args": [{"name": "direction", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_gravity_direction", "args": [], "return_type": 5}
+      ],
+      "property_count": 8,
+      "properties": [
+        {"name": "monitoring", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "monitorable", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "gravity_space_override", "type": 2, "hint": 2, "hint_string": "Disabled,Combine,CombineReplace,Replace,ReplaceCombin", "usage": 4102},
+        {"name": "gravity", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "gravity_direction", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "gravity_point", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "priority", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "audio_bus_override", "type": 1, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 4,
+      "signals": [
+        {"name": "body_entered", "args": [{"name": "body", "type": 24}]},
+        {"name": "body_exited", "args": [{"name": "body", "type": 24}]},
+        {"name": "area_entered", "args": [{"name": "area", "type": 24}]},
+        {"name": "area_exited", "args": [{"name": "area", "type": 24}]}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "CollisionShape2D",
+      "parent": "Node2D",
+      "method_count": 8,
+      "methods": [
+        {"name": "set_shape", "args": [{"name": "shape", "type": 24, "class_name": "Shape2D"}], "return_type": 0},
+        {"name": "get_shape", "args": [], "return_type": 24},
+        {"name": "set_disabled", "args": [{"name": "disabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_disabled", "args": [], "return_type": 1},
+        {"name": "set_one_way_collision", "args": [{"name": "enabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_one_way_collision_enabled", "args": [], "return_type": 1},
+        {"name": "set_one_way_collision_margin", "args": [{"name": "margin", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_one_way_collision_margin", "args": [], "return_type": 3}
+      ],
+      "property_count": 4,
+      "properties": [
+        {"name": "shape", "type": 24, "hint": 17, "hint_string": "Shape2D", "usage": 4102},
+        {"name": "disabled", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "one_way_collision", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "one_way_collision_margin", "type": 3, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 0,
+      "signals": []
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Control",
+      "parent": "CanvasItem",
+      "method_count": 35,
+      "methods": [
+        {"name": "get_minimum_size", "args": [], "return_type": 5},
+        {"name": "set_size", "args": [{"name": "size", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_size", "args": [], "return_type": 5},
+        {"name": "set_position", "args": [{"name": "position", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_position", "args": [], "return_type": 5},
+        {"name": "set_anchor", "args": [{"name": "side", "type": 2, "class_name": ""}, {"name": "anchor", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_anchor", "args": [{"name": "side", "type": 2, "class_name": ""}], "return_type": 3},
+        {"name": "set_focus_mode", "args": [{"name": "mode", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_focus_mode", "args": [], "return_type": 2},
+        {"name": "grab_focus", "args": [], "return_type": 0},
+        {"name": "release_focus", "args": [], "return_type": 0},
+        {"name": "has_focus", "args": [], "return_type": 1},
+        {"name": "get_rect", "args": [], "return_type": 7},
+        {"name": "get_global_rect", "args": [], "return_type": 7},
+        {"name": "set_visible", "args": [{"name": "visible", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_visible", "args": [], "return_type": 1},
+        {"name": "set_mouse_filter", "args": [{"name": "filter", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_mouse_filter", "args": [], "return_type": 2},
+        {"name": "accept_event", "args": [], "return_type": 0},
+        {"name": "set_custom_minimum_size", "args": [{"name": "size", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_custom_minimum_size", "args": [], "return_type": 5},
+        {"name": "set_tooltip_text", "args": [{"name": "hint", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_tooltip_text", "args": [], "return_type": 4},
+        {"name": "set_h_size_flags", "args": [{"name": "flags", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_h_size_flags", "args": [], "return_type": 2},
+        {"name": "set_v_size_flags", "args": [{"name": "flags", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_v_size_flags", "args": [], "return_type": 2},
+        {"name": "set_stretch_ratio", "args": [{"name": "ratio", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_stretch_ratio", "args": [], "return_type": 3},
+        {"name": "set_layout_direction", "args": [{"name": "direction", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_layout_direction", "args": [], "return_type": 2},
+        {"name": "set_pivot_offset", "args": [{"name": "pivot_offset", "type": 5, "class_name": ""}], "return_type": 0},
+        {"name": "get_pivot_offset", "args": [], "return_type": 5},
+        {"name": "set_theme", "args": [{"name": "theme", "type": 24, "class_name": "Theme"}], "return_type": 0},
+        {"name": "get_theme", "args": [], "return_type": 24}
+      ],
+      "property_count": 18,
+      "properties": [
+        {"name": "visible", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "size", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "position", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "anchor_left", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "anchor_top", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "anchor_right", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "anchor_bottom", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "mouse_filter", "type": 2, "hint": 2, "hint_string": "Stop,Pass,Ignore", "usage": 4102},
+        {"name": "focus_mode", "type": 2, "hint": 2, "hint_string": "None,Click,All", "usage": 4102},
+        {"name": "custom_minimum_size", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "layout_direction", "type": 2, "hint": 2, "hint_string": "", "usage": 4102},
+        {"name": "tooltip_text", "type": 4, "hint": 13, "hint_string": "", "usage": 4102},
+        {"name": "size_flags_horizontal", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "size_flags_vertical", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "size_flags_stretch_ratio", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "pivot_offset", "type": 5, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "theme", "type": 24, "hint": 17, "hint_string": "Theme", "usage": 4102},
+        {"name": "clip_contents", "type": 1, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 6,
+      "signals": [
+        {"name": "resized", "args": []},
+        {"name": "gui_input", "args": [{"name": "event", "type": 24}]},
+        {"name": "mouse_entered", "args": []},
+        {"name": "mouse_exited", "args": []},
+        {"name": "focus_entered", "args": []},
+        {"name": "focus_exited", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Label",
+      "parent": "Control",
+      "method_count": 14,
+      "methods": [
+        {"name": "get_text", "args": [], "return_type": 4},
+        {"name": "set_text", "args": [{"name": "text", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_line_count", "args": [], "return_type": 2},
+        {"name": "get_visible_line_count", "args": [], "return_type": 2},
+        {"name": "set_horizontal_alignment", "args": [{"name": "alignment", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_horizontal_alignment", "args": [], "return_type": 2},
+        {"name": "set_vertical_alignment", "args": [{"name": "alignment", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_vertical_alignment", "args": [], "return_type": 2},
+        {"name": "set_autowrap_mode", "args": [{"name": "autowrap_mode", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_autowrap_mode", "args": [], "return_type": 2},
+        {"name": "set_clip_text", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_clipping_text", "args": [], "return_type": 1},
+        {"name": "set_uppercase", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_uppercase", "args": [], "return_type": 1}
+      ],
+      "property_count": 8,
+      "properties": [
+        {"name": "text", "type": 4, "hint": 13, "hint_string": "", "usage": 4102},
+        {"name": "horizontal_alignment", "type": 2, "hint": 2, "hint_string": "Left,Center,Right,Fill", "usage": 4102},
+        {"name": "vertical_alignment", "type": 2, "hint": 2, "hint_string": "Top,Center,Bottom,Fill", "usage": 4102},
+        {"name": "autowrap_mode", "type": 2, "hint": 2, "hint_string": "Off,Arbitrary,Word,WordSmart", "usage": 4102},
+        {"name": "clip_text", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "uppercase", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "text_overrun_behavior", "type": 2, "hint": 2, "hint_string": "", "usage": 4102},
+        {"name": "lines_skipped", "type": 2, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 0,
+      "signals": []
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Button",
+      "parent": "BaseButton",
+      "method_count": 12,
+      "methods": [
+        {"name": "get_text", "args": [], "return_type": 4},
+        {"name": "set_text", "args": [{"name": "text", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "is_pressed", "args": [], "return_type": 1},
+        {"name": "set_pressed", "args": [{"name": "pressed", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "set_disabled", "args": [{"name": "disabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_disabled", "args": [], "return_type": 1},
+        {"name": "set_toggle_mode", "args": [{"name": "enabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_toggle_mode", "args": [], "return_type": 1},
+        {"name": "set_flat", "args": [{"name": "enabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_flat", "args": [], "return_type": 1},
+        {"name": "set_icon", "args": [{"name": "texture", "type": 24, "class_name": "Texture2D"}], "return_type": 0},
+        {"name": "get_icon", "args": [], "return_type": 24}
+      ],
+      "property_count": 6,
+      "properties": [
+        {"name": "text", "type": 4, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "flat", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "disabled", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "toggle_mode", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "icon", "type": 24, "hint": 17, "hint_string": "Texture2D", "usage": 4102},
+        {"name": "clip_text", "type": 1, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 3,
+      "signals": [
+        {"name": "pressed", "args": []},
+        {"name": "toggled", "args": [{"name": "toggled_on", "type": 1}]},
+        {"name": "button_down", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "Timer",
+      "parent": "Node",
+      "method_count": 14,
+      "methods": [
+        {"name": "start", "args": [], "return_type": 0},
+        {"name": "stop", "args": [], "return_type": 0},
+        {"name": "is_stopped", "args": [], "return_type": 1},
+        {"name": "get_time_left", "args": [], "return_type": 3},
+        {"name": "set_wait_time", "args": [{"name": "time_sec", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_wait_time", "args": [], "return_type": 3},
+        {"name": "set_one_shot", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_one_shot", "args": [], "return_type": 1},
+        {"name": "set_autostart", "args": [{"name": "enable", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "has_autostart", "args": [], "return_type": 1},
+        {"name": "set_paused", "args": [{"name": "paused", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_paused", "args": [], "return_type": 1},
+        {"name": "set_timer_process_callback", "args": [{"name": "callback", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_timer_process_callback", "args": [], "return_type": 2}
+      ],
+      "property_count": 5,
+      "properties": [
+        {"name": "wait_time", "type": 3, "hint": 1, "hint_string": "0.001,4096,0.001,or_greater,suffix:s", "usage": 4102},
+        {"name": "one_shot", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "autostart", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "paused", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "process_callback", "type": 2, "hint": 2, "hint_string": "Physics,Idle", "usage": 4102}
+      ],
+      "signal_count": 1,
+      "signals": [
+        {"name": "timeout", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "AudioStreamPlayer",
+      "parent": "Node",
+      "method_count": 10,
+      "methods": [
+        {"name": "play", "args": [], "return_type": 0},
+        {"name": "stop", "args": [], "return_type": 0},
+        {"name": "is_playing", "args": [], "return_type": 1},
+        {"name": "get_playback_position", "args": [], "return_type": 3},
+        {"name": "seek", "args": [{"name": "to_position", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "set_volume_db", "args": [{"name": "volume_db", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_volume_db", "args": [], "return_type": 3},
+        {"name": "set_stream", "args": [{"name": "stream", "type": 24, "class_name": "AudioStream"}], "return_type": 0},
+        {"name": "get_stream", "args": [], "return_type": 24},
+        {"name": "set_bus", "args": [{"name": "bus", "type": 21, "class_name": ""}], "return_type": 0}
+      ],
+      "property_count": 6,
+      "properties": [
+        {"name": "stream", "type": 24, "hint": 17, "hint_string": "AudioStream", "usage": 4102},
+        {"name": "volume_db", "type": 3, "hint": 1, "hint_string": "-80,24,0.01,suffix:dB", "usage": 4102},
+        {"name": "autoplay", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "bus", "type": 21, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "pitch_scale", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "mix_target", "type": 2, "hint": 2, "hint_string": "Stereo,Surround,Center", "usage": 4102}
+      ],
+      "signal_count": 1,
+      "signals": [
+        {"name": "finished", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "TileMap",
+      "parent": "Node2D",
+      "method_count": 18,
+      "methods": [
+        {"name": "set_cell", "args": [{"name": "layer", "type": 2, "class_name": ""}, {"name": "coords", "type": 5, "class_name": ""}, {"name": "source_id", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_cell_source_id", "args": [{"name": "coords", "type": 5, "class_name": ""}], "return_type": 2},
+        {"name": "get_cell_atlas_coords", "args": [{"name": "coords", "type": 5, "class_name": ""}], "return_type": 5},
+        {"name": "get_used_cells", "args": [], "return_type": 28},
+        {"name": "get_used_rect", "args": [], "return_type": 7},
+        {"name": "local_to_map", "args": [{"name": "local_position", "type": 5, "class_name": ""}], "return_type": 5},
+        {"name": "map_to_local", "args": [{"name": "map_position", "type": 5, "class_name": ""}], "return_type": 5},
+        {"name": "set_tile_set", "args": [{"name": "tileset", "type": 24, "class_name": "TileSet"}], "return_type": 0},
+        {"name": "get_tile_set", "args": [], "return_type": 24},
+        {"name": "clear", "args": [], "return_type": 0},
+        {"name": "get_layers_count", "args": [], "return_type": 2},
+        {"name": "add_layer", "args": [{"name": "to_position", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "remove_layer", "args": [{"name": "layer", "type": 2, "class_name": ""}], "return_type": 0},
+        {"name": "get_neighbor_cell", "args": [{"name": "coords", "type": 5, "class_name": ""}], "return_type": 5},
+        {"name": "set_layer_enabled", "args": [{"name": "layer", "type": 2, "class_name": ""}, {"name": "enabled", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_layer_enabled", "args": [{"name": "layer", "type": 2, "class_name": ""}], "return_type": 1},
+        {"name": "set_layer_name", "args": [{"name": "layer", "type": 2, "class_name": ""}, {"name": "name", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_layer_name", "args": [{"name": "layer", "type": 2, "class_name": ""}], "return_type": 4}
+      ],
+      "property_count": 4,
+      "properties": [
+        {"name": "tile_set", "type": 24, "hint": 17, "hint_string": "TileSet", "usage": 4102},
+        {"name": "cell_quadrant_size", "type": 2, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "collision_animatable", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "collision_visibility_mode", "type": 2, "hint": 2, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 1,
+      "signals": [
+        {"name": "changed", "args": []}
+      ]
+    }
+  },
+  {
+    "fixture_id": "classdb_probe",
+    "capture_type": "classdb",
+    "data": {
+      "class": "AnimationPlayer",
+      "parent": "AnimationMixer",
+      "method_count": 22,
+      "methods": [
+        {"name": "play", "args": [{"name": "name", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "stop", "args": [], "return_type": 0},
+        {"name": "pause", "args": [], "return_type": 0},
+        {"name": "is_playing", "args": [], "return_type": 1},
+        {"name": "get_current_animation", "args": [], "return_type": 4},
+        {"name": "set_current_animation", "args": [{"name": "animation", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_current_animation_length", "args": [], "return_type": 3},
+        {"name": "get_current_animation_position", "args": [], "return_type": 3},
+        {"name": "seek", "args": [{"name": "seconds", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "has_animation", "args": [{"name": "name", "type": 21, "class_name": ""}], "return_type": 1},
+        {"name": "get_animation_list", "args": [], "return_type": 30},
+        {"name": "set_speed_scale", "args": [{"name": "speed", "type": 3, "class_name": ""}], "return_type": 0},
+        {"name": "get_speed_scale", "args": [], "return_type": 3},
+        {"name": "set_autoplay", "args": [{"name": "name", "type": 4, "class_name": ""}], "return_type": 0},
+        {"name": "get_autoplay", "args": [], "return_type": 4},
+        {"name": "set_active", "args": [{"name": "active", "type": 1, "class_name": ""}], "return_type": 0},
+        {"name": "is_active", "args": [], "return_type": 1},
+        {"name": "queue", "args": [{"name": "name", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "clear_queue", "args": [], "return_type": 0},
+        {"name": "get_queue", "args": [], "return_type": 30},
+        {"name": "play_backwards", "args": [{"name": "name", "type": 21, "class_name": ""}], "return_type": 0},
+        {"name": "set_assigned_animation", "args": [{"name": "animation", "type": 4, "class_name": ""}], "return_type": 0}
+      ],
+      "property_count": 6,
+      "properties": [
+        {"name": "current_animation", "type": 4, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "speed_scale", "type": 3, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "autoplay", "type": 4, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "active", "type": 1, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "assigned_animation", "type": 4, "hint": 0, "hint_string": "", "usage": 4102},
+        {"name": "movie_quit_on_finish", "type": 1, "hint": 0, "hint_string": "", "usage": 4102}
+      ],
+      "signal_count": 3,
+      "signals": [
+        {"name": "animation_finished", "args": [{"name": "anim_name", "type": 21}]},
+        {"name": "animation_started", "args": [{"name": "anim_name", "type": 21}]},
+        {"name": "current_animation_changed", "args": [{"name": "name", "type": 4}]}
+      ]
+    }
+  }
+]

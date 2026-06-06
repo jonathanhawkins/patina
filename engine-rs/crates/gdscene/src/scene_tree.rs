@@ -12,6 +12,7 @@ use gdobject::notification::{
     NOTIFICATION_UNPARENTED,
 };
 use gdobject::signal::SignalStore;
+use gdobject::weak_ref;
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
@@ -44,6 +45,12 @@ pub struct SceneTree {
     /// Snapshot of input state for the current frame, used by scripts
     /// that call `Input.is_action_pressed()` etc.
     input_snapshot: Option<crate::scripting::InputSnapshot>,
+    /// The packed scene that was used to load the current scene (if any).
+    /// Stored for `reload_current_scene()`.
+    current_packed_scene: Option<crate::packed_scene::PackedScene>,
+    /// The NodeId of the current scene root (first child of root after
+    /// `change_scene_to_packed` or `change_scene_to_node`).
+    current_scene_id: Option<NodeId>,
     /// Nodes marked for deferred deletion via `queue_free()`.
     /// They are removed at the end of the frame by `process_deletions()`.
     pending_deletions: Vec<NodeId>,
@@ -69,8 +76,11 @@ impl std::fmt::Debug for SceneTree {
 impl SceneTree {
     /// Creates a new scene tree with an empty root node named `"root"`.
     pub fn new() -> Self {
-        let root = Node::new("root", "Node");
+        let mut root = Node::new("root", "Node");
         let root_id = root.id();
+        // The root node is always inside the tree.
+        root.set_inside_tree(true);
+        weak_ref::register_object(root_id.object_id());
         let mut nodes = HashMap::new();
         nodes.insert(root_id, root);
         Self {
@@ -82,6 +92,8 @@ impl SceneTree {
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
+            current_packed_scene: None,
+            current_scene_id: None,
             pending_deletions: Vec::new(),
             event_trace: EventTrace::new(),
             trace_frame: 0,
@@ -92,6 +104,12 @@ impl SceneTree {
     /// Returns the ID of the root node.
     pub fn root_id(&self) -> NodeId {
         self.root_id
+    }
+
+    /// Returns the ID of the current scene root, if one has been set via
+    /// `change_scene_to_packed` or `change_scene_to_node`.
+    pub fn current_scene(&self) -> Option<NodeId> {
+        self.current_scene_id
     }
 
     /// Sets the input snapshot for the current frame. Scripts will see this
@@ -170,6 +188,7 @@ impl SceneTree {
         }
 
         let child_id = node.id();
+        weak_ref::register_object(child_id.object_id());
         node.set_parent(Some(parent_id));
         self.nodes.insert(child_id, node);
 
@@ -201,6 +220,48 @@ impl SceneTree {
             .unwrap_or(false);
         if should_enter_tree {
             LifecycleManager::enter_tree(self, child_id);
+        }
+
+        // Camera3D auto-activation: if this Camera3D has current=true (explicit),
+        // deactivate all others. If no Camera3D has current=true, auto-activate this one.
+        let is_camera3d = self
+            .nodes
+            .get(&child_id)
+            .map(|n| n.class_name() == "Camera3D")
+            .unwrap_or(false);
+        if is_camera3d {
+            let this_is_current = self
+                .nodes
+                .get(&child_id)
+                .map(|n| n.get_property("current") == Variant::Bool(true))
+                .unwrap_or(false);
+
+            if this_is_current {
+                // Explicit current=true: deactivate all other Camera3D nodes.
+                let others: Vec<NodeId> = self
+                    .nodes
+                    .iter()
+                    .filter(|(id, n)| **id != child_id && n.class_name() == "Camera3D")
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in others {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.set_property("current", Variant::Bool(false));
+                    }
+                }
+            } else {
+                // No explicit current: auto-activate if no other Camera3D is current.
+                let any_other_current = self.nodes.iter().any(|(id, n)| {
+                    *id != child_id
+                        && n.class_name() == "Camera3D"
+                        && n.get_property("current") == Variant::Bool(true)
+                });
+                if !any_other_current {
+                    if let Some(node) = self.nodes.get_mut(&child_id) {
+                        node.set_property("current", Variant::Bool(true));
+                    }
+                }
+            }
         }
 
         Ok(child_id)
@@ -247,6 +308,7 @@ impl SceneTree {
         // Remove all collected nodes from the arena and group index.
         for &nid in &removed {
             if let Some(node) = self.nodes.remove(&nid) {
+                weak_ref::unregister_object(nid.object_id());
                 for group in node.groups() {
                     if let Some(members) = self.groups.get_mut(group) {
                         members.remove(&nid);
@@ -272,6 +334,22 @@ impl SceneTree {
             return Err(EngineError::NotFound(format!(
                 "new parent {new_parent_id} not found"
             )));
+        }
+
+        // Reject reparenting a node into itself or one of its own descendants,
+        // which would create a cycle and detach the subtree from the scene.
+        // Walk up from the proposed new parent; reaching `node_id` means the
+        // new parent lives inside node_id's subtree.
+        {
+            let mut cursor = Some(new_parent_id);
+            while let Some(cur) = cursor {
+                if cur == node_id {
+                    return Err(EngineError::InvalidOperation(
+                        "cannot reparent a node into itself or its own descendant".into(),
+                    ));
+                }
+                cursor = self.nodes.get(&cur).and_then(|n| n.parent());
+            }
         }
 
         // Detach from old parent.
@@ -463,10 +541,28 @@ impl SceneTree {
     }
 
     /// Resolves a relative path from a given node (e.g. `"Player/Sprite"`).
+    ///
+    /// Supports `%UniqueName` syntax: if the **first** segment starts with
+    /// `%`, it is resolved via [`get_node_by_unique_name`](Self::get_node_by_unique_name)
+    /// within the scene-owner scope. Remaining segments (if any) are resolved
+    /// relative to the unique-name result.
     pub fn get_node_relative(&self, from: NodeId, rel_path: &str) -> Option<NodeId> {
         if rel_path.is_empty() {
             return Some(from);
         }
+
+        // Handle %UniqueName paths — first segment starts with '%'.
+        if let Some(stripped) = rel_path.strip_prefix('%') {
+            let parts: Vec<&str> = stripped.split('/').collect();
+            let unique_node = self.get_node_by_unique_name(from, parts[0])?;
+            if parts.len() == 1 {
+                return Some(unique_node);
+            }
+            // Resolve remaining segments relative to the unique node.
+            let rest = parts[1..].join("/");
+            return self.get_node_relative(unique_node, &rest);
+        }
+
         let parts: Vec<&str> = rel_path.split('/').collect();
         let mut current = from;
         for &part in &parts {
@@ -494,6 +590,99 @@ impl SceneTree {
             }
         }
         None
+    }
+
+    /// Resolves a `%UniqueName` within the scene owner scope.
+    ///
+    /// In Godot, `get_node("%Foo")` searches the subtree owned by the same
+    /// scene root for a node with `unique_name == true` whose name matches
+    /// `"Foo"`. The search starts from the owner of `from` (or `from`
+    /// itself if it has no owner, i.e. it is a scene root).
+    pub fn get_node_by_unique_name(&self, from: NodeId, name: &str) -> Option<NodeId> {
+        // Determine the owner scope root.
+        let owner_id = self
+            .nodes
+            .get(&from)
+            .and_then(|n| n.owner())
+            .unwrap_or(from);
+
+        // Breadth-first search through the owner's subtree.
+        self.find_unique_in_subtree(owner_id, name)
+    }
+
+    /// Searches a subtree (depth-first) for a node with `unique_name == true`
+    /// and the given name.
+    fn find_unique_in_subtree(&self, root: NodeId, name: &str) -> Option<NodeId> {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                if node.is_unique_name() && node.name() == name {
+                    return Some(id);
+                }
+                // Push children in reverse order so left-most is visited first.
+                for &child_id in node.children().iter().rev() {
+                    stack.push(child_id);
+                }
+            }
+        }
+        None
+    }
+
+    // -- unique-name-in-owner (`%`) indicator -------------------------------
+
+    /// Toggles the node's "Access as Unique Name" flag (`unique_name_in_owner`
+    /// in Godot). When enabled the Scene Tree row shows the `%` badge and the
+    /// node becomes reachable via the `%Name` path within its owner. Returns
+    /// `true` if the node existed and was updated.
+    pub fn set_unique_name_in_owner(&mut self, id: NodeId, unique: bool) -> bool {
+        match self.get_node_mut(id) {
+            Some(node) => {
+                node.set_unique_name(unique);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Returns `true` if `id` is flagged "Access as Unique Name", i.e. whether
+    /// its Scene Tree row should show the `%` badge.
+    pub fn is_unique_name_in_owner(&self, id: NodeId) -> bool {
+        self.get_node(id)
+            .map(|n| n.is_unique_name())
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if `id`'s unique name collides — i.e. `id` is flagged as
+    /// a unique name and another node within the same owner scope is also
+    /// flagged with the same name. Unique names must be unique per owner, so a
+    /// duplicate is surfaced as a warning on the row. Returns `false` when `id`
+    /// is not flagged or its unique name is the only one in scope.
+    pub fn unique_name_collision(&self, id: NodeId) -> bool {
+        let node = match self.get_node(id) {
+            Some(n) if n.is_unique_name() => n,
+            _ => return false,
+        };
+        let name = node.name();
+        // Same owner scope the `%Name` lookup uses: the node's owner, or the
+        // node itself when it has none (i.e. it is a scene root).
+        let owner_id = node.owner().unwrap_or(id);
+
+        let mut matches = 0usize;
+        let mut stack = vec![owner_id];
+        while let Some(cur) = stack.pop() {
+            if let Some(n) = self.nodes.get(&cur) {
+                if n.is_unique_name() && n.name() == name {
+                    matches += 1;
+                    if matches > 1 {
+                        return true;
+                    }
+                }
+                for &child in n.children().iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+        false
     }
 
     // -- group management ---------------------------------------------------
@@ -528,6 +717,88 @@ impl SceneTree {
             .get(group)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// Returns `true` if `id` is a member of `group`.
+    ///
+    /// Convenience wrapper for the Scene Tree context-menu group editor, which
+    /// queries membership per node rather than scanning a whole group.
+    pub fn node_in_group(&self, id: NodeId, group: &str) -> bool {
+        self.get_node(id)
+            .map(|n| n.is_in_group(group))
+            .unwrap_or(false)
+    }
+
+    /// Returns the groups `id` belongs to, sorted for stable presentation in
+    /// the inspector / context menu. Empty when the node is in no groups.
+    pub fn node_groups(&self, id: NodeId) -> Vec<String> {
+        let mut groups: Vec<String> = self
+            .get_node(id)
+            .map(|n| n.groups().iter().cloned().collect())
+            .unwrap_or_default();
+        groups.sort();
+        groups
+    }
+
+    /// Returns `true` if `id` belongs to at least one group, i.e. whether its
+    /// Scene Tree row should show the group badge.
+    pub fn has_group_membership(&self, id: NodeId) -> bool {
+        self.get_node(id)
+            .map(|n| !n.groups().is_empty())
+            .unwrap_or(false)
+    }
+
+    // -- editor "group" (children-selection-lock) ---------------------------
+    //
+    // Distinct from named groups above: the Scene Tree "group" toggle marks a
+    // node as a children-selection-lock root via the `_edit_group_` meta
+    // (matching Godot). While set, the node shows the group badge and its
+    // descendants cannot be picked individually in the viewport — a click on
+    // any descendant selects the grouped ancestor instead.
+
+    /// Meta key Godot uses to flag a node as a children-selection-lock root.
+    const EDIT_GROUP_META: &'static str = "_edit_group_";
+
+    /// Toggles the editor "group" flag on `id`. When `grouped` is true the
+    /// `_edit_group_` meta is set (showing the badge and locking child
+    /// selection); when false the meta is removed. Returns `true` if the node
+    /// existed and was updated.
+    pub fn set_edit_group(&mut self, id: NodeId, grouped: bool) -> bool {
+        match self.get_node_mut(id) {
+            Some(node) => {
+                if grouped {
+                    node.set_meta(Self::EDIT_GROUP_META, Variant::Bool(true));
+                } else {
+                    node.remove_meta(Self::EDIT_GROUP_META);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Returns `true` if `id` is flagged as a children-selection-lock root,
+    /// i.e. whether its Scene Tree row should show the group badge.
+    pub fn is_edit_group(&self, id: NodeId) -> bool {
+        self.get_node(id)
+            .map(|n| matches!(n.get_meta(Self::EDIT_GROUP_META), Variant::Bool(true)))
+            .unwrap_or(false)
+    }
+
+    /// Resolves the node that should actually be selected when `id` is picked
+    /// in the viewport, honouring the "group" lock. Walks from `id` to the
+    /// root and returns the outermost grouped ancestor (the topmost lock wins,
+    /// matching Godot); returns `id` unchanged when no ancestor is grouped.
+    pub fn group_selection_target(&self, id: NodeId) -> NodeId {
+        let mut target = id;
+        let mut current = id;
+        while let Some(parent) = self.get_node(current).and_then(|n| n.parent()) {
+            if self.is_edit_group(parent) {
+                target = parent;
+            }
+            current = parent;
+        }
+        target
     }
 
     // -- traversal helpers --------------------------------------------------
@@ -910,6 +1181,38 @@ impl SceneTree {
         self.scripts.get_mut(&node_id)
     }
 
+    // -- configuration-warning indicator ------------------------------------
+
+    /// Returns the node's configuration-warning messages by invoking its
+    /// `_get_configuration_warnings` script method. Returns an empty list when
+    /// the node has no script, the method is absent, or it reports no warnings.
+    /// Drives the Scene Tree warning triangle and its hover tooltip. Accepts
+    /// either a `String` array (Godot's `PackedStringArray`) or a single
+    /// `String`; empty strings are ignored.
+    pub fn node_configuration_warnings(&mut self, node_id: NodeId) -> Vec<String> {
+        let script = match self.scripts.get_mut(&node_id) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        match script.call_method("_get_configuration_warnings", &[]) {
+            Ok(Variant::Array(items)) => items
+                .into_iter()
+                .filter_map(|v| match v {
+                    Variant::String(s) if !s.is_empty() => Some(s),
+                    _ => None,
+                })
+                .collect(),
+            Ok(Variant::String(s)) if !s.is_empty() => vec![s],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Returns `true` if `node_id` reports at least one configuration warning,
+    /// i.e. whether its Scene Tree row should show the warning triangle.
+    pub fn has_configuration_warning(&mut self, node_id: NodeId) -> bool {
+        !self.node_configuration_warnings(node_id).is_empty()
+    }
+
     /// Records a trace event for the given node, if tracing is enabled.
     pub fn trace_record(&mut self, node_id: NodeId, event_type: TraceEventType, detail: &str) {
         if self.event_trace.is_enabled() {
@@ -942,6 +1245,10 @@ impl SceneTree {
             self.trace_record(node_id, TraceEventType::ScriptCall, method);
 
             let snapshot_clone = self.input_snapshot.clone();
+            // SAFETY: We pass `self` as a raw pointer to SceneTreeAccessor. This is
+            // safe because the accessor is used only within this call frame — it is
+            // created, passed to the script, and cleared (via `clear_scene_access`)
+            // before this method returns, so no dangling pointer can escape.
             let accessor = if let Some(snapshot) = snapshot_clone {
                 unsafe {
                     crate::scripting::SceneTreeAccessor::with_input(
@@ -950,6 +1257,8 @@ impl SceneTree {
                     )
                 }
             } else {
+                // SAFETY: Same invariant as the branch above — accessor lives only
+                // within this call frame and is cleared before return.
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
@@ -977,7 +1286,14 @@ impl SceneTree {
     }
 
     /// Calls `_ready()` on the node's script, if present.
+    ///
+    /// Before `_ready` executes, any `@onready` variables are resolved
+    /// by evaluating their default expressions.
     pub fn process_script_ready(&mut self, node_id: NodeId) {
+        // Resolve @onready vars before _ready (even if _ready is not defined).
+        if let Some(script) = self.scripts.get_mut(&node_id) {
+            let _ = script.resolve_onready();
+        }
         self.call_script_with_access(node_id, "_ready", &[]);
     }
 
@@ -1261,6 +1577,88 @@ impl SceneTree {
     pub fn pending_deletion_count(&self) -> usize {
         self.pending_deletions.len()
     }
+
+    /// Replaces the current scene by removing all children of the root node
+    /// and instancing the given [`PackedScene`] under root.
+    ///
+    /// This mirrors Godot's `SceneTree.change_scene_to_packed()`.
+    pub fn change_scene_to_packed(
+        &mut self,
+        scene: &crate::packed_scene::PackedScene,
+    ) -> EngineResult<NodeId> {
+        // Collect direct children of root (snapshot to avoid borrow issues).
+        let children: Vec<NodeId> = self
+            .get_node(self.root_id)
+            .map(|root| root.children().to_vec())
+            .unwrap_or_default();
+
+        // Remove each child subtree (this fires exit_tree, unparented, etc.).
+        for child_id in children {
+            // Also clean up scripts for the subtree.
+            let mut subtree = Vec::new();
+            self.collect_subtree_top_down(child_id, &mut subtree);
+            for &nid in &subtree {
+                self.scripts.remove(&nid);
+                self.signal_stores.remove(&nid);
+                self.animation_players.remove(&nid);
+            }
+            let _ = self.remove_node(child_id);
+        }
+
+        // Process any pending deletions.
+        self.process_deletions();
+
+        // Remember the packed scene for reload_current_scene().
+        self.current_packed_scene = Some(scene.clone());
+
+        // Instance the new scene under root.
+        let id = crate::packed_scene::add_packed_scene_to_tree(self, self.root_id, scene)?;
+        self.current_scene_id = Some(id);
+        Ok(id)
+    }
+
+    /// Reloads the current scene from its packed source.
+    ///
+    /// Returns an error if no packed scene source is stored (e.g. scene was
+    /// set via `change_scene_to_node`).
+    pub fn reload_current_scene(&mut self) -> EngineResult<NodeId> {
+        let packed = self.current_packed_scene.clone().ok_or_else(|| {
+            EngineError::InvalidOperation("No packed scene source to reload from".into())
+        })?;
+        self.change_scene_to_packed(&packed)
+    }
+
+    /// Replaces the current scene with a manually constructed node.
+    ///
+    /// Unlike `change_scene_to_packed`, this clears the packed scene source,
+    /// so `reload_current_scene` will fail afterward.
+    pub fn change_scene_to_node(&mut self, node: Node) -> EngineResult<NodeId> {
+        // Remove existing children of root.
+        let children: Vec<NodeId> = self
+            .get_node(self.root_id)
+            .map(|root| root.children().to_vec())
+            .unwrap_or_default();
+
+        for child_id in children {
+            let mut subtree = Vec::new();
+            self.collect_subtree_top_down(child_id, &mut subtree);
+            for &nid in &subtree {
+                self.scripts.remove(&nid);
+                self.signal_stores.remove(&nid);
+                self.animation_players.remove(&nid);
+            }
+            let _ = self.remove_node(child_id);
+        }
+
+        self.process_deletions();
+
+        // Clear packed source — reload won't work after this.
+        self.current_packed_scene = None;
+
+        let id = self.add_child(self.root_id, node)?;
+        self.current_scene_id = Some(id);
+        Ok(id)
+    }
 }
 
 impl Default for SceneTree {
@@ -1421,6 +1819,26 @@ mod tests {
     }
 
     #[test]
+    fn reparent_into_own_descendant_fails() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let a_id = tree.add_child(root, Node::new("A", "Node")).unwrap();
+        let b_id = tree.add_child(a_id, Node::new("B", "Node")).unwrap();
+        let c_id = tree.add_child(b_id, Node::new("C", "Node")).unwrap();
+
+        // Reparenting A under its own descendant C would create a cycle.
+        assert!(tree.reparent(a_id, c_id).is_err());
+        // Reparenting a node under itself is also rejected.
+        assert!(tree.reparent(a_id, a_id).is_err());
+
+        // The hierarchy is left untouched after the rejected operations.
+        assert_eq!(tree.get_node(a_id).unwrap().parent(), Some(root));
+        assert_eq!(tree.get_node(b_id).unwrap().parent(), Some(a_id));
+        assert_eq!(tree.get_node(c_id).unwrap().parent(), Some(b_id));
+    }
+
+    #[test]
     fn group_management() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
@@ -1447,6 +1865,232 @@ mod tests {
     }
 
     #[test]
+    fn scene_tree_group_membership() {
+        // Context-menu group editing: add/remove the selected node from named
+        // groups, surface the group badge, and keep group lists consistent.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a_id = tree.add_child(root, Node::new("A", "Node")).unwrap();
+        let b_id = tree.add_child(root, Node::new("B", "Node")).unwrap();
+
+        // No groups yet → no badge on either row.
+        assert!(!tree.has_group_membership(a_id));
+        assert!(!tree.has_group_membership(b_id));
+        assert!(tree.node_groups(a_id).is_empty());
+
+        // Add A to two groups and B to one (shared with A).
+        tree.add_to_group(a_id, "enemies").unwrap();
+        tree.add_to_group(a_id, "visible").unwrap();
+        tree.add_to_group(b_id, "enemies").unwrap();
+
+        // Membership is recorded and the badge lights up.
+        assert!(tree.node_in_group(a_id, "enemies"));
+        assert!(tree.node_in_group(a_id, "visible"));
+        assert!(tree.has_group_membership(a_id));
+        assert!(tree.has_group_membership(b_id));
+        // node_groups is the sorted per-node list shown in the menu.
+        assert_eq!(tree.node_groups(a_id), vec!["enemies", "visible"]);
+        assert_eq!(tree.node_groups(b_id), vec!["enemies"]);
+
+        // Group lists stay consistent across nodes: "enemies" holds A and B.
+        let enemies = tree.get_nodes_in_group("enemies");
+        assert_eq!(enemies.len(), 2);
+        assert!(enemies.contains(&a_id));
+        assert!(enemies.contains(&b_id));
+
+        // Remove A from "enemies": its membership clears and the group list
+        // drops A, but B (and A's other group) are untouched.
+        tree.remove_from_group(a_id, "enemies").unwrap();
+        assert!(!tree.node_in_group(a_id, "enemies"));
+        assert_eq!(tree.get_nodes_in_group("enemies"), vec![b_id]);
+        // A still belongs to "visible", so its badge stays lit.
+        assert!(tree.has_group_membership(a_id));
+        assert_eq!(tree.node_groups(a_id), vec!["visible"]);
+
+        // Removing A's last group clears the badge.
+        tree.remove_from_group(a_id, "visible").unwrap();
+        assert!(!tree.has_group_membership(a_id));
+        assert!(tree.node_groups(a_id).is_empty());
+        // B is unaffected throughout.
+        assert!(tree.has_group_membership(b_id));
+        assert!(tree.node_in_group(b_id, "enemies"));
+    }
+
+    #[test]
+    fn scene_tree_group_indicator_locks_child_selection() {
+        // The Scene Tree "group" toggle marks a node as a children-selection
+        // lock: it sets the `_edit_group_` meta (badge), and picking any
+        // descendant in the viewport resolves to the grouped ancestor.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
+        let child = tree.add_child(parent, Node::new("Child", "Node2D")).unwrap();
+        let grandchild = tree
+            .add_child(child, Node::new("GrandChild", "Node2D"))
+            .unwrap();
+
+        // Ungrouped: no badge, and picks resolve to the clicked node itself.
+        assert!(!tree.is_edit_group(parent));
+        assert_eq!(tree.group_selection_target(child), child);
+        assert_eq!(tree.group_selection_target(grandchild), grandchild);
+
+        // Toggle the group button on Parent → sets `_edit_group_` meta + badge.
+        assert!(tree.set_edit_group(parent, true));
+        assert!(tree.is_edit_group(parent));
+        assert!(matches!(
+            tree.get_node(parent).unwrap().get_meta("_edit_group_"),
+            Variant::Bool(true)
+        ));
+
+        // Clicking a grouped child (or deeper descendant) selects the grouped
+        // ancestor; clicking the grouped node itself still selects it.
+        assert_eq!(tree.group_selection_target(child), parent);
+        assert_eq!(tree.group_selection_target(grandchild), parent);
+        assert_eq!(tree.group_selection_target(parent), parent);
+
+        // The outermost group wins: also group Child, and a grandchild pick
+        // still resolves to the topmost grouped ancestor (Parent).
+        assert!(tree.set_edit_group(child, true));
+        assert_eq!(tree.group_selection_target(grandchild), parent);
+
+        // Toggling Parent off: Child's group now governs grandchild picks, and
+        // Parent loses its badge.
+        assert!(tree.set_edit_group(parent, false));
+        assert!(!tree.is_edit_group(parent));
+        assert_eq!(tree.group_selection_target(grandchild), child);
+
+        // Toggling the last group off restores per-node selection everywhere.
+        assert!(tree.set_edit_group(child, false));
+        assert_eq!(tree.group_selection_target(grandchild), grandchild);
+        assert_eq!(tree.group_selection_target(child), child);
+    }
+
+    #[test]
+    fn scene_tree_unique_name_indicator_reflects_flag() {
+        // The "Access as Unique Name" toggle drives the `%` badge, and a
+        // duplicate unique name within the same owner is flagged as a warning.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = tree.add_child(root, Node::new("ContainerA", "Node")).unwrap();
+        let b = tree.add_child(root, Node::new("ContainerB", "Node")).unwrap();
+        let foo1 = tree.add_child(a, Node::new("Foo", "Node")).unwrap();
+        let foo2 = tree.add_child(b, Node::new("Foo", "Node")).unwrap();
+        // Scene nodes are owned by the scene root (the unique-name scope).
+        for n in [a, b, foo1, foo2] {
+            tree.get_node_mut(n).unwrap().set_owner(Some(root));
+        }
+
+        // No `%` badge and no collision until the flag is enabled.
+        assert!(!tree.is_unique_name_in_owner(foo1));
+        assert!(!tree.unique_name_collision(foo1));
+
+        // Enable "Access as Unique Name" on foo1 → `%` badge shows.
+        assert!(tree.set_unique_name_in_owner(foo1, true));
+        assert!(tree.is_unique_name_in_owner(foo1));
+        // Only one unique "Foo" in the owner → no collision yet.
+        assert!(!tree.unique_name_collision(foo1));
+
+        // Enabling the flag on the second "Foo" in the same owner creates a
+        // duplicate unique name → flagged as a collision on both rows.
+        assert!(tree.set_unique_name_in_owner(foo2, true));
+        assert!(tree.is_unique_name_in_owner(foo2));
+        assert!(tree.unique_name_collision(foo1));
+        assert!(tree.unique_name_collision(foo2));
+
+        // Disabling foo2's flag clears its badge and resolves the collision.
+        assert!(tree.set_unique_name_in_owner(foo2, false));
+        assert!(!tree.is_unique_name_in_owner(foo2));
+        assert!(!tree.unique_name_collision(foo2));
+        assert!(!tree.unique_name_collision(foo1));
+    }
+
+    /// Minimal script whose `_get_configuration_warnings` returns a fixed list,
+    /// standing in for a node script that reports editor warnings.
+    struct ConfigWarningScript {
+        warnings: Vec<String>,
+    }
+
+    impl ScriptInstance for ConfigWarningScript {
+        fn call_method(
+            &mut self,
+            name: &str,
+            _args: &[Variant],
+        ) -> Result<Variant, gdscript_interop::bindings::ScriptError> {
+            if name == "_get_configuration_warnings" {
+                Ok(Variant::Array(
+                    self.warnings.iter().cloned().map(Variant::String).collect(),
+                ))
+            } else {
+                Err(gdscript_interop::bindings::ScriptError::MethodNotFound(
+                    name.to_string(),
+                ))
+            }
+        }
+        fn get_property(&self, _name: &str) -> Option<Variant> {
+            None
+        }
+        fn set_property(&mut self, _name: &str, _value: Variant) -> bool {
+            false
+        }
+        fn list_methods(&self) -> Vec<gdscript_interop::bindings::MethodInfo> {
+            Vec::new()
+        }
+        fn list_properties(&self) -> Vec<gdscript_interop::bindings::ScriptPropertyInfo> {
+            Vec::new()
+        }
+        fn get_script_name(&self) -> &str {
+            "ConfigWarningScript"
+        }
+    }
+
+    #[test]
+    fn scene_tree_configuration_warning_surfaces_messages() {
+        // A node whose `_get_configuration_warnings` returns messages shows the
+        // warning triangle, and the messages are exposed for its tooltip.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let clean = tree.add_child(root, Node::new("Clean", "Node2D")).unwrap();
+        let warned = tree
+            .add_child(root, Node::new("Broken", "CollisionShape2D"))
+            .unwrap();
+
+        // No script → no triangle, no messages.
+        assert!(!tree.has_configuration_warning(clean));
+        assert!(tree.node_configuration_warnings(clean).is_empty());
+
+        // Attach a script reporting two configuration warnings.
+        tree.attach_script(
+            warned,
+            Box::new(ConfigWarningScript {
+                warnings: vec![
+                    "A shape resource must be set.".to_string(),
+                    "This node has no children.".to_string(),
+                ],
+            }),
+        );
+
+        // The triangle shows and the tooltip lists exactly those messages.
+        assert!(tree.has_configuration_warning(warned));
+        assert_eq!(
+            tree.node_configuration_warnings(warned),
+            vec![
+                "A shape resource must be set.".to_string(),
+                "This node has no children.".to_string(),
+            ]
+        );
+
+        // A script that reports no warnings shows no triangle.
+        tree.attach_script(
+            clean,
+            Box::new(ConfigWarningScript {
+                warnings: Vec::new(),
+            }),
+        );
+        assert!(!tree.has_configuration_warning(clean));
+        assert!(tree.node_configuration_warnings(clean).is_empty());
+    }
+
+    #[test]
     fn process_frame_dispatches_notification() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
@@ -1457,16 +2101,18 @@ mod tests {
         tree.process_frame();
 
         let root_log = tree.get_node(root).unwrap().notification_log();
-        // CHILD_ORDER_CHANGED from add_child + PROCESS from process_frame
-        assert_eq!(root_log.len(), 2);
-        assert_eq!(root_log[0], gdobject::NOTIFICATION_CHILD_ORDER_CHANGED);
-        assert_eq!(root_log[1], gdobject::NOTIFICATION_PROCESS);
+        // POSTINITIALIZE + CHILD_ORDER_CHANGED (add_child) + PROCESS (frame)
+        assert!(root_log.contains(&gdobject::NOTIFICATION_POSTINITIALIZE));
+        assert!(root_log.contains(&gdobject::NOTIFICATION_CHILD_ORDER_CHANGED));
+        assert!(root_log.contains(&gdobject::NOTIFICATION_PROCESS));
 
         let child_log = tree.get_node(child_id).unwrap().notification_log();
-        // PARENTED from add_child + PROCESS from process_frame
-        assert_eq!(child_log.len(), 2);
-        assert_eq!(child_log[0], gdobject::NOTIFICATION_PARENTED);
-        assert_eq!(child_log[1], gdobject::NOTIFICATION_PROCESS);
+        // POSTINITIALIZE + PARENTED + ENTER_TREE + READY + PROCESS
+        assert!(child_log.contains(&gdobject::NOTIFICATION_POSTINITIALIZE));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_PARENTED));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_ENTER_TREE));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_READY));
+        assert!(child_log.contains(&gdobject::NOTIFICATION_PROCESS));
     }
 
     #[test]
@@ -1567,10 +2213,12 @@ mod tests {
         tree.process_physics_frame();
 
         let log = tree.get_node(child_id).unwrap().notification_log();
-        // PARENTED from add_child + PHYSICS_PROCESS from process_physics_frame
-        assert_eq!(log.len(), 2);
-        assert_eq!(log[0], gdobject::NOTIFICATION_PARENTED);
-        assert_eq!(log[1], gdobject::NOTIFICATION_PHYSICS_PROCESS);
+        // POSTINITIALIZE + PARENTED + ENTER_TREE + READY + PHYSICS_PROCESS
+        assert!(log.contains(&gdobject::NOTIFICATION_POSTINITIALIZE));
+        assert!(log.contains(&gdobject::NOTIFICATION_PARENTED));
+        assert!(log.contains(&gdobject::NOTIFICATION_ENTER_TREE));
+        assert!(log.contains(&gdobject::NOTIFICATION_READY));
+        assert!(log.contains(&gdobject::NOTIFICATION_PHYSICS_PROCESS));
     }
 
     #[test]

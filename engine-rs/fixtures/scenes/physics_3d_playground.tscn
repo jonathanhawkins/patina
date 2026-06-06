@@ -1,0 +1,35 @@
+[gd_scene format=3]
+
+[node name="Physics3DPlayground" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 5, 10)
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(0, 10, 0)
+
+[node name="Floor" type="StaticBody3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="FloorShape" type="CollisionShape3D" parent="Floor"]
+
+[node name="FloorMesh" type="MeshInstance3D" parent="Floor"]
+
+[node name="Ball" type="RigidBody3D" parent="."]
+position = Vector3(0, 5, 0)
+
+[node name="BallShape" type="CollisionShape3D" parent="Ball"]
+
+[node name="BallMesh" type="MeshInstance3D" parent="Ball"]
+
+[node name="Crate" type="RigidBody3D" parent="."]
+position = Vector3(2, 3, 0)
+
+[node name="CrateShape" type="CollisionShape3D" parent="Crate"]
+
+[node name="CrateMesh" type="MeshInstance3D" parent="Crate"]
+
+[node name="Ramp" type="StaticBody3D" parent="."]
+position = Vector3(-3, 0.5, 0)
+
+[node name="RampShape" type="CollisionShape3D" parent="Ramp"]

@@ -1,0 +1,81 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_tilemap_level",
+  "generated_at": "2026-03-22T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "ParallaxLayer",
+              "name": "BackgroundLayer",
+              "path": "/root/TileMapLevel/Background/BackgroundLayer",
+              "properties": {}
+            }
+          ],
+          "class": "ParallaxBackground",
+          "name": "Background",
+          "path": "/root/TileMapLevel/Background",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "TileMapLayer",
+          "name": "TileMapLayer",
+          "path": "/root/TileMapLevel/TileMapLayer",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "Area2D",
+              "name": "Coin1",
+              "path": "/root/TileMapLevel/Collectibles/Coin1",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "Area2D",
+              "name": "Coin2",
+              "path": "/root/TileMapLevel/Collectibles/Coin2",
+              "properties": {}
+            },
+            {
+              "children": [],
+              "class": "Area2D",
+              "name": "Coin3",
+              "path": "/root/TileMapLevel/Collectibles/Coin3",
+              "properties": {}
+            }
+          ],
+          "class": "Node2D",
+          "name": "Collectibles",
+          "path": "/root/TileMapLevel/Collectibles",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "SpawnPoints",
+          "path": "/root/TileMapLevel/SpawnPoints",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "Node2D",
+          "name": "Boundaries",
+          "path": "/root/TileMapLevel/Boundaries",
+          "properties": {}
+        }
+      ],
+      "class": "Node2D",
+      "name": "TileMapLevel",
+      "path": "/root/TileMapLevel",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

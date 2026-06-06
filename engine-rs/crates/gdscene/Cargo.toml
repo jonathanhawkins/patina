@@ -12,8 +12,14 @@ gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
 gdscript-interop = { path = "../gdscript-interop" }
 gdphysics2d = { path = "../gdphysics2d" }
+gdphysics3d = { path = "../gdphysics3d" }
+gdserver3d = { path = "../gdserver3d" }
+gdrender3d = { path = "../gdrender3d" }
 gdplatform = { path = "../gdplatform" }
 thiserror.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 

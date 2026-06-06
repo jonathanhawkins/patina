@@ -1,0 +1,301 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"name": "PlayerCollision",
+							"path": "/root/NavWorld/Player/PlayerCollision",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "NavigationAgent2D",
+							"name": "PlayerNavAgent",
+							"path": "/root/NavWorld/Player/PlayerNavAgent",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "CharacterBody2D",
+					"name": "Player",
+					"path": "/root/NavWorld/Player",
+					"properties": {
+						"position": {
+							"class_type": "",
+							"hint": 1,
+							"type": "Vector2",
+							"value": {
+								"x": 50.0,
+								"y": 100.0
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"name": "Enemy1Collision",
+							"path": "/root/NavWorld/Enemy1/Enemy1Collision",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "NavigationAgent2D",
+							"name": "Enemy1NavAgent",
+							"path": "/root/NavWorld/Enemy1/Enemy1NavAgent",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "CharacterBody2D",
+					"name": "Enemy1",
+					"path": "/root/NavWorld/Enemy1",
+					"properties": {
+						"position": {
+							"class_type": "",
+							"hint": 1,
+							"type": "Vector2",
+							"value": {
+								"x": 400.0,
+								"y": 100.0
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"name": "Enemy2Collision",
+							"path": "/root/NavWorld/Enemy2/Enemy2Collision",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "NavigationAgent2D",
+							"name": "Enemy2NavAgent",
+							"path": "/root/NavWorld/Enemy2/Enemy2NavAgent",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "CharacterBody2D",
+					"name": "Enemy2",
+					"path": "/root/NavWorld/Enemy2",
+					"properties": {
+						"position": {
+							"class_type": "",
+							"hint": 1,
+							"type": "Vector2",
+							"value": {
+								"x": 300.0,
+								"y": 300.0
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Marker2D",
+							"name": "Waypoint1",
+							"path": "/root/NavWorld/Patrol/Waypoint1",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 100.0,
+										"y": 50.0
+									}
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Marker2D",
+							"name": "Waypoint2",
+							"path": "/root/NavWorld/Patrol/Waypoint2",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 500.0,
+										"y": 50.0
+									}
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Marker2D",
+							"name": "Waypoint3",
+							"path": "/root/NavWorld/Patrol/Waypoint3",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 500.0,
+										"y": 350.0
+									}
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "Marker2D",
+							"name": "Waypoint4",
+							"path": "/root/NavWorld/Patrol/Waypoint4",
+							"properties": {
+								"position": {
+									"class_type": "",
+									"hint": 1,
+									"type": "Vector2",
+									"value": {
+										"x": 100.0,
+										"y": 350.0
+									}
+								}
+							}
+						}
+					],
+					"class": "Node2D",
+					"name": "Patrol",
+					"path": "/root/NavWorld/Patrol",
+					"properties": {
+
+					}
+				}
+			],
+			"class": "Node2D",
+			"name": "NavWorld",
+			"path": "/root/NavWorld",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

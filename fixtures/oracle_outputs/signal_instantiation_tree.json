@@ -1,0 +1,65 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Node2D",
+							"groups": [],
+							"name": "Hitbox",
+							"owner": "/root/GameWorld",
+							"path": "/root/GameWorld/Player/Hitbox"
+						}
+					],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Player",
+					"owner": "/root/GameWorld",
+					"path": "/root/GameWorld/Player"
+				},
+				{
+					"children": [],
+					"class": "Node2D",
+					"groups": [],
+					"name": "Enemy",
+					"owner": "/root/GameWorld",
+					"path": "/root/GameWorld/Enemy"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "Node",
+							"groups": [],
+							"name": "ScoreLabel",
+							"owner": "/root/GameWorld",
+							"path": "/root/GameWorld/HUD/ScoreLabel"
+						}
+					],
+					"class": "Node",
+					"groups": [],
+					"name": "HUD",
+					"owner": "/root/GameWorld",
+					"path": "/root/GameWorld/HUD"
+				}
+			],
+			"class": "Node2D",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "GameWorld",
+			"owner": "/root",
+			"path": "/root/GameWorld"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

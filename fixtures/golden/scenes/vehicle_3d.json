@@ -1,0 +1,157 @@
+{
+  "fixture_id": "scene_vehicle_3d",
+  "capture_type": "scene_tree",
+  "upstream_version": "4.6.1-stable",
+  "note": "Vehicle with chassis, 4 wheels, ground plane — tests deep rigid body hierarchy",
+  "upstream_commit": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+  "generated_at": "2026-03-25T09:40:00+00:00",
+  "data": {
+    "nodes": [
+      {
+        "name": "Track",
+        "class": "Node3D",
+        "path": "/root/Track",
+        "children": ["Camera", "Sun", "Chassis", "Ground"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+        }
+      },
+      {
+        "name": "Camera",
+        "class": "Camera3D",
+        "path": "/root/Track/Camera",
+        "children": [],
+        "properties": {
+          "fov": 60.0,
+          "near": 0.05,
+          "far": 500.0
+        }
+      },
+      {
+        "name": "Sun",
+        "class": "DirectionalLight3D",
+        "path": "/root/Track/Sun",
+        "children": [],
+        "properties": {
+          "light_energy": 1.0,
+          "shadow_enabled": true
+        }
+      },
+      {
+        "name": "Chassis",
+        "class": "RigidBody3D",
+        "path": "/root/Track/Chassis",
+        "children": ["ChassisShape", "ChassisMesh", "WheelFL", "WheelFR", "WheelRL", "WheelRR"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)",
+          "mass": 800.0
+        }
+      },
+      {
+        "name": "ChassisShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Track/Chassis/ChassisShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "ChassisMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Track/Chassis/ChassisMesh",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "WheelFL",
+        "class": "RigidBody3D",
+        "path": "/root/Track/Chassis/WheelFL",
+        "children": ["WheelFLShape"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, -0.5, 1.5)",
+          "mass": 20.0
+        }
+      },
+      {
+        "name": "WheelFLShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Track/Chassis/WheelFL/WheelFLShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "WheelFR",
+        "class": "RigidBody3D",
+        "path": "/root/Track/Chassis/WheelFR",
+        "children": ["WheelFRShape"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, -0.5, 1.5)",
+          "mass": 20.0
+        }
+      },
+      {
+        "name": "WheelFRShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Track/Chassis/WheelFR/WheelFRShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "WheelRL",
+        "class": "RigidBody3D",
+        "path": "/root/Track/Chassis/WheelRL",
+        "children": ["WheelRLShape"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1, -0.5, -1.5)",
+          "mass": 20.0
+        }
+      },
+      {
+        "name": "WheelRLShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Track/Chassis/WheelRL/WheelRLShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "WheelRR",
+        "class": "RigidBody3D",
+        "path": "/root/Track/Chassis/WheelRR",
+        "children": ["WheelRRShape"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, -0.5, -1.5)",
+          "mass": 20.0
+        }
+      },
+      {
+        "name": "WheelRRShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Track/Chassis/WheelRR/WheelRRShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "Ground",
+        "class": "StaticBody3D",
+        "path": "/root/Track/Ground",
+        "children": ["GroundShape", "GroundMesh"],
+        "properties": {
+          "transform": "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1, 0)"
+        }
+      },
+      {
+        "name": "GroundShape",
+        "class": "CollisionShape3D",
+        "path": "/root/Track/Ground/GroundShape",
+        "children": [],
+        "properties": {}
+      },
+      {
+        "name": "GroundMesh",
+        "class": "MeshInstance3D",
+        "path": "/root/Track/Ground/GroundMesh",
+        "children": [],
+        "properties": {}
+      }
+    ]
+  }
+}

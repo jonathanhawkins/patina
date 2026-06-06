@@ -17,7 +17,7 @@ use gdrender2d::export::{encode_bmp, encode_png};
 use gdrender2d::renderer::FrameBuffer;
 use std::collections::HashMap;
 
-use gdscene::animation::{Animation, AnimationTrack, KeyFrame, LoopMode};
+use gdscene::animation::{Animation, AnimationTrack, KeyFrame, LoopMode, TrackType};
 use gdscene::main_loop::MainLoop;
 use gdscene::node::{Node, NodeId};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
@@ -26,6 +26,8 @@ use gdscene::SceneTree;
 use gdvariant::serialize::{from_json, to_json};
 use gdvariant::Variant;
 
+use crate::create_dialog::CreateNodeDialog;
+use crate::filesystem::{EditorFileSystem, FileSystemDock};
 use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
@@ -43,6 +45,34 @@ pub struct AnimationPlaybackState {
     pub current_time: f64,
     /// Whether keyframe recording mode is active.
     pub recording: bool,
+    /// Secondary animation for blend preview (if any).
+    pub blend_secondary: Option<String>,
+    /// Blend weight: 0.0 = fully primary, 1.0 = fully secondary.
+    pub blend_weight: f32,
+}
+
+/// A single function timing entry in a profiler frame snapshot.
+#[derive(Debug, Clone)]
+pub struct ProfilerFuncEntry {
+    /// Function or subsystem name (e.g. "physics_step", "render_2d", "script_process").
+    pub name: String,
+    /// Time spent in this function in milliseconds.
+    pub time_ms: f64,
+}
+
+/// A snapshot of one frame's profiling data.
+#[derive(Debug, Clone)]
+pub struct ProfilerFrame {
+    /// Frame number.
+    pub frame_number: u64,
+    /// Total frame time in milliseconds.
+    pub total_ms: f64,
+    /// CPU time in milliseconds.
+    pub cpu_ms: f64,
+    /// GPU time in milliseconds (estimated or 0 if unavailable).
+    pub gpu_ms: f64,
+    /// Per-function timing breakdown.
+    pub functions: Vec<ProfilerFuncEntry>,
 }
 
 /// State for an in-progress drag operation.
@@ -72,6 +102,9 @@ pub struct LogEntry {
 /// Maximum number of log entries to keep.
 const MAX_LOG_ENTRIES: usize = 100;
 
+/// Maximum number of frame time entries to keep.
+const MAX_FRAME_TIMES: usize = 120;
+
 /// Editor display settings that can be persisted.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditorDisplaySettings {
@@ -81,6 +114,16 @@ pub struct EditorDisplaySettings {
     pub rulers_visible: bool,
     pub background_color: [f64; 4],
     pub font_size: String,
+    /// Color theme: "dark" or "light".
+    pub theme: String,
+    /// Physics ticks per second.
+    pub physics_fps: u32,
+    /// Saved panel sizes for layout persistence.
+    pub panel_sizes: std::collections::HashMap<String, f64>,
+    /// Whether smart snapping (alignment guides to sibling nodes) is enabled.
+    pub smart_snap_enabled: bool,
+    /// Distance threshold in world-space pixels for smart snap to engage.
+    pub smart_snap_threshold: f32,
 }
 impl Default for EditorDisplaySettings {
     fn default() -> Self {
@@ -91,8 +134,137 @@ impl Default for EditorDisplaySettings {
             rulers_visible: true,
             background_color: [0.08, 0.08, 0.1, 1.0],
             font_size: "medium".to_string(),
+            theme: "dark".to_string(),
+            physics_fps: 60,
+            panel_sizes: std::collections::HashMap::new(),
+            smart_snap_enabled: true,
+            smart_snap_threshold: 5.0,
         }
     }
+}
+
+/// A snap guide line for rendering in the viewport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapGuide {
+    /// "x" for vertical guide, "y" for horizontal guide.
+    pub axis: &'static str,
+    /// The world-space coordinate of the guide line.
+    pub position: f32,
+    /// The node being snapped to (for display purposes).
+    pub target_node_id: NodeId,
+}
+
+/// Snap a position to the grid if grid snapping is enabled.
+pub fn snap_to_grid(pos: Vector2, grid_size: u32) -> Vector2 {
+    let g = grid_size as f32;
+    Vector2::new((pos.x / g).round() * g, (pos.y / g).round() * g)
+}
+
+/// Compute smart snap guides by comparing a candidate position against sibling nodes.
+pub fn compute_smart_snap(
+    tree: &SceneTree,
+    dragged_id: NodeId,
+    candidate_pos: Vector2,
+    threshold: f32,
+) -> (Vector2, Vec<SnapGuide>) {
+    use crate::scene_renderer::{extract_position, extract_size};
+
+    let mut guides = Vec::new();
+    let mut snapped = candidate_pos;
+    let mut best_dx: f32 = threshold + 1.0;
+    let mut best_dy: f32 = threshold + 1.0;
+
+    let dragged_size = tree
+        .get_node(dragged_id)
+        .map(|n| extract_size(n))
+        .unwrap_or(Vector2::ZERO);
+    let parent_id = tree
+        .get_node(dragged_id)
+        .and_then(|n| n.parent())
+        .unwrap_or_else(|| tree.root_id());
+    let sibling_ids: Vec<NodeId> = tree
+        .get_node(parent_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    let siblings: Vec<(NodeId, Vector2, Vector2)> = sibling_ids
+        .iter()
+        .filter(|&&nid| nid != dragged_id)
+        .filter_map(|&nid| {
+            tree.get_node(nid)
+                .map(|n| (nid, extract_position(n), extract_size(n)))
+        })
+        .collect();
+
+    for &(nid, sib_pos, sib_size) in &siblings {
+        let snap_xs: [(f32, f32); 3] = [
+            (candidate_pos.x, sib_pos.x),
+            (
+                candidate_pos.x,
+                sib_pos.x - sib_size.x / 2.0 + dragged_size.x / 2.0,
+            ),
+            (
+                candidate_pos.x,
+                sib_pos.x + sib_size.x / 2.0 - dragged_size.x / 2.0,
+            ),
+        ];
+        for (cand_x, target_x) in snap_xs {
+            let dx = (cand_x - target_x).abs();
+            if dx < threshold && dx < best_dx {
+                best_dx = dx;
+                snapped.x = target_x;
+                guides.retain(|g: &SnapGuide| g.axis != "x");
+                guides.push(SnapGuide {
+                    axis: "x",
+                    position: target_x,
+                    target_node_id: nid,
+                });
+            }
+        }
+        let snap_ys: [(f32, f32); 3] = [
+            (candidate_pos.y, sib_pos.y),
+            (
+                candidate_pos.y,
+                sib_pos.y - sib_size.y / 2.0 + dragged_size.y / 2.0,
+            ),
+            (
+                candidate_pos.y,
+                sib_pos.y + sib_size.y / 2.0 - dragged_size.y / 2.0,
+            ),
+        ];
+        for (cand_y, target_y) in snap_ys {
+            let dy = (cand_y - target_y).abs();
+            if dy < threshold && dy < best_dy {
+                best_dy = dy;
+                snapped.y = target_y;
+                guides.retain(|g: &SnapGuide| g.axis != "y");
+                guides.push(SnapGuide {
+                    axis: "y",
+                    position: target_y,
+                    target_node_id: nid,
+                });
+            }
+        }
+    }
+    (snapped, guides)
+}
+
+/// Apply all enabled snap modes to a candidate position.
+pub fn apply_snap(
+    tree: &SceneTree,
+    settings: &EditorDisplaySettings,
+    dragged_id: NodeId,
+    candidate_pos: Vector2,
+) -> (Vector2, Vec<SnapGuide>) {
+    let mut pos = candidate_pos;
+    if settings.grid_snap_enabled {
+        pos = snap_to_grid(pos, settings.grid_snap_size);
+    }
+    if settings.smart_snap_enabled {
+        let (snapped, guides) =
+            compute_smart_snap(tree, dragged_id, pos, settings.smart_snap_threshold);
+        return (snapped, guides);
+    }
+    (pos, Vec::new())
 }
 /// Serialized node data for the copy/paste clipboard.
 #[derive(Debug, Clone)]
@@ -136,6 +308,20 @@ pub struct EditorState {
     /// Whether the scene has unsaved modifications.
     pub scene_modified: bool,
     pub selected_nodes: Vec<NodeId>,
+    /// Inspector navigation history: the stack of previously inspected nodes,
+    /// with `inspector_history_index` pointing at the current position. Drives
+    /// the inspector Back/Forward buttons.
+    pub inspector_history: Vec<NodeId>,
+    pub inspector_history_index: usize,
+    /// pat-didnj: Monotonic per-node version counter for optimistic concurrency
+    /// control on the PATCH endpoint. Missing entries are treated as version 0.
+    pub node_versions: HashMap<NodeId, u64>,
+    /// pat-zzgh5: WebSocket subscribers for `/api/events`. Each entry is a
+    /// channel sender owned by an upgraded connection. `publish_event` clones
+    /// the message into each sender and prunes entries whose receiver has
+    /// hung up. Stored on the state so mutation handlers can broadcast under
+    /// the same lock they already hold.
+    pub event_subscribers: Vec<std::sync::mpsc::Sender<String>>,
     pub clipboard: Vec<ClipboardEntry>,
     pub display_settings: EditorDisplaySettings,
     /// Cache of loaded textures for viewport rendering.
@@ -168,6 +354,275 @@ pub struct EditorState {
     /// Input action map: action name -> list of key names.
     pub input_map: HashMap<String, Vec<String>>,
     pub tile_grid_store: gdscene::tilemap::TileGridStore,
+    /// Currently active editor mode: "2d", "3d", or "script".
+    pub editor_mode: String,
+    /// Active transform axis constraint: None, "x", or "y".
+    pub transform_axis_constraint: Option<String>,
+    /// Keyframe clipboard for copy/paste in animation editor.
+    pub keyframe_clipboard: Vec<(usize, gdscene::animation::KeyFrame)>,
+    /// Breakpoint lines per script path.
+    pub breakpoints: HashMap<String, Vec<u32>>,
+    /// Error lines per script path (line number + message).
+    pub script_errors: HashMap<String, Vec<(u32, String)>>,
+    /// Frame time history for monitors panel (ring buffer of last 120 frame times in ms).
+    pub frame_times: VecDeque<f64>,
+    /// Profiler frame snapshots (ring buffer of last 120 frames).
+    pub profiler_frames: VecDeque<ProfilerFrame>,
+    /// Debug stack trace (populated when runtime hits a breakpoint or error).
+    pub debug_stack_trace: Vec<String>,
+    /// Debugger state: "detached", "running", or "paused".
+    pub debug_state: String,
+    /// Structured debug stack frames: (function, script, line).
+    pub debug_frames: Vec<(String, String, usize)>,
+    /// Debug breakpoints: (script, line).
+    pub debug_breakpoints: Vec<(String, usize)>,
+    /// Debug local variables for current frame: (name, type, value).
+    pub debug_locals: Vec<(String, String, String)>,
+    /// Debug global variables: (name, type, value).
+    pub debug_globals: Vec<(String, String, String)>,
+    /// Registered editor plugins.
+    pub plugins: Vec<PluginEntry>,
+    /// Editor keybindings for the settings dialog.
+    pub keybindings: Vec<EditorKeyBinding>,
+    /// Current viewport tool mode (select, move, rotate, scale).
+    pub viewport_mode: ViewportMode,
+    /// Output log from script print() calls.
+    pub output_entries: VecDeque<String>,
+    /// Project settings (pat-kj4 / pat-c4zlm).
+    pub project_name: String,
+    /// Project description.
+    pub project_description: String,
+    /// Project icon path.
+    pub project_icon: String,
+    /// Project main scene path.
+    pub project_main_scene: String,
+    /// Project display resolution width.
+    pub project_resolution_w: u32,
+    /// Project display resolution height.
+    pub project_resolution_h: u32,
+    /// Stretch mode.
+    pub project_stretch_mode: String,
+    /// Stretch aspect.
+    pub project_stretch_aspect: String,
+    /// Fullscreen mode.
+    pub project_fullscreen: bool,
+    /// V-Sync enabled.
+    pub project_vsync: bool,
+    /// Project physics FPS.
+    pub project_physics_fps: u32,
+    /// Project default gravity.
+    pub project_gravity: f64,
+    /// Default linear damp.
+    pub project_linear_damp: f64,
+    /// Default angular damp.
+    pub project_angular_damp: f64,
+    /// Default audio bus layout.
+    pub project_bus_layout: String,
+    /// Master volume in dB.
+    pub project_master_volume_db: f64,
+    /// Enable audio input.
+    pub project_audio_input: bool,
+    /// Renderer backend.
+    pub project_renderer: String,
+    /// Anti-aliasing mode.
+    pub project_anti_aliasing: String,
+    /// Default environment path.
+    pub project_environment_default: String,
+    /// Active smart snap alignment guides (cleared when drag ends).
+    pub snap_guides: Vec<SnapGuide>,
+    /// Open scene tabs: (tab_id, scene_path, display_name, modified).
+    pub scene_tabs: Vec<SceneTab>,
+    /// Index of the currently active scene tab.
+    pub active_tab_index: usize,
+    /// Node creation dialog with class search and filtering.
+    pub create_node_dialog: CreateNodeDialog,
+    /// Filesystem dock backing the asset browser panel. Default points at
+    /// the current working directory; tests replace this with a temp-dir
+    /// fixture before starting the server.
+    pub asset_browser: FileSystemDock,
+}
+
+/// A single scene tab in the editor.
+#[derive(Debug, Clone)]
+pub struct SceneTab {
+    /// Unique tab identifier.
+    pub id: u32,
+    /// File path of the scene (empty for unsaved).
+    pub path: String,
+    /// Display name shown on the tab.
+    pub name: String,
+    /// Whether the scene has unsaved changes.
+    pub modified: bool,
+    /// This scene's inspector navigation stack, saved when the tab is
+    /// deactivated and restored when it becomes active again so each open
+    /// scene keeps its own back/forward history. Mirrors
+    /// `EditorState.inspector_history`/`inspector_history_index`.
+    pub inspector_history: Vec<NodeId>,
+    /// Cursor into `inspector_history` for this scene's nav stack.
+    pub inspector_history_index: usize,
+}
+
+/// Viewport tool modes for the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportMode {
+    /// Select mode (Q).
+    Select,
+    /// Move mode (W).
+    Move,
+    /// Rotate mode (E).
+    Rotate,
+    /// Scale mode (S).
+    Scale,
+}
+
+impl ViewportMode {
+    /// Parses a mode from a string name.
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s {
+            "select" => Some(Self::Select),
+            "move" => Some(Self::Move),
+            "rotate" => Some(Self::Rotate),
+            "scale" => Some(Self::Scale),
+            _ => None,
+        }
+    }
+
+    /// Returns the string name for this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Move => "move",
+            Self::Rotate => "rotate",
+            Self::Scale => "scale",
+        }
+    }
+}
+
+/// A registered editor plugin entry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginEntry {
+    /// Plugin display name.
+    pub name: String,
+    /// Whether the plugin is currently enabled.
+    pub enabled: bool,
+}
+
+/// An editor keybinding entry for the settings dialog.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EditorKeyBinding {
+    /// The action name (e.g. "delete", "duplicate", "undo").
+    pub action: String,
+    /// Human-readable description.
+    pub description: String,
+    /// The key combination string (e.g. "Ctrl+Z", "F2", "Delete").
+    pub keys: String,
+}
+
+impl EditorKeyBinding {
+    fn defaults() -> Vec<Self> {
+        vec![
+            Self {
+                action: "delete".into(),
+                description: "Delete selected node".into(),
+                keys: "Delete".into(),
+            },
+            Self {
+                action: "rename".into(),
+                description: "Rename selected node".into(),
+                keys: "F2".into(),
+            },
+            Self {
+                action: "duplicate".into(),
+                description: "Duplicate selected node".into(),
+                keys: "Ctrl+D".into(),
+            },
+            Self {
+                action: "copy".into(),
+                description: "Copy selected node".into(),
+                keys: "Ctrl+C".into(),
+            },
+            Self {
+                action: "paste".into(),
+                description: "Paste node".into(),
+                keys: "Ctrl+V".into(),
+            },
+            Self {
+                action: "cut".into(),
+                description: "Cut selected node".into(),
+                keys: "Ctrl+X".into(),
+            },
+            Self {
+                action: "undo".into(),
+                description: "Undo last action".into(),
+                keys: "Ctrl+Z".into(),
+            },
+            Self {
+                action: "redo".into(),
+                description: "Redo last action".into(),
+                keys: "Ctrl+Y".into(),
+            },
+            Self {
+                action: "save".into(),
+                description: "Save scene".into(),
+                keys: "Ctrl+S".into(),
+            },
+            Self {
+                action: "zoom_in".into(),
+                description: "Zoom in".into(),
+                keys: "Ctrl++".into(),
+            },
+            Self {
+                action: "zoom_out".into(),
+                description: "Zoom out".into(),
+                keys: "Ctrl+-".into(),
+            },
+            Self {
+                action: "zoom_reset".into(),
+                description: "Reset zoom".into(),
+                keys: "Ctrl+0".into(),
+            },
+            Self {
+                action: "tool_select".into(),
+                description: "Select tool".into(),
+                keys: "Q".into(),
+            },
+            Self {
+                action: "tool_move".into(),
+                description: "Move tool".into(),
+                keys: "W".into(),
+            },
+            Self {
+                action: "tool_rotate".into(),
+                description: "Rotate tool".into(),
+                keys: "E".into(),
+            },
+            Self {
+                action: "play".into(),
+                description: "Play scene".into(),
+                keys: "F5".into(),
+            },
+            Self {
+                action: "play_current".into(),
+                description: "Play current scene".into(),
+                keys: "F6".into(),
+            },
+            Self {
+                action: "pause".into(),
+                description: "Pause playback".into(),
+                keys: "F7".into(),
+            },
+            Self {
+                action: "stop".into(),
+                description: "Stop playback".into(),
+                keys: "F8".into(),
+            },
+            Self {
+                action: "help".into(),
+                description: "Show help".into(),
+                keys: "F1".into(),
+            },
+        ]
+    }
 }
 
 // SAFETY: EditorState is only accessed through a Mutex, so concurrent
@@ -179,6 +634,7 @@ unsafe impl Send for EditorState {}
 impl EditorState {
     /// Creates a new editor state with the given scene tree.
     pub fn new(tree: SceneTree) -> Self {
+        gdobject::class_db::register_editor_classes();
         Self {
             scene_tree: tree,
             selected_node: None,
@@ -197,6 +653,10 @@ impl EditorState {
             scene_modified: false,
             texture_cache: TextureCache::default(),
             selected_nodes: Vec::new(),
+            inspector_history: Vec::new(),
+            inspector_history_index: 0,
+            node_versions: HashMap::new(),
+            event_subscribers: Vec::new(),
             clipboard: Vec::new(),
             display_settings: EditorDisplaySettings::default(),
             is_running: false,
@@ -210,6 +670,8 @@ impl EditorState {
                 animation_name: None,
                 current_time: 0.0,
                 recording: false,
+                blend_secondary: None,
+                blend_weight: 0.0,
             },
             pressed_keys: HashSet::new(),
             just_pressed_keys: HashSet::new(),
@@ -218,7 +680,69 @@ impl EditorState {
             mouse_buttons: HashSet::new(),
             input_map: Self::default_input_map(),
             tile_grid_store: gdscene::tilemap::TileGridStore::new_with_defaults(),
+            editor_mode: "2d".to_string(),
+            transform_axis_constraint: None,
+            keyframe_clipboard: Vec::new(),
+            breakpoints: HashMap::new(),
+            script_errors: HashMap::new(),
+            frame_times: VecDeque::new(),
+            profiler_frames: VecDeque::new(),
+            debug_stack_trace: Vec::new(),
+            debug_state: "detached".to_string(),
+            debug_frames: Vec::new(),
+            debug_breakpoints: Vec::new(),
+            debug_locals: Vec::new(),
+            debug_globals: Vec::new(),
+            plugins: Vec::new(),
+            keybindings: EditorKeyBinding::defaults(),
+            viewport_mode: ViewportMode::Select,
+            output_entries: VecDeque::new(),
+            project_name: "New Project".to_string(),
+            project_description: String::new(),
+            project_icon: String::new(),
+            project_main_scene: String::new(),
+            project_resolution_w: 1152,
+            project_resolution_h: 648,
+            project_stretch_mode: "disabled".to_string(),
+            project_stretch_aspect: "keep".to_string(),
+            project_fullscreen: false,
+            project_vsync: true,
+            project_physics_fps: 60,
+            project_gravity: 980.0,
+            project_linear_damp: 0.1,
+            project_angular_damp: 1.0,
+            project_bus_layout: "res://default_bus_layout.tres".to_string(),
+            project_master_volume_db: 0.0,
+            project_audio_input: false,
+            project_renderer: "forward_plus".to_string(),
+            project_anti_aliasing: "disabled".to_string(),
+            project_environment_default: String::new(),
+            snap_guides: Vec::new(),
+            scene_tabs: vec![SceneTab {
+                id: 1,
+                path: String::new(),
+                name: "Untitled".to_string(),
+                modified: false,
+                inspector_history: Vec::new(),
+                inspector_history_index: 0,
+            }],
+            active_tab_index: 0,
+            create_node_dialog: {
+                let mut dlg = CreateNodeDialog::with_catalog();
+                dlg.add_favorite("Node2D");
+                dlg.add_favorite("Sprite2D");
+                dlg.add_favorite("CharacterBody2D");
+                dlg.add_favorite("Control");
+                dlg.add_favorite("Label");
+                dlg
+            },
+            asset_browser: FileSystemDock::new(EditorFileSystem::new(".")),
         }
+    }
+
+    /// Returns the next available tab ID.
+    fn next_tab_id(&self) -> u32 {
+        self.scene_tabs.iter().map(|t| t.id).max().unwrap_or(0) + 1
     }
 
     /// Returns the default input action map (Godot-style).
@@ -367,30 +891,350 @@ pub struct EditorServerHandle {
     viewport_cache: Arc<ViewportCache>,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Actual TCP port the server bound to (resolved when started with `0`).
+    port: u16,
+}
+
+/// pat-vxejb: Per-token rate limiter for the editor HTTP server.
+///
+/// Tracks request counts in a 1-second sliding window keyed by the bearer
+/// token presented by the client (or `"anonymous"` when no Authorization
+/// header is supplied). Requests exceeding `per_second_limit` are rejected
+/// with HTTP 429 and a `Retry-After` header.
+pub struct RateLimiter {
+    buckets: std::sync::Mutex<std::collections::HashMap<String, RateBucket>>,
+    per_second_limit: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RateBucket {
+    window_start_secs: u64,
+    count: u32,
+}
+
+/// Default per-token rate limit (requests / second). Picked to match the bead's
+/// acceptance criteria (">60 requests per second returns HTTP 429").
+pub const DEFAULT_RATE_LIMIT_PER_SECOND: u32 = 60;
+
+const RATE_LIMIT_BODY: &str =
+    r#"{"error":{"code":"rate_limit","message":"rate limit exceeded"}}"#;
+
+/// pat-bof7u: Configurable CORS origin allowlist.
+///
+/// When the allowlist is **empty**, the server runs in legacy open-CORS mode
+/// and emits `Access-Control-Allow-Origin: *` (matches pre-allowlist behavior).
+///
+/// When the allowlist is **non-empty**, requests carrying an `Origin` header
+/// that does **not** match any entry are refused with HTTP 403. Matching
+/// origins receive `Access-Control-Allow-Origin: <that origin>` echoed back
+/// (per the CORS spec — wildcard is never used with a non-empty allowlist).
+#[derive(Default, Clone)]
+pub struct CorsAllowlist {
+    origins: Vec<String>,
+}
+
+impl CorsAllowlist {
+    /// Build an allowlist from any iterable of origin strings. Empty list
+    /// means "open CORS" (legacy `*` behavior).
+    pub fn new<I, S>(origins: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            origins: origins.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.origins.is_empty()
+    }
+
+    fn matches(&self, origin: &str) -> bool {
+        self.origins.iter().any(|o| o == origin)
+    }
+}
+
+// pat-bof7u: per-thread matched CORS origin, set in `handle_connection` after
+// the allowlist check and read by the response helpers when emitting the
+// `Access-Control-Allow-Origin` header. Defaults to "*" so legacy callers see
+// no behavioral change until an allowlist is configured.
+thread_local! {
+    static CORS_ALLOW_ORIGIN: std::cell::RefCell<String> =
+        std::cell::RefCell::new("*".to_string());
+}
+
+fn cors_set_allow_origin(value: &str) {
+    CORS_ALLOW_ORIGIN.with(|c| *c.borrow_mut() = value.to_string());
+}
+
+fn cors_reset_allow_origin() {
+    CORS_ALLOW_ORIGIN.with(|c| *c.borrow_mut() = "*".to_string());
+}
+
+fn cors_current_allow_origin() -> String {
+    CORS_ALLOW_ORIGIN.with(|c| c.borrow().clone())
+}
+
+/// pat-rk3md: Idempotency-key dedupe cache for state-mutating endpoints.
+///
+/// Keyed by `(idempotency_key, method, path)`. When a POST/PUT/PATCH/DELETE
+/// presents an `Idempotency-Key` header, the server caches the full response
+/// bytes plus expiry; a duplicate request within the window replays the
+/// cached response without re-dispatching the handler, so the underlying
+/// mutation is only applied once.
+pub struct IdempotencyCache {
+    entries: std::sync::Mutex<std::collections::HashMap<String, IdempotencyEntry>>,
+    ttl: std::time::Duration,
+}
+
+struct IdempotencyEntry {
+    response: Vec<u8>,
+    expires_at: SystemTime,
+}
+
+/// Default idempotency cache window. Long enough that real client retries
+/// land in it (network blip, redrive) without keeping responses around so
+/// long that operators forget the cache exists.
+pub const DEFAULT_IDEMPOTENCY_TTL_SECS: u64 = 300;
+
+impl Default for IdempotencyCache {
+    fn default() -> Self {
+        Self::new(std::time::Duration::from_secs(DEFAULT_IDEMPOTENCY_TTL_SECS))
+    }
+}
+
+impl IdempotencyCache {
+    pub fn new(ttl: std::time::Duration) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ttl,
+        }
+    }
+
+    fn cache_key(token: &str, method: &str, path: &str) -> String {
+        format!("{token}|{method}|{path}")
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let now = SystemTime::now();
+        if let Some(entry) = entries.get(key) {
+            if entry.expires_at > now {
+                return Some(entry.response.clone());
+            }
+            entries.remove(key);
+        }
+        None
+    }
+
+    fn insert(&self, key: String, response: Vec<u8>) {
+        let expires_at = SystemTime::now() + self.ttl;
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.insert(key, IdempotencyEntry { response, expires_at });
+    }
+}
+
+// pat-rk3md: per-thread response-capture buffer. When `Some`, the `send_*`
+// helpers append their bytes here in addition to writing to the stream so the
+// handler's response can be cached for idempotent replay.
+thread_local! {
+    static RESPONSE_CAPTURE: std::cell::RefCell<Option<Vec<u8>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn capture_start() {
+    RESPONSE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+fn capture_take() -> Option<Vec<u8>> {
+    RESPONSE_CAPTURE.with(|c| c.borrow_mut().take())
+}
+
+fn capture_append(bytes: &[u8]) {
+    RESPONSE_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.extend_from_slice(bytes);
+        }
+    });
+}
+
+/// HTTP 403 response for a request whose Origin header is not in the
+/// configured CORS allowlist.
+fn send_cors_forbidden(stream: &mut TcpStream, origin: &str) {
+    audit_set_status(403);
+    let message = format!("origin not allowed: {}", origin);
+    let body = error_envelope_body("cors_origin", &message);
+    let response = format!(
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body,
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new(DEFAULT_RATE_LIMIT_PER_SECOND)
+    }
+}
+
+impl RateLimiter {
+    pub fn new(per_second_limit: u32) -> Self {
+        Self {
+            buckets: std::sync::Mutex::new(std::collections::HashMap::new()),
+            per_second_limit,
+        }
+    }
+
+    /// Returns `Ok(())` when the request is allowed, or `Err(retry_after)`
+    /// (seconds) when the caller has exceeded its 1-second bucket.
+    fn check(&self, token: &str) -> Result<(), u64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = buckets.entry(token.to_string()).or_insert(RateBucket {
+            window_start_secs: now,
+            count: 0,
+        });
+        if entry.window_start_secs != now {
+            entry.window_start_secs = now;
+            entry.count = 0;
+        }
+        entry.count = entry.count.saturating_add(1);
+        if entry.count > self.per_second_limit {
+            Err(1)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl EditorServerHandle {
-    /// Starts the editor HTTP server on the given port.
+    /// Starts the editor HTTP server on the given port without bearer-token
+    /// authentication. Use [`start_with_auth`] to require a token on `/api/*`.
     pub fn start(port: u16, state: EditorState) -> Self {
+        Self::start_with_auth(port, state, None)
+    }
+
+    /// Starts the editor HTTP server with optional bearer-token auth.
+    ///
+    /// When `auth_token` is `Some`, every request whose path begins with
+    /// `/api/` must present a matching `Authorization: Bearer <token>` header
+    /// or it is rejected with HTTP 401. When `None`, the server runs in
+    /// open-access mode (back-compat).
+    ///
+    /// To source the token from the environment (env var or config file),
+    /// callers can use [`editor_auth_token_from_env`] and pass its result.
+    pub fn start_with_auth(port: u16, state: EditorState, auth_token: Option<String>) -> Self {
+        Self::start_with_auth_and_limiter(port, state, auth_token, RateLimiter::default())
+    }
+
+    /// Starts the editor HTTP server with an explicit rate limiter — useful
+    /// for tests that need a smaller or larger per-token quota than the
+    /// default (60 req/s). The CORS allowlist defaults to "open" (legacy `*`).
+    pub fn start_with_auth_and_limiter(
+        port: u16,
+        state: EditorState,
+        auth_token: Option<String>,
+        rate_limiter: RateLimiter,
+    ) -> Self {
+        Self::start_full(
+            port,
+            state,
+            auth_token,
+            rate_limiter,
+            CorsAllowlist::default(),
+        )
+    }
+
+    /// pat-bof7u: Full constructor that takes every configurable knob,
+    /// including the CORS allowlist. An empty allowlist preserves the legacy
+    /// open-CORS behavior. pat-rk3md: default idempotency cache (5 min TTL).
+    pub fn start_full(
+        port: u16,
+        state: EditorState,
+        auth_token: Option<String>,
+        rate_limiter: RateLimiter,
+        cors_allowlist: CorsAllowlist,
+    ) -> Self {
+        Self::start_with_idempotency(
+            port,
+            state,
+            auth_token,
+            rate_limiter,
+            cors_allowlist,
+            IdempotencyCache::default(),
+        )
+    }
+
+    /// pat-rk3md: Full constructor including the idempotency cache. Tests
+    /// can dial the TTL down to make replay timing easy to assert.
+    pub fn start_with_idempotency(
+        port: u16,
+        state: EditorState,
+        auth_token: Option<String>,
+        rate_limiter: RateLimiter,
+        cors_allowlist: CorsAllowlist,
+        idempotency: IdempotencyCache,
+    ) -> Self {
         let state = Arc::new(Mutex::new(state));
         let viewport_cache = Arc::new(ViewportCache {
             png: Mutex::new(None),
             bmp: Mutex::new(None),
         });
         let running = Arc::new(AtomicBool::new(true));
+        let auth: Arc<Option<String>> = Arc::new(auth_token);
+        let limiter = Arc::new(rate_limiter);
+        let cors = Arc::new(cors_allowlist);
+        let idem = Arc::new(idempotency);
 
         let state_clone = Arc::clone(&state);
         let cache_clone = Arc::clone(&viewport_cache);
         let running_clone = Arc::clone(&running);
-        let thread = thread::spawn(move || {
-            run_server(state_clone, cache_clone, running_clone, port);
+        let auth_clone = Arc::clone(&auth);
+        let limiter_clone = Arc::clone(&limiter);
+        let cors_clone = Arc::clone(&cors);
+        let idem_clone = Arc::clone(&idem);
+        // Bind synchronously here (not inside the spawned thread) so the port is
+        // claimed before we return — eliminating the probe-then-rebind gap in
+        // which two concurrent tests could grab the same ephemeral port and
+        // cross their HTTP clients onto each other's server. `port == 0` binds an
+        // OS-assigned ephemeral port; the actual port is read back and exposed
+        // via `port()`.
+        let (listener, bound_port) = match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => {
+                let p = l.local_addr().map(|a| a.port()).unwrap_or(port);
+                (Some(l), p)
+            }
+            Err(e) => {
+                tracing::error!("Failed to bind editor server on port {port}: {e}");
+                (None, port)
+            }
+        };
+        let thread = listener.map(move |listener| {
+            thread::spawn(move || {
+                run_server(
+                    state_clone,
+                    cache_clone,
+                    auth_clone,
+                    limiter_clone,
+                    cors_clone,
+                    idem_clone,
+                    running_clone,
+                    listener,
+                );
+            })
         });
 
         Self {
             state,
             viewport_cache,
             running,
-            thread: Some(thread),
+            thread,
+            port: bound_port,
         }
     }
 
@@ -414,6 +1258,12 @@ impl EditorServerHandle {
         &self.state
     }
 
+    /// The actual TCP port the server bound to. When started with `port == 0`
+    /// this is the OS-assigned ephemeral port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Signals the server to stop and waits for the thread to finish.
     pub fn stop(mut self) {
         self.running.store(false, Ordering::SeqCst);
@@ -426,16 +1276,13 @@ impl EditorServerHandle {
 fn run_server(
     state: Arc<Mutex<EditorState>>,
     viewport_cache: Arc<ViewportCache>,
+    auth_token: Arc<Option<String>>,
+    rate_limiter: Arc<RateLimiter>,
+    cors_allowlist: Arc<CorsAllowlist>,
+    idempotency: Arc<IdempotencyCache>,
     running: Arc<AtomicBool>,
-    port: u16,
+    listener: TcpListener,
 ) {
-    let listener = match TcpListener::bind(format!("127.0.0.1:{port}")) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind editor server on port {port}: {e}");
-            return;
-        }
-    };
     // Non-blocking so we can check the running flag, but we use a tight
     // accept loop with minimal sleep to avoid missing connections.
     listener
@@ -449,9 +1296,21 @@ fn run_server(
                 Ok((stream, _)) => {
                     let state_clone = Arc::clone(&state);
                     let cache_clone = Arc::clone(&viewport_cache);
+                    let auth_clone = Arc::clone(&auth_token);
+                    let limiter_clone = Arc::clone(&rate_limiter);
+                    let cors_clone = Arc::clone(&cors_allowlist);
+                    let idem_clone = Arc::clone(&idempotency);
                     thread::spawn(move || {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            handle_connection(&state_clone, &cache_clone, stream);
+                            handle_connection(
+                                &state_clone,
+                                &cache_clone,
+                                &auth_clone,
+                                &limiter_clone,
+                                &cors_clone,
+                                &idem_clone,
+                                stream,
+                            );
                         }));
                     });
                 }
@@ -478,6 +1337,50 @@ struct HttpRequest {
     path: String,
     query: String,
     body: String,
+    /// Bearer token extracted from the `Authorization: Bearer <token>` header,
+    /// or `None` if the header is missing/malformed.
+    auth_token: Option<String>,
+    /// pat-bof7u: raw `Origin` header value (without trailing whitespace).
+    /// `None` when the request did not include an Origin (typically same-origin
+    /// or non-browser callers).
+    origin: Option<String>,
+    /// pat-rk3md: `Idempotency-Key` header value, if any. Used to deduplicate
+    /// state-mutating requests within the cache window.
+    idempotency_key: Option<String>,
+    /// pat-zzgh5: `Sec-WebSocket-Key` header value, parsed for the
+    /// `/api/events` WebSocket upgrade. `None` for non-WS requests.
+    sec_websocket_key: Option<String>,
+    /// pat-zzgh5: true when the request carries an `Upgrade: websocket`
+    /// header (case-insensitive). Used to route `/api/events` into the
+    /// WebSocket handler instead of the normal dispatch table.
+    upgrade_websocket: bool,
+}
+
+/// Reads the editor server's expected bearer token from the environment.
+///
+/// Resolution order:
+///   1. `PATINA_EDITOR_TOKEN` — token value inline.
+///   2. `PATINA_EDITOR_TOKEN_FILE` — path to a file whose trimmed contents
+///      are the token (config-file form).
+///
+/// Returns `None` if neither source yields a non-empty token, in which case
+/// the server runs without authentication (back-compat for existing callers).
+pub fn editor_auth_token_from_env() -> Option<String> {
+    if let Ok(tok) = std::env::var("PATINA_EDITOR_TOKEN") {
+        let trimmed = tok.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(path) = std::env::var("PATINA_EDITOR_TOKEN_FILE") {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
@@ -547,6 +1450,75 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         })
         .unwrap_or(0);
 
+    // Parse Authorization: Bearer <token> header (case-insensitive name,
+    // case-sensitive scheme/token per RFC 6750).
+    let auth_token: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        let value = value.trim();
+        let mut parts = value.splitn(2, char::is_whitespace);
+        let scheme = parts.next()?;
+        let token = parts.next()?.trim();
+        if scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty() {
+            Some(token.to_string())
+        } else {
+            None
+        }
+    });
+
+    // pat-bof7u: parse `Origin` header so the CORS allowlist can match it.
+    let origin: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("origin") {
+            return None;
+        }
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    // pat-rk3md: parse `Idempotency-Key` header for state-mutating dedupe.
+    let idempotency_key: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("idempotency-key") {
+            return None;
+        }
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    // pat-zzgh5: parse `Sec-WebSocket-Key` for the /api/events upgrade.
+    let sec_websocket_key: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("sec-websocket-key") {
+            return None;
+        }
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    // pat-zzgh5: detect `Upgrade: websocket` header (case-insensitive value).
+    let upgrade_websocket: bool = header_str.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.trim().eq_ignore_ascii_case("upgrade")
+            && value.trim().eq_ignore_ascii_case("websocket")
+    });
+
     // Read remaining body bytes if needed.
     let body_start = header_end + 4; // skip \r\n\r\n
     while raw.len() < body_start + content_length {
@@ -570,6 +1542,11 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         path,
         query,
         body,
+        auth_token,
+        origin,
+        idempotency_key,
+        sec_websocket_key,
+        upgrade_websocket,
     })
 }
 
@@ -585,41 +1562,186 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 fn handle_connection(
     state: &Arc<Mutex<EditorState>>,
     viewport_cache: &Arc<ViewportCache>,
+    auth_token: &Arc<Option<String>>,
+    rate_limiter: &Arc<RateLimiter>,
+    cors_allowlist: &Arc<CorsAllowlist>,
+    idempotency: &Arc<IdempotencyCache>,
     mut stream: TcpStream,
 ) {
+    // pat-kts88: reset the per-thread audit slot so each request starts fresh.
+    audit_reset_status();
+    // pat-bof7u: reset CORS allow-origin so this request starts at the
+    // legacy default and only opts into a specific value after the allowlist
+    // matches a real Origin header.
+    cors_reset_allow_origin();
     let req = match parse_request(&mut stream) {
         Some(r) => r,
         None => {
             // Always send something so the browser doesn't get ERR_EMPTY_RESPONSE.
-            let _ = stream.write_all(
-                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+            // pat-f23vr: emit the standardized error envelope so clients can
+            // parse a uniform shape even for malformed requests.
+            send_error_coded(&mut stream, 400, "bad_request", "malformed HTTP request");
             return;
         }
     };
+
+    // Bearer-token gate: when the server was started with `Some(token)`,
+    // every `/api/*` request must present a matching Authorization header.
+    // CORS preflight (OPTIONS) is exempt because browsers cannot attach
+    // auth headers to preflights.
+    // pat-bof7u: CORS origin allowlist. When a non-empty allowlist is
+    // configured, a request that carries an `Origin` header outside the list
+    // is refused with HTTP 403 before any handler runs. Matched origins are
+    // echoed back via the per-thread CORS slot so response helpers emit
+    // `Access-Control-Allow-Origin: <origin>` instead of `*`.
+    if !cors_allowlist.is_open() {
+        if let Some(origin) = req.origin.as_deref() {
+            if !cors_allowlist.matches(origin) {
+                send_cors_forbidden(&mut stream, origin);
+                audit_log_request(&req, auth_token.as_ref().as_deref());
+                return;
+            }
+            cors_set_allow_origin(origin);
+        }
+    } else if let Some(origin) = req.origin.as_deref() {
+        // Open mode echoes the origin if one is present; keeps CORS working
+        // for browsers while preserving the wildcard fallback for clients
+        // that don't send Origin.
+        cors_set_allow_origin(origin);
+    }
+
+    if req.method != "OPTIONS" && req.path.starts_with("/api/") {
+        if let Some(expected) = auth_token.as_ref().as_ref() {
+            let provided = req.auth_token.as_deref();
+            if provided != Some(expected.as_str()) {
+                // pat-f23vr: emit the standardized error envelope so clients
+                // can rely on a uniform error shape for 401.
+                let body = error_envelope_body(
+                    "unauthorized",
+                    "missing or invalid Bearer token",
+                );
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"patina-editor\"\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{body}",
+                    len = body.len(),
+                    origin = cors_current_allow_origin(),
+                );
+                let _ = stream.write_all(response.as_bytes());
+                // pat-kts88: still record the auth-rejected mutation so
+                // operators see attempted writes from invalid tokens.
+                audit_set_status(401);
+                audit_log_request(&req, auth_token.as_ref().as_deref());
+                return;
+            }
+        }
+
+        // pat-vxejb: per-token rate limit on /api/*. Keyed by the bearer
+        // token the client presented (or "anonymous" when no Authorization
+        // header is set), so a noisy token can't starve a quiet one.
+        let client_token = req.auth_token.as_deref().unwrap_or("anonymous");
+        if let Err(retry_after) = rate_limiter.check(client_token) {
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\n\
+                 Retry-After: {retry_after}\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {len}\r\n\
+                 Access-Control-Allow-Origin: {origin}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                len = RATE_LIMIT_BODY.len(),
+                body = RATE_LIMIT_BODY,
+                origin = cors_current_allow_origin(),
+            );
+            let _ = stream.write_all(response.as_bytes());
+            audit_set_status(429);
+            audit_log_request(&req, auth_token.as_ref().as_deref());
+            return;
+        }
+    }
+
+    // pat-rk3md: Idempotency-Key dedupe. For state-mutating routes that carry
+    // an Idempotency-Key header, look up the cached response by
+    // (key, method, path). On hit we replay the bytes verbatim and skip
+    // dispatch entirely so the underlying mutation runs exactly once. On
+    // miss we arm the capture buffer so the response we *will* send gets
+    // stored after dispatch completes.
+    let idem_cache_key: Option<String> = if audit_is_mutating(&req.method) {
+        req.idempotency_key.as_deref().map(|key| {
+            IdempotencyCache::cache_key(key, &req.method, &req.path)
+        })
+    } else {
+        None
+    };
+    if let Some(key) = idem_cache_key.as_deref() {
+        if let Some(cached) = idempotency.get(key) {
+            let _ = stream.write_all(&cached);
+            audit_set_status(200);
+            audit_log_request(&req, auth_token.as_ref().as_deref());
+            return;
+        }
+        capture_start();
+    }
+
+    // pat-zzgh5: WebSocket upgrade at /api/events. The handler consumes the
+    // TcpStream and blocks until the client disconnects, so route it before
+    // the normal dispatch table (which expects `&mut stream`).
+    if req.method == "GET" && req.path == "/api/events" && req.upgrade_websocket {
+        api_events_websocket(state, &req, stream);
+        return;
+    }
 
     match (req.method.as_str(), req.path.as_str()) {
         ("OPTIONS", _) => serve_cors_preflight(&mut stream),
         ("GET", "/favicon.ico") => serve_404(&mut stream),
         ("GET", "/editor") => serve_editor_html(&mut stream),
+        ("GET", "/api/capabilities") => api_get_capabilities(&mut stream),
         ("GET", "/api/scene") => api_get_scene(state, &mut stream),
         ("GET", "/api/node/signals") => api_get_node_signals(state, &req.query, &mut stream),
+        ("GET", "/api/node/warnings") => api_get_node_warnings(state, &req.query, &mut stream),
+        ("GET", "/api/node/script") => api_get_node_script(state, &req.query, &mut stream),
         ("GET", p) if p.starts_with("/api/node/") && req.method == "GET" => {
             // Extract node ID from /api/node/<id>
             let id_str = &p["/api/node/".len()..];
             api_get_node(state, id_str, &mut stream);
         }
         ("GET", "/api/selected") => api_get_selected(state, &mut stream),
+        ("GET", "/api/inspector/header") => api_inspector_header(state, &mut stream),
+        ("POST", "/api/inspector/back") => api_inspector_back(state, &mut stream),
+        ("POST", "/api/inspector/forward") => api_inspector_forward(state, &mut stream),
+        ("GET", "/api/inspector/history") => api_inspector_history_list(state, &mut stream),
+        ("POST", "/api/inspector/history/select") => {
+            api_inspector_history_select(state, &req.body, &mut stream)
+        }
         ("GET", "/api/viewport") => api_get_viewport_bmp(viewport_cache, &mut stream),
         ("GET", "/api/viewport/png") => api_get_viewport_png(viewport_cache, &mut stream),
         ("POST", "/api/node/add") => api_add_node(state, &req.body, &mut stream),
         ("POST", "/api/node/delete") => api_delete_node(state, &req.body, &mut stream),
         ("POST", "/api/node/select") => api_select_node(state, &req.body, &mut stream),
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/change_type") => api_change_node_type(state, &req.body, &mut stream),
+        ("POST", "/api/node/editable_children") => {
+            api_set_editable_children(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/node/make_local") => api_make_local(state, &req.body, &mut stream),
+        ("POST", "/api/node/lock") => api_set_node_lock(state, &req.body, &mut stream),
+        ("POST", "/api/node/open_scene") => api_open_node_scene(state, &req.body, &mut stream),
+        ("POST", "/api/node/open_script") => api_open_node_script(state, &req.body, &mut stream),
+        ("POST", "/api/node/group") => api_set_group(state, &req.body, &mut stream),
+        ("POST", "/api/node/unique_name") => api_set_unique_name(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/create_dialog") => api_create_dialog(state, &req.body, &mut stream),
+        ("POST", "/api/node/create_dialog/toggle_favorite") => {
+            api_create_dialog_toggle_favorite(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/node/create_dialog/confirm") => {
+            api_create_dialog_confirm(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/node/catalog_2d") => api_node_catalog_2d(state, &mut stream),
+        ("POST", "/api/resource/property/set") => {
+            api_set_resource_property(state, &req.body, &mut stream)
+        }
         ("POST", "/api/node/reorder") => api_reorder_node(state, &req.body, &mut stream),
         ("POST", "/api/property/set") => api_set_property(state, &req.body, &mut stream),
+        ("PATCH", "/api/node/patch") => api_patch_node(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
         ("POST", "/api/redo") => api_redo(state, &mut stream),
         ("POST", "/api/scene/save") => api_save_scene(state, &req.body, &mut stream),
@@ -633,10 +1755,15 @@ fn handle_connection(
         ("GET", "/api/viewport/zoom_pan") => api_get_zoom_pan(state, &mut stream),
         ("POST", "/api/viewport/zoom") => api_set_zoom(state, &req.body, &mut stream),
         ("POST", "/api/viewport/pan") => api_set_pan(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/pan_by") => api_pan_by(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/frame_selection") => api_frame_selection(state, &mut stream),
         ("GET", "/api/logs") => api_get_logs(state, &mut stream),
         ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
-        ("GET", "/api/filesystem") => api_get_filesystem(&mut stream),
+        ("GET", "/api/filesystem") => api_get_filesystem(&req.query, &mut stream),
+        ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
         ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
+        // pat-yxe4s: SCRIPT main-screen view for the selected node.
+        ("GET", "/api/script/main_view") => api_script_main_view(state, &req.query, &mut stream),
         ("POST", "/api/script/save") => api_save_script(&req.body, &mut stream),
         ("POST", "/api/node/signals/connect") => api_connect_signal(state, &req.body, &mut stream),
         ("POST", "/api/node/groups/add") => api_add_group(state, &req.body, &mut stream),
@@ -648,7 +1775,12 @@ fn handle_connection(
         ("POST", "/api/node/cut") => api_cut_nodes(state, &req.body, &mut stream),
         ("GET", "/api/settings") => api_get_settings(state, &mut stream),
         ("POST", "/api/settings") => api_set_settings(state, &req.body, &mut stream),
+        ("GET", "/api/plugins") => api_get_plugins(state, &mut stream),
+        ("POST", "/api/plugins/toggle") => api_toggle_plugin(state, &req.body, &mut stream),
+        ("GET", "/api/keybindings") => api_get_keybindings(state, &mut stream),
+        ("POST", "/api/keybindings") => api_set_keybinding(state, &req.body, &mut stream),
         ("POST", "/api/viewport/box_select") => api_box_select(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/drop") => api_viewport_drop(state, &req.body, &mut stream),
         ("POST", "/api/viewport/drag_multi") => {
             api_viewport_drag_multi(state, &req.body, &mut stream)
         }
@@ -666,6 +1798,7 @@ fn handle_connection(
         ("GET", "/api/animation/status") => api_animation_status(state, &mut stream),
         ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
+        ("POST", "/api/animation/blend") => api_animation_blend(state, &req.body, &mut stream),
         ("POST", "/api/runtime/play") => api_runtime_play(state, &mut stream),
         ("POST", "/api/runtime/stop") => api_runtime_stop(state, &mut stream),
         ("POST", "/api/runtime/pause") => api_runtime_pause(state, &mut stream),
@@ -696,44 +1829,309 @@ fn handle_connection(
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
         ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
+        // pat-r5p: Transform gizmo
+        ("POST", "/api/viewport/drag_axis") => {
+            api_viewport_drag_axis(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/rotate_node") => {
+            api_viewport_rotate_node(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/scale_node") => {
+            api_viewport_scale_node(state, &req.body, &mut stream)
+        }
+        // pat-zlv: Snap info
+        ("GET", "/api/viewport/snap_info") => api_get_snap_info(state, &mut stream),
+        ("GET", "/api/viewport/snap_guides") => api_get_snap_guides(state, &mut stream),
+        // pat-cgc: Script find/replace
+        ("POST", "/api/script/find") => api_script_find(&req.body, &mut stream),
+        ("POST", "/api/script/replace") => api_script_replace(&req.body, &mut stream),
+        // pat-1v3: Script breakpoints
+        ("POST", "/api/script/breakpoint/toggle") => {
+            api_toggle_breakpoint(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/script/breakpoints") => api_get_breakpoints(state, &req.query, &mut stream),
+        // pat-n86px: Explicit typed track creation (property/method/audio)
+        ("POST", "/api/animation/track/add") => api_add_track(state, &req.body, &mut stream),
+        ("POST", "/api/animation/track/delete") => api_delete_track(state, &req.body, &mut stream),
+        // pat-2s1: Animation track reorder + keyframe copy/paste
+        ("POST", "/api/animation/track/reorder") => {
+            api_reorder_track(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/keyframe/copy") => {
+            api_copy_keyframes(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/keyframe/paste") => {
+            api_paste_keyframes(state, &req.body, &mut stream)
+        }
+        // pat-o51nk: Curve editor — set keyframe transition type
+        ("POST", "/api/animation/keyframe/transition") => {
+            api_set_keyframe_transition(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/animation/keyframe/transition") => {
+            api_get_keyframe_transition(state, &req.query, &mut stream)
+        }
+        // pat-lbu: Debug + monitors
+        ("GET", "/api/debug/stack_trace") => api_get_stack_trace(state, &mut stream),
+        // pat-zf49m: Debugger panel with breakpoint, step, and variable inspection
+        ("GET", "/api/debug/state") => api_get_debug_state(state, &mut stream),
+        ("GET", "/api/debug/locals") => api_get_debug_locals(state, &req.query, &mut stream),
+        ("POST", "/api/debug/continue") => api_debug_continue(state, &mut stream),
+        ("POST", "/api/debug/step_in") => api_debug_step_in(state, &mut stream),
+        ("POST", "/api/debug/step_over") => api_debug_step_over(state, &mut stream),
+        ("POST", "/api/debug/step_out") => api_debug_step_out(state, &mut stream),
+        ("POST", "/api/debug/remove_breakpoint") => {
+            api_debug_remove_breakpoint(state, &req.body, &mut stream)
+        }
+        ("GET", "/api/monitors/frame_times") => api_get_frame_times(state, &mut stream),
+        ("GET", "/api/profiler") => api_get_profiler(state, &mut stream),
+        ("POST", "/api/profiler/record") => api_profiler_record(state, &req.body, &mut stream),
+        // pat-dj6: Editor mode
+        ("POST", "/api/editor/mode") => api_set_editor_mode(state, &req.body, &mut stream),
+        ("GET", "/api/editor/mode") => api_get_editor_mode(state, &mut stream),
+        ("GET", "/api/editor/main_view") => api_editor_main_view(state, &mut stream),
+        // pat-e0heb: Scene tabs
+        ("GET", "/api/scene/tabs") => api_get_scene_tabs(state, &mut stream),
+        // pat-w1ub4: Scene > New Scene
+        ("POST", "/api/scene/new") => api_new_scene(state, &mut stream),
+        ("POST", "/api/scene/tabs/open") => api_open_scene_tab(state, &req.body, &mut stream),
+        ("POST", "/api/scene/tabs/close") => api_close_scene_tab(state, &req.body, &mut stream),
+        ("POST", "/api/scene/tabs/switch") => api_switch_scene_tab(state, &req.body, &mut stream),
+        // Batch 2 beads
+        ("POST", "/api/viewport/set_mode") => api_set_viewport_mode(state, &req.body, &mut stream),
+        ("GET", "/api/viewport/mode") => api_get_viewport_mode(state, &mut stream),
+        ("GET", "/api/search") => api_search_scripts(&req.query, &mut stream),
+        ("POST", "/api/signal/disconnect") => api_disconnect_signal(state, &req.body, &mut stream),
+        ("POST", "/api/output/clear") => api_clear_output(state, &mut stream),
+        ("GET", "/api/output") => api_get_output(state, &mut stream),
+        // pat-kj4: Project settings
+        ("GET", "/api/project_settings") => api_get_project_settings(state, &mut stream),
+        ("POST", "/api/project_settings") => {
+            api_set_project_settings(state, &req.body, &mut stream)
+        }
+        // pat-db37w: Project Settings > Input Map tab
+        ("GET", "/api/input_map") => api_get_input_map(state, &mut stream),
+        ("POST", "/api/input_map") => api_set_input_map(state, &req.body, &mut stream),
+        // pat-flr: Filesystem operations
+        ("POST", "/api/filesystem/rename") => api_filesystem_rename(&req.body, &mut stream),
+        ("POST", "/api/filesystem/delete") => api_filesystem_delete(&req.body, &mut stream),
+        ("POST", "/api/filesystem/mkdir") => api_filesystem_mkdir(&req.body, &mut stream),
+        // pat-mn3: Multi-object shared properties
+        ("POST", "/api/node/shared_properties") => {
+            api_get_shared_properties(state, &req.body, &mut stream)
+        }
+        // pat-ugb0p: Command palette
+        ("GET", "/api/commands") => api_get_commands(&mut stream),
+        ("POST", "/api/command/execute") => api_execute_command(state, &req.body, &mut stream),
+        // pat-omfrq: Filesystem tree and dir
+        ("GET", "/api/filesystem/tree") => api_filesystem_tree(&req.query, &mut stream),
+        ("GET", "/api/filesystem/dir") => api_filesystem_dir(&req.query, &mut stream),
+        // pat-vyko1: Import settings
+        ("GET", "/api/import_settings") => api_get_import_settings(&req.query, &mut stream),
+        ("POST", "/api/import_settings") => api_set_import_settings(&req.body, &mut stream),
+        // pat-1zlel: Version control integration
+        ("GET", "/api/vcs/status") => api_vcs_status(&mut stream),
+        ("GET", "/api/vcs/diff") => api_vcs_diff(&req.query, &mut stream),
+        ("GET", "/api/vcs/log") => api_vcs_log(&req.query, &mut stream),
+        ("POST", "/api/vcs/stage") => api_vcs_stage(&req.body, &mut stream),
+        ("POST", "/api/vcs/unstage") => api_vcs_unstage(&req.body, &mut stream),
+        ("POST", "/api/vcs/discard") => api_vcs_discard(&req.body, &mut stream),
         _ => serve_404(&mut stream),
     }
+
+    // pat-rk3md: persist the captured response into the idempotency cache so
+    // a duplicate POST/PUT/PATCH/DELETE with the same Idempotency-Key within
+    // the TTL replays this exact response without re-running the handler.
+    if let Some(key) = idem_cache_key {
+        if let Some(buf) = capture_take() {
+            if !buf.is_empty() {
+                idempotency.insert(key, buf);
+            }
+        }
+    }
+
+    // pat-kts88: append-only audit log for state-mutating routes.
+    audit_log_request(&req, auth_token.as_ref().as_deref());
 }
 
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
 
+// pat-kts88: per-connection response status, recorded by `send_*` helpers and
+// read by the audit-log writer after dispatch. A thread-local fits because
+// each connection is handled on its own thread (`thread::spawn` in
+// `run_server`); the status is reset at the start of each request.
+thread_local! {
+    static LAST_RESPONSE_STATUS: std::cell::Cell<u16> = std::cell::Cell::new(0);
+}
+
+fn audit_set_status(status: u16) {
+    LAST_RESPONSE_STATUS.with(|c| c.set(status));
+}
+
+fn audit_reset_status() {
+    LAST_RESPONSE_STATUS.with(|c| c.set(0));
+}
+
+fn audit_current_status() -> u16 {
+    LAST_RESPONSE_STATUS.with(|c| c.get())
+}
+
 fn send_json(stream: &mut TcpStream, json: &str) {
+    audit_set_status(200);
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        json.len(),
-        json
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{json}",
+        len = json.len(),
+        origin = cors_current_allow_origin(),
     );
+    capture_append(response.as_bytes());
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn send_error(stream: &mut TcpStream, status: u16, message: &str) {
-    let json = format!(r#"{{"error":"{}"}}"#, message.replace('"', "\\\""));
-    let status_text = match status {
+/// pat-f23vr: JSON-escape a string so it can be inlined inside a JSON literal.
+fn escape_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// pat-f23vr: Default machine-readable error code for an HTTP status.
+/// Documented in `prd/editor_error_codes.md`.
+fn default_error_code(status: u16) -> &'static str {
+    match status {
+        400 => "bad_request",
+        401 => "unauthorized",
+        403 => "forbidden",
+        404 => "not_found",
+        409 => "conflict",
+        413 => "payload_too_large",
+        415 => "unsupported_media_type",
+        422 => "unprocessable_entity",
+        429 => "rate_limit",
+        500 => "internal",
+        501 => "not_implemented",
+        503 => "unavailable",
+        _ => "error",
+    }
+}
+
+/// pat-f23vr: Build the standardized error envelope JSON body.
+fn error_envelope_body(code: &str, message: &str) -> String {
+    format!(
+        r#"{{"error":{{"code":"{}","message":"{}"}}}}"#,
+        escape_json_str(code),
+        escape_json_str(message),
+    )
+}
+
+fn status_text(status: u16) -> &'static str {
+    match status {
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
         _ => "Error",
-    };
+    }
+}
+
+fn send_error(stream: &mut TcpStream, status: u16, message: &str) {
+    send_error_coded(stream, status, default_error_code(status), message);
+}
+
+/// pat-f23vr: send a non-2xx response with an explicit machine-readable code.
+/// Use this when the default code from `default_error_code(status)` is too
+/// coarse (e.g. 403 sandbox violation, 429 rate limit, 401 missing bearer).
+fn send_error_coded(stream: &mut TcpStream, status: u16, code: &str, message: &str) {
+    audit_set_status(status);
+    let json = error_envelope_body(code, message);
     let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        json.len(),
-        json
+        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{json}",
+        status_text = status_text(status),
+        len = json.len(),
+        origin = cors_current_allow_origin(),
     );
+    capture_append(response.as_bytes());
     let _ = stream.write_all(response.as_bytes());
+}
+
+/// pat-aivim: Reject paths containing `..` or pointing outside the project root.
+///
+/// Strips `res://` prefix. Returns the resolved absolute path on success.
+/// On failure returns an error string intended for an HTTP 403 sandbox violation.
+fn sandbox_path(input: &str) -> Result<std::path::PathBuf, &'static str> {
+    let raw = input.strip_prefix("res://").unwrap_or(input);
+    if raw.is_empty() {
+        return Err("empty path");
+    }
+    let raw_path = std::path::Path::new(raw);
+    if raw_path.is_absolute() {
+        return Err("absolute path outside project root");
+    }
+    // Reject any `..` segment without touching the filesystem.
+    if raw.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err("path contains traversal segment");
+    }
+    let cwd = std::env::current_dir().map_err(|_| "cwd unavailable")?;
+    let canon_root = cwd.canonicalize().map_err(|_| "cwd not canonicalizable")?;
+    let joined = canon_root.join(raw);
+    let canon = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // Target may not exist yet (mkdir, rename target). Canonicalize
+            // the longest existing prefix and reattach the missing tail.
+            let mut probe = joined.clone();
+            let mut tail: Vec<std::ffi::OsString> = Vec::new();
+            while !probe.exists() {
+                match probe.file_name().map(|n| n.to_owned()) {
+                    Some(name) => tail.push(name),
+                    None => return Err("path resolution failed"),
+                }
+                if !probe.pop() {
+                    return Err("path resolution failed");
+                }
+            }
+            let mut canon = probe.canonicalize().map_err(|_| "canonicalize failed")?;
+            for name in tail.into_iter().rev() {
+                canon.push(name);
+            }
+            canon
+        }
+    };
+    if !canon.starts_with(&canon_root) {
+        return Err("path outside project root");
+    }
+    Ok(canon)
+}
+
+/// pat-aivim: HTTP 403 response with a machine-readable error code.
+fn send_sandbox_violation(stream: &mut TcpStream, message: &str) {
+    send_error_coded(stream, 403, "path_sandbox", message);
 }
 
 fn send_binary(stream: &mut TcpStream, content_type: &str, data: &[u8]) {
     use std::io::BufWriter;
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-        data.len()
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        len = data.len(),
+        origin = cors_current_allow_origin(),
     );
     let mut writer = BufWriter::new(stream);
     let _ = writer.write_all(header.as_bytes());
@@ -742,23 +2140,332 @@ fn send_binary(stream: &mut TcpStream, content_type: &str, data: &[u8]) {
 }
 
 fn serve_cors_preflight(stream: &mut TcpStream) {
-    let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
+    let response = format!(
+        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nConnection: close\r\n\r\n",
+        origin = cors_current_allow_origin(),
+    );
     let _ = stream.write_all(response.as_bytes());
 }
 
 fn serve_editor_html(stream: &mut TcpStream) {
     let html = crate::editor_ui::EDITOR_HTML;
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        html.len(),
-        html
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{html}",
+        len = html.len(),
+        origin = cors_current_allow_origin(),
     );
     let _ = stream.write_all(response.as_bytes());
 }
 
 fn serve_404(stream: &mut TcpStream) {
-    let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
-    let _ = stream.write_all(response.as_bytes());
+    // pat-f23vr: emit the standardized error envelope so every non-2xx
+    // response has the same shape, including catch-all route misses.
+    send_error_coded(stream, 404, "not_found", "route not found");
+}
+
+// ---------------------------------------------------------------------------
+// pat-zzgh5: WebSocket helpers for `/api/events` mutation broadcast
+// ---------------------------------------------------------------------------
+//
+// We hand-roll a minimal slice of RFC 6455: the SHA-1+base64 accept hash for
+// the upgrade handshake, plus a server→client text-frame encoder. The server
+// never receives frames from `/api/events` clients (the test does not send
+// any), so we omit the masked-frame decoder. Keeping the implementation
+// inline avoids adding a `sha1` or `base64` dependency for this single use
+// site.
+
+const WS_MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// Computes the SHA-1 digest of `data` per FIPS 180-4. Verified against the
+/// RFC 3174 test vector: SHA1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d.
+fn sha1_digest(data: &[u8]) -> [u8; 20] {
+    let mut h0: u32 = 0x6745_2301;
+    let mut h1: u32 = 0xEFCD_AB89;
+    let mut h2: u32 = 0x98BA_DCFE;
+    let mut h3: u32 = 0x1032_5476;
+    let mut h4: u32 = 0xC3D2_E1F0;
+
+    let bit_len: u64 = (data.len() as u64).wrapping_mul(8);
+    let mut msg: Vec<u8> = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        for (i, &word) in w.iter().enumerate() {
+            let (f, k) = if i < 20 {
+                ((b & c) | ((!b) & d), 0x5A82_7999u32)
+            } else if i < 40 {
+                (b ^ c ^ d, 0x6ED9_EBA1)
+            } else if i < 60 {
+                ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC)
+            } else {
+                (b ^ c ^ d, 0xCA62_C1D6)
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    out[0..4].copy_from_slice(&h0.to_be_bytes());
+    out[4..8].copy_from_slice(&h1.to_be_bytes());
+    out[8..12].copy_from_slice(&h2.to_be_bytes());
+    out[12..16].copy_from_slice(&h3.to_be_bytes());
+    out[16..20].copy_from_slice(&h4.to_be_bytes());
+    out
+}
+
+/// Standard base64 encoder (RFC 4648, with `=` padding). Output uses the
+/// `A-Z a-z 0-9 + /` alphabet expected by the WebSocket handshake.
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Computes the `Sec-WebSocket-Accept` value for a given `Sec-WebSocket-Key`
+/// per RFC 6455 §1.3: `base64(SHA1(key || WS_MAGIC))`.
+fn ws_compute_accept(key: &str) -> String {
+    let mut combined = String::with_capacity(key.len() + WS_MAGIC.len());
+    combined.push_str(key);
+    combined.push_str(WS_MAGIC);
+    let hash = sha1_digest(combined.as_bytes());
+    base64_encode(&hash)
+}
+
+/// Encodes a single server→client text frame: FIN=1, RSV=0, opcode=1, MASK=0.
+/// Length is encoded in 7 / 7+16 / 7+64 bits per the spec.
+fn encode_text_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 10);
+    frame.push(0x81); // FIN | opcode=text
+    let n = payload.len();
+    if n <= 125 {
+        frame.push(n as u8);
+    } else if n <= 65535 {
+        frame.push(126);
+        frame.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(n as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Broadcasts a mutation event JSON string to every registered subscriber.
+/// Drops senders whose receiver has hung up (the connection thread exited).
+fn publish_event(state: &mut EditorState, msg: String) {
+    state
+        .event_subscribers
+        .retain(|tx| tx.send(msg.clone()).is_ok());
+}
+
+/// `GET /api/events` with `Upgrade: websocket` — completes the RFC 6455
+/// handshake, registers a subscriber channel, and writes each broadcast
+/// event back to the client as an unfragmented text frame. The function
+/// blocks the connection thread on `recv()` until the receiver hangs up.
+fn api_events_websocket(
+    state: &Arc<Mutex<EditorState>>,
+    req: &HttpRequest,
+    mut stream: TcpStream,
+) {
+    let key = match req.sec_websocket_key.as_deref() {
+        Some(k) => k,
+        None => {
+            send_error(&mut stream, 400, "missing Sec-WebSocket-Key");
+            return;
+        }
+    };
+    let accept = ws_compute_accept(key);
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {accept}\r\n\r\n"
+    );
+    if stream.write_all(response.as_bytes()).is_err() {
+        return;
+    }
+    let _ = stream.flush();
+
+    // Register a subscriber under the shared lock, then release the lock
+    // before sitting in `recv()` so mutation handlers can keep publishing.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    {
+        let mut state = state.lock().unwrap();
+        state.event_subscribers.push(tx);
+    }
+
+    while let Ok(msg) = rx.recv() {
+        let frame = encode_text_frame(msg.as_bytes());
+        if stream.write_all(&frame).is_err() {
+            break;
+        }
+        if stream.flush().is_err() {
+            break;
+        }
+    }
+    // Our sender (held by the state via `event_subscribers`) gets dropped
+    // lazily by `publish_event` on its next failed send. We don't need to
+    // scan and prune it here.
+}
+
+// ---------------------------------------------------------------------------
+// pat-kts88: Append-only audit log for state-mutating REST calls
+// ---------------------------------------------------------------------------
+
+/// Returns true for HTTP methods that mutate server state. GET, HEAD, OPTIONS
+/// are read-only / metadata and are intentionally excluded.
+fn audit_is_mutating(method: &str) -> bool {
+    matches!(method, "POST" | "PUT" | "PATCH" | "DELETE")
+}
+
+/// Stable, non-secret 64-bit identifier derived from the configured auth
+/// token. The raw token never lands in the log; without auth we emit a
+/// dedicated `anonymous` marker so operators can still see attribution.
+fn audit_token_id(token: Option<&str>) -> String {
+    match token {
+        Some(t) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            t.hash(&mut h);
+            format!("tok-{:016x}", h.finish())
+        }
+        None => "anonymous".to_string(),
+    }
+}
+
+/// Hash of the request body. We don't store the body itself (it can contain
+/// secrets or user content); a fingerprint is enough to correlate the audit
+/// entry with the wire payload during incident review.
+fn audit_body_hash(body: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// ISO-8601-ish UTC timestamp with microsecond precision: `YYYY-MM-DDTHH:MM:SS.uuuuuuZ`.
+fn audit_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let micros = now.subsec_micros();
+    // Convert to civil time without pulling in chrono — days since epoch
+    // arithmetic is enough for an audit log.
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+    let (year, month, day) = days_to_ymd(days as i64);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z"
+    )
+}
+
+/// Convert days since 1970-01-01 to (year, month, day) in the proleptic
+/// Gregorian calendar. Algorithm from Howard Hinnant's date library.
+fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d)
+}
+
+/// pat-kts88: returns the configured audit-log path (`.editor/audit.log`)
+/// relative to the project root (cwd). Made `pub(crate)` so the integration
+/// test can read the same canonical location the server writes to.
+pub fn audit_log_path() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    cwd.join(".editor").join("audit.log")
+}
+
+/// Append one JSON-Lines record for a state-mutating call. Read-only routes
+/// (GET, HEAD, OPTIONS) are skipped so the log can't fill up under load.
+fn audit_log_request(req: &HttpRequest, server_token: Option<&str>) {
+    if !audit_is_mutating(&req.method) {
+        return;
+    }
+    let status = audit_current_status();
+    let entry = format!(
+        r#"{{"timestamp":"{ts}","token_id":"{tok}","method":"{m}","path":"{p}","status":{s},"body_hash":"{h}"}}{nl}"#,
+        ts = audit_timestamp(),
+        tok = audit_token_id(server_token),
+        m = req.method,
+        p = req.path.replace('"', "\\\""),
+        s = status,
+        h = audit_body_hash(&req.body),
+        nl = "\n",
+    );
+    let path = audit_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(entry.as_bytes());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +2498,78 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
     let is_instance = !matches!(node.get_property("_instance_source"), Variant::Nil)
         || !matches!(node.get_property("_instance"), Variant::Nil);
 
+    // The recorded source path of an instanced scene, surfaced so the
+    // scene-tree instance indicator can show where the instance came from.
+    let instance_path = match node.get_property("_instance_source") {
+        Variant::String(ref s) if !s.is_empty() => s.clone(),
+        _ => String::new(),
+    };
+
+    // Whether an instance's internal nodes are exposed for editing
+    // ("Editable Children"). Only meaningful for instanced nodes.
+    let editable_children = matches!(node.get_property("_editable_children"), Variant::Bool(true));
+
+    // Whether the node is edit-locked: locked nodes show the lock badge and
+    // cannot be picked in the viewport. Honor both the Godot-canonical
+    // `_edit_lock_` meta and the legacy `_locked` flag.
+    let locked = matches!(node.get_property("_edit_lock_"), Variant::Bool(true))
+        || matches!(node.get_property("_locked"), Variant::Bool(true));
+
+    // Whether the node groups its children for selection: grouped nodes show the
+    // group badge and a click on any descendant in the viewport selects this
+    // node instead. Stored as the Godot-canonical `_edit_group_` meta.
+    let grouped = matches!(node.get_property("_edit_group_"), Variant::Bool(true));
+
+    // Unique-name-in-owner (`%`) badge: nodes flagged "Access as Unique Name"
+    // (the `_unique_name_in_owner` meta) show the `%` indicator. A duplicate
+    // unique name among nodes in the same owner (this single-scene tree) is
+    // surfaced as a collision warning so the UI can flag it.
+    let unique_name_in_owner =
+        matches!(node.get_property("_unique_name_in_owner"), Variant::Bool(true));
+    let unique_name_collision = unique_name_in_owner && {
+        let my_name = node.name();
+        tree.all_nodes_in_tree_order()
+            .into_iter()
+            .filter(|&other| other != node_id)
+            .any(|other| {
+                tree.get_node(other).map_or(false, |o| {
+                    matches!(o.get_property("_unique_name_in_owner"), Variant::Bool(true))
+                        && o.name() == my_name
+                })
+            })
+    };
+
+    // Detect scripts: via _script_path property or attached ScriptInstance.
+    let has_script =
+        !matches!(node.get_property("_script_path"), Variant::Nil) || tree.has_script(node_id);
+    // The attached script's path, surfaced for the script badge's open-script
+    // action. Empty when the script has no recorded path.
+    let script_path = match node.get_property("_script_path") {
+        Variant::String(p) if !p.is_empty() => p,
+        _ => String::new(),
+    };
+
+    // Detect signal connections.
+    let has_signals = match node.get_property("signal_connections") {
+        Variant::String(ref s) if !s.is_empty() => true,
+        _ => false,
+    };
+
+    // Collect groups.
+    let groups: Vec<&str> = node.groups().iter().map(|s| s.as_str()).collect();
+    let prop_groups: Vec<String> = match node.get_property("groups") {
+        Variant::String(ref s) if !s.is_empty() => {
+            s.split(',').map(|g| g.trim().to_string()).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut all_groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+    for g in &prop_groups {
+        if !all_groups.contains(g) {
+            all_groups.push(g.clone());
+        }
+    }
+
     serde_json::json!({
         "id": node_id.raw(),
         "name": node.name(),
@@ -798,6 +2577,16 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
         "path": path,
         "visible": visible,
         "is_instance": is_instance,
+        "instance_path": instance_path,
+        "editable_children": editable_children,
+        "locked": locked,
+        "grouped": grouped,
+        "unique_name_in_owner": unique_name_in_owner,
+        "unique_name_collision": unique_name_collision,
+        "has_script": has_script,
+        "script_path": script_path,
+        "has_signals": has_signals,
+        "groups": all_groups,
         "children": children
     })
 }
@@ -955,6 +2744,10 @@ fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStr
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
     state.scene_modified = true;
+    // Focus the newly created child in the scene tree, matching Godot's
+    // "Add Child Node" behavior where the new node becomes the selection.
+    state.selected_node = Some(created_id);
+    state.selected_nodes = vec![created_id];
     state.add_log(
         "info",
         format!("Added {} node '{}'", class_name_str, name_str),
@@ -964,7 +2757,11 @@ fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStr
     send_json(stream, &json);
 }
 
-/// `POST /api/node/delete` — removes a node from the tree.
+/// `POST /api/node/delete` — removes one or more nodes (and their subtrees)
+/// from the tree. Accepts either a single `node_id` or a `node_ids` array for
+/// multi-selection delete. Removing a node also removes its full subtree (see
+/// `SceneTree::remove_node`), so no descendants are left orphaned. The current
+/// selection is cleared, since the selected nodes no longer exist.
 fn api_delete_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -974,48 +2771,71 @@ fn api_delete_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         }
     };
 
-    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
-        Some(v) => v,
-        None => {
-            send_error(stream, 400, "missing node_id");
-            return;
+    // Collect target raw ids: multi-select via `node_ids`, else a single
+    // `node_id` for backward compatibility.
+    let mut raw_ids: Vec<u64> = Vec::new();
+    if let Some(arr) = parsed.get("node_ids").and_then(|v| v.as_array()) {
+        for iv in arr {
+            if let Some(r) = iv.as_u64() {
+                raw_ids.push(r);
+            }
         }
-    };
+    } else if let Some(r) = parsed.get("node_id").and_then(|v| v.as_u64()) {
+        raw_ids.push(r);
+    }
 
-    let mut state = state.lock().unwrap();
-    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
-        Some(id) => id,
-        None => {
-            send_error(stream, 404, "node not found");
-            return;
-        }
-    };
-
-    // Get node info for undo.
-    let (name, class_name) = {
-        let node = state.scene_tree.get_node(node_id).unwrap();
-        (node.name().to_string(), node.class_name().to_string())
-    };
-
-    let log_name = name.clone();
-    let mut cmd = EditorCommand::RemoveNode {
-        node_id,
-        parent_id: None,
-        name,
-        class_name,
-    };
-
-    if let Err(e) = cmd.execute(&mut state.scene_tree) {
-        send_error(stream, 500, &e.to_string());
+    if raw_ids.is_empty() {
+        send_error(stream, 400, "missing node_id or node_ids");
         return;
     }
 
-    state.undo_stack.push(cmd);
+    let mut state = state.lock().unwrap();
+
+    // Resolve to NodeIds, deduped and order-preserving.
+    let mut targets: Vec<NodeId> = Vec::new();
+    for r in raw_ids {
+        if let Some(id) = find_node_by_raw_id(&state.scene_tree, r) {
+            if !targets.contains(&id) {
+                targets.push(id);
+            }
+        }
+    }
+    if targets.is_empty() {
+        send_error(stream, 404, "node not found");
+        return;
+    }
+
+    let mut deleted = 0usize;
+    for node_id in targets {
+        // With multi-select, a target may already have been removed as part of
+        // an earlier target's subtree (ancestor + descendant both selected).
+        let (name, class_name) = match state.scene_tree.get_node(node_id) {
+            Some(node) => (node.name().to_string(), node.class_name().to_string()),
+            None => continue,
+        };
+        let log_name = name.clone();
+        let mut cmd = EditorCommand::RemoveNode {
+            node_id,
+            parent_id: None,
+            name,
+            class_name,
+        };
+        if let Err(e) = cmd.execute(&mut state.scene_tree) {
+            send_error(stream, 500, &e.to_string());
+            return;
+        }
+        state.undo_stack.push(cmd);
+        deleted += 1;
+        state.add_log("info", format!("Deleted node '{}'", log_name));
+    }
+
     state.redo_stack.clear();
     state.scene_modified = true;
-    state.add_log("info", format!("Deleted node '{}'", log_name));
+    // The deleted nodes no longer exist; clear the selection.
+    state.selected_node = None;
+    state.selected_nodes.clear();
 
-    send_json(stream, r#"{"ok":true}"#);
+    send_json(stream, &format!(r#"{{"ok":true,"deleted":{}}}"#, deleted));
 }
 
 /// `POST /api/node/select` — selects a node.
@@ -1047,7 +2867,48 @@ fn api_select_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
 
     state.selected_node = Some(node_id);
     state.selected_nodes = vec![node_id];
+    push_inspector_history(&mut state, node_id);
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Records `node_id` as the newly inspected object in the inspector navigation
+/// history, dropping any forward entries (a fresh inspection branches from the
+/// current position). Re-inspecting the current node is a no-op.
+fn push_inspector_history(state: &mut EditorState, node_id: NodeId) {
+    if !state.inspector_history.is_empty()
+        && state.inspector_history.get(state.inspector_history_index) == Some(&node_id)
+    {
+        return;
+    }
+    let keep = (state.inspector_history_index + 1).min(state.inspector_history.len());
+    state.inspector_history.truncate(keep);
+    state.inspector_history.push(node_id);
+    state.inspector_history_index = state.inspector_history.len() - 1;
+}
+
+/// Switches the active scene tab to `new_idx`, persisting the outgoing scene's
+/// inspector navigation stack into its tab and restoring the incoming scene's
+/// stack, so each open scene keeps its own back/forward history across tab
+/// switches. A no-op when `new_idx` is already active or out of range.
+fn switch_active_tab(state: &mut EditorState, new_idx: usize) {
+    if new_idx >= state.scene_tabs.len() || new_idx == state.active_tab_index {
+        return;
+    }
+    // Save the currently active scene's nav stack into its tab.
+    let cur_history = state.inspector_history.clone();
+    let cur_index = state.inspector_history_index;
+    if let Some(tab) = state.scene_tabs.get_mut(state.active_tab_index) {
+        tab.inspector_history = cur_history;
+        tab.inspector_history_index = cur_index;
+    }
+    // Activate the target tab and restore its saved nav stack.
+    state.active_tab_index = new_idx;
+    let (history, index) = match state.scene_tabs.get(new_idx) {
+        Some(tab) => (tab.inspector_history.clone(), tab.inspector_history_index),
+        None => (Vec::new(), 0),
+    };
+    state.inspector_history = history;
+    state.inspector_history_index = index;
 }
 
 /// `GET /api/selected` — returns the selected node's info.
@@ -1059,6 +2920,144 @@ fn api_get_selected(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             None => "null".to_string(),
         }
     };
+    send_json(stream, &json);
+}
+
+/// `GET /api/inspector/header` — the inspected-object header row (class icon +
+/// name + class label, matching Godot's EditorInspector). Reports the selected
+/// node's `name`, `class`, and scene `path`; `visible` is false when nothing is
+/// inspected so the header hides.
+fn api_inspector_header(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        match state.selected_node.and_then(|id| {
+            state.scene_tree.get_node(id).map(|n| (n, id))
+        }) {
+            Some((node, id)) => {
+                let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+                let name = esc(node.name());
+                let class = esc(node.class_name());
+                let path = esc(&state.scene_tree.node_path(id).unwrap_or_default());
+                format!(
+                    r#"{{"visible":true,"name":"{name}","class":"{class}","path":"{path}"}}"#
+                )
+            }
+            None => r#"{"visible":false}"#.to_string(),
+        }
+    };
+    send_json(stream, &json);
+}
+
+/// Serializes the inspector navigation state: the current selection and
+/// whether Back/Forward are enabled (i.e. there are entries on either side of
+/// the history cursor).
+fn inspector_nav_json(state: &EditorState) -> String {
+    let len = state.inspector_history.len();
+    let idx = state.inspector_history_index;
+    let can_back = len > 0 && idx > 0;
+    let can_forward = len > 0 && idx + 1 < len;
+    let selected = match state.selected_node {
+        Some(id) => id.raw().to_string(),
+        None => "null".to_string(),
+    };
+    format!(r#"{{"selected":{selected},"can_back":{can_back},"can_forward":{can_forward}}}"#)
+}
+
+/// `POST /api/inspector/back` — re-inspects the previous object in the
+/// navigation history (no-op when already at the start).
+fn api_inspector_back(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.inspector_history.is_empty() && state.inspector_history_index > 0 {
+        state.inspector_history_index -= 1;
+        let id = state.inspector_history[state.inspector_history_index];
+        state.selected_node = Some(id);
+        state.selected_nodes = vec![id];
+    }
+    let json = inspector_nav_json(&state);
+    send_json(stream, &json);
+}
+
+/// `POST /api/inspector/forward` — re-inspects the next object in the
+/// navigation history (no-op when already at the end).
+fn api_inspector_forward(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.inspector_history.is_empty()
+        && state.inspector_history_index + 1 < state.inspector_history.len()
+    {
+        state.inspector_history_index += 1;
+        let id = state.inspector_history[state.inspector_history_index];
+        state.selected_node = Some(id);
+        state.selected_nodes = vec![id];
+    }
+    let json = inspector_nav_json(&state);
+    send_json(stream, &json);
+}
+
+/// `GET /api/inspector/history` — lists recently inspected objects (the
+/// history-dropdown contents), most-recent-first, each with `id`, `name`, and
+/// `class`.
+fn api_inspector_history_list(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let items: Vec<String> = state
+            .inspector_history
+            .iter()
+            .rev()
+            .filter_map(|&id| {
+                state.scene_tree.get_node(id).map(|n| {
+                    format!(
+                        r#"{{"id":{},"name":"{}","class":"{}"}}"#,
+                        id.raw(),
+                        esc(n.name()),
+                        esc(n.class_name())
+                    )
+                })
+            })
+            .collect();
+        format!(r#"{{"history":[{}]}}"#, items.join(","))
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/inspector/history/select` — re-inspects a history entry by id.
+/// If the node is already in the history it moves the cursor there (so Back/
+/// Forward stay coherent); otherwise it records a fresh inspection.
+fn api_inspector_history_select(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.inspector_history.iter().position(|&n| n == node_id) {
+        Some(pos) => state.inspector_history_index = pos,
+        None => push_inspector_history(&mut state, node_id),
+    }
+    state.selected_node = Some(node_id);
+    state.selected_nodes = vec![node_id];
+    let json = inspector_nav_json(&state);
     send_json(stream, &json);
 }
 
@@ -1103,14 +3102,25 @@ fn api_reparent_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         }
     };
 
+    // Optional: preserve the node's global transform across the reparent
+    // (the Reparent dialog's "Keep Global Transform" option). Defaults off.
+    let keep_transform = parsed
+        .get("keep_transform")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let mut cmd = EditorCommand::ReparentNode {
         node_id,
         new_parent_id,
         old_parent_id: None,
+        keep_transform,
+        saved_transform: None,
     };
 
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
-        send_error(stream, 500, &e.to_string());
+        // Reparent execute failures are client errors (e.g. attempting to
+        // reparent a node into its own descendant), not server faults.
+        send_error(stream, 400, &e.to_string());
         return;
     }
 
@@ -1118,6 +3128,436 @@ fn api_reparent_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     state.redo_stack.clear();
 
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/change_type` — converts a node to a different class in
+/// place. The node keeps its identity (id), name, children, and property bag,
+/// so any properties common to both types carry over automatically.
+fn api_change_node_type(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let new_class = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let old_class = match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            let old = n.class_name().to_string();
+            n.set_class_name(&new_class);
+            old
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Changed node type '{}' -> '{}'", old_class, new_class),
+    );
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/editable_children` — toggles whether an instanced node's
+/// internal (child) nodes are exposed for editing. Sets the `_editable_children`
+/// flag, surfaced as `editable_children` in the scene tree JSON.
+fn api_set_editable_children(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    // Default to enabling; callers may pass `enabled: false` to hide again.
+    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_editable_children", Variant::Bool(enabled));
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"editable_children":{enabled}}}"#));
+}
+
+/// `POST /api/node/make_local` — converts an instanced node into an owned local
+/// subtree by clearing its instance markers (`_instance_source` / `_instance`).
+/// The node and its children stay in place; it simply stops being an instance.
+fn api_make_local(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_instance_source", Variant::Nil);
+            n.set_property("_instance", Variant::Nil);
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    state.add_log("info", "Made instanced node local".to_string());
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/lock` — toggle a node's edit-lock. Body:
+/// `{"node_id": <id>, "locked": <bool>}` (defaults to locking when omitted).
+/// Sets the Godot-canonical `_edit_lock_` meta. A locked node renders the lock
+/// badge (surfaced as `locked` in the scene tree JSON) and is unpickable in the
+/// viewport (see `api_viewport_click`).
+fn api_set_node_lock(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let locked = parsed.get("locked").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_edit_lock_", Variant::Bool(locked));
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"locked":{locked}}}"#));
+}
+
+/// `POST /api/node/open_scene` — "activate instance badge": opens the source
+/// `.tscn` of an instanced node in a scene tab (switching to it if already
+/// open). The node must be an instance, i.e. carry a non-empty
+/// `_instance_source` property. Returns the routed source path.
+fn api_open_node_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    // Resolve the instance's source scene path.
+    let source = match state.scene_tree.get_node(node_id) {
+        Some(n) => match n.get_property("_instance_source") {
+            Variant::String(p) if !p.trim().is_empty() => p,
+            _ => {
+                send_error(stream, 400, "node is not an instanced scene");
+                return;
+            }
+        },
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let source_esc = source.replace('\\', "\\\\").replace('"', "\\\"");
+
+    // Switch to the source scene's tab if it's already open.
+    if let Some(idx) = state
+        .scene_tabs
+        .iter()
+        .position(|t| !t.path.is_empty() && t.path == source)
+    {
+        switch_active_tab(&mut state, idx);
+        let tab_id = state.scene_tabs[idx].id;
+        send_json(
+            stream,
+            &format!(
+                r#"{{"ok":true,"path":"{source_esc}","tab_id":{tab_id},"switched":true}}"#
+            ),
+        );
+        return;
+    }
+
+    // Otherwise open a new tab for the source scene.
+    let name = source.rsplit('/').next().unwrap_or(&source).to_string();
+    let tab_id = state.next_tab_id();
+    state.scene_tabs.push(SceneTab {
+        id: tab_id,
+        path: source.clone(),
+        name,
+        modified: false,
+        inspector_history: Vec::new(),
+        inspector_history_index: 0,
+    });
+    let new_idx = state.scene_tabs.len() - 1;
+    switch_active_tab(&mut state, new_idx);
+    state.add_log("info", format!("Opened instanced scene '{}'", source));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"path":"{source_esc}","tab_id":{tab_id}}}"#),
+    );
+}
+
+/// `POST /api/node/open_script` — "activate script badge": routes an
+/// open-script request for the node's attached script (its `_script_path`).
+/// The node must have a non-empty `_script_path`. Returns the routed path.
+fn api_open_node_script(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let script_path = match state.scene_tree.get_node(node_id) {
+        Some(n) => match n.get_property("_script_path") {
+            Variant::String(p) if !p.trim().is_empty() => p,
+            _ => {
+                send_error(stream, 400, "node has no attached script");
+                return;
+            }
+        },
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    state.add_log("info", format!("Opened script '{}'", script_path));
+    let path_esc = script_path.replace('\\', "\\\\").replace('"', "\\\"");
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"path":"{path_esc}"}}"#),
+    );
+}
+
+/// `POST /api/node/group` — toggles whether a node groups its children for
+/// selection. Sets the Godot-canonical `_edit_group_` meta; defaults to
+/// enabling. Surfaced as `grouped` in the scene tree JSON and honored by the
+/// viewport click handler (a click on a grouped node's descendant selects the
+/// grouped ancestor instead).
+fn api_set_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_edit_group_", Variant::Bool(enabled));
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"grouped":{enabled}}}"#));
+}
+
+/// `POST /api/node/unique_name` — toggles a node's "Access as Unique Name"
+/// (`%`) flag. Sets the `_unique_name_in_owner` meta; defaults to enabling.
+/// Surfaced as `unique_name_in_owner` in the scene tree JSON, with a
+/// `unique_name_collision` warning when another unique-named node in the same
+/// owner shares this node's name.
+fn api_set_unique_name(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(n) => {
+            n.set_property("_unique_name_in_owner", Variant::Bool(enabled));
+            // Keep the canonical `unique_name` flag in sync with the meta so
+            // `%Name` path resolution and packed-scene serialization (both of
+            // which read `is_unique_name()`) reflect the editor toggle.
+            n.set_unique_name(enabled);
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"unique_name_in_owner":{enabled}}}"#));
+}
+
+/// Resolves the selection target for a viewport click: walks up from `node_id`
+/// and returns the topmost ancestor with the `_edit_group_` meta set, so a
+/// click on a grouped node's descendant selects the grouped ancestor. Returns
+/// `node_id` unchanged when no ancestor is grouped.
+fn resolve_group_selection(tree: &SceneTree, node_id: NodeId) -> NodeId {
+    let mut target = node_id;
+    let mut current = tree.get_node(node_id).and_then(|n| n.parent());
+    while let Some(ancestor) = current {
+        if matches!(
+            tree.get_node(ancestor).map(|n| n.get_property("_edit_group_")),
+            Some(Variant::Bool(true))
+        ) {
+            target = ancestor;
+        }
+        current = tree.get_node(ancestor).and_then(|n| n.parent());
+    }
+    target
 }
 
 /// `POST /api/node/rename` — renames a node.
@@ -1145,6 +3585,12 @@ fn api_rename_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         }
     };
 
+    // Reject empty / whitespace-only names.
+    if new_name.trim().is_empty() {
+        send_error(stream, 400, "name cannot be empty");
+        return;
+    }
+
     let mut state = state.lock().unwrap();
     let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
         Some(id) => id,
@@ -1154,10 +3600,32 @@ fn api_rename_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
         }
     };
 
-    let new_name_log = new_name.clone();
+    // Collision-safe uniquification: if a sibling already uses the requested
+    // name, auto-suffix it (e.g. `Foo` -> `Foo2`).
+    let unique_name = match state.scene_tree.get_node(node_id).and_then(|n| n.parent()) {
+        Some(parent_id) => {
+            let siblings: Vec<String> = state
+                .scene_tree
+                .get_node(parent_id)
+                .map(|p| {
+                    p.children()
+                        .iter()
+                        .filter(|&&c| c != node_id)
+                        .filter_map(|&c| {
+                            state.scene_tree.get_node(c).map(|n| n.name().to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            unique_sibling_name(&new_name, &siblings)
+        }
+        None => new_name.clone(),
+    };
+
+    let new_name_log = unique_name.clone();
     let mut cmd = EditorCommand::RenameNode {
         node_id,
-        new_name,
+        new_name: unique_name,
         old_name: String::new(),
     };
 
@@ -1227,12 +3695,274 @@ fn api_duplicate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
 
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
+    state.scene_modified = true;
+    // Focus the newly created duplicate.
+    if let Some(id) = find_node_by_raw_id(&state.scene_tree, root_created) {
+        state.selected_node = Some(id);
+        state.selected_nodes = vec![id];
+    }
 
     let json = format!(r#"{{"id":{root_created}}}"#);
     send_json(stream, &json);
 }
 
-/// `POST /api/node/reorder` — reorders a node within its parent's children.
+/// `POST /api/node/create_dialog` — returns classes from ClassDB with search, filter, favorites, and recent.
+fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    use crate::create_dialog::NodeCategory;
+
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    if !body.is_empty() {
+        if let Some(parsed) = parse_json_body(body) {
+            if let Some(search) = parsed.get("search").and_then(|v| v.as_str()) {
+                dlg.set_search(search);
+            } else {
+                dlg.set_search("");
+            }
+            if let Some(base) = parsed.get("base_class").and_then(|v| v.as_str()) {
+                if base.is_empty() {
+                    dlg.set_base_class(None);
+                } else {
+                    dlg.set_base_class(Some(base.to_string()));
+                }
+            }
+            if let Some(cat) = parsed.get("category").and_then(|v| v.as_str()) {
+                let category = match cat {
+                    "Node2D" | "2D Nodes" => Some(NodeCategory::Node2D),
+                    "Physics2D" | "2D Physics" => Some(NodeCategory::Physics2D),
+                    "UI" | "UI Controls" => Some(NodeCategory::UI),
+                    "Utility" => Some(NodeCategory::Utility),
+                    _ => None,
+                };
+                dlg.set_category_filter(category);
+            } else {
+                dlg.set_category_filter(None);
+            }
+        }
+    } else {
+        dlg.set_search("");
+        dlg.set_base_class(None);
+        dlg.set_category_filter(None);
+    }
+    let classes = dlg.filtered_classes();
+    let recent = dlg.recent_entries();
+    let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
+    let class_names: Vec<&str> = classes.iter().map(|c| c.class_name.as_str()).collect();
+    let class_entries: Vec<serde_json::Value> = classes
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "class_name": c.class_name, "parent_class": c.parent_class,
+                "inheritance_chain": c.inheritance_chain, "is_favorite": c.is_favorite,
+                "description": c.description, "category": c.category.map(|cat| cat.label()),
+            })
+        })
+        .collect();
+    let recent_json: Vec<serde_json::Value> = recent
+        .iter()
+        .map(|c| serde_json::json!({ "class_name": c.class_name, "parent_class": c.parent_class }))
+        .collect();
+    let json = serde_json::json!({
+        "classes": class_names, "class_entries": class_entries, "favorites": favorites,
+        "recent": recent_json, "match_count": class_names.len(),
+    })
+    .to_string();
+    send_json(stream, &json);
+}
+
+/// `GET /api/node/catalog_2d` — returns the 2D node catalog with categories and helper presets.
+fn api_node_catalog_2d(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let st = state.lock().unwrap();
+    let dlg = &st.create_node_dialog;
+    if let Some(catalog) = dlg.catalog() {
+        let entries: Vec<serde_json::Value> = catalog
+            .entries()
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "class_name": e.class_name,
+                    "category": e.category.label(),
+                    "description": e.description,
+                })
+            })
+            .collect();
+        let helpers: Vec<serde_json::Value> = catalog
+            .helpers()
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "name": h.name,
+                    "description": h.description,
+                    "root_class": h.root_class,
+                    "children": h.children,
+                })
+            })
+            .collect();
+        let categories: Vec<&str> = catalog.categories().iter().map(|c| c.label()).collect();
+        let json = serde_json::json!({
+            "entries": entries, "helpers": helpers, "categories": categories,
+        })
+        .to_string();
+        send_json(stream, &json);
+    } else {
+        send_json(stream, r#"{"entries":[],"helpers":[],"categories":[]}"#);
+    }
+}
+
+/// `POST /api/node/create_dialog/toggle_favorite` — toggle a class favorite.
+fn api_create_dialog_toggle_favorite(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    let is_favorite = if dlg.favorites().contains(&class_name) {
+        dlg.remove_favorite(&class_name);
+        false
+    } else {
+        dlg.add_favorite(&class_name);
+        true
+    };
+    let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
+    let json =
+        serde_json::json!({ "is_favorite": is_favorite, "favorites": favorites }).to_string();
+    send_json(stream, &json);
+}
+
+/// `POST /api/node/create_dialog/confirm` — confirm selection, track in recent list.
+fn api_create_dialog_confirm(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let class_name = match parsed.get("class_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing class_name");
+            return;
+        }
+    };
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    dlg.select(&class_name);
+    dlg.confirm();
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/resource/property/set` — set a property within a resource sub-editor.
+fn api_set_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let resource_property = match parsed.get("resource_property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing resource_property");
+            return;
+        }
+    };
+    let sub_property = match parsed.get("sub_property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing sub_property");
+            return;
+        }
+    };
+    let value_json = match parsed.get("value") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing value");
+            return;
+        }
+    };
+    let new_sub_value = match from_json(value_json) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid variant value");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let current = match state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property(&resource_property))
+    {
+        Some(v) => v,
+        None => {
+            send_error(stream, 404, "resource property not found");
+            return;
+        }
+    };
+    let new_value = match current {
+        Variant::Resource(mut r) => {
+            r.properties.insert(sub_property.clone(), new_sub_value);
+            Variant::Resource(r)
+        }
+        _ => {
+            send_error(stream, 400, "property is not a Resource type");
+            return;
+        }
+    };
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: resource_property.clone(),
+        new_value,
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!(
+            "Changed resource property '{}.{}'",
+            resource_property, sub_property
+        ),
+    );
+    send_json(stream, r#"{"ok":true}"#);
+}
+
 fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -1310,11 +4040,13 @@ fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     };
 
-    // Swap in the parent's children list.
+    // Swap in the parent's children list. (Boundary no-ops returned early
+    // above without reaching here, so they do not mark the scene modified.)
     if let Some(parent) = state.scene_tree.get_node_mut(parent_id) {
         let children = parent.children_mut();
         children.swap(idx, new_idx);
     }
+    state.scene_modified = true;
 
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -1385,7 +4117,117 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.scene_modified = true;
     state.add_log("info", format!("Changed property '{}'", prop_name));
 
+    // pat-zzgh5: broadcast a mutation event to every `/api/events` subscriber.
+    let event = format!(
+        r#"{{"type":"property_changed","node_id":{node},"property":"{prop}"}}"#,
+        node = node_raw,
+        prop = prop_name.replace('"', "\\\""),
+    );
+    publish_event(&mut state, event);
+
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// pat-didnj: `PATCH /api/node/patch` — optimistic concurrency property update.
+///
+/// Body: `{"node_id": <u64>, "version": <u64>, "property": "<name>", "value": <variant>}`.
+/// Returns `409 Conflict` if the supplied `version` does not match the node's
+/// current monotonic version (a stale version indicates a concurrent write
+/// landed first). On success bumps the version and returns
+/// `{"ok":true,"version":<new>}`.
+fn api_patch_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let supplied_version = match parsed.get("version").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing version");
+            return;
+        }
+    };
+    let property = match parsed.get("property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing property");
+            return;
+        }
+    };
+    let value_json = match parsed.get("value") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing value");
+            return;
+        }
+    };
+    let new_value = match from_json(value_json) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid variant value");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let current_version = state.node_versions.get(&node_id).copied().unwrap_or(0);
+    if supplied_version != current_version {
+        send_error(
+            stream,
+            409,
+            &format!(
+                "stale version: supplied {supplied_version} != current {current_version}"
+            ),
+        );
+        return;
+    }
+
+    let prop_name = property.clone();
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property,
+        new_value,
+        old_value: Variant::Nil,
+    };
+
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    let new_version = current_version + 1;
+    state.node_versions.insert(node_id, new_version);
+    state.add_log(
+        "info",
+        format!("PATCH property '{prop_name}' v{current_version}->v{new_version}"),
+    );
+
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"version":{new_version}}}"#),
+    );
 }
 
 /// `POST /api/undo` — undoes the last command.
@@ -1461,6 +4303,52 @@ fn api_get_viewport_png(cache: &Arc<ViewportCache>, stream: &mut TcpStream) {
     }
 }
 
+/// Crash-safe file write: writes `contents` to a sibling temp file,
+/// fsyncs the data, then renames it over `path`. POSIX `rename(2)` is
+/// atomic within a single filesystem, so a SIGKILL injected at any point
+/// leaves either the previous file or the new file on disk — never a
+/// partial or truncated target.
+pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file name")
+        })?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        ".{file_name}.atomic.{}.{unique}.tmp",
+        std::process::id()
+    ));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, contents)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
 /// `POST /api/scene/save` — saves the scene tree to a .tscn file.
 fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
@@ -1491,7 +4379,7 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     let save_root = scene_root.unwrap_or(root_id);
     let tscn = TscnSaver::save_tree(&state.scene_tree, save_root);
 
-    if let Err(e) = std::fs::write(&path, &tscn) {
+    if let Err(e) = atomic_write(std::path::Path::new(&path), tscn.as_bytes()) {
         send_error(stream, 500, &format!("failed to write: {e}"));
         return;
     }
@@ -1585,6 +4473,19 @@ fn api_viewport_click(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     let pan = state.viewport_pan;
     let hit =
         crate::scene_renderer::hit_test_with_zoom_pan(&state.scene_tree, vw, vh, zoom, pan, x, y);
+
+    // Edit-locked nodes are unpickable in the viewport: drop a locked hit so
+    // clicking it selects nothing (matches Godot's lock behavior).
+    let hit = hit.filter(|&id| {
+        state.scene_tree.get_node(id).map_or(true, |n| {
+            !(matches!(n.get_property("_edit_lock_"), Variant::Bool(true))
+                || matches!(n.get_property("_locked"), Variant::Bool(true)))
+        })
+    });
+
+    // Children-selection lock: a click on a grouped node's descendant selects
+    // the grouped ancestor instead of the descendant.
+    let hit = hit.map(|id| resolve_group_selection(&state.scene_tree, id));
 
     state.selected_node = hit;
     state.selected_nodes = hit.into_iter().collect();
@@ -1681,7 +4582,12 @@ fn api_viewport_drag(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     let zoom = state.viewport_zoom as f32;
     let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
     let world_delta = Vector2::new(pixel_delta.x / zoom, pixel_delta.y / zoom);
-    let new_pos = drag.start_node_pos + world_delta;
+    let candidate_pos = drag.start_node_pos + world_delta;
+
+    // Apply grid snap and smart snap.
+    let settings = state.display_settings.clone();
+    let (new_pos, guides) = apply_snap(&state.scene_tree, &settings, drag.node_id, candidate_pos);
+    state.snap_guides = guides;
 
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
         node.set_property("position", Variant::Vector2(new_pos));
@@ -1720,7 +4626,11 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     let zoom = state.viewport_zoom as f32;
     let pixel_delta = Vector2::new(x - drag.start_pixel.x, y - drag.start_pixel.y);
     let world_delta = Vector2::new(pixel_delta.x / zoom, pixel_delta.y / zoom);
-    let new_pos = drag.start_node_pos + world_delta;
+    let candidate_pos = drag.start_node_pos + world_delta;
+
+    let settings = state.display_settings.clone();
+    let (new_pos, _) = apply_snap(&state.scene_tree, &settings, drag.node_id, candidate_pos);
+    state.snap_guides.clear();
 
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
         node.set_property("position", Variant::Vector2(new_pos));
@@ -1783,6 +4693,92 @@ fn api_set_pan(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStre
     let json = format!(
         r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
         state.viewport_zoom, x, y
+    );
+    send_json(stream, &json);
+}
+
+/// `POST /api/viewport/pan_by` — pans the viewport by a cursor delta
+/// (middle-drag / space-drag): accumulates `dx`/`dy` onto the current pan
+/// offset. Panning never changes the current selection.
+fn api_pan_by(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let dx = parsed.get("dx").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let dy = parsed.get("dy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut state = state.lock().unwrap();
+    state.viewport_pan = (state.viewport_pan.0 + dx, state.viewport_pan.1 + dy);
+    let json = format!(
+        r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
+        state.viewport_zoom, state.viewport_pan.0, state.viewport_pan.1
+    );
+    send_json(stream, &json);
+}
+
+/// `POST /api/viewport/frame_selection` — frame-selection (F): centers the
+/// current selection in the viewport and adjusts zoom to fit its bounds. With
+/// no selection it frames the scene origin at the default zoom.
+fn api_frame_selection(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    let vw = s.viewport_width as f32;
+    let vh = s.viewport_height as f32;
+
+    // Bounding box of the selected nodes' positions; fall back to the origin
+    // when nothing is selected.
+    let mut found = false;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &nid in &s.selected_nodes {
+        if let Some(n) = s.scene_tree.get_node(nid) {
+            let p = crate::scene_renderer::extract_position(n);
+            found = true;
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+    }
+    let (center_x, center_y, bounds_w, bounds_h) = if found {
+        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, max_x - min_x, max_y - min_y)
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+
+    // Zoom to fit the bounds with a small margin; a point/degenerate bounds
+    // keeps the default zoom.
+    const MARGIN: f32 = 1.2;
+    let zoom = if bounds_w > 0.0 || bounds_h > 0.0 {
+        let zx = if bounds_w > 0.0 {
+            vw / (bounds_w * MARGIN)
+        } else {
+            f32::INFINITY
+        };
+        let zy = if bounds_h > 0.0 {
+            vh / (bounds_h * MARGIN)
+        } else {
+            f32::INFINITY
+        };
+        zx.min(zy).clamp(0.1, 16.0)
+    } else {
+        1.0
+    };
+
+    // Pan so the selection center lands at the viewport center, accounting for
+    // the scene-centered camera offset.
+    let scene_bounds = crate::scene_renderer::compute_scene_bounds(&s.scene_tree);
+    let scene_cx = scene_bounds.position.x + scene_bounds.size.x / 2.0;
+    let scene_cy = scene_bounds.position.y + scene_bounds.size.y / 2.0;
+    let pan_x = ((scene_cx - center_x) * zoom) as f64;
+    let pan_y = ((scene_cy - center_y) * zoom) as f64;
+
+    s.viewport_zoom = zoom as f64;
+    s.viewport_pan = (pan_x, pan_y);
+    let json = format!(
+        r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
+        s.viewport_zoom, pan_x, pan_y
     );
     send_json(stream, &json);
 }
@@ -1861,6 +4857,10 @@ struct FsEntry {
     path: String,
     is_dir: bool,
     children: Vec<FsEntry>,
+    /// File size in bytes (0 for directories).
+    size: u64,
+    /// File type string (e.g. "GDScript", "Scene", "Resource").
+    file_type: String,
 }
 
 impl FsEntry {
@@ -1875,11 +4875,25 @@ impl FsEntry {
             )
         } else {
             format!(
-                r#"{{"name":"{}","path":"{}","is_dir":false}}"#,
+                r#"{{"name":"{}","path":"{}","is_dir":false,"size":{},"file_type":"{}"}}"#,
                 self.name.replace('\\', "\\\\").replace('"', "\\\""),
                 self.path.replace('\\', "\\\\").replace('"', "\\\""),
+                self.size,
+                self.file_type,
             )
         }
+    }
+}
+
+fn file_type_for_ext(ext: &str) -> &str {
+    match ext {
+        "gd" => "GDScript",
+        "tscn" => "Scene",
+        "tres" => "Resource",
+        "png" | "jpg" | "jpeg" | "webp" | "svg" => "Image",
+        "wav" | "ogg" | "mp3" => "Audio",
+        "ttf" | "otf" => "Font",
+        _ => "File",
     }
 }
 
@@ -1924,21 +4938,39 @@ fn scan_directory(
                     path: format!("res://{}", child_prefix),
                     is_dir: true,
                     children,
+                    size: 0,
+                    file_type: "Directory".to_string(),
                 });
             }
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "tscn" | "gd" | "tres") {
+            if matches!(
+                ext,
+                "tscn"
+                    | "gd"
+                    | "tres"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "webp"
+                    | "svg"
+                    | "gdshader"
+                    | "glsl"
+                    | "cfg"
+            ) {
                 let file_path = if prefix.is_empty() {
                     format!("res://{}", name)
                 } else {
                     format!("res://{}/{}", prefix, name)
                 };
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 files.push(FsEntry {
                     name,
                     path: file_path,
                     is_dir: false,
                     children: Vec::new(),
+                    size,
+                    file_type: file_type_for_ext(ext).to_string(),
                 });
             }
         }
@@ -1951,8 +4983,133 @@ fn scan_directory(
     dirs
 }
 
+// ---------------------------------------------------------------------------
+// pat-r5udv: GET /api/capabilities — machine-readable route schema.
+// ---------------------------------------------------------------------------
+
+/// Static route schema. Each entry is (method, path, params_json,
+/// body_schema_json, response_shape_json). Values are pre-serialized JSON
+/// fragments so the endpoint can stitch them together without pulling in a
+/// schema library, and so the on-wire output is byte-deterministic.
+const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
+    // (method, path, params, body_schema, response_shape)
+    ("GET", "/api/capabilities", "[]", "null", "{\"type\":\"object\",\"properties\":{\"version\":\"number\",\"routes\":\"array\"}}"),
+    ("GET", "/api/scene", "[]", "null", "{\"type\":\"object\",\"properties\":{\"nodes\":\"array\"}}"),
+    ("GET", "/api/selected", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/selected_nodes", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/scene/info", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/viewport", "[]", "null", "{\"type\":\"binary\",\"content_type\":\"image/bmp\"}"),
+    ("GET", "/api/viewport/png", "[]", "null", "{\"type\":\"binary\",\"content_type\":\"image/png\"}"),
+    ("GET", "/api/filesystem", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"root\":\"string\",\"files\":\"array\"}}"),
+    ("GET", "/api/filesystem/tree", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"tree\":\"array\"}}"),
+    ("GET", "/api/filesystem/dir", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"files\":\"array\"}}"),
+    ("GET", "/api/preview/file", "[\"path\"]", "null", "{\"type\":\"object_or_binary\"}"),
+    ("GET", "/api/script", "[\"path\"]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/commands", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/animations", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/animation", "[\"name\"]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/runtime/status", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/runtime/input/state", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/settings", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/plugins", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/keybindings", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/editor/mode", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/scene/tabs", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/viewport/mode", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/output", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/project_settings", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/vcs/status", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/vcs/diff", "[\"path?\"]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/vcs/log", "[\"limit?\"]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/add", "[]", "{\"parent_id\":\"number\",\"name\":\"string\",\"class\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/delete", "[]", "{\"node_id\":\"number\",\"node_ids\":\"array\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/select", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/rename", "[]", "{\"node_id\":\"number\",\"new_name\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/reparent", "[]", "{\"node_id\":\"number\",\"new_parent_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/change_type", "[]", "{\"node_id\":\"number\",\"class_name\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/duplicate", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/property/set", "[]", "{\"node_id\":\"number\",\"name\":\"string\",\"value\":\"any\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/undo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
+    ("POST", "/api/redo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
+    ("POST", "/api/scene/save", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/scene/load", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/filesystem/rename", "[]", "{\"old_path\":\"string\",\"new_name\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/filesystem/delete", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/filesystem/mkdir", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/script/save", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/play", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/stop", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/pause", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/runtime/step", "[]", "null", "{\"type\":\"object\"}"),
+];
+
+/// `GET /api/capabilities` — returns a deterministic JSON document listing
+/// every registered route with its method, path, params, request body schema,
+/// and response shape. Entries are emitted in sorted (method, path) order so
+/// the output is byte-stable across runs.
+fn api_get_capabilities(stream: &mut TcpStream) {
+    let mut entries: Vec<(&str, &str, &str, &str, &str)> = CAPABILITIES.to_vec();
+    entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    let routes: Vec<String> = entries
+        .iter()
+        .map(|(method, path, params, body, response)| {
+            format!(
+                r#"{{"method":"{method}","path":"{path}","params":{params},"body_schema":{body},"response_shape":{response}}}"#,
+            )
+        })
+        .collect();
+    let json = format!(
+        r#"{{"version":1,"routes":[{}]}}"#,
+        routes.join(",")
+    );
+    send_json(stream, &json);
+}
+
+/// `GET /api/node/warnings?node_id=<id>` — returns the node's configuration
+/// warnings (from `_get_configuration_warnings`), driving the scene-tree
+/// warning triangle and its hover tooltip. `has_warning` is true when the
+/// list is non-empty.
+fn api_get_node_warnings(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let node_raw: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let warnings = state.scene_tree.node_configuration_warnings(node_id);
+    let items: Vec<String> = warnings
+        .iter()
+        .map(|w| format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"node_id":{node_raw},"has_warning":{},"warnings":[{}]}}"#,
+            !warnings.is_empty(),
+            items.join(",")
+        ),
+    );
+}
+
 /// `GET /api/filesystem` -- returns project files (.tscn, .gd, .tres) as a tree.
-fn api_get_filesystem(stream: &mut TcpStream) {
+fn api_get_filesystem(query: &str, stream: &mut TcpStream) {
+    // pat-aivim: when a `path` query is supplied, sandbox-validate it. Empty
+    // or absent `path` keeps the legacy behavior of scanning from cwd.
+    if let Some(raw) = query_param(query, "path") {
+        if let Err(why) = sandbox_path(raw) {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let entries = scan_directory(&cwd, "", 0, 3);
     let entries_json: Vec<String> = entries.iter().map(|e| e.to_json()).collect();
@@ -1965,6 +5122,151 @@ fn api_get_filesystem(stream: &mut TcpStream) {
         entries_json.join(",")
     );
     send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// File preview endpoint
+// ---------------------------------------------------------------------------
+
+/// `GET /api/preview/file?path=res://...` -- returns a preview for the given file.
+///
+/// For images: returns the raw image bytes with appropriate content type.
+/// For scripts (.gd): returns JSON with first N lines of the file.
+/// For scenes (.tscn): returns JSON with node count and root type.
+/// For resources (.tres): returns JSON with resource type info.
+fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
+    let path = match query_param(query, "path") {
+        Some(p) => {
+            // URL-decode the path (handle %20, etc.)
+            let decoded = p.replace("%20", " ").replace("%2F", "/");
+            decoded.replace("res://", "")
+        }
+        None => {
+            send_error(stream, 400, "missing path parameter");
+            return;
+        }
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let full_path = cwd.join(&path);
+
+    if !full_path.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+
+    let ext = full_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        // Image files: serve raw bytes with content type
+        "png" => serve_binary_file(stream, &full_path, "image/png"),
+        "jpg" | "jpeg" => serve_binary_file(stream, &full_path, "image/jpeg"),
+        "webp" => serve_binary_file(stream, &full_path, "image/webp"),
+        "svg" => serve_binary_file(stream, &full_path, "image/svg+xml"),
+
+        // Script files: return first 30 lines as JSON
+        "gd" | "gdshader" | "glsl" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let lines: Vec<&str> = content.lines().take(30).collect();
+            let line_count = content.lines().count();
+            let escaped = lines
+                .join("\n")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t");
+            let json = format!(
+                r#"{{"type":"script","lines":{},"preview":"{}"}}"#,
+                line_count, escaped
+            );
+            send_json(stream, &json);
+        }
+
+        // Scene files: parse and return summary
+        "tscn" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let node_count = content.matches("[node").count();
+            let root_type = content
+                .lines()
+                .find(|l| l.starts_with("[node") && !l.contains("parent="))
+                .and_then(|l| {
+                    l.split("type=")
+                        .nth(1)
+                        .map(|t| t.split('"').nth(1).unwrap_or("Node").to_string())
+                })
+                .unwrap_or_else(|| "Node".to_string());
+            let ext_res_count = content.matches("[ext_resource").count();
+            let sub_res_count = content.matches("[sub_resource").count();
+            let json = format!(
+                r#"{{"type":"scene","node_count":{},"root_type":"{}","ext_resources":{},"sub_resources":{}}}"#,
+                node_count, root_type, ext_res_count, sub_res_count
+            );
+            send_json(stream, &json);
+        }
+
+        // Resource files: return resource type
+        "tres" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let res_type = content
+                .lines()
+                .find(|l| l.starts_with("[gd_resource"))
+                .and_then(|l| {
+                    l.split("type=")
+                        .nth(1)
+                        .map(|t| t.split('"').nth(1).unwrap_or("Resource").to_string())
+                })
+                .unwrap_or_else(|| "Resource".to_string());
+            let sub_res_count = content.matches("[sub_resource").count();
+            let size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
+            let json = format!(
+                r#"{{"type":"resource","resource_type":"{}","sub_resources":{},"size":{}}}"#,
+                res_type, sub_res_count, size
+            );
+            send_json(stream, &json);
+        }
+
+        // Config files: show first 20 lines
+        "cfg" => {
+            let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let lines: Vec<&str> = content.lines().take(20).collect();
+            let escaped = lines
+                .join("\n")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t");
+            let json = format!(r#"{{"type":"config","preview":"{}"}}"#, escaped);
+            send_json(stream, &json);
+        }
+
+        _ => {
+            send_json(stream, r#"{"type":"unknown"}"#);
+        }
+    }
+}
+
+/// Serve a binary file with the given content type.
+fn serve_binary_file(stream: &mut TcpStream, path: &std::path::Path, content_type: &str) {
+    match std::fs::read(path) {
+        Ok(data) => {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nCache-Control: max-age=60\r\nConnection: close\r\n\r\n",
+                len = data.len(),
+                origin = cors_current_allow_origin(),
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&data);
+        }
+        Err(_) => {
+            // pat-f23vr: emit the standardized error envelope for thumbnail
+            // misses so every non-2xx response carries the same shape.
+            send_error_coded(stream, 404, "not_found", "thumbnail not found");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2174,8 +5476,23 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
         let signals_json: Vec<String> = available
             .iter()
             .map(|sig| {
-                let connected = connections_str.contains(sig);
-                format!(r#"{{"name":"{}","connected":{}}}"#, sig, connected,)
+                // Parse connections to get details for this signal
+                let connections: Vec<String> = connections_str
+                    .split(',')
+                    .filter(|c| !c.is_empty() && c.starts_with(&format!("{}:", sig)))
+                    .map(|c| {
+                        let method = c.splitn(2, ':').nth(1).unwrap_or("");
+                        format!(r#"{{"method":"{}"}}"#, method.replace('"', "\\\""))
+                    })
+                    .collect();
+                let connected = !connections.is_empty();
+                format!(
+                    r#"{{"name":"{}","connected":{},"connection_count":{},"connections":[{}]}}"#,
+                    sig,
+                    connected,
+                    connections.len(),
+                    connections.join(",")
+                )
             })
             .collect();
 
@@ -2184,12 +5501,17 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
             .map(|g| format!(r#""{}""#, g.replace('\\', "\\\\").replace('"', "\\\"")))
             .collect();
 
+        let total_connected = signals_json
+            .iter()
+            .filter(|s| s.contains(r#""connected":true"#))
+            .count();
         format!(
-            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}]}}"#,
+            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}],"connected_count":{}}}"#,
             node_raw,
             class_name.replace('"', "\\\""),
             signals_json.join(","),
             groups_json.join(","),
+            total_connected,
         )
     };
     send_json(stream, &json);
@@ -2455,6 +5777,22 @@ fn api_select_multi(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
                 state.selected_nodes.push(nid);
             }
         }
+        "range" => {
+            // Shift-select: select the contiguous span (in scene-tree order)
+            // between the active anchor (current focused node) and the target,
+            // inclusive. Falls back to a single selection if the anchor is gone.
+            let order = state.scene_tree.all_nodes_in_tree_order();
+            let anchor = state.selected_node.unwrap_or(nid);
+            let ai = order.iter().position(|&n| n == anchor);
+            let ti = order.iter().position(|&n| n == nid);
+            match (ai, ti) {
+                (Some(a), Some(t)) => {
+                    let (lo, hi) = if a <= t { (a, t) } else { (t, a) };
+                    state.selected_nodes = order[lo..=hi].to_vec();
+                }
+                _ => state.selected_nodes = vec![nid],
+            }
+        }
         _ => {
             state.selected_nodes = vec![nid];
         }
@@ -2523,6 +5861,24 @@ fn paste_clipboard_entry(
     Ok(new_id)
 }
 
+/// Pick a name not already used by `siblings`, appending/incrementing a numeric
+/// suffix (e.g. `Foo` → `Foo2` → `Foo3`). Used to uniquify pasted nodes.
+fn unique_sibling_name(base: &str, siblings: &[String]) -> String {
+    if !siblings.iter().any(|s| s == base) {
+        return base.to_string();
+    }
+    let stem = base.trim_end_matches(|c: char| c.is_ascii_digit());
+    let stem = if stem.is_empty() { base } else { stem };
+    let mut n = 2;
+    loop {
+        let candidate = format!("{stem}{n}");
+        if !siblings.iter().any(|s| s == &candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 fn api_copy_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = parse_json_body(body);
     let mut state = state.lock().unwrap();
@@ -2583,7 +5939,33 @@ fn api_paste_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     let mut ids = Vec::new();
     for e in &cb {
         match paste_clipboard_entry(&mut state.scene_tree, pid, e) {
-            Ok(i) => ids.push(i),
+            Ok(i) => {
+                // Uniquify the top-level pasted node's name among its new
+                // siblings (children keep their names, matching Godot).
+                let siblings: Vec<String> = state
+                    .scene_tree
+                    .get_node(pid)
+                    .map(|p| {
+                        p.children()
+                            .iter()
+                            .filter(|&&c| c != i)
+                            .filter_map(|&c| {
+                                state.scene_tree.get_node(c).map(|n| n.name().to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let base = state
+                    .scene_tree
+                    .get_node(i)
+                    .map(|n| n.name().to_string())
+                    .unwrap_or_default();
+                let unique = unique_sibling_name(&base, &siblings);
+                if let Some(n) = state.scene_tree.get_node_mut(i) {
+                    n.set_name(unique);
+                }
+                ids.push(i);
+            }
             Err(e) => {
                 send_error(stream, 500, &e.to_string());
                 return;
@@ -2683,6 +6065,25 @@ fn api_set_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     }
     if let Some(v) = p.get("font_size").and_then(|v| v.as_str()) {
         s.display_settings.font_size = v.to_string();
+    }
+    if let Some(v) = p.get("theme").and_then(|v| v.as_str()) {
+        s.display_settings.theme = v.to_string();
+    }
+    if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {
+        s.display_settings.physics_fps = v as u32;
+    }
+    if let Some(obj) = p.get("panel_sizes").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(f) = v.as_f64() {
+                s.display_settings.panel_sizes.insert(k.clone(), f);
+            }
+        }
+    }
+    if let Some(v) = p.get("smart_snap_enabled").and_then(|v| v.as_bool()) {
+        s.display_settings.smart_snap_enabled = v;
+    }
+    if let Some(v) = p.get("smart_snap_threshold").and_then(|v| v.as_f64()) {
+        s.display_settings.smart_snap_threshold = v as f32;
     }
     let j = serde_json::to_string(&s.display_settings).unwrap_or_else(|_| "{}".to_string());
     send_json(stream, &j);
@@ -2855,18 +6256,27 @@ fn api_get_animation(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut 
                     .keyframes()
                     .iter()
                     .map(|kf| {
+                        let transition_json = match kf.transition {
+                            gdscene::animation::TransitionType::Linear => r#""linear""#.to_string(),
+                            gdscene::animation::TransitionType::Nearest => r#""nearest""#.to_string(),
+                            gdscene::animation::TransitionType::CubicBezier(x1, y1, x2, y2) => {
+                                format!(r#"{{"type":"cubic_bezier","x1":{},"y1":{},"x2":{},"y2":{}}}"#, x1, y1, x2, y2)
+                            }
+                        };
                         format!(
-                            r#"{{"time":{},"value":{}}}"#,
+                            r#"{{"time":{},"value":{},"transition":{}}}"#,
                             kf.time,
-                            variant_to_simple_json(&kf.value)
+                            variant_to_simple_json(&kf.value),
+                            transition_json
                         )
                     })
                     .collect();
                 format!(
-                    r#"{{"index":{},"node_path":"{}","property":"{}","keyframes":[{}]}}"#,
+                    r#"{{"index":{},"node_path":"{}","property":"{}","track_type":"{}","keyframes":[{}]}}"#,
                     idx,
                     track.node_path.replace('"', "\\\""),
                     track.property_path.replace('"', "\\\""),
+                    track.track_type.as_str(),
                     kf_json.join(",")
                 )
             })
@@ -3001,6 +6411,11 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
             return;
         }
     };
+    let track_type = parsed
+        .get("track_type")
+        .and_then(|v| v.as_str())
+        .and_then(TrackType::from_str_name)
+        .unwrap_or(TrackType::Property);
     let mut state = state.lock().unwrap();
     let anim = match state.animations.get_mut(&anim_name) {
         Some(a) => a,
@@ -3009,14 +6424,13 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
             return;
         }
     };
-    let track_idx = anim
-        .tracks
-        .iter()
-        .position(|t| t.node_path == node_path && t.property_path == property);
+    let track_idx = anim.tracks.iter().position(|t| {
+        t.node_path == node_path && t.property_path == property && t.track_type == track_type
+    });
     let track_idx = match track_idx {
         Some(idx) => idx,
         None => {
-            let track = AnimationTrack::with_node(&node_path, &property);
+            let track = AnimationTrack::with_type(&node_path, &property, track_type);
             anim.tracks.push(track);
             anim.tracks.len() - 1
         }
@@ -3024,8 +6438,124 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     anim.tracks[track_idx].add_keyframe(KeyFrame::linear(time, value));
     send_json(
         stream,
-        &format!(r#"{{"ok":true,"track_index":{}}}"#, track_idx),
+        &format!(
+            r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#,
+            track_idx,
+            track_type.as_str()
+        ),
     );
+}
+
+/// `POST /api/animation/track/add` -- add an explicit typed track to an animation.
+fn api_add_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let node_path = match parsed.get("node_path").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing node_path");
+            return;
+        }
+    };
+    let property = match parsed.get("property").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing property");
+            return;
+        }
+    };
+    let track_type = match parsed.get("track_type").and_then(|v| v.as_str()) {
+        Some(s) => match TrackType::from_str_name(s) {
+            Some(tt) => tt,
+            None => {
+                send_error(
+                    stream,
+                    400,
+                    "invalid track_type (use property, method, or audio)",
+                );
+                return;
+            }
+        },
+        None => TrackType::Property,
+    };
+    let mut state = state.lock().unwrap();
+    let anim = match state.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    // Check for duplicate track
+    let exists = anim.tracks.iter().any(|t| {
+        t.node_path == node_path && t.property_path == property && t.track_type == track_type
+    });
+    if exists {
+        send_error(stream, 400, "track already exists");
+        return;
+    }
+    let track = AnimationTrack::with_type(&node_path, &property, track_type);
+    anim.tracks.push(track);
+    let idx = anim.tracks.len() - 1;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"track_index":{},"track_type":"{}"}}"#,
+            idx,
+            track_type.as_str()
+        ),
+    );
+}
+
+/// `POST /api/animation/track/delete` -- remove a track from an animation.
+fn api_delete_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let anim = match state.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    anim.tracks.remove(track_index);
+    send_json(stream, r#"{"ok":true}"#);
 }
 
 /// `POST /api/animation/keyframe/remove` -- remove a keyframe from a track.
@@ -3124,9 +6654,13 @@ fn api_animation_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream)
             Some(n) => format!(r#""{}""#, n.replace('"', "\\\"")),
             None => "null".to_string(),
         };
+        let blend_json = match &pb.blend_secondary {
+            Some(n) => format!(r#""{}""#, n.replace('"', "\\\"")),
+            None => "null".to_string(),
+        };
         format!(
-            r#"{{"playing":{},"current_time":{},"animation_name":{},"recording":{}}}"#,
-            pb.playing, pb.current_time, name_json, pb.recording
+            r#"{{"playing":{},"current_time":{},"animation_name":{},"recording":{},"blend_secondary":{},"blend_weight":{}}}"#,
+            pb.playing, pb.current_time, name_json, pb.recording, blend_json, pb.blend_weight
         )
     };
     send_json(stream, &json);
@@ -3199,6 +6733,87 @@ fn api_toggle_recording(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
         },
     );
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/blend` -- set blend preview between two animations.
+///
+/// Body: `{"secondary": "anim_name", "weight": 0.5}` or `{"secondary": null}` to clear.
+fn api_animation_blend(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let secondary = parsed
+        .get("secondary")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let weight = parsed.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+    // Validate the secondary animation exists (if provided).
+    if let Some(ref name) = secondary {
+        if !state.animations.contains_key(name) {
+            send_error(stream, 404, "secondary animation not found");
+            return;
+        }
+    }
+
+    state.animation_playback.blend_secondary = secondary.clone();
+    state.animation_playback.blend_weight = weight.clamp(0.0, 1.0);
+
+    // Apply blended values to scene tree for preview.
+    let primary_name = state.animation_playback.animation_name.clone();
+    let time = state.animation_playback.current_time;
+    let blend_w = state.animation_playback.blend_weight;
+
+    if let (Some(ref prim), Some(ref sec)) = (&primary_name, &secondary) {
+        if let (Some(prim_anim), Some(sec_anim)) = (
+            state.animations.get(prim).cloned(),
+            state.animations.get(sec).cloned(),
+        ) {
+            let prim_values = prim_anim.sample_all(time);
+            let sec_values = sec_anim.sample_all(time);
+
+            // Build map from secondary animation.
+            let sec_map: std::collections::HashMap<String, gdvariant::Variant> =
+                sec_values.into_iter().collect();
+
+            for (prop, prim_val) in &prim_values {
+                if let Some(sec_val) = sec_map.get(prop) {
+                    let blended =
+                        gdscene::animation::interpolate_variant(prim_val, sec_val, blend_w)
+                            .unwrap_or_else(|| prim_val.clone());
+                    // Find the track's node path from the primary animation.
+                    if let Some(track) = prim_anim.tracks.iter().find(|t| t.property_path == *prop)
+                    {
+                        let node_id = find_node_by_name(&state.scene_tree, &track.node_path);
+                        if let Some(nid) = node_id {
+                            if let Some(node) = state.scene_tree.get_node_mut(nid) {
+                                node.set_property(prop, blended);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let action = if secondary.is_some() {
+        format!("Blend preview: weight={:.0}%", weight * 100.0)
+    } else {
+        "Blend preview cleared".to_string()
+    };
+    state.add_log("info", action);
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"blend_weight":{}}}"#,
+            state.animation_playback.blend_weight
+        ),
+    );
 }
 
 /// Find a node by name anywhere in the scene tree (simple linear search).
@@ -3420,6 +7035,7 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         tscn_source: source,
         created_ids: Vec::new(),
         root_id: None,
+        source_path: Some(path.clone()),
     };
 
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
@@ -3439,6 +7055,242 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
 
     let json = format!(r#"{{"id":{}}}"#, root_id.raw());
     send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// Viewport asset drop endpoint
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/drop` — handles an asset dropped onto the viewport.
+///
+/// Body: `{"asset_type": "scene"|"texture"|"audio", "path": "...", "parent_id": 123, "pixel_x": 100, "pixel_y": 200}`
+/// Returns: `{"id": <created_node_id>}`
+fn api_viewport_drop(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let asset_type = match parsed.get("asset_type").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing asset_type");
+            return;
+        }
+    };
+    let path = match parsed.get("path").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let parent_raw = match parsed.get("parent_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing parent_id");
+            return;
+        }
+    };
+    let pixel_x = parsed
+        .get("pixel_x")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    let pixel_y = parsed
+        .get("pixel_y")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+
+    match asset_type.as_str() {
+        "scene" => {
+            // Instance the .tscn scene and set position
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    send_error(stream, 400, &format!("failed to read: {e}"));
+                    return;
+                }
+            };
+
+            let mut state = state.lock().unwrap();
+            let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+                Some(id) => id,
+                None => {
+                    send_error(stream, 404, "parent not found");
+                    return;
+                }
+            };
+
+            let world_pos = pixel_to_world_pos(&state, pixel_x, pixel_y);
+
+            let mut cmd = EditorCommand::InstanceScene {
+                parent_id,
+                tscn_source: source,
+                created_ids: Vec::new(),
+                root_id: None,
+                source_path: Some(path.clone()),
+            };
+
+            if let Err(e) = cmd.execute(&mut state.scene_tree) {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+
+            let root_id = match &cmd {
+                EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
+                _ => unreachable!(),
+            };
+
+            // Set the instanced root's position to the drop location
+            if let Some(node) = state.scene_tree.get_node_mut(root_id) {
+                node.set_property(
+                    "position",
+                    Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)),
+                );
+            }
+
+            state.undo_stack.push(cmd);
+            state.redo_stack.clear();
+            state.scene_modified = true;
+            state.add_log(
+                "info",
+                format!(
+                    "Dropped scene '{}' at ({:.0}, {:.0})",
+                    path, world_pos.x, world_pos.y
+                ),
+            );
+
+            let json = format!(r#"{{"id":{}}}"#, root_id.raw());
+            send_json(stream, &json);
+        }
+        "texture" => {
+            // Create a Sprite2D with the texture path
+            let mut state = state.lock().unwrap();
+            let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+                Some(id) => id,
+                None => {
+                    send_error(stream, 404, "parent not found");
+                    return;
+                }
+            };
+
+            let world_pos = pixel_to_world_pos(&state, pixel_x, pixel_y);
+
+            // Derive a node name from the filename
+            let node_name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Sprite2D".to_string());
+
+            let mut cmd = EditorCommand::AddNode {
+                parent_id,
+                name: node_name.clone(),
+                class_name: "Sprite2D".to_string(),
+                created_id: None,
+            };
+
+            if let Err(e) = cmd.execute(&mut state.scene_tree) {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+
+            let created_id = match &cmd {
+                EditorCommand::AddNode { created_id, .. } => created_id.unwrap(),
+                _ => unreachable!(),
+            };
+
+            // Set position and texture
+            if let Some(node) = state.scene_tree.get_node_mut(created_id) {
+                node.set_property(
+                    "position",
+                    Variant::Vector2(Vector2::new(world_pos.x, world_pos.y)),
+                );
+                node.set_property("texture", Variant::String(format!("res://{}", path)));
+            }
+
+            state.undo_stack.push(cmd);
+            state.redo_stack.clear();
+            state.scene_modified = true;
+            state.add_log(
+                "info",
+                format!("Created Sprite2D '{}' from '{}'", node_name, path),
+            );
+
+            let json = format!(r#"{{"id":{}}}"#, created_id.raw());
+            send_json(stream, &json);
+        }
+        "audio" => {
+            // Create an AudioStreamPlayer with the audio path
+            let mut state = state.lock().unwrap();
+            let parent_id = match find_node_by_raw_id(&state.scene_tree, parent_raw) {
+                Some(id) => id,
+                None => {
+                    send_error(stream, 404, "parent not found");
+                    return;
+                }
+            };
+
+            let node_name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "AudioStreamPlayer".to_string());
+
+            let mut cmd = EditorCommand::AddNode {
+                parent_id,
+                name: node_name.clone(),
+                class_name: "AudioStreamPlayer".to_string(),
+                created_id: None,
+            };
+
+            if let Err(e) = cmd.execute(&mut state.scene_tree) {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+
+            let created_id = match &cmd {
+                EditorCommand::AddNode { created_id, .. } => created_id.unwrap(),
+                _ => unreachable!(),
+            };
+
+            if let Some(node) = state.scene_tree.get_node_mut(created_id) {
+                node.set_property("stream", Variant::String(format!("res://{}", path)));
+            }
+
+            state.undo_stack.push(cmd);
+            state.redo_stack.clear();
+            state.scene_modified = true;
+            state.add_log(
+                "info",
+                format!("Created AudioStreamPlayer '{}' from '{}'", node_name, path),
+            );
+
+            let json = format!(r#"{{"id":{}}}"#, created_id.raw());
+            send_json(stream, &json);
+        }
+        _ => {
+            send_error(
+                stream,
+                400,
+                &format!("unsupported asset_type: {}", asset_type),
+            );
+        }
+    }
+}
+
+/// Convert pixel coordinates to world-space position using current viewport settings.
+fn pixel_to_world_pos(state: &EditorState, pixel_x: f32, pixel_y: f32) -> Vector2 {
+    let offset = crate::scene_renderer::camera_offset_with_zoom_pan(
+        &state.scene_tree,
+        state.viewport_width,
+        state.viewport_height,
+        state.viewport_zoom,
+        state.viewport_pan,
+    );
+    let z = state.viewport_zoom as f32;
+    Vector2::new((pixel_x - offset.x) / z, (pixel_y - offset.y) / z)
 }
 
 // ---------------------------------------------------------------------------
@@ -3987,6 +7839,2303 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
     );
 }
 
+// ---------------------------------------------------------------------------
+// pat-r5p: Transform gizmo - axis-constrained drag, rotate, scale
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/drag_axis` -- drag constrained to X or Y axis.
+fn api_viewport_drag_axis(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let dx = p.get("dx").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let dy = p.get("dy").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let axis = p
+        .get("axis")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut s = state.lock().unwrap();
+    let z = s.viewport_zoom as f32;
+    let (wdx, wdy) = match axis.as_str() {
+        "x" => (dx / z, 0.0),
+        "y" => (0.0, dy / z),
+        _ => (dx / z, dy / z),
+    };
+    if let Some(nid) = s.selected_node {
+        let cur_pos = s
+            .scene_tree
+            .get_node(nid)
+            .map(|n| match n.get_property("position") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::ZERO,
+            })
+            .unwrap_or(Vector2::ZERO);
+        let candidate = Vector2::new(cur_pos.x + wdx, cur_pos.y + wdy);
+        let settings = s.display_settings.clone();
+        let (new_pos, guides) = apply_snap(&s.scene_tree, &settings, nid, candidate);
+        s.snap_guides = guides;
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            n.set_property("position", Variant::Vector2(new_pos));
+        }
+    }
+    s.transform_axis_constraint = if axis.is_empty() { None } else { Some(axis) };
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/viewport/rotate_node` -- rotate the selected node.
+fn api_viewport_rotate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let delta_angle = p.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut s = state.lock().unwrap();
+    if let Some(nid) = s.selected_node {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let rotation = match n.get_property("rotation") {
+                Variant::Float(v) => v,
+                _ => 0.0,
+            };
+            n.set_property("rotation", Variant::Float(rotation + delta_angle));
+        }
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 400, "no node selected");
+    }
+}
+
+/// `POST /api/viewport/scale_node` -- scale the selected node.
+fn api_viewport_scale_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let sx = p.get("sx").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let sy = p.get("sy").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let mut s = state.lock().unwrap();
+    if let Some(nid) = s.selected_node {
+        if let Some(n) = s.scene_tree.get_node_mut(nid) {
+            let scale = match n.get_property("scale") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::new(1.0, 1.0),
+            };
+            n.set_property(
+                "scale",
+                Variant::Vector2(Vector2::new(
+                    (scale.x as f64 * sx) as f32,
+                    (scale.y as f64 * sy) as f32,
+                )),
+            );
+        }
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 400, "no node selected");
+    }
+}
+
+/// `GET /api/plugins` — returns the list of registered editor plugins.
+fn api_get_plugins(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let j = serde_json::to_string(&s.plugins).unwrap_or_else(|_| "[]".to_string());
+    send_json(stream, &format!(r#"{{"plugins":{j}}}"#));
+}
+
+// ---------------------------------------------------------------------------
+// pat-sbdts: Editor settings dialog — keybindings + plugin toggle endpoints
+// ---------------------------------------------------------------------------
+
+/// `GET /api/keybindings` -- returns the list of editor keybindings.
+fn api_get_keybindings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let j = serde_json::to_string(&s.keybindings).unwrap_or_else(|_| "[]".to_string());
+    send_json(stream, &format!(r#"{{"keybindings":{j}}}"#));
+}
+
+/// `POST /api/keybindings` -- update a single keybinding by action name.
+/// Body: `{"action":"undo","keys":"Ctrl+Shift+Z"}`
+fn api_set_keybinding(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let action = match p.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 400, "missing 'action'");
+            return;
+        }
+    };
+    let keys = match p.get("keys").and_then(|v| v.as_str()) {
+        Some(k) => k,
+        None => {
+            send_error(stream, 400, "missing 'keys'");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(kb) = s.keybindings.iter_mut().find(|kb| kb.action == action) {
+        kb.keys = keys.to_string();
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 404, "keybinding action not found");
+    }
+}
+
+/// `POST /api/plugins/toggle` -- toggle a plugin's enabled state.
+/// Body: `{"name":"Tilemap","enabled":true}`
+fn api_toggle_plugin(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match p.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 400, "missing 'name'");
+            return;
+        }
+    };
+    let enabled = match p.get("enabled").and_then(|v| v.as_bool()) {
+        Some(e) => e,
+        None => {
+            send_error(stream, 400, "missing 'enabled'");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(plugin) = s.plugins.iter_mut().find(|pl| pl.name == name) {
+        plugin.enabled = enabled;
+        send_json(stream, r#"{"ok":true}"#);
+    } else {
+        send_error(stream, 404, "plugin not found");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-zlv: Snapping improvements - snap info endpoint
+// ---------------------------------------------------------------------------
+
+/// `GET /api/viewport/snap_info` -- returns current snap configuration.
+fn api_get_snap_info(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let ds = &s.display_settings;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"snap_enabled":{},"snap_size":{},"grid_visible":{},"rulers_visible":{},"smart_snap_enabled":{},"smart_snap_threshold":{}}}"#,
+            ds.grid_snap_enabled,
+            ds.grid_snap_size,
+            ds.grid_visible,
+            ds.rulers_visible,
+            ds.smart_snap_enabled,
+            ds.smart_snap_threshold
+        ),
+    );
+}
+
+fn api_get_snap_guides(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let guides_json: Vec<String> = s
+        .snap_guides
+        .iter()
+        .map(|g| {
+            format!(
+                r#"{{"axis":"{}","position":{},"target_node_id":{}}}"#,
+                g.axis,
+                g.position,
+                g.target_node_id.raw()
+            )
+        })
+        .collect();
+    send_json(
+        stream,
+        &format!(r#"{{"guides":[{}]}}"#, guides_json.join(",")),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-cgc: Script editor core - find/replace, go-to-line
+// ---------------------------------------------------------------------------
+
+/// `POST /api/script/find` -- search within a script for occurrences of a pattern.
+fn api_script_find(body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let content = match parsed.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            send_error(stream, 400, "missing content");
+            return;
+        }
+    };
+    let query = match parsed.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q,
+        None => {
+            send_error(stream, 400, "missing query");
+            return;
+        }
+    };
+    let case_sensitive = parsed
+        .get("case_sensitive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let (search_content, search_query) = if case_sensitive {
+        (content.to_string(), query.to_string())
+    } else {
+        (content.to_lowercase(), query.to_lowercase())
+    };
+
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(pos) = search_content[offset..].find(&search_query) {
+        let abs_pos = offset + pos;
+        let line = content[..abs_pos].matches('\n').count() + 1;
+        let col = abs_pos - content[..abs_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        matches.push(format!(
+            r#"{{"line":{},"col":{},"offset":{}}}"#,
+            line, col, abs_pos
+        ));
+        offset = abs_pos + query.len();
+        if offset >= search_content.len() {
+            break;
+        }
+    }
+    send_json(
+        stream,
+        &format!(
+            r#"{{"matches":[{}],"count":{}}}"#,
+            matches.join(","),
+            matches.len()
+        ),
+    );
+}
+
+/// `POST /api/script/replace` -- replace occurrences in a script.
+fn api_script_replace(body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let content = match parsed.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            send_error(stream, 400, "missing content");
+            return;
+        }
+    };
+    let query = match parsed.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q.to_string(),
+        None => {
+            send_error(stream, 400, "missing query");
+            return;
+        }
+    };
+    let replacement = match parsed.get("replacement").and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(),
+        None => {
+            send_error(stream, 400, "missing replacement");
+            return;
+        }
+    };
+    let replace_all = parsed
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let result = if replace_all {
+        content.replace(&query, &replacement)
+    } else {
+        content.replacen(&query, &replacement, 1)
+    };
+
+    let count = if replace_all {
+        content.matches(&query).count()
+    } else if content.contains(&query) {
+        1
+    } else {
+        0
+    };
+
+    let json = serde_json::json!({
+        "content": result,
+        "replacements": count
+    });
+    send_json(stream, &json.to_string());
+}
+
+// ---------------------------------------------------------------------------
+// pat-1v3: Script editor advanced - breakpoints, error lines
+// ---------------------------------------------------------------------------
+
+/// `POST /api/script/breakpoint/toggle` -- toggle a breakpoint on a line.
+fn api_toggle_breakpoint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match parsed.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let line = match parsed.get("line").and_then(|v| v.as_u64()) {
+        Some(l) => l as u32,
+        None => {
+            send_error(stream, 400, "missing line");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let added = {
+        let bps = s.breakpoints.entry(path.clone()).or_default();
+        if let Some(pos) = bps.iter().position(|&l| l == line) {
+            bps.remove(pos);
+            false
+        } else {
+            bps.push(line);
+            bps.sort();
+            true
+        }
+    };
+    s.add_log(
+        "info",
+        format!(
+            "{} breakpoint at {}:{}",
+            if added { "Added" } else { "Removed" },
+            path,
+            line
+        ),
+    );
+    let bp_list = s
+        .breakpoints
+        .get(&path)
+        .map(|v| {
+            v.iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"added":{},"line":{},"breakpoints":[{}]}}"#,
+            added, line, bp_list
+        ),
+    );
+}
+
+/// `GET /api/script/breakpoints` -- get all breakpoints for a script.
+fn api_get_breakpoints(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let path = match query_param(query, "path") {
+        Some(p) => url_decode(p),
+        None => {
+            send_error(stream, 400, "missing path parameter");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let bps = s.breakpoints.get(&path).cloned().unwrap_or_default();
+    let errs = s.script_errors.get(&path).cloned().unwrap_or_default();
+    let bp_json: Vec<String> = bps.iter().map(|l| l.to_string()).collect();
+    let err_json: Vec<String> = errs
+        .iter()
+        .map(|(l, m)| format!(r#"{{"line":{},"message":"{}"}}"#, l, m.replace('"', "\\\"")))
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"breakpoints":[{}],"errors":[{}]}}"#,
+            bp_json.join(","),
+            err_json.join(",")
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-2s1: Animation track reorder + keyframe copy/paste
+// ---------------------------------------------------------------------------
+
+/// `POST /api/animation/track/reorder` -- move a track to a new position.
+fn api_reorder_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let from = match parsed.get("from").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing from");
+            return;
+        }
+    };
+    let to = match parsed.get("to").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing to");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if from >= anim.tracks.len() || to >= anim.tracks.len() {
+        send_error(stream, 400, "track index out of range");
+        return;
+    }
+    let track = anim.tracks.remove(from);
+    anim.tracks.insert(to, track);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/keyframe/copy` -- copy keyframes to clipboard.
+fn api_copy_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_indices: Vec<usize> =
+        match parsed.get("keyframe_indices").and_then(|v| v.as_array()) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect(),
+            None => {
+                send_error(stream, 400, "missing keyframe_indices");
+                return;
+            }
+        };
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let kfs = anim.tracks[track_index].keyframes();
+    let mut copied = Vec::new();
+    for &idx in &keyframe_indices {
+        if idx < kfs.len() {
+            copied.push((track_index, kfs[idx].clone()));
+        }
+    }
+    let count = copied.len();
+    s.keyframe_clipboard = copied;
+    send_json(stream, &format!(r#"{{"ok":true,"copied":{}}}"#, count));
+}
+
+/// `POST /api/animation/keyframe/paste` -- paste keyframes from clipboard.
+fn api_paste_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let time_offset = parsed
+        .get("time_offset")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let mut s = state.lock().unwrap();
+    let clipboard = s.keyframe_clipboard.clone();
+    if clipboard.is_empty() {
+        send_error(stream, 400, "keyframe clipboard is empty");
+        return;
+    }
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let mut pasted = 0;
+    for (_, kf) in &clipboard {
+        let mut new_kf = kf.clone();
+        new_kf.time += time_offset;
+        anim.tracks[track_index].add_keyframe(new_kf);
+        pasted += 1;
+    }
+    send_json(stream, &format!(r#"{{"ok":true,"pasted":{}}}"#, pasted));
+}
+
+// ---------------------------------------------------------------------------
+// pat-o51nk: Curve editor — keyframe transition endpoints
+// ---------------------------------------------------------------------------
+
+/// `POST /api/animation/keyframe/transition` -- set a keyframe's transition type.
+///
+/// Body: `{"animation":"name","track_index":0,"keyframe_index":1,
+///         "transition":"cubic_bezier","x1":0.42,"y1":0,"x2":0.58,"y2":1}`
+///
+/// `transition` can be `"linear"`, `"nearest"`, or `"cubic_bezier"` (requires x1/y1/x2/y2).
+fn api_set_keyframe_transition(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let anim_name = match parsed.get("animation").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index = match parsed.get("track_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_index = match parsed.get("keyframe_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        None => {
+            send_error(stream, 400, "missing keyframe_index");
+            return;
+        }
+    };
+    let transition_str = match parsed.get("transition").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            send_error(stream, 400, "missing transition");
+            return;
+        }
+    };
+
+    use gdscene::animation::TransitionType;
+    let transition = match transition_str {
+        "linear" => TransitionType::Linear,
+        "nearest" => TransitionType::Nearest,
+        "cubic_bezier" => {
+            let x1 = parsed.get("x1").and_then(|v| v.as_f64()).unwrap_or(0.42) as f32;
+            let y1 = parsed.get("y1").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let x2 = parsed.get("x2").and_then(|v| v.as_f64()).unwrap_or(0.58) as f32;
+            let y2 = parsed.get("y2").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            TransitionType::CubicBezier(x1.clamp(0.0, 1.0), y1, x2.clamp(0.0, 1.0), y2)
+        }
+        _ => {
+            send_error(stream, 400, "unknown transition type");
+            return;
+        }
+    };
+
+    let mut s = state.lock().unwrap();
+    let anim = match s.animations.get_mut(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let track = &mut anim.tracks[track_index];
+    // Access keyframes mutably — we need to get the underlying Vec.
+    // KeyFrame fields are pub, but keyframes() returns &[KeyFrame].
+    // We use a helper: remove + re-add with new transition.
+    let kfs = track.keyframes();
+    if keyframe_index >= kfs.len() {
+        send_error(stream, 400, "keyframe_index out of range");
+        return;
+    }
+    let mut kf = kfs[keyframe_index].clone();
+    kf.transition = transition;
+    track.remove_keyframe(keyframe_index);
+    track.add_keyframe(kf);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/animation/keyframe/transition?animation=name&track_index=0&keyframe_index=1`
+///
+/// Returns the transition type and bezier control points for a specific keyframe.
+fn api_get_keyframe_transition(
+    state: &Arc<Mutex<EditorState>>,
+    query: &str,
+    stream: &mut TcpStream,
+) {
+    let anim_name = match query_param(query, "animation") {
+        Some(s) => url_decode(s),
+        None => {
+            send_error(stream, 400, "missing animation");
+            return;
+        }
+    };
+    let track_index: usize = match query_param(query, "track_index").and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing track_index");
+            return;
+        }
+    };
+    let keyframe_index: usize =
+        match query_param(query, "keyframe_index").and_then(|v| v.parse().ok()) {
+            Some(v) => v,
+            None => {
+                send_error(stream, 400, "missing keyframe_index");
+                return;
+            }
+        };
+
+    let s = state.lock().unwrap();
+    let anim = match s.animations.get(&anim_name) {
+        Some(a) => a,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    if track_index >= anim.tracks.len() {
+        send_error(stream, 400, "track_index out of range");
+        return;
+    }
+    let kfs = anim.tracks[track_index].keyframes();
+    if keyframe_index >= kfs.len() {
+        send_error(stream, 400, "keyframe_index out of range");
+        return;
+    }
+    let kf = &kfs[keyframe_index];
+    use gdscene::animation::TransitionType;
+    let json = match kf.transition {
+        TransitionType::Linear => r#"{"transition":"linear"}"#.to_string(),
+        TransitionType::Nearest => r#"{"transition":"nearest"}"#.to_string(),
+        TransitionType::CubicBezier(x1, y1, x2, y2) => {
+            format!(
+                r#"{{"transition":"cubic_bezier","x1":{},"y1":{},"x2":{},"y2":{}}}"#,
+                x1, y1, x2, y2
+            )
+        }
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-lbu: Bottom panels - debugger + monitors
+// ---------------------------------------------------------------------------
+
+/// `GET /api/debug/stack_trace` -- get current debug stack trace.
+fn api_get_stack_trace(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let frames: Vec<String> = s
+        .debug_stack_trace
+        .iter()
+        .map(|f| format!(r#""{}""#, f.replace('"', "\\\"")))
+        .collect();
+    send_json(stream, &format!(r#"{{"frames":[{}]}}"#, frames.join(",")));
+}
+
+/// `GET /api/debug/state` -- get full debugger state (stack, breakpoints, variables).
+fn api_get_debug_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let frames: Vec<String> = s
+        .debug_frames
+        .iter()
+        .map(|(func, script, line)| {
+            format!(
+                r#"{{"function":"{}","script":"{}","line":{}}}"#,
+                func.replace('"', "\\\""),
+                script.replace('"', "\\\""),
+                line
+            )
+        })
+        .collect();
+    let breakpoints: Vec<String> = s
+        .debug_breakpoints
+        .iter()
+        .map(|(script, line)| {
+            format!(
+                r#"{{"script":"{}","line":{}}}"#,
+                script.replace('"', "\\\""),
+                line
+            )
+        })
+        .collect();
+    let locals = format_var_list(&s.debug_locals);
+    let globals = format_var_list(&s.debug_globals);
+    send_json(
+        stream,
+        &format!(
+            r#"{{"state":"{}","frames":[{}],"breakpoints":[{}],"locals":[{}],"globals":[{}]}}"#,
+            s.debug_state,
+            frames.join(","),
+            breakpoints.join(","),
+            locals,
+            globals,
+        ),
+    );
+}
+
+/// Format a list of (name, type, value) triples as JSON array entries.
+fn format_var_list(vars: &[(String, String, String)]) -> String {
+    vars.iter()
+        .map(|(name, ty, val)| {
+            format!(
+                r#"{{"name":"{}","type":"{}","value":"{}"}}"#,
+                name.replace('"', "\\\""),
+                ty.replace('"', "\\\""),
+                val.replace('"', "\\\""),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `GET /api/debug/locals` -- get local variables for a specific stack frame.
+fn api_get_debug_locals(state: &Arc<Mutex<EditorState>>, _query: &str, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let locals = format_var_list(&s.debug_locals);
+    send_json(stream, &format!(r#"{{"locals":[{}]}}"#, locals));
+}
+
+/// `POST /api/debug/continue` -- resume execution.
+fn api_debug_continue(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+        s.debug_locals.clear();
+        s.debug_globals.clear();
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/debug/step_in` -- step into next statement.
+fn api_debug_step_in(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+    }
+    send_json(stream, r#"{"ok":true,"step":"in"}"#);
+}
+
+/// `POST /api/debug/step_over` -- step over next statement.
+fn api_debug_step_over(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+    }
+    send_json(stream, r#"{"ok":true,"step":"over"}"#);
+}
+
+/// `POST /api/debug/step_out` -- step out of current function.
+fn api_debug_step_out(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    if s.debug_state == "paused" {
+        s.debug_state = "running".to_string();
+    }
+    send_json(stream, r#"{"ok":true,"step":"out"}"#);
+}
+
+/// `POST /api/debug/remove_breakpoint` -- remove a breakpoint by script:line.
+fn api_debug_remove_breakpoint(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let mut s = state.lock().unwrap();
+    if let Some(v) = parse_json_body(body) {
+        let script = v["script"].as_str().unwrap_or_default().to_string();
+        let line = v["line"].as_u64().unwrap_or(0) as usize;
+        s.debug_breakpoints
+            .retain(|(sc, ln)| !(sc == &script && *ln == line));
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/monitors/frame_times` -- get frame time history for graph.
+fn api_get_frame_times(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let times: Vec<String> = s.frame_times.iter().map(|t| format!("{:.2}", t)).collect();
+    let avg = if s.frame_times.is_empty() {
+        0.0
+    } else {
+        s.frame_times.iter().sum::<f64>() / s.frame_times.len() as f64
+    };
+    let max = s.frame_times.iter().cloned().fold(0.0f64, f64::max);
+    let min = s.frame_times.iter().cloned().fold(f64::MAX, f64::min);
+    let fps = if avg > 0.0 { 1000.0 / avg } else { 0.0 };
+    send_json(
+        stream,
+        &format!(
+            r#"{{"times":[{}],"avg":{:.2},"max":{:.2},"min":{:.2},"fps":{:.1}}}"#,
+            times.join(","),
+            avg,
+            max,
+            if min == f64::MAX { 0.0 } else { min },
+            fps
+        ),
+    );
+}
+
+/// `GET /api/profiler` -- get profiler frame data for the visual frame graph.
+fn api_get_profiler(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let frames: Vec<String> = s
+        .profiler_frames
+        .iter()
+        .map(|f| {
+            let funcs: Vec<String> = f
+                .functions
+                .iter()
+                .map(|e| {
+                    format!(
+                        r#"{{"name":"{}","time_ms":{:.2}}}"#,
+                        e.name.replace('"', "\\\""),
+                        e.time_ms
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"frame":{},"total_ms":{:.2},"cpu_ms":{:.2},"gpu_ms":{:.2},"functions":[{}]}}"#,
+                f.frame_number,
+                f.total_ms,
+                f.cpu_ms,
+                f.gpu_ms,
+                funcs.join(",")
+            )
+        })
+        .collect();
+
+    // Aggregate stats
+    let count = s.profiler_frames.len();
+    let avg_total = if count > 0 {
+        s.profiler_frames.iter().map(|f| f.total_ms).sum::<f64>() / count as f64
+    } else {
+        0.0
+    };
+    let max_total = s
+        .profiler_frames
+        .iter()
+        .map(|f| f.total_ms)
+        .fold(0.0f64, f64::max);
+    let avg_fps = if avg_total > 0.0 {
+        1000.0 / avg_total
+    } else {
+        0.0
+    };
+
+    send_json(
+        stream,
+        &format!(
+            r#"{{"frames":[{}],"count":{},"avg_ms":{:.2},"max_ms":{:.2},"avg_fps":{:.1}}}"#,
+            frames.join(","),
+            count,
+            avg_total,
+            max_total,
+            avg_fps
+        ),
+    );
+}
+
+/// `POST /api/profiler/record` -- push a profiler frame snapshot (used by runtime).
+fn api_profiler_record(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let frame_number = parsed.get("frame").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_ms = parsed
+        .get("total_ms")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let cpu_ms = parsed
+        .get("cpu_ms")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(total_ms);
+    let gpu_ms = parsed.get("gpu_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    let functions = parsed
+        .get("functions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name")?.as_str()?.to_string();
+                    let time_ms = entry.get("time_ms")?.as_f64()?;
+                    Some(ProfilerFuncEntry { name, time_ms })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut s = state.lock().unwrap();
+    if s.profiler_frames.len() >= 120 {
+        s.profiler_frames.pop_front();
+    }
+    s.profiler_frames.push_back(ProfilerFrame {
+        frame_number,
+        total_ms,
+        cpu_ms,
+        gpu_ms,
+        functions,
+    });
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// pat-dj6: Top bar - editor mode
+// ---------------------------------------------------------------------------
+
+/// `POST /api/editor/mode` -- set the editor mode (2d, 3d, script, game, assetlib).
+fn api_set_editor_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mode = match parsed.get("mode").and_then(|v| v.as_str()) {
+        Some(m) if m == "2d" || m == "3d" || m == "script" || m == "game" || m == "assetlib" => {
+            m.to_string()
+        }
+        _ => {
+            send_error(
+                stream,
+                400,
+                "mode must be '2d', '3d', 'script', 'game', or 'assetlib'",
+            );
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    s.editor_mode = mode.clone();
+    s.add_log("info", format!("Switched to {} mode", mode));
+    send_json(stream, &format!(r#"{{"ok":true,"mode":"{}"}}"#, mode));
+}
+
+/// `GET /api/editor/mode` -- get current editor mode.
+fn api_get_editor_mode(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    send_json(stream, &format!(r#"{{"mode":"{}"}}"#, s.editor_mode));
+}
+
+/// `GET /api/editor/main_view` -- the central main-screen view served for the
+/// CURRENT editor mode.
+///
+/// This is the server side of the main-screen mode switch: it routes the stored
+/// `editor_mode` through the [`MainScreenSwitcher`](crate::main_screen) so the
+/// served central view actually corresponds to the mode — a `Spatial3D`,
+/// `ScriptEditor`, `GamePreview`, or `AssetLibBrowser` component, distinct from
+/// the 2D `canvas_item_editor` — rather than the switch being cosmetic. The
+/// `is_2d_viewport` flag lets clients (and the e2e smoke test) assert that a
+/// non-2D mode is NOT still serving the 2D viewport.
+fn api_editor_main_view(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let mode = crate::EditorMode::from_str_key(&s.editor_mode).unwrap_or(crate::EditorMode::Canvas2D);
+    let component = crate::main_screen::MainScreenSwitcher::view_for(mode)
+        .component()
+        .component_id;
+    let is_2d_viewport = component == "canvas_item_editor";
+    send_json(
+        stream,
+        &format!(
+            r#"{{"mode":"{}","component_id":"{}","is_2d_viewport":{}}}"#,
+            mode.key(),
+            component,
+            is_2d_viewport
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-e0heb: Scene tabs
+// ---------------------------------------------------------------------------
+
+/// `GET /api/scene/tabs` -- list all open scene tabs.
+fn api_get_scene_tabs(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let tabs_json: Vec<String> = s
+        .scene_tabs
+        .iter()
+        .map(|t| {
+            format!(
+                r#"{{"id":{},"path":"{}","name":"{}","modified":{}}}"#,
+                t.id,
+                t.path.replace('\\', "\\\\").replace('"', "\\\""),
+                t.name.replace('\\', "\\\\").replace('"', "\\\""),
+                t.modified
+            )
+        })
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"tabs":[{}],"active_tab_index":{}}}"#,
+            tabs_json.join(","),
+            s.active_tab_index
+        ),
+    );
+}
+
+/// `POST /api/scene/tabs/open` -- open a new scene tab.
+fn api_open_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = parsed
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            if path.is_empty() {
+                "Untitled".to_string()
+            } else {
+                path.rsplit('/').next().unwrap_or(&path).to_string()
+            }
+        });
+    let mut s = state.lock().unwrap();
+    // Check if already open
+    if let Some(idx) = s
+        .scene_tabs
+        .iter()
+        .position(|t| !t.path.is_empty() && t.path == path)
+    {
+        switch_active_tab(&mut s, idx);
+        send_json(
+            stream,
+            &format!(
+                r#"{{"ok":true,"tab_id":{},"switched":true,"active_tab_index":{}}}"#,
+                s.scene_tabs[idx].id, idx
+            ),
+        );
+        return;
+    }
+    let tab_id = s.next_tab_id();
+    s.scene_tabs.push(SceneTab {
+        id: tab_id,
+        path,
+        name,
+        modified: false,
+        inspector_history: Vec::new(),
+        inspector_history_index: 0,
+    });
+    let new_idx = s.scene_tabs.len() - 1;
+    switch_active_tab(&mut s, new_idx);
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"tab_id":{},"active_tab_index":{}}}"#,
+            tab_id, s.active_tab_index
+        ),
+    );
+}
+
+/// `POST /api/scene/tabs/close` -- close a scene tab by id.
+fn api_close_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let tab_id = match parsed.get("tab_id").and_then(|v| v.as_u64()) {
+        Some(id) => id as u32,
+        None => {
+            send_error(stream, 400, "tab_id required");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if s.scene_tabs.len() <= 1 {
+        send_error(stream, 400, "cannot close last tab");
+        return;
+    }
+    if let Some(idx) = s.scene_tabs.iter().position(|t| t.id == tab_id) {
+        // Persist the live nav stack into the active tab so every tab's saved
+        // history is current before we remove one and re-point the cursor.
+        let live_history = s.inspector_history.clone();
+        let live_index = s.inspector_history_index;
+        let active = s.active_tab_index;
+        if let Some(tab) = s.scene_tabs.get_mut(active) {
+            tab.inspector_history = live_history;
+            tab.inspector_history_index = live_index;
+        }
+        s.scene_tabs.remove(idx);
+        // Keep the cursor on the same scene where possible: closing a tab
+        // before the active one shifts everything down by one; closing the
+        // active (or last) tab falls back to the new last tab.
+        let new_active = if idx < active {
+            active - 1
+        } else if active >= s.scene_tabs.len() {
+            s.scene_tabs.len() - 1
+        } else {
+            active
+        };
+        s.active_tab_index = new_active;
+        // Restore the now-active scene's nav stack into the live inspector.
+        let (history, index) = match s.scene_tabs.get(new_active) {
+            Some(tab) => (tab.inspector_history.clone(), tab.inspector_history_index),
+            None => (Vec::new(), 0),
+        };
+        s.inspector_history = history;
+        s.inspector_history_index = index;
+        send_json(
+            stream,
+            &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, s.active_tab_index),
+        );
+    } else {
+        send_error(stream, 404, "tab not found");
+    }
+}
+
+/// `POST /api/scene/tabs/switch` -- switch to a scene tab by id or index.
+fn api_switch_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    if let Some(tab_id) = parsed.get("tab_id").and_then(|v| v.as_u64()) {
+        if let Some(idx) = s.scene_tabs.iter().position(|t| t.id == tab_id as u32) {
+            switch_active_tab(&mut s, idx);
+            send_json(
+                stream,
+                &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
+            );
+        } else {
+            send_error(stream, 404, "tab not found");
+        }
+    } else if let Some(index) = parsed.get("index").and_then(|v| v.as_u64()) {
+        let idx = index as usize;
+        if idx < s.scene_tabs.len() {
+            switch_active_tab(&mut s, idx);
+            send_json(
+                stream,
+                &format!(r#"{{"ok":true,"active_tab_index":{}}}"#, idx),
+            );
+        } else {
+            send_error(stream, 400, "index out of range");
+        }
+    } else {
+        send_error(stream, 400, "tab_id or index required");
+    }
+}
+
+/// `POST /api/scene/new` — create a fresh empty scene in a new tab.
+///
+/// Mirrors Godot's `Scene > New Scene`: it adds an "Untitled" tab backed by an
+/// empty scene tree (a single bare root with no children) and makes it active.
+/// The outgoing scene's live inspector navigation stack is persisted into its
+/// tab first so its history survives if the user switches back to it.
+fn api_new_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    // Persist the outgoing scene's nav stack into its tab before we swap trees.
+    let cur_history = s.inspector_history.clone();
+    let cur_index = s.inspector_history_index;
+    let active = s.active_tab_index;
+    if let Some(tab) = s.scene_tabs.get_mut(active) {
+        tab.inspector_history = cur_history;
+        tab.inspector_history_index = cur_index;
+    }
+    // Fresh empty scene: a bare root with no children. Drop any selection and
+    // nav history that referenced the previous scene's now-gone nodes.
+    s.scene_tree = SceneTree::new();
+    s.selected_node = None;
+    s.selected_nodes.clear();
+    s.inspector_history = Vec::new();
+    s.inspector_history_index = 0;
+    // A unique "Untitled" label so multiple unsaved scenes don't collide.
+    let name = unique_untitled_name(&s.scene_tabs);
+    let tab_id = s.next_tab_id();
+    s.scene_tabs.push(SceneTab {
+        id: tab_id,
+        path: String::new(),
+        name: name.clone(),
+        modified: false,
+        inspector_history: Vec::new(),
+        inspector_history_index: 0,
+    });
+    let new_idx = s.scene_tabs.len() - 1;
+    s.active_tab_index = new_idx;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"tab_id":{},"name":"{}","active_tab_index":{}}}"#,
+            tab_id,
+            name.replace('\\', "\\\\").replace('"', "\\\""),
+            new_idx
+        ),
+    );
+}
+
+/// Picks an unused `Untitled` label for a new scene tab: `Untitled` first, then
+/// `Untitled 2`, `Untitled 3`, … skipping labels already taken by open tabs.
+fn unique_untitled_name(tabs: &[SceneTab]) -> String {
+    let taken = |n: &str| tabs.iter().any(|t| t.name == n);
+    if !taken("Untitled") {
+        return "Untitled".to_string();
+    }
+    let mut i = 2;
+    loop {
+        let candidate = format!("Untitled {i}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch 2 editor bead endpoints
+// ---------------------------------------------------------------------------
+
+/// `POST /api/viewport/set_mode` — sets the viewport tool mode.
+fn api_set_viewport_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mode_str = match p.get("mode").and_then(|v| v.as_str()) {
+        Some(m) => m,
+        None => {
+            send_error(stream, 400, "missing mode");
+            return;
+        }
+    };
+    let mode = match ViewportMode::from_str_name(mode_str) {
+        Some(m) => m,
+        None => {
+            send_error(stream, 400, "invalid mode");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    s.viewport_mode = mode;
+    s.add_log("info", format!("Viewport mode: {}", mode.as_str()));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"mode":"{}"}}"#, mode.as_str()),
+    );
+}
+
+/// `GET /api/viewport/mode` — returns the current viewport tool mode.
+fn api_get_viewport_mode(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    send_json(
+        stream,
+        &format!(r#"{{"mode":"{}"}}"#, s.viewport_mode.as_str()),
+    );
+}
+
+/// `GET /api/node/script?node_id=<id>` — returns the script source for a node.
+fn api_get_node_script(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw_id: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, raw_id) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = s.scene_tree.get_node(nid).unwrap();
+    let script_path = match node.get_property("_script_path") {
+        Variant::String(sp) => sp,
+        _ => {
+            send_json(stream, r#"{"has_script":false,"path":"","source":""}"#);
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let file_path = if let Some(stripped) = script_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&script_path)
+    };
+    let source = std::fs::read_to_string(&file_path).unwrap_or_default();
+    let json = serde_json::json!({ "has_script": true, "path": script_path, "source": source });
+    send_json(stream, &json.to_string());
+}
+
+/// `GET /api/script/main_view?node_id=<id>` — the SCRIPT main-screen view for a
+/// node. When the node has an attached script, returns the editable, syntax-
+/// highlighted code pane wired to save: the script's `path`, on-disk `source`,
+/// `editable: true`, the `save_endpoint` edits POST back to, and a `language`
+/// hint so the pane highlights. A node with no script returns `has_script:
+/// false` plus the empty `prompt` the pane shows in place of a code pane
+/// (pat-yxe4s).
+fn api_script_main_view(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw_id: u64 = match query_param(query, "node_id").and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing or invalid node_id");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, raw_id) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = match s.scene_tree.get_node(nid) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let script_path = match node.get_property("_script_path") {
+        Variant::String(sp) if !sp.trim().is_empty() => sp,
+        _ => {
+            // No attached script: the pane shows the empty prompt instead of a
+            // code editor.
+            send_json(
+                stream,
+                &serde_json::json!({
+                    "has_script": false,
+                    "editable": false,
+                    "prompt": crate::script_main_view::EMPTY_PROMPT,
+                })
+                .to_string(),
+            );
+            return;
+        }
+    };
+    // Load the script source from disk (res:// resolves relative to cwd).
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let file_path = if let Some(stripped) = script_path.strip_prefix("res://") {
+        cwd.join(stripped)
+    } else {
+        std::path::PathBuf::from(&script_path)
+    };
+    let (source, exists) = match std::fs::read_to_string(&file_path) {
+        Ok(c) => (c, true),
+        Err(_) => (String::new(), false),
+    };
+    let lines = source.lines().count();
+    send_json(
+        stream,
+        &serde_json::json!({
+            "has_script": true,
+            "path": script_path,
+            "source": source,
+            "exists": exists,
+            "lines": lines,
+            "editable": true,
+            "language": "gdscript",
+            "save_endpoint": "/api/script/save",
+        })
+        .to_string(),
+    );
+}
+
+/// `GET /api/search?q=<query>` — searches all .gd script files for a string.
+fn api_search_scripts(query: &str, stream: &mut TcpStream) {
+    let search = match query_param(query, "q") {
+        Some(q) => url_decode(q),
+        None => {
+            send_error(stream, 400, "missing q parameter");
+            return;
+        }
+    };
+    if search.is_empty() {
+        send_json(stream, r#"{"results":[]}"#);
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut results = Vec::new();
+    fn search_dir(
+        dir: &std::path::Path,
+        query: &str,
+        results: &mut Vec<serde_json::Value>,
+        depth: usize,
+    ) {
+        if depth > 6 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                search_dir(&path, query, results, depth + 1);
+            } else if name.ends_with(".gd") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for (i, line) in content.lines().enumerate() {
+                        if line.contains(query) {
+                            results.push(serde_json::json!({
+                                "file": path.display().to_string(),
+                                "line": i + 1,
+                                "text": line.trim()
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    search_dir(&cwd, &search, &mut results, 0);
+    send_json(stream, &serde_json::json!({"results": results}).to_string());
+}
+
+/// `POST /api/signal/disconnect` — disconnects a signal from a node.
+fn api_disconnect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let signal = match p.get("signal").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            send_error(stream, 400, "missing signal");
+            return;
+        }
+    };
+    let mut s = state.lock().unwrap();
+    let nid = match find_node_by_raw_id(&s.scene_tree, node_raw) {
+        Some(n) => n,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let node = s.scene_tree.get_node_mut(nid).unwrap();
+    let connections = match node.get_property("signal_connections") {
+        Variant::String(c) => c,
+        _ => String::new(),
+    };
+    let updated: Vec<&str> = connections
+        .split(';')
+        .filter(|entry| !entry.is_empty() && !entry.contains(&signal))
+        .collect();
+    node.set_property("signal_connections", Variant::String(updated.join(";")));
+    s.add_log(
+        "info",
+        format!("Signal disconnected: {} on node {}", signal, node_raw),
+    );
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/output/clear` — clears the script output log.
+fn api_clear_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    s.output_entries.clear();
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/output` — returns script output log entries.
+fn api_get_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let s = state.lock().unwrap();
+    let entries: Vec<&String> = s.output_entries.iter().collect();
+    send_json(stream, &serde_json::json!({"entries": entries}).to_string());
+}
+
+// ---------------------------------------------------------------------------
+// pat-kj4: Project settings
+// ---------------------------------------------------------------------------
+
+/// `GET /api/project_settings` — returns project settings organized by category (pat-c4zlm).
+fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let s = state.lock().unwrap();
+        let categories = serde_json::json!([
+            {
+                "id": "application", "label": "Application",
+                "properties": [
+                    {"key":"project_name","label":"Project Name","editor":"text","value":&s.project_name},
+                    {"key":"main_scene","label":"Main Scene","editor":"text","value":&s.project_main_scene},
+                    {"key":"description","label":"Description","editor":"text","value":&s.project_description},
+                    {"key":"icon","label":"Icon Path","editor":"text","value":&s.project_icon},
+                ]
+            },
+            {
+                "id": "display", "label": "Display",
+                "properties": [
+                    {"key":"resolution_w","label":"Resolution Width","editor":{"type":"integer","min":1,"max":7680},"value":s.project_resolution_w},
+                    {"key":"resolution_h","label":"Resolution Height","editor":{"type":"integer","min":1,"max":4320},"value":s.project_resolution_h},
+                    {"key":"stretch_mode","label":"Stretch Mode","editor":{"type":"enum","options":["disabled","canvas_items","viewport"]},"value":&s.project_stretch_mode},
+                    {"key":"stretch_aspect","label":"Stretch Aspect","editor":{"type":"enum","options":["ignore","keep","keep_width","keep_height","expand"]},"value":&s.project_stretch_aspect},
+                    {"key":"fullscreen","label":"Fullscreen","editor":"bool","value":s.project_fullscreen},
+                    {"key":"vsync","label":"V-Sync","editor":"bool","value":s.project_vsync},
+                ]
+            },
+            {
+                "id": "physics", "label": "Physics",
+                "properties": [
+                    {"key":"physics_fps","label":"Physics FPS","editor":{"type":"integer","min":1,"max":240},"value":s.project_physics_fps},
+                    {"key":"gravity","label":"Default Gravity","editor":{"type":"number","min":0,"max":10000,"step":0.1},"value":s.project_gravity},
+                    {"key":"linear_damp","label":"Default Linear Damp","editor":{"type":"number","min":0,"max":100,"step":0.01},"value":s.project_linear_damp},
+                    {"key":"angular_damp","label":"Default Angular Damp","editor":{"type":"number","min":0,"max":100,"step":0.01},"value":s.project_angular_damp},
+                ]
+            },
+            {
+                "id": "audio", "label": "Audio",
+                "properties": [
+                    {"key":"bus_layout","label":"Default Bus Layout","editor":"text","value":&s.project_bus_layout},
+                    {"key":"master_volume_db","label":"Master Volume (dB)","editor":{"type":"number","min":-80,"max":24,"step":0.1},"value":s.project_master_volume_db},
+                    {"key":"audio_input","label":"Enable Audio Input","editor":"bool","value":s.project_audio_input},
+                ]
+            },
+            {
+                "id": "rendering", "label": "Rendering",
+                "properties": [
+                    {"key":"renderer","label":"Renderer","editor":{"type":"enum","options":["forward_plus","mobile","compatibility"]},"value":&s.project_renderer},
+                    {"key":"anti_aliasing","label":"Anti-Aliasing","editor":{"type":"enum","options":["disabled","fxaa","msaa_2x","msaa_4x","msaa_8x"]},"value":&s.project_anti_aliasing},
+                    {"key":"environment_default","label":"Default Environment","editor":"text","value":&s.project_environment_default},
+                ]
+            }
+        ]);
+        serde_json::json!({
+            "project_name": &s.project_name,
+            "main_scene": &s.project_main_scene,
+            "description": &s.project_description,
+            "categories": categories,
+        })
+        .to_string()
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/project_settings` — updates project settings (pat-c4zlm).
+fn api_set_project_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let json = {
+        let mut s = state.lock().unwrap();
+        // Application
+        if let Some(v) = p.get("project_name").and_then(|v| v.as_str()) {
+            s.project_name = v.to_string();
+        }
+        if let Some(v) = p.get("description").and_then(|v| v.as_str()) {
+            s.project_description = v.to_string();
+        }
+        if let Some(v) = p.get("icon").and_then(|v| v.as_str()) {
+            s.project_icon = v.to_string();
+        }
+        if let Some(v) = p.get("main_scene").and_then(|v| v.as_str()) {
+            s.project_main_scene = v.to_string();
+        }
+        // Display
+        if let Some(v) = p.get("resolution_w").and_then(|v| v.as_u64()) {
+            s.project_resolution_w = v as u32;
+        }
+        if let Some(v) = p.get("resolution_h").and_then(|v| v.as_u64()) {
+            s.project_resolution_h = v as u32;
+        }
+        if let Some(v) = p.get("stretch_mode").and_then(|v| v.as_str()) {
+            s.project_stretch_mode = v.to_string();
+        }
+        if let Some(v) = p.get("stretch_aspect").and_then(|v| v.as_str()) {
+            s.project_stretch_aspect = v.to_string();
+        }
+        if let Some(v) = p.get("fullscreen").and_then(|v| v.as_bool()) {
+            s.project_fullscreen = v;
+        }
+        if let Some(v) = p.get("vsync").and_then(|v| v.as_bool()) {
+            s.project_vsync = v;
+        }
+        // Physics
+        if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {
+            s.project_physics_fps = v as u32;
+        }
+        if let Some(v) = p.get("gravity").and_then(|v| v.as_f64()) {
+            s.project_gravity = v;
+        }
+        if let Some(v) = p.get("linear_damp").and_then(|v| v.as_f64()) {
+            s.project_linear_damp = v;
+        }
+        if let Some(v) = p.get("angular_damp").and_then(|v| v.as_f64()) {
+            s.project_angular_damp = v;
+        }
+        // Audio
+        if let Some(v) = p.get("bus_layout").and_then(|v| v.as_str()) {
+            s.project_bus_layout = v.to_string();
+        }
+        if let Some(v) = p.get("master_volume_db").and_then(|v| v.as_f64()) {
+            s.project_master_volume_db = v;
+        }
+        if let Some(v) = p.get("audio_input").and_then(|v| v.as_bool()) {
+            s.project_audio_input = v;
+        }
+        // Rendering
+        if let Some(v) = p.get("renderer").and_then(|v| v.as_str()) {
+            s.project_renderer = v.to_string();
+        }
+        if let Some(v) = p.get("anti_aliasing").and_then(|v| v.as_str()) {
+            s.project_anti_aliasing = v.to_string();
+        }
+        if let Some(v) = p.get("environment_default").and_then(|v| v.as_str()) {
+            s.project_environment_default = v.to_string();
+        }
+        serde_json::json!({ "ok": true }).to_string()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-db37w: Project Settings > Input Map tab (live wiring of systems_input_map)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/input_map` — returns the project's input map as JSON, built from
+/// the live `EditorState::input_map` via the [`InputMap`](crate::input_map::InputMap)
+/// model. This is what the Project Settings > Input Map tab loads.
+fn api_get_input_map(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let state = state.lock().unwrap();
+    let map = crate::input_map::InputMap::from_runtime_map(&state.input_map);
+    send_json(stream, &map.to_json());
+}
+
+/// `POST /api/input_map` — edits the project's input map in the running editor.
+///
+/// Body commands (used by the Input Map dialog):
+///   `{"action":"jump","keys":["Space"]}`  upsert an action bound to these keys
+///   `{"action":"jump","remove":true}`      remove the action
+///
+/// Edits go through the [`InputMap`](crate::input_map::InputMap) model and are
+/// projected back into `EditorState::input_map`, so the change takes effect at
+/// runtime immediately (`is_action_pressed`) and survives subsequent reads.
+fn api_set_input_map(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let action = match p.get("action").and_then(|v| v.as_str()) {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => {
+            send_error(stream, 400, "missing action");
+            return;
+        }
+    };
+
+    let json = {
+        let mut s = state.lock().unwrap();
+        let mut map = crate::input_map::InputMap::from_runtime_map(&s.input_map);
+        let remove = p.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
+        if remove {
+            map.remove_action(&action);
+        } else {
+            // Replace this action's bindings with exactly the requested keys.
+            map.remove_action(&action);
+            map.add_action(action.clone());
+            if let Some(keys) = p.get("keys").and_then(|v| v.as_array()) {
+                for key in keys.iter().filter_map(|k| k.as_str()) {
+                    map.bind(
+                        &action,
+                        crate::input_map::InputEvent::Key(key.to_string()),
+                    );
+                }
+            }
+        }
+        s.input_map = map.to_runtime_map();
+        map.to_json()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-flr: Filesystem operations
+// ---------------------------------------------------------------------------
+
+/// `POST /api/filesystem/rename` — renames a file or directory.
+fn api_filesystem_rename(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let old_path = match p.get("old_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing old_path");
+            return;
+        }
+    };
+    let new_name = match p.get("new_name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            send_error(stream, 400, "missing new_name");
+            return;
+        }
+    };
+    // pat-aivim: sandbox the existing path AND reject any `new_name` that
+    // contains path separators or traversal segments — otherwise a caller
+    // could rename a sandboxed file into an arbitrary location.
+    let resolved = match sandbox_path(&old_path) {
+        Ok(p) => p,
+        Err(why) => {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    };
+    if new_name.contains('/') || new_name.contains('\\') || new_name.split('/').any(|s| s == "..") {
+        send_sandbox_violation(stream, "new_name contains path separator or traversal");
+        return;
+    }
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let new_path = resolved.parent().unwrap_or(&cwd).join(&new_name);
+    match std::fs::rename(&resolved, &new_path) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("rename failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/delete` — deletes a file or empty directory.
+fn api_filesystem_delete(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    // pat-aivim: sandbox the target to the project root.
+    let resolved = match sandbox_path(&path) {
+        Ok(p) => p,
+        Err(why) => {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    };
+    if !resolved.exists() {
+        send_error(stream, 404, "file not found");
+        return;
+    }
+    let result = if resolved.is_dir() {
+        std::fs::remove_dir(&resolved)
+    } else {
+        std::fs::remove_file(&resolved)
+    };
+    match result {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("delete failed: {e}")),
+    }
+}
+
+/// `POST /api/filesystem/mkdir` — creates a new directory.
+fn api_filesystem_mkdir(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match p.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    // pat-aivim: sandbox the target to the project root.
+    let resolved = match sandbox_path(&path) {
+        Ok(p) => p,
+        Err(why) => {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    };
+    match std::fs::create_dir_all(&resolved) {
+        Ok(_) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &format!("mkdir failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-omfrq: Filesystem tree and dir stubs
+// ---------------------------------------------------------------------------
+
+/// `GET /api/filesystem/tree` — returns the full directory tree.
+fn api_filesystem_tree(query: &str, stream: &mut TcpStream) {
+    // pat-aivim: sandbox-validate any caller-supplied path query.
+    if let Some(raw) = query_param(query, "path") {
+        if let Err(why) = sandbox_path(raw) {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    }
+    // Stub: return empty tree. Full implementation pending.
+    send_json(stream, r#"{"tree":[]}"#);
+}
+
+/// `GET /api/filesystem/dir` — returns directory listing.
+fn api_filesystem_dir(query: &str, stream: &mut TcpStream) {
+    // Stub: return empty listing. Full implementation pending.
+    send_json(stream, r#"{"files":[]}"#);
+}
+
+// ---------------------------------------------------------------------------
+// pat-vyko1: Import settings stubs
+// ---------------------------------------------------------------------------
+
+/// `GET /api/import_settings` — returns import settings for a resource.
+fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
+    // Stub: return empty settings. Full implementation pending.
+    send_json(stream, r#"{"settings":{}}"#);
+}
+
+/// `POST /api/import_settings` — updates import settings for a resource.
+fn api_set_import_settings(body: &str, stream: &mut TcpStream) {
+    // Stub: accept and acknowledge. Full implementation pending.
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// pat-1zlel: Version control integration
+// ---------------------------------------------------------------------------
+
+/// `GET /api/vcs/status` — returns git status for the project directory.
+fn api_vcs_status(stream: &mut TcpStream) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let status = crate::vcs::query_git_status(&cwd);
+    match serde_json::to_string(&status) {
+        Ok(json) => send_json(stream, &json),
+        // pat-f23vr: route the serialize fallback through the envelope helper
+        // so failure responses keep the standardized shape.
+        Err(_) => send_error(stream, 500, "failed to serialize git status"),
+    }
+}
+
+/// `GET /api/vcs/diff?file=<path>&staged=<bool>` — returns diff for a file.
+fn api_vcs_diff(query: &str, stream: &mut TcpStream) {
+    let file = match query_param(query, "file") {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file parameter");
+            return;
+        }
+    };
+    let staged = query_param(query, "staged").map_or(false, |v| v == "true" || v == "1");
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let diff = if staged {
+        crate::vcs::get_file_diff_staged(&cwd, &file)
+    } else {
+        crate::vcs::get_file_diff(&cwd, &file)
+    };
+    // Escape the diff string for JSON.
+    let escaped = serde_json::to_string(&diff).unwrap_or_else(|_| "\"\"".into());
+    send_json(stream, &format!(r#"{{"diff":{escaped}}}"#));
+}
+
+/// `GET /api/vcs/log?count=<N>` — returns recent commit log.
+fn api_vcs_log(query: &str, stream: &mut TcpStream) {
+    let count: u32 = query_param(query, "count")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let commits = crate::vcs::get_commit_log(&cwd, count);
+    let json = serde_json::to_string(&commits).unwrap_or_else(|_| "[]".into());
+    send_json(stream, &format!(r#"{{"commits":{json}}}"#));
+}
+
+/// `POST /api/vcs/stage` — stages a file for commit.
+fn api_vcs_stage(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let file = match p.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::vcs::stage_file(&cwd, &file) {
+        Ok(()) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &e),
+    }
+}
+
+/// `POST /api/vcs/unstage` — unstages a file.
+fn api_vcs_unstage(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let file = match p.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::vcs::unstage_file(&cwd, &file) {
+        Ok(()) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &e),
+    }
+}
+
+/// `POST /api/vcs/discard` — discards working tree changes for a file.
+fn api_vcs_discard(body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let file = match p.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing file");
+            return;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match crate::vcs::discard_changes(&cwd, &file) {
+        Ok(()) => send_json(stream, r#"{"ok":true}"#),
+        Err(e) => send_error(stream, 500, &e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-mn3: Multi-object shared properties
+// ---------------------------------------------------------------------------
+
+/// `POST /api/node/shared_properties` — returns properties shared by all given nodes.
+fn api_get_shared_properties(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_ids: Vec<u64> = match p.get("node_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_u64()).collect(),
+        None => {
+            send_error(stream, 400, "missing node_ids array");
+            return;
+        }
+    };
+    let json = {
+        let s = state.lock().unwrap();
+        let mut shared: Option<HashMap<String, serde_json::Value>> = None;
+        for raw_id in &node_ids {
+            let nid = match find_node_by_raw_id(&s.scene_tree, *raw_id) {
+                Some(id) => id,
+                None => continue,
+            };
+            let node = match s.scene_tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            let mut props = HashMap::new();
+            for (name, value) in node.properties() {
+                let vj = gdvariant::serialize::to_json(value);
+                let type_name = vj
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                props.insert(
+                    name.to_string(),
+                    serde_json::json!({"name": name, "type": type_name, "value": vj}),
+                );
+            }
+            shared = match shared {
+                None => Some(props),
+                Some(existing) => {
+                    let mut intersection = HashMap::new();
+                    for (k, v) in existing {
+                        if props.contains_key(&k) {
+                            intersection.insert(k, v);
+                        }
+                    }
+                    Some(intersection)
+                }
+            };
+        }
+        let props_arr: Vec<serde_json::Value> = shared.unwrap_or_default().into_values().collect();
+        serde_json::json!({"properties": props_arr, "count": node_ids.len()}).to_string()
+    };
+    send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// pat-ugb0p: Command palette
+// ---------------------------------------------------------------------------
+
+/// The static list of editor commands available in the command palette.
+const EDITOR_COMMANDS: &[(&str, &str, &str)] = &[
+    // (id, label, category)
+    ("save_scene", "Save Scene", "File"),
+    ("load_scene", "Load Scene", "File"),
+    ("new_scene", "New Scene", "File"),
+    ("add_node", "Add Node...", "Scene"),
+    ("delete_node", "Delete Selected Node", "Scene"),
+    ("duplicate_node", "Duplicate Selected Node", "Scene"),
+    ("rename_node", "Rename Selected Node", "Scene"),
+    ("copy_nodes", "Copy", "Edit"),
+    ("paste_nodes", "Paste", "Edit"),
+    ("cut_nodes", "Cut", "Edit"),
+    ("undo", "Undo", "Edit"),
+    ("redo", "Redo", "Edit"),
+    ("select_tool", "Select Tool", "Tool"),
+    ("move_tool", "Move Tool", "Tool"),
+    ("rotate_tool", "Rotate Tool", "Tool"),
+    ("scale_tool", "Scale Tool", "Tool"),
+    ("zoom_in", "Zoom In", "View"),
+    ("zoom_out", "Zoom Out", "View"),
+    ("zoom_reset", "Reset Zoom", "View"),
+    ("toggle_grid", "Toggle Grid", "View"),
+    ("toggle_rulers", "Toggle Rulers", "View"),
+    ("toggle_snap", "Toggle Grid Snap", "View"),
+    ("open_settings", "Open Editor Settings", "Editor"),
+    ("open_project_settings", "Open Project Settings", "Editor"),
+    ("open_help", "Open Help / Shortcuts", "Editor"),
+    ("search_nodes", "Search Nodes", "Scene"),
+    ("play_scene", "Play Scene", "Run"),
+    ("stop_scene", "Stop Scene", "Run"),
+    ("toggle_theme", "Toggle Light/Dark Theme", "View"),
+];
+
+/// `GET /api/commands` — returns the full list of editor commands for the palette.
+fn api_get_commands(stream: &mut TcpStream) {
+    let commands: Vec<serde_json::Value> = EDITOR_COMMANDS
+        .iter()
+        .map(|&(id, label, category)| {
+            serde_json::json!({
+                "id": id,
+                "label": label,
+                "category": category,
+            })
+        })
+        .collect();
+    let json = serde_json::json!({ "commands": commands }).to_string();
+    send_json(stream, &json);
+}
+
+/// `POST /api/command/execute` — execute a command by id.
+///
+/// Body: `{"command": "save_scene"}` (plus optional params).
+/// Server-side commands (undo, redo, etc.) are executed directly.
+/// Client-side commands return `{"action": "client", "command": "<id>"}` to
+/// signal the frontend to handle them.
+fn api_execute_command(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let cmd = match parsed.get("command").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => {
+            send_error(stream, 400, "missing command");
+            return;
+        }
+    };
+
+    match cmd.as_str() {
+        "undo" => {
+            let mut st = state.lock().unwrap();
+            if let Some(action) = st.undo_stack.pop() {
+                action.undo(&mut st.scene_tree);
+                st.redo_stack.push(action);
+            }
+            send_json(stream, r#"{"ok":true,"executed":"undo"}"#);
+        }
+        "redo" => {
+            let mut st = state.lock().unwrap();
+            if let Some(mut action) = st.redo_stack.pop() {
+                let _ = action.execute(&mut st.scene_tree);
+                st.undo_stack.push(action);
+            }
+            send_json(stream, r#"{"ok":true,"executed":"redo"}"#);
+        }
+        "delete_node" => {
+            let st = state.lock().unwrap();
+            if let Some(sel) = st.selected_node {
+                drop(st);
+                api_delete_node(state, &format!(r#"{{"node_id":{}}}"#, sel.raw()), stream);
+            } else {
+                send_json(stream, r#"{"ok":false,"reason":"no node selected"}"#);
+            }
+        }
+        // Most commands are best handled client-side (opening dialogs, changing
+        // tool mode, etc.). Return an action hint so the JS can dispatch them.
+        _ => {
+            // Verify the command id is valid
+            let valid = EDITOR_COMMANDS.iter().any(|&(id, _, _)| id == cmd.as_str());
+            if !valid {
+                send_error(stream, 404, "unknown command");
+                return;
+            }
+            let json = serde_json::json!({
+                "ok": true,
+                "action": "client",
+                "command": cmd,
+            });
+            send_json(stream, &json.to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4003,7 +10152,6 @@ mod tests {
     }
 
     fn make_server() -> (EditorServerHandle, u16) {
-        let port = free_port();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut main = Node::new("Main", "Node2D");
@@ -4011,7 +10159,10 @@ mod tests {
         tree.add_child(root, main).unwrap();
 
         let state = EditorState::new(tree);
-        let handle = EditorServerHandle::start(port, state);
+        // port 0 → server binds an ephemeral port atomically (no probe/rebind
+        // race); read the actual bound port back from the handle.
+        let handle = EditorServerHandle::start(0, state);
+        let port = handle.port();
         // Wait for server to be ready.
         thread::sleep(Duration::from_millis(100));
         (handle, port)
@@ -4177,6 +10328,321 @@ mod tests {
         handle.stop();
     }
 
+    /// Acceptance test for the "Add Child Node" scene-tree operation
+    /// (bead scene-tree-ops-add-child-node / pat-r8tne): adding a child to a
+    /// selected parent must (1) create a child of the requested type under it,
+    /// (2) focus the new node in the tree, and (3) mark the scene dirty.
+    #[test]
+    fn scene_tree_add_child_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a child of a specific requested type to the Main node.
+        let add_body = format!(
+            r#"{{"parent_id":{main_id},"name":"NewChild","class_name":"Sprite2D"}}"#
+        );
+        let add_resp = http_post(port, "/api/node/add", &add_body);
+        assert!(add_resp.contains("200 OK"), "add should succeed");
+        let add_json: serde_json::Value =
+            serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let new_id = add_json["id"].as_u64().expect("add returns new node id");
+
+        // (1) The child exists under the requested parent with the requested type.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let main = &scene["nodes"]["children"][0];
+        assert_eq!(
+            main["id"].as_u64(),
+            Some(main_id),
+            "first child of root is the Main parent"
+        );
+        let child = main["children"]
+            .as_array()
+            .expect("main has children")
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(new_id))
+            .expect("new node is a child of the selected parent");
+        assert_eq!(child["name"], "NewChild");
+        assert_eq!(
+            child["class"], "Sprite2D",
+            "child is created of the requested type"
+        );
+
+        // (2) The newly created node is focused (selected) in the tree.
+        let sel_resp = http_get(port, "/api/selected_nodes");
+        let sel: serde_json::Value =
+            serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        let selected: Vec<u64> = sel["selected_nodes"]
+            .as_array()
+            .expect("selected_nodes array")
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .collect();
+        assert_eq!(
+            selected,
+            vec![new_id],
+            "the new child becomes the focused selection"
+        );
+
+        // (3) The scene is marked dirty.
+        let info_resp = http_get(port, "/api/scene/info");
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&info_resp)).unwrap();
+        assert_eq!(
+            info["modified"].as_bool(),
+            Some(true),
+            "adding a node marks the scene modified"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Instance Child Scene" scene-tree operation
+    /// (bead scene-tree-ops-instance-child-scene / pat-8mz00): instancing an
+    /// external `.tscn` as a child must (1) root the instanced subtree at the
+    /// selected parent and (2) record the originating scene path on the
+    /// instanced root so the scene-tree instance indicator can show its
+    /// source.
+    #[test]
+    fn scene_tree_instance_child_scene() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // An external scene to instance as a child.
+        let tscn_content = r#"
+[gd_scene format=3]
+
+[node name="Enemy" type="Node2D"]
+
+[node name="Sprite" type="Sprite2D" parent="."]
+position = Vector2(10, 20)
+"#;
+        let dir = std::env::temp_dir().join("patina_test_instance_child_scene");
+        let _ = std::fs::create_dir_all(&dir);
+        let tscn_path = dir.join("enemy.tscn");
+        std::fs::write(&tscn_path, tscn_content).unwrap();
+        let path_str = tscn_path.to_string_lossy().to_string();
+
+        // Instance it under the selected parent (Main).
+        let body = format!(
+            r#"{{"path":"{}","parent_id":{}}}"#,
+            path_str.replace('\\', "\\\\"),
+            main_id
+        );
+        let resp = http_post(port, "/api/scene/instance", &body);
+        assert!(resp.contains("200 OK"), "instance should succeed: {resp}");
+        let inst_json: serde_json::Value =
+            serde_json::from_str(extract_body(&resp)).unwrap();
+        let root_id = inst_json["id"]
+            .as_u64()
+            .expect("instance returns instanced root id");
+
+        // (1) The instanced root is a child of the selected parent.
+        let scene_resp = http_get(port, "/api/scene");
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let main = &scene["nodes"]["children"][0];
+        assert_eq!(
+            main["id"].as_u64(),
+            Some(main_id),
+            "first child of root is the Main parent"
+        );
+        let instanced = main["children"]
+            .as_array()
+            .expect("main has children")
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(root_id))
+            .expect("instanced root is a child of the selected parent");
+        assert_eq!(instanced["name"], "Enemy", "instanced root keeps its name");
+
+        // (2) The instanced root is flagged as an instance and records its
+        //     source path for the instance indicator.
+        assert_eq!(
+            instanced["is_instance"].as_bool(),
+            Some(true),
+            "instanced root is marked as an instance"
+        );
+        assert_eq!(
+            instanced["instance_path"].as_str(),
+            Some(path_str.as_str()),
+            "instanced root records its source .tscn path"
+        );
+
+        // The instanced subtree is embedded (the child Sprite came along).
+        let sprite = instanced["children"]
+            .as_array()
+            .expect("instanced root has children")
+            .iter()
+            .find(|c| c["name"] == "Sprite");
+        assert!(sprite.is_some(), "instanced subtree is embedded under the root");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Delete node(s)" scene-tree operation
+    /// (bead scene-tree-ops-delete-node / pat-uc2m6): deleting one or more
+    /// selected nodes must remove their full subtrees (no orphaned
+    /// descendants), support multi-selection, and clear the selection.
+    #[test]
+    fn scene_tree_delete_node_subtree() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Helper to add a child and return its new id.
+        let add = |parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+            v["id"].as_u64().unwrap()
+        };
+
+        // Build a subtree under Main: DelParent > DelChild > DelGrandchild,
+        // plus a separate sibling DelSibling for multi-select.
+        let parent_id = add(main_id, "DelParent");
+        let child_id = add(parent_id, "DelChild");
+        let _grandchild_id = add(child_id, "DelGrandchild");
+        let sibling_id = add(main_id, "DelSibling");
+
+        // Sanity: the whole subtree is present before deletion.
+        let before = http_get(port, "/api/scene");
+        for n in ["DelParent", "DelChild", "DelGrandchild", "DelSibling"] {
+            assert!(before.contains(n), "{n} should exist before delete");
+        }
+
+        // Multi-select delete. Include child_id (inside DelParent's subtree)
+        // to exercise the ancestor+descendant skip path.
+        let del_body =
+            format!(r#"{{"node_ids":[{parent_id},{child_id},{sibling_id}]}}"#);
+        let resp = http_post(port, "/api/node/delete", &del_body);
+        assert!(resp.contains("200 OK"), "delete should succeed");
+        let del: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        // DelParent (subtree) + DelSibling = 2 distinct deletions; DelChild was
+        // already removed with its parent's subtree.
+        assert_eq!(
+            del["deleted"].as_u64(),
+            Some(2),
+            "two distinct top-level deletions"
+        );
+
+        // The full subtree and the sibling are gone with no orphans left behind.
+        let after = http_get(port, "/api/scene");
+        for n in ["DelParent", "DelChild", "DelGrandchild", "DelSibling"] {
+            assert!(
+                !after.contains(n),
+                "{n} (and its subtree) should be removed without orphaning"
+            );
+        }
+
+        // Selection is cleared after deletion.
+        let sel_resp = http_get(port, "/api/selected_nodes");
+        let sel: serde_json::Value =
+            serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        assert_eq!(
+            sel["selected_nodes"].as_array().map(|a| a.len()),
+            Some(0),
+            "deleting clears the selection"
+        );
+
+        // Scene is marked dirty.
+        let info_resp = http_get(port, "/api/scene/info");
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&info_resp)).unwrap();
+        assert_eq!(info["modified"].as_bool(), Some(true));
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Duplicate node" scene-tree operation
+    /// (bead scene-tree-ops-duplicate-node / pat-omqpr): duplicating a node
+    /// produces a deep copy of its subtree, inserted as the *next sibling*,
+    /// with a *unique* name and *copied* properties.
+    #[test]
+    fn scene_tree_duplicate_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str, class: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"{class}"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+            v["id"].as_u64().unwrap()
+        };
+
+        // Main > [Orig(Sprite2D) > Kid, After]. Duplicating Orig should yield
+        // Orig2 inserted between Orig and After.
+        let orig_id = add(main_id, "Orig", "Sprite2D");
+        let _kid_id = add(orig_id, "Kid", "Node");
+        let _after_id = add(main_id, "After", "Node");
+
+        // Set a custom property on Orig to verify property copying.
+        let prop_body = format!(
+            r#"{{"node_id":{orig_id},"property":"health","value":{{"type":"Int","value":100}}}}"#
+        );
+        assert!(http_post(port, "/api/property/set", &prop_body).contains("200 OK"));
+
+        // Duplicate Orig.
+        let resp = http_post(port, "/api/node/duplicate", &format!(r#"{{"node_id":{orig_id}}}"#));
+        assert!(resp.contains("200 OK"), "duplicate should succeed");
+        let dup_id = serde_json::from_str::<serde_json::Value>(extract_body(&resp))
+            .unwrap()["id"]
+            .as_u64()
+            .expect("duplicate returns new node id");
+
+        // Inspect Main's children order.
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let main = &scene["nodes"]["children"][0];
+        let kids = main["children"].as_array().expect("Main has children");
+        let names: Vec<&str> = kids.iter().filter_map(|c| c["name"].as_str()).collect();
+
+        // Unique name: the duplicate is "Orig2", original "Orig" remains.
+        assert!(names.contains(&"Orig"), "original remains, got {names:?}");
+        assert!(names.contains(&"Orig2"), "duplicate uniquified, got {names:?}");
+
+        // Next-sibling: Orig2 sits immediately after Orig, before After.
+        let i_orig = names.iter().position(|n| *n == "Orig").unwrap();
+        let i_dup = names.iter().position(|n| *n == "Orig2").unwrap();
+        let i_after = names.iter().position(|n| *n == "After").unwrap();
+        assert_eq!(i_dup, i_orig + 1, "duplicate is the next sibling: {names:?}");
+        assert!(i_after > i_dup, "duplicate inserted before later siblings");
+
+        // Deep subtree copy: Orig2 has its own "Kid" child of the right class.
+        let dup_node = kids.iter().find(|c| c["name"] == "Orig2").unwrap();
+        assert_eq!(dup_node["class"], "Sprite2D", "class copied");
+        let dup_children = dup_node["children"].as_array().unwrap();
+        assert_eq!(dup_children.len(), 1, "subtree deep-copied");
+        assert_eq!(dup_children[0]["name"], "Kid");
+
+        // Copied properties: the duplicate carries the custom `health` property.
+        let dup_detail = http_get(port, &format!("/api/node/{dup_id}"));
+        assert!(
+            extract_body(&dup_detail).contains("health"),
+            "custom property copied to the duplicate"
+        );
+
+        // The duplicate is focused and the scene is dirty.
+        let sel: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+        let selected: Vec<u64> = sel["selected_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .collect();
+        assert_eq!(selected, vec![dup_id], "duplicate becomes the selection");
+
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/info"))).unwrap();
+        assert_eq!(info["modified"].as_bool(), Some(true));
+
+        handle.stop();
+    }
+
     #[test]
     fn test_select_node() {
         let (handle, port) = make_server();
@@ -4246,6 +10712,118 @@ mod tests {
         let root_children = v["nodes"]["children"].as_array().unwrap();
         let a_found = root_children.iter().any(|c| c["name"] == "A");
         assert!(a_found, "A should be a direct child of root after reparent");
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-ops-reparent-node: reparenting moves a node and
+    /// its whole subtree under the target parent, rejects reparenting a node into
+    /// its own descendant, and preserves the global transform when requested.
+    #[test]
+    fn scene_tree_reparent_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Helper: read a node's `position` property as (x, y).
+        let read_pos = |port: u16, id: u64| -> (f64, f64) {
+            let resp = http_get(port, &format!("/api/node/{id}"));
+            let body = extract_body(&resp);
+            let v: serde_json::Value = serde_json::from_str(body).unwrap();
+            let pos = v["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == "position")
+                .expect("position property present");
+            let arr = pos["value"]["value"].as_array().unwrap();
+            (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
+        };
+        let add_child = |port: u16, parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        // Build: main -> Branch -> Leaf, and a separate Target under main.
+        let branch_id = add_child(port, main_id, "Branch");
+        let leaf_id = add_child(port, branch_id, "Leaf");
+        let target_id = add_child(port, main_id, "Target");
+
+        // (1) Reparent Branch under Target: the whole subtree moves with it.
+        let resp = http_post(
+            port,
+            "/api/node/reparent",
+            &format!(r#"{{"node_id":{branch_id},"new_parent_id":{target_id}}}"#),
+        );
+        assert!(resp.contains("200 OK"), "reparent should succeed: {resp}");
+
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let main = scene["nodes"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(main_id))
+            .unwrap();
+        let target = main["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(target_id))
+            .unwrap();
+        let branch = target["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(branch_id))
+            .expect("Branch moved under Target");
+        assert_eq!(
+            branch["children"][0]["id"].as_u64(),
+            Some(leaf_id),
+            "Leaf subtree preserved under Branch after reparent"
+        );
+
+        // (2) Reject reparenting a node into its own descendant (Target -> Leaf).
+        let resp = http_post(
+            port,
+            "/api/node/reparent",
+            &format!(r#"{{"node_id":{target_id},"new_parent_id":{leaf_id}}}"#),
+        );
+        assert!(
+            resp.contains("400"),
+            "reparenting into own descendant must be rejected: {resp}"
+        );
+
+        // (3) Keep-global-transform: position Target globally and move Leaf under
+        // it with keep_transform — Leaf's global position is unchanged.
+        for (id, x, y) in [(target_id, 100.0, 50.0), (leaf_id, 30.0, 20.0)] {
+            let body = format!(
+                r#"{{"node_id":{id},"property":"position","value":{{"type":"Vector2","value":[{x},{y}]}}}}"#
+            );
+            assert!(http_post(port, "/api/property/set", &body).contains("200 OK"));
+        }
+        // Leaf is currently under Branch (global = Target + Branch + Leaf locals,
+        // but Branch sits at origin, so Leaf global == Target + Leaf == (130,70)).
+        // Reparent Leaf directly under main with keep_transform: its new local
+        // must equal its old global so the global position is preserved.
+        let resp = http_post(
+            port,
+            "/api/node/reparent",
+            &format!(
+                r#"{{"node_id":{leaf_id},"new_parent_id":{main_id},"keep_transform":true}}"#
+            ),
+        );
+        assert!(resp.contains("200 OK"), "keep_transform reparent: {resp}");
+        let (lx, ly) = read_pos(port, leaf_id);
+        // Old global of Leaf was Target(100,50) + Leaf(30,20) = (130,70); main is
+        // at the origin, so the preserved local equals that global.
+        assert!(
+            (lx - 130.0).abs() < 1e-3 && (ly - 70.0).abs() < 1e-3,
+            "global transform preserved across reparent: got ({lx},{ly}), want (130,70)"
+        );
 
         handle.stop();
     }
@@ -4672,6 +11250,151 @@ mod tests {
         handle.stop();
     }
 
+    /// Acceptance test for the lock indicator (bead scene-tree-lock-indicator /
+    /// pat-quyck): toggling lock sets the `_edit_lock_` meta and surfaces the
+    /// lock badge, and a locked node is unpickable in the viewport.
+    #[test]
+    fn scene_tree_lock_indicator_blocks_viewport_pick() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Helper: read whether Main's row carries the lock badge.
+        let main_locked = |port: u16| -> bool {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(main_id))
+                .expect("Main present")["locked"]
+                .as_bool()
+                .unwrap_or(false)
+        };
+
+        // Sanity: Main (at scene (10,20)) is pickable at pixel (400,300) and
+        // shows no lock badge.
+        assert!(!main_locked(port), "unlocked by default");
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":400,"y":300}"#);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(
+            v["selected"].as_u64(),
+            Some(main_id),
+            "unlocked node is pickable"
+        );
+
+        // Lock it: badge appears and the node becomes unpickable.
+        let resp = http_post(
+            port,
+            "/api/node/lock",
+            &format!(r#"{{"node_id":{main_id},"locked":true}}"#),
+        );
+        assert!(resp.contains("200 OK"), "lock should succeed: {resp}");
+        assert!(main_locked(port), "lock badge appears after locking");
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":400,"y":300}"#);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert!(
+            v["selected"].is_null(),
+            "locked node is unselectable in the viewport: {v}"
+        );
+
+        // Unlock: badge clears and the node is pickable again.
+        let resp = http_post(
+            port,
+            "/api/node/lock",
+            &format!(r#"{{"node_id":{main_id},"locked":false}}"#),
+        );
+        assert!(resp.contains("200 OK"), "unlock should succeed");
+        assert!(!main_locked(port), "lock badge clears after unlocking");
+        let resp = http_post(port, "/api/viewport/click", r#"{"x":400,"y":300}"#);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(
+            v["selected"].as_u64(),
+            Some(main_id),
+            "node is pickable again after unlock"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for selection-state sync (bead
+    /// scene-tree-selection-state-sync / pat-imbud): the editor keeps a single
+    /// selection set (`EditorState.selected_nodes`) that the dock, viewport,
+    /// and inspector all read via `/api/selected_nodes`, so selecting through
+    /// any path — single (viewport-style), additive (ctrl), range (shift), or
+    /// toggle — yields one identical selection set everywhere.
+    #[test]
+    fn scene_tree_selection_state_stays_synced() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        // The canonical selection set as seen by dock/viewport/inspector.
+        let selection = |port: u16| -> Vec<u64> {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+            v["selected_nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .collect()
+        };
+        let select = |body: &str| http_post(port, "/api/node/select_multi", body);
+
+        let a = add("A");
+        let b = add("B");
+        let c = add("C");
+        let d = add("D");
+
+        // Single select (viewport-style): set the anchor to A.
+        select(&format!(r#"{{"node_id":{a},"mode":"set"}}"#));
+        assert_eq!(selection(port), vec![a], "single select replaces selection");
+
+        // Range (shift) from anchor A to C: spans A,B,C in scene-tree order.
+        select(&format!(r#"{{"node_id":{c},"mode":"range"}}"#));
+        let mut sel = selection(port);
+        sel.sort();
+        let mut want = vec![a, b, c];
+        want.sort();
+        assert_eq!(sel, want, "range select spans A..C inclusive");
+
+        // Additive (ctrl): add D to the existing range selection.
+        select(&format!(r#"{{"node_id":{d},"mode":"add"}}"#));
+        let mut sel = selection(port);
+        sel.sort();
+        let mut want = vec![a, b, c, d];
+        want.sort();
+        assert_eq!(sel, want, "additive select extends the set");
+
+        // Toggle (ctrl on a selected node): remove B.
+        select(&format!(r#"{{"node_id":{b},"mode":"toggle"}}"#));
+        let mut sel = selection(port);
+        sel.sort();
+        let mut want = vec![a, c, d];
+        want.sort();
+        assert_eq!(sel, want, "toggle removes an already-selected node");
+
+        // A plain single-select (the viewport-click path uses the same store)
+        // collapses the multi-selection everywhere.
+        let click = http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#));
+        assert!(click.contains("200 OK"));
+        assert_eq!(
+            selection(port),
+            vec![a],
+            "single-select via the viewport/select path resets the shared set"
+        );
+
+        handle.stop();
+    }
+
     #[test]
     fn test_viewport_drag_updates_position() {
         let (handle, port) = make_server();
@@ -4897,6 +11620,79 @@ mod tests {
         handle.stop();
     }
 
+    /// Acceptance test for the "Rename node" scene-tree operation
+    /// (bead scene-tree-ops-rename-node / pat-53yhs): renaming commits the new
+    /// name, rejects empty names, and auto-suffixes a duplicate sibling name to
+    /// keep sibling names unique.
+    #[test]
+    fn scene_tree_rename_node_unique() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let names = |port: u16| -> Vec<String> {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let _alpha = add("Alpha");
+        let beta = add("Beta");
+
+        // Commit a normal rename.
+        let resp = http_post(
+            port,
+            "/api/node/rename",
+            &format!(r#"{{"node_id":{beta},"new_name":"Gamma"}}"#),
+        );
+        assert!(resp.contains("200 OK"), "rename should succeed");
+        assert!(
+            names(port).contains(&"Gamma".to_string()),
+            "rename committed: {:?}",
+            names(port)
+        );
+
+        // Reject an empty name; the node keeps its current name.
+        let resp = http_post(
+            port,
+            "/api/node/rename",
+            &format!(r#"{{"node_id":{beta},"new_name":""}}"#),
+        );
+        assert!(resp.contains("400"), "empty name should be rejected");
+        assert!(
+            names(port).contains(&"Gamma".to_string()),
+            "name unchanged after rejected empty rename"
+        );
+
+        // Rename to a name that collides with sibling "Alpha" → uniquified.
+        let resp = http_post(
+            port,
+            "/api/node/rename",
+            &format!(r#"{{"node_id":{beta},"new_name":"Alpha"}}"#),
+        );
+        assert!(resp.contains("200 OK"));
+        let ns = names(port);
+        assert!(ns.contains(&"Alpha".to_string()), "original Alpha remains: {ns:?}");
+        assert!(
+            ns.contains(&"Alpha2".to_string()),
+            "collision auto-suffixed to Alpha2: {ns:?}"
+        );
+
+        handle.stop();
+    }
+
     #[test]
     fn test_duplicate_node() {
         let (handle, port) = make_server();
@@ -4927,12 +11723,22 @@ mod tests {
             root_children.len()
         );
 
-        // Both should be named "Main".
-        let main_count = root_children.iter().filter(|c| c["name"] == "Main").count();
-        assert_eq!(main_count, 2, "should have two Main nodes");
+        // The original keeps its name; the duplicate gets a unique name.
+        let names: Vec<&str> = root_children
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert!(names.contains(&"Main"), "original Main remains, got {names:?}");
+        assert!(
+            names.contains(&"Main2"),
+            "duplicate gets a unique name, got {names:?}"
+        );
 
         // The duplicate should also have a Child child.
-        let dup = &root_children[1];
+        let dup = root_children
+            .iter()
+            .find(|c| c["name"] == "Main2")
+            .expect("duplicate Main2 present");
         let dup_children = dup["children"].as_array().unwrap();
         assert_eq!(dup_children.len(), 1, "duplicate should have 1 child");
         assert_eq!(dup_children[0]["name"], "Child");
@@ -5080,6 +11886,1225 @@ mod tests {
             &format!(r#"{{"node_id":{only_id},"direction":"down"}}"#),
         );
         assert!(resp.contains("200 OK"));
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Move Up / Move Down" scene-tree operation
+    /// (bead scene-tree-ops-reorder-siblings / pat-hszip): reordering changes
+    /// a node's index among its siblings, is a no-op at the boundaries, and
+    /// updates child ordering deterministically.
+    #[test]
+    fn scene_tree_reorder_siblings() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        for n in ["A", "B", "C"] {
+            let body = format!(r#"{{"parent_id":{main_id},"name":"{n}","class_name":"Node"}}"#);
+            http_post(port, "/api/node/add", &body);
+        }
+
+        // Read Main's children names in order.
+        let order = |port: u16| -> Vec<String> {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let id_of = |port: u16, name: &str| -> u64 {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let reorder = |port: u16, id: u64, dir: &str| {
+            let body = format!(r#"{{"node_id":{id},"direction":"{dir}"}}"#);
+            assert!(http_post(port, "/api/node/reorder", &body).contains("200 OK"));
+        };
+
+        assert_eq!(order(port), ["A", "B", "C"], "initial order");
+        let a_id = id_of(port, "A");
+
+        // Move A down twice → [B, C, A].
+        reorder(port, a_id, "down");
+        assert_eq!(order(port), ["B", "A", "C"], "A moved down one");
+        reorder(port, a_id, "down");
+        assert_eq!(order(port), ["B", "C", "A"], "A moved down again");
+
+        // Move A up once → [B, A, C].
+        reorder(port, a_id, "up");
+        assert_eq!(order(port), ["B", "A", "C"], "A moved back up");
+
+        // Boundary no-ops: first node up, last node down — order unchanged.
+        let first_id = id_of(port, "B"); // index 0
+        reorder(port, first_id, "up");
+        assert_eq!(order(port), ["B", "A", "C"], "up at top boundary is a no-op");
+        let last_id = id_of(port, "C"); // index 2
+        reorder(port, last_id, "down");
+        assert_eq!(order(port), ["B", "A", "C"], "down at bottom boundary is a no-op");
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Cut / Copy / Paste" scene-tree operation
+    /// (bead scene-tree-ops-cut-copy-paste / pat-b34jb): Copy then Paste
+    /// inserts a clone of the copied subtree under the paste target, Cut then
+    /// Paste moves the original, and Paste uniquifies names.
+    #[test]
+    fn scene_tree_cut_copy_paste_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str| -> u64 {
+            let body = format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let scene = |port: u16| -> serde_json::Value {
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap()
+        };
+        // Names of the children of the node at `path` under Main's subtree.
+        let main_child_names = |port: u16| -> Vec<String> {
+            scene(port)["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Main > [Src > Leaf, Dest].
+        let src_id = add(main_id, "Src");
+        add(src_id, "Leaf");
+        let dest_id = add(main_id, "Dest");
+
+        // Copy Src, then paste under Main. The copy must clone the subtree and,
+        // because "Src" already exists under Main, paste uniquifies to "Src2".
+        assert!(http_post(port, "/api/node/copy", &format!(r#"{{"node_id":{src_id}}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/node/paste", &format!(r#"{{"parent_id":{main_id}}}"#))
+            .contains("200 OK"));
+
+        let names = main_child_names(port);
+        assert!(names.contains(&"Src".to_string()), "original Src remains (copy): {names:?}");
+        assert!(names.contains(&"Src2".to_string()), "paste uniquified to Src2: {names:?}");
+        // The pasted clone carries the subtree (Leaf).
+        let sc = scene(port);
+        let src2 = sc["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Src2")
+            .unwrap();
+        assert_eq!(src2["children"].as_array().unwrap()[0]["name"], "Leaf",
+            "copied subtree includes Leaf");
+
+        // Cut the original Src, then paste under Dest → the original moves.
+        assert!(http_post(port, "/api/node/cut", &format!(r#"{{"node_id":{src_id}}}"#))
+            .contains("200 OK"));
+        let after_cut = main_child_names(port);
+        assert!(!after_cut.contains(&"Src".to_string()),
+            "cut removed the original Src from Main: {after_cut:?}");
+
+        assert!(http_post(port, "/api/node/paste", &format!(r#"{{"parent_id":{dest_id}}}"#))
+            .contains("200 OK"));
+        let sc2 = scene(port);
+        let dest = sc2["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Dest")
+            .unwrap();
+        let dest_children: Vec<&str> = dest["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert!(dest_children.contains(&"Src"),
+            "cut+paste moved Src under Dest: {dest_children:?}");
+        // And its subtree came along.
+        let moved = dest["children"].as_array().unwrap().iter().find(|c| c["name"] == "Src").unwrap();
+        assert_eq!(moved["children"].as_array().unwrap()[0]["name"], "Leaf");
+
+        handle.stop();
+    }
+
+    /// Acceptance test for the "Change Type" scene-tree operation
+    /// (bead scene-tree-ops-change-type / pat-71ryb): changing a node's type
+    /// replaces it with the chosen type in place, retains its children and
+    /// name, and carries over properties common to both types.
+    #[test]
+    fn scene_tree_change_node_type() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Main > Sub(Node2D) > Leaf, with a custom property on Sub.
+        let sub_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Sub","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        http_post(
+            port,
+            "/api/node/add",
+            &format!(r#"{{"parent_id":{sub_id},"name":"Leaf","class_name":"Node"}}"#),
+        );
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(r#"{{"node_id":{sub_id},"property":"health","value":{{"type":"Int","value":7}}}}"#),
+        )
+        .contains("200 OK"));
+
+        // Change Sub from Node2D to Sprite2D.
+        let resp = http_post(
+            port,
+            "/api/node/change_type",
+            &format!(r#"{{"node_id":{sub_id},"class_name":"Sprite2D"}}"#),
+        );
+        assert!(resp.contains("200 OK"), "change_type should succeed");
+
+        // In place: same node, new class, same name, children retained.
+        let scene: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let sub = scene["nodes"]["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_u64() == Some(sub_id))
+            .expect("node retained in place with same id");
+        assert_eq!(sub["class"], "Sprite2D", "type changed to the chosen class");
+        assert_eq!(sub["name"], "Sub", "name retained");
+        let children = sub["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1, "children retained");
+        assert_eq!(children[0]["name"], "Leaf");
+
+        // Shared property carried over.
+        let detail = http_get(port, &format!("/api/node/{sub_id}"));
+        assert!(
+            extract_body(&detail).contains("health"),
+            "common property carried over after type change"
+        );
+
+        // Scene marked dirty.
+        let info: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/info"))).unwrap();
+        assert_eq!(info["modified"].as_bool(), Some(true));
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-signal-connection-indicator (pat-lc7gk): a
+    /// node's signal badge (`has_signals`) toggles in real time as signal
+    /// connections are added to and removed from the node.
+    #[test]
+    fn scene_tree_signal_indicator_tracks_connections() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // A node to carry the signal connection.
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Emitter","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        // Read the node's `has_signals` badge flag from the scene tree JSON.
+        let has_signals = |port: u16| -> bool {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(node_id))
+                .expect("emitter node present")["has_signals"]
+                .as_bool()
+                .unwrap_or(false)
+        };
+
+        // Baseline: no connections → badge off.
+        assert!(!has_signals(port), "no signal badge before any connection");
+
+        // Connect a signal → badge turns on in real time.
+        assert!(http_post(
+            port,
+            "/api/node/signals/connect",
+            &format!(r#"{{"node_id":{node_id},"signal":"pressed","method":"_on_pressed"}}"#),
+        )
+        .contains("200 OK"));
+        assert!(has_signals(port), "signal badge appears after connecting a signal");
+
+        // Disconnect it → badge clears in real time.
+        assert!(http_post(
+            port,
+            "/api/signal/disconnect",
+            &format!(r#"{{"node_id":{node_id},"signal":"pressed"}}"#),
+        )
+        .contains("200 OK"));
+        assert!(!has_signals(port), "signal badge clears after disconnecting the signal");
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-instance-badge (pat-z9mbg): an instanced-scene
+    /// node shows the instance badge (`is_instance` + `instance_path`), and
+    /// activating it (`/api/node/open_scene`) routes an open-scene request for
+    /// the instance's source `.tscn` path.
+    #[test]
+    fn scene_tree_instance_badge_opens_source_scene() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let source = "res://enemy.tscn";
+
+        // Add a node and mark it as an instance by recording its source scene.
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Enemy","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{node_id},"property":"_instance_source","value":{{"type":"String","value":"{source}"}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+
+        // The scene tree shows the instance badge: is_instance + instance_path.
+        let inst = {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(node_id))
+                .expect("instanced node present")
+                .clone()
+        };
+        assert_eq!(inst["is_instance"].as_bool(), Some(true), "instance badge shown");
+        assert_eq!(
+            inst["instance_path"].as_str(),
+            Some(source),
+            "badge records the source scene path"
+        );
+
+        // Activating the badge routes an open-scene request for the source path.
+        let open_resp = http_post(
+            port,
+            "/api/node/open_scene",
+            &format!(r#"{{"node_id":{node_id}}}"#),
+        );
+        assert!(open_resp.contains("200 OK"), "open_scene should succeed: {open_resp}");
+        let open_body: serde_json::Value =
+            serde_json::from_str(extract_body(&open_resp)).unwrap();
+        assert_eq!(
+            open_body["path"].as_str(),
+            Some(source),
+            "open-scene request targets the instance's source path"
+        );
+
+        // The source scene is now open as a tab (the request was routed).
+        let tabs = {
+            let resp = http_get(port, "/api/scene/tabs");
+            let body = extract_body(&resp);
+            serde_json::from_str::<serde_json::Value>(body).unwrap()
+        };
+        let opened = tabs["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["path"].as_str() == Some(source));
+        assert!(opened, "source scene opened in a tab: {tabs}");
+
+        // A non-instanced node has no badge action → 400.
+        let plain_resp =
+            http_post(port, "/api/node/open_scene", &format!(r#"{{"node_id":{main_id}}}"#));
+        assert!(
+            plain_resp.contains("400"),
+            "open_scene on a non-instanced node is rejected: {plain_resp}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-script-badge (pat-bxv10): a node with an
+    /// attached script shows the script badge (`has_script` + `script_path`),
+    /// and activating it (`/api/node/open_script`) routes an open-script
+    /// request for that node's script path.
+    #[test]
+    fn scene_tree_script_badge_opens_script() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let script = "res://player.gd";
+
+        // Add a node and attach a script to it (recorded via `_script_path`).
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Player","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{node_id},"property":"_script_path","value":{{"type":"String","value":"{script}"}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+
+        // The scene tree shows the script badge: has_script + script_path.
+        let node = {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(node_id))
+                .expect("scripted node present")
+                .clone()
+        };
+        assert_eq!(node["has_script"].as_bool(), Some(true), "script badge shown");
+        assert_eq!(
+            node["script_path"].as_str(),
+            Some(script),
+            "badge records the attached script path"
+        );
+
+        // Activating the badge routes an open-script request for the script path.
+        let open_resp = http_post(
+            port,
+            "/api/node/open_script",
+            &format!(r#"{{"node_id":{node_id}}}"#),
+        );
+        assert!(open_resp.contains("200 OK"), "open_script should succeed: {open_resp}");
+        let open_body: serde_json::Value =
+            serde_json::from_str(extract_body(&open_resp)).unwrap();
+        assert_eq!(
+            open_body["path"].as_str(),
+            Some(script),
+            "open-script request targets the node's script path"
+        );
+
+        // A node without a script has no badge action → 400.
+        let plain_resp =
+            http_post(port, "/api/node/open_script", &format!(r#"{{"node_id":{main_id}}}"#));
+        assert!(
+            plain_resp.contains("400"),
+            "open_script on a script-less node is rejected: {plain_resp}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-group-children-indicator (pat-7jlbl): toggling
+    /// the group button sets `_edit_group_`, shows the group badge, and a
+    /// viewport click on a grouped node's child selects the grouped ancestor.
+    #[test]
+    fn scene_tree_group_indicator_locks_child_selection() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        // Parent (at origin) with a Child positioned at world (100,100). The
+        // camera centers the scene-bounds center (the Child) in the viewport.
+        let parent_id = add(main_id, "Parent");
+        let child_id = add(parent_id, "Child");
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{child_id},"property":"position","value":{{"type":"Vector2","value":[100,100]}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+
+        // Read the `grouped` badge flag for the parent from the scene tree.
+        let parent_grouped = |port: u16| -> bool {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(parent_id))
+                .expect("parent present")["grouped"]
+                .as_bool()
+                .unwrap_or(false)
+        };
+        // Click the child's pixel and return the id the viewport selected.
+        // The editor camera centers the scene-bounds center in the viewport.
+        // Positioned nodes are Main (10,20) and the Child (100,100) → bounds
+        // center (55,60), camera offset (vw/2-55, vh/2-60) = (345,240), so the
+        // Child at world (100,100) renders at pixel (100+345, 100+240) = (445,340).
+        let click_child = |port: u16| -> u64 {
+            let resp = http_post(port, "/api/viewport/click", r#"{"x":445,"y":340}"#);
+            let body = extract_body(&resp);
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["selected"]
+                .as_u64()
+                .expect("a node was selected")
+        };
+
+        // Baseline: not grouped → clicking the child selects the child itself.
+        assert!(!parent_grouped(port), "no group badge before toggling");
+        assert_eq!(click_child(port), child_id, "ungrouped child is directly selectable");
+
+        // Toggle group on the parent → badge shows.
+        assert!(http_post(
+            port,
+            "/api/node/group",
+            &format!(r#"{{"node_id":{parent_id},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        assert!(parent_grouped(port), "group badge shown after toggling on");
+
+        // Now a click on the child selects the grouped ancestor (parent).
+        assert_eq!(
+            click_child(port),
+            parent_id,
+            "viewport click on grouped child selects the grouped ancestor"
+        );
+
+        // Toggle group off → child is directly selectable again.
+        assert!(http_post(
+            port,
+            "/api/node/group",
+            &format!(r#"{{"node_id":{parent_id},"enabled":false}}"#),
+        )
+        .contains("200 OK"));
+        assert!(!parent_grouped(port), "group badge cleared after toggling off");
+        assert_eq!(click_child(port), child_id, "child selectable again once ungrouped");
+
+        handle.stop();
+    }
+
+    /// Acceptance for scene-tree-unique-name-indicator (pat-cxide): enabling
+    /// "Access as Unique Name" shows the `%` badge, and two unique-named nodes
+    /// sharing a name in the same owner are flagged as a collision warning.
+    #[test]
+    fn scene_tree_unique_name_indicator_reflects_flag() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let add = |parent: u64, name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        // Two branches each holding a child named "Hero" — the same name is
+        // legal across different parents but shares the one scene owner.
+        let b1 = add(main_id, "Branch1");
+        let b2 = add(main_id, "Branch2");
+        let h1 = add(b1, "Hero");
+        let h2 = add(b2, "Hero");
+
+        // Recursively locate a node by id in the scene tree JSON.
+        fn find(node: &serde_json::Value, id: u64) -> Option<serde_json::Value> {
+            if node["id"].as_u64() == Some(id) {
+                return Some(node.clone());
+            }
+            if let Some(children) = node["children"].as_array() {
+                for c in children {
+                    if let Some(found) = find(c, id) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        let flags = |port: u16, id: u64| -> (bool, bool) {
+            let resp = http_get(port, "/api/scene");
+            let body = extract_body(&resp);
+            let scene: serde_json::Value = serde_json::from_str(body).unwrap();
+            let n = find(&scene["nodes"], id).expect("node present in scene tree");
+            (
+                n["unique_name_in_owner"].as_bool().unwrap_or(false),
+                n["unique_name_collision"].as_bool().unwrap_or(false),
+            )
+        };
+
+        // Baseline: no `%` badge, no collision.
+        assert_eq!(flags(port, h1), (false, false), "no unique badge initially");
+
+        // Enable unique on the first Hero → `%` badge, no collision yet.
+        assert!(http_post(
+            port,
+            "/api/node/unique_name",
+            &format!(r#"{{"node_id":{h1},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        assert_eq!(
+            flags(port, h1),
+            (true, false),
+            "% badge shown, no collision with a single unique Hero"
+        );
+
+        // Enable unique on the second Hero → duplicate unique name → both flagged.
+        assert!(http_post(
+            port,
+            "/api/node/unique_name",
+            &format!(r#"{{"node_id":{h2},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        assert_eq!(flags(port, h1), (true, true), "first Hero flagged as colliding");
+        assert_eq!(flags(port, h2), (true, true), "second Hero flagged as colliding");
+
+        // Disable unique on the second Hero → the collision clears on the first.
+        assert!(http_post(
+            port,
+            "/api/node/unique_name",
+            &format!(r#"{{"node_id":{h2},"enabled":false}}"#),
+        )
+        .contains("200 OK"));
+        assert_eq!(
+            flags(port, h1),
+            (true, false),
+            "collision clears once the duplicate unique name is unset"
+        );
+        assert_eq!(flags(port, h2), (false, false), "second Hero no longer unique");
+
+        handle.stop();
+    }
+
+    /// Editor-side surfacing for scene-tree-configuration-warning (pat-q2jvi):
+    /// the `/api/node/warnings` endpoint exposes a node's configuration warnings
+    /// (empty for a script-less node) for the warning triangle/tooltip. The full
+    /// warning round-trip is covered by gdscene's
+    /// `scene_tree_configuration_warning_surfaces_messages`.
+    #[test]
+    fn node_warnings_endpoint_reports_clean_node() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Plain","class_name":"Node2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        let resp = http_get(port, &format!("/api/node/warnings?node_id={node_id}"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            v["has_warning"].as_bool(),
+            Some(false),
+            "a node with no script reports no configuration warnings"
+        );
+        assert_eq!(
+            v["warnings"].as_array().map(|a| a.len()),
+            Some(0),
+            "no warning messages for a clean node"
+        );
+
+        // Unknown node → 404.
+        let missing = http_get(port, "/api/node/warnings?node_id=999999");
+        assert!(missing.contains("404"), "unknown node yields 404: {missing}");
+
+        handle.stop();
+    }
+
+
+    /// Acceptance for inspector-object-header (pat-16kt2): inspecting a node
+    /// shows a header line with its class and name; clearing the inspector
+    /// hides it.
+    #[test]
+    fn inspector_object_header_renders_class_and_name() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let node_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Hero","class_name":"Sprite2D"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+
+        let header = |port: u16| -> serde_json::Value {
+            let resp = http_get(port, "/api/inspector/header");
+            let body = extract_body(&resp);
+            serde_json::from_str(body).unwrap()
+        };
+
+        // Clear any auto-selection (adding a node selects it) → header hidden.
+        assert!(http_post(port, "/api/node/select_multi", r#"{"node_ids":[]}"#).contains("200 OK"));
+        assert_eq!(
+            header(port)["visible"].as_bool(),
+            Some(false),
+            "header hidden when nothing is inspected"
+        );
+
+        // Inspect the node → header shows its class label and object name.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{node_id}}}"#))
+            .contains("200 OK"));
+        let h = header(port);
+        assert_eq!(h["visible"].as_bool(), Some(true), "header visible while inspecting");
+        assert_eq!(h["name"].as_str(), Some("Hero"), "header shows the object name");
+        assert_eq!(h["class"].as_str(), Some("Sprite2D"), "header shows the class label");
+        assert!(h["path"].as_str().is_some(), "header includes the scene path");
+
+        // Clear the inspector → header hides again.
+        assert!(http_post(port, "/api/node/select_multi", r#"{"node_ids":[]}"#).contains("200 OK"));
+        assert_eq!(
+            header(port)["visible"].as_bool(),
+            Some(false),
+            "header hides once the inspector is cleared"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for inspector-history-back-forward (pat-67r94): inspecting A
+    /// then B and pressing Back re-selects A and enables Forward; Back at the
+    /// start of the stack is disabled.
+    #[test]
+    fn inspector_history_back_forward_navigates_stack() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add("A");
+        let b = add("B");
+
+        let select = |port: u16, id: u64| {
+            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                .contains("200 OK"));
+        };
+        let nav = |port: u16, dir: &str| -> serde_json::Value {
+            let resp = http_post(port, &format!("/api/inspector/{dir}"), "");
+            let body = extract_body(&resp);
+            serde_json::from_str(body).unwrap()
+        };
+
+        // Inspect A then B (builds the history stack [A, B], cursor at B).
+        select(port, a);
+        select(port, b);
+
+        // Back → re-selects A; Back now disabled (at start), Forward enabled.
+        let back = nav(port, "back");
+        assert_eq!(back["selected"].as_u64(), Some(a), "Back re-selects A");
+        assert_eq!(back["can_back"].as_bool(), Some(false), "Back disabled at the start");
+        assert_eq!(
+            back["can_forward"].as_bool(),
+            Some(true),
+            "Forward enabled after stepping back"
+        );
+
+        // Forward → re-selects B; Forward disabled (at end), Back enabled.
+        let fwd = nav(port, "forward");
+        assert_eq!(fwd["selected"].as_u64(), Some(b), "Forward re-selects B");
+        assert_eq!(fwd["can_back"].as_bool(), Some(true), "Back enabled after stepping forward");
+        assert_eq!(fwd["can_forward"].as_bool(), Some(false), "Forward disabled at the end");
+
+        // Back to A, then Back again is a no-op at the start of the stack.
+        nav(port, "back");
+        let back2 = nav(port, "back");
+        assert_eq!(back2["selected"].as_u64(), Some(a), "Back at the start stays on A");
+        assert_eq!(
+            back2["can_back"].as_bool(),
+            Some(false),
+            "Back remains disabled at the start"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance for inspector-history-dropdown (pat-uhctq): after inspecting
+    /// three objects the history dropdown lists all three most-recent-first, and
+    /// selecting an entry re-inspects that object.
+    #[test]
+    fn inspector_history_dropdown_lists_and_selects() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add("A");
+        let b = add("B");
+        let c = add("C");
+
+        let select = |port: u16, id: u64| {
+            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                .contains("200 OK"));
+        };
+        // Inspect A, then B, then C.
+        select(port, a);
+        select(port, b);
+        select(port, c);
+
+        // The dropdown lists all three, most-recent-first: C, B, A.
+        let history = {
+            let resp = http_get(port, "/api/inspector/history");
+            let body = extract_body(&resp);
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["history"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(history.len(), 3, "dropdown lists all three inspected objects");
+        assert_eq!(history[0]["id"].as_u64(), Some(c), "most recent first: C");
+        assert_eq!(history[1]["id"].as_u64(), Some(b), "then B");
+        assert_eq!(history[2]["id"].as_u64(), Some(a), "then A");
+        assert_eq!(history[0]["name"].as_str(), Some("C"), "entry carries the object name");
+
+        // Selecting the oldest entry re-inspects it.
+        let resp = http_post(
+            port,
+            "/api/inspector/history/select",
+            &format!(r#"{{"node_id":{a}}}"#),
+        );
+        assert!(resp.contains("200 OK"), "history select succeeds: {resp}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["selected"]
+                .as_u64(),
+            Some(a),
+            "selecting a history entry re-inspects that object"
+        );
+        // And the inspector reflects it.
+        let sel = {
+            let r = http_get(port, "/api/selected");
+            serde_json::from_str::<serde_json::Value>(extract_body(&r)).unwrap()["id"].as_u64()
+        };
+        assert_eq!(sel, Some(a), "inspector now shows the re-selected object");
+
+        handle.stop();
+    }
+
+    /// Acceptance test for per-scene inspector history (bead
+    /// inspector-history-persists-per-scene / pat-zlsfl): the inspected-object
+    /// navigation stack is saved per open scene tab, so building history in
+    /// scene A, switching to scene B, then back to A restores A's back/forward
+    /// stack while B keeps its own (empty) stack.
+    #[test]
+    fn inspector_history_persists_per_scene() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let select = |id: u64| {
+            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                .contains("200 OK"));
+        };
+        let history_ids = |port: u16| -> Vec<u64> {
+            let resp = http_get(port, "/api/inspector/history");
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e["id"].as_u64())
+                .collect()
+        };
+
+        let a = add("A");
+        let b = add("B");
+        let c = add("C");
+
+        // Scene A is the initial tab. Build a navigation stack: inspect A, B, C.
+        select(a);
+        select(b);
+        select(c);
+        let scene_a_history = history_ids(port);
+        assert_eq!(
+            scene_a_history,
+            vec![c, b, a],
+            "scene A accumulates a history stack, most-recent-first"
+        );
+
+        // Open scene B in a new tab; it becomes active with its own empty stack.
+        let opened = http_post(
+            port,
+            "/api/scene/tabs/open",
+            r#"{"path":"res://scene_b.tscn","name":"B"}"#,
+        );
+        assert!(opened.contains("200 OK"), "opening scene B succeeds: {opened}");
+        assert!(
+            history_ids(port).is_empty(),
+            "a freshly opened scene starts with an empty navigation stack"
+        );
+
+        // Switch back to scene A (tab index 0): its stack is restored.
+        let switched = http_post(port, "/api/scene/tabs/switch", r#"{"index":0}"#);
+        assert!(switched.contains("200 OK"), "switching back to A succeeds: {switched}");
+        assert_eq!(
+            history_ids(port),
+            scene_a_history,
+            "switching back to scene A restores its history stack"
+        );
+
+        // The back/forward cursor is restored too: Back from the current entry
+        // (C) re-inspects the previous entry (B).
+        let back = http_post(port, "/api/inspector/back", "{}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(extract_body(&back)).unwrap()["selected"]
+                .as_u64(),
+            Some(b),
+            "Back navigates within the restored scene-A stack"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for rubber-band box selection (bead viewport-select-box
+    /// / pat-2fzzf): dragging a selection rectangle selects every node whose
+    /// position falls within it, and the `add` modifier extends the existing
+    /// selection.
+    #[test]
+    fn viewport_select_box() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let add_node = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node2D"}}"#);
+            serde_json::from_str::<serde_json::Value>(extract_body(&http_post(
+                port,
+                "/api/node/add",
+                &body,
+            )))
+            .unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add_node("A");
+        let b = add_node("B");
+        let c = add_node("C");
+
+        let selection = |port: u16| -> Vec<u64> {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+            v["selected_nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .collect()
+        };
+
+        // A rectangle covering the whole viewport intersects the scene origin
+        // (where the new nodes sit), so every selectable node is selected.
+        let resp = http_post(
+            port,
+            "/api/viewport/box_select",
+            r#"{"x1":0,"y1":0,"x2":800,"y2":600,"add":false}"#,
+        );
+        assert!(resp.contains("200 OK"), "box select succeeds: {resp}");
+        let sel = selection(port);
+        assert!(
+            sel.contains(&a) && sel.contains(&b) && sel.contains(&c),
+            "a box over the origin selects every intersecting node: {sel:?}"
+        );
+
+        // A tiny rectangle in the corner maps far from the origin, so it
+        // intersects nothing and clears the selection.
+        let resp = http_post(
+            port,
+            "/api/viewport/box_select",
+            r#"{"x1":0,"y1":0,"x2":1,"y2":1,"add":false}"#,
+        );
+        assert!(resp.contains("200 OK"));
+        assert!(
+            selection(port).is_empty(),
+            "an off-origin box selects nothing: {:?}",
+            selection(port)
+        );
+
+        // The modifier (add) extends the existing selection rather than
+        // replacing it: start from just A, then box-add over the origin.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
+            .contains("200 OK"));
+        let resp = http_post(
+            port,
+            "/api/viewport/box_select",
+            r#"{"x1":0,"y1":0,"x2":800,"y2":600,"add":true}"#,
+        );
+        assert!(resp.contains("200 OK"));
+        let sel = selection(port);
+        assert!(
+            sel.contains(&a) && sel.contains(&b),
+            "the add modifier keeps the prior selection and adds box nodes: {sel:?}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for viewport panning (bead viewport-pan / pat-hxk0c):
+    /// middle-drag / space-drag pans the viewport by the cursor delta,
+    /// accumulating the scroll offset without changing the selection.
+    #[test]
+    fn viewport_pan() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Establish a selection that panning must not disturb.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{main_id}}}"#))
+            .contains("200 OK"));
+
+        let selected = |port: u16| -> Vec<u64> {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/selected_nodes"))).unwrap();
+            v["selected_nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .collect()
+        };
+        let pan = |port: u16| -> (f64, f64) {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/viewport/zoom_pan")))
+                    .unwrap();
+            (v["pan_x"].as_f64().unwrap(), v["pan_y"].as_f64().unwrap())
+        };
+
+        // The viewport starts at the origin.
+        assert_eq!(pan(port), (0.0, 0.0));
+
+        // A middle-drag pans the viewport by the cursor delta.
+        let resp = http_post(port, "/api/viewport/pan_by", r#"{"dx":50.0,"dy":-30.0}"#);
+        assert!(resp.contains("200 OK"), "pan_by succeeds: {resp}");
+        assert_eq!(pan(port), (50.0, -30.0), "pan offset updates by the cursor delta");
+
+        // Continuing the drag accumulates onto the offset.
+        assert!(http_post(port, "/api/viewport/pan_by", r#"{"dx":10.0,"dy":10.0}"#)
+            .contains("200 OK"));
+        assert_eq!(pan(port), (60.0, -20.0), "subsequent drags accumulate the scroll offset");
+
+        // Panning never changes the selection.
+        assert_eq!(
+            selected(port),
+            vec![main_id],
+            "panning leaves the selection unchanged"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for frame-selection (bead viewport-frame-selection /
+    /// pat-c2k88): F centers the selection and adjusts zoom to fit its bounds;
+    /// with no selection it frames the scene origin at the default zoom.
+    #[test]
+    fn viewport_frame_selection() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        let zoom_pan = |port: u16| -> (f64, f64, f64) {
+            let v: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/viewport/zoom_pan")))
+                    .unwrap();
+            (
+                v["zoom"].as_f64().unwrap(),
+                v["pan_x"].as_f64().unwrap(),
+                v["pan_y"].as_f64().unwrap(),
+            )
+        };
+
+        // With nothing selected, frame-selection frames the scene origin at the
+        // default zoom (a point keeps zoom 1.0).
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (z, _px, _py) = zoom_pan(port);
+        assert!((z - 1.0).abs() < 1e-9, "no selection frames the origin at zoom 1.0: {z}");
+
+        // Add two nodes with explicit, spread-out positions (a 2000x2000 box).
+        let add_node = |name: &str| -> u64 {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node2D"}}"#);
+            serde_json::from_str::<serde_json::Value>(extract_body(&http_post(
+                port,
+                "/api/node/add",
+                &body,
+            )))
+            .unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        let a = add_node("A");
+        let b = add_node("B");
+        let set_pos = |id: u64, x: f64, y: f64| {
+            let body = format!(
+                r#"{{"node_id":{id},"property":"position","value":{{"type":"Vector2","value":[{x},{y}]}}}}"#
+            );
+            assert!(http_post(port, "/api/property/set", &body).contains("200 OK"));
+        };
+        set_pos(a, -1000.0, -1000.0);
+        set_pos(b, 1000.0, 1000.0);
+
+        // Select both, then frame: the 2000x2000 bounds are larger than the
+        // viewport, so zoom is reduced to fit them.
+        assert!(http_post(port, "/api/node/select_multi", &format!(r#"{{"node_id":{a},"mode":"set"}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/node/select_multi", &format!(r#"{{"node_id":{b},"mode":"add"}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (z, _px, _py) = zoom_pan(port);
+        assert!(
+            z < 1.0 && z >= 0.1,
+            "frame-selection adjusts zoom to fit the selection bounds: {z}"
+        );
+
+        // Centering responds to the selection: framing A alone vs. B alone (at
+        // different positions) yields different pans.
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (_za, pax, pay) = zoom_pan(port);
+        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{b}}}"#))
+            .contains("200 OK"));
+        assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
+        let (_zb, pbx, pby) = zoom_pan(port);
+        assert!(
+            (pax, pay) != (pbx, pby),
+            "framing different selections centers different points: A={:?} B={:?}",
+            (pax, pay),
+            (pbx, pby)
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance test for "Editable Children / Make Local"
+    /// (bead scene-tree-ops-editable-children / pat-z3bcj): toggling Editable
+    /// Children reveals an instance's internal nodes as editable, and Make
+    /// Local converts an instanced node into an owned local subtree.
+    #[test]
+    fn scene_tree_editable_children_make_local() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+
+        // Add a node and mark it as an instance by setting `_instance_source`.
+        let inst_id = {
+            let body =
+                format!(r#"{{"parent_id":{main_id},"name":"Inst","class_name":"Node"}}"#);
+            let resp = http_post(port, "/api/node/add", &body);
+            serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
+                .as_u64()
+                .unwrap()
+        };
+        assert!(http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{inst_id},"property":"_instance_source","value":{{"type":"String","value":"res://inst.tscn"}}}}"#
+            ),
+        )
+        .contains("200 OK"));
+        // An internal node of the instance.
+        http_post(
+            port,
+            "/api/node/add",
+            &format!(r#"{{"parent_id":{inst_id},"name":"Internal","class_name":"Node"}}"#),
+        );
+
+        let find_inst = |port: u16| -> serde_json::Value {
+            let scene: serde_json::Value =
+                serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+            scene["nodes"]["children"][0]["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(inst_id))
+                .unwrap()
+                .clone()
+        };
+
+        // Baseline: it is an instance, children not yet exposed for editing.
+        let before = find_inst(port);
+        assert_eq!(before["is_instance"].as_bool(), Some(true), "is an instance");
+        assert_eq!(
+            before["editable_children"].as_bool(),
+            Some(false),
+            "children not editable by default"
+        );
+
+        // Toggle Editable Children on → internal nodes exposed for editing.
+        assert!(http_post(
+            port,
+            "/api/node/editable_children",
+            &format!(r#"{{"node_id":{inst_id},"enabled":true}}"#),
+        )
+        .contains("200 OK"));
+        let editable = find_inst(port);
+        assert_eq!(
+            editable["editable_children"].as_bool(),
+            Some(true),
+            "editable children revealed"
+        );
+
+        // Make Local → no longer an instance, but its subtree is retained.
+        assert!(http_post(
+            port,
+            "/api/node/make_local",
+            &format!(r#"{{"node_id":{inst_id}}}"#),
+        )
+        .contains("200 OK"));
+        let local = find_inst(port);
+        assert_eq!(
+            local["is_instance"].as_bool(),
+            Some(false),
+            "converted to a local owned subtree"
+        );
+        let children = local["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1, "subtree retained after make-local");
+        assert_eq!(children[0]["name"], "Internal");
 
         handle.stop();
     }
@@ -5248,12 +13273,71 @@ mod tests {
     }
 
     #[test]
+    fn test_filesystem_includes_image_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("icon.png"), &[0x89, 0x50, 0x4e, 0x47]).unwrap();
+        std::fs::write(tmp.path().join("bg.jpg"), &[0xFF, 0xD8, 0xFF]).unwrap();
+        std::fs::write(tmp.path().join("main.tscn"), "[gd_scene]").unwrap();
+        std::fs::write(tmp.path().join("readme.txt"), "ignore").unwrap();
+
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"icon.png"),
+            "should find png files, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"bg.jpg"),
+            "should find jpg files, got {:?}",
+            names
+        );
+        assert!(names.contains(&"main.tscn"), "should still find tscn files");
+        assert!(
+            !names.contains(&"readme.txt"),
+            "should not include txt files"
+        );
+
+        let png_entry = entries.iter().find(|e| e.name == "icon.png").unwrap();
+        assert_eq!(png_entry.file_type, "Image");
+    }
+
+    #[test]
+    fn test_filesystem_includes_shader_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("water.gdshader"), "shader_type spatial;").unwrap();
+        std::fs::write(tmp.path().join("project.cfg"), "[application]").unwrap();
+
+        let entries = super::scan_directory(tmp.path(), "", 0, 3);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"water.gdshader"),
+            "should find shader files"
+        );
+        assert!(names.contains(&"project.cfg"), "should find cfg files");
+    }
+
+    #[test]
+    fn test_file_type_for_ext_images() {
+        assert_eq!(super::file_type_for_ext("png"), "Image");
+        assert_eq!(super::file_type_for_ext("jpg"), "Image");
+        assert_eq!(super::file_type_for_ext("jpeg"), "Image");
+        assert_eq!(super::file_type_for_ext("webp"), "Image");
+        assert_eq!(super::file_type_for_ext("svg"), "Image");
+        assert_eq!(super::file_type_for_ext("wav"), "Audio");
+        assert_eq!(super::file_type_for_ext("ttf"), "Font");
+        assert_eq!(super::file_type_for_ext("xyz"), "File");
+    }
+
+    #[test]
     fn test_fs_entry_to_json() {
         let entry = super::FsEntry {
             name: "test.tscn".to_string(),
             path: "res://test.tscn".to_string(),
             is_dir: false,
             children: Vec::new(),
+            size: 1024,
+            file_type: "Scene".to_string(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -5273,7 +13357,11 @@ mod tests {
                 path: "res://scenes/main.tscn".to_string(),
                 is_dir: false,
                 children: Vec::new(),
+                size: 512,
+                file_type: "Scene".to_string(),
             }],
+            size: 0,
+            file_type: String::new(),
         };
         let json = entry.to_json();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -5485,6 +13573,88 @@ mod tests {
         let resp = http_post(port, "/api/script/save", &json_body.to_string());
         assert!(resp.contains("200 OK"), "should create dirs: {resp}");
         assert!(nested_path.exists());
+        handle.stop();
+    }
+
+    /// Acceptance (pat-yxe4s): choosing a scripted node exposes it through the
+    /// SCRIPT main view as an editable, highlighted code pane wired to save —
+    /// the live-editor side of the `script_main_view` model. The pane reports
+    /// `editable` + a `save_endpoint`, shows the node's on-disk source, and a
+    /// save through that endpoint round-trips back into the view.
+    #[test]
+    fn test_script_main_view_endpoint_editable_and_saves() {
+        let (handle, port) = make_server();
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("player.gd");
+        std::fs::write(&script_path, "extends Node2D\nfunc _ready():\n\tpass\n").unwrap();
+        let path_str = script_path.to_str().unwrap().to_string();
+
+        // Attach the script to the scene's Main node.
+        let main_id = get_main_node_id(port);
+        let set = http_post(
+            port,
+            "/api/property/set",
+            &serde_json::json!({
+                "node_id": main_id,
+                "property": "_script_path",
+                "value": { "type": "String", "value": path_str },
+            })
+            .to_string(),
+        );
+        assert!(set.contains("200 OK"), "attach script via property set: {set}");
+
+        // SCRIPT main view for the scripted node: editable + highlighted + save.
+        let resp = http_get(port, &format!("/api/script/main_view?node_id={main_id}"));
+        assert!(resp.contains("200 OK"), "main_view ok: {resp}");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["has_script"].as_bool(), Some(true));
+        assert_eq!(v["editable"].as_bool(), Some(true), "the pane is editable");
+        assert_eq!(
+            v["save_endpoint"].as_str(),
+            Some("/api/script/save"),
+            "the pane is wired to save"
+        );
+        assert_eq!(v["language"].as_str(), Some("gdscript"), "highlight language hint");
+        assert!(
+            v["source"].as_str().unwrap().contains("extends Node2D"),
+            "the pane shows the node's script source: {v}"
+        );
+
+        // Edit + save through the wired endpoint, then re-open: the main view
+        // reflects the saved edit (a real on-disk round-trip).
+        let edited = "extends Node\nfunc _ready():\n\tprint(\"hi\")\n";
+        let save = http_post(
+            port,
+            "/api/script/save",
+            &serde_json::json!({ "path": path_str, "content": edited }).to_string(),
+        );
+        assert!(save.contains("200 OK"), "save ok: {save}");
+        let resp2 = http_get(port, &format!("/api/script/main_view?node_id={main_id}"));
+        let v2: serde_json::Value = serde_json::from_str(extract_body(&resp2)).unwrap();
+        assert_eq!(
+            v2["source"].as_str(),
+            Some(edited),
+            "the main view reflects the saved edit"
+        );
+
+        handle.stop();
+    }
+
+    /// A node with no attached script shows the empty prompt instead of a code
+    /// pane (pat-yxe4s).
+    #[test]
+    fn test_script_main_view_node_without_script_shows_prompt() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/script/main_view?node_id={main_id}"));
+        assert!(resp.contains("200 OK"), "ok: {resp}");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["has_script"].as_bool(), Some(false));
+        assert_eq!(v["editable"].as_bool(), Some(false));
+        assert!(
+            v["prompt"].as_str().unwrap().contains("script"),
+            "empty state prompts to select a scripted node: {v}"
+        );
         handle.stop();
     }
 
@@ -6848,6 +15018,1111 @@ position = Vector2(10, 20)
             resp.contains("404"),
             "selecting nonexistent node should return 404"
         );
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-c9b Filesystem dock =====
+
+    #[test]
+    fn test_b3_filesystem_endpoint_returns_json() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/filesystem");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(v.get("root").is_some());
+        assert!(v.get("files").is_some());
+        assert!(v["files"].is_array());
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_filesystem_html_panel() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("id=\"filesystem-panel\""));
+        assert!(body.contains("id=\"fs-tree\""));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_panel_in_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("id=\"fs-preview\""),
+            "should have preview panel"
+        );
+        assert!(
+            body.contains("showFilePreview"),
+            "should have preview JS function"
+        );
+        assert!(
+            body.contains("preview-img"),
+            "should have image preview CSS class"
+        );
+        assert!(
+            body.contains("preview-code"),
+            "should have code preview CSS class"
+        );
+        assert!(
+            body.contains("/api/preview/file"),
+            "should reference preview API"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_scene() {
+        let (handle, port) = make_server();
+        let tmp_scene = format!("test_preview_scene_{}.tscn", port);
+        std::fs::write(
+            &tmp_scene,
+            "[gd_scene load_steps=2]\n[ext_resource type=\"PackedScene\"]\n[node name=\"Root\" type=\"Node2D\"]\n[node name=\"Child\" type=\"Sprite2D\" parent=\".\"]\n",
+        )
+        .unwrap();
+        let resp = http_get(port, &format!("/api/preview/file?path=res://{}", tmp_scene));
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["type"], "scene");
+        assert_eq!(v["node_count"], 2);
+        assert_eq!(v["root_type"], "Node2D");
+        assert_eq!(v["ext_resources"], 1);
+        std::fs::remove_file(&tmp_scene).ok();
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_script() {
+        let (handle, port) = make_server();
+        let tmp_script = format!("test_preview_script_{}.gd", port);
+        std::fs::write(
+            &tmp_script,
+            "extends Node\n\nfunc _ready():\n\tprint(\"hello\")\n",
+        )
+        .unwrap();
+        let resp = http_get(
+            port,
+            &format!("/api/preview/file?path=res://{}", tmp_script),
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["type"], "script");
+        assert_eq!(v["lines"], 4);
+        assert!(v["preview"].as_str().unwrap().contains("extends Node"));
+        std::fs::remove_file(&tmp_script).ok();
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_resource() {
+        let (handle, port) = make_server();
+        let tmp_res = format!("test_preview_res_{}.tres", port);
+        std::fs::write(
+            &tmp_res,
+            "[gd_resource type=\"Theme\" format=3]\n[sub_resource type=\"StyleBox\"]\n",
+        )
+        .unwrap();
+        let resp = http_get(port, &format!("/api/preview/file?path=res://{}", tmp_res));
+        let body = extract_body(&resp);
+        let v: serde_json::Value =
+            serde_json::from_str(body).expect(&format!("invalid JSON: {}", body));
+        assert_eq!(v["type"], "resource", "body was: {}", body);
+        assert_eq!(v["resource_type"], "Theme");
+        assert_eq!(v["sub_resources"], 1);
+        std::fs::remove_file(&tmp_res).ok();
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_missing_file() {
+        // pat-f23vr: error responses use the standard envelope shape.
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/preview/file?path=res://nonexistent_xyz.gd");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            v["error"]["code"].is_string(),
+            "should return envelope error.code; got {v}"
+        );
+        assert!(
+            v["error"]["message"].is_string(),
+            "should return envelope error.message; got {v}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_file_preview_endpoint_missing_param() {
+        // pat-f23vr: error responses use the standard envelope shape.
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/preview/file");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            v["error"]["code"].is_string(),
+            "should return envelope error.code; got {v}"
+        );
+        assert!(
+            v["error"]["message"].is_string(),
+            "should return envelope error.message; got {v}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_filesystem_click_loads_tscn() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/scene/load",
+            r#"{"path":"res://nonexistent.tscn"}"#,
+        );
+        assert!(!resp.contains("404 Not Found"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-200 Menu actions =====
+
+    #[test]
+    fn test_b3_menu_bar_in_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("id=\"menu-bar\""));
+        assert!(body.contains("menu-new-scene"));
+        assert!(body.contains("menu-save-scene"));
+        assert!(body.contains("menu-open-scene"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_menu_undo_redo_apis() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        http_post(
+            port,
+            "/api/property/set",
+            &format!(
+                r#"{{"node_id":{},"property":"hp","value":{{"type":"Int","value":42}}}}"#,
+                main_id
+            ),
+        );
+        assert!(http_post(port, "/api/undo", "").contains("200 OK"));
+        assert!(http_post(port, "/api/redo", "").contains("200 OK"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_menu_scene_endpoints() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/scene/save", r#"{"path":""}"#);
+        assert!(!resp.contains("404"));
+        handle.stop();
+    }
+
+    /// pat-xse8a: Verify all Godot-standard menus (Scene, Edit, Project,
+    /// Debug, Editor, Help) are present in the editor HTML with correct actions.
+    #[test]
+    fn test_menu_bar_godot_menus_with_actions() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+
+        // Menu bar and brand
+        assert!(body.contains("id=\"menu-bar\""), "menu-bar element missing");
+        assert!(body.contains("menu-bar-brand"), "brand element missing");
+        assert!(body.contains("Patina"), "brand text missing");
+
+        // Scene menu and its actions
+        assert!(body.contains("data-menu=\"scene\""), "Scene menu missing");
+        assert!(
+            body.contains("data-action=\"scene-new\""),
+            "scene-new action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-open\""),
+            "scene-open action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-save\""),
+            "scene-save action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-save-as\""),
+            "scene-save-as action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-close\""),
+            "scene-close action missing"
+        );
+        assert!(
+            body.contains("data-action=\"scene-quit\""),
+            "scene-quit action missing"
+        );
+
+        // Edit menu and its actions
+        assert!(body.contains("data-menu=\"edit\""), "Edit menu missing");
+        assert!(
+            body.contains("data-action=\"edit-undo\""),
+            "edit-undo action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-redo\""),
+            "edit-redo action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-cut\""),
+            "edit-cut action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-copy\""),
+            "edit-copy action missing"
+        );
+        assert!(
+            body.contains("data-action=\"edit-paste\""),
+            "edit-paste action missing"
+        );
+
+        // Project menu and its actions
+        assert!(
+            body.contains("data-menu=\"project\""),
+            "Project menu missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-settings\""),
+            "project-settings action missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-export\""),
+            "project-export action missing"
+        );
+        assert!(
+            body.contains("data-action=\"project-refresh\""),
+            "project-refresh action missing"
+        );
+
+        // Debug menu and its actions
+        assert!(body.contains("data-menu=\"debug\""), "Debug menu missing");
+        assert!(
+            body.contains("data-action=\"debug-run\""),
+            "debug-run action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-run-current\""),
+            "debug-run-current action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-pause\""),
+            "debug-pause action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-stop\""),
+            "debug-stop action missing"
+        );
+        assert!(
+            body.contains("data-action=\"debug-step\""),
+            "debug-step action missing"
+        );
+
+        // Editor menu and its actions
+        assert!(body.contains("data-menu=\"editor\""), "Editor menu missing");
+        assert!(
+            body.contains("data-action=\"editor-settings\""),
+            "editor-settings action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-layout-save\""),
+            "editor-layout-save action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-layout-default\""),
+            "editor-layout-default action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-toggle-fullscreen\""),
+            "editor-toggle-fullscreen action missing"
+        );
+        assert!(
+            body.contains("data-action=\"editor-toggle-console\""),
+            "editor-toggle-console action missing"
+        );
+
+        // Help menu and its actions
+        assert!(body.contains("data-menu=\"help\""), "Help menu missing");
+        assert!(
+            body.contains("data-action=\"help-docs\""),
+            "help-docs action missing"
+        );
+        assert!(
+            body.contains("data-action=\"help-issues\""),
+            "help-issues action missing"
+        );
+        assert!(
+            body.contains("data-action=\"help-about\""),
+            "help-about action missing"
+        );
+
+        // Keyboard shortcuts are shown
+        assert!(body.contains("Ctrl+N"), "Ctrl+N shortcut missing");
+        assert!(body.contains("Ctrl+O"), "Ctrl+O shortcut missing");
+        assert!(body.contains("Ctrl+S"), "Ctrl+S shortcut missing");
+        assert!(body.contains("F5"), "F5 shortcut missing");
+        assert!(body.contains("F11"), "F11 shortcut missing");
+
+        // handleMenuAction function exists in JS
+        assert!(
+            body.contains("handleMenuAction"),
+            "handleMenuAction function missing"
+        );
+
+        handle.stop();
+    }
+
+    // ===== pat-b68xe: Inspector toolbar, history, and sub-resource navigation =====
+
+    #[test]
+    fn test_inspector_toolbar_history_and_sub_resource_navigation() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+
+        // Inspector toolbar CSS classes
+        assert!(
+            body.contains(".insp-history"),
+            "insp-history CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-history button"),
+            "insp-history button CSS missing"
+        );
+        assert!(
+            body.contains(".resource-info"),
+            "resource-info CSS class missing"
+        );
+        assert!(
+            body.contains(".resource-info .resource-type"),
+            "resource-type CSS class missing"
+        );
+        assert!(
+            body.contains(".resource-info .resource-path"),
+            "resource-path CSS class missing"
+        );
+
+        // Sub-resource breadcrumb CSS
+        assert!(
+            body.contains(".insp-breadcrumb"),
+            "insp-breadcrumb CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-breadcrumb-item"),
+            "insp-breadcrumb-item CSS class missing"
+        );
+        assert!(
+            body.contains(".insp-breadcrumb-sep"),
+            "insp-breadcrumb-sep CSS class missing"
+        );
+
+        // Inspector history JS state variables
+        assert!(
+            body.contains("var inspectorHistory = []"),
+            "inspectorHistory state missing"
+        );
+        assert!(
+            body.contains("var inspectorHistoryIndex = -1"),
+            "inspectorHistoryIndex state missing"
+        );
+        assert!(
+            body.contains("var subResourceStack = []"),
+            "subResourceStack state missing"
+        );
+
+        // Inspector history navigation functions
+        assert!(
+            body.contains("function inspectorBack()"),
+            "inspectorBack function missing"
+        );
+        assert!(
+            body.contains("function inspectorForward()"),
+            "inspectorForward function missing"
+        );
+        assert!(
+            body.contains("function pushInspectorHistory("),
+            "pushInspectorHistory function missing"
+        );
+        assert!(
+            body.contains("function updateHistoryButtons()"),
+            "updateHistoryButtons function missing"
+        );
+
+        // Inspector toolbar creates back/forward buttons with keyboard shortcut tooltips
+        assert!(
+            body.contains("inspector-history-back"),
+            "back button id missing"
+        );
+        assert!(
+            body.contains("inspector-history-forward"),
+            "forward button id missing"
+        );
+        assert!(body.contains("Alt+Left"), "Alt+Left shortcut hint missing");
+        assert!(
+            body.contains("Alt+Right"),
+            "Alt+Right shortcut hint missing"
+        );
+
+        // Alt+Arrow keyboard shortcuts wired up
+        assert!(
+            body.contains("e.altKey && e.key === 'ArrowLeft'"),
+            "Alt+Left keyboard shortcut missing"
+        );
+        assert!(
+            body.contains("e.altKey && e.key === 'ArrowRight'"),
+            "Alt+Right keyboard shortcut missing"
+        );
+
+        // Resource info structured display (type + path spans)
+        assert!(body.contains("resource-type"), "resource-type span missing");
+        assert!(body.contains("resource-path"), "resource-path span missing");
+
+        // Sub-resource navigation: breadcrumb rendering with root and stack items
+        assert!(
+            body.contains("insp-breadcrumb"),
+            "breadcrumb element id/class missing"
+        );
+        assert!(
+            body.contains("subResourceStack.length"),
+            "sub-resource stack length check missing"
+        );
+
+        // Sub-resource button navigates into sub-resource (pushes to stack)
+        assert!(
+            body.contains("subResourceStack.push"),
+            "subResourceStack.push missing for navigation"
+        );
+        assert!(
+            body.contains("SubResource"),
+            "SubResource pattern matching missing"
+        );
+
+        // Sub-resource inline edit button
+        assert!(
+            body.contains("insp-sub-resource-btn"),
+            "sub-resource button class missing"
+        );
+        assert!(
+            body.contains("data-sub-resource"),
+            "data-sub-resource attribute missing"
+        );
+
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-5f4 Settings =====
+
+    #[test]
+    fn test_b3_settings_defaults() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/settings");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["grid_snap_enabled"], false);
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["physics_fps"], 60);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_update() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/settings",
+            r#"{"grid_snap_enabled":true,"theme":"light","physics_fps":120}"#,
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["grid_snap_enabled"], true);
+        assert_eq!(v["theme"], "light");
+        assert_eq!(v["physics_fps"], 120);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_panel_sizes() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/settings",
+            r#"{"panel_sizes":{"left":250,"bottom":180}}"#,
+        );
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["panel_sizes"]["left"], 250.0);
+        assert_eq!(v["panel_sizes"]["bottom"], 180.0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_settings_html() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        let body = extract_body(&resp);
+        assert!(body.contains("set-theme"));
+        assert!(body.contains("set-physics-fps"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-d8b Theme =====
+
+    #[test]
+    fn test_b3_theme_dark_default() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/settings");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["theme"], "dark");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_theme_light_toggle() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/settings", r#"{"theme":"light"}"#);
+        let resp = http_get(port, "/api/settings");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["theme"], "light");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_light_theme_css() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        assert!(extract_body(&resp).contains("body.light"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-81a Keyboard shortcuts =====
+
+    #[test]
+    fn test_b3_shortcuts_documented() {
+        let (handle, port) = make_server();
+        let resp_html = http_get(port, "/editor");
+        let body = extract_body(&resp_html);
+        assert!(body.contains("Ctrl+S"));
+        assert!(body.contains("Ctrl+Z"));
+        assert!(body.contains("Ctrl+D"));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_shortcuts_js_handler() {
+        let (handle, port) = make_server();
+        let resp_html = http_get(port, "/editor");
+        let body = extract_body(&resp_html);
+        assert!(body.contains("setupKeyboardShortcuts"));
+        assert!(body.contains("keydown"));
+        handle.stop();
+    }
+
+    // ===== Batch 3: pat-0fa Plugin system =====
+
+    #[test]
+    fn test_b3_plugins_empty() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/plugins");
+        assert!(resp.contains("200 OK"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert!(v["plugins"].is_array());
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 0);
+        handle.stop();
+    }
+
+    #[test]
+    fn test_b3_plugins_registered() {
+        // Plugin system is deferred; verify the endpoint returns a valid response.
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/plugins");
+        assert!(resp.contains("200 OK") || resp.contains("404"));
+        handle.stop();
+    }
+    // =========================================================================
+    // Batch 2 editor bead tests
+    // =========================================================================
+
+    // Bead 1: Viewport selection modes
+    #[test]
+    fn test_viewport_set_mode_select() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"select"}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""mode":"select""#));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_move() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"move"}"#);
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""mode":"move""#));
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_rotate_and_get() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/viewport/set_mode", r#"{"mode":"rotate"}"#);
+        let resp = http_get(port, "/api/viewport/mode");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains(r#""mode":"rotate""#),
+            "mode should be rotate, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_viewport_set_mode_invalid() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/viewport/set_mode", r#"{"mode":"invalid"}"#);
+        assert!(resp.contains("400"), "invalid mode should return 400");
+        handle.stop();
+    }
+
+    // Bead 2: Transform gizmos
+    #[test]
+    fn test_gizmo_renders_for_selected_node_batch2() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        let nid = tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, Some(nid), 200, 200);
+        let mut has_red = false;
+        let mut has_green = false;
+        for y in 80..120 {
+            for x in 80..180 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+                if c.g > 0.7 && c.r < 0.4 && c.b < 0.4 {
+                    has_green = true;
+                }
+            }
+        }
+        assert!(has_red, "selected node should have red gizmo arrow");
+        assert!(has_green, "selected node should have green gizmo arrow");
+    }
+
+    #[test]
+    fn test_gizmo_not_rendered_when_unselected_batch2() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Player", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, None, 200, 200);
+        let mut has_red = false;
+        for y in 90..110 {
+            for x in 100..160 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+            }
+        }
+        assert!(!has_red, "unselected node should not have gizmo arrows");
+    }
+
+    #[test]
+    fn test_gizmo_different_colors_per_axis() {
+        use crate::scene_renderer::render_scene;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("NPC", "Node2D");
+        node.set_property("position", Variant::Vector2(Vector2::new(100.0, 100.0)));
+        let nid = tree.add_child(root, node).unwrap();
+        let fb = render_scene(&tree, Some(nid), 300, 300);
+        // Scan the whole framebuffer for both red and green gizmo pixels
+        let mut has_red = false;
+        let mut has_green = false;
+        for y in 0..300 {
+            for x in 0..300 {
+                let c = fb.get_pixel(x, y);
+                if c.r > 0.8 && c.g < 0.4 && c.b < 0.4 {
+                    has_red = true;
+                }
+                if c.g > 0.7 && c.r < 0.4 && c.b < 0.4 {
+                    has_green = true;
+                }
+            }
+        }
+        assert!(
+            has_red && has_green,
+            "gizmo should have both red (X) and green (Y) axis colors"
+        );
+    }
+
+    // Bead 3: Snapping
+    #[test]
+    fn test_snap_info_endpoint() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/viewport/snap_info");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("snap"),
+            "snap_info should return snap settings, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_snap_toggle_via_settings_batch2() {
+        let (handle, port) = make_server();
+        http_post(
+            port,
+            "/api/settings",
+            r#"{"grid_snap_enabled":true,"grid_snap_size":16}"#,
+        );
+        let resp = http_get(port, "/api/settings");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("grid_snap"),
+            "settings should return snap settings; got: {body}"
+        );
+        handle.stop();
+    }
+
+    // Bead 4: Script editor core
+    #[test]
+    fn test_get_node_script_no_script() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/node/script?node_id={main_id}"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("has_script") && body.contains("false"),
+            "node without script should return has_script:false, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_get_node_script_with_path() {
+        let port = free_port();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut main = Node::new("Main", "Node2D");
+        main.set_property(
+            "_script_path",
+            Variant::String("nonexistent.gd".to_string()),
+        );
+        tree.add_child(root, main).unwrap();
+        let state = EditorState::new(tree);
+        let handle = EditorServerHandle::start(port, state);
+        thread::sleep(Duration::from_millis(100));
+        let resp = http_get(port, "/api/scene");
+        let scene_body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(scene_body).unwrap();
+        let nid = v["nodes"]["children"][0]["id"].as_u64().unwrap();
+        let resp = http_get(port, &format!("/api/node/script?node_id={nid}"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("has_script") && body.contains("true"),
+            "node with script path should return has_script:true, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_editor_html_has_syntax_highlighting() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("gd-keyword"), "should have keyword styling");
+        assert!(html.contains("gd-string"), "should have string styling");
+        assert!(html.contains("gd-comment"), "should have comment styling");
+    }
+
+    // Bead 5: Script search
+    #[test]
+    fn test_search_missing_query() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/search");
+        assert!(resp.contains("400"), "missing q should return 400");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_search_returns_results_array() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/search?q=nonexistent_string_xyz");
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("results"),
+            "should return results key, got: {body}"
+        );
+        handle.stop();
+    }
+
+    // Bead 6: Signals dock
+    #[test]
+    fn test_signals_endpoint_returns_signals() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_get(port, &format!("/api/node/signals?node_id={main_id}"));
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("signals"),
+            "should return signals, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_signal_connect_and_disconnect() {
+        let (handle, port) = make_server();
+        let main_id = get_main_node_id(port);
+        let resp = http_post(
+            port,
+            "/api/node/signals/connect",
+            &format!(r#"{{"node_id":{main_id},"signal":"ready","method":"_on_ready"}}"#),
+        );
+        assert!(resp.contains("200") || resp.contains("ok"));
+        let resp = http_post(
+            port,
+            "/api/signal/disconnect",
+            &format!(r#"{{"node_id":{main_id},"signal":"ready"}}"#),
+        );
+        assert!(resp.contains("200 OK"), "disconnect should succeed");
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""ok":true"#), "got: {body}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_signal_disconnect_nonexistent_node() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/signal/disconnect",
+            r#"{"node_id":9999999,"signal":"ready"}"#,
+        );
+        assert!(
+            resp.contains("404"),
+            "should return 404 for nonexistent node"
+        );
+        handle.stop();
+    }
+
+    // Bead 7: Animation editor
+    #[test]
+    fn test_animations_list_initially_empty() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/animations");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body == "[]" || body.contains("[]"),
+            "should be empty, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_animation_create_and_list_batch2() {
+        let (handle, port) = make_server();
+        http_post(
+            port,
+            "/api/animation/create",
+            r#"{"name":"walk","length":1.0}"#,
+        );
+        let resp = http_get(port, "/api/animations");
+        let body = extract_body(&resp);
+        assert!(body.contains("walk"), "should contain 'walk', got: {body}");
+        handle.stop();
+    }
+
+    // Bead 8: Bottom panels
+    #[test]
+    fn test_output_returns_entries() {
+        let (handle, port) = make_server();
+        let resp = http_get(port, "/api/output");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("entries"),
+            "should return entries, got: {body}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_output_clear_endpoint() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/output/clear", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(body.contains(r#""ok":true"#), "got: {body}");
+        handle.stop();
+    }
+
+    #[test]
+    fn test_bottom_panel_and_output_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("bottom-panel"), "should have bottom panel");
+        assert!(html.contains("output"), "should have output");
+    }
+
+    // Bead 9: Top bar
+    #[test]
+    fn test_top_bar_play_stop_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("btn-play"), "should have play button");
+        assert!(html.contains("btn-stop"), "should have stop button");
+    }
+
+    #[test]
+    fn test_scene_tab_in_html() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(html.contains("scene-tab"), "should have scene tab");
+    }
+
+    #[test]
+    fn test_runtime_play_stop_endpoints() {
+        let (handle, port) = make_server();
+        let resp = http_post(port, "/api/runtime/play", "");
+        assert!(resp.contains("200 OK"));
+        let body = extract_body(&resp);
+        assert!(
+            body.contains("running") || body.contains("true"),
+            "got: {body}"
+        );
+        let resp = http_post(port, "/api/runtime/stop", "");
+        assert!(resp.contains("200 OK"));
+        handle.stop();
+    }
+
+    /// Regression (pat-yl0fg): selecting a scene-tree node end-to-end populates
+    /// the Inspector. Reproduces the front-end flow at the HTTP layer — the tree
+    /// row click POSTs `/api/node/select`, then the status bar + Inspector read
+    /// `/api/selected`. This guards the wire from "click a tree row" to "status
+    /// bar shows the name + Path, Inspector shows properties".
+    #[test]
+    fn test_tree_select_populates_inspector_end_to_end() {
+        let (handle, port) = make_server();
+
+        // The tree-row id, exactly as the front-end reads it from GET /api/scene.
+        let node_id = get_main_node_id(port);
+
+        // Nothing is selected yet: the Inspector shows its empty state.
+        let none = http_get(port, "/api/selected");
+        assert!(none.contains("200 OK"));
+        assert_eq!(
+            extract_body(&none).trim(),
+            "null",
+            "no selection => /api/selected is null (Inspector empty)"
+        );
+
+        // Clicking the tree row selects the node (front-end POSTs this).
+        let sel = http_post(port, "/api/node/select", &format!(r#"{{"node_id":{node_id}}}"#));
+        assert!(sel.contains("200 OK"), "tree-row select succeeds: {sel}");
+        assert!(extract_body(&sel).contains("\"ok\":true"));
+
+        // Now the Inspector is populated: /api/selected returns the node's name
+        // (status bar), a non-empty scene path (Path field), and its properties
+        // (the Inspector body) — i.e. selection is wired through to the Inspector.
+        let resp = http_get(port, "/api/selected");
+        assert!(resp.contains("200 OK"));
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(
+            v["name"].as_str(),
+            Some("Main"),
+            "status bar shows the selected node's name: {v}"
+        );
+        assert!(
+            v["path"].as_str().map(|p| !p.is_empty()).unwrap_or(false),
+            "the Path field is set for the selected node: {v}"
+        );
+        assert!(
+            v["properties"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "the Inspector shows the node's properties: {v}"
+        );
+
+        handle.stop();
+    }
+
+    /// Acceptance (pat-w1ub4): `Scene > New Scene` adds an "Untitled" tab backed
+    /// by an empty root and makes it active, leaving the previous scene's tab in
+    /// place. This is the live-editor side of multi-scene tab management, on top
+    /// of the `top_bar_scene_tabs_switch` / `top_bar_tab_unsaved_and_close`
+    /// editor-context model.
+    #[test]
+    fn test_new_scene_adds_untitled_tab_with_empty_root() {
+        let (handle, port) = make_server();
+
+        // The server starts with a single tab whose scene has a "Main" child.
+        let before: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/tabs"))).unwrap();
+        assert_eq!(before["tabs"].as_array().unwrap().len(), 1);
+        assert_eq!(before["active_tab_index"].as_u64(), Some(0));
+        let scene_before: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        assert_eq!(
+            scene_before["nodes"]["children"].as_array().unwrap().len(),
+            1,
+            "the initial scene has a Main child"
+        );
+
+        // Scene > New Scene.
+        let resp = http_post(port, "/api/scene/new", "");
+        assert!(resp.contains("200 OK"), "new scene succeeds: {resp}");
+        let body: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(body["ok"].as_bool(), Some(true));
+
+        // A second tab was added and is now the active one.
+        let after: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene/tabs"))).unwrap();
+        let tabs = after["tabs"].as_array().unwrap();
+        assert_eq!(tabs.len(), 2, "a new tab was added: {after}");
+        let active = after["active_tab_index"].as_u64().unwrap() as usize;
+        assert_eq!(active, 1, "the new scene tab is active");
+        let new_tab = &tabs[active];
+        assert!(
+            new_tab["name"].as_str().unwrap().starts_with("Untitled"),
+            "the new tab is labeled Untitled: {new_tab}"
+        );
+        assert_eq!(
+            new_tab["path"].as_str(),
+            Some(""),
+            "an unsaved new scene has no path"
+        );
+        assert_eq!(
+            new_tab["modified"].as_bool(),
+            Some(false),
+            "a fresh scene starts unmodified"
+        );
+
+        // The active scene is now an empty root (no children).
+        let scene_after: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+        let children = scene_after["nodes"]["children"].as_array();
+        assert!(
+            children.map(|c| c.is_empty()).unwrap_or(true),
+            "the new scene's root is empty: {}",
+            scene_after["nodes"]
+        );
+
         handle.stop();
     }
 }

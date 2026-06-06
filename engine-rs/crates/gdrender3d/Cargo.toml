@@ -1,0 +1,20 @@
+[package]
+name = "gdrender3d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+gpu = ["wgpu", "pollster", "bytemuck"]
+
+[dependencies]
+gdcore = { path = "../gdcore" }
+gdserver3d = { path = "../gdserver3d" }
+gdvariant = { path = "../gdvariant" }
+thiserror.workspace = true
+tracing.workspace = true
+wgpu = { version = "29", optional = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }

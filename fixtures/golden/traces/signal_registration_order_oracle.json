@@ -1,0 +1,43 @@
+{
+  "description": "Oracle trace fixture for signal registration order parity. Godot fires callbacks in connection insertion order and emits one SignalEmit trace per emit_signal() call. This fixture captures the expected trace when signals from signal_instantiation.tscn are emitted in oracle declaration order.",
+  "upstream_version": "4.6.1-stable",
+  "scenario": "registration_order",
+  "event_trace": [
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/GameWorld/Player",
+      "detail": "health_changed",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/GameWorld/Player",
+      "detail": "died",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/GameWorld/Player/Hitbox",
+      "detail": "hit",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/GameWorld/Enemy",
+      "detail": "attack",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/GameWorld/Enemy",
+      "detail": "defeated",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/GameWorld",
+      "detail": "score_updated",
+      "frame": 0
+    }
+  ]
+}

@@ -38,7 +38,7 @@ fn run_patina_on_scene(scene_path: &Path) -> Value {
     let output = Command::new(&binary)
         .arg(scene_path.to_str().expect("valid UTF-8"))
         .arg("--frames")
-        .arg("1")
+        .arg("0")
         .output()
         .unwrap_or_else(|e| panic!("failed to execute patina-runner: {e}"));
     assert!(

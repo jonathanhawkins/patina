@@ -143,7 +143,7 @@ func _write_output() -> void:
 
 	var upstream_version := _get_arg(UPSTREAM_VERSION_ARG)
 	if upstream_version.is_empty():
-		upstream_version = "4.5.1-stable"
+		upstream_version = "4.6.1-stable"
 
 	# Capture scene tree.
 	var scene_tree_data := _dump_scene_tree(root)

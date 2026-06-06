@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-UPSTREAM_VERSION = "4.5.1-stable"
-UPSTREAM_COMMIT = "f62fdbde15035c5576dad93e586201f4d41ef0cb"
+UPSTREAM_VERSION = "4.6.1-stable"
+UPSTREAM_COMMIT = "14d19694e0c88a3f9e82d899a0400f27a24c176e"
 
 
 def load_json(path: Path) -> Any:

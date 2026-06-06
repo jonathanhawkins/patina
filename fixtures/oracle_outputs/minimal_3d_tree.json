@@ -1,0 +1,62 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/World",
+					"path": "/root/World/Camera"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Cube",
+					"owner": "/root/World",
+					"path": "/root/World/Cube"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "Sun",
+					"owner": "/root/World",
+					"path": "/root/World/Sun"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "CollisionShape",
+							"owner": "/root/World",
+							"path": "/root/World/Floor/CollisionShape"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Floor",
+					"owner": "/root/World",
+					"path": "/root/World/Floor"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "World",
+			"owner": "/root",
+			"path": "/root/World"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

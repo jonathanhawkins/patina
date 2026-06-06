@@ -1,0 +1,29 @@
+[gd_scene format=3]
+
+[node name="AnimatedScene3D" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+position = Vector3(0, 2, 5)
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+position = Vector3(3, 8, 3)
+
+[node name="Character" type="Node3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="Skeleton" type="Skeleton3D" parent="Character"]
+
+[node name="CharacterMesh" type="MeshInstance3D" parent="Character/Skeleton"]
+
+[node name="Animator" type="AnimationPlayer" parent="Character"]
+
+[node name="Attachment" type="BoneAttachment3D" parent="Character/Skeleton"]
+
+[node name="Weapon" type="MeshInstance3D" parent="Character/Skeleton/Attachment"]
+position = Vector3(0.5, 0.5, 0)
+scale = Vector3(0.2, 0.2, 1)
+
+[node name="Ground" type="StaticBody3D" parent="."]
+position = Vector3(0, 0, 0)
+
+[node name="GroundShape" type="CollisionShape3D" parent="Ground"]

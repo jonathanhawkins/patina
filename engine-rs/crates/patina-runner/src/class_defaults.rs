@@ -231,6 +231,146 @@ static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyL
     m.insert("Label", label);
     m.insert("Button", button);
 
+    // -- Node3D (base for all 3D nodes) --
+    let identity_transform = gdcore::math3d::Transform3D {
+        basis: gdcore::math3d::Basis::IDENTITY,
+        origin: gdcore::math::Vector3::ZERO,
+    };
+    let node3d: Vec<PropDefault> = vec![
+        ("transform", Variant::Transform3D(identity_transform)),
+        ("visible", Variant::Bool(true)),
+    ];
+
+    // -- Camera3D = Node3D + camera properties --
+    let camera_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.extend([
+            ("fov", Variant::Float(75.0)),
+            ("near", Variant::Float(0.05)),
+            ("far", Variant::Float(4000.0)),
+            ("current", Variant::Bool(false)),
+        ]);
+        v
+    };
+
+    // -- MeshInstance3D = Node3D + mesh properties --
+    let mesh_instance_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.push(("cast_shadow", Variant::Int(1)));
+        v
+    };
+
+    // -- Light3D base = Node3D + light properties --
+    let light_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.extend([
+            ("light_energy", Variant::Float(1.0)),
+            ("light_color", Variant::Color(gdcore::math::Color::WHITE)),
+            ("shadow_enabled", Variant::Bool(false)),
+            ("shadow_bias", Variant::Float(0.1)),
+            ("shadow_blur", Variant::Float(1.0)),
+        ]);
+        v
+    };
+
+    // -- DirectionalLight3D = Light3D + directional properties --
+    let directional_light_3d: Vec<PropDefault> = {
+        let mut v = light_3d.clone();
+        v.extend([
+            ("directional_shadow_mode", Variant::Int(2)),
+            ("directional_shadow_max_distance", Variant::Float(100.0)),
+        ]);
+        v
+    };
+
+    // -- OmniLight3D = Light3D + omni properties --
+    let omni_light_3d: Vec<PropDefault> = {
+        let mut v = light_3d.clone();
+        v.extend([
+            ("omni_range", Variant::Float(5.0)),
+            ("omni_attenuation", Variant::Float(1.0)),
+            ("omni_shadow_mode", Variant::Int(1)),
+        ]);
+        v
+    };
+
+    // -- SpotLight3D = Light3D + spot properties --
+    let spot_light_3d: Vec<PropDefault> = {
+        let mut v = light_3d.clone();
+        v.extend([
+            ("spot_range", Variant::Float(5.0)),
+            ("spot_attenuation", Variant::Float(1.0)),
+            ("spot_angle", Variant::Float(45.0)),
+            ("spot_angle_attenuation", Variant::Float(1.0)),
+        ]);
+        v
+    };
+
+    // -- CollisionObject3D = Node3D + collision properties --
+    let collision_object_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.extend([
+            ("collision_layer", Variant::Int(1)),
+            ("collision_mask", Variant::Int(1)),
+        ]);
+        v
+    };
+
+    // -- PhysicsBody3D / StaticBody3D --
+    let physics_body_3d = collision_object_3d.clone();
+
+    // -- RigidBody3D = PhysicsBody3D + rigid properties --
+    let rigid_body_3d: Vec<PropDefault> = {
+        let mut v = physics_body_3d.clone();
+        v.extend([
+            ("mass", Variant::Float(1.0)),
+            ("gravity_scale", Variant::Float(1.0)),
+            ("freeze", Variant::Bool(false)),
+        ]);
+        v
+    };
+
+    // -- CharacterBody3D = PhysicsBody3D + character properties --
+    let character_body_3d: Vec<PropDefault> = {
+        let mut v = physics_body_3d.clone();
+        v.push(("velocity", Variant::Vector3(gdcore::math::Vector3::ZERO)));
+        v
+    };
+
+    // -- Area3D = CollisionObject3D + area properties --
+    let area_3d: Vec<PropDefault> = {
+        let mut v = collision_object_3d.clone();
+        v.extend([
+            ("monitoring", Variant::Bool(true)),
+            ("monitorable", Variant::Bool(true)),
+        ]);
+        v
+    };
+
+    // -- CollisionShape3D = Node3D + disabled --
+    let collision_shape_3d: Vec<PropDefault> = {
+        let mut v = node3d.clone();
+        v.push(("disabled", Variant::Bool(false)));
+        v
+    };
+
+    m.insert("Node3D", node3d.clone());
+    m.insert("Camera3D", camera_3d);
+    m.insert("MeshInstance3D", mesh_instance_3d);
+    m.insert("MultiMeshInstance3D", node3d.clone());
+    m.insert("Light3D", light_3d);
+    m.insert("DirectionalLight3D", directional_light_3d);
+    m.insert("OmniLight3D", omni_light_3d);
+    m.insert("SpotLight3D", spot_light_3d);
+    m.insert("CollisionObject3D", collision_object_3d);
+    m.insert("PhysicsBody3D", physics_body_3d.clone());
+    m.insert("StaticBody3D", physics_body_3d.clone());
+    m.insert("RigidBody3D", rigid_body_3d);
+    m.insert("CharacterBody3D", character_body_3d);
+    m.insert("Area3D", area_3d);
+    m.insert("CollisionShape3D", collision_shape_3d);
+    m.insert("Marker3D", node3d);
+
     m
 });
 
@@ -296,6 +436,24 @@ fn variant_eq(a: &Variant, b: &Variant) -> bool {
                 && (f64::from(a.g) - f64::from(b.g)).abs() < FLOAT_TOL
                 && (f64::from(a.b) - f64::from(b.b)).abs() < FLOAT_TOL
                 && (f64::from(a.a) - f64::from(b.a)).abs() < FLOAT_TOL
+        }
+        (Variant::Transform3D(a), Variant::Transform3D(b)) => {
+            let ab = a.basis;
+            let bb = b.basis;
+            let ao = a.origin;
+            let bo = b.origin;
+            (f64::from(ab.x.x) - f64::from(bb.x.x)).abs() < FLOAT_TOL
+                && (f64::from(ab.x.y) - f64::from(bb.x.y)).abs() < FLOAT_TOL
+                && (f64::from(ab.x.z) - f64::from(bb.x.z)).abs() < FLOAT_TOL
+                && (f64::from(ab.y.x) - f64::from(bb.y.x)).abs() < FLOAT_TOL
+                && (f64::from(ab.y.y) - f64::from(bb.y.y)).abs() < FLOAT_TOL
+                && (f64::from(ab.y.z) - f64::from(bb.y.z)).abs() < FLOAT_TOL
+                && (f64::from(ab.z.x) - f64::from(bb.z.x)).abs() < FLOAT_TOL
+                && (f64::from(ab.z.y) - f64::from(bb.z.y)).abs() < FLOAT_TOL
+                && (f64::from(ab.z.z) - f64::from(bb.z.z)).abs() < FLOAT_TOL
+                && (f64::from(ao.x) - f64::from(bo.x)).abs() < FLOAT_TOL
+                && (f64::from(ao.y) - f64::from(bo.y)).abs() < FLOAT_TOL
+                && (f64::from(ao.z) - f64::from(bo.z)).abs() < FLOAT_TOL
         }
         _ => false,
     }
@@ -622,6 +780,135 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // should_output_property: Camera3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn camera3d_current_default_not_output() {
+        // current=false is the default, so it should NOT be output.
+        assert!(!should_output_property(
+            "Camera3D",
+            "current",
+            &Variant::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn camera3d_current_true_is_output() {
+        // current=true differs from default, so it SHOULD be output.
+        assert!(should_output_property(
+            "Camera3D",
+            "current",
+            &Variant::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn camera3d_fov_default_not_output() {
+        assert!(!should_output_property(
+            "Camera3D",
+            "fov",
+            &Variant::Float(75.0)
+        ));
+    }
+
+    #[test]
+    fn camera3d_fov_nondefault_output() {
+        assert!(should_output_property(
+            "Camera3D",
+            "fov",
+            &Variant::Float(90.0)
+        ));
+    }
+
+    #[test]
+    fn camera3d_transform_identity_not_output() {
+        let identity = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::ZERO,
+        };
+        assert!(!should_output_property(
+            "Camera3D",
+            "transform",
+            &Variant::Transform3D(identity)
+        ));
+    }
+
+    #[test]
+    fn camera3d_transform_nonidentity_output() {
+        let t = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::new(0.0, 2.0, 5.0),
+        };
+        assert!(should_output_property(
+            "Camera3D",
+            "transform",
+            &Variant::Transform3D(t)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_output_property: Node3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node3d_visible_default_not_output() {
+        assert!(!should_output_property(
+            "Node3D",
+            "visible",
+            &Variant::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn node3d_visible_false_output() {
+        assert!(should_output_property(
+            "Node3D",
+            "visible",
+            &Variant::Bool(false)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_output_property: DirectionalLight3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn directionallight3d_shadow_enabled_default_not_output() {
+        assert!(!should_output_property(
+            "DirectionalLight3D",
+            "shadow_enabled",
+            &Variant::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn directionallight3d_shadow_enabled_true_output() {
+        assert!(should_output_property(
+            "DirectionalLight3D",
+            "shadow_enabled",
+            &Variant::Bool(true)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // should_output_property: StaticBody3D
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn staticbody3d_transform_nonidentity_output() {
+        let t = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::new(0.0, -1.0, 0.0),
+        };
+        assert!(should_output_property(
+            "StaticBody3D",
+            "transform",
+            &Variant::Transform3D(t)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
     // variant_eq
     // -----------------------------------------------------------------------
 
@@ -658,5 +945,33 @@ mod tests {
     #[test]
     fn variant_eq_different_types() {
         assert!(!variant_eq(&Variant::Int(0), &Variant::Float(0.0)));
+    }
+
+    #[test]
+    fn variant_eq_transform3d_identity() {
+        let identity = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::ZERO,
+        };
+        assert!(variant_eq(
+            &Variant::Transform3D(identity),
+            &Variant::Transform3D(identity)
+        ));
+    }
+
+    #[test]
+    fn variant_eq_transform3d_different() {
+        let identity = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::ZERO,
+        };
+        let moved = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::IDENTITY,
+            origin: gdcore::math::Vector3::new(0.0, 2.0, 5.0),
+        };
+        assert!(!variant_eq(
+            &Variant::Transform3D(identity),
+            &Variant::Transform3D(moved)
+        ));
     }
 }

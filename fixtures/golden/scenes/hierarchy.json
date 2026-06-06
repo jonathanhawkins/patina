@@ -1,30 +1,31 @@
 {
-  "fixture_id": "scene_hierarchy",
   "capture_type": "scene_tree",
-  "upstream_version": "pending",
+  "fixture_id": "scene_hierarchy",
+  "generated_at": "2026-03-22T08:00:00+00:00",
   "nodes": [
     {
-      "name": "Root",
-      "class": "Node",
-      "path": "/root/Root",
       "children": [
         {
-          "name": "Player",
-          "class": "Node2D",
-          "path": "/root/Root/Player",
           "children": [
             {
-              "name": "Sprite",
-              "class": "Sprite2D",
-              "path": "/root/Root/Player/Sprite",
               "children": [],
+              "class": "Sprite2D",
+              "name": "Sprite",
+              "path": "/root/Root/Player/Sprite",
               "properties": {}
             }
           ],
+          "class": "Node2D",
+          "name": "Player",
+          "path": "/root/Root/Player",
           "properties": {}
         }
       ],
+      "class": "Node",
+      "name": "Root",
+      "path": "/root/Root",
       "properties": {}
     }
-  ]
+  ],
+  "upstream_version": "4.6.1-stable"
 }

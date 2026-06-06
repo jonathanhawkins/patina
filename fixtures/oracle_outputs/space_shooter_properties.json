@@ -17,6 +17,12 @@
 					"name": "Player",
 					"path": "/root/SpaceShooter/Player",
 					"properties": {
+						"can_shoot": {
+							"class_type": "",
+							"hint": 0,
+							"type": "bool",
+							"value": true
+						},
 						"position": {
 							"class_type": "",
 							"hint": 1,
@@ -25,6 +31,18 @@
 								"x": 320.0,
 								"y": 400.0
 							}
+						},
+						"shoot_cooldown": {
+							"class_type": "",
+							"hint": 0,
+							"type": "float",
+							"value": 0.0
+						},
+						"speed": {
+							"class_type": "",
+							"hint": 0,
+							"type": "float",
+							"value": 200.0
 						}
 					}
 				},
@@ -42,6 +60,18 @@
 								"x": 320.0,
 								"y": 0.0
 							}
+						},
+						"spawn_interval": {
+							"class_type": "",
+							"hint": 0,
+							"type": "float",
+							"value": 2.0
+						},
+						"spawn_timer": {
+							"class_type": "",
+							"hint": 0,
+							"type": "float",
+							"value": 0.0
 						}
 					}
 				},

@@ -1,0 +1,55 @@
+{
+  "description": "Oracle trace fixture for signal argument forwarding parity. Godot forwards all arguments to each connected callback in order. Arguments are passed by value. This fixture defines expected argument payloads for verification.",
+  "upstream_version": "4.6.1-stable",
+  "scenario": "arguments",
+  "emissions": [
+    {
+      "signal": "health_changed",
+      "from": "/root/Emitter",
+      "frame": 0,
+      "args": [42, "damage"],
+      "expected_callbacks": [
+        { "target": "ReceiverA", "method": "on_health", "receives_args": [42, "damage"] },
+        { "target": "ReceiverB", "method": "on_health_log", "receives_args": [42, "damage"] }
+      ]
+    },
+    {
+      "signal": "item_collected",
+      "from": "/root/Emitter",
+      "frame": 0,
+      "args": ["gold_coin", 5, true],
+      "expected_callbacks": [
+        { "target": "ReceiverA", "method": "on_item", "receives_args": ["gold_coin", 5, true] }
+      ]
+    },
+    {
+      "signal": "no_args_signal",
+      "from": "/root/Emitter",
+      "frame": 1,
+      "args": [],
+      "expected_callbacks": [
+        { "target": "ReceiverA", "method": "on_empty", "receives_args": [] }
+      ]
+    }
+  ],
+  "event_trace": [
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/Emitter",
+      "detail": "health_changed",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/Emitter",
+      "detail": "item_collected",
+      "frame": 0
+    },
+    {
+      "event_type": "SignalEmit",
+      "node_path": "/root/Emitter",
+      "detail": "no_args_signal",
+      "frame": 1
+    }
+  ]
+}

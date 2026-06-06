@@ -2653,3 +2653,60 @@ ui_accept={
         assert!(map.event_matches_action(&evt, "jump"));
     }
 }
+
+/// Context for drag-and-drop operations, tracking accepted file paths
+/// and the current drop position.
+#[derive(Debug, Clone, Default)]
+pub struct DropContext {
+    /// File paths that have been dropped.
+    pub files: Vec<String>,
+    /// Drop position in window coordinates.
+    pub position: (f32, f32),
+    /// Whether a drop operation is currently active.
+    pub active: bool,
+}
+
+impl DropContext {
+    /// Creates a new empty drop context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Clears the drop context state.
+    pub fn clear(&mut self) {
+        self.files.clear();
+        self.position = (0.0, 0.0);
+        self.active = false;
+    }
+
+    /// Signals that a drag operation has entered the window.
+    pub fn drag_enter(&mut self) {
+        self.active = true;
+    }
+
+    /// Accepts dropped files, ending the drag hover state.
+    pub fn drop_files(&mut self, files: Vec<String>) {
+        self.files.extend(files);
+        self.active = false;
+    }
+
+    /// Returns `true` if a drag is currently hovering over the window.
+    pub fn is_hovering(&self) -> bool {
+        self.active
+    }
+
+    /// Returns `true` if there are pending files that haven't been consumed.
+    pub fn has_pending_files(&self) -> bool {
+        !self.files.is_empty()
+    }
+
+    /// Returns the number of pending dropped files.
+    pub fn pending_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Takes all pending files, clearing the internal list.
+    pub fn take_pending_files(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.files)
+    }
+}

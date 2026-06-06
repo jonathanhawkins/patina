@@ -1,0 +1,9 @@
+[gd_scene format=3 uid="uid://simple_hierarchy"]
+
+[node name="Root" type="Node2D"]
+
+[node name="Child1" type="Node2D" parent="."]
+
+[node name="GrandChild" type="Node2D" parent="Child1"]
+
+[node name="Child2" type="Node2D" parent="."]

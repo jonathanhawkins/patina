@@ -1,0 +1,58 @@
+[gd_scene format=3 uid="uid://physics_playground_extended"]
+
+[node name="World" type="Node"]
+
+[node name="BallA" type="RigidBody2D" parent="."]
+position = Vector2(100, 50)
+linear_velocity = Vector2(80, 120)
+mass = 1.0
+bounce = 0.6
+collision_layer = 1
+collision_mask = 1
+
+[node name="CollisionShape" type="CollisionShape2D" parent="BallA"]
+radius = 10.0
+
+[node name="BallB" type="RigidBody2D" parent="."]
+position = Vector2(300, 50)
+linear_velocity = Vector2(-60, 100)
+mass = 2.0
+bounce = 0.6
+collision_layer = 1
+collision_mask = 1
+
+[node name="CollisionShape" type="CollisionShape2D" parent="BallB"]
+radius = 12.0
+
+[node name="Player" type="CharacterBody2D" parent="."]
+position = Vector2(50, 180)
+velocity = Vector2(100, 0)
+collision_layer = 1
+collision_mask = 1
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Player"]
+radius = 8.0
+
+[node name="Floor" type="StaticBody2D" parent="."]
+position = Vector2(250, 220)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="Floor"]
+size = Vector2(500, 20)
+
+[node name="WallLeft" type="StaticBody2D" parent="."]
+position = Vector2(0, 130)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="WallLeft"]
+size = Vector2(20, 200)
+
+[node name="WallRight" type="StaticBody2D" parent="."]
+position = Vector2(500, 130)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape" type="CollisionShape2D" parent="WallRight"]
+size = Vector2(20, 200)

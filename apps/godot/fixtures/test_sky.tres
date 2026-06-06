@@ -1,0 +1,14 @@
+[gd_resource type="Sky" format=3]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_abc"]
+sky_top_color = Color(0.385, 0.454, 0.55, 1)
+sky_horizon_color = Color(0.646, 0.654, 0.67, 1)
+sky_curve = 0.15
+ground_bottom_color = Color(0.2, 0.169, 0.133, 1)
+ground_horizon_color = Color(0.646, 0.654, 0.67, 1)
+ground_curve = 0.02
+
+[resource]
+sky_material = SubResource("ProceduralSkyMaterial_abc")
+process_mode = 0
+radiance_size = 3

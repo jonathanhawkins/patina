@@ -1,0 +1,408 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"name": "Camera",
+					"path": "/root/Track/Camera",
+					"properties": {
+						"far": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 500.0
+						},
+						"fov": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 60.0
+						},
+						"near": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 0.0500000007450581
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 0.949999988079071, "z": -0.310000002384186 },
+									"z": { "x": 0.0, "y": 0.310000002384186, "z": 0.949999988079071 }
+								},
+								"origin": { "x": 0.0, "y": 5.0, "z": 12.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"name": "Sun",
+					"path": "/root/Track/Sun",
+					"properties": {
+						"light_energy": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 1.0
+						},
+						"shadow_enabled": {
+							"class_type": "",
+							"hint": 42,
+							"type": "bool",
+							"value": true
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"name": "ChassisShape",
+							"path": "/root/Track/Chassis/ChassisShape",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"name": "ChassisMesh",
+							"path": "/root/Track/Chassis/ChassisMesh",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"name": "WheelFLShape",
+									"path": "/root/Track/Chassis/WheelFL/WheelFLShape",
+									"properties": {
+
+									}
+								}
+							],
+							"class": "RigidBody3D",
+							"name": "WheelFL",
+							"path": "/root/Track/Chassis/WheelFL",
+							"properties": {
+								"mass": {
+									"class_type": "",
+									"hint": 1,
+									"type": "float",
+									"value": 20.0
+								},
+								"transform": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Transform3D",
+									"value": {
+										"basis": {
+											"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+											"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+											"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+										},
+										"origin": { "x": -1.0, "y": -0.5, "z": 1.5 }
+									}
+								}
+							}
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"name": "WheelFRShape",
+									"path": "/root/Track/Chassis/WheelFR/WheelFRShape",
+									"properties": {
+
+									}
+								}
+							],
+							"class": "RigidBody3D",
+							"name": "WheelFR",
+							"path": "/root/Track/Chassis/WheelFR",
+							"properties": {
+								"mass": {
+									"class_type": "",
+									"hint": 1,
+									"type": "float",
+									"value": 20.0
+								},
+								"transform": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Transform3D",
+									"value": {
+										"basis": {
+											"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+											"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+											"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+										},
+										"origin": { "x": 1.0, "y": -0.5, "z": 1.5 }
+									}
+								}
+							}
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"name": "WheelRLShape",
+									"path": "/root/Track/Chassis/WheelRL/WheelRLShape",
+									"properties": {
+
+									}
+								}
+							],
+							"class": "RigidBody3D",
+							"name": "WheelRL",
+							"path": "/root/Track/Chassis/WheelRL",
+							"properties": {
+								"mass": {
+									"class_type": "",
+									"hint": 1,
+									"type": "float",
+									"value": 20.0
+								},
+								"transform": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Transform3D",
+									"value": {
+										"basis": {
+											"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+											"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+											"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+										},
+										"origin": { "x": -1.0, "y": -0.5, "z": -1.5 }
+									}
+								}
+							}
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "CollisionShape3D",
+									"name": "WheelRRShape",
+									"path": "/root/Track/Chassis/WheelRR/WheelRRShape",
+									"properties": {
+
+									}
+								}
+							],
+							"class": "RigidBody3D",
+							"name": "WheelRR",
+							"path": "/root/Track/Chassis/WheelRR",
+							"properties": {
+								"mass": {
+									"class_type": "",
+									"hint": 1,
+									"type": "float",
+									"value": 20.0
+								},
+								"transform": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Transform3D",
+									"value": {
+										"basis": {
+											"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+											"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+											"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+										},
+										"origin": { "x": 1.0, "y": -0.5, "z": -1.5 }
+									}
+								}
+							}
+						}
+					],
+					"class": "RigidBody3D",
+					"name": "Chassis",
+					"path": "/root/Track/Chassis",
+					"properties": {
+						"mass": {
+							"class_type": "",
+							"hint": 1,
+							"type": "float",
+							"value": 800.0
+						},
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": 0.0, "y": 1.0, "z": 0.0 }
+							}
+						}
+					}
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"name": "GroundShape",
+							"path": "/root/Track/Ground/GroundShape",
+							"properties": {
+
+							}
+						},
+						{
+							"children": [],
+							"class": "MeshInstance3D",
+							"name": "GroundMesh",
+							"path": "/root/Track/Ground/GroundMesh",
+							"properties": {
+
+							}
+						}
+					],
+					"class": "StaticBody3D",
+					"name": "Ground",
+					"path": "/root/Track/Ground",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": { "x": 1.0, "y": 0.0, "z": 0.0 },
+									"y": { "x": 0.0, "y": 1.0, "z": 0.0 },
+									"z": { "x": 0.0, "y": 0.0, "z": 1.0 }
+								},
+								"origin": { "x": 0.0, "y": -1.0, "z": 0.0 }
+							}
+						}
+					}
+				}
+			],
+			"class": "Node3D",
+			"name": "Track",
+			"path": "/root/Track",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

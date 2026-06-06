@@ -1,0 +1,135 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "CollisionShape",
+							"owner": "/root/World",
+							"path": "/root/World/BallA/CollisionShape"
+						}
+					],
+					"class": "RigidBody2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "BallA",
+					"owner": "/root/World",
+					"path": "/root/World/BallA"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "CollisionShape",
+							"owner": "/root/World",
+							"path": "/root/World/BallB/CollisionShape"
+						}
+					],
+					"class": "RigidBody2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "BallB",
+					"owner": "/root/World",
+					"path": "/root/World/BallB"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "CollisionShape",
+							"owner": "/root/World",
+							"path": "/root/World/Player/CollisionShape"
+						}
+					],
+					"class": "CharacterBody2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Player",
+					"owner": "/root/World",
+					"path": "/root/World/Player"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "CollisionShape",
+							"owner": "/root/World",
+							"path": "/root/World/Floor/CollisionShape"
+						}
+					],
+					"class": "StaticBody2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "Floor",
+					"owner": "/root/World",
+					"path": "/root/World/Floor"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "CollisionShape",
+							"owner": "/root/World",
+							"path": "/root/World/WallLeft/CollisionShape"
+						}
+					],
+					"class": "StaticBody2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "WallLeft",
+					"owner": "/root/World",
+					"path": "/root/World/WallLeft"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape2D",
+							"groups": [],
+							"name": "CollisionShape",
+							"owner": "/root/World",
+							"path": "/root/World/WallRight/CollisionShape"
+						}
+					],
+					"class": "StaticBody2D",
+					"groups": [
+						"_root_canvas77309411328"
+					],
+					"name": "WallRight",
+					"owner": "/root/World",
+					"path": "/root/World/WallRight"
+				}
+			],
+			"class": "Node",
+			"groups": [],
+			"name": "World",
+			"owner": "/root",
+			"path": "/root/World"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

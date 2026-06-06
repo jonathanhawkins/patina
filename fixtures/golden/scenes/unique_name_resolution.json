@@ -1,0 +1,53 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_unique_name_resolution",
+  "generated_at": "2026-03-22T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "ProgressBar",
+          "name": "HealthBar",
+          "path": "/root/Root/HealthBar",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "Label",
+              "name": "ScoreLabel",
+              "path": "/root/Root/Panel/ScoreLabel",
+              "properties": {}
+            }
+          ],
+          "class": "Panel",
+          "name": "Panel",
+          "path": "/root/Root/Panel",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "TextureRect",
+              "name": "StatusIcon",
+              "path": "/root/Root/Container/StatusIcon",
+              "properties": {}
+            }
+          ],
+          "class": "VBoxContainer",
+          "name": "Container",
+          "path": "/root/Root/Container",
+          "properties": {}
+        }
+      ],
+      "class": "Node2D",
+      "name": "Root",
+      "path": "/root/Root",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

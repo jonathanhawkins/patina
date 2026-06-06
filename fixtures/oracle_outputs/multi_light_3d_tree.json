@@ -1,0 +1,94 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/Camera"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Sphere",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/Sphere"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Pedestal",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/Pedestal"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "KeyLight",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/KeyLight"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "FillLight",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/FillLight"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "RimLight",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/RimLight"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "AccentSpot",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/AccentSpot"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "FloorShape",
+							"owner": "/root/Stage",
+							"path": "/root/Stage/Floor/FloorShape"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "Floor",
+					"owner": "/root/Stage",
+					"path": "/root/Stage/Floor"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "Stage",
+			"owner": "/root",
+			"path": "/root/Stage"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

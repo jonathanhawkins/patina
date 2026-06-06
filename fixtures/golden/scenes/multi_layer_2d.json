@@ -1,0 +1,100 @@
+{
+  "capture_type": "scene_tree",
+  "fixture_id": "scene_multi_layer_2d",
+  "generated_at": "2026-03-28T08:00:00+00:00",
+  "nodes": [
+    {
+      "children": [
+        {
+          "children": [],
+          "class": "Sprite2D",
+          "name": "Background",
+          "path": "/root/World2D/Background",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [512.0, 300.0]
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "TileMapLayer",
+          "name": "TileLayer",
+          "path": "/root/World2D/TileLayer",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "Sprite2D",
+          "name": "PlayerSprite",
+          "path": "/root/World2D/PlayerSprite",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [100.0, 400.0]
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "AnimatedSprite2D",
+          "name": "AnimSprite",
+          "path": "/root/World2D/AnimSprite",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [300.0, 400.0]
+            }
+          }
+        },
+        {
+          "children": [],
+          "class": "Line2D",
+          "name": "Trail",
+          "path": "/root/World2D/Trail",
+          "properties": {}
+        },
+        {
+          "children": [
+            {
+              "children": [],
+              "class": "PathFollow2D",
+              "name": "Follower",
+              "path": "/root/World2D/MovePath/Follower",
+              "properties": {}
+            }
+          ],
+          "class": "Path2D",
+          "name": "MovePath",
+          "path": "/root/World2D/MovePath",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "NavigationRegion2D",
+          "name": "NavRegion",
+          "path": "/root/World2D/NavRegion",
+          "properties": {}
+        },
+        {
+          "children": [],
+          "class": "Camera2D",
+          "name": "Camera",
+          "path": "/root/World2D/Camera",
+          "properties": {
+            "position": {
+              "type": "Vector2",
+              "value": [512.0, 300.0]
+            }
+          }
+        }
+      ],
+      "class": "Node2D",
+      "name": "World2D",
+      "path": "/root/World2D",
+      "properties": {}
+    }
+  ],
+  "upstream_version": "4.6.1-stable"
+}

@@ -1,0 +1,119 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [],
+					"class": "Camera3D",
+					"groups": [],
+					"name": "Camera",
+					"owner": "/root/World",
+					"path": "/root/World/Camera"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Terrain",
+					"owner": "/root/World",
+					"path": "/root/World/Terrain"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "TerrainCollision",
+							"owner": "/root/World",
+							"path": "/root/World/TerrainBody/TerrainCollision"
+						}
+					],
+					"class": "StaticBody3D",
+					"groups": [],
+					"name": "TerrainBody",
+					"owner": "/root/World",
+					"path": "/root/World/TerrainBody"
+				},
+				{
+					"children": [],
+					"class": "DirectionalLight3D",
+					"groups": [],
+					"name": "Sun",
+					"owner": "/root/World",
+					"path": "/root/World/Sun"
+				},
+				{
+					"children": [],
+					"class": "OmniLight3D",
+					"groups": [],
+					"name": "FillLight",
+					"owner": "/root/World",
+					"path": "/root/World/FillLight"
+				},
+				{
+					"children": [],
+					"class": "FogVolume",
+					"groups": [],
+					"name": "FogVolume",
+					"owner": "/root/World",
+					"path": "/root/World/FogVolume"
+				},
+				{
+					"children": [],
+					"class": "WorldEnvironment",
+					"groups": [],
+					"name": "WorldEnvironment",
+					"owner": "/root/World",
+					"path": "/root/World/WorldEnvironment"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Tree1",
+					"owner": "/root/World",
+					"path": "/root/World/Tree1"
+				},
+				{
+					"children": [],
+					"class": "MeshInstance3D",
+					"groups": [],
+					"name": "Tree2",
+					"owner": "/root/World",
+					"path": "/root/World/Tree2"
+				},
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CollisionShape3D",
+							"groups": [],
+							"name": "RockCollision",
+							"owner": "/root/World",
+							"path": "/root/World/Rock1/RockCollision"
+						}
+					],
+					"class": "RigidBody3D",
+					"groups": [],
+					"name": "Rock1",
+					"owner": "/root/World",
+					"path": "/root/World/Rock1"
+				}
+			],
+			"class": "Node3D",
+			"groups": [],
+			"name": "World",
+			"owner": "/root",
+			"path": "/root/World"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

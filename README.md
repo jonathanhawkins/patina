@@ -37,7 +37,7 @@ cd apps/web && pnpm dev
 
 Patina uses the pinned `upstream/godot/` submodule as the behavioral oracle for
 fixture generation and parity checks. The current pin is Godot
-`4.5.1-stable` (`f62fdbde15035c5576dad93e586201f4d41ef0cb`).
+`4.6.1-stable` (`14d19694e0c88a3f9e82d899a0400f27a24c176e`).
 
 To update the oracle pin intentionally:
 

@@ -1,79 +1,134 @@
 {
-  "fixture_id": "scene_physics_playground",
   "capture_type": "scene_tree",
-  "upstream_version": "pending",
+  "fixture_id": "scene_physics_playground",
+  "generated_at": "2026-03-22T08:00:00+00:00",
   "nodes": [
     {
-      "name": "World",
-      "class": "Node",
-      "path": "/root/World",
       "children": [
         {
-          "name": "Ball",
-          "class": "RigidBody2D",
-          "path": "/root/World/Ball",
           "children": [
             {
-              "name": "CollisionShape",
+              "children": [],
               "class": "CollisionShape2D",
+              "name": "CollisionShape",
               "path": "/root/World/Ball/CollisionShape",
-              "children": [],
               "properties": {
-                "radius": { "type": "Float", "value": 16.0 }
+                "radius": {
+                  "type": "Float",
+                  "value": 16.0
+                }
               }
             }
           ],
+          "class": "RigidBody2D",
+          "name": "Ball",
+          "path": "/root/World/Ball",
           "properties": {
-            "position": { "type": "Vector2", "value": [400.0, 100.0] },
-            "mass": { "type": "Float", "value": 1.0 },
-            "collision_layer": { "type": "Int", "value": 1 },
-            "collision_mask": { "type": "Int", "value": 1 }
+            "collision_layer": {
+              "type": "Int",
+              "value": 1
+            },
+            "collision_mask": {
+              "type": "Int",
+              "value": 1
+            },
+            "mass": {
+              "type": "Float",
+              "value": 1.0
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                400.0,
+                100.0
+              ]
+            }
           }
         },
         {
-          "name": "Wall",
-          "class": "StaticBody2D",
-          "path": "/root/World/Wall",
           "children": [
             {
-              "name": "CollisionShape",
+              "children": [],
               "class": "CollisionShape2D",
+              "name": "CollisionShape",
               "path": "/root/World/Wall/CollisionShape",
-              "children": [],
               "properties": {
-                "size": { "type": "Vector2", "value": [20.0, 400.0] }
+                "size": {
+                  "type": "Vector2",
+                  "value": [
+                    20.0,
+                    400.0
+                  ]
+                }
               }
             }
           ],
+          "class": "StaticBody2D",
+          "name": "Wall",
+          "path": "/root/World/Wall",
           "properties": {
-            "position": { "type": "Vector2", "value": [800.0, 300.0] },
-            "collision_layer": { "type": "Int", "value": 1 },
-            "collision_mask": { "type": "Int", "value": 0 }
+            "collision_layer": {
+              "type": "Int",
+              "value": 1
+            },
+            "collision_mask": {
+              "type": "Int",
+              "value": 0
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                800.0,
+                300.0
+              ]
+            }
           }
         },
         {
-          "name": "Floor",
-          "class": "StaticBody2D",
-          "path": "/root/World/Floor",
           "children": [
             {
-              "name": "CollisionShape",
-              "class": "CollisionShape2D",
-              "path": "/root/World/Floor/CollisionShape",
               "children": [],
+              "class": "CollisionShape2D",
+              "name": "CollisionShape",
+              "path": "/root/World/Floor/CollisionShape",
               "properties": {
-                "size": { "type": "Vector2", "value": [800.0, 20.0] }
+                "size": {
+                  "type": "Vector2",
+                  "value": [
+                    800.0,
+                    20.0
+                  ]
+                }
               }
             }
           ],
+          "class": "StaticBody2D",
+          "name": "Floor",
+          "path": "/root/World/Floor",
           "properties": {
-            "position": { "type": "Vector2", "value": [400.0, 600.0] },
-            "collision_layer": { "type": "Int", "value": 1 },
-            "collision_mask": { "type": "Int", "value": 0 }
+            "collision_layer": {
+              "type": "Int",
+              "value": 1
+            },
+            "collision_mask": {
+              "type": "Int",
+              "value": 0
+            },
+            "position": {
+              "type": "Vector2",
+              "value": [
+                400.0,
+                600.0
+              ]
+            }
           }
         }
       ],
+      "class": "Node",
+      "name": "World",
+      "path": "/root/World",
       "properties": {}
     }
-  ]
+  ],
+  "upstream_version": "4.6.1-stable"
 }
