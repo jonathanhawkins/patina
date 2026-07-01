@@ -474,6 +474,10 @@ fn run_command_capture(
     timeout: Duration,
 ) -> std::io::Result<CommandOutcome> {
     use std::io::Read;
+    // Lead a fresh process group so a timeout can SIGKILL the whole tree, not
+    // just bash. Without this the orphaned cargo-nextest survives, holds the
+    // build-dir lock, and wedges every later verify (pat-regax).
+    use std::os::unix::process::CommandExt;
 
     let mut child = Command::new("bash")
         .args(["-lc", cmd])
@@ -482,6 +486,8 @@ fn run_command_capture(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // pgid == this child's pid; descendants inherit it (pat-regax).
+        .process_group(0)
         .spawn()?;
 
     let stdout = child.stdout.take();
@@ -504,10 +510,30 @@ fn run_command_capture(
     let status = match child.wait_timeout(timeout)? {
         Some(s) => s,
         None => {
-            // Timed out — kill and reap bash. Don't join the readers (a lingering
-            // grandchild could hold the pipe open); let them detach harmlessly.
-            let _ = child.kill();
+            // Timed out. bash leads its own process group (set via
+            // `process_group(0)`), so its pid is also the pgid. SIGKILL the
+            // WHOLE group — not just bash — so orphaned descendants
+            // (cargo-nextest and its spawned test binaries) can't survive and
+            // wedge the lane by holding the build-dir lock (pat-regax). Then
+            // reap bash so it doesn't linger as a zombie. Don't join the readers
+            // (a lingering grandchild could hold the pipe open); let them detach.
+            let pgid = child.id() as i32;
+            // SAFETY: kill(2) with a negative pid targets the process group
+            // `pgid`. `pgid` is this child's pid, which we made a group leader
+            // via `process_group(0)`, so the signal only reaches this command's
+            // own tree — no unrelated processes share the group.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
             let _ = child.wait();
+            // Post-kill assertion: nothing in the group should still be alive.
+            // If something is (e.g. a descendant that escaped into its own
+            // group), surface it loudly so a wedge is visible, not silent.
+            if let Some(survivors) = surviving_group_members(pgid) {
+                tracing::error!(
+                    "[verify] timeout kill left process(es) alive in group {pgid}: {survivors}"
+                );
+            }
             return Ok(None);
         }
     };
@@ -515,6 +541,269 @@ fn run_command_capture(
     let out = out_handle.join().unwrap_or_default();
     let err = err_handle.join().unwrap_or_default();
     Ok(Some((status, format!("{out}{err}"))))
+}
+
+/// PIDs still alive in process group `pgid` (space-separated), or `None` if the
+/// group is empty. Used to assert that a timeout-kill actually reaped the whole
+/// tree rather than leaving orphans behind (pat-regax). Best-effort: returns
+/// `None` if `pgrep` is unavailable.
+fn surviving_group_members(pgid: i32) -> Option<String> {
+    let out = Command::new("pgrep")
+        .args(["-g", &pgid.to_string()])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pids: Vec<&str> = stdout.split_whitespace().collect();
+    if pids.is_empty() {
+        None
+    } else {
+        Some(pids.join(" "))
+    }
+}
+
+/// Verify-lane circuit breaker for the host dyld-wedge (pat-8zkm3).
+///
+/// When the kernel AMFI/code-sign wedge sets in, every freshly launched test
+/// binary hangs at `_dyld_start`. The verifier would otherwise keep launching a
+/// new 900s verify every cycle, each timing out and spawning ~26 more wedged
+/// processes — deepening the wedge (only a host reboot clears it). This breaker
+/// watches for that signature: after `N` consecutive wall-clock timeouts with
+/// no compile error in the output it trips, the lane stops launching new
+/// verifies, an operator alert is emitted, and the lane auto-resumes once a
+/// cheap probe launch succeeds (proof the host can run binaries again).
+///
+/// The state machine is pure and synchronous so it is unit-testable by
+/// injecting outcomes and probe results — no real 900s waits required.
+///
+/// WIRING: live as of pat-f6ndj — `spawn_verifier_worker` (coordinator.rs) holds
+/// a `VerifyCircuitBreaker`, gates each launch on `should_launch()`, feeds every
+/// result through `classify_verify_outcome()` + `record()`, emits the
+/// [`WedgeAlert`] (HOST-ISSUE log line + operator agent-mail) on trip, and
+/// auto-resumes via [`probe_recent_test_binary`]. A couple of read-only getters
+/// (`is_tripped`/`consecutive_timeouts`) remain test-only, so the module keeps
+/// `allow(dead_code)`.
+#[allow(dead_code)]
+pub mod circuit_breaker {
+    use super::{classify_failure, run_command_capture};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    /// Outcome of a single verify run, as seen by [`VerifyCircuitBreaker`].
+    ///
+    /// Only a bare wall-clock timeout with no compile error counts toward the
+    /// dyld-wedge breaker; every other terminal result resets the streak.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum VerifyOutcome {
+        /// The verify finished with a terminal status (pass / test failure /
+        /// compile error). Resets the consecutive-timeout streak.
+        Finished,
+        /// The verify hit the wall-clock timeout with no compile error in its
+        /// output — the dyld-wedge signature (binaries hung at `_dyld_start`).
+        TimedOut,
+    }
+
+    /// Classify a completed verify attempt for the circuit breaker.
+    ///
+    /// `timed_out` is true when [`run_command_capture`](super::run_command_capture)
+    /// returned `None`. A timeout whose captured output already shows a compile
+    /// error is NOT treated as a wedge — a real build problem is the worker's to
+    /// fix, not a host issue — so it maps to [`VerifyOutcome::Finished`].
+    pub fn classify_verify_outcome(timed_out: bool, output: &str) -> VerifyOutcome {
+        if timed_out && classify_failure(output) != "compile-error" {
+            VerifyOutcome::TimedOut
+        } else {
+            VerifyOutcome::Finished
+        }
+    }
+
+    /// Operator alert emitted exactly once when the breaker trips. Carries
+    /// everything needed to write the HOST-ISSUE log line and an agent-mail
+    /// message to the coordinator/operator.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct WedgeAlert {
+        /// How many consecutive timeouts tripped the breaker.
+        pub consecutive_timeouts: u32,
+    }
+
+    impl WedgeAlert {
+        /// One-line, grep-friendly banner for verifier.log.
+        pub fn host_issue_log_line(&self) -> String {
+            format!(
+                "HOST-ISSUE: dyld-wedge suspected after {} consecutive verify timeouts \
+                 (no compile error) — freshly launched test binaries are hanging at \
+                 _dyld_start (kernel AMFI/code-sign wedge). Verify lane HALTED; only a \
+                 host REBOOT clears this. Probing periodically to auto-resume.",
+                self.consecutive_timeouts
+            )
+        }
+
+        /// Subject line for the operator agent-mail.
+        pub fn mail_subject(&self) -> String {
+            "[verifier] HOST-ISSUE: dyld-wedge — verify lane halted".to_string()
+        }
+
+        /// Body for the operator agent-mail: the signature, how to confirm with
+        /// `sample <pid> 1`, and the auto-resume behavior.
+        pub fn mail_body(&self) -> String {
+            format!(
+                "The verifier lane halted after {n} consecutive verify timeouts with no \
+                 compile error in the output.\n\n\
+                 Signature: every freshly launched test binary hangs at `_dyld_start` \
+                 (kernel AMFI / code-sign wedge). Each new verify deepens the wedge by \
+                 launching ~26 more hung processes, so the lane has stopped launching new \
+                 verifies to avoid pure harm.\n\n\
+                 Confirm: pick a hung child PID and run `sample <pid> 1`; if the stack \
+                 bottoms out at `_dyld_start` the wedge is confirmed. Only a host REBOOT \
+                 clears it — `cargo clean`, a `syspolicyd` restart, and killing cargo do NOT.\n\n\
+                 Auto-resume: the lane re-probes by launching a tiny prebuilt test binary \
+                 with `--list` under a 10s timeout; when that returns promptly the wedge \
+                 has cleared and verification resumes automatically.",
+                n = self.consecutive_timeouts
+            )
+        }
+    }
+
+    /// Circuit breaker that halts the verify lane on a host dyld-wedge.
+    #[derive(Debug)]
+    pub struct VerifyCircuitBreaker {
+        threshold: u32,
+        consecutive_timeouts: u32,
+        tripped: bool,
+    }
+
+    impl VerifyCircuitBreaker {
+        /// New breaker that trips after `threshold` consecutive timeouts. The
+        /// pat-8zkm3 default is `N = 2`; `threshold` is clamped to at least 1.
+        pub fn new(threshold: u32) -> Self {
+            Self {
+                threshold: threshold.max(1),
+                consecutive_timeouts: 0,
+                tripped: false,
+            }
+        }
+
+        /// Whether the lane may launch the next verify. False once tripped,
+        /// until a successful probe resumes it.
+        pub fn should_launch(&self) -> bool {
+            !self.tripped
+        }
+
+        /// Whether the breaker is currently tripped (lane halted).
+        pub fn is_tripped(&self) -> bool {
+            self.tripped
+        }
+
+        /// Current consecutive-timeout streak (test/diagnostic visibility).
+        pub fn consecutive_timeouts(&self) -> u32 {
+            self.consecutive_timeouts
+        }
+
+        /// Record one verify outcome. Returns `Some(alert)` exactly once — on
+        /// the transition that trips the breaker — so the caller emits the
+        /// HOST-ISSUE log line and operator mail a single time. A non-timeout
+        /// outcome resets the streak (but does not by itself un-trip the
+        /// breaker — only a probe does, since while tripped no verifies run to
+        /// produce a `Finished` result).
+        pub fn record(&mut self, outcome: VerifyOutcome) -> Option<WedgeAlert> {
+            match outcome {
+                VerifyOutcome::TimedOut => {
+                    self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+                    if !self.tripped && self.consecutive_timeouts >= self.threshold {
+                        self.tripped = true;
+                        return Some(WedgeAlert {
+                            consecutive_timeouts: self.consecutive_timeouts,
+                        });
+                    }
+                    None
+                }
+                VerifyOutcome::Finished => {
+                    self.consecutive_timeouts = 0;
+                    None
+                }
+            }
+        }
+
+        /// While tripped, run `probe` (a cheap launch — e.g. a prebuilt test
+        /// binary with `--list` under a short timeout). On success, reset and
+        /// resume the lane; returns whether the lane is now running. A no-op
+        /// returning `true` when not tripped. The probe is injected so the
+        /// state machine stays unit-testable without a real launch.
+        pub fn probe_and_maybe_resume(&mut self, probe: impl FnOnce() -> bool) -> bool {
+            if !self.tripped {
+                return true;
+            }
+            if probe() {
+                self.tripped = false;
+                self.consecutive_timeouts = 0;
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Default probe for [`VerifyCircuitBreaker::probe_and_maybe_resume`]:
+    /// launch a prebuilt test binary with `--list` under a short timeout.
+    /// Returns true when it completes promptly with success — proof the host can
+    /// launch binaries again (the dyld-wedge has cleared). Never triggers a
+    /// build, so it is safe to call while the lane is halted.
+    pub fn probe_prebuilt_binary(test_binary: &Path, timeout: Duration) -> bool {
+        let cwd = test_binary.parent().unwrap_or_else(|| Path::new("."));
+        let cmd = format!("'{}' --list", test_binary.display());
+        matches!(run_command_capture(cwd, &cmd, timeout), Ok(Some((status, _))) if status.success())
+    }
+
+    /// The most-recently-modified executable regular file across `dirs`, if any.
+    /// Used to find a freshly-built local test binary for the resume probe.
+    fn newest_executable(dirs: &[PathBuf]) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                // Regular files with any execute bit set — skips .rlib/.d sidecars
+                // and .dSYM directories that share the deps/ dir.
+                if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+                let Ok(mtime) = meta.modified() else {
+                    continue;
+                };
+                if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+                    best = Some((mtime, entry.path()));
+                }
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// Conservative auto-resume probe (pat-f6ndj): launch the most-recently-built
+    /// *local* test binary — ad-hoc-signed, exactly what the dyld-wedge breaks —
+    /// with `--list` under a 10s timeout. A prompt success proves the host can
+    /// launch freshly-built binaries again, so the lane may resume.
+    ///
+    /// Returns `false` when no such binary is found, keeping the breaker safely
+    /// tripped. Deliberately does NOT fall back to a system binary: a cached
+    /// binary in the dyld shared cache launches fine even while the wedge
+    /// persists, so probing one would falsely resume the lane → relaunch a full
+    /// 900s verify → re-trip (oscillation that deepens the wedge).
+    pub fn probe_recent_test_binary(project_root: &Path) -> bool {
+        let candidates = [
+            project_root.join("engine-rs/target/debug/deps"),
+            project_root.join("engine-rs/target/release/deps"),
+            project_root.join("apps/orchestrator/crate/target/debug/deps"),
+            project_root.join("apps/orchestrator/crate/target/release/deps"),
+        ];
+        match newest_executable(&candidates) {
+            Some(bin) => probe_prebuilt_binary(&bin, Duration::from_secs(10)),
+            None => false,
+        }
+    }
 }
 
 /// Run each command via bash and return an error on failure or timeout.
@@ -625,6 +914,163 @@ impl WaitTimeout for std::process::Child {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// pat-regax: a verify timeout must SIGKILL the entire process group, not
+    /// just the bash parent. Spawns a fake long-running command tree
+    /// (`sleep 1000 & sleep 1000 & wait`) through the verifier timeout path with
+    /// a 2s timeout and asserts that every descendant the shell spawned is dead
+    /// afterwards — i.e. no orphaned process survives to wedge the lane. With
+    /// the old `child.kill()` (bash only) the backgrounded sleeps would survive
+    /// and this test would fail.
+    #[cfg(unix)]
+    #[test]
+    fn verifier_timeout_kills_process_group() {
+        let dir = TempDir::new().unwrap();
+        let pidfile = dir.path().join("pids.txt");
+        let pf = pidfile.display();
+        // Record bash's own pid (the group leader) plus the two backgrounded
+        // sleep children, then block forever so the call must time out.
+        let cmd = format!(
+            "echo $$ > '{pf}'; sleep 1000 & echo $! >> '{pf}'; sleep 1000 & echo $! >> '{pf}'; wait"
+        );
+
+        let outcome =
+            run_command_capture(dir.path(), &cmd, Duration::from_secs(2)).expect("spawn ok");
+        assert!(outcome.is_none(), "command should have timed out");
+
+        let recorded = std::fs::read_to_string(&pidfile).unwrap_or_default();
+        let pids: Vec<String> = recorded.split_whitespace().map(|s| s.to_string()).collect();
+        assert!(
+            pids.len() >= 3,
+            "expected bash + 2 sleep pids recorded, got: {recorded:?}"
+        );
+
+        // Every recorded pid must be dead after the timeout kill. Poll briefly
+        // to absorb the small teardown/reap window.
+        let pid_alive = |pid: &str| -> bool {
+            Command::new("kill")
+                .args(["-0", pid])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        for pid in &pids {
+            let mut alive = true;
+            for _ in 0..30 {
+                if !pid_alive(pid) {
+                    alive = false;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(
+                !alive,
+                "pid {pid} survived the timeout kill — process group was not fully reaped"
+            );
+        }
+    }
+
+    // ─── pat-8zkm3: dyld-wedge circuit breaker ───────────────────────────
+    use super::circuit_breaker::{
+        classify_verify_outcome, probe_prebuilt_binary, VerifyCircuitBreaker, VerifyOutcome,
+    };
+
+    /// pat-8zkm3: after N=2 consecutive verify timeouts the breaker must halt
+    /// the lane (the third verify is NOT launched) and emit the operator alert
+    /// exactly once; a successful probe must resume the lane. Outcomes are
+    /// injected through the state machine — no real 900s waits.
+    #[test]
+    fn verifier_timeout_circuit_breaker() {
+        let mut cb = VerifyCircuitBreaker::new(2);
+        assert!(cb.should_launch(), "lane should launch before any timeout");
+
+        // First timeout: streak=1, not tripped, no alert, lane still runs.
+        assert_eq!(cb.record(VerifyOutcome::TimedOut), None);
+        assert!(cb.should_launch(), "one timeout must not halt the lane");
+
+        // Second consecutive timeout: trips and emits the alert exactly once.
+        let alert = cb
+            .record(VerifyOutcome::TimedOut)
+            .expect("breaker must trip on the 2nd consecutive timeout");
+        assert_eq!(alert.consecutive_timeouts, 2);
+        assert!(alert.host_issue_log_line().contains("HOST-ISSUE"));
+        assert!(alert.host_issue_log_line().to_lowercase().contains("dyld"));
+        assert!(
+            alert.mail_body().contains("_dyld_start") && alert.mail_body().contains("sample"),
+            "operator mail must describe the _dyld_start signature and the `sample` check"
+        );
+
+        // Lane is halted: the THIRD verify must not be launched.
+        assert!(cb.is_tripped());
+        assert!(
+            !cb.should_launch(),
+            "tripped breaker must stop launching new verifies"
+        );
+
+        // Further timeouts while tripped do not re-emit the alert (fires once).
+        assert_eq!(cb.record(VerifyOutcome::TimedOut), None);
+        assert!(!cb.should_launch());
+
+        // A failing probe does NOT resume the lane.
+        assert!(!cb.probe_and_maybe_resume(|| false));
+        assert!(
+            !cb.should_launch(),
+            "lane must stay halted while the probe keeps failing"
+        );
+
+        // A successful probe resumes the lane and clears the streak.
+        assert!(cb.probe_and_maybe_resume(|| true));
+        assert!(cb.should_launch(), "successful probe must resume the lane");
+        assert!(!cb.is_tripped());
+        assert_eq!(cb.consecutive_timeouts(), 0, "streak resets on resume");
+    }
+
+    /// A timeout whose output already shows a compile error is a real build
+    /// problem, not a host wedge — it must NOT count toward the breaker.
+    #[test]
+    fn circuit_breaker_compile_error_timeout_is_not_a_wedge() {
+        let mut cb = VerifyCircuitBreaker::new(2);
+        let ce = classify_verify_outcome(true, "error[E0599]: no method named `foo`");
+        assert_eq!(ce, VerifyOutcome::Finished);
+        assert_eq!(cb.record(ce), None);
+
+        // A bare timeout (no output) is the wedge candidate.
+        let bare = classify_verify_outcome(true, "");
+        assert_eq!(bare, VerifyOutcome::TimedOut);
+        assert_eq!(cb.record(bare), None); // streak=1, not yet tripped
+        assert!(cb.should_launch());
+    }
+
+    /// Any non-timeout terminal result resets the consecutive-timeout streak.
+    #[test]
+    fn circuit_breaker_finished_outcome_resets_streak() {
+        let mut cb = VerifyCircuitBreaker::new(2);
+        assert_eq!(cb.record(VerifyOutcome::TimedOut), None); // streak=1
+        assert_eq!(cb.record(VerifyOutcome::Finished), None); // reset
+        assert_eq!(cb.consecutive_timeouts(), 0);
+        // It now takes two fresh consecutive timeouts again to trip.
+        assert_eq!(cb.record(VerifyOutcome::TimedOut), None); // streak=1
+        assert!(
+            cb.record(VerifyOutcome::TimedOut).is_some(),
+            "two fresh consecutive timeouts must trip the breaker"
+        );
+    }
+
+    /// The real probe helper returns true for a binary that launches and exits
+    /// 0, false for one that exits non-zero — exercising the actual launch path
+    /// (no 900s wait) that the lane uses to auto-resume.
+    #[cfg(unix)]
+    #[test]
+    fn circuit_breaker_probe_helper_runs_prebuilt_binary() {
+        assert!(
+            probe_prebuilt_binary(Path::new("/bin/echo"), Duration::from_secs(10)),
+            "a binary that launches and exits 0 must probe true"
+        );
+        assert!(
+            !probe_prebuilt_binary(Path::new("/usr/bin/false"), Duration::from_secs(10)),
+            "a binary that exits non-zero must probe false"
+        );
+    }
 
     #[test]
     fn test_extract_from_fenced_block() {

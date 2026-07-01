@@ -1348,3 +1348,19 @@ V1 is complete. No further planner cycles needed.
 ## 2026-03-25 01:55 UTC — SKIPPED (queue healthy: 163 open, 7 in-progress)
 
 ## 2026-03-25 02:00 UTC — SKIPPED (queue healthy: 163 open, 7 in-progress)
+
+## 2026-06-12 17:35 UTC — user-requested reconciliation cycle (interactive, queue-gate overridden by explicit request)
+- Active phase: editor-parity → COMPLETE this cycle
+- Criteria checked off this cycle: mode-switch-renders-view-app + main-screen-e2e-modes (both via editor_mode_e2e_test_modes_serve_distinct_views) — EDITOR_PARITY_EXIT.md now 156/156
+- Phase chain status: editor-agent seeded/closed (boxes cosmetic per planner.toml note), editor-parity-bootstrap 19/19, editor-parity 156/156
+- Binary apply summary: created=0 skipped=0 failed=0; heal: nothing to heal
+- Beads created manually from UPSTREAM_GAP_MATRIX reconciliation: pat-7xflw (HTTPClient/HTTPRequest), pat-p2nes (WebSocketPeer) — the only 2 matrix entries with no code and no beads
+- UPSTREAM_GAP_MATRIX.md reconciled: 19/22 entries verified implemented (closed beads + code present), statuses flipped; gpu-render-backbone stays partial (editor slice deferred as pat-ism62)
+- Queue: 26 open, 9 in-progress, 2728 closed
+
+## 2026-06-18 — METHODOLOGY: source-driven visual fidelity lane added (interactive, user-requested)
+- Problem: the planner seeded beads only from hand-authored functional maps and never read upstream/godot/, so permanent visual chrome (★ Favorites header, path bar, Filter Files box, sort/split toggles) was never enumerated or beaded, and behavioral acceptance tests passed while the widget was absent. User flagged the FileSystem dock missing its Favorites star.
+- Fix: new prd/EDITOR_PARITY_VISUAL_FIDELITY_METHODOLOGY.md (read Godot source → enumerate unconditional widgets → P2 bead per missing widget with a served-DOM acceptance test). Updated /editor-parity skill (source-first Step 0, P2 for permanent chrome, DOM-test acceptance, fixed broken `jq '.issues|length'` dedup → `jq 'length'` since br search returns a bare array). Updated /planner skill (visual fidelity is a first-class source-driven lane).
+- Wiring: prd/EDITOR_PARITY_VISUAL_FIDELITY_MAP.md + _EXIT.md; planner.toml phase 4 `editor-parity-visual-fidelity` (test_binaries=[editor_filesystem_chrome_test]).
+- Worked example implemented + verified: FileSystem dock chrome (Favorites header+star, nav/path/split toolbar, Filter Files + sort) in editor_ui.rs; 3 served-DOM tests pass (editor_filesystem_chrome_test).
+- Beads created for the rest: pat-k6600 (favoriting), pat-96yv4 (split mode), pat-ypgqq (context menu), pat-l695a (scene tree chrome), pat-5b63c (inspector chrome).

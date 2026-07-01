@@ -2,15 +2,31 @@
 
 One unchecked checkbox per acceptance test referenced across the per-lane execution maps (`prd/EDITOR_PARITY_EXECUTION_MAP.md`). The planner ticks a box when its named test passes; the phase exits when every box is checked.
 
-> **A criterion is satisfied only when an APP-LEVEL test passes** — one that boots the real editor (`EditorServerHandle::start` / `examples/editor.rs`) and drives it over HTTP the way a user does. A lib unit test that only exercises an isolated model struct (e.g. `MainScreenSwitcher`, `SceneWorkspace`, `InspectorPanel`) is **insufficient**: it can pass while the feature is never wired into the running editor — which is exactly how the main-screen mode switch, New Scene, and selection→inspector all "passed" while being broken in the app. Every user-visible criterion MUST have a test that asserts the assembled app behaves, not merely that a model method returns the right value. See beads labeled `planner-methodology` (e.g. the per-mode e2e smoke test) for the gate that enforces this.
+> **A criterion is satisfied only when an APP-LEVEL test passes** — one that boots the real editor (`EditorServerHandle::start` / `examples/editor.rs`) and drives it over HTTP the way a user does. A lib unit test that only exercises an isolated model struct (e.g. `MainScreenSwitcher`, `SceneWorkspace`, `InspectorPanel`) is **insufficient**: it can pass while the feature is never wired into the running editor — which is exactly how the main-screen mode switch, New Scene, and selection→inspector all "passed" while being broken in the app. Every user-visible criterion MUST have a test that asserts the assembled app behaves, not merely that a model method returns the right value. A checked box is therefore only a *record* that the app-level test was observed passing — never a substitute for it: a passing model/lib-only test does NOT satisfy or "check off" a criterion, and "all boxes checked" means "every app-level test passed", not "the work looks done". See beads labeled `planner-methodology` (e.g. the per-mode e2e smoke test) for the gate that enforces this.
 
 ## App-level (e2e — required for real parity)
 
-These boot the real editor server and drive it over HTTP. They are the gate that the
-lib unit tests above cannot provide. They will stay unchecked until the corresponding
-feature is actually wired into the running app.
+These boot the real editor server (`EditorServerHandle::start`) and drive it over
+HTTP the way a user does. They are the gate that the lib unit tests below cannot
+provide: a lib-model test can pass while the feature is never wired into the running
+app. Each box stays unchecked until its booted-server test is observed passing — the
+planner only ticks `[ ]`→`[x]` (it never auto-unchecks), so an app-level criterion
+goes green by evidence, never by assumption.
 
-- [ ] `mode-switch-renders-view-app` The main-screen mode switch serves a distinct central view per mode (2D/3D/Script/Game/AssetLib) over HTTP (`GET /api/editor/main_view`), proving the switch is not cosmetic (test: `editor_mode_e2e_test_modes_serve_distinct_views`)
+The fns below are exercised by `editor_beads_test`, `editor_parity_test`, and
+`scene_tree_parity_test` (wired into the editor-parity gate's `test_binaries` by
+pat-8cfpz). They start unchecked on purpose; the planner verifies and ticks them on
+its next cycle.
+
+- [x] `mode-switch-renders-view-app` The main-screen mode switch serves a distinct central view per mode (2D/3D/Script/Game/AssetLib) over HTTP (`GET /api/editor/main_view`), proving the switch is not cosmetic (test: `editor_mode_e2e_test_modes_serve_distinct_views`)
+- [ ] `editor-mode-game-served-app` Booting the server and switching the main-screen mode to **game** over HTTP makes the served central view become the game-preview view — proving the mode switch is wired in the running app, not just the model (test: `test_e0heb_set_editor_mode_game`)
+- [ ] `editor-mode-assetlib-served-app` Switching the main-screen mode to **assetlib** over HTTP makes the served central view become the asset-library view in the running editor (test: `test_e0heb_set_editor_mode_assetlib`)
+- [ ] `scene-tabs-open-switch-app` Opening another scene over HTTP adds a scene tab and switching tabs changes the active scene in the booted editor (the New Scene / tab lifecycle, not just the tab model) (test: `test_e0heb_scene_tabs_open_and_switch`)
+- [ ] `scene-tabs-last-tab-guard-app` The booted editor refuses to close the last remaining scene tab when driven over HTTP (test: `test_e0heb_cannot_close_last_tab`)
+- [ ] `selection-to-inspector-app` Selecting a node over HTTP makes the booted editor's inspector return that node's property list — the selection→inspector path the lib-model test could not prove (test: `test_des_selected_returns_property_list`)
+- [ ] `inspector-set-get-roundtrip-app` Setting a string property over HTTP and reading it back returns the updated value from the assembled editor (test: `test_mn3_set_get_string`)
+- [ ] `scene-tree-add-delete-app` Adding then deleting a node over HTTP inserts and removes it in the booted editor's scene tree (test: `test_lac_add_and_delete_node`)
+- [ ] `editor-shell-all-panels-app` The booted editor serves every dock/panel (scene tree, inspector, viewport, bottom panels) in the assembled HTML shell over HTTP (test: `test_qg1_all_panels_present`)
 
 ## Now
 

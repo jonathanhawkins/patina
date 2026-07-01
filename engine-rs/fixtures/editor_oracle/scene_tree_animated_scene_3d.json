@@ -1,0 +1,97 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/animated_scene_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "AnimatedScene3D",
+				"path": "/root/AnimatedScene3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "AnimatedScene3D",
+				"path": "/root/AnimatedScene3D/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [
+							{
+								"children": [],
+								"name": "CharacterMesh",
+								"node_class": "MeshInstance3D",
+								"owner": "AnimatedScene3D",
+								"path": "/root/AnimatedScene3D/Character/Skeleton/CharacterMesh",
+								"scene_file_path": ""
+							},
+							{
+								"children": [
+									{
+										"children": [],
+										"name": "Weapon",
+										"node_class": "MeshInstance3D",
+										"owner": "AnimatedScene3D",
+										"path": "/root/AnimatedScene3D/Character/Skeleton/Attachment/Weapon",
+										"scene_file_path": ""
+									}
+								],
+								"name": "Attachment",
+								"node_class": "BoneAttachment3D",
+								"owner": "AnimatedScene3D",
+								"path": "/root/AnimatedScene3D/Character/Skeleton/Attachment",
+								"scene_file_path": ""
+							}
+						],
+						"name": "Skeleton",
+						"node_class": "Skeleton3D",
+						"owner": "AnimatedScene3D",
+						"path": "/root/AnimatedScene3D/Character/Skeleton",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "Animator",
+						"node_class": "AnimationPlayer",
+						"owner": "AnimatedScene3D",
+						"path": "/root/AnimatedScene3D/Character/Animator",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Character",
+				"node_class": "Node3D",
+				"owner": "AnimatedScene3D",
+				"path": "/root/AnimatedScene3D/Character",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "GroundShape",
+						"node_class": "CollisionShape3D",
+						"owner": "AnimatedScene3D",
+						"path": "/root/AnimatedScene3D/Ground/GroundShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Ground",
+				"node_class": "StaticBody3D",
+				"owner": "AnimatedScene3D",
+				"path": "/root/AnimatedScene3D/Ground",
+				"scene_file_path": ""
+			}
+		],
+		"name": "AnimatedScene3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/AnimatedScene3D",
+		"scene_file_path": "res://scenes/animated_scene_3d.tscn"
+	}
+}

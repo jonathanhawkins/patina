@@ -693,3 +693,126 @@ fn test_flr_fs_context_menu_html() {
     );
     handle.stop();
 }
+
+// pat-v89tw: open a real game project res:// (FileSystem points at example cwd)
+//
+// Acceptance: opening a project shows its res:// tree and double-clicking a
+// .tscn opens it. This test creates a temp project (project.godot + a scene),
+// opens it via POST /api/project/open, asserts GET /api/filesystem now roots
+// at the project and lists its scene as a res:// path, and asserts the scene
+// opens in a tab.
+#[test]
+fn editor_open_project_roots_filesystem() {
+    let (handle, port) = make_server();
+
+    // Build a throwaway Godot-style project on disk.
+    let proj = std::env::temp_dir().join(format!("patina_open_project_{port}"));
+    let _ = std::fs::remove_dir_all(&proj);
+    std::fs::create_dir_all(proj.join("scenes")).unwrap();
+    std::fs::write(
+        proj.join("project.godot"),
+        "[application]\nconfig/name=\"DemoGame\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("scenes/main.tscn"),
+        "[gd_scene format=3]\n[node name=\"Main\" type=\"Node2D\"]\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("scenes/player.gd"), "extends Node2D\n").unwrap();
+
+    // Before opening: the filesystem dock roots at the process cwd, not our
+    // project, so the project's scene must not be visible yet.
+    let before_resp = http_get(port, "/api/filesystem");
+    let before = extract_body(&before_resp);
+    assert!(
+        !before.contains("res://scenes/main.tscn"),
+        "project scene should not be listed before opening it: {before}"
+    );
+
+    // Open the project.
+    let resp = http_post(
+        port,
+        "/api/project/open",
+        &format!(r#"{{"path":"{}"}}"#, proj.display()),
+    );
+    assert!(resp.contains("200 OK"), "open project should succeed: {resp}");
+    let opened: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+    assert_eq!(opened["ok"].as_bool(), Some(true));
+    assert!(
+        opened["project_root"]
+            .as_str()
+            .unwrap()
+            .contains("patina_open_project"),
+        "project_root should be the opened dir: {opened}"
+    );
+
+    // After opening: the dock roots at the project and lists its res:// tree.
+    let after_resp = http_get(port, "/api/filesystem");
+    let after = extract_body(&after_resp);
+    assert!(
+        after.contains("res://scenes/main.tscn"),
+        "project scene should be listed after opening: {after}"
+    );
+    assert!(
+        after.contains("res://scenes/player.gd"),
+        "project script should be listed after opening: {after}"
+    );
+
+    // Double-clicking the scene opens it in a tab.
+    let open_tab = http_post(
+        port,
+        "/api/scene/tabs/open",
+        r#"{"path":"res://scenes/main.tscn","name":"main.tscn"}"#,
+    );
+    assert!(open_tab.contains("200 OK"), "open scene tab failed: {open_tab}");
+    let tab: serde_json::Value = serde_json::from_str(extract_body(&open_tab)).unwrap();
+    assert_eq!(tab["ok"].as_bool(), Some(true));
+    assert!(tab["tab_id"].as_u64().is_some(), "expected a tab_id: {tab}");
+
+    // The open scene must be reflected in the scene tab list.
+    let tabs_resp = http_get(port, "/api/scene/tabs");
+    let tabs = extract_body(&tabs_resp);
+    assert!(
+        tabs.contains("res://scenes/main.tscn"),
+        "opened scene should appear in tab list: {tabs}"
+    );
+
+    let _ = std::fs::remove_dir_all(&proj);
+    handle.stop();
+}
+
+// pat-v89tw: a directory without a project.godot manifest is rejected.
+#[test]
+fn editor_open_project_requires_manifest() {
+    let (handle, port) = make_server();
+
+    let not_proj = std::env::temp_dir().join(format!("patina_not_project_{port}"));
+    let _ = std::fs::remove_dir_all(&not_proj);
+    std::fs::create_dir_all(&not_proj).unwrap();
+    std::fs::write(not_proj.join("readme.txt"), "no manifest here").unwrap();
+
+    let resp = http_post(
+        port,
+        "/api/project/open",
+        &format!(r#"{{"path":"{}"}}"#, not_proj.display()),
+    );
+    assert!(
+        resp.contains("400"),
+        "opening a dir without project.godot should be rejected: {resp}"
+    );
+
+    // A non-existent directory is a 404.
+    let missing = http_post(
+        port,
+        "/api/project/open",
+        r#"{"path":"/definitely/not/a/real/patina/project/dir"}"#,
+    );
+    assert!(
+        missing.contains("404"),
+        "opening a missing dir should 404: {missing}"
+    );
+
+    let _ = std::fs::remove_dir_all(&not_proj);
+    handle.stop();
+}

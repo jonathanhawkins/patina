@@ -186,17 +186,34 @@ pub struct DirChild {
 // FileSystem Dock — file browser with icons, filter, and favorites
 // ---------------------------------------------------------------------------
 
-/// An action offered by the filesystem dock's file context menu.
+/// An action offered by the filesystem dock's file/folder context menu.
+///
+/// Mirrors Godot's `FileSystemDock` `tree_popup`/`file_list_popup`
+/// (upstream/godot/editor/docks/filesystem_dock.cpp `_file_and_folders_fill_popup`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileContextAction {
-    /// Open the file in its default editor / instance the scene.
+    /// Open the file in its default editor / instance the scene (folders: expand).
     Open,
-    /// Reveal the file in the OS file manager.
-    ShowInFileManager,
-    /// Open the dependency editor for the file.
+    /// Open the dependency editor for the file (`FILE_MENU_DEPENDENCIES`).
     EditDependencies,
-    /// Show which resources reference (own) this file.
+    /// Show which resources reference (own) this file (`FILE_MENU_OWNERS`).
     ViewOwners,
+    /// Copy the `res://` path to the clipboard (`FILE_MENU_COPY_PATH`).
+    CopyPath,
+    /// Copy the absolute on-disk path (`FILE_MENU_COPY_ABSOLUTE_PATH`).
+    CopyAbsolutePath,
+    /// Copy the resource UID (`FILE_MENU_COPY_UID`). Files only.
+    CopyUid,
+    /// Rename the file/folder (`FILE_MENU_RENAME`).
+    Rename,
+    /// Duplicate the file/folder (`FILE_MENU_DUPLICATE`).
+    Duplicate,
+    /// Delete the file/folder (`FILE_MENU_REMOVE`).
+    Delete,
+    /// Reveal the file in the OS file manager (`FILE_MENU_SHOW_IN_EXPLORER`).
+    ShowInFileManager,
+    /// Create New ▸ (Folder/Scene/Script/Resource) submenu (`FILE_MENU_NEW`).
+    New,
 }
 
 /// Icon type for a file or directory in the filesystem dock.
@@ -261,6 +278,56 @@ pub struct FileSystemEntry {
 /// - File type icons
 /// - Text filter/search
 /// - Favorites list
+/// The dock's split display mode, mirroring Godot's
+/// `FileSystemDock::DisplayMode` (upstream/godot/editor/docks/filesystem_dock.h):
+/// a single combined tree, or a split with a separate file list laid out
+/// vertically (file list below the tree) or horizontally (beside it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsDisplayMode {
+    /// One combined tree; no separate file list (`DISPLAY_MODE_TREE_ONLY`).
+    TreeOnly,
+    /// Tree on top, file list below (`DISPLAY_MODE_VSPLIT`).
+    VSplit,
+    /// Tree beside file list (`DISPLAY_MODE_HSPLIT`).
+    HSplit,
+}
+
+impl FsDisplayMode {
+    /// Stable wire/persistence token.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FsDisplayMode::TreeOnly => "tree_only",
+            FsDisplayMode::VSplit => "vsplit",
+            FsDisplayMode::HSplit => "hsplit",
+        }
+    }
+
+    /// Parse a token back to a mode, defaulting to `TreeOnly` for anything
+    /// unrecognized.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "vsplit" => FsDisplayMode::VSplit,
+            "hsplit" => FsDisplayMode::HSplit,
+            _ => FsDisplayMode::TreeOnly,
+        }
+    }
+
+    /// The next mode in Godot's `_change_split_mode` cycle:
+    /// TreeOnly → VSplit → HSplit → TreeOnly.
+    pub fn next(&self) -> Self {
+        match self {
+            FsDisplayMode::TreeOnly => FsDisplayMode::VSplit,
+            FsDisplayMode::VSplit => FsDisplayMode::HSplit,
+            FsDisplayMode::HSplit => FsDisplayMode::TreeOnly,
+        }
+    }
+
+    /// Whether this mode shows the separate file list (i.e. is a split layout).
+    pub fn is_split(&self) -> bool {
+        !matches!(self, FsDisplayMode::TreeOnly)
+    }
+}
+
 #[derive(Debug)]
 pub struct FileSystemDock {
     /// The underlying filesystem.
@@ -275,6 +342,8 @@ pub struct FileSystemDock {
     selected_index: Option<usize>,
     /// Set of expanded directory paths.
     expanded_dirs: std::collections::HashSet<String>,
+    /// Tree-only vs split display layout (Godot `DisplayMode`).
+    display_mode: FsDisplayMode,
 }
 
 impl FileSystemDock {
@@ -287,6 +356,7 @@ impl FileSystemDock {
             favorites: Vec::new(),
             selected_index: None,
             expanded_dirs: std::collections::HashSet::new(),
+            display_mode: FsDisplayMode::TreeOnly,
         }
     }
 
@@ -349,21 +419,157 @@ impl FileSystemDock {
         self.favorites.iter().any(|f| f == res_path)
     }
 
+    /// Map a `res://` path to its on-disk location under the project root.
+    /// `res://` itself maps to the project root.
+    fn res_to_disk(&self, res_path: &str) -> std::path::PathBuf {
+        let rel = res_path.strip_prefix("res://").unwrap_or(res_path);
+        let rel = rel.trim_end_matches('/');
+        if rel.is_empty() {
+            self.filesystem.project_root().to_path_buf()
+        } else {
+            self.filesystem.project_root().join(rel)
+        }
+    }
+
+    /// The file Godot persists per-project favorites to:
+    /// `<project>/.godot/editor/favorites`, one `res://` path per line
+    /// (upstream/godot/editor/settings/editor_settings.cpp set_favorites).
+    pub fn favorites_file_path(&self) -> std::path::PathBuf {
+        self.filesystem
+            .project_root()
+            .join(".godot")
+            .join("editor")
+            .join("favorites")
+    }
+
+    /// Persist the current favorites list to disk so it survives editor
+    /// reloads and restarts. Mirrors Godot's `EditorSettings::set_favorites`,
+    /// which writes one path per line to the project settings dir.
+    pub fn save_favorites(&self) -> std::io::Result<()> {
+        let path = self.favorites_file_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut body = String::new();
+        for fav in &self.favorites {
+            body.push_str(fav);
+            body.push('\n');
+        }
+        std::fs::write(path, body)
+    }
+
+    /// Load favorites from disk, pruning any whose target no longer exists
+    /// (matching Godot's `_update_tree`, which drops dead favorite paths and
+    /// rewrites the file). `res://` is always kept. Replaces the in-memory
+    /// list. Missing file is a no-op (leaves favorites empty).
+    pub fn load_favorites(&mut self) {
+        let path = self.favorites_file_path();
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let mut loaded = Vec::new();
+        let mut pruned_any = false;
+        for line in contents.lines() {
+            let fav = line.trim();
+            if fav.is_empty() || !fav.starts_with("res://") {
+                continue;
+            }
+            // `res://` (the project root) is always valid; other favorites are
+            // kept only while their file/dir still exists on disk.
+            let keep = fav == "res://" || self.res_to_disk(fav).exists();
+            if keep {
+                if !loaded.contains(&fav.to_string()) {
+                    loaded.push(fav.to_string());
+                }
+            } else {
+                pruned_any = true;
+            }
+        }
+        self.favorites = loaded;
+        // Rewrite the file if we dropped dead entries, as Godot does.
+        if pruned_any {
+            let _ = self.save_favorites();
+        }
+    }
+
+    /// The current split display mode.
+    pub fn display_mode(&self) -> FsDisplayMode {
+        self.display_mode
+    }
+
+    /// Set the split display mode and persist it.
+    pub fn set_display_mode(&mut self, mode: FsDisplayMode) {
+        self.display_mode = mode;
+        let _ = self.save_display_mode();
+    }
+
+    /// Advance to the next display mode in Godot's cycle
+    /// (TreeOnly → VSplit → HSplit → TreeOnly) and persist. Returns the new
+    /// mode. Mirrors `FileSystemDock::_change_split_mode`.
+    pub fn cycle_display_mode(&mut self) -> FsDisplayMode {
+        self.set_display_mode(self.display_mode.next());
+        self.display_mode
+    }
+
+    /// File the dock's split display mode is persisted to, alongside favorites.
+    fn display_mode_file_path(&self) -> std::path::PathBuf {
+        self.filesystem
+            .project_root()
+            .join(".godot")
+            .join("editor")
+            .join("fs_display_mode")
+    }
+
+    /// Persist the display mode so it survives editor reloads/restarts.
+    pub fn save_display_mode(&self) -> std::io::Result<()> {
+        let path = self.display_mode_file_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.display_mode.as_str())
+    }
+
+    /// Load the persisted display mode; missing file leaves the default.
+    pub fn load_display_mode(&mut self) {
+        if let Ok(s) = std::fs::read_to_string(self.display_mode_file_path()) {
+            self.display_mode = FsDisplayMode::from_str(s.trim());
+        }
+    }
+
     /// The file context-menu actions available for the currently selected
     /// entry. Files expose the full set; directories expose only the actions
     /// that apply to them (open / show in file manager). Returns an empty list
     /// when nothing is selected.
     pub fn context_menu_actions(&self) -> Vec<FileContextAction> {
+        use FileContextAction::*;
         match self.selected_entry() {
             None => Vec::new(),
-            Some(entry) if entry.is_directory => {
-                vec![FileContextAction::Open, FileContextAction::ShowInFileManager]
-            }
+            // Folders: no Edit Dependencies / View Owners / Copy UID (those are
+            // resource-only in Godot), but everything else applies.
+            Some(entry) if entry.is_directory => vec![
+                Open,
+                CopyPath,
+                CopyAbsolutePath,
+                Rename,
+                Duplicate,
+                Delete,
+                ShowInFileManager,
+                New,
+            ],
+            // Files: the full Godot menu.
             Some(_) => vec![
-                FileContextAction::Open,
-                FileContextAction::ShowInFileManager,
-                FileContextAction::EditDependencies,
-                FileContextAction::ViewOwners,
+                Open,
+                EditDependencies,
+                ViewOwners,
+                CopyPath,
+                CopyAbsolutePath,
+                CopyUid,
+                Rename,
+                Duplicate,
+                Delete,
+                ShowInFileManager,
+                New,
             ],
         }
     }
@@ -434,6 +640,11 @@ impl FileSystemDock {
         // Auto-expand root level.
         self.expanded_dirs.insert(String::new());
         self.rebuild_entries();
+        // Restore persisted favorites so reopening a project (or reloading the
+        // editor) pins them under the Favorites header again. pat-k6600.
+        self.load_favorites();
+        // Restore the persisted split display mode (pat-96yv4).
+        self.load_display_mode();
         Ok(count)
     }
 
@@ -941,6 +1152,122 @@ mod tests {
         dock.deselect();
         assert!(dock.context_menu_actions().is_empty());
         assert_eq!(dock.context_action_target(), None);
+    }
+
+    /// pat-k6600: favorites round-trip to `<project>/.godot/editor/favorites`
+    /// and reload on refresh, and dead favorites are pruned on load (matching
+    /// Godot's behavior of dropping favorites whose path no longer exists).
+    #[test]
+    fn dock_favorites_persist_and_prune() {
+        let (dir, mut dock) = make_dock();
+        dock.refresh().unwrap();
+
+        // Favorite a real dir and a real file, then persist.
+        assert!(dock.add_favorite("res://scenes"));
+        assert!(dock.add_favorite("res://scripts/main.gd"));
+        dock.save_favorites().unwrap();
+
+        // The file lives where Godot writes it, one path per line.
+        let fav_file = dir.path().join(".godot").join("editor").join("favorites");
+        let written = std::fs::read_to_string(&fav_file).unwrap();
+        assert!(written.lines().any(|l| l == "res://scenes"));
+        assert!(written.lines().any(|l| l == "res://scripts/main.gd"));
+
+        // A fresh dock at the same root reloads them on refresh.
+        let mut reloaded = FileSystemDock::new(EditorFileSystem::new(dir.path()));
+        reloaded.refresh().unwrap();
+        assert!(reloaded.is_favorite("res://scenes"));
+        assert!(reloaded.is_favorite("res://scripts/main.gd"));
+
+        // Append a favorite whose target was deleted; it is pruned on load and
+        // the file is rewritten without it.
+        std::fs::write(
+            &fav_file,
+            "res://scenes\nres://scripts/main.gd\nres://gone_dir\n",
+        )
+        .unwrap();
+        let mut pruned = FileSystemDock::new(EditorFileSystem::new(dir.path()));
+        pruned.refresh().unwrap();
+        assert!(pruned.is_favorite("res://scenes"));
+        assert!(!pruned.is_favorite("res://gone_dir"), "dead favorite pruned");
+        let rewritten = std::fs::read_to_string(&fav_file).unwrap();
+        assert!(!rewritten.contains("gone_dir"), "prune rewrites the file");
+    }
+
+    /// pat-96yv4: the split display mode cycles like Godot's
+    /// `_change_split_mode` (TreeOnly → VSplit → HSplit → TreeOnly) and is
+    /// persisted/reloaded across a fresh dock at the same root.
+    #[test]
+    fn dock_display_mode_cycles_and_persists() {
+        let (dir, mut dock) = make_dock();
+        dock.refresh().unwrap();
+
+        // Default is tree-only.
+        assert_eq!(dock.display_mode(), FsDisplayMode::TreeOnly);
+
+        // Godot's cycle.
+        assert_eq!(dock.cycle_display_mode(), FsDisplayMode::VSplit);
+        assert_eq!(dock.cycle_display_mode(), FsDisplayMode::HSplit);
+        assert_eq!(dock.cycle_display_mode(), FsDisplayMode::TreeOnly);
+
+        // Land on a split mode and confirm it's on disk.
+        dock.cycle_display_mode(); // -> VSplit
+        let mode_file = dir.path().join(".godot").join("editor").join("fs_display_mode");
+        assert_eq!(std::fs::read_to_string(&mode_file).unwrap().trim(), "vsplit");
+
+        // A fresh dock at the same root reloads the persisted mode.
+        let mut reloaded = FileSystemDock::new(EditorFileSystem::new(dir.path()));
+        reloaded.refresh().unwrap();
+        assert_eq!(reloaded.display_mode(), FsDisplayMode::VSplit);
+    }
+
+    /// pat-ypgqq: right-clicking a file exposes Godot's full menu, and a folder
+    /// exposes the same minus the resource-only items (Edit Dependencies, View
+    /// Owners, Copy UID). Every action targets the selected path.
+    #[test]
+    fn fs_dock_context_menu_full_actions() {
+        use FileContextAction::*;
+        let (_dir, mut dock) = make_dock();
+        dock.refresh().unwrap();
+        dock.expand_dir("scenes");
+
+        // A selected file exposes the complete menu.
+        let idx = dock.find_entry("res://scenes/main.tscn").unwrap();
+        assert!(dock.select(idx));
+        let fa = dock.context_menu_actions();
+        for expected in [
+            Open,
+            EditDependencies,
+            ViewOwners,
+            CopyPath,
+            CopyAbsolutePath,
+            CopyUid,
+            Rename,
+            Duplicate,
+            Delete,
+            ShowInFileManager,
+            New,
+        ] {
+            assert!(fa.contains(&expected), "file menu missing {expected:?}");
+        }
+        assert_eq!(dock.context_action_target(), Some("res://scenes/main.tscn"));
+
+        // A selected folder exposes the same set minus resource-only items.
+        let dir_idx = dock
+            .entries()
+            .iter()
+            .position(|e| e.is_directory && e.name == "scenes")
+            .unwrap();
+        assert!(dock.select(dir_idx));
+        let da = dock.context_menu_actions();
+        for expected in [Open, CopyPath, CopyAbsolutePath, Rename, Duplicate, Delete, ShowInFileManager, New] {
+            assert!(da.contains(&expected), "folder menu missing {expected:?}");
+        }
+        for absent in [EditDependencies, ViewOwners, CopyUid] {
+            assert!(!da.contains(&absent), "folder menu should not have {absent:?}");
+        }
+        // Directory entries carry a trailing slash in their res_path.
+        assert_eq!(dock.context_action_target(), Some("res://scenes/"));
     }
 
     #[test]

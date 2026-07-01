@@ -447,6 +447,132 @@ pub enum ShaderCompileStatus {
     Error(String),
 }
 
+// ── Validation diagnostics ──────────────────────────────────────────────
+
+/// A single diagnostic (error or warning) from validating shader source.
+///
+/// Mirrors the line/column error links Godot renders in the Shader Editor's
+/// warnings panel (`text_shader_editor.cpp` `_update_warnings`), which the
+/// user clicks to jump to the offending line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShaderDiagnostic {
+    /// 1-based line number (0 when the diagnostic is not line-specific).
+    pub line: usize,
+    /// 1-based column number (0 when not column-specific).
+    pub col: usize,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// The result of validating shader source.
+///
+/// Godot's `ShaderTextEditor::_validate_script` compiles the shader and, on
+/// failure, shows the error line in the code editor's status bar and marks the
+/// file with an error icon in the shader list. On success it surfaces any
+/// warnings in the (otherwise hidden) warnings panel. [`validate_shader_source`]
+/// reproduces that split into fatal `errors` and non-fatal `warnings`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShaderValidation {
+    /// Whether the shader validated cleanly (no fatal errors).
+    pub ok: bool,
+    /// Fatal errors that prevent compilation.
+    pub errors: Vec<ShaderDiagnostic>,
+    /// Non-fatal warnings (e.g. an unused uniform).
+    pub warnings: Vec<ShaderDiagnostic>,
+}
+
+/// Validates GDShader source, returning structured diagnostics.
+///
+/// This mirrors Godot's `ShaderTextEditor::_validate_script` at a high level:
+/// a lexical error is a fatal error at its line/column; a missing `shader_type`
+/// declaration is fatal (Godot's parser requires one as the first statement).
+/// When the shader is otherwise valid, an unused-uniform heuristic produces the
+/// same class of warning Godot's `UNUSED_UNIFORM` check raises, so the warnings
+/// panel has real content to display.
+pub fn validate_shader_source(source: &str) -> ShaderValidation {
+    // Lexical pass first — an unterminated comment / bad char / bad number is a
+    // fatal error carrying the exact line and column.
+    let tokens = match tokenize_shader(source) {
+        Ok(t) => t,
+        Err(e) => {
+            let (line, col) = shader_lex_error_pos(&e);
+            return ShaderValidation {
+                ok: false,
+                errors: vec![ShaderDiagnostic {
+                    line,
+                    col,
+                    message: e.to_string(),
+                }],
+                warnings: Vec::new(),
+            };
+        }
+    };
+
+    // Godot requires a `shader_type` declaration; without one the parser errors.
+    if gdresource::shader_tokenizer::extract_shader_type(&tokens).is_none() {
+        return ShaderValidation {
+            ok: false,
+            errors: vec![ShaderDiagnostic {
+                line: 1,
+                col: 1,
+                message: "Expected a 'shader_type' declaration.".to_string(),
+            }],
+            warnings: Vec::new(),
+        };
+    }
+
+    ShaderValidation {
+        ok: true,
+        errors: Vec::new(),
+        warnings: unused_uniform_warnings(source),
+    }
+}
+
+/// Extracts the (line, col) position from a [`ShaderLexError`].
+fn shader_lex_error_pos(e: &ShaderLexError) -> (usize, usize) {
+    match e {
+        ShaderLexError::UnterminatedBlockComment { line, col }
+        | ShaderLexError::UnexpectedChar { line, col, .. }
+        | ShaderLexError::InvalidNumber { line, col, .. } => (*line, *col),
+    }
+}
+
+/// Produces an unused-uniform warning for every uniform whose name never
+/// appears again after its declaration (Godot's `UNUSED_UNIFORM` warning).
+fn unused_uniform_warnings(source: &str) -> Vec<ShaderDiagnostic> {
+    let tokens = match tokenize_shader_no_comments(source) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let uniforms = parse_uniforms(&tokens);
+    if uniforms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut warnings = Vec::new();
+    for u in &uniforms {
+        // Count identifier occurrences of this uniform's name. A single
+        // occurrence means it is declared but never referenced.
+        let uses = tokens
+            .iter()
+            .filter(|span| matches!(&span.token, ShaderToken::Ident(name) if name == &u.name))
+            .count();
+        if uses <= 1 {
+            // Locate the declaration line for the warning link.
+            let decl = tokens
+                .iter()
+                .find(|span| matches!(&span.token, ShaderToken::Ident(name) if name == &u.name));
+            let (line, col) = decl.map(|s| (s.line, s.col)).unwrap_or((0, 0));
+            warnings.push(ShaderDiagnostic {
+                line,
+                col,
+                message: format!("The uniform '{}' is declared but never used.", u.name),
+            });
+        }
+    }
+    warnings
+}
+
 /// The shader editor, managing multiple open shader tabs.
 #[derive(Debug)]
 pub struct ShaderEditor {
@@ -1212,6 +1338,54 @@ void fragment() {
         assert_eq!(uniforms[0].type_name, "vec4");
         assert_eq!(uniforms[1].name, "noise_tex");
         assert_eq!(uniforms[1].type_name, "sampler2D");
+    }
+
+    #[test]
+    fn validate_ok_shader_has_no_errors() {
+        let v = validate_shader_source(SAMPLE_SHADER);
+        assert!(v.ok, "sample shader should validate");
+        assert!(v.errors.is_empty());
+        // SAMPLE_SHADER references both uniforms, so no unused warnings.
+        assert!(v.warnings.is_empty(), "no unused uniforms in sample: {:?}", v.warnings);
+    }
+
+    #[test]
+    fn validate_missing_shader_type_is_fatal() {
+        let v = validate_shader_source("void fragment() {\n    ALBEDO = vec3(1.0);\n}\n");
+        assert!(!v.ok, "a shader without shader_type must fail");
+        assert_eq!(v.errors.len(), 1);
+        assert_eq!(v.errors[0].line, 1);
+        assert!(
+            v.errors[0].message.contains("shader_type"),
+            "error explains the cause: {}",
+            v.errors[0].message
+        );
+    }
+
+    #[test]
+    fn validate_lex_error_reports_line_and_col() {
+        // An unterminated block comment is a fatal lexical error carrying a
+        // precise position (Godot links the warnings panel to that line).
+        let src = "shader_type spatial;\nvoid fragment() { /* oops";
+        let v = validate_shader_source(src);
+        assert!(!v.ok);
+        assert_eq!(v.errors.len(), 1);
+        assert_eq!(v.errors[0].line, 2, "error is on the comment's line");
+        assert!(v.errors[0].col > 0, "error carries a column");
+    }
+
+    #[test]
+    fn validate_flags_unused_uniform_as_warning() {
+        // `tint` is declared but never referenced → an unused-uniform warning,
+        // while the shader still validates (warnings are non-fatal).
+        let src = "shader_type canvas_item;\n\
+                   uniform vec4 tint : source_color;\n\
+                   void fragment() {\n    COLOR = vec4(1.0);\n}\n";
+        let v = validate_shader_source(src);
+        assert!(v.ok, "unused uniform is a warning, not an error");
+        assert_eq!(v.warnings.len(), 1, "one unused uniform: {:?}", v.warnings);
+        assert!(v.warnings[0].message.contains("tint"));
+        assert_eq!(v.warnings[0].line, 2, "warning points at the declaration");
     }
 
     #[test]

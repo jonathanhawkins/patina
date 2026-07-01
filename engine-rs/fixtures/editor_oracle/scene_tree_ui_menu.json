@@ -1,0 +1,87 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/ui_menu.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Background",
+				"node_class": "Node2D",
+				"owner": "MenuRoot",
+				"path": "/root/MenuRoot/Background",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Title",
+						"node_class": "Label",
+						"owner": "MenuRoot",
+						"path": "/root/MenuRoot/VBox/Title",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "StartButton",
+						"node_class": "Node",
+						"owner": "MenuRoot",
+						"path": "/root/MenuRoot/VBox/StartButton",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "OptionsButton",
+						"node_class": "Node",
+						"owner": "MenuRoot",
+						"path": "/root/MenuRoot/VBox/OptionsButton",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "QuitButton",
+						"node_class": "Node",
+						"owner": "MenuRoot",
+						"path": "/root/MenuRoot/VBox/QuitButton",
+						"scene_file_path": ""
+					}
+				],
+				"name": "VBox",
+				"node_class": "VBoxContainer",
+				"owner": "MenuRoot",
+				"path": "/root/MenuRoot/VBox",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "VolumeSlider",
+						"node_class": "Node",
+						"owner": "MenuRoot",
+						"path": "/root/MenuRoot/OptionsPanel/VolumeSlider",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "FullscreenToggle",
+						"node_class": "Node",
+						"owner": "MenuRoot",
+						"path": "/root/MenuRoot/OptionsPanel/FullscreenToggle",
+						"scene_file_path": ""
+					}
+				],
+				"name": "OptionsPanel",
+				"node_class": "Control",
+				"owner": "MenuRoot",
+				"path": "/root/MenuRoot/OptionsPanel",
+				"scene_file_path": ""
+			}
+		],
+		"name": "MenuRoot",
+		"node_class": "Control",
+		"owner": "",
+		"path": "/root/MenuRoot",
+		"scene_file_path": "res://scenes/ui_menu.tscn"
+	}
+}

@@ -133,6 +133,38 @@ impl ConnectionList {
     pub fn is_empty(&self) -> bool {
         self.connections.is_empty()
     }
+
+    /// Disconnects (removes) the connection at `index`. Returns whether a
+    /// connection was removed (Godot's "Disconnect" on a slot).
+    pub fn disconnect(&mut self, index: usize) -> bool {
+        if index < self.connections.len() {
+            self.connections.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Disconnects every connection matching a signal/target/method tuple,
+    /// returning how many were removed.
+    pub fn disconnect_matching(&mut self, signal: &str, target: &str, method: &str) -> usize {
+        let before = self.connections.len();
+        self.connections
+            .retain(|c| !(c.signal == signal && c.target == target && c.method == method));
+        before - self.connections.len()
+    }
+
+    /// Edits (replaces) the connection at `index` — used by Godot's "Edit..."
+    /// to change the bound args / flags / method of an existing connection.
+    /// Returns whether the connection was replaced.
+    pub fn edit(&mut self, index: usize, connection: Connection) -> bool {
+        if index < self.connections.len() {
+            self.connections[index] = connection;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

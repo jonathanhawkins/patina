@@ -1,0 +1,29 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/render_test_sprite.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Sprite",
+				"node_class": "Sprite2D",
+				"owner": "Root",
+				"path": "/root/Root/Sprite",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Label",
+				"node_class": "Node2D",
+				"owner": "Root",
+				"path": "/root/Root/Label",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Root",
+		"node_class": "Node",
+		"owner": "",
+		"path": "/root/Root",
+		"scene_file_path": "res://scenes/render_test_sprite.tscn"
+	}
+}

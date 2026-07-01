@@ -42,6 +42,7 @@ pub mod theme;
 pub mod tilemap;
 pub mod trace;
 mod trace_oracle_tests;
+pub mod transform_inspector;
 pub mod tween;
 
 // Re-export the most-used types at the crate root.

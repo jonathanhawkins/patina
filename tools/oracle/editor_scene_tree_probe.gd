@@ -80,7 +80,7 @@ func _serialize(node: Node, path: String) -> Dictionary:
 	return entry
 
 func _get_arg(name: String) -> String:
-	var args := OS.get_cmdline_args()
+	var args := OS.get_cmdline_user_args()
 	for i in range(args.size() - 1):
 		if args[i] == name:
 			return args[i + 1]

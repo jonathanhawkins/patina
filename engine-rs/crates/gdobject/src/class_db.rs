@@ -714,6 +714,95 @@ pub fn register_2d_classes() {
     }
 }
 
+/// Registers the networking node/class hierarchy in the ClassDB.
+///
+/// Adds Godot's HTTP and WebSocket types so GDScript referencing
+/// `HTTPRequest`, `HTTPClient`, or `WebSocketPeer` resolves against ClassDB:
+///
+/// * `HTTPRequest : Node` (scene/main/http_request)
+/// * `HTTPClient : RefCounted` (core/io/http_client)
+/// * `WebSocketPeer : PacketPeer : RefCounted` (modules/websocket)
+///
+/// Idempotent — each class is only registered if not already present.
+pub fn register_networking_classes() {
+    // Ensure the base chain exists (Object → RefCounted → PacketPeer, and Node).
+    if !class_exists("Object") {
+        register_class(ClassRegistration::new("Object"));
+    }
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+    if !class_exists("Node") {
+        register_class(ClassRegistration::new("Node").parent("Object"));
+    }
+    if !class_exists("PacketPeer") {
+        register_class(ClassRegistration::new("PacketPeer").parent("RefCounted"));
+    }
+
+    // -- HTTPClient : RefCounted --
+    if !class_exists("HTTPClient") {
+        register_class(
+            ClassRegistration::new("HTTPClient")
+                .parent("RefCounted")
+                .method(MethodInfo::new("connect_to_host", 3))
+                .method(MethodInfo::new("request", 4))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("get_status", 0))
+                .method(MethodInfo::new("has_response", 0))
+                .method(MethodInfo::new("get_response_code", 0))
+                .method(MethodInfo::new("get_response_headers", 0))
+                .method(MethodInfo::new("get_response_body_length", 0))
+                .method(MethodInfo::new("read_response_body_chunk", 0))
+                .method(MethodInfo::new("close", 0)),
+        );
+    }
+
+    // -- HTTPRequest : Node --
+    if !class_exists("HTTPRequest") {
+        register_class(
+            ClassRegistration::new("HTTPRequest")
+                .parent("Node")
+                .property(PropertyInfo::new("timeout", Variant::Float(0.0)))
+                .property(PropertyInfo::new("max_redirects", Variant::Int(8)))
+                .property(PropertyInfo::new("use_threads", Variant::Bool(false)))
+                .property(PropertyInfo::new("accept_gzip", Variant::Bool(true)))
+                .property(PropertyInfo::new("body_size_limit", Variant::Int(-1)))
+                .property(PropertyInfo::new(
+                    "download_file",
+                    Variant::String(String::new()),
+                ))
+                .method(MethodInfo::new("request", 4))
+                .method(MethodInfo::new("request_raw", 4))
+                .method(MethodInfo::new("cancel_request", 0))
+                .method(MethodInfo::new("get_http_client_status", 0))
+                .method(MethodInfo::new("set_timeout", 1))
+                .method(MethodInfo::new("get_timeout", 0))
+                .method(MethodInfo::new("set_max_redirects", 1))
+                .method(MethodInfo::new("get_max_redirects", 0)),
+        );
+    }
+
+    // -- WebSocketPeer : PacketPeer --
+    if !class_exists("WebSocketPeer") {
+        register_class(
+            ClassRegistration::new("WebSocketPeer")
+                .parent("PacketPeer")
+                .method(MethodInfo::new("connect_to_url", 2))
+                .method(MethodInfo::new("accept_stream", 1))
+                .method(MethodInfo::new("send", 2))
+                .method(MethodInfo::new("send_text", 1))
+                .method(MethodInfo::new("get_available_packet_count", 0))
+                .method(MethodInfo::new("get_packet", 0))
+                .method(MethodInfo::new("was_string_packet", 0))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("close", 2))
+                .method(MethodInfo::new("get_ready_state", 0))
+                .method(MethodInfo::new("get_close_code", 0))
+                .method(MethodInfo::new("get_close_reason", 0)),
+        );
+    }
+}
+
 /// Registers all core, 2D, and 3D classes for the editor.
 ///
 /// Convenience function that ensures the full class hierarchy is available.

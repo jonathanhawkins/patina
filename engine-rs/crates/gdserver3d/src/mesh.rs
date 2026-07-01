@@ -214,6 +214,56 @@ impl Mesh3D {
         }
     }
 
+    /// Generates a torus (ring) lying in the XZ plane, matching Godot's
+    /// `TorusMesh`. `inner_radius` is the hole radius and `outer_radius` the
+    /// outer edge; `ring_sides` segments go around the main ring and
+    /// `ring_segments` around the tube's circular cross-section.
+    pub fn torus(inner_radius: f32, outer_radius: f32, ring_sides: u32, ring_segments: u32) -> Self {
+        let center_radius = (outer_radius + inner_radius) * 0.5;
+        let tube_radius = (outer_radius - inner_radius) * 0.5;
+
+        let mut vertices = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+
+        for i in 0..=ring_sides {
+            let u = 2.0 * std::f32::consts::PI * i as f32 / ring_sides as f32;
+            let (sin_u, cos_u) = u.sin_cos();
+            for j in 0..=ring_segments {
+                let v = 2.0 * std::f32::consts::PI * j as f32 / ring_segments as f32;
+                let (sin_v, cos_v) = v.sin_cos();
+                let ring = center_radius + tube_radius * cos_v;
+                vertices.push(Vector3::new(ring * cos_u, tube_radius * sin_v, ring * sin_u));
+                normals.push(Vector3::new(cos_v * cos_u, sin_v, cos_v * sin_u));
+                uvs.push([i as f32 / ring_sides as f32, j as f32 / ring_segments as f32]);
+            }
+        }
+
+        let row = ring_segments + 1;
+        for i in 0..ring_sides {
+            for j in 0..ring_segments {
+                let cur = i * row + j;
+                let next = cur + row;
+                indices.push(cur);
+                indices.push(next);
+                indices.push(cur + 1);
+                indices.push(cur + 1);
+                indices.push(next);
+                indices.push(next + 1);
+            }
+        }
+
+        Self {
+            vertices,
+            normals,
+            uvs,
+            indices,
+            primitive_type: PrimitiveType::Triangles,
+            surfaces: Vec::new(),
+        }
+    }
+
     /// Generates a flat plane on the XZ axis centered at the origin.
     pub fn plane(size: f32) -> Self {
         let h = size * 0.5;
@@ -803,6 +853,30 @@ mod tests {
         let mesh = Mesh3D::sphere(3.0, 8);
         for v in &mesh.vertices {
             assert!((v.length() - 3.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn torus_structure_and_bounds() {
+        let inner = 0.5;
+        let outer = 1.0;
+        let mesh = Mesh3D::torus(inner, outer, 24, 12);
+        assert!(!mesh.vertices.is_empty());
+        assert_eq!(mesh.vertices.len(), mesh.normals.len());
+        assert_eq!(mesh.vertices.len(), mesh.uvs.len());
+        let tube = (outer - inner) * 0.5;
+        for v in &mesh.vertices {
+            // Every vertex lies within the torus's tube radius of the ring.
+            assert!(v.y.abs() <= tube + 1e-4, "y within tube radius: {}", v.y);
+            let radial = (v.x * v.x + v.z * v.z).sqrt();
+            assert!(
+                radial >= inner - 1e-4 && radial <= outer + 1e-4,
+                "radial distance {radial} within [{inner}, {outer}]"
+            );
+        }
+        // Normals are unit length.
+        for n in &mesh.normals {
+            assert!((n.length() - 1.0).abs() < 1e-3);
         }
     }
 

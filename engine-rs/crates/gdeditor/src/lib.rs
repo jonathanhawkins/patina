@@ -68,6 +68,7 @@ pub mod fs_import_pipeline;
 pub mod fs_thumbnails;
 pub mod gdscript_highlight;
 pub mod group_dialog;
+pub mod idle_render;
 pub mod import;
 pub mod import_settings;
 pub mod export_groups;
@@ -84,6 +85,8 @@ pub mod help_menu_commands;
 pub mod indent_block;
 pub mod input_map;
 pub mod inspector;
+pub mod inspector_schema;
+pub mod inspector_schema_generated;
 pub mod line_ops;
 pub mod linked_proportional;
 pub mod main_screen;
@@ -216,8 +219,9 @@ pub use scene_editor::SceneEditor;
 pub use script_editor::{FindMatch, FindOptions, FindReplace, ScriptEditor};
 pub use settings::{EditorSettings, EditorTheme, ProjectSettings};
 pub use shader_editor::{
-    MaterialPreview, PreviewShape, PreviewUniformInfo, ShaderCompileStatus, ShaderEditor,
-    ShaderHighlightKind, ShaderHighlightSpan, ShaderHighlighter, ShaderTab, UniformValue,
+    validate_shader_source, MaterialPreview, PreviewShape, PreviewUniformInfo, ShaderCompileStatus,
+    ShaderDiagnostic, ShaderEditor, ShaderHighlightKind, ShaderHighlightSpan, ShaderHighlighter,
+    ShaderTab, ShaderValidation, UniformValue,
 };
 pub use theme_editor::{
     OverrideEntry, OverrideKind, PreviewControl, StyleBoxFlat, ThemeColorPalette, ThemeEditor,
@@ -505,10 +509,20 @@ pub enum EditorCommand {
         node_id: NodeId,
         /// The parent it was attached to (populated on execute).
         parent_id: Option<NodeId>,
-        /// The node's name (saved for undo).
+        /// The node's name (saved for undo / labels).
         name: String,
         /// The node's class name (saved for undo).
         class_name: String,
+        /// The full removed subtree — name, class, properties, and children —
+        /// captured on the first execute so undo restores the node exactly
+        /// (properties + descendants), not a bare empty node (pat-undoredo).
+        captured: Option<CapturedNode>,
+        /// The removed node's index among its siblings, for order-preserving undo.
+        index: Option<usize>,
+        /// The id the node was restored under by the last undo. The arena assigns
+        /// a fresh id on re-add, so redo must remove THIS id, not the stale
+        /// original `node_id`.
+        restored_id: Option<NodeId>,
     },
     /// Reparent a node to a new parent.
     ReparentNode {
@@ -637,6 +651,55 @@ pub enum EditorCommand {
     },
 }
 
+/// A captured node subtree (name, class, properties, and children), used to make
+/// node removal fully reversible: [`EditorCommand::RemoveNode`] captures it on
+/// execute so undo can restore the node exactly (pat-undoredo).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedNode {
+    name: String,
+    class_name: String,
+    props: Vec<(String, Variant)>,
+    children: Vec<CapturedNode>,
+}
+
+/// Recursively snapshots the subtree rooted at `id` (or `None` if it doesn't exist).
+fn capture_subtree(tree: &SceneTree, id: NodeId) -> Option<CapturedNode> {
+    let node = tree.get_node(id)?;
+    let name = node.name().to_string();
+    let class_name = node.class_name().to_string();
+    let props: Vec<(String, Variant)> =
+        node.properties().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let child_ids = node.children().to_vec();
+    let children = child_ids
+        .iter()
+        .filter_map(|c| capture_subtree(tree, *c))
+        .collect();
+    Some(CapturedNode {
+        name,
+        class_name,
+        props,
+        children,
+    })
+}
+
+/// Recursively re-creates a captured subtree under `parent`, returning the new
+/// root id. Properties and descendants are restored; ids are freshly assigned.
+fn restore_subtree(
+    tree: &mut SceneTree,
+    parent: NodeId,
+    cap: &CapturedNode,
+) -> EditorResult<NodeId> {
+    let mut node = Node::new(cap.name.as_str(), cap.class_name.as_str());
+    for (k, v) in &cap.props {
+        node.set_property(k, v.clone());
+    }
+    let new_id = tree.add_child(parent, node)?;
+    for child in &cap.children {
+        restore_subtree(tree, new_id, child)?;
+    }
+    Ok(new_id)
+}
+
 impl EditorCommand {
     /// Executes this command on the given scene tree.
     pub fn execute(&mut self, tree: &mut SceneTree) -> EditorResult<()> {
@@ -673,12 +736,31 @@ impl EditorCommand {
                 Ok(())
             }
             EditorCommand::RemoveNode {
-                node_id, parent_id, ..
+                node_id,
+                parent_id,
+                captured,
+                index,
+                restored_id,
+                ..
             } => {
-                // Save parent for undo.
-                *parent_id = tree.get_node(*node_id).and_then(|n| n.parent());
-                tree.remove_node(*node_id)?;
-                tracing::debug!("RemoveNode {:?}", node_id);
+                // After an undo the node was re-created under a fresh id, so
+                // redo must remove THAT node, not the stale original id.
+                let target = (*restored_id).unwrap_or(*node_id);
+                // Save parent + sibling index for an order-preserving undo.
+                *parent_id = tree.get_node(target).and_then(|n| n.parent());
+                if let Some(pid) = *parent_id {
+                    *index = tree
+                        .get_node(pid)
+                        .and_then(|p| p.children().iter().position(|c| *c == target));
+                }
+                // Capture the full subtree once (first execute) so undo can
+                // restore properties + children, not just an empty node.
+                if captured.is_none() {
+                    *captured = capture_subtree(tree, target);
+                }
+                tree.remove_node(target)?;
+                *restored_id = None;
+                tracing::debug!("RemoveNode {:?}", target);
                 Ok(())
             }
             EditorCommand::ReparentNode {
@@ -1076,7 +1158,7 @@ impl EditorCommand {
     }
 
     /// Reverses this command on the given scene tree.
-    pub fn undo(&self, tree: &mut SceneTree) -> EditorResult<()> {
+    pub fn undo(&mut self, tree: &mut SceneTree) -> EditorResult<()> {
         match self {
             EditorCommand::SetProperty {
                 node_id,
@@ -1100,13 +1182,27 @@ impl EditorCommand {
                 parent_id,
                 name,
                 class_name,
+                captured,
+                index,
+                restored_id,
                 ..
             } => {
-                // Re-add the node under its old parent. Note: the original
-                // NodeId cannot be reused because the arena assigns fresh IDs.
-                if let Some(pid) = parent_id {
-                    let node = Node::new(name.as_str(), class_name.as_str());
-                    tree.add_child(*pid, node)?;
+                // Re-add the node under its old parent, restoring its full
+                // subtree (properties + children) from the capture. The arena
+                // assigns a fresh id, so record it for a subsequent redo.
+                if let Some(pid) = *parent_id {
+                    let new_id = if let Some(cap) = captured {
+                        restore_subtree(tree, pid, cap)?
+                    } else {
+                        // Fallback for commands constructed without a capture.
+                        let node = Node::new(name.as_str(), class_name.as_str());
+                        tree.add_child(pid, node)?
+                    };
+                    // Restore the original sibling order where known.
+                    if let Some(idx) = *index {
+                        let _ = tree.move_child(pid, new_id, idx);
+                    }
+                    *restored_id = Some(new_id);
                 }
                 Ok(())
             }
@@ -1199,7 +1295,7 @@ impl EditorCommand {
             }
             EditorCommand::Group { commands, .. } => {
                 // Undo in reverse order.
-                for cmd in commands.iter().rev() {
+                for cmd in commands.iter_mut().rev() {
                     cmd.undo(tree)?;
                 }
                 Ok(())
@@ -1437,7 +1533,7 @@ impl Editor {
 
     /// Undoes the most recent command.
     pub fn undo(&mut self) -> EditorResult<()> {
-        let command = self.undo_stack.pop().ok_or(EditorError::NothingToUndo)?;
+        let mut command = self.undo_stack.pop().ok_or(EditorError::NothingToUndo)?;
         command.undo(&mut self.tree)?;
         self.redo_stack.push(command);
         Ok(())
@@ -1789,6 +1885,9 @@ mod tests {
                 parent_id: None,
                 name: "Main".to_string(),
                 class_name: "Node".to_string(),
+                captured: None,
+                index: None,
+                restored_id: None,
             })
             .unwrap();
 

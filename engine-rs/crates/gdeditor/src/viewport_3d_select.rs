@@ -87,4 +87,42 @@ mod tests {
         assert!(vp.selection.primary().is_none(), "selection cleared on a miss");
         assert!(!vp.selection.is_selected(a.raw()));
     }
+
+    /// Rubber-band box-select (Godot parity): a screen rectangle selects every
+    /// Node3D whose origin projects inside it, an empty area selects nothing, and
+    /// a full-viewport rectangle catches everything.
+    #[test]
+    fn editor3d_box_select_node3d() {
+        gdobject::class_db::register_3d_classes();
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = tree
+            .add_child(root, Node::new("A", "MeshInstance3D"))
+            .unwrap();
+        let b = tree
+            .add_child(root, Node::new("B", "MeshInstance3D"))
+            .unwrap();
+        node3d::set_position(&mut tree, a, Vector3::new(0.0, 0.0, 0.0));
+        node3d::set_position(&mut tree, b, Vector3::new(6.0, 0.0, 0.0));
+
+        let mut vp = Viewport3D::new(800, 600);
+        let (ax, ay) = vp.world_to_screen(Vector3::new(0.0, 0.0, 0.0));
+        let (bx, by) = vp.world_to_screen(Vector3::new(6.0, 0.0, 0.0));
+
+        // A tight rectangle around A's projection selects A only.
+        let hits = vp.box_select_hits(&tree, ax - 12.0, ay - 12.0, ax + 12.0, ay + 12.0);
+        assert!(hits.contains(&a.raw()), "box around A selects A");
+        assert!(!hits.contains(&b.raw()), "box around A excludes the distant B");
+
+        // Corner order doesn't matter; a rect spanning both projections selects both.
+        let (min_x, max_x) = (ax.min(bx) - 12.0, ax.max(bx) + 12.0);
+        let (min_y, max_y) = (ay.min(by) - 12.0, ay.max(by) + 12.0);
+        let both = vp.box_select_hits(&tree, max_x, max_y, min_x, min_y);
+        assert!(both.contains(&a.raw()) && both.contains(&b.raw()), "wide box selects both");
+
+        // An empty corner of the screen selects nothing.
+        let none = vp.box_select_hits(&tree, 0.0, 0.0, 4.0, 4.0);
+        assert!(none.is_empty(), "an empty screen region selects nothing");
+    }
 }

@@ -76,6 +76,16 @@ impl TextureCache {
         &self.project_root
     }
 
+    /// Updates the project root used to resolve `res://` paths.
+    ///
+    /// Clears the cache so any textures loaded against the previous root are
+    /// reloaded relative to the new project (pat-v89tw: opening a real game
+    /// project re-roots the editor).
+    pub fn set_project_root(&mut self, project_root: impl Into<String>) {
+        self.project_root = project_root.into();
+        self.cache.clear();
+    }
+
     /// Inserts a texture directly into the cache (useful for testing).
     pub fn insert(&mut self, res_path: &str, texture: Texture2D) {
         self.cache.insert(res_path.to_string(), Some(texture));
@@ -146,6 +156,21 @@ mod tests {
     fn project_root_accessor() {
         let cache = TextureCache::new("/my/project");
         assert_eq!(cache.project_root(), "/my/project");
+    }
+
+    #[test]
+    fn set_project_root_updates_and_clears_cache() {
+        let mut cache = TextureCache::new("/old/project");
+        cache.insert(
+            "res://icon.png",
+            Texture2D::solid(1, 1, Color::rgb(1.0, 0.0, 0.0)),
+        );
+        assert_eq!(cache.len(), 1);
+        // Re-rooting at a new project (pat-v89tw) updates the root and clears
+        // textures resolved against the old root.
+        cache.set_project_root("/new/project");
+        assert_eq!(cache.project_root(), "/new/project");
+        assert!(cache.is_empty());
     }
 
     #[test]

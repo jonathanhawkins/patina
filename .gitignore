@@ -8,6 +8,10 @@ dist/
 out/
 .turbo/
 target/
+.shadertest-target/
+
+# Large regenerable Godot ClassDB dump (recreate: godot --headless --dump-extension-api)
+engine-rs/fixtures/editor_oracle/godot_extension_api.json
 
 # Environment
 .env

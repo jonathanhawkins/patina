@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, MailConfig};
 use crate::error::{OrchestratorError, Result};
 use crate::mail::{MailClient, OutgoingMessage};
 use crate::worker::SwarmHealth;
@@ -98,6 +98,9 @@ impl Coordinator {
             Arc::clone(&pending_verifications),
             Arc::clone(&pending_completion_msgs),
             config.cache_dir().join("verifier.log"),
+            config.mail.clone(),
+            config.coordinator_agent.clone(),
+            config.project_root.to_string_lossy().to_string(),
         );
         Ok(Self {
             config,
@@ -1809,6 +1812,7 @@ fn verifier_log_append(path: &PathBuf, line: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_verifier_worker(
     project_root: PathBuf,
     timeout: Duration,
@@ -1817,11 +1821,58 @@ fn spawn_verifier_worker(
     pending_verifications: Arc<Mutex<HashMap<String, Instant>>>,
     pending_completion_msgs: Arc<Mutex<HashSet<i64>>>,
     verifier_log_path: PathBuf,
+    // pat-f6ndj: alert plumbing for the dyld-wedge circuit breaker. When the
+    // breaker trips we mail the coordinator/operator; `coordinator_name == None`
+    // makes the alert log-only (used in tests, where there is no mail server).
+    alert_mail_config: MailConfig,
+    coordinator_name: Option<String>,
+    project_key: String,
 ) {
+    use crate::verifier::circuit_breaker::{probe_recent_test_binary, VerifyCircuitBreaker};
+
     std::thread::spawn(move || {
+        // pat-f6ndj: a host dyld-wedge makes every freshly launched test binary
+        // hang for the full timeout. After N=2 consecutive bare timeouts the
+        // breaker trips: the lane stops launching new verifies (each would hang
+        // ~900s and deepen the wedge) and alerts the operator. It auto-resumes
+        // when a probe launch of a freshly-built local binary succeeds, throttled
+        // to one probe per window so a backlog of requests can't spin the prober.
+        const BREAKER_THRESHOLD: u32 = 2;
+        let probe_interval = Duration::from_secs(60);
+        let mut breaker = VerifyCircuitBreaker::new(BREAKER_THRESHOLD);
+        let mut last_probe: Option<Instant> = None;
+
         while let Ok(request) = verify_request_rx.recv() {
             let bead_id = request.bead_id.clone();
             let msg_id = request.msg_id;
+
+            // Breaker open → do not launch this verify. Try a throttled probe to
+            // resume; if it's not time yet or the probe fails, skip the launch
+            // and leave the bead pending so the stale-verification reaper (B3)
+            // handles it — don't bounce the worker during a host-level wedge.
+            if !breaker.should_launch() {
+                let due = last_probe.map_or(true, |t| t.elapsed() >= probe_interval);
+                let resumed = due && {
+                    last_probe = Some(Instant::now());
+                    breaker.probe_and_maybe_resume(|| probe_recent_test_binary(&project_root))
+                };
+                if resumed {
+                    verifier_log_append(
+                        &verifier_log_path,
+                        "RESUMED verify lane — probe launch succeeded (dyld-wedge cleared)",
+                    );
+                    tracing::warn!("verify lane resumed after dyld-wedge probe succeeded");
+                } else {
+                    verifier_log_append(
+                        &verifier_log_path,
+                        &format!(
+                            "SKIPPED bead={bead_id} — verify lane halted (dyld-wedge circuit breaker open)"
+                        ),
+                    );
+                    continue;
+                }
+            }
+
             // B1: isolate each verification in catch_unwind so a panic on one
             // bead can never kill the verifier thread and wedge the whole swarm.
             // Always remove the bead from the pending sets afterwards — otherwise
@@ -1836,12 +1887,30 @@ fn spawn_verifier_worker(
                     &verifier_log_path,
                 )
             }));
-            if result.is_err() {
-                verifier_log_append(
-                    &verifier_log_path,
-                    &format!("PANIC bead={bead_id} — verification thread recovered"),
-                );
-                tracing::error!(bead = %bead_id, "verification panicked — thread recovered, bead reopened next cycle");
+            match result {
+                Ok(outcome) => {
+                    // Feed the outcome to the breaker; emit the operator alert
+                    // exactly once, on the transition that trips it.
+                    if let Some(alert) = breaker.record(outcome) {
+                        verifier_log_append(&verifier_log_path, &alert.host_issue_log_line());
+                        tracing::error!("{}", alert.host_issue_log_line());
+                        send_host_issue_alert(
+                            &alert_mail_config,
+                            coordinator_name.as_deref(),
+                            &project_key,
+                            &alert,
+                        );
+                        // Don't probe immediately at the trip — wait a window.
+                        last_probe = Some(Instant::now());
+                    }
+                }
+                Err(_) => {
+                    verifier_log_append(
+                        &verifier_log_path,
+                        &format!("PANIC bead={bead_id} — verification thread recovered"),
+                    );
+                    tracing::error!(bead = %bead_id, "verification panicked — thread recovered, bead reopened next cycle");
+                }
             }
             pending_verifications.lock().unwrap().remove(&bead_id);
             if let Some(id) = msg_id {
@@ -1851,15 +1920,43 @@ fn spawn_verifier_worker(
     });
 }
 
+/// Send the dyld-wedge HOST-ISSUE alert to the coordinator/operator (pat-f6ndj).
+/// Best-effort and log-only when no coordinator recipient is configured.
+fn send_host_issue_alert(
+    mail_config: &MailConfig,
+    coordinator: Option<&str>,
+    project_key: &str,
+    alert: &crate::verifier::circuit_breaker::WedgeAlert,
+) {
+    let Some(coord) = coordinator else {
+        return;
+    };
+    let msg = OutgoingMessage {
+        project_key: project_key.to_string(),
+        sender_name: "verifier".to_string(),
+        to: vec![coord.to_string()],
+        subject: alert.mail_subject(),
+        body_md: alert.mail_body(),
+        importance: "high".to_string(),
+        ack_required: false,
+        topic: "host-issue".to_string(),
+        thread_id: "verifier-dyld-wedge".to_string(),
+    };
+    let _ = MailClient::new(mail_config).send_message_best_effort(&msg);
+}
+
 /// Run one verification request and send its result. Separated out so the
-/// verifier loop can wrap it in `catch_unwind` (B1).
+/// verifier loop can wrap it in `catch_unwind` (B1). Returns the outcome
+/// classified for the dyld-wedge circuit breaker (pat-f6ndj): a bare wall-clock
+/// timeout (no compile error) is `TimedOut`, every other terminal result is
+/// `Finished`.
 fn process_one_verification(
     project_root: &std::path::Path,
     timeout: Duration,
     request: VerifyRequest,
     verify_tx: &mpsc::Sender<VerifyResult>,
     verifier_log_path: &PathBuf,
-) {
+) -> crate::verifier::circuit_breaker::VerifyOutcome {
     let bead_id = request.bead_id.clone();
     let queue_wait_ms = request.enqueued_at.elapsed().as_millis() as u64;
     let joined = request.commands.join(" && ");
@@ -1901,6 +1998,19 @@ fn process_one_verification(
         );
     }
 
+    // Classify for the circuit breaker before `reject_reason` is moved into the
+    // result. A bare timeout is reported by `verify_commands` as a "timed out
+    // after …" error with no build output; treat that (and only that) as the
+    // wedge-candidate `TimedOut`.
+    let timed_out = !passed
+        && reject_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("timed out after"));
+    let outcome = verifier::circuit_breaker::classify_verify_outcome(
+        timed_out,
+        reject_reason.as_deref().unwrap_or(""),
+    );
+
     let _ = verify_tx.send(VerifyResult {
         bead_id: request.bead_id.clone(),
         worker: request.worker,
@@ -1912,6 +2022,8 @@ fn process_one_verification(
         reject_reason,
         is_stale_recovery: request.is_stale_recovery,
     });
+
+    outcome
 }
 
 /// Update per-bead orphan strike counts and return beads that have reached the
@@ -2076,6 +2188,77 @@ mod tests {
             identity_cache: Mutex::new(HashMap::new()),
             last_reclaim: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// pat-f6ndj: the live verify lane must STOP launching verifies once the
+    /// dyld-wedge circuit breaker trips. Drives the real `spawn_verifier_worker`
+    /// loop with a 1s timeout and three `sleep 30` requests (each a guaranteed
+    /// bare timeout): after the 2nd consecutive timeout the breaker trips, the
+    /// HOST-ISSUE banner is logged, and the 3rd request is SKIPPED (never
+    /// launched) instead of eating another full timeout. coordinator_name=None
+    /// keeps the alert log-only (no mail server in tests).
+    #[test]
+    fn verify_lane_halts_after_two_consecutive_timeouts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path().join("verifier.log");
+        let (req_tx, req_rx) = mpsc::channel();
+        let (res_tx, _res_rx) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending_msgs = Arc::new(Mutex::new(HashSet::new()));
+
+        spawn_verifier_worker(
+            dir.path().to_path_buf(),
+            Duration::from_secs(1), // short timeout → `sleep 30` always times out
+            req_rx,
+            res_tx,
+            Arc::clone(&pending),
+            Arc::clone(&pending_msgs),
+            log_path.clone(),
+            crate::config::test_config().mail,
+            None, // log-only alert
+            "test-project".to_string(),
+        );
+
+        for i in 0..3 {
+            req_tx
+                .send(VerifyRequest {
+                    bead_id: format!("pat-test-{i}"),
+                    worker: "w".to_string(),
+                    msg_id: None,
+                    ack_required: false,
+                    files_changed: String::new(),
+                    tests_run: String::new(),
+                    commands: vec!["sleep 30".to_string()],
+                    is_stale_recovery: false,
+                    enqueued_at: Instant::now(),
+                })
+                .unwrap();
+        }
+        drop(req_tx); // close the channel so the loop exits after draining
+
+        // Wait for the 3rd request to be reached and skipped (≤10s; real work ~2s).
+        let mut log = String::new();
+        for _ in 0..100 {
+            log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("SKIPPED bead=pat-test-2") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        assert!(
+            log.contains("HOST-ISSUE"),
+            "breaker must log the HOST-ISSUE banner after 2 consecutive timeouts; log:\n{log}"
+        );
+        assert!(
+            log.contains("SKIPPED bead=pat-test-2"),
+            "the 3rd verify must be skipped (lane halted), not launched; log:\n{log}"
+        );
+        let starts = log.matches("START bead=").count();
+        assert_eq!(
+            starts, 2,
+            "only the first 2 verifies should launch, not the 3rd; log:\n{log}"
+        );
     }
 
     /// B3: a verification held past the reap threshold is reopened and removed

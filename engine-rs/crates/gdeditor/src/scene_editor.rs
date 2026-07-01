@@ -295,6 +295,9 @@ impl SceneEditor {
             parent_id: None,
             name,
             class_name,
+            captured: None,
+            index: None,
+            restored_id: None,
         };
         self.editor.execute(cmd)?;
         self.editor.deselect();

@@ -104,6 +104,97 @@ impl FrameBuffer {
     }
 }
 
+/// A blendable raster target that projected-line overlays (the editor's 3D grid,
+/// gizmos, and selection outlines) can draw onto.
+///
+/// Implemented for both the float [`FrameBuffer`] (the software render path) and
+/// the byte-native [`Bgra8Image`] (the GPU render path), so the overlay drawing
+/// code is written once and composites onto whichever target the caller holds.
+/// The GPU path uses `Bgra8Image` to avoid a per-pixel float round-trip
+/// (`bytes → Color → bytes`) that dominates the frame at full resolution.
+pub trait Raster {
+    /// Target width in pixels.
+    fn width(&self) -> u32;
+    /// Target height in pixels.
+    fn height(&self) -> u32;
+    /// Alpha-blends `color` over the pixel at (`x`, `y`) with coverage `a`
+    /// (clamped to `0..=1`). Out-of-bounds coordinates are a no-op; the result
+    /// stays fully opaque, matching the editor overlay compositing.
+    fn blend(&mut self, x: i32, y: i32, color: Color, a: f32);
+}
+
+impl Raster for FrameBuffer {
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+    fn blend(&mut self, x: i32, y: i32, color: Color, a: f32) {
+        if a <= 0.0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        let a = a.min(1.0);
+        let idx = (y as u32 * self.width + x as u32) as usize;
+        let d = self.pixels[idx];
+        self.pixels[idx] = Color {
+            r: d.r * (1.0 - a) + color.r * a,
+            g: d.g * (1.0 - a) + color.g * a,
+            b: d.b * (1.0 - a) + color.b * a,
+            a: 1.0,
+        };
+    }
+}
+
+/// A byte-native BGRA raster (top-down, 4 bytes/pixel in `B, G, R, A` order) — the
+/// exact format the GPU editor path reads back and the BMP stream wants.
+///
+/// Compositing overlays and emitting BMP directly on these bytes avoids the two
+/// per-pixel float loops (`bytes → Color` on readback and `Color → bytes` on
+/// encode) that a [`FrameBuffer`] would require — a large per-frame win at full
+/// resolution, where those loops otherwise dominate.
+#[derive(Debug, Clone)]
+pub struct Bgra8Image {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Row-major, top-down BGRA bytes; length is `width * height * 4`.
+    pub data: Vec<u8>,
+}
+
+impl Bgra8Image {
+    /// Wraps raw top-down BGRA bytes. `data` must be exactly `width*height*4` long.
+    pub fn from_bgra(width: u32, height: u32, data: Vec<u8>) -> Self {
+        debug_assert_eq!(data.len(), (width * height * 4) as usize, "BGRA buffer size mismatch");
+        Self { width, height, data }
+    }
+}
+
+impl Raster for Bgra8Image {
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+    fn blend(&mut self, x: i32, y: i32, color: Color, a: f32) {
+        if a <= 0.0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        let a = a.min(1.0);
+        let idx = ((y as u32 * self.width + x as u32) * 4) as usize;
+        // Stored order is B, G, R, A (matching the GPU Bgra8Unorm readback + BMP).
+        let sb = color.b.clamp(0.0, 1.0) * 255.0;
+        let sg = color.g.clamp(0.0, 1.0) * 255.0;
+        let sr = color.r.clamp(0.0, 1.0) * 255.0;
+        self.data[idx] = (self.data[idx] as f32 * (1.0 - a) + sb * a) as u8;
+        self.data[idx + 1] = (self.data[idx + 1] as f32 * (1.0 - a) + sg * a) as u8;
+        self.data[idx + 2] = (self.data[idx + 2] as f32 * (1.0 - a) + sr * a) as u8;
+        self.data[idx + 3] = 255;
+    }
+}
+
 /// A CPU-based 2D software renderer.
 #[derive(Debug)]
 pub struct SoftwareRenderer {

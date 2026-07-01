@@ -61,10 +61,16 @@ pub struct AxisLine {
 pub enum ViewPreset {
     /// Looking down −Z.
     Front,
+    /// Looking down +Z (rear).
+    Rear,
     /// Looking straight down (top-down).
     Top,
+    /// Looking straight up (bottom).
+    Bottom,
     /// Looking down −X (right side).
     Right,
+    /// Looking down +X (left side).
+    Left,
 }
 
 impl Viewport3D {
@@ -103,8 +109,11 @@ impl Viewport3D {
     pub fn toolbar_set_view(&mut self, preset: ViewPreset) {
         match preset {
             ViewPreset::Front => self.camera.snap_to_front(),
+            ViewPreset::Rear => self.camera.snap_to_rear(),
             ViewPreset::Top => self.camera.snap_to_top(),
+            ViewPreset::Bottom => self.camera.snap_to_bottom(),
             ViewPreset::Right => self.camera.snap_to_right(),
+            ViewPreset::Left => self.camera.snap_to_left(),
         }
     }
 }
@@ -161,5 +170,26 @@ mod tests {
         // Top looks straight down (pitch is driven negative).
         vp.toolbar_set_view(ViewPreset::Top);
         assert!(vp.camera.pitch < 0.0, "top view looks downward");
+    }
+
+    /// All six Godot view presets snap the camera to distinct orientations.
+    #[test]
+    fn editor3d_six_view_presets() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let mut vp = Viewport3D::default();
+
+        vp.toolbar_set_view(ViewPreset::Front);
+        assert_eq!((vp.camera.yaw, vp.camera.pitch), (0.0, 0.0));
+        vp.toolbar_set_view(ViewPreset::Rear);
+        assert_eq!(vp.camera.yaw, PI);
+        assert_eq!(vp.camera.pitch, 0.0);
+        vp.toolbar_set_view(ViewPreset::Right);
+        assert_eq!(vp.camera.yaw, FRAC_PI_2);
+        vp.toolbar_set_view(ViewPreset::Left);
+        assert_eq!(vp.camera.yaw, -FRAC_PI_2);
+        vp.toolbar_set_view(ViewPreset::Top);
+        assert!(vp.camera.pitch < 0.0, "top looks down");
+        vp.toolbar_set_view(ViewPreset::Bottom);
+        assert!(vp.camera.pitch > 0.0, "bottom looks up");
     }
 }

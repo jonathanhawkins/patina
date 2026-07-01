@@ -59,6 +59,14 @@ gdeditor = { path = "crates/gdeditor" }
 patina-runner = { path = "crates/patina-runner" }
 serde_json.workspace = true
 
+[features]
+# Enables the wgpu GPU path in gdrender3d so the workspace-level GPU integration
+# tests (tests/render_3d_gpu_pipeline_test.rs, `#[cfg(feature = "gpu")]`) compile
+# and run — they skip themselves when no adapter is present. Non-default so plain
+# builds are unaffected (the editor already links wgpu via gdeditor's default
+# `gpu-render` feature). Run the GPU tests with `--features gpu`.
+gpu = ["gdrender3d/gpu"]
+
 [[example]]
 name = "demo_2d"
 path = "examples/demo_2d.rs"

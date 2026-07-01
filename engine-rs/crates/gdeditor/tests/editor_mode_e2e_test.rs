@@ -141,4 +141,56 @@ fn editor_mode_e2e_test_modes_serve_distinct_views() {
 
     // All five modes (2d + the four above) serve mutually-distinct views.
     assert_eq!(seen.len(), 5, "all five modes serve distinct views: {seen:?}");
+
+    // Statefulness / round-trip (pat-nbakh): the served central view follows the
+    // CURRENT mode held by the wired `MainPane` — it is not a one-way latch.
+    // After cycling through every mode, switching back to 2D must restore the 2D
+    // viewport, and a non-2D mode must again swap away from it.
+    let back_2d = served_view(port, "2d");
+    assert_eq!(
+        back_2d["is_2d_viewport"], true,
+        "switching back to 2d restores the 2D viewport: {back_2d}"
+    );
+    assert_eq!(
+        back_2d["component_id"], two_d_component,
+        "2d round-trips to the same central component"
+    );
+    let back_3d = served_view(port, "3d");
+    assert_eq!(
+        back_3d["component_id"], "spatial_editor",
+        "re-selecting 3d swaps the central view again: {back_3d}"
+    );
+
+    // Frontend wiring guard (pat-nbakh): the original bug was that the top-bar
+    // 2D/3D/SCRIPT/GAME/ASSETLIB buttons only restyled themselves and never
+    // POSTed the mode endpoint, so the central view stayed on the 2D viewport in
+    // every mode. Assert the *served* editor HTML actually wires the buttons to
+    // (a) POST `/api/editor/mode` and (b) mount the routed central view, so the
+    // switch can never silently regress to cosmetic-only.
+    let html = http_get(port, "/editor");
+    assert!(
+        html.contains("200 OK"),
+        "editor html served: {}",
+        &html[..html.len().min(120)]
+    );
+    assert!(
+        html.contains("/api/editor/mode"),
+        "top-bar mode buttons POST the mode endpoint (not cosmetic-only)"
+    );
+    assert!(
+        html.contains("setCentralView"),
+        "the mode handler mounts the routed central view"
+    );
+    for marker in [
+        "data-mode=\"2d\"",
+        "data-mode=\"3d\"",
+        "data-mode=\"script\"",
+        "data-mode=\"game\"",
+        "data-mode=\"assetlib\"",
+    ] {
+        assert!(
+            html.contains(marker),
+            "the top-bar exposes the per-mode button {marker}"
+        );
+    }
 }

@@ -1,0 +1,103 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/vehicle_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "Vehicle3D",
+				"path": "/root/Vehicle3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "Vehicle3D",
+				"path": "/root/Vehicle3D/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Body",
+						"node_class": "MeshInstance3D",
+						"owner": "Vehicle3D",
+						"path": "/root/Vehicle3D/Chassis/Body",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "ChassisShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Vehicle3D",
+						"path": "/root/Vehicle3D/Chassis/ChassisShape",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "WheelFL",
+						"node_class": "MeshInstance3D",
+						"owner": "Vehicle3D",
+						"path": "/root/Vehicle3D/Chassis/WheelFL",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "WheelFR",
+						"node_class": "MeshInstance3D",
+						"owner": "Vehicle3D",
+						"path": "/root/Vehicle3D/Chassis/WheelFR",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "WheelRL",
+						"node_class": "MeshInstance3D",
+						"owner": "Vehicle3D",
+						"path": "/root/Vehicle3D/Chassis/WheelRL",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "WheelRR",
+						"node_class": "MeshInstance3D",
+						"owner": "Vehicle3D",
+						"path": "/root/Vehicle3D/Chassis/WheelRR",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Chassis",
+				"node_class": "RigidBody3D",
+				"owner": "Vehicle3D",
+				"path": "/root/Vehicle3D/Chassis",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "RoadShape",
+						"node_class": "CollisionShape3D",
+						"owner": "Vehicle3D",
+						"path": "/root/Vehicle3D/Road/RoadShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Road",
+				"node_class": "StaticBody3D",
+				"owner": "Vehicle3D",
+				"path": "/root/Vehicle3D/Road",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Vehicle3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/Vehicle3D",
+		"scene_file_path": "res://scenes/vehicle_3d.tscn"
+	}
+}

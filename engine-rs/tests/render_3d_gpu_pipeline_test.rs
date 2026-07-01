@@ -470,4 +470,147 @@ mod gpu_tests {
             dark_brightness
         );
     }
+
+    // ── Editor-optimized color path (render_editor_color) ────────────
+
+    /// The editor path clears to the *provided* background color (not black) and
+    /// returns no depth (the editor never reads GPU depth). Also guards the
+    /// non-sRGB (`Bgra8Unorm`) target: a linear clear of 0.13 must read back as
+    /// ~0.13, not the ~0.40 an sRGB target would encode.
+    #[test]
+    fn editor_color_clears_to_background_and_skips_depth() {
+        let mut renderer = match skip_if_no_gpu() {
+            Some(r) => r,
+            None => return,
+        };
+        let bg = Color::new(0.13, 0.14, 0.17, 1.0);
+        let vp = test_viewport(48, 48);
+        let frame = renderer.render_editor_color(&vp, bg);
+
+        assert_eq!(frame.width, 48);
+        assert_eq!(frame.height, 48);
+        assert_eq!(frame.pixels.len(), 48 * 48);
+        // No depth is read back on the editor path (a saved GPU sync + copy).
+        assert!(frame.depth.is_empty(), "editor path must not read back depth");
+        // Every pixel is the flat background (no geometry), and linear — an sRGB
+        // target would lift 0.13 to ~0.40 and fail this.
+        for p in &frame.pixels {
+            assert!(
+                (p.r - bg.r).abs() < 0.02 && (p.g - bg.g).abs() < 0.02 && (p.b - bg.b).abs() < 0.02,
+                "expected linear background {:?}, got {:?}",
+                bg,
+                p
+            );
+        }
+    }
+
+    /// A mesh renders over the editor background, and the background survives where
+    /// there's no geometry — the clear + draw composite correctly on the cached
+    /// target.
+    #[test]
+    fn editor_color_draws_mesh_over_background() {
+        let mut renderer = match skip_if_no_gpu() {
+            Some(r) => r,
+            None => return,
+        };
+        let bg = Color::new(0.10, 0.12, 0.16, 1.0);
+        let id = renderer.create_instance();
+        renderer.set_mesh(id, triangle_mesh());
+        renderer.set_material(
+            id,
+            Material3D {
+                albedo: Color::new(1.0, 0.0, 0.0, 1.0),
+                shading_mode: ShadingMode::Unlit,
+                ..Default::default()
+            },
+        );
+        let vp = test_viewport(64, 64);
+        let frame = renderer.render_editor_color(&vp, bg);
+
+        let red = frame
+            .pixels
+            .iter()
+            .filter(|p| p.r > 0.5 && p.g < 0.2 && p.b < 0.2)
+            .count();
+        let background = frame
+            .pixels
+            .iter()
+            .filter(|p| {
+                (p.r - bg.r).abs() < 0.03 && (p.g - bg.g).abs() < 0.03 && (p.b - bg.b).abs() < 0.03
+            })
+            .count();
+        assert!(red > 10, "expected red triangle pixels, found {red}");
+        assert!(background > 10, "expected surviving background pixels, found {background}");
+    }
+
+    /// The cached render targets and readback buffer are reused across frames (the
+    /// buffer is unmapped after each read) and rebuilt on resize. Rendering several
+    /// frames — including a size change — must not panic and must keep producing
+    /// correct content. Regression guard for the cached-buffer `unmap` + resize.
+    #[test]
+    fn editor_color_reuses_targets_and_handles_resize() {
+        let mut renderer = match skip_if_no_gpu() {
+            Some(r) => r,
+            None => return,
+        };
+        let bg = Color::new(0.13, 0.14, 0.17, 1.0);
+        let id = renderer.create_instance();
+        renderer.set_mesh(id, triangle_mesh());
+        renderer.set_material(
+            id,
+            Material3D {
+                albedo: Color::new(1.0, 0.0, 0.0, 1.0),
+                shading_mode: ShadingMode::Unlit,
+                ..Default::default()
+            },
+        );
+
+        // Many frames at the same size exercise cached-buffer reuse + unmap; a
+        // missing unmap would panic on the second map_async.
+        let vp = test_viewport(64, 64);
+        for i in 0..5 {
+            let frame = renderer.render_editor_color(&vp, bg);
+            let red = frame.pixels.iter().filter(|p| p.r > 0.5 && p.g < 0.2).count();
+            assert!(red > 10, "frame {i}: expected red pixels, found {red}");
+        }
+
+        // A resize must rebuild the cached targets without panicking.
+        let vp2 = test_viewport(96, 72);
+        let frame = renderer.render_editor_color(&vp2, bg);
+        assert_eq!(frame.width, 96);
+        assert_eq!(frame.height, 72);
+        assert_eq!(frame.pixels.len(), 96 * 72);
+        let red = frame.pixels.iter().filter(|p| p.r > 0.5 && p.g < 0.2).count();
+        assert!(red > 10, "after resize: expected red pixels, found {red}");
+    }
+
+    /// `reset_scene` clears instances/lights so the persistent editor renderer can
+    /// be repopulated each frame without accumulating stale geometry.
+    #[test]
+    fn reset_scene_clears_instances_between_frames() {
+        let mut renderer = match skip_if_no_gpu() {
+            Some(r) => r,
+            None => return,
+        };
+        let bg = Color::new(0.13, 0.14, 0.17, 1.0);
+        let id = renderer.create_instance();
+        renderer.set_mesh(id, triangle_mesh());
+        renderer.set_material(
+            id,
+            Material3D {
+                albedo: Color::new(1.0, 0.0, 0.0, 1.0),
+                shading_mode: ShadingMode::Unlit,
+                ..Default::default()
+            },
+        );
+        let vp = test_viewport(64, 64);
+        let before = renderer.render_editor_color(&vp, bg);
+        assert!(before.pixels.iter().filter(|p| p.r > 0.5).count() > 10);
+
+        // After reset the scene is empty → no red geometry, just background.
+        renderer.reset_scene();
+        let after = renderer.render_editor_color(&vp, bg);
+        let red = after.pixels.iter().filter(|p| p.r > 0.5).count();
+        assert_eq!(red, 0, "reset_scene must clear instances, found {red} red pixels");
+    }
 }

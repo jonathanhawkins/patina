@@ -61,6 +61,14 @@ pub enum CompletionCondition {
     AllGatesPassing,
     AllCriteriaChecked,
     ParityAbove(f64),
+    /// Like [`ParityAbove`](CompletionCondition::ParityAbove), but evaluated
+    /// against the EDITOR-parity metric (the Godot editor-UI oracle, pat-l01l2
+    /// Layer 4) instead of runtime oracle parity. Parsed from
+    /// `{ editor_parity_threshold = N }`. Until the editor goldens (pat-l01l2-a)
+    /// and the comparison oracle test (pat-47s1r) land and emit a report, the
+    /// metric is *unavailable* and this condition evaluates as Unevaluable —
+    /// never a silent pass.
+    EditorParityAbove(f64),
 }
 
 /// One phase in the planner's phase chain.
@@ -346,6 +354,10 @@ fn parse_completion_condition(val: toml::Value) -> Option<CompletionCondition> {
                 Some(CompletionCondition::ParityAbove(*f))
             } else if let Some(toml::Value::Integer(i)) = t.get("parity_threshold") {
                 Some(CompletionCondition::ParityAbove(*i as f64))
+            } else if let Some(toml::Value::Float(f)) = t.get("editor_parity_threshold") {
+                Some(CompletionCondition::EditorParityAbove(*f))
+            } else if let Some(toml::Value::Integer(i)) = t.get("editor_parity_threshold") {
+                Some(CompletionCondition::EditorParityAbove(*i as f64))
             } else {
                 None
             }
@@ -445,6 +457,28 @@ next_sources = ["prd/PLAN.md"]
             CompletionCondition::ParityAbove(98.0)
         );
         assert_eq!(cfg.next_sources.len(), 1);
+    }
+
+    /// pat-8fcjl: `{ editor_parity_threshold = N }` parses to a distinct
+    /// EditorParityAbove condition (evaluated against editor parity, not
+    /// runtime), while plain `parity_threshold` still maps to ParityAbove.
+    #[test]
+    fn test_parse_editor_parity_threshold_completion() {
+        let cond = |s: &str| parse_completion_condition(s.parse::<toml::Value>().unwrap());
+        // Float and integer forms both parse to EditorParityAbove.
+        assert_eq!(
+            cond("editor_parity_threshold = 95.0"),
+            Some(CompletionCondition::EditorParityAbove(95.0))
+        );
+        assert_eq!(
+            cond("editor_parity_threshold = 90"),
+            Some(CompletionCondition::EditorParityAbove(90.0))
+        );
+        // Runtime `parity_threshold` is unaffected.
+        assert_eq!(
+            cond("parity_threshold = 98.0"),
+            Some(CompletionCondition::ParityAbove(98.0))
+        );
     }
 
     #[test]

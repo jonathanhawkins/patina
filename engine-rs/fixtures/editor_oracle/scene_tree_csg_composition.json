@@ -1,0 +1,87 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/csg_composition.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "CSGComposition",
+				"path": "/root/CSGComposition/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "CSGComposition",
+				"path": "/root/CSGComposition/Sun",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Base",
+						"node_class": "CSGBox3D",
+						"owner": "CSGComposition",
+						"path": "/root/CSGComposition/Combiner/Base",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "Dome",
+						"node_class": "CSGSphere3D",
+						"owner": "CSGComposition",
+						"path": "/root/CSGComposition/Combiner/Dome",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "Pillar",
+						"node_class": "CSGCylinder3D",
+						"owner": "CSGComposition",
+						"path": "/root/CSGComposition/Combiner/Pillar",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Combiner",
+				"node_class": "CSGCombiner3D",
+				"owner": "CSGComposition",
+				"path": "/root/CSGComposition/Combiner",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Probe",
+				"node_class": "ReflectionProbe",
+				"owner": "CSGComposition",
+				"path": "/root/CSGComposition/Probe",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "FloorShape",
+						"node_class": "CollisionShape3D",
+						"owner": "CSGComposition",
+						"path": "/root/CSGComposition/Floor/FloorShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Floor",
+				"node_class": "StaticBody3D",
+				"owner": "CSGComposition",
+				"path": "/root/CSGComposition/Floor",
+				"scene_file_path": ""
+			}
+		],
+		"name": "CSGComposition",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/CSGComposition",
+		"scene_file_path": "res://scenes/csg_composition.tscn"
+	}
+}

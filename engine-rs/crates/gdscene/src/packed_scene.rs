@@ -107,7 +107,16 @@ impl PackedScene {
         let mut templates: Vec<NodeTemplate> = Vec::new();
         let mut connections: Vec<SceneConnection> = Vec::new();
         let mut ext_resources: HashMap<String, ExtResourceEntry> = HashMap::new();
+        // Inline sub-resources: id -> type (e.g. "SphereMesh"). Used to resolve a
+        // node's `mesh = SubResource("id")` to a concrete primitive type so the
+        // 3D viewport can draw the real shape.
+        let mut sub_resources: HashMap<String, String> = HashMap::new();
+        // Inline sub-resource property lines (id -> {key: value}), so e.g. a
+        // CollisionShape3D's BoxShape3D `size` can size its wireframe gizmo.
+        let mut sub_resource_props: HashMap<String, HashMap<String, Variant>> = HashMap::new();
         let mut current: Option<NodeTemplate> = None;
+        // The id of the sub-resource whose property lines we're currently reading.
+        let mut current_sub: Option<String> = None;
 
         for (line_num, line) in source.lines().enumerate() {
             let _line_num = line_num + 1; // 1-based, for error reporting
@@ -120,6 +129,8 @@ impl PackedScene {
 
             // Section header.
             if line.starts_with('[') && line.ends_with(']') {
+                // A new section ends any sub-resource we were reading.
+                current_sub = None;
                 // Flush previous node template.
                 if let Some(tmpl) = current.take() {
                     templates.push(tmpl);
@@ -199,9 +210,20 @@ impl PackedScene {
                         let res_type = attrs.get("type").cloned().unwrap_or_default();
                         ext_resources.insert(id, ExtResourceEntry { res_type, path });
                     }
+                } else if inner.starts_with("sub_resource") {
+                    // Capture the type by id so `mesh = SubResource("id")` can be
+                    // resolved to a primitive. The sub-resource's own property
+                    // lines that follow have no `current` node and are skipped.
+                    let attrs = extract_header_attrs(inner);
+                    if let (Some(id), Some(ty)) =
+                        (attrs.get("id").cloned(), attrs.get("type").cloned())
+                    {
+                        sub_resources.insert(id.clone(), ty);
+                        sub_resource_props.entry(id.clone()).or_default();
+                        current_sub = Some(id);
+                    }
                 }
-                // Ignore other sections (sub_resource, etc.)
-                // for this simplified parser.
+                // Ignore other sections for this simplified parser.
                 continue;
             }
 
@@ -236,12 +258,112 @@ impl PackedScene {
                         }
                     }
                 }
+            } else if let Some(ref sub_id) = current_sub {
+                // Property lines inside a [sub_resource] section (e.g. a
+                // BoxShape3D's `size`), kept so the gizmo can use real extents.
+                if let Some((key, value_str)) = line.split_once('=') {
+                    if let Ok(value) = parse_variant_value(value_str.trim()) {
+                        sub_resource_props
+                            .entry(sub_id.clone())
+                            .or_default()
+                            .insert(key.trim().to_string(), value);
+                    }
+                }
             }
         }
 
         // Flush last template.
         if let Some(tmpl) = current.take() {
             templates.push(tmpl);
+        }
+
+        // pat-ghfv0.40: record inline SubResource references for the served
+        // inspector BEFORE the mesh/shape resolution below overwrites the raw
+        // `SubResource:<id>` values with viewport markers. For every property that
+        // is an inline SubResource ref, remember `resource_class::sub_id` under a
+        // `__resref__<prop>` companion key so `/api/node` can present it as Godot
+        // does (`{resource_class, resource_path = "<scene res://>::<id>"}`). The
+        // companion is hidden from the inspector's property list and skipped by
+        // the scene saver.
+        for tmpl in &mut templates {
+            let refs: Vec<(String, String)> = tmpl
+                .properties
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    Variant::String(s) => {
+                        let id = s.strip_prefix("SubResource:")?;
+                        let class = sub_resources.get(id).cloned().unwrap_or_default();
+                        Some((k.clone(), format!("{class}::{id}")))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for (prop, meta) in refs {
+                tmpl.properties
+                    .insert(format!("__resref__{prop}"), Variant::String(meta));
+            }
+        }
+
+        // Resolve a mesh's material albedo to an `albedo_color` property so the
+        // 3D viewport can shade the mesh in its real colour (like Godot), from a
+        // node-level `surface_material_override/0` or the mesh's own `material`.
+        // Run before mesh resolution, while `mesh = SubResource:<id>` is intact.
+        let sub_ref_id = |v: Option<&Variant>| -> Option<String> {
+            match v {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").map(String::from),
+                _ => None,
+            }
+        };
+        for tmpl in &mut templates {
+            let mat_id = sub_ref_id(tmpl.properties.get("surface_material_override/0")).or_else(|| {
+                sub_ref_id(tmpl.properties.get("mesh"))
+                    .and_then(|mesh_id| sub_resource_props.get(&mesh_id))
+                    .and_then(|p| sub_ref_id(p.get("material")))
+            });
+            if let Some(mat_id) = mat_id {
+                if let Some(Variant::Color(c)) =
+                    sub_resource_props.get(&mat_id).and_then(|p| p.get("albedo_color"))
+                {
+                    tmpl.properties.insert("albedo_color".into(), Variant::Color(*c));
+                }
+            }
+        }
+
+        // Resolve `mesh = SubResource("id")` references to a concrete primitive
+        // marker (`primitive:<Type>`) the 3D viewport renderer understands, stored
+        // under a `__viewport_mesh__` companion so the real `mesh` property keeps
+        // its `SubResource:<id>` value (correct scene round-trip + inspector).
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("mesh") {
+                Some(Variant::String(s)) => s
+                    .strip_prefix("SubResource:")
+                    .and_then(|id| sub_resources.get(id))
+                    .map(|ty| format!("primitive:{ty}")),
+                _ => None,
+            };
+            if let Some(p) = resolved {
+                tmpl.properties
+                    .insert("__viewport_mesh__".into(), Variant::String(p));
+            }
+        }
+
+        // Resolve `shape = SubResource("id")` on CollisionShape nodes to a
+        // `shape:<Type>` marker so the 3D viewport can draw the matching
+        // collision-shape wireframe gizmo (BoxShape3D, SphereShape3D, etc.),
+        // stored under a `__viewport_shape__` companion so the real `shape`
+        // property keeps its `SubResource:<id>` value (round-trip + inspector).
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("shape") {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
+                    let ty = sub_resources.get(id)?;
+                    Some(encode_shape_marker(ty, sub_resource_props.get(id)))
+                }),
+                _ => None,
+            };
+            if let Some(p) = resolved {
+                tmpl.properties
+                    .insert("__viewport_shape__".into(), Variant::String(p));
+            }
         }
 
         if templates.is_empty() {
@@ -626,6 +748,36 @@ fn extract_header_attrs(header: &str) -> HashMap<String, String> {
 
 /// Parses a groups attribute value like `["enemy", "damageable"]` into a
 /// `Vec<String>`.
+/// Encodes a collision shape sub-resource as a `shape:<Type>[|dims]` marker for
+/// the 3D viewport's wireframe gizmo. `dims` carries the shape's real extents
+/// (box `size`, sphere `radius`, capsule/cylinder `radius,height`) when present,
+/// so the gizmo matches the actual collision bounds rather than a default size.
+fn encode_shape_marker(ty: &str, props: Option<&HashMap<String, Variant>>) -> String {
+    let num = |k: &str| -> Option<f32> {
+        match props?.get(k)? {
+            Variant::Float(f) => Some(*f as f32),
+            Variant::Int(i) => Some(*i as f32),
+            _ => None,
+        }
+    };
+    match ty {
+        "BoxShape3D" => match props.and_then(|p| p.get("size")) {
+            Some(Variant::Vector3(s)) => format!("shape:BoxShape3D|{},{},{}", s.x, s.y, s.z),
+            _ => "shape:BoxShape3D".to_string(),
+        },
+        "SphereShape3D" => match num("radius") {
+            Some(r) => format!("shape:SphereShape3D|{r}"),
+            None => "shape:SphereShape3D".to_string(),
+        },
+        "CapsuleShape3D" | "CylinderShape3D" => {
+            let r = num("radius").unwrap_or(0.5);
+            let h = num("height").unwrap_or(2.0);
+            format!("shape:{ty}|{r},{h}")
+        }
+        _ => format!("shape:{ty}"),
+    }
+}
+
 fn parse_groups_attr(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
     // Strip outer brackets.
@@ -944,6 +1096,93 @@ position = Vector2(100, 200)
         let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
         assert_eq!(scene.node_count(), 3);
         assert_eq!(scene.uid.as_deref(), Some("uid://abc123"));
+    }
+
+    #[test]
+    fn mesh_sub_resource_resolved_to_primitive() {
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="SphereMesh" id="Sphere_1"]
+
+[node name="World" type="Node3D"]
+
+[node name="Ball" type="MeshInstance3D" parent="."]
+mesh = SubResource("Sphere_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let ball = nodes.iter().find(|n| n.name() == "Ball").expect("Ball node");
+        // `mesh = SubResource("id")` keeps its raw value; the resolved primitive
+        // marker goes to the `__viewport_mesh__` companion for the viewport.
+        assert_eq!(
+            ball.get_property("mesh"),
+            Variant::String("SubResource:Sphere_1".into())
+        );
+        assert_eq!(
+            ball.get_property("__viewport_mesh__"),
+            Variant::String("primitive:SphereMesh".into())
+        );
+    }
+
+    #[test]
+    fn shape_sub_resource_resolved_with_extents() {
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="BoxShape3D" id="Box_1"]
+size = Vector3(2, 1, 3)
+
+[sub_resource type="SphereShape3D" id="Sph_1"]
+radius = 0.75
+
+[node name="World" type="Node3D"]
+
+[node name="BoxCol" type="CollisionShape3D" parent="."]
+shape = SubResource("Box_1")
+
+[node name="SphCol" type="CollisionShape3D" parent="."]
+shape = SubResource("Sph_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let vp = |n: &str| -> Variant {
+            nodes.iter().find(|x| x.name() == n).unwrap().get_property("__viewport_shape__")
+        };
+        let raw = |n: &str| -> Variant {
+            nodes.iter().find(|x| x.name() == n).unwrap().get_property("shape")
+        };
+        // `shape = SubResource("id")` keeps its raw value; the resolved shape
+        // marker (type + real extents) goes to the `__viewport_shape__` companion.
+        assert_eq!(raw("BoxCol"), Variant::String("SubResource:Box_1".into()));
+        assert_eq!(vp("BoxCol"), Variant::String("shape:BoxShape3D|2,1,3".into()));
+        assert_eq!(vp("SphCol"), Variant::String("shape:SphereShape3D|0.75".into()));
+    }
+
+    #[test]
+    fn mesh_material_albedo_resolved() {
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="BoxMesh" id="Box_1"]
+
+[sub_resource type="StandardMaterial3D" id="Mat_1"]
+albedo_color = Color(1, 0, 0, 1)
+
+[node name="World" type="Node3D"]
+
+[node name="RedBox" type="MeshInstance3D" parent="."]
+mesh = SubResource("Box_1")
+surface_material_override/0 = SubResource("Mat_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let red = nodes.iter().find(|n| n.name() == "RedBox").unwrap();
+        // The material override's albedo is surfaced as an `albedo_color` Color.
+        match red.get_property("albedo_color") {
+            Variant::Color(c) => assert!(
+                (c.r - 1.0).abs() < 1e-4 && c.g.abs() < 1e-4 && c.b.abs() < 1e-4,
+                "red albedo: {c:?}"
+            ),
+            other => panic!("expected albedo_color Color, got {other:?}"),
+        }
     }
 
     #[test]

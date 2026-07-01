@@ -95,6 +95,74 @@ pub fn render_scene_with_zoom_pan(
     render_scene_inner(tree, selected, width, height, zoom, pan, None)
 }
 
+/// Whether `tree` should be drawn through the 3D renderer (rather than the 2D
+/// canvas rasterizer), mirroring Godot's main-plugin selection
+/// (`EditorNode::set_edited_scene` → `_find_node_types`): the scene root's own
+/// type wins — a `Node3D` root is 3D, a `CanvasItem` root is 2D — and a bare
+/// `Node` root (a level container) falls back to whichever spatial/canvas node
+/// type dominates the descendants. Ties and empty scenes default to 2D
+/// (`false`). This is the same rule the editor uses to pick the 2D vs 3D main
+/// screen for an opened scene, applied to the *running* scene so the Game view
+/// renders it the way the game itself would.
+pub fn scene_is_3d(tree: &SceneTree) -> bool {
+    let root = tree
+        .current_scene()
+        .or_else(|| {
+            tree.get_node(tree.root_id())
+                .and_then(|n| n.children().first().copied())
+        })
+        .unwrap_or_else(|| tree.root_id());
+    if let Some(node) = tree.get_node(root) {
+        if node.is_class("Node3D") {
+            return true;
+        }
+        if node.is_class("CanvasItem") {
+            return false;
+        }
+    }
+    let (mut count_3d, mut count_2d) = (0u32, 0u32);
+    for nid in tree.all_nodes_in_tree_order() {
+        if let Some(node) = tree.get_node(nid) {
+            if node.is_class("Node3D") {
+                count_3d += 1;
+            } else if node.is_class("CanvasItem") {
+                count_2d += 1;
+            }
+        }
+    }
+    count_3d > count_2d
+}
+
+/// Renders one frame of the *running* scene for the editor's Game view, picking
+/// the renderer the way Godot's game viewport would: a 3D scene is drawn through
+/// the spatial renderer (`render_editor_3d_frame`, using the editor's 3D
+/// viewport camera so the view matches the spatial editor you launched from),
+/// and a 2D scene through the canvas rasterizer.
+///
+/// This fixes a blank Game view for 3D scenes: the run loop previously always
+/// used the 2D rasterizer, which has nothing to draw for a `Node3D` scene (no
+/// `CanvasItem`s), so pressing Play on a 3D scene showed an empty grid even
+/// though the scene was running. `viewport_3d` is borrowed read-only and cloned
+/// internally to apply the panel size, so callers can pass `&state`'s viewport
+/// alongside an immutable borrow of the running tree.
+pub fn render_runtime_frame(
+    tree: &SceneTree,
+    viewport_3d: &crate::viewport_3d::Viewport3D,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> FrameBuffer {
+    if scene_is_3d(tree) {
+        let mut vp = viewport_3d.clone();
+        vp.width = width.max(1);
+        vp.height = height.max(1);
+        crate::viewport_3d_render::render_editor_3d_frame(&vp, tree)
+    } else {
+        render_scene_with_zoom_pan(tree, None, width, height, zoom, pan)
+    }
+}
+
 /// Renders with texture support for Sprite2D nodes.
 pub fn render_scene_with_textures(
     tree: &SceneTree,
@@ -1129,81 +1197,16 @@ fn draw_bitmap_string(fb: &mut FrameBuffer, x: f32, y: f32, s: &str, color: Colo
     }
 }
 
-/// Returns a 5x7 bitmap for common characters. Each `u8` has its low 5 bits
-/// representing pixel columns for that row.
+/// Returns a 5x7 bitmap for a character, with full printable-ASCII coverage.
+///
+/// Delegates to the shared [`gdrender2d::font`] bitmap font so viewport labels
+/// and ruler ticks use the same complete glyph set as the rest of the engine.
+/// This module previously kept its own partial table (only `0-9`, `A-F`, `a`,
+/// `-`, space), so every other letter fell back to a filled box — node names
+/// like "Player" rendered as tofu (pat-rvebj). The encoding is identical: each
+/// `u8` holds one row, low 5 bits, MSB = leftmost column.
 fn char_bitmap(ch: char) -> [u8; 7] {
-    match ch {
-        '0' => [
-            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-        ],
-        '1' => [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-        '2' => [
-            0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111,
-        ],
-        '3' => [
-            0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110,
-        ],
-        '4' => [
-            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-        ],
-        '5' => [
-            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
-        ],
-        '6' => [
-            0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-        '7' => [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-        '8' => [
-            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-        ],
-        '9' => [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
-        ],
-        'A' => [
-            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-        'a' => [
-            0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111,
-        ],
-        'B' => [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
-        ],
-        'C' => [
-            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
-        ],
-        'D' => [
-            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
-        ],
-        'E' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
-        ],
-        'F' => [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-        '-' => [
-            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
-        ],
-        ' ' => [
-            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000,
-        ],
-        _ => {
-            // For unrecognized chars, draw a small filled block.
-            if ch.is_ascii_uppercase() || ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-                // Generic letter: filled square with gap.
-                [
-                    0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
-                ]
-            } else {
-                [
-                    0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000,
-                ]
-            }
-        }
-    }
+    gdrender2d::font::char_bitmap(ch)
 }
 
 // ---------------------------------------------------------------------------
@@ -2400,6 +2403,41 @@ mod tests {
         assert!(
             white_count > 20,
             "bitmap string '123' should draw many white pixels, got {white_count}"
+        );
+    }
+
+    /// Regression for pat-rvebj: viewport node-name labels rendered as tofu
+    /// boxes because this module kept its own partial glyph table (only `0-9`,
+    /// `A-F`, `a`, `-`, space), so every other letter fell through to a filled
+    /// placeholder box. Now that `char_bitmap` delegates to the shared
+    /// `gdrender2d::font`, every printable character in real node names and
+    /// ruler ticks must resolve to a distinct, non-placeholder glyph.
+    #[test]
+    fn editor_viewport_label_glyph_coverage() {
+        // The old fallback drawn for unknown letters: a filled rectangle.
+        const FALLBACK_BOX: [u8; 7] =
+            [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111];
+
+        // Every char that appears in the demo scene's node labels and ruler
+        // ticks must map to a real glyph — not the tofu box, not blank.
+        for ch in "PlayerEnemyGround0123456789-".chars() {
+            let bm = char_bitmap(ch);
+            assert_ne!(
+                bm, FALLBACK_BOX,
+                "char '{ch}' renders as a placeholder box (tofu)"
+            );
+            assert_ne!(bm, [0u8; 7], "char '{ch}' renders as blank");
+        }
+
+        // "Player" must not be six identical cells: each letter is its own
+        // glyph. Before the fix, P/l/y/e/r all collapsed to the box and only
+        // 'a' differed (2 distinct), which is exactly the reported tofu.
+        let player_cells: std::collections::HashSet<[u8; 7]> =
+            "Player".chars().map(char_bitmap).collect();
+        assert!(
+            player_cells.len() >= 5,
+            "'Player' label has only {} distinct glyph cells (tofu collapse)",
+            player_cells.len()
         );
     }
 

@@ -1,0 +1,86 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/spotlight_gallery_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "SpotRed",
+				"node_class": "SpotLight3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/SpotRed",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "SpotGreen",
+				"node_class": "SpotLight3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/SpotGreen",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "SpotBlue",
+				"node_class": "SpotLight3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/SpotBlue",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "PedestalLeft",
+				"node_class": "MeshInstance3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/PedestalLeft",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "PedestalCenter",
+				"node_class": "MeshInstance3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/PedestalCenter",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "PedestalRight",
+				"node_class": "MeshInstance3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/PedestalRight",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "FloorShape",
+						"node_class": "CollisionShape3D",
+						"owner": "SpotlightGallery3D",
+						"path": "/root/SpotlightGallery3D/Floor/FloorShape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Floor",
+				"node_class": "StaticBody3D",
+				"owner": "SpotlightGallery3D",
+				"path": "/root/SpotlightGallery3D/Floor",
+				"scene_file_path": ""
+			}
+		],
+		"name": "SpotlightGallery3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/SpotlightGallery3D",
+		"scene_file_path": "res://scenes/spotlight_gallery_3d.tscn"
+	}
+}

@@ -1,0 +1,10 @@
+; Minimal Godot project manifest for the editor-parity oracle (pat-ghfv0.40).
+; Roots `engine-rs/fixtures/` as a res:// project so the served editor can
+; resolve scene paths (res://scenes/<scene>.tscn) and emit SubResource
+; resource_paths that match the Godot 4.6.1 goldens captured with a project root.
+
+config_version=5
+
+[application]
+
+config/name="Patina Fixtures"

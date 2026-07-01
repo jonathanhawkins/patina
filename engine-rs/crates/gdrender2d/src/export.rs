@@ -36,13 +36,19 @@ pub fn encode_bmp(fb: &FrameBuffer) -> Vec<u8> {
     buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
 
     // -- Pixel data (bottom-up, BGRA) --
-    for y in (0..fb.height).rev() {
-        for x in 0..fb.width {
-            let c = fb.get_pixel(x, y);
-            buf.push((c.b.clamp(0.0, 1.0) * 255.0) as u8);
-            buf.push((c.g.clamp(0.0, 1.0) * 255.0) as u8);
-            buf.push((c.r.clamp(0.0, 1.0) * 255.0) as u8);
-            buf.push((c.a.clamp(0.0, 1.0) * 255.0) as u8);
+    // Iterate each row as a slice (avoids get_pixel's per-pixel index recompute +
+    // bounds check) and write whole 4-byte pixels — this loop runs on every
+    // interactive frame, so the per-pixel overhead matters.
+    let w = fb.width as usize;
+    for y in (0..fb.height as usize).rev() {
+        let row = &fb.pixels[y * w..y * w + w];
+        for c in row {
+            buf.extend_from_slice(&[
+                (c.b.clamp(0.0, 1.0) * 255.0) as u8,
+                (c.g.clamp(0.0, 1.0) * 255.0) as u8,
+                (c.r.clamp(0.0, 1.0) * 255.0) as u8,
+                (c.a.clamp(0.0, 1.0) * 255.0) as u8,
+            ]);
         }
     }
 
@@ -52,6 +58,50 @@ pub fn encode_bmp(fb: &FrameBuffer) -> Vec<u8> {
 /// Saves the framebuffer as a BMP file.
 pub fn save_bmp(fb: &FrameBuffer, path: &str) -> std::io::Result<()> {
     std::fs::write(path, encode_bmp(fb))
+}
+
+/// Encodes a top-down [`Bgra8Image`](crate::renderer::Bgra8Image) as an
+/// uncompressed 32-bit BMP (bottom-up BGRA).
+///
+/// This is the byte-native fast path for the GPU editor viewport stream: the GPU
+/// already produced BGRA pixels, so encoding is just the header plus a
+/// row-reversed **whole-row copy** — none of the per-pixel `Color → byte` clamp +
+/// multiply that [`encode_bmp`] must do. At full resolution that per-pixel loop is
+/// one of the dominant per-frame costs, so skipping it is a large win.
+pub fn encode_bmp_bgra(img: &crate::renderer::Bgra8Image) -> Vec<u8> {
+    let (w, h) = (img.width, img.height);
+    let pixel_data_size = w * h * 4;
+    let file_size = 14 + 40 + pixel_data_size;
+    let mut buf = Vec::with_capacity(file_size as usize);
+
+    // -- File header (14 bytes) --
+    buf.extend_from_slice(b"BM");
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved1
+    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved2
+    buf.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+
+    // -- DIB header (BITMAPINFOHEADER, 40 bytes) --
+    buf.extend_from_slice(&40u32.to_le_bytes()); // header size
+    buf.extend_from_slice(&(w as i32).to_le_bytes());
+    buf.extend_from_slice(&(h as i32).to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // planes
+    buf.extend_from_slice(&32u16.to_le_bytes()); // bpp
+    buf.extend_from_slice(&0u32.to_le_bytes()); // compression (BI_RGB)
+    buf.extend_from_slice(&pixel_data_size.to_le_bytes());
+    buf.extend_from_slice(&2835u32.to_le_bytes()); // h-res (pixels/m)
+    buf.extend_from_slice(&2835u32.to_le_bytes()); // v-res
+    buf.extend_from_slice(&0u32.to_le_bytes()); // colors used
+    buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
+
+    // -- Pixel data: BMP is bottom-up; the source is top-down BGRA already in the
+    //    output byte order, so each row is a plain copy in reverse row order. --
+    let stride = (w * 4) as usize;
+    for y in (0..h as usize).rev() {
+        buf.extend_from_slice(&img.data[y * stride..y * stride + stride]);
+    }
+
+    buf
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +135,23 @@ pub fn save_ppm(fb: &FrameBuffer, path: &str) -> std::io::Result<()> {
 /// Uses filter type 0 (None) for all scanlines and deflate compression
 /// via `miniz_oxide`.
 pub fn encode_png(fb: &FrameBuffer) -> Vec<u8> {
+    encode_png_level(fb, 6)
+}
+
+/// Like [`encode_png`] but tuned for the live editor viewport stream: uses the
+/// fastest deflate level (1) instead of 6.
+///
+/// The image is byte-identical — PNG is lossless at every level; only the
+/// compressed size differs, which is irrelevant over localhost. Re-encoding a
+/// full-resolution (~2MB) frame every interactive tick at level 6 wastes CPU in
+/// the render loop; level 1 is several times faster to compress.
+pub fn encode_png_fast(fb: &FrameBuffer) -> Vec<u8> {
+    encode_png_level(fb, 1)
+}
+
+/// PNG encoder with an explicit deflate `level` (0 = store … 9/10 = max). Shared
+/// by [`encode_png`] (level 6, small files) and [`encode_png_fast`] (level 1).
+fn encode_png_level(fb: &FrameBuffer, level: u8) -> Vec<u8> {
     use miniz_oxide::deflate::compress_to_vec_zlib;
 
     let mut buf = Vec::new();
@@ -104,20 +171,25 @@ pub fn encode_png(fb: &FrameBuffer) -> Vec<u8> {
     write_png_chunk(&mut buf, b"IHDR", &ihdr_data);
 
     // -- IDAT --
-    // Build raw scanline data: filter byte (0) + RGBA pixels per row.
-    let row_bytes = 1 + fb.width as usize * 4;
+    // Build raw scanline data: filter byte (0) + RGBA pixels per row. Iterate each
+    // row as a slice (avoids get_pixel's per-pixel index recompute + bounds check)
+    // and write whole 4-byte pixels — this runs on every interactive frame.
+    let w = fb.width as usize;
+    let row_bytes = 1 + w * 4;
     let mut raw = Vec::with_capacity(row_bytes * fb.height as usize);
-    for y in 0..fb.height {
+    for y in 0..fb.height as usize {
         raw.push(0); // filter type: None
-        for x in 0..fb.width {
-            let c = fb.get_pixel(x, y);
-            raw.push((c.r.clamp(0.0, 1.0) * 255.0) as u8);
-            raw.push((c.g.clamp(0.0, 1.0) * 255.0) as u8);
-            raw.push((c.b.clamp(0.0, 1.0) * 255.0) as u8);
-            raw.push((c.a.clamp(0.0, 1.0) * 255.0) as u8);
+        let row = &fb.pixels[y * w..y * w + w];
+        for c in row {
+            raw.extend_from_slice(&[
+                (c.r.clamp(0.0, 1.0) * 255.0) as u8,
+                (c.g.clamp(0.0, 1.0) * 255.0) as u8,
+                (c.b.clamp(0.0, 1.0) * 255.0) as u8,
+                (c.a.clamp(0.0, 1.0) * 255.0) as u8,
+            ]);
         }
     }
-    let compressed = compress_to_vec_zlib(&raw, 6);
+    let compressed = compress_to_vec_zlib(&raw, level);
     write_png_chunk(&mut buf, b"IDAT", &compressed);
 
     // -- IEND --
@@ -332,6 +404,34 @@ mod tests {
         assert_eq!(raw[4], 255); // A
     }
 
+    /// The fast (level-1) live-stream encoder is byte-for-byte lossless: it
+    /// decodes to exactly the same pixels as the level-6 encoder — only the
+    /// compressed size differs — so using it for the viewport stream can't change
+    /// what the user sees.
+    #[test]
+    fn encode_png_fast_is_lossless() {
+        use miniz_oxide::inflate::decompress_to_vec_zlib;
+        // Inflate the IDAT scanlines of a PNG built by this module (fixed layout:
+        // 8-byte signature + 25-byte IHDR chunk, then IDAT).
+        fn raw_scanlines(png: &[u8]) -> Vec<u8> {
+            let off = 8 + 25;
+            let len = u32::from_be_bytes([png[off], png[off + 1], png[off + 2], png[off + 3]])
+                as usize;
+            assert_eq!(&png[off + 4..off + 8], b"IDAT");
+            decompress_to_vec_zlib(&png[off + 8..off + 8 + len]).expect("inflate")
+        }
+        let fb = FrameBuffer::new(4, 3, Color::rgb(0.2, 0.4, 0.6));
+        let slow = encode_png(&fb);
+        let fast = encode_png_fast(&fb);
+        assert_eq!(
+            raw_scanlines(&slow),
+            raw_scanlines(&fast),
+            "fast PNG must decode to identical pixels"
+        );
+        // Still a valid PNG (intact signature).
+        assert_eq!(&fast[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
     // -- Save to temp file tests --
 
     #[test]
@@ -362,5 +462,57 @@ mod tests {
         let data = std::fs::read(path).expect("failed to read PPM");
         assert!(data.starts_with(b"P6\n"));
         let _ = std::fs::remove_file(path);
+    }
+
+    // -- Byte-native BGRA path (GPU editor stream) --
+
+    /// The byte-native `encode_bmp_bgra` must produce output byte-for-byte
+    /// identical to the float `encode_bmp` for the same image — it's just a faster
+    /// route (per-row copy vs per-pixel clamp+multiply) to the same BMP.
+    #[test]
+    fn bmp_bgra_matches_float_bmp_byte_for_byte() {
+        use crate::renderer::Bgra8Image;
+        let (w, h) = (2u32, 3u32);
+        let mut fb = FrameBuffer::new(w, h, Color::rgb(0.1, 0.2, 0.3));
+        fb.pixels[0] = Color::new(1.0, 0.0, 0.0, 1.0);
+        fb.pixels[5] = Color::new(0.0, 1.0, 0.0, 1.0);
+        // Equivalent top-down BGRA bytes, built with the same arithmetic encode_bmp
+        // uses, so the two encoders must agree.
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for c in &fb.pixels {
+            data.push((c.b.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push((c.g.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push((c.r.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push((c.a.clamp(0.0, 1.0) * 255.0) as u8);
+        }
+        let img = Bgra8Image::from_bgra(w, h, data);
+        assert_eq!(encode_bmp(&fb), encode_bmp_bgra(&img), "byte BMP must equal float BMP");
+        // Header sanity on the byte path.
+        let bmp = encode_bmp_bgra(&img);
+        assert_eq!(&bmp[0..2], b"BM");
+        let bw = i32::from_le_bytes([bmp[18], bmp[19], bmp[20], bmp[21]]);
+        let bh = i32::from_le_bytes([bmp[22], bmp[23], bmp[24], bmp[25]]);
+        assert_eq!((bw, bh), (2, 3));
+    }
+
+    /// `Bgra8Image` composites overlays in byte space the same way the float
+    /// `FrameBuffer` does in `Color` space: full coverage overwrites, partial
+    /// coverage blends, out-of-bounds is a no-op, and the result stays opaque.
+    #[test]
+    fn bgra_blend_composites_in_byte_space() {
+        use crate::renderer::{Bgra8Image, Raster};
+        let mut img = Bgra8Image::from_bgra(1, 1, vec![0, 0, 0, 255]);
+        // Opaque red at full coverage → BGRA (0, 0, 255, 255).
+        img.blend(0, 0, Color::new(1.0, 0.0, 0.0, 1.0), 1.0);
+        assert_eq!(img.data, vec![0, 0, 255, 255]);
+        // White at half coverage over red → B/G ~127, R stays 255, opaque.
+        img.blend(0, 0, Color::new(1.0, 1.0, 1.0, 1.0), 0.5);
+        assert!((img.data[0] as i32 - 127).abs() <= 2, "B ~127: {}", img.data[0]);
+        assert!((img.data[1] as i32 - 127).abs() <= 2, "G ~127: {}", img.data[1]);
+        assert_eq!(img.data[2], 255, "R stays 255");
+        assert_eq!(img.data[3], 255, "stays opaque");
+        // Out-of-bounds is a no-op (must not panic or corrupt).
+        img.blend(9, 9, Color::new(0.0, 0.0, 0.0, 1.0), 1.0);
+        img.blend(-1, 0, Color::new(0.0, 0.0, 0.0, 1.0), 1.0);
     }
 }

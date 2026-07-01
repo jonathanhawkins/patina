@@ -25,17 +25,35 @@ use std::time::Duration;
 
 use gdcore::math::Color;
 use gdeditor::editor_server::{EditorServerHandle, EditorState};
+use gdeditor::idle_render::ViewportRenderSignature;
 use gdrender2d::test_adapter::capture_frame;
 use gdrender2d::SoftwareRenderer;
 use gdscene::lifecycle::LifecycleManager;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::SceneTree;
+use gdvariant::Variant;
 use gdserver2d::viewport::Viewport;
 
 const DEFAULT_SCENE: &str = "fixtures/scenes/demo_2d.tscn";
 const DEFAULT_PORT: u16 = 8080;
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
+/// How often the idle editor re-renders even when nothing changed — a low-
+/// frequency safety net (pat-5xrsr) for any frame-affecting state the render
+/// signature doesn't model. Low enough that an idle editor stays well under 5%
+/// CPU, high enough that nothing stays stale for long.
+const IDLE_KEEPALIVE: Duration = Duration::from_secs(2);
+
+/// A rendered editor frame ready to publish. The GPU 3D path yields pre-rendered
+/// BGRA bytes (published cheaply via `update_frame_bmp`); the 2D path yields a
+/// float `FrameBuffer` (published via `update_frame_ex`). Kept as an enum so the
+/// frame is computed *under* the state lock and published *after* releasing it.
+enum RenderedFrame {
+    /// GPU-rendered 3D viewport: BGRA bytes with overlays already composited.
+    Gpu(gdrender2d::Bgra8Image),
+    /// Software-rendered 2D viewport.
+    Cpu(gdrender2d::FrameBuffer),
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -74,6 +92,23 @@ fn main() {
     let scene_root = add_packed_scene_to_tree(&mut tree, root_id, &packed)
         .unwrap_or_else(|e| panic!("Failed to instance scene: {e}"));
 
+    // Attach demo scripts so Script mode shows real content for a selected node
+    // (pat-qtmbv): Player -> player.gd, Enemy -> enemy_spawner.gd. The selection
+    // handler reads `_script_path` and loads it via GET /api/script (res://
+    // resolves against the cwd, where fixtures/scripts/*.gd live).
+    for nid in tree.all_nodes_in_tree_order() {
+        let script = match tree.get_node(nid).map(|n| n.name().to_string()).as_deref() {
+            Some("Player") => Some("res://fixtures/scripts/player.gd"),
+            Some("Enemy") => Some("res://fixtures/scripts/enemy_spawner.gd"),
+            _ => None,
+        };
+        if let Some(path) = script {
+            if let Some(node) = tree.get_node_mut(nid) {
+                node.set_property("_script_path", Variant::String(path.to_string()));
+            }
+        }
+    }
+
     // Run lifecycle (enter_tree + ready).
     LifecycleManager::enter_tree(&mut tree, scene_root);
 
@@ -86,15 +121,33 @@ fn main() {
     let mut state = EditorState::new(tree);
     state.scene_file = Some(scene_path.clone());
     state.frame_buffer = Some(initial_frame);
-    let project_root = std::path::Path::new(&scene_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .to_string_lossy()
-        .to_string();
+    // Root res:// at the current working directory so the runtime resolves
+    // res:// scripts/textures the same way the editor's /api/script and
+    // /api/filesystem do (both cwd-based). This keeps a node's _script_path
+    // (e.g. res://fixtures/scripts/player.gd) loadable in BOTH the editor's
+    // Script view and the running game (pat-xwdlg) instead of the runtime
+    // doubling the scene-dir prefix.
+    let project_root = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
     state.texture_cache = gdeditor::texture_cache::TextureCache::new(&project_root);
 
     // Start the editor server.
     let handle = EditorServerHandle::start(port, state);
+
+    // Interactive 3D-viewport render tuning (see /api/viewport/3d/perf to re-tune
+    // live). The 3D viewport now rasterizes meshes on the GPU (a persistent wgpu
+    // renderer, pat-ism62), whose cost barely scales with pixel count — so the
+    // moving camera renders at FULL resolution (scale 1.0), not the reduced scale
+    // the old software rasterizer needed. The loop polls every 2ms during motion.
+    // These are process-global knobs set only here, so test servers keep the safe
+    // defaults. (If no GPU adapter is present the render path falls back to the
+    // software rasterizer; dial PERF_SCALE down via the API for that case.)
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        gdeditor::editor_server::PERF_SCALE_X1000.store(1000, Relaxed);
+        gdeditor::editor_server::PERF_TICK_MS.store(2, Relaxed);
+    }
 
     println!("Patina Editor running at http://localhost:{port}/editor");
     println!("Scene: {scene_path}");
@@ -108,6 +161,27 @@ fn main() {
     // Main loop: re-render, and run game loop when playing.
     let mut frame_count: u64 = 0;
     let mut last_runtime_tick = std::time::Instant::now();
+    // Render-on-change gating for the idle editor (pat-5xrsr): the signature of
+    // the last frame we actually rendered, and when we rendered it. While idle we
+    // re-render only when the signature changes or the keepalive elapses.
+    let mut last_render_sig: Option<ViewportRenderSignature> = None;
+    let mut last_render_at = std::time::Instant::now();
+    // Adaptive idle cadence: after we actually render a changed frame (e.g. the
+    // user is dragging/orbiting the camera), keep polling fast for a short window
+    // so a continuous interaction renders smoothly (~60 fps) instead of the 20 fps
+    // a flat 50ms tick allows. When nothing changes the window lapses and we fall
+    // back to the 50ms low-CPU tick — preserving the pat-5xrsr idle-CPU fix, since
+    // only the *cheap* signature check polls faster, never the expensive raster.
+    let mut active_render_until = std::time::Instant::now();
+    // Dynamic-resolution state (interactive-render optimization): while the 3D
+    // camera is actively moving we raster a smaller frame and let the browser
+    // upscale it (the software rasterizer's cost scales with pixel count, so this
+    // multiplies the interactive framerate). `last_frame_lowres` lets us re-render
+    // once at full resolution the moment the camera stops, so the view snaps back
+    // to crisp. The interactive scale is a live perf knob (PERF_SCALE_X1000,
+    // default 0.4×); the browser upscales the frame with bilinear smoothing during
+    // motion so the reduced resolution reads as motion blur.
+    let mut last_frame_lowres = false;
     while running.load(Ordering::SeqCst) {
         let is_runtime_running = {
             let state = handle.state().lock().unwrap();
@@ -135,21 +209,30 @@ fn main() {
                 let state = handle.state().lock().unwrap();
                 let zoom = state.viewport_zoom;
                 let pan = state.viewport_pan;
+                // Render at the panel's real size (reported by the browser via
+                // /api/viewport/resize) so the frame fills the viewport instead
+                // of letterboxing a fixed 640x480 box into a centered square.
+                let (rw, rh) = (state.render_width.clamp(64, 2048), state.render_height.clamp(64, 2048));
+                // Render the running scene the way its game would: a 3D scene
+                // (Node3D) through the spatial renderer, a 2D scene through the
+                // canvas rasterizer. Previously the run loop always used the 2D
+                // rasterizer, so pressing Play on a 3D scene showed a blank Game
+                // view (nothing for the canvas to draw) even though it was running.
                 if let Some(ref main_loop) = state.run_main_loop {
-                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                    gdeditor::scene_renderer::render_runtime_frame(
                         main_loop.tree(),
-                        None,
-                        WIDTH,
-                        HEIGHT,
+                        &state.editor_viewport_3d,
+                        rw,
+                        rh,
                         zoom,
                         pan,
                     )
                 } else {
-                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                    gdeditor::scene_renderer::render_runtime_frame(
                         &state.scene_tree,
-                        state.selected_node,
-                        WIDTH,
-                        HEIGHT,
+                        &state.editor_viewport_3d,
+                        rw,
+                        rh,
                         zoom,
                         pan,
                     )
@@ -157,23 +240,156 @@ fn main() {
             };
             handle.update_frame(fb);
         } else {
-            std::thread::sleep(Duration::from_millis(50));
-            if frame_count % 2 == 0 {
-                let fb = {
-                    let state = handle.state().lock().unwrap();
-                    let selected = state.selected_node;
-                    let zoom = state.viewport_zoom;
-                    let pan = state.viewport_pan;
-                    gdeditor::scene_renderer::render_scene_with_zoom_pan(
-                        &state.scene_tree,
-                        selected,
-                        WIDTH,
-                        HEIGHT,
-                        zoom,
-                        pan,
+            // Poll fast while an interaction is actively producing new frames,
+            // otherwise idle at 50ms. The interaction cadence is a live perf knob
+            // (PERF_TICK_MS) so the framerate benchmark can sweep it.
+            let interaction_active = std::time::Instant::now() < active_render_until;
+            let tick_ms = if interaction_active {
+                gdeditor::editor_server::PERF_TICK_MS.load(std::sync::atomic::Ordering::Relaxed)
+                    as u64
+            } else {
+                gdeditor::idle_render::idle_tick_sleep(false).as_millis() as u64
+            };
+            std::thread::sleep(Duration::from_millis(tick_ms));
+            // Render-on-change (pat-5xrsr): only re-raster the idle viewport when
+            // something that affects the frame actually changed (tracked by a
+            // cheap signature), when an animation preview is playing, or on a
+            // low-frequency keepalive. Previously this rendered the full software
+            // raster ~10x/second unconditionally, so an idle editor burned
+            // 30-77% CPU and orphans starved the shared build lock.
+            let maybe_fb = {
+                let mut state = handle.state().lock().unwrap();
+                let sig = ViewportRenderSignature::from_state(&state);
+                // Render every idle tick while an animation preview plays or a
+                // node/gizmo drag is in progress — both change the frame live
+                // without bumping the signature (drags don't push undo until
+                // drag-end), so gating on the signature alone would freeze them.
+                let force_active = gdeditor::idle_render::force_render_active(&state);
+                // Reduce resolution only while the 3D *camera* is moving — never
+                // during a node/gizmo drag or an animation preview (those set
+                // `force_active` and need full precision/quality).
+                let camera_lowres =
+                    interaction_active && !force_active && state.editor_mode == "3d";
+                // When the camera stops, the last low-res frame must be re-rendered
+                // once at full resolution to sharpen — even though the render
+                // signature is unchanged (so `should_render_idle` alone wouldn't
+                // fire).
+                let sharpen = last_frame_lowres && !camera_lowres;
+                if sharpen
+                    || gdeditor::idle_render::should_render_idle(
+                        last_render_sig.as_ref(),
+                        &sig,
+                        force_active,
+                        last_render_at.elapsed(),
+                        IDLE_KEEPALIVE,
                     )
-                };
-                handle.update_frame(fb);
+                {
+                    // Render at the panel's real size (reported by the browser
+                    // via /api/viewport/resize) so the frame fills the viewport
+                    // edge-to-edge like Godot, instead of letterboxing a fixed
+                    // 640x480 box into a centered square.
+                    let (rw, rh) = (state.render_width.clamp(64, 2048), state.render_height.clamp(64, 2048));
+                    // Interactive render scale is a live perf knob (0.1..1.0×).
+                    let scale = if camera_lowres {
+                        (gdeditor::editor_server::PERF_SCALE_X1000
+                            .load(std::sync::atomic::Ordering::Relaxed) as f32)
+                            / 1000.0
+                    } else {
+                        1.0
+                    };
+                    let this_lowres = scale < 1.0;
+                    // Perf knob: optionally skip the ground grid (~200 projected
+                    // lines) while the camera moves; it returns on the sharpen frame.
+                    let restore_grid = if this_lowres
+                        && state.editor_mode == "3d"
+                        && !gdeditor::editor_server::PERF_GRID_IN_MOTION
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        let saved = state.editor_viewport_3d.grid.visible;
+                        state.editor_viewport_3d.grid.visible = false;
+                        Some(saved)
+                    } else {
+                        None
+                    };
+                    let fb = if state.editor_mode == "3d" {
+                        // pat-7i8u4 / pat-3dnav: in 3D mode the viewport shows a
+                        // perspective render from the *persistent* editor camera
+                        // (so orbit/pan/zoom accumulate), not the 2D rasterizer.
+                        // Set the viewport dims to the ACTUAL rendered size (which
+                        // may be reduced while orbiting) so 3D picking / gizmo math
+                        // stays consistent with the displayed frame's pixels — the
+                        // browser scales its click coords by the image's natural
+                        // width, which equals these dims.
+                        state.editor_viewport_3d.width = ((rw as f32 * scale) as u32).max(64);
+                        state.editor_viewport_3d.height = ((rh as f32 * scale) as u32).max(64);
+                        // Keep the 3D viewport selection in sync with the editor
+                        // selection so the selection outline + transform gizmo
+                        // follow tree/inspector selection too — and clear when a
+                        // selected node is deleted (pat-3dnav sync fix).
+                        let ids: Vec<u64> =
+                            state.selected_nodes.iter().map(|id| id.raw()).collect();
+                        state.editor_viewport_3d.selection.selected_nodes = ids;
+                        let sref = &*state;
+                        let raster_t = std::time::Instant::now();
+                        let f = gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(
+                            &sref.editor_viewport_3d,
+                            &sref.scene_tree,
+                        );
+                        gdeditor::editor_server::PERF_LAST_RASTER_US.store(
+                            raster_t.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        RenderedFrame::Gpu(f)
+                    } else {
+                        let selected = state.selected_node;
+                        let zoom = state.viewport_zoom;
+                        let pan = state.viewport_pan;
+                        RenderedFrame::Cpu(gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                            &state.scene_tree,
+                            selected,
+                            rw,
+                            rh,
+                            zoom,
+                            pan,
+                        ))
+                    };
+                    if let Some(saved) = restore_grid {
+                        state.editor_viewport_3d.grid.visible = saved;
+                    }
+                    last_render_sig = Some(sig);
+                    Some((fb, this_lowres))
+                } else {
+                    None
+                }
+            };
+            if let Some((rendered, this_lowres)) = maybe_fb {
+                // For the 2D path, stream BMP-only while actively interacting: BMP
+                // encodes far cheaper than PNG deflate, so refreshing PNG every
+                // frame would cap the rate well under 60fps. The settle frame after
+                // motion stops (interaction_active clears) refreshes the PNG too.
+                let full_quality = !this_lowres && !interaction_active;
+                match rendered {
+                    // GPU 3D path: the frame is already BGRA with overlays baked in.
+                    // Encode BMP with a cheap per-row copy (no per-pixel Color pass)
+                    // and publish. Only BMP is streamed live, so PNG is skipped.
+                    RenderedFrame::Gpu(img) => {
+                        let (w, h) = (img.width, img.height);
+                        let enc_t = std::time::Instant::now();
+                        let bmp = gdrender2d::encode_bmp_bgra(&img);
+                        gdeditor::editor_server::PERF_LAST_ENCODE_US.store(
+                            enc_t.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        handle.update_frame_bmp(bmp, w, h);
+                    }
+                    // 2D path: the float FrameBuffer encodes BMP (+ PNG on settle).
+                    RenderedFrame::Cpu(fb) => handle.update_frame_ex(fb, full_quality),
+                }
+                last_render_at = std::time::Instant::now();
+                last_frame_lowres = this_lowres;
+                // A frame changed → stay in the fast-poll window for a moment so a
+                // continuing drag/orbit renders at interactive rate.
+                active_render_until = last_render_at + Duration::from_millis(300);
             }
         }
         frame_count += 1;

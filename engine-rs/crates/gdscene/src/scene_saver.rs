@@ -194,21 +194,39 @@ fn write_node_section(out: &mut String, node: &crate::node::Node, parent_path: O
     let name = node.name();
     let class = node.class_name();
 
+    // Emit group membership in the node header (`groups=["a", "b"]`), matching
+    // the loader's parse format, so groups survive a save/load round-trip.
+    // Sorted for deterministic output.
+    let groups_attr = {
+        let mut groups: Vec<&str> = node.groups().iter().map(String::as_str).collect();
+        if groups.is_empty() {
+            String::new()
+        } else {
+            groups.sort_unstable();
+            let list: Vec<String> = groups.iter().map(|g| format!("\"{g}\"")).collect();
+            format!(" groups=[{}]", list.join(", "))
+        }
+    };
+
     match parent_path {
         None => {
-            writeln!(out, "[node name=\"{name}\" type=\"{class}\"]").unwrap();
+            writeln!(out, "[node name=\"{name}\" type=\"{class}\"{groups_attr}]").unwrap();
         }
         Some(parent) => {
             writeln!(
                 out,
-                "[node name=\"{name}\" type=\"{class}\" parent=\"{parent}\"]"
+                "[node name=\"{name}\" type=\"{class}\" parent=\"{parent}\"{groups_attr}]"
             )
             .unwrap();
         }
     }
 
-    // Write properties sorted for determinism.
-    let mut props: Vec<(&String, &Variant)> = node.properties().collect();
+    // Write properties sorted for determinism. `__resref__*` / `__viewport_*`
+    // companions are internal metadata (pat-ghfv0.40), never part of the saved scene.
+    let mut props: Vec<(&String, &Variant)> = node
+        .properties()
+        .filter(|(k, _)| !k.starts_with("__resref__") && !k.starts_with("__viewport_"))
+        .collect();
     props.sort_by_key(|(k, _)| k.as_str().to_owned());
     for (key, value) in props {
         writeln!(out, "{} = {}", key, format_variant_value(value)).unwrap();

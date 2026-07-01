@@ -224,13 +224,20 @@ pub fn set_mesh_path(tree: &mut SceneTree, node_id: NodeId, path: &str) {
     }
 }
 
-/// Reads the `"mesh"` property as a path string, if present.
+/// Reads the viewport mesh marker as a path string, if present. Prefers the
+/// `__viewport_mesh__` companion (the resolved `primitive:<Type>` marker the
+/// `.tscn` parser stores, leaving the real `mesh` as its `SubResource:<id>`),
+/// falling back to a marker set directly on `mesh` (tests / legacy).
 pub fn get_mesh_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id)
-        .and_then(|n| match n.get_property("mesh") {
+    tree.get_node(node_id).and_then(|n| {
+        match n.get_property("__viewport_mesh__") {
             Variant::String(s) => Some(s),
-            _ => None,
-        })
+            _ => match n.get_property("mesh") {
+                Variant::String(s) => Some(s),
+                _ => None,
+            },
+        }
+    })
 }
 
 /// Sets the `"material"` property to a resource path string.

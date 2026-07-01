@@ -5,11 +5,16 @@ the pinned `upstream/godot` 4.6.1 oracle checkout and the audited Patina
 implementation. This is intentionally narrow and machine-readable so the planner
 can create concrete beads without inferring from prose.
 
+> **Reconciled 2026-06-12:** 19 of 22 entries verified implemented (closed beads +
+> code present in `engine-rs/crates`). Remaining: `httpclient-node` (pat-7xflw),
+> `websocket-peer` (pat-p2nes), and `gpu-render-backbone` (partial — editor-viewport
+> slice deferred as pat-ism62).
+
 ## Source-Backed Planner Gaps
 
 ### `collisionpolygon3d-node`
 - Title: Implement CollisionPolygon3D scene node and shape baking path
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — pat-k63cu et al. closed; shape baking in gdphysics3d)
 - Priority: P4
 - Labels: phase6, 3d, physics
 - Acceptance: ./scripts/rust_task.sh nextest run --test physics3d_trace_comparison_test -- collision_polygon3d
@@ -21,7 +26,7 @@ Evidence:
 
 ### `conetwistjoint3d-runtime`
 - Title: Implement ConeTwistJoint3D runtime constraint integration
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — pat-maqfj/pat-mjs42 closed)
 - Priority: P4
 - Labels: phase6, 3d, physics
 - Acceptance: ./scripts/rust_task.sh nextest run --test physics3d_trace_comparison_test -- conetwist_joint3d
@@ -33,7 +38,7 @@ Evidence:
 
 ### `generic6dof-basis-runtime`
 - Title: Implement Generic6DOFJoint3D basis-rotated runtime constraint behavior
-- Status: partial
+- Status: implemented (reconciled 2026-06-12 — pat-mjs42/pat-wewu2 closed; basis-rotated constraints landed)
 - Priority: P4
 - Labels: phase6, 3d, physics
 - Acceptance: ./scripts/rust_task.sh nextest run --test physics3d_trace_comparison_test -- generic6dof_joint3d
@@ -45,7 +50,7 @@ Evidence:
 
 ### `lightmapgi-runtime`
 - Title: Implement LightmapGI resource loading and baked sampling path
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — pat-oincb/pat-1c0st closed; gdserver3d/src/gi.rs)
 - Priority: P4
 - Labels: phase6, 3d, render
 - Acceptance: ./scripts/rust_task.sh nextest run --test render_3d_parity_test -- lightmap_gi
@@ -57,7 +62,7 @@ Evidence:
 
 ### `navigationagent3d-runtime`
 - Title: Implement NavigationAgent3D runtime pathfinding integration
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — pat-lrh01/pat-mdjrx closed; gdserver3d/src/navigation.rs)
 - Priority: P4
 - Labels: phase6, 3d, navigation
 - Acceptance: ./scripts/rust_task.sh nextest run --test physics3d_trace_comparison_test -- navigation_agent3d
@@ -73,7 +78,7 @@ The following entries were added from the 2026-04-20 Opus 4.7 upstream review ag
 
 ### `animation-player`
 - Title: Implement AnimationPlayer node with keyframe track playback
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdscene/src/animation.rs)
 - Priority: P1
 - Labels: phase6, animation, scene
 - Acceptance: ./scripts/rust_task.sh nextest run --test animation_parity_test -- animation_player
@@ -85,7 +90,7 @@ Evidence:
 
 ### `tween-node`
 - Title: Implement Tween property interpolation with easing curves and chained sequences
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdscene/src/tween.rs)
 - Priority: P1
 - Labels: phase6, animation, scene
 - Acceptance: ./scripts/rust_task.sh nextest run --test animation_parity_test -- tween_property
@@ -96,7 +101,7 @@ Evidence:
 
 ### `animation-tree`
 - Title: Implement AnimationTree with blend nodes, state machine, and blend spaces
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdscene/src/animation_tree.rs)
 - Priority: P2
 - Labels: phase6, animation, scene
 - Acceptance: ./scripts/rust_task.sh nextest run --test animation_parity_test -- animation_tree_blend
@@ -107,7 +112,7 @@ Evidence:
 
 ### `gltf-import`
 - Title: Implement glTF 2.0 scene import producing Patina scene tree
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — pat-epu6j/pat-rib6j/pat-z42y8 closed; gdresource)
 - Priority: P1
 - Labels: phase6, import, resource
 - Acceptance: ./scripts/rust_task.sh nextest run --test import_parity_test -- gltf_scene
@@ -119,7 +124,7 @@ Evidence:
 
 ### `image-import`
 - Title: Implement PNG, JPEG, WebP image decode producing Image/Texture2D
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdresource/src/texture_import.rs)
 - Priority: P1
 - Labels: phase6, import, resource
 - Acceptance: ./scripts/rust_task.sh nextest run --test import_parity_test -- image_decode
@@ -130,7 +135,7 @@ Evidence:
 
 ### `audio-import`
 - Title: Implement WAV and OGG Vorbis audio decode producing AudioStream resources
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdresource/src/audio_import.rs)
 - Priority: P2
 - Labels: phase6, import, audio
 - Acceptance: ./scripts/rust_task.sh nextest run --test import_parity_test -- audio_decode
@@ -141,7 +146,7 @@ Evidence:
 
 ### `font-import`
 - Title: Implement TTF/OTF font import producing FontFile resource
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdresource/src/importers.rs + gdrender2d/src/font.rs)
 - Priority: P2
 - Labels: phase6, import, ui
 - Acceptance: ./scripts/rust_task.sh nextest run --test import_parity_test -- font_import
@@ -152,7 +157,7 @@ Evidence:
 
 ### `tilemap-node`
 - Title: Implement TileMap and TileSet runtime nodes with layer rendering and physics
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdscene/src/tilemap.rs + gdphysics2d tilemap_collision.rs)
 - Priority: P1
 - Labels: phase6, 2d, scene
 - Acceptance: ./scripts/rust_task.sh nextest run --test tilemap_parity_test -- tilemap_layer_render
@@ -163,7 +168,7 @@ Evidence:
 
 ### `cpu-particles2d`
 - Title: Implement CPUParticles2D emission and simulation for 2D scenes
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — pat-estfm/pat-jajqq closed; registered in class_db)
 - Priority: P3
 - Labels: phase6, 2d, render
 - Acceptance: ./scripts/rust_task.sh nextest run --test render_2d_parity_test -- cpu_particles2d
@@ -174,7 +179,7 @@ Evidence:
 
 ### `theme-resource`
 - Title: Implement Theme resource loading and style property lookup
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdscene/src/theme.rs)
 - Priority: P2
 - Labels: phase6, ui
 - Acceptance: ./scripts/rust_task.sh nextest run --test ui_parity_test -- theme_property_lookup
@@ -185,7 +190,7 @@ Evidence:
 
 ### `control-layout`
 - Title: Implement Control anchor/margin/size-flags layout solver
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — anchors/offsets in gdscene/src/control.rs)
 - Priority: P2
 - Labels: phase6, ui
 - Acceptance: ./scripts/rust_task.sh nextest run --test ui_parity_test -- control_anchor_layout
@@ -196,7 +201,7 @@ Evidence:
 
 ### `container-nodes`
 - Title: Implement VBoxContainer, HBoxContainer, GridContainer layout arrangement
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — pat-nri4p/pat-sk37j/pat-grdja closed; gdscene/src/control.rs)
 - Priority: P2
 - Labels: phase6, ui
 - Acceptance: ./scripts/rust_task.sh nextest run --test ui_parity_test -- container_arrangement
@@ -207,7 +212,7 @@ Evidence:
 
 ### `gdscript-export-vars`
 - Title: Serialize @export-annotated GDScript properties through TSCN save/load
-- Status: partial
+- Status: implemented (reconciled 2026-06-12 — export_var_round_trip in tests/gdscript_parity_test.rs)
 - Priority: P2
 - Labels: phase6, scripting
 - Acceptance: ./scripts/rust_task.sh nextest run --test gdscript_parity_test -- export_var_round_trip
@@ -218,7 +223,7 @@ Evidence:
 
 ### `gdscript-type-checker`
 - Title: Implement GDScript static type checking (class_name, typed args, return types)
-- Status: missing
+- Status: implemented (reconciled 2026-06-12 — gdscript-interop/src/type_checker.rs)
 - Priority: P3
 - Labels: phase6, scripting
 - Acceptance: ./scripts/rust_task.sh nextest run --test gdscript_parity_test -- type_check_errors
@@ -230,6 +235,7 @@ Evidence:
 ### `httpclient-node`
 - Title: Implement HTTPClient and HTTPRequest nodes for HTTP(S) access
 - Status: missing
+- Bead: pat-7xflw (created 2026-06-12)
 - Priority: P3
 - Labels: phase6, networking
 - Acceptance: ./scripts/rust_task.sh nextest run --test networking_parity_test -- http_request
@@ -241,6 +247,7 @@ Evidence:
 ### `websocket-peer`
 - Title: Implement WebSocketPeer for bidirectional WS connections
 - Status: missing
+- Bead: pat-p2nes (created 2026-06-12)
 - Priority: P3
 - Labels: phase6, networking
 - Acceptance: ./scripts/rust_task.sh nextest run --test networking_parity_test -- websocket_peer

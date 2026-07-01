@@ -1,0 +1,38 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/hierarchy.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Sprite",
+						"node_class": "Sprite2D",
+						"owner": "Root",
+						"path": "/root/Root/Player/Sprite",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Player",
+				"node_class": "Node2D",
+				"owner": "Root",
+				"path": "/root/Root/Player",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Enemy",
+				"node_class": "Node2D",
+				"owner": "Root",
+				"path": "/root/Root/Enemy",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Root",
+		"node_class": "Node",
+		"owner": "",
+		"path": "/root/Root",
+		"scene_file_path": "res://scenes/hierarchy.tscn"
+	}
+}

@@ -300,6 +300,23 @@ impl ViewportCamera3D {
         }
     }
 
+    /// Scale the free-look movement speed by `factor`, clamped to a sane range.
+    ///
+    /// Mirrors Godot's `scale_freelook_speed`: rolling the mouse wheel while the
+    /// right mouse button is held speeds up / slows down free-look flight instead
+    /// of dollying the camera. A non-finite or non-positive result resets to the
+    /// default so the speed can't get stuck at zero or NaN.
+    pub fn scale_fly_speed(&mut self, factor: f32) {
+        const MIN_FLY_SPEED: f32 = 0.01;
+        const MAX_FLY_SPEED: f32 = 10_000.0;
+        let scaled = self.fly_speed * factor;
+        self.fly_speed = if scaled.is_finite() && scaled > 0.0 {
+            scaled.clamp(MIN_FLY_SPEED, MAX_FLY_SPEED)
+        } else {
+            5.0
+        };
+    }
+
     // -----------------------------------------------------------------------
     // Presets
     // -----------------------------------------------------------------------
@@ -319,6 +336,24 @@ impl ViewportCamera3D {
     /// Snap to right-side view.
     pub fn snap_to_right(&mut self) {
         self.yaw = std::f32::consts::FRAC_PI_2;
+        self.pitch = 0.0;
+    }
+
+    /// Snap to bottom-up view.
+    pub fn snap_to_bottom(&mut self) {
+        self.yaw = 0.0;
+        self.pitch = PITCH_MAX; // looking straight up
+    }
+
+    /// Snap to rear view (looking down +Z).
+    pub fn snap_to_rear(&mut self) {
+        self.yaw = std::f32::consts::PI;
+        self.pitch = 0.0;
+    }
+
+    /// Snap to left-side view.
+    pub fn snap_to_left(&mut self) {
+        self.yaw = -std::f32::consts::FRAC_PI_2;
         self.pitch = 0.0;
     }
 
@@ -749,6 +784,23 @@ pub struct Viewport3D {
     pub height: u32,
     /// In-progress gizmo drag state, if any.
     pub gizmo_drag: Option<GizmoDragState3D>,
+    /// Whether the colored origin axes are emphasized in the grid overlay
+    /// (Godot's View → "View Origin"). When off, the center lines draw as plain
+    /// grid lines instead of the red/blue X/Z axes.
+    pub show_origin: bool,
+    /// Whether transform gizmos operate in the selected node's local space
+    /// (Godot's "Use Local Space", `T`). When off, gizmos use world axes.
+    pub use_local_space: bool,
+    /// Whether transforms snap to fixed increments by default (Godot's "Use
+    /// Snap", `Y`). A gizmo drag also snaps while Ctrl is held; this makes the
+    /// behavior persistent via the toolbar toggle.
+    pub use_snap: bool,
+    /// Translation snap step in world units (Godot's Configure Snap → Translate).
+    pub snap_translate: f32,
+    /// Rotation snap step in degrees (Godot's Configure Snap → Rotate).
+    pub snap_rotate: f32,
+    /// Scale snap step as a fraction (Godot's Configure Snap → Scale; 0.1 = 10%).
+    pub snap_scale: f32,
 }
 
 impl Default for Viewport3D {
@@ -761,6 +813,12 @@ impl Default for Viewport3D {
             width: 800,
             height: 600,
             gizmo_drag: None,
+            show_origin: true,
+            use_local_space: false,
+            use_snap: false,
+            snap_translate: 1.0,
+            snap_rotate: 15.0,
+            snap_scale: 0.1,
         }
     }
 }
@@ -890,6 +948,12 @@ pub struct Node3DRenderable {
     pub visible: bool,
     /// Mesh resource path for mesh-bearing nodes (`MeshInstance3D`), else `None`.
     pub mesh_path: Option<String>,
+    /// Collision shape marker (`shape:<Type>`) for `CollisionShape3D` nodes, used
+    /// to draw the matching wireframe gizmo; `None` for everything else.
+    pub shape_path: Option<String>,
+    /// The mesh's material albedo colour (resolved by the `.tscn` parser), so the
+    /// viewport shades the mesh in its real colour like Godot; `None` = default.
+    pub albedo: Option<Color>,
 }
 
 impl Viewport3D {
@@ -911,12 +975,29 @@ impl Viewport3D {
             if !node.is_class("Node3D") {
                 continue;
             }
+            // CollisionShape3D nodes carry a `shape:<Type>` marker (resolved by
+            // the .tscn parser into a `__viewport_shape__` companion, so the real
+            // `shape` keeps its SubResource value) — draw the wireframe from it.
+            // Fall back to a marker set directly on `shape` (tests / legacy).
+            let shape_path = match node.get_property("__viewport_shape__") {
+                gdvariant::Variant::String(s) if s.starts_with("shape:") => Some(s),
+                _ => match node.get_property("shape") {
+                    gdvariant::Variant::String(s) if s.starts_with("shape:") => Some(s),
+                    _ => None,
+                },
+            };
+            let albedo = match node.get_property("albedo_color") {
+                gdvariant::Variant::Color(c) => Some(c),
+                _ => None,
+            };
             out.push(Node3DRenderable {
                 node_id: nid.raw(),
                 class_name: node.class_name().to_string(),
                 global_transform: node3d::get_global_transform(tree, nid),
                 visible: node3d::is_visible(tree, nid),
                 mesh_path: node3d::get_mesh_path(tree, nid),
+                shape_path,
+                albedo,
             });
         }
         out
@@ -1449,19 +1530,61 @@ impl Viewport3D {
             + view.origin.z;
 
         let aspect = self.aspect_ratio();
-        let half_fov = (self.camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
 
-        // Perspective divide (vz is negative in front of camera)
-        let inv_z = if vz.abs() < 1e-6 { -1e6 } else { -1.0 / vz };
-
-        let ndc_x = (vx * inv_z) / (half_fov * aspect);
-        let ndc_y = (vy * inv_z) / half_fov;
+        // Perspective divides by depth; orthographic projects in parallel (no
+        // divide), scaled by ortho_size — matching `project_view` in the renderer.
+        let (ndc_x, ndc_y) = match self.camera.projection {
+            Projection::Orthographic => {
+                let half_h = (self.camera.ortho_size * 0.5).max(1e-3);
+                (vx / (half_h * aspect), vy / half_h)
+            }
+            Projection::Perspective => {
+                let half_fov = (self.camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
+                let inv_z = if vz.abs() < 1e-6 { -1e6 } else { -1.0 / vz };
+                ((vx * inv_z) / (half_fov * aspect), (vy * inv_z) / half_fov)
+            }
+        };
 
         // NDC [-1, 1] to pixel
         let px = (ndc_x + 1.0) * 0.5 * self.width as f32;
         let py = (1.0 - ndc_y) * 0.5 * self.height as f32;
 
         (px, py)
+    }
+
+    /// Returns the raw ids of every pickable `Node3D` whose origin projects to a
+    /// screen point inside the rectangle with corners (`x1`,`y1`) and
+    /// (`x2`,`y2`) — Godot's rubber-band box select in the spatial editor. The
+    /// corners may be given in any order. Nodes behind the camera are skipped so
+    /// a flipped perspective projection can't produce false hits.
+    pub fn box_select_hits(
+        &self,
+        tree: &SceneTree,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    ) -> Vec<u64> {
+        let (min_x, max_x) = (x1.min(x2), x1.max(x2));
+        let (min_y, max_y) = (y1.min(y2), y1.max(y2));
+        let view = self.camera.view_transform();
+        self.pickable_nodes(tree)
+            .into_iter()
+            .filter(|&(_, p)| {
+                // View-space z is negative in front of the camera; cull anything
+                // at or behind the camera plane.
+                let vz = view.basis.x.z * p.x
+                    + view.basis.y.z * p.y
+                    + view.basis.z.z * p.z
+                    + view.origin.z;
+                if vz > -1e-4 {
+                    return false;
+                }
+                let (sx, sy) = self.world_to_screen(p);
+                sx >= min_x && sx <= max_x && sy >= min_y && sy <= max_y
+            })
+            .map(|(id, _)| id)
+            .collect()
     }
 }
 
@@ -1587,7 +1710,7 @@ impl GizmoSnap3D {
 }
 
 /// The result of a completed gizmo drag operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum GizmoTransform3D {
     /// Translation by a world-space delta vector.
     Move(Vector3),

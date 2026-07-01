@@ -634,6 +634,76 @@ pub struct GpuRenderer3D {
     next_id: u64,
     /// The texture format used for color attachments.
     pub target_format: wgpu::TextureFormat,
+    /// Lazily-built pipeline for the editor color-only path. Uses a **non-sRGB**
+    /// (`Bgra8Unorm`) target so shader output is written to bytes linearly,
+    /// matching the software rasterizer's `color * 255` — which keeps GPU meshes
+    /// visually consistent with the (linear) software overlays and background
+    /// drawn around them. Separate from `pipeline` so the sRGB `render_frame`
+    /// trait path and its tests are unaffected.
+    editor_pipeline: Option<RenderPipeline3D>,
+    /// Cached editor render targets, reused across frames and recreated only on
+    /// resize — the per-frame texture/readback-buffer churn is a real cost at
+    /// 60fps.
+    editor_targets: Option<EditorTargets>,
+}
+
+/// Cached GPU render targets for the editor color path. Held across frames and
+/// rebuilt only when the viewport size changes.
+struct EditorTargets {
+    /// Cached width the targets were built for.
+    width: u32,
+    /// Cached height the targets were built for.
+    height: u32,
+    /// Color render target (also a copy source for readback).
+    color_tex: wgpu::Texture,
+    /// View of `color_tex` used as the render-pass color attachment.
+    color_view: wgpu::TextureView,
+    /// Depth attachment view (used for z-testing; never read back).
+    depth_view: wgpu::TextureView,
+    /// Persistent mappable buffer the color texture is copied into each frame.
+    readback_buf: wgpu::Buffer,
+    /// 256-aligned bytes-per-row of `readback_buf`.
+    padded_row: u32,
+}
+
+impl EditorTargets {
+    /// Builds fresh color + depth targets and a readback buffer sized `w`×`h`.
+    fn new(device: &wgpu::Device, w: u32, h: u32, color_format: wgpu::TextureFormat) -> Self {
+        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("editor-color-target"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("editor-depth-target"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_row = (w * 4 + align - 1) / align * align;
+        let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor-color-readback"),
+            size: (padded_row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        Self { width: w, height: h, color_view, color_tex, depth_view, readback_buf, padded_row }
+    }
 }
 
 impl std::fmt::Debug for GpuRenderer3D {
@@ -662,7 +732,288 @@ impl GpuRenderer3D {
             reflection_probes: Vec::new(),
             next_id: 1,
             target_format: format,
+            editor_pipeline: None,
+            editor_targets: None,
         })
+    }
+
+    /// Clears all instances, lights, and probes so the persistent renderer can be
+    /// repopulated for a fresh frame, while keeping the expensive-to-create GPU
+    /// state (device, pipelines, cached targets) alive. The editor rebuilds its
+    /// render list every frame, so its per-frame render calls this first.
+    pub fn reset_scene(&mut self) {
+        self.instances.clear();
+        self.lights.clear();
+        self.reflection_probes.clear();
+        self.next_id = 1;
+    }
+
+    /// Editor-optimized render: rasterizes the scene's meshes into a **cached**,
+    /// non-sRGB color target and reads back only the color buffer (clearing to
+    /// `clear`), returning tight **top-down BGRA bytes** `(width, height, data)`.
+    /// Tuned for per-frame use at 60fps, it differs from the trait
+    /// [`render_frame`](RenderingServer3D::render_frame) in four ways:
+    ///
+    /// - **Cached targets**: the color texture, depth texture, and readback buffer
+    ///   are reused across frames and rebuilt only on resize, instead of being
+    ///   allocated every frame.
+    /// - **No depth readback**: depth is still used for z-testing but is never
+    ///   copied back, eliminating a second texture copy and a second blocking GPU
+    ///   sync per frame (the editor draws its own overlays and never reads GPU
+    ///   depth).
+    /// - **Linear target** (`Bgra8Unorm`): shader output is written to bytes
+    ///   without sRGB encoding, so the bytes match the software rasterizer's
+    ///   `color * 255` exactly and GPU meshes stay consistent with the software
+    ///   overlays/background composited around them.
+    /// - **Byte-native output**: returns raw BGRA (de-padded per row, no per-pixel
+    ///   float conversion), so the caller can composite overlays and encode BMP
+    ///   without the `bytes → Color → bytes` round-trip that dominates a full-res
+    ///   frame.
+    pub fn render_editor_color_bgra(
+        &mut self,
+        viewport: &Viewport3D,
+        clear: Color,
+    ) -> (u32, u32, Vec<u8>) {
+        let w = viewport.width.max(1);
+        let h = viewport.height.max(1);
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+
+        // Lazily build the editor (non-sRGB) pipeline and (re)build cached targets
+        // on first use or resize. Done before borrowing device/queue immutably.
+        if self.editor_pipeline.is_none() {
+            self.editor_pipeline = Some(RenderPipeline3D::new(&self.ctx.device, format));
+        }
+        let need_new = match &self.editor_targets {
+            Some(t) => t.width != w || t.height != h,
+            None => true,
+        };
+        if need_new {
+            self.editor_targets = Some(EditorTargets::new(&self.ctx.device, w, h, format));
+        }
+
+        let device = &self.ctx.device;
+        let queue = &self.ctx.queue;
+        let pipeline = self.editor_pipeline.as_ref().unwrap();
+        let targets = self.editor_targets.as_ref().unwrap();
+
+        // Camera uniforms.
+        let view_matrix = transform_to_view_matrix(&viewport.camera_transform);
+        let projection_matrix = perspective_projection_matrix(
+            viewport.fov,
+            viewport.aspect(),
+            viewport.near,
+            viewport.far,
+        );
+        let cam_pos = viewport.camera_transform.origin;
+        let camera_data = CameraUniformData {
+            view_matrix,
+            projection_matrix,
+            camera_position: [cam_pos.x, cam_pos.y, cam_pos.z],
+            _pad0: 0.0,
+        };
+        let camera_buf = create_buffer_init(
+            device,
+            queue,
+            "editor-camera-uniform",
+            bytemuck::bytes_of(&camera_data),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let camera_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor-camera-bind-group"),
+            layout: &pipeline.camera_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() }],
+        });
+
+        // Light uniforms.
+        let mut light_data = LightArrayData {
+            lights: [GpuLightData {
+                kind: 0,
+                shadow_enabled: 0,
+                range: 0.0,
+                attenuation: 1.0,
+                direction: [0.0, -1.0, 0.0],
+                spot_angle: 0.0,
+                color: [0.0, 0.0, 0.0],
+                spot_angle_attenuation: 1.0,
+                position: [0.0, 0.0, 0.0],
+                _pad: 0.0,
+            }; 16],
+        };
+        for (i, light) in self.lights.iter().enumerate().take(16) {
+            light_data.lights[i] = light_to_gpu(light);
+        }
+        let light_buf = create_buffer_init(
+            device,
+            queue,
+            "editor-light-uniform",
+            bytemuck::bytes_of(&light_data),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let light_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("editor-light-bind-group"),
+            layout: &pipeline.light_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: light_buf.as_entire_binding() }],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("editor-3d-encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("editor-3d-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &targets.color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: clear.r as f64,
+                            g: clear.g as f64,
+                            b: clear.b as f64,
+                            a: clear.a as f64,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&pipeline.pipeline);
+            pass.set_bind_group(0, &camera_bg, &[]);
+            pass.set_bind_group(2, &light_bg, &[]);
+
+            for inst in self.instances.values() {
+                if !inst.visible {
+                    continue;
+                }
+                let mesh = match &inst.mesh {
+                    Some(m) => m,
+                    None => continue,
+                };
+                let vertices = mesh_to_gpu_vertices(mesh);
+                if vertices.is_empty() {
+                    continue;
+                }
+                let vertex_buf = create_buffer_init(
+                    device,
+                    queue,
+                    "editor-vertex",
+                    bytemuck::cast_slice(&vertices),
+                    wgpu::BufferUsages::VERTEX,
+                );
+                let index_buf = create_buffer_init(
+                    device,
+                    queue,
+                    "editor-index",
+                    bytemuck::cast_slice(&mesh.indices),
+                    wgpu::BufferUsages::INDEX,
+                );
+                let material = inst.material.as_ref().cloned().unwrap_or_default();
+                let shading_mode = match material.shading_mode {
+                    ShadingMode::Unlit => 0u32,
+                    ShadingMode::Lambert => 1u32,
+                    ShadingMode::Phong => 2u32,
+                };
+                let model_data = ModelUniformData {
+                    model_matrix: transform_to_model_matrix(&inst.transform),
+                    albedo: [material.albedo.r, material.albedo.g, material.albedo.b, material.albedo.a],
+                    emission: [
+                        material.emission.r,
+                        material.emission.g,
+                        material.emission.b,
+                        material.emission.a,
+                    ],
+                    roughness: material.roughness,
+                    metallic: material.metallic,
+                    shading_mode,
+                    num_lights: self.lights.len().min(16) as u32,
+                };
+                let model_buf = create_buffer_init(
+                    device,
+                    queue,
+                    "editor-model-uniform",
+                    bytemuck::bytes_of(&model_data),
+                    wgpu::BufferUsages::UNIFORM,
+                );
+                let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("editor-model-bind-group"),
+                    layout: &pipeline.model_layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: model_buf.as_entire_binding() }],
+                });
+                pass.set_bind_group(1, &model_bg, &[]);
+                pass.set_vertex_buffer(0, vertex_buf.slice(..));
+                pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+            }
+        }
+
+        // Copy color → cached readback buffer (no depth copy).
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &targets.color_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &targets.readback_buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(targets.padded_row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // Map, sync once, de-pad each row into a tight top-down BGRA buffer, then
+        // unmap so the cached buffer can be mapped again next frame. This is a
+        // per-row copy (no per-pixel float work): the caller composites overlays
+        // and encodes BMP directly on these bytes.
+        let slice = targets.readback_buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .ok();
+        let mapped = slice.get_mapped_range();
+        let unpadded = (w * 4) as usize;
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h as usize {
+            let start = row * targets.padded_row as usize;
+            data.extend_from_slice(&mapped[start..start + unpadded]);
+        }
+        drop(mapped);
+        targets.readback_buf.unmap();
+
+        (w, h, data)
+    }
+
+    /// Color-buffer twin of [`render_editor_color_bgra`], returning a
+    /// [`FrameData3D`] (RGBA `Color` pixels, empty depth). Kept for tests and any
+    /// consumer that wants `Color`; the editor hot path uses the byte-native
+    /// `_bgra` method to avoid this per-pixel unpack.
+    pub fn render_editor_color(&mut self, viewport: &Viewport3D, clear: Color) -> FrameData3D {
+        let (w, h, data) = self.render_editor_color_bgra(viewport, clear);
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        for px in data.chunks_exact(4) {
+            // Stored order is B, G, R, A.
+            pixels.push(Color::new(
+                px[2] as f32 / 255.0,
+                px[1] as f32 / 255.0,
+                px[0] as f32 / 255.0,
+                px[3] as f32 / 255.0,
+            ));
+        }
+        FrameData3D { width: w, height: h, pixels, depth: Vec::new() }
     }
 
     /// Returns the reflection probes currently registered with the renderer.

@@ -1,0 +1,106 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/hierarchy_3d.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [
+					{
+						"children": [
+							{
+								"children": [],
+								"name": "GrandchildA1a",
+								"node_class": "MeshInstance3D",
+								"owner": "Hierarchy3D",
+								"path": "/root/Hierarchy3D/GroupA/ChildA1/GrandchildA1a",
+								"scene_file_path": ""
+							}
+						],
+						"name": "ChildA1",
+						"node_class": "Node3D",
+						"owner": "Hierarchy3D",
+						"path": "/root/Hierarchy3D/GroupA/ChildA1",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "ChildA2",
+						"node_class": "Node3D",
+						"owner": "Hierarchy3D",
+						"path": "/root/Hierarchy3D/GroupA/ChildA2",
+						"scene_file_path": ""
+					}
+				],
+				"name": "GroupA",
+				"node_class": "Node3D",
+				"owner": "Hierarchy3D",
+				"path": "/root/Hierarchy3D/GroupA",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [
+							{
+								"children": [
+									{
+										"children": [],
+										"name": "LeafMesh",
+										"node_class": "MeshInstance3D",
+										"owner": "Hierarchy3D",
+										"path": "/root/Hierarchy3D/GroupB/ChildB1/DeepNested/LeafMesh",
+										"scene_file_path": ""
+									}
+								],
+								"name": "DeepNested",
+								"node_class": "Node3D",
+								"owner": "Hierarchy3D",
+								"path": "/root/Hierarchy3D/GroupB/ChildB1/DeepNested",
+								"scene_file_path": ""
+							}
+						],
+						"name": "ChildB1",
+						"node_class": "Node3D",
+						"owner": "Hierarchy3D",
+						"path": "/root/Hierarchy3D/GroupB/ChildB1",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "Marker",
+						"node_class": "Marker3D",
+						"owner": "Hierarchy3D",
+						"path": "/root/Hierarchy3D/GroupB/Marker",
+						"scene_file_path": ""
+					}
+				],
+				"name": "GroupB",
+				"node_class": "Node3D",
+				"owner": "Hierarchy3D",
+				"path": "/root/Hierarchy3D/GroupB",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Camera",
+				"node_class": "Camera3D",
+				"owner": "Hierarchy3D",
+				"path": "/root/Hierarchy3D/Camera",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Sun",
+				"node_class": "DirectionalLight3D",
+				"owner": "Hierarchy3D",
+				"path": "/root/Hierarchy3D/Sun",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Hierarchy3D",
+		"node_class": "Node3D",
+		"owner": "",
+		"path": "/root/Hierarchy3D",
+		"scene_file_path": "res://scenes/hierarchy_3d.tscn"
+	}
+}

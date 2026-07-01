@@ -128,6 +128,21 @@ impl AudioBusLayout {
         true
     }
 
+    /// Renames the bus at `index`. The `Master` bus (index 0) is fixed and
+    /// cannot be renamed, matching Godot. Returns whether a rename happened.
+    pub fn rename_bus(&mut self, index: usize, name: impl Into<String>) -> bool {
+        if index == 0 {
+            return false;
+        }
+        match self.buses.get_mut(index) {
+            Some(bus) => {
+                bus.name = name.into();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Sets the volume (in dB) of the bus at `index`.
     pub fn set_volume(&mut self, index: usize, volume_db: f32) -> bool {
         match self.buses.get_mut(index) {
@@ -183,6 +198,54 @@ impl AudioBusLayout {
             }
             _ => false,
         }
+    }
+
+    /// Toggles the `enabled` flag of the effect at `effect_index` on the bus at
+    /// `index`, returning the new state.
+    pub fn toggle_effect(&mut self, index: usize, effect_index: usize) -> Option<bool> {
+        let bus = self.buses.get_mut(index)?;
+        let effect = bus.effects.get_mut(effect_index)?;
+        effect.enabled = !effect.enabled;
+        Some(effect.enabled)
+    }
+
+    /// Sets the **output bus** that the bus at `index` routes to. This mirrors
+    /// Godot's per-bus output dropdown: a bus has a single primary output (its
+    /// first send). The `Master` bus (index 0) has no output and is rejected.
+    /// Returns whether the output was set.
+    pub fn set_output(&mut self, index: usize, target: impl Into<String>) -> bool {
+        if index == 0 {
+            return false;
+        }
+        let target = target.into();
+        match self.buses.get_mut(index) {
+            Some(bus) => {
+                match bus.sends.first_mut() {
+                    Some(send) => send.target = target,
+                    None => bus.sends.push(BusSend {
+                        target,
+                        amount_db: 0.0,
+                    }),
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The output bus that the bus at `index` routes to (its first send's
+    /// target), or `None` for `Master`/unrouted buses.
+    pub fn output_of(&self, index: usize) -> Option<&str> {
+        self.buses
+            .get(index)
+            .and_then(|bus| bus.sends.first())
+            .map(|send| send.target.as_str())
+    }
+
+    /// Replaces this layout with the default (a single `Master` bus). Mirrors
+    /// Godot's "Load Default" / "Create" actions.
+    pub fn reset_to_default(&mut self) {
+        *self = Self::default();
     }
 
     /// Adds a send from the bus at `index` to `target` at `amount_db`.
@@ -284,5 +347,41 @@ mod tests {
         assert_eq!(layout.toggle_mute(99), None);
         assert!(!layout.set_volume(99, 1.0));
         assert!(!layout.add_effect(99, "Delay"));
+    }
+
+    /// Renaming, effect toggling, and output routing behave like Godot: Master
+    /// is fixed (cannot be renamed and has no output), effects flip enabled, and
+    /// a bus's output routes through its first send.
+    #[test]
+    fn rename_effect_toggle_and_output_routing() {
+        let mut layout = AudioBusLayout::new();
+        let music = layout.add_bus("Music");
+
+        // Master (index 0) cannot be renamed; a real bus can.
+        assert!(!layout.rename_bus(0, "NotMaster"));
+        assert_eq!(layout.bus(0).unwrap().name, MASTER_BUS);
+        assert!(layout.rename_bus(music, "BGM"));
+        assert_eq!(layout.bus(music).unwrap().name, "BGM");
+
+        // New buses route to Master by default; output can be re-routed.
+        assert_eq!(layout.output_of(music), Some(MASTER_BUS));
+        let sfx = layout.add_bus("SFX");
+        assert!(layout.set_output(sfx, "BGM"));
+        assert_eq!(layout.output_of(sfx), Some("BGM"));
+        // Master has no output and rejects routing.
+        assert!(!layout.set_output(0, "BGM"));
+        assert_eq!(layout.output_of(0), None);
+
+        // Effects flip their enabled flag.
+        assert!(layout.add_effect(music, "Reverb"));
+        assert_eq!(layout.toggle_effect(music, 0), Some(false));
+        assert!(!layout.bus(music).unwrap().effects[0].enabled);
+        assert_eq!(layout.toggle_effect(music, 0), Some(true));
+        assert_eq!(layout.toggle_effect(music, 99), None);
+
+        // Reset drops everything back to a lone Master bus.
+        layout.reset_to_default();
+        assert_eq!(layout.len(), 1);
+        assert_eq!(layout.bus(0).unwrap().name, MASTER_BUS);
     }
 }

@@ -90,11 +90,66 @@ Editor work is organized into 18 lanes (see `prd/EDITOR_PARITY_BEADS.md`):
 10. Menu parity: scene/project/debug/editor/help actions
 11-18. Create Node dialog, bottom panels, script editor, FileSystem dock, signals dock, animation editor, editor systems
 
-### Editor parity testing (3 layers)
+### Editor parity testing (4 layers)
 
 1. **Layer 1 — API behavioral parity** (P2): `editor_inspector_probe.gd` captures Godot inspector ground truth → `editor_api_behavioral_parity_test.rs` compares Patina REST API responses against golden JSON
 2. **Layer 2 — DOM structure parity** (P3): `editor_dom_parity_test.rs` verifies HTML has correct elements, icons, panel layout. `/api/ui/state` endpoint enables programmatic UI queries.
 3. **Layer 3 — Viewport rendering** (P3): `editor_viewport_golden_test.rs` pixel-diffs Patina viewport renders against golden PNGs
+4. **Layer 4 — Godot editor UI oracle** (pat-l01l2, **SCAFFOLDED — goldens not yet recorded**): the strongest layer. Every other editor test has a pass condition the *author* chose; this one asserts Patina's served editor reproduces what *real Godot* actually did. See the dedicated section below.
+
+#### Layer 4 — Godot editor UI oracle (capture procedure + harness design)
+
+This mirrors the **runtime** oracle (`engine-rs/tests/oracle_regression_test.rs`,
+fn `golden_all_scenes_property_parity_report`), which loads Godot-captured golden
+JSON from `engine-rs/fixtures/oracle_outputs/`, runs the Patina runner on the same
+`.tscn`, flattens both trees, and reports an overall parity %. Layer 4 applies the
+same record-real-Godot / replay-Patina / diff / threshold shape to **editor
+interactions** instead of headless scene runs.
+
+**Why it matters:** an editor-parity criterion satisfied by a hand-authored test
+proves only "Patina does what *we* asserted". The oracle proves "Patina's served
+editor reproduces what *Godot's* editor produced" — closing the author-chooses-the-
+pass-condition loophole.
+
+**Interaction model (golden = a scripted sequence + its observed end state).** Each
+golden captures one canonical workflow, e.g.:
+`open res://demo_2d.tscn → switch main screen to 3D → select node "Player" → inspector set position = (10, 0, 0)`
+and records the resulting editor state: active main-screen mode, selected node
+path(s), the inspected object's property list + values, and the scene-tree shape.
+
+**Golden storage:** `engine-rs/fixtures/editor_oracle/<interaction>.json` (one file
+per workflow), parallel to `fixtures/oracle_outputs/`. Each file holds
+`{ steps: [...], expected: { mode, selection, inspector_properties, scene_tree } }`.
+
+**Capture procedure (run in REAL Godot 4.6.1 — NOT runnable in this agent/CI env):**
+1. Author a Godot `EditorScript` / editor plugin `editor_oracle_probe.gd` (alongside
+   the existing `editor_inspector_probe.gd` used by Layer 1) that, given a workflow
+   id, drives the editor through the step list using `EditorInterface`
+   (`open_scene_from_path`, `set_main_screen_editor`, `edit_node`,
+   `get_inspector()`, `get_selection()`), then serializes the end state to the
+   `expected` JSON shape above and writes `fixtures/editor_oracle/<id>.json`.
+2. Run it from a desktop Godot for each canonical workflow (2D scene-tree edit,
+   3D select+transform, inspector property set, scene-tab switch, mode switch).
+3. Commit the resulting golden JSON. **Do NOT hand-write these files** — a
+   hand-authored golden re-opens the exact loophole this layer closes.
+
+**Comparison test (Patina side — TODO, must NOT be added while editor-shell owns
+`gdeditor`):** `editor_ui_oracle_test.rs` boots `EditorServerHandle::start` (reuse
+the in-process `make_server()` harness from `editor_parity_test.rs`), replays each
+golden's `steps` over HTTP (`POST /api/editor/mode`, scene-tree/select/inspector
+endpoints), captures Patina's served editor state, diffs it field-by-field against
+`expected`, and emits an overall editor-parity % (mirror `parity_percentage` /
+`golden_all_scenes_property_parity_report`).
+
+**Wiring:** a ready-to-activate, **commented-out** `[[phase]]` ("editor-parity-oracle")
+already exists at the end of `.orchestrator/planner.toml` with a
+`completion = [{ parity_threshold = 95.0 }]` (ParityAbove) condition — so the gate
+becomes "matches Godot ≥ 95%", not "passes our own unit test".
+
+**TODOs before Layer 4 is LIVE (be honest — today it is scaffolding only):**
+- `pat-l01l2-a`: record goldens from real Godot via the procedure above (blocked: no real-Godot capture in this env; do not fabricate).
+- `pat-l01l2-b`: plumb the editor-oracle parity % into the planner's `parity` report — today `ParityAbove` reads the *runtime* `ParityReport.overall` (`planner.rs ~L855`), not editor parity; a live wiring needs an orchestrator code change.
+- `pat-l01l2-c`: add `editor_ui_oracle_test` and list it in the phase's `test_binaries` (defer until `gdeditor` is not concurrently owned).
 
 ### When creating editor beads
 
@@ -102,6 +157,23 @@ Editor work is organized into 18 lanes (see `prd/EDITOR_PARITY_BEADS.md`):
 - Reference the lane number in the description
 - P1 = broken functionality, P2 = missing feature, P3 = visual polish
 - Run `/editor-parity` periodically to measure convergence
+
+### Visual fidelity is a first-class lane (source-driven)
+
+The goal is a 1:1 copy of Godot's editor — so the maps must enumerate Godot's
+**visual structure**, not just behaviors. Functional maps alone let permanent
+chrome (the `★ Favorites:` header, path bar, filter box, sort/split toggles)
+slip through: it is never enumerated and a behavioral test passes while the
+widget is absent. See `prd/EDITOR_PARITY_VISUAL_FIDELITY_METHODOLOGY.md`.
+
+- Ground truth is `upstream/godot/editor/` — enumerate every widget a dock's
+  constructor builds **unconditionally**; each missing one is a **P2** bead (not
+  P3) with a **served-DOM acceptance test** `(test: \`name\`)`.
+- The visual-fidelity execution map is `prd/EDITOR_PARITY_VISUAL_FIDELITY_MAP.md`
+  (+ `_EXIT.md`), wired as a phase in `.orchestrator/planner.toml`. The planner
+  seeds and ticks it exactly like the functional lanes, but for structure.
+- A criterion is satisfied only when its DOM test asserts the served `/editor`
+  HTML contains the element/label/icon — never by visual judgment alone.
 
 ## Hard Rules
 

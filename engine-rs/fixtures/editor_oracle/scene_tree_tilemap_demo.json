@@ -1,0 +1,29 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/tilemap_demo.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [],
+				"name": "TileMap",
+				"node_class": "TileMap",
+				"owner": "World",
+				"path": "/root/World/TileMap",
+				"scene_file_path": ""
+			},
+			{
+				"children": [],
+				"name": "Player",
+				"node_class": "Node2D",
+				"owner": "World",
+				"path": "/root/World/Player",
+				"scene_file_path": ""
+			}
+		],
+		"name": "World",
+		"node_class": "Node",
+		"owner": "",
+		"path": "/root/World",
+		"scene_file_path": "res://scenes/tilemap_demo.tscn"
+	}
+}

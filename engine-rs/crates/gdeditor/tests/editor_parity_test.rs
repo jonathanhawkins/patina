@@ -576,8 +576,8 @@ fn test_7wvfu_profiler_tab_present() {
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
     assert!(
-        b.contains("data-tab=\"profiler\""),
-        "Bottom panel must have Profiler tab"
+        b.contains("data-dbgtab=\"profiler\""),
+        "Profiler must be a Debugger sub-tab (Godot parity: it lives inside the debugger, not as a top-level bottom tab)"
     );
     assert!(
         b.contains("profiler-panel"),
@@ -1379,23 +1379,47 @@ fn test_e0heb_scene_tabs_close() {
 }
 
 #[test]
-fn test_e0heb_cannot_close_last_tab() {
+fn test_e0heb_close_last_tab_opens_fresh_empty_scene() {
+    // Godot parity (EditorNode::_remove_edited_scene): closing the last scene
+    // does NOT leave the editor tab-less — it opens a fresh empty, untitled
+    // scene in its place, so there is always exactly one scene open.
     let (handle, port) = make_server();
-    // Get the only tab's id
     let resp = http_get(port, "/api/scene/tabs");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
     let tab_id = v["tabs"][0]["id"].as_u64().unwrap();
 
-    // Try to close it
+    // Closing the only tab succeeds.
     let close_resp = http_post(
         port,
         "/api/scene/tabs/close",
-        &format!(r#"{{"tab_id":{}}}"#, tab_id),
+        &format!(r#"{{"tab_id":{tab_id}}}"#),
     );
     assert!(
-        close_resp.contains("400"),
-        "Should not be able to close last tab"
+        close_resp.contains("200 OK"),
+        "closing the last tab succeeds (opens a new empty scene): {close_resp}"
+    );
+
+    // Still exactly one tab, now a fresh Untitled with no path.
+    let after: serde_json::Value =
+        serde_json::from_str(extract_body(&http_get(port, "/api/scene/tabs"))).unwrap();
+    let tabs = after["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 1, "still exactly one tab after closing the last: {after}");
+    assert_eq!(after["active_tab_index"].as_u64(), Some(0));
+    assert_eq!(tabs[0]["path"].as_str(), Some(""), "the replacement scene is unsaved");
+    assert!(
+        tabs[0]["name"].as_str().unwrap().starts_with("Untitled"),
+        "the replacement scene is Untitled: {after}"
+    );
+
+    // And the scene itself is empty (no root node) — a brand new scene.
+    let scene: serde_json::Value =
+        serde_json::from_str(extract_body(&http_get(port, "/api/scene"))).unwrap();
+    assert!(
+        scene["nodes"]["children"]
+            .as_array()
+            .map(|c| c.is_empty())
+            .unwrap_or(true),
+        "the replacement scene has no root node: {scene}"
     );
     handle.stop();
 }
@@ -1727,5 +1751,74 @@ fn test_9ujvj_blend_toolbar() {
         b.contains("anim-blend-select"),
         "Must have blend animation selector"
     );
+    handle.stop();
+}
+
+// ---- pat-w1ub4.7: active scene tab reflects the loaded scene's filename ----
+
+/// Loading a scene must relabel the active tab from "Untitled" to the scene's
+/// filename (and clear its modified flag), so the tab matches the open scene
+/// instead of permanently reading "Untitled".
+#[test]
+fn editor_tab_label_reflects_scene_filename() {
+    let (handle, port) = make_server();
+
+    // Before loading anything the lone tab is the default "Untitled".
+    let before = http_get(port, "/api/scene/tabs");
+    let bv: serde_json::Value = serde_json::from_str(extract_body(&before)).unwrap();
+    let active = bv["active_tab_index"].as_u64().unwrap() as usize;
+    assert_eq!(
+        bv["tabs"][active]["name"].as_str(),
+        Some("Untitled"),
+        "fresh editor starts on an Untitled tab"
+    );
+
+    // Write a scene to disk and load it through the same endpoint the UI uses.
+    let scene_path = std::env::temp_dir().join(format!("demo_2d_{port}.tscn"));
+    std::fs::write(
+        &scene_path,
+        "[gd_scene load_steps=2]\n[ext_resource type=\"PackedScene\"]\n[node name=\"Root\" type=\"Node2D\"]\n[node name=\"Child\" type=\"Sprite2D\" parent=\".\"]\n",
+    )
+    .unwrap();
+    let scene_path_str = scene_path.to_string_lossy().to_string();
+    let load = http_post(
+        port,
+        "/api/scene/load",
+        &format!(r#"{{"path":"{}"}}"#, scene_path_str.replace('\\', "\\\\")),
+    );
+    assert!(
+        extract_body(&load).contains("\"ok\":true"),
+        "scene load should succeed: {load}"
+    );
+
+    // The active tab now reflects the scene's filename, carries its path, and is
+    // not marked modified.
+    let after = http_get(port, "/api/scene/tabs");
+    let av: serde_json::Value = serde_json::from_str(extract_body(&after)).unwrap();
+    let active = av["active_tab_index"].as_u64().unwrap() as usize;
+    let tab = &av["tabs"][active];
+    let expected_name = format!("demo_2d_{port}.tscn");
+    assert_eq!(
+        tab["name"].as_str(),
+        Some(expected_name.as_str()),
+        "active tab label should be the scene filename, not 'Untitled': {av}"
+    );
+    assert_ne!(
+        tab["name"].as_str(),
+        Some("Untitled"),
+        "tab must no longer read 'Untitled' after a scene is loaded"
+    );
+    assert_eq!(
+        tab["path"].as_str(),
+        Some(scene_path_str.as_str()),
+        "active tab path should point at the loaded scene"
+    );
+    assert_eq!(
+        tab["modified"].as_bool(),
+        Some(false),
+        "a freshly loaded scene is not modified"
+    );
+
+    std::fs::remove_file(&scene_path).ok();
     handle.stop();
 }

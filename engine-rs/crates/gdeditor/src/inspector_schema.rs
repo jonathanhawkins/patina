@@ -1,0 +1,256 @@
+//! Per-class editor property schema registry (pat-ghfv0.x editor-inspector parity).
+//!
+//! Godot's inspector does not show only the properties a node happens to have
+//! stored; it enumerates the node's **full class property schema** — every
+//! `PROPERTY_USAGE_EDITOR` property, resolved through the inheritance chain
+//! (`Node` → `CanvasItem`/`Node3D` → leaf), each shown with its class default
+//! value unless the node stored an override.
+//!
+//! Patina's `/api/node/<id>` historically surfaced only the STORED properties
+//! (those set in the `.tscn` plus a few engine defaults), which is why the
+//! editor-parity oracle (`editor_ui_oracle_test`) once measured ~1% inspector
+//! parity against real Godot 4.6.1.
+//!
+//! This module is the mechanism; the per-class schema data lives in the
+//! generated [`crate::inspector_schema_generated`] table (produced from the
+//! captured goldens by `tools/oracle/gen_inspector_schema.py`), covering every
+//! class in the oracle scenes (Node, Node2D, Node3D, Control, MeshInstance3D,
+//! the light/physics/CSG families, …). Any class NOT directly seeded resolves to
+//! its nearest seeded ancestor via [`parent_of`], so new/uncaptured classes still
+//! get a sensible base schema.
+//!
+//! The schema is deliberately kept in `gdeditor`, separate from the runtime
+//! `gdobject::class_db` (a runtime registry with different defaults/hints that
+//! does not model editor-synthesized properties such as
+//! `position`/`rotation`/`scale`). Property orderings, hints, and defaults are
+//! transcribed from `fixtures/editor_oracle/inspector_*.json` — the exact source
+//! of truth the oracle diffs against.
+
+use gdvariant::Variant;
+
+/// One editor-visible property in a class's inspector schema: its name, the
+/// Godot type name, the `PropertyHint` value, and the class default value used
+/// when the node has not stored an override.
+#[derive(Debug, Clone)]
+pub struct EditorProp {
+    /// Property name, e.g. `"position"`.
+    pub name: &'static str,
+    /// Godot type name, e.g. `"Vector2"` / `"int"` / `"Color"`.
+    pub type_name: &'static str,
+    /// Godot `PropertyHint` value (0 = none).
+    pub hint: i32,
+    /// Godot `hint_string` (e.g. an enum's `"Inherit,Pausable,…"` list), `""` if none.
+    pub hint_string: &'static str,
+    /// The class default value shown when the node stores no override.
+    pub default: Variant,
+}
+
+impl EditorProp {
+    pub(crate) fn new(
+        name: &'static str,
+        type_name: &'static str,
+        hint: i32,
+        hint_string: &'static str,
+        default: Variant,
+    ) -> Self {
+        Self {
+            name,
+            type_name,
+            hint,
+            hint_string,
+            default,
+        }
+    }
+}
+
+/// Returns the flattened editor property schema for `class_name`, resolving
+/// through inheritance to the nearest **seeded** class. Returns `None` when no
+/// seeded ancestor exists (the caller then falls back to stored-only
+/// enumeration).
+///
+/// Examples: `editor_schema("Node2D")` returns the 27-property `Node2D` schema;
+/// `editor_schema("Sprite2D")` returns Sprite2D's own 39-property schema;
+/// an uncaptured `Path2D` would resolve up to `Node2D`.
+pub fn editor_schema(class_name: &str) -> Option<Vec<EditorProp>> {
+    let mut cur = class_name;
+    for _ in 0..64 {
+        if let Some(schema) = seeded_schema(cur) {
+            return Some(schema);
+        }
+        cur = parent_of(cur)?;
+    }
+    None
+}
+
+/// The classes that have a seeded flattened editor schema. The table is
+/// generated from the Godot 4.6.1 goldens by `tools/oracle/gen_inspector_schema.py`
+/// (see `inspector_schema_generated.rs`) — 33 classes covering every class in the
+/// captured oracle scenes.
+fn seeded_schema(class_name: &str) -> Option<Vec<EditorProp>> {
+    crate::inspector_schema_generated::generated_schema(class_name)
+}
+
+/// True if `class_name` is `ancestor` or inherits from it (walking [`parent_of`]).
+pub fn class_inherits(class_name: &str, ancestor: &str) -> bool {
+    let mut cur = class_name;
+    if cur == ancestor {
+        return true;
+    }
+    for _ in 0..64 {
+        match parent_of(cur) {
+            Some(p) => {
+                if p == ancestor {
+                    return true;
+                }
+                cur = p;
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Immediate parent class, for inheritance resolution. Covers every class that
+/// appears in the captured Godot editor goldens plus their ancestors up to
+/// `Object`, so any oracle node resolves to its nearest seeded base. Derived
+/// from `fixtures/editor_oracle/godot_extension_api.json` (`inherits`).
+pub fn parent_of(class_name: &str) -> Option<&'static str> {
+    const PARENTS: &[(&str, &str)] = &[
+        ("AnimationMixer", "Node"),
+        ("AnimationPlayer", "AnimationMixer"),
+        ("Area2D", "CollisionObject2D"),
+        ("BoneAttachment3D", "Node3D"),
+        ("BoxContainer", "Container"),
+        ("CSGBox3D", "CSGPrimitive3D"),
+        ("CSGCombiner3D", "CSGShape3D"),
+        ("CSGCylinder3D", "CSGPrimitive3D"),
+        ("CSGPrimitive3D", "CSGShape3D"),
+        ("CSGShape3D", "GeometryInstance3D"),
+        ("CSGSphere3D", "CSGPrimitive3D"),
+        ("Camera2D", "Node2D"),
+        ("Camera3D", "Node3D"),
+        ("CanvasItem", "Node"),
+        ("CharacterBody2D", "PhysicsBody2D"),
+        ("CollisionObject2D", "Node2D"),
+        ("CollisionObject3D", "Node3D"),
+        ("CollisionShape2D", "Node2D"),
+        ("CollisionShape3D", "Node3D"),
+        ("Container", "Control"),
+        ("Control", "CanvasItem"),
+        ("DirectionalLight3D", "Light3D"),
+        ("FogVolume", "VisualInstance3D"),
+        ("GeometryInstance3D", "VisualInstance3D"),
+        ("Label", "Control"),
+        ("Light3D", "VisualInstance3D"),
+        ("Marker3D", "Node3D"),
+        ("MeshInstance3D", "GeometryInstance3D"),
+        ("Node", "Object"),
+        ("Node2D", "CanvasItem"),
+        ("Node3D", "Node"),
+        ("OmniLight3D", "Light3D"),
+        ("PhysicsBody2D", "CollisionObject2D"),
+        ("PhysicsBody3D", "CollisionObject3D"),
+        ("ReflectionProbe", "VisualInstance3D"),
+        ("RigidBody3D", "PhysicsBody3D"),
+        ("Skeleton3D", "Node3D"),
+        ("SpotLight3D", "Light3D"),
+        ("Sprite2D", "Node2D"),
+        ("StaticBody2D", "PhysicsBody2D"),
+        ("StaticBody3D", "PhysicsBody3D"),
+        ("TileMap", "Node2D"),
+        ("Timer", "Node"),
+        ("VBoxContainer", "BoxContainer"),
+        ("Viewport", "Node"),
+        ("VisualInstance3D", "Node3D"),
+        ("Window", "Viewport"),
+        ("WorldEnvironment", "Node"),
+    ];
+    PARENTS
+        .iter()
+        .find(|(c, _)| *c == class_name)
+        .map(|(_, p)| *p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(schema: &[EditorProp]) -> Vec<&str> {
+        schema.iter().map(|p| p.name).collect()
+    }
+
+    #[test]
+    fn seeded_base_classes_have_expected_shapes() {
+        assert_eq!(editor_schema("Node").unwrap().len(), 8);
+        assert_eq!(editor_schema("Node2D").unwrap().len(), 27);
+        assert_eq!(editor_schema("Node3D").unwrap().len(), 16);
+    }
+
+    #[test]
+    fn node2d_schema_matches_godot_order_and_defaults() {
+        let s = editor_schema("Node2D").unwrap();
+        assert_eq!(names(&s)[0], "process_mode");
+        assert_eq!(names(&s).last().copied(), Some("script"));
+        // Editor-synthesized transform is present with the type-zero default.
+        let pos = s.iter().find(|p| p.name == "position").unwrap();
+        assert_eq!(pos.type_name, "Vector2");
+        assert!(matches!(&pos.default, Variant::Vector2(v) if v.x == 0.0 && v.y == 0.0));
+        // CanvasItem defaults come through: modulate = opaque white, visible = true.
+        let modulate = s.iter().find(|p| p.name == "modulate").unwrap();
+        assert!(matches!(&modulate.default, Variant::Color(c) if c.r == 1.0 && c.a == 1.0));
+        let visible = s.iter().find(|p| p.name == "visible").unwrap();
+        assert!(matches!(&visible.default, Variant::Bool(true)));
+    }
+
+    #[test]
+    fn node3d_defaults_match_godot() {
+        let s = editor_schema("Node3D").unwrap();
+        let scale = s.iter().find(|p| p.name == "scale").unwrap();
+        assert!(matches!(&scale.default, Variant::Vector3(v) if v.x == 1.0 && v.y == 1.0 && v.z == 1.0));
+        let order = s.iter().find(|p| p.name == "rotation_order").unwrap();
+        assert!(matches!(&order.default, Variant::Int(2)));
+    }
+
+    #[test]
+    fn leaf_classes_are_directly_seeded_with_full_lists() {
+        // Fill phase seeds every oracle class with its OWN full flattened list.
+        assert_eq!(editor_schema("Sprite2D").unwrap().len(), 39);
+        assert_eq!(editor_schema("MeshInstance3D").unwrap().len(), 38);
+        assert_eq!(editor_schema("Camera3D").unwrap().len(), 31);
+        assert_eq!(editor_schema("DirectionalLight3D").unwrap().len(), 44);
+        assert_eq!(editor_schema("Control").unwrap().len(), 72);
+        assert_eq!(editor_schema("Label").unwrap().len(), 96);
+        assert_eq!(editor_schema("VBoxContainer").unwrap().len(), 74);
+        assert_eq!(editor_schema("Timer").unwrap().len(), 13);
+    }
+
+    #[test]
+    fn uncaptured_class_resolves_to_nearest_seeded_ancestor() {
+        // Path2D is not captured; it should resolve up to Node2D (27 props).
+        assert!(parent_of("Path2D").is_none()); // not in the parent table either
+                                                 // but a known intermediate resolves:
+        assert_eq!(editor_schema("BoxContainer").unwrap().len(), 72); // -> Control
+    }
+
+    #[test]
+    fn class_inherits_walks_the_chain() {
+        // Container-derived (for Control layout_mode = 2).
+        assert!(class_inherits("VBoxContainer", "Container"));
+        assert!(class_inherits("VBoxContainer", "Control"));
+        // Control-derived but NOT a Container (layout_mode = 0).
+        assert!(class_inherits("Label", "Control"));
+        assert!(!class_inherits("Label", "Container"));
+        // Self.
+        assert!(class_inherits("Control", "Control"));
+        // Unrelated / non-Control parent (scene-root Control → layout_mode = 3).
+        assert!(!class_inherits("Window", "Control"));
+        assert!(!class_inherits("Node2D", "Control"));
+    }
+
+    #[test]
+    fn unknown_class_has_no_schema() {
+        assert!(editor_schema("TotallyMadeUpClass").is_none());
+        // Object itself is above the seeded bases and has no schema.
+        assert!(editor_schema("Object").is_none());
+    }
+}

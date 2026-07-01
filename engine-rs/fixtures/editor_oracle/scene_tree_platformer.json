@@ -1,0 +1,105 @@
+{
+	"godot_version": "4.6.1-stable (official)",
+	"scene": "res://scenes/platformer.tscn",
+	"tree": {
+		"children": [
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Sprite",
+						"node_class": "Sprite2D",
+						"owner": "Platformer",
+						"path": "/root/Platformer/Player/Sprite",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "Collision",
+						"node_class": "CollisionShape2D",
+						"owner": "Platformer",
+						"path": "/root/Platformer/Player/Collision",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "Camera",
+						"node_class": "Camera2D",
+						"owner": "Platformer",
+						"path": "/root/Platformer/Player/Camera",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Player",
+				"node_class": "CharacterBody2D",
+				"owner": "Platformer",
+				"path": "/root/Platformer/Player",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Shape",
+						"node_class": "CollisionShape2D",
+						"owner": "Platformer",
+						"path": "/root/Platformer/Ground/Shape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Ground",
+				"node_class": "StaticBody2D",
+				"owner": "Platformer",
+				"path": "/root/Platformer/Ground",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Shape",
+						"node_class": "CollisionShape2D",
+						"owner": "Platformer",
+						"path": "/root/Platformer/Platform1/Shape",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Platform1",
+				"node_class": "StaticBody2D",
+				"owner": "Platformer",
+				"path": "/root/Platformer/Platform1",
+				"scene_file_path": ""
+			},
+			{
+				"children": [
+					{
+						"children": [],
+						"name": "Coin1",
+						"node_class": "Area2D",
+						"owner": "Platformer",
+						"path": "/root/Platformer/Coins/Coin1",
+						"scene_file_path": ""
+					},
+					{
+						"children": [],
+						"name": "Coin2",
+						"node_class": "Area2D",
+						"owner": "Platformer",
+						"path": "/root/Platformer/Coins/Coin2",
+						"scene_file_path": ""
+					}
+				],
+				"name": "Coins",
+				"node_class": "Node2D",
+				"owner": "Platformer",
+				"path": "/root/Platformer/Coins",
+				"scene_file_path": ""
+			}
+		],
+		"name": "Platformer",
+		"node_class": "Node2D",
+		"owner": "",
+		"path": "/root/Platformer",
+		"scene_file_path": "res://scenes/platformer.tscn"
+	}
+}

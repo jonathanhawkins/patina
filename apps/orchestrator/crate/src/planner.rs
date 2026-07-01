@@ -57,6 +57,25 @@ pub struct SceneParity {
     pub parity: f64,
 }
 
+/// Editor-parity metric — the Godot editor-UI oracle analogue of [`ParityReport`]
+/// (pat-l01l2 Layer 4). Kept separate from runtime parity so a phase can gate on
+/// "the served editor reproduces real Godot ≥ N%" independently of runtime
+/// oracle parity.
+///
+/// `available` is `false` until the real-Godot goldens (pat-l01l2-a) and the
+/// comparison oracle test (pat-47s1r) land and emit a report. The planner treats
+/// an unavailable metric as Unevaluable — a phase gated on editor parity is
+/// skipped, never silently passed — so this plumbing is safe to ship before the
+/// goldens exist.
+#[derive(Debug, Clone, Serialize)]
+pub struct EditorParityReport {
+    /// Whether the editor-parity metric could be sourced at all.
+    pub available: bool,
+    pub overall: f64,
+    pub total: usize,
+    pub matched: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GateReport {
     pub total: usize,
@@ -261,6 +280,10 @@ fn analyze_phase_chain(
     let mut active_label = String::from("default");
     let mut active_gates = empty_gates();
     let active_parity = empty_parity();
+    // pat-8fcjl: editor-parity metric for any phase gated on EditorParityAbove.
+    // Unavailable until the editor goldens + oracle test land (pat-l01l2-a /
+    // pat-47s1r); such phases then evaluate as Unevaluable and are skipped.
+    let editor_parity = read_editor_parity(project_root);
     let mut recommendations: Vec<Recommendation> = Vec::new();
     let mut all_phases_resolved = true;
 
@@ -329,7 +352,7 @@ fn analyze_phase_chain(
         // "skip this phase" — Unevaluable means we couldn't determine its
         // state (e.g. exit_criteria file not yet authored). Either way, don't
         // block the walk on a phase we can't make progress on.
-        match phase_status(phase, &criteria_now, Some(&gates), None) {
+        match phase_status(phase, &criteria_now, Some(&gates), None, Some(&editor_parity)) {
             PhaseStatus::Complete => {
                 eprintln!("[plan] phase '{}': complete, advancing", phase.label);
                 continue;
@@ -439,12 +462,15 @@ fn quick_recommendations_phase_chain(
 
     let mut recommendations: Vec<Recommendation> = Vec::new();
 
+    // pat-8fcjl: editor-parity metric (unavailable until goldens land).
+    let editor_parity = read_editor_parity(project_root);
+
     for phase in &config.phases {
         let criteria = load_phase_criteria(project_root, phase);
         // Tier-1 has no analysis context. Skip phases that are complete OR
         // unevaluable (e.g. all_gates_passing without gate context) so the
         // walk doesn't stall on conditions only analyze() can resolve.
-        match phase_status(phase, &criteria, None, None) {
+        match phase_status(phase, &criteria, None, None, Some(&editor_parity)) {
             PhaseStatus::Complete | PhaseStatus::Unevaluable => continue,
             PhaseStatus::Incomplete => {}
         }
@@ -823,6 +849,7 @@ fn phase_status(
     criteria: &[prd_parser::CriteriaItem],
     gates: Option<&GateReport>,
     parity: Option<&ParityReport>,
+    editor_parity: Option<&EditorParityReport>,
 ) -> PhaseStatus {
     if phase.completion.is_empty() {
         // No explicit completion → fall back to "all criteria checked".
@@ -857,6 +884,14 @@ fn phase_status(
                 Some(_) => return PhaseStatus::Incomplete,
                 None => return PhaseStatus::Unevaluable,
             },
+            // pat-8fcjl: gate on the EDITOR-parity metric (not runtime parity).
+            // An unavailable metric (or no editor-parity context) is Unevaluable,
+            // never a silent pass — the phase is skipped until goldens land.
+            CompletionCondition::EditorParityAbove(t) => match editor_parity {
+                Some(p) if p.available && p.overall >= *t => {}
+                Some(p) if p.available => return PhaseStatus::Incomplete,
+                _ => return PhaseStatus::Unevaluable,
+            },
         }
     }
     PhaseStatus::Complete
@@ -870,9 +905,10 @@ fn phase_is_complete(
     criteria: &[prd_parser::CriteriaItem],
     gates: Option<&GateReport>,
     parity: Option<&ParityReport>,
+    editor_parity: Option<&EditorParityReport>,
 ) -> bool {
     matches!(
-        phase_status(phase, criteria, gates, parity),
+        phase_status(phase, criteria, gates, parity, editor_parity),
         PhaseStatus::Complete
     )
 }
@@ -1069,6 +1105,54 @@ pub fn parse_parity_output(text: &str) -> ParityReport {
         total: overall_total,
         matched: overall_matched,
         scenes,
+    }
+}
+
+// ─── Editor-parity metric (pat-8fcjl plumbing for the editor-UI oracle) ──────
+
+/// An editor-parity metric that is not yet available (no goldens / no report).
+fn unavailable_editor_parity() -> EditorParityReport {
+    EditorParityReport {
+        available: false,
+        overall: 0.0,
+        total: 0,
+        matched: 0,
+    }
+}
+
+/// Parse the editor-parity summary emitted by the editor-UI oracle test.
+///
+/// Mirrors [`parse_parity_output`]: the oracle prints an
+/// `OVERALL <total> <matched> <pct>%` row. The presence of that row means the
+/// metric is available; its absence (test didn't run, or no goldens) yields an
+/// *unavailable* report so a missing metric is never mistaken for a present-but-
+/// 0% one.
+pub fn parse_editor_parity_output(text: &str) -> EditorParityReport {
+    let re = Regex::new(r"(?m)^\s*OVERALL\s+(\d+)\s+(\d+)\s+(\d+(?:\.\d+)?)%\s*$").unwrap();
+    match re.captures(text) {
+        Some(cap) => EditorParityReport {
+            available: true,
+            total: cap[1].parse().unwrap_or(0),
+            matched: cap[2].parse().unwrap_or(0),
+            overall: cap[3].parse().unwrap_or(0.0),
+        },
+        None => unavailable_editor_parity(),
+    }
+}
+
+/// Read the editor-parity metric for the planner.
+///
+/// Looks for the editor-UI oracle's report at
+/// `engine-rs/fixtures/editor_oracle/parity_report.txt` and parses it; returns
+/// an *unavailable* metric when that file doesn't yet exist (the goldens +
+/// oracle test that produce it are pat-l01l2-a / pat-47s1r, intentionally out of
+/// scope here — engine-rs/ is owned by the editor-shell agent). Pure plumbing:
+/// once the report lands the planner consumes it with no further code change.
+pub fn read_editor_parity(project_root: &Path) -> EditorParityReport {
+    let report = project_root.join("engine-rs/fixtures/editor_oracle/parity_report.txt");
+    match std::fs::read_to_string(&report) {
+        Ok(text) => parse_editor_parity_output(&text),
+        Err(_) => unavailable_editor_parity(),
     }
 }
 
@@ -2057,6 +2141,10 @@ fn determine_phase(
             // against the criteria items; the V1-centric legacy path uses
             // gate/parity signals only, so this condition is a no-op here.
             CompletionCondition::AllCriteriaChecked => {}
+            // Editor parity is a phase-chain (V2) signal only; the legacy V1
+            // determine_phase path has no editor-parity context, so it's a
+            // no-op here (the phase-chain walk evaluates it via phase_status).
+            CompletionCondition::EditorParityAbove(_) => {}
         }
     }
 
@@ -2234,7 +2322,7 @@ mod tests {
         assert_eq!(p1_specs.len(), 1);
         let p1_crit = load_phase_criteria(root, &phases[0]);
         assert!(
-            !phase_is_complete(&phases[0], &p1_crit, None, None),
+            !phase_is_complete(&phases[0], &p1_crit, None, None, None),
             "p1 unchecked criteria → not complete"
         );
         // Simulated "already-implemented" title.
@@ -2323,7 +2411,7 @@ mod tests {
             lib: false,
         };
         assert_eq!(
-            phase_status(&phase, &[], None, None),
+            phase_status(&phase, &[], None, None, None),
             PhaseStatus::Unevaluable
         );
         // With gates context (all passing), it should be Complete.
@@ -2333,7 +2421,7 @@ mod tests {
             failing: vec![],
         };
         assert_eq!(
-            phase_status(&phase, &[], Some(&gates_ok), None),
+            phase_status(&phase, &[], Some(&gates_ok), None, None),
             PhaseStatus::Complete
         );
         // With failing gates, Incomplete.
@@ -2343,9 +2431,115 @@ mod tests {
             failing: vec!["b".into(), "c".into()],
         };
         assert_eq!(
-            phase_status(&phase, &[], Some(&gates_fail), None),
+            phase_status(&phase, &[], Some(&gates_fail), None, None),
             PhaseStatus::Incomplete
         );
+    }
+
+    /// pat-8fcjl: a phase gated on EditorParityAbove is evaluated against the
+    /// editor-parity metric — Complete at/above threshold, Incomplete below, and
+    /// Unevaluable (skipped, never a silent pass) when the metric is unavailable
+    /// or absent.
+    #[test]
+    fn test_phase_status_editor_parity_above() {
+        use crate::project_config::{AnalysisSource, Phase};
+        use std::path::PathBuf;
+
+        let phase = Phase {
+            label: "editor-parity-oracle".into(),
+            execution_map: Some(PathBuf::from("MAP.md")),
+            exit_criteria: None,
+            analysis: AnalysisSource::Commands(vec![]),
+            completion: vec![CompletionCondition::EditorParityAbove(95.0)],
+            test_binaries: vec![],
+            test_packages: vec![],
+            lib: false,
+        };
+
+        let at_or_above = EditorParityReport {
+            available: true,
+            overall: 96.0,
+            total: 100,
+            matched: 96,
+        };
+        assert_eq!(
+            phase_status(&phase, &[], None, None, Some(&at_or_above)),
+            PhaseStatus::Complete
+        );
+
+        let below = EditorParityReport {
+            available: true,
+            overall: 90.0,
+            total: 100,
+            matched: 90,
+        };
+        assert_eq!(
+            phase_status(&phase, &[], None, None, Some(&below)),
+            PhaseStatus::Incomplete
+        );
+
+        // Unavailable metric → Unevaluable (never silently complete).
+        let unavailable = EditorParityReport {
+            available: false,
+            overall: 0.0,
+            total: 0,
+            matched: 0,
+        };
+        assert_eq!(
+            phase_status(&phase, &[], None, None, Some(&unavailable)),
+            PhaseStatus::Unevaluable
+        );
+        // No editor-parity context at all → also Unevaluable.
+        assert_eq!(
+            phase_status(&phase, &[], None, None, None),
+            PhaseStatus::Unevaluable
+        );
+    }
+
+    /// pat-8fcjl: the editor-parity parser marks the metric available only when
+    /// an OVERALL row is present; otherwise it's unavailable (not a present 0%).
+    #[test]
+    fn test_parse_editor_parity_output() {
+        let text = "\
+Scene                        Total    Match   Parity
+-------------------------------------------------------
+scene_tree                       10        9    90.0%
+OVERALL                         100       95    95.0%
+";
+        let r = parse_editor_parity_output(text);
+        assert!(r.available);
+        assert!((r.overall - 95.0).abs() < 0.01);
+        assert_eq!(r.total, 100);
+        assert_eq!(r.matched, 95);
+
+        // No OVERALL row → unavailable, never a silent present-0%.
+        let r = parse_editor_parity_output("no parity table here");
+        assert!(!r.available);
+        assert_eq!(r.overall, 0.0);
+        assert_eq!(r.total, 0);
+
+        // Empty → unavailable.
+        assert!(!parse_editor_parity_output("").available);
+    }
+
+    /// pat-8fcjl: with no report file present, the source reads as unavailable;
+    /// when a report lands it is parsed with no further code change.
+    #[test]
+    fn test_read_editor_parity_source() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            !read_editor_parity(dir.path()).available,
+            "editor parity must be unavailable until a report lands"
+        );
+
+        let report_dir = dir.path().join("engine-rs/fixtures/editor_oracle");
+        fs::create_dir_all(&report_dir).unwrap();
+        fs::write(report_dir.join("parity_report.txt"), "OVERALL  200  190  95.0%\n").unwrap();
+        let r = read_editor_parity(dir.path());
+        assert!(r.available);
+        assert!((r.overall - 95.0).abs() < 0.01);
+        assert_eq!(r.total, 200);
+        assert_eq!(r.matched, 190);
     }
 
     #[test]
@@ -3659,7 +3853,7 @@ OVERALL        101   100    99.0%
         };
 
         // No criteria → not complete (avoid false-positive on empty file).
-        assert!(!phase_is_complete(&phase, &[], None, None));
+        assert!(!phase_is_complete(&phase, &[], None, None, None));
 
         // All checked → complete.
         let all_checked = vec![
@@ -3676,12 +3870,12 @@ OVERALL        101   100    99.0%
                 line_number: 2,
             },
         ];
-        assert!(phase_is_complete(&phase, &all_checked, None, None));
+        assert!(phase_is_complete(&phase, &all_checked, None, None, None));
 
         // Any unchecked → not complete.
         let mut one_unchecked = all_checked.clone();
         one_unchecked[0].checked = false;
-        assert!(!phase_is_complete(&phase, &one_unchecked, None, None));
+        assert!(!phase_is_complete(&phase, &one_unchecked, None, None, None));
     }
 
     #[test]
@@ -3790,7 +3984,7 @@ OVERALL        101   100    99.0%
         let mut active: Option<&Phase> = None;
         for ph in &phases {
             let crit = load_phase_criteria(root, ph);
-            if !phase_is_complete(ph, &crit, None, None) {
+            if !phase_is_complete(ph, &crit, None, None, None) {
                 active = Some(ph);
                 break;
             }
