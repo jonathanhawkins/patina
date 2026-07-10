@@ -4,9 +4,12 @@ Godot 4.6.1 inspector goldens (pat-ghfv0.x fill phase).
 
 Reads every `engine-rs/fixtures/editor_oracle/inspector_*.json` golden and emits
 `engine-rs/crates/gdeditor/src/inspector_schema_generated.rs`, a data table of
-`class -> ordered [EditorProp{name,type_name,hint,default}]` where each default
-is the class default value taken from an `is_default=true` golden entry (falling
-back to the Godot type-zero when a property is overridden in every sample).
+`class -> ordered [EditorProp{name,type_name,hint,default,true_default}]` where
+`default` is the value Godot's inspector SHOWS (taken from an `is_default=true`
+golden entry, else the unanimous shown value, else the Godot type-zero) and
+`true_default` is Godot's real ClassDB default used to decide `is_default` — the
+two differ for project-settings-/context-derived and always-overridden props
+(see `KNOWN_TRUE_DEFAULTS` / `true_default_expr`; pat-ghfv0.41).
 
 This is the single source of truth for the seeded schema: it transcribes the
 real editor property list, order, hints, and defaults straight from Godot rather
@@ -141,6 +144,61 @@ def rust_default(type_name, value):
     return "Variant::Nil"
 
 
+# Godot 4.6.1 ClassDB defaults (`ClassDB.class_get_property_default_value`) for
+# editor props whose goldens contain NO `is_default=true` sample to recover the
+# real default from — so the shown (override / display) value would otherwise be
+# mistaken for the default and `is_default` would wrongly read true. Each entry is
+# the documented real class default; `is_default` is computed against it, while
+# the shown display value (`default`) is left untouched to preserve value-parity.
+KNOWN_TRUE_DEFAULTS = {
+    # Camera3D.current defaults to false; every captured camera sets current=true,
+    # so a current camera is an override.
+    ("Camera3D", "current"): "Variant::Bool(false)",
+    # CollisionShape debug_color's ClassDB default is transparent black; the shown
+    # color is derived from ProjectSettings `debug/shapes/collision/shape_color`.
+    ("CollisionShape3D", "debug_color"): "Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })",
+    ("CollisionShape2D", "debug_color"): "Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })",
+    # Control.layout_mode defaults to POSITION (0); a Label parented to a Container
+    # is forced to CONTAINER (2), an override.
+    ("Label", "layout_mode"): "Variant::Int(0)",
+    # anchors_preset for a plain Control defaults to Custom (-1); the shown 0
+    # (Top-Left) is a set preset -> override. A Container records 0 as ITS own
+    # default (recovered from that class's own is_default=true golden sample).
+    ("Control", "anchors_preset"): "Variant::Int(-1)",
+    # Control.size defaults to (0,0); Label/VBoxContainer show a laid-out size.
+    ("Label", "size"): "Variant::Vector2(Vector2 { x: 0.0, y: 0.0 })",
+    ("VBoxContainer", "size"): "Variant::Vector2(Vector2 { x: 0.0, y: 0.0 })",
+    # A bare VBoxContainer's computed layout_mode has no scalar ClassDB default we
+    # can recover from the goldens (Godot yields an empty/typed value); model it as
+    # Nil so the shown Int is a type-mismatch override, matching the capture's
+    # `typeof(value) == typeof(default)` guard.
+    ("VBoxContainer", "layout_mode"): "Variant::Nil",
+}
+
+
+def true_default_expr(cls, name, tname, entry, display_default):
+    """Rust `Variant` expression for a prop's TRUE ClassDB default, used for
+    `is_default` (distinct from the shown `display_default`). Precedence:
+      1. an `is_default=true` golden sample directly reveals the real default;
+      2. a known Godot ClassDB default for props with no such sample;
+      3. transform defaults (position -> origin, scale -> unit vector);
+      4. otherwise the display default (the two coincide for the vast majority).
+    `surface_material_override/N` slots are handled by the server (always an
+    override), so they fall through to (4) here."""
+    if name in entry["default"]:
+        # An is_default=true sample IS Godot's class default for this class.
+        return rust_default(tname, entry["default"][name])
+    if (cls, name) in KNOWN_TRUE_DEFAULTS:
+        return KNOWN_TRUE_DEFAULTS[(cls, name)]
+    if name == "position":
+        return rust_default(tname, {})  # origin: (0,0) / (0,0,0)
+    if name == "scale":
+        if tname in ("Vector2", "Vector2i"):
+            return "Variant::Vector2(Vector2 { x: 1.0, y: 1.0 })"
+        return "Variant::Vector3(Vector3 { x: 1.0, y: 1.0, z: 1.0 })"
+    return display_default
+
+
 def main():
     files = sorted(glob.glob(os.path.join(ORACLE_DIR, "inspector_*.json")))
     # class -> {"order": [propnames from the maximal instance], "hint": {}, "type": {}, "default": {}}
@@ -213,9 +271,10 @@ def main():
                     dflt = rust_default(tname, vals[0])
                 else:
                     dflt = rust_default(tname, "" if tname in ("String", "StringName", "NodePath") else {})
+            true_dflt = true_default_expr(cls, name, tname, entry, dflt)
             lines.append(
                 f"            EditorProp::new({rust_str(name)}, {rust_str(tname)}, {hint}, "
-                f"{rust_str(hint_string)}, {dflt}),"
+                f"{rust_str(hint_string)}, {dflt}, {true_dflt}),"
             )
         lines.append("        ],")
 

@@ -147,11 +147,31 @@ fn collision_shape_for(shape: &str) -> (CollisionShapeKind, Vector3) {
     }
 }
 
-/// Chooses the mesh geometry for a `MeshInstance3D` from its resolved `mesh`
-/// path. `primitive:<Type>` markers (produced when the `.tscn` parser resolves an
-/// inline mesh sub-resource) map to the matching built-in primitive; anything
-/// else (e.g. an `.obj` path we can't load yet) falls back to a box placeholder.
+/// Resolves a `MeshInstance3D`'s mesh geometry from its `primitive:<Type>` path,
+/// **memoized per thread** (pat-ism62 #2): the editor rebuilds its render list
+/// every frame, so without a cache the procedural tessellation (`Mesh3D::sphere`,
+/// `torus`, `capsule`, …) would re-run each frame for every mesh. Geometry is
+/// deterministic per path, so we generate it once and clone from the cache — a
+/// clone is a cheap memcpy vs. the trig-heavy tessellation. The cache is naturally
+/// bounded by the fixed set of primitive descriptors.
 fn mesh_for_primitive(path: &str) -> Mesh3D {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static MESH_CACHE: RefCell<HashMap<String, Mesh3D>> = RefCell::new(HashMap::new());
+    }
+    MESH_CACHE.with(|cache| {
+        if let Some(mesh) = cache.borrow().get(path) {
+            return mesh.clone();
+        }
+        let mesh = build_mesh_for_primitive(path);
+        cache.borrow_mut().insert(path.to_string(), mesh.clone());
+        mesh
+    })
+}
+
+/// The uncached geometry builder behind [`mesh_for_primitive`].
+fn build_mesh_for_primitive(path: &str) -> Mesh3D {
     match path.strip_prefix("primitive:").unwrap_or("") {
         "SphereMesh" => Mesh3D::sphere(0.45, 18),
         "BoxMesh" | "CubeMesh" => Mesh3D::cube(0.8),
@@ -175,20 +195,50 @@ fn primitive_for_class(class: &str) -> PrimitiveShape {
     }
 }
 
-/// The world-space direction the scene's first `DirectionalLight3D` shines (its
-/// local −Z), normalized — so the viewport lights the scene like Godot does.
-/// `None` when there is no directional light (the renderer uses its default).
-fn scene_directional_light_dir(tree: &SceneTree) -> Option<Vector3> {
-    tree.all_nodes_in_tree_order().into_iter().find_map(|nid| {
-        let node = tree.get_node(nid)?;
+/// A scene `DirectionalLight3D`'s render inputs: the direction it shines plus
+/// the properties that drive both surface shading and the sky's sun disc.
+#[derive(Debug, Clone, Copy)]
+pub struct SceneLight3D {
+    /// World-space direction the light shines (its global −Z), normalized.
+    pub direction: Vector3,
+    /// `light_color` (sRGB authoring).
+    pub color: Color,
+    /// `light_energy`.
+    pub energy: f32,
+    /// `light_angular_distance` in degrees (sun disc size).
+    pub angular_distance: f32,
+}
+
+/// Collects the scene's `DirectionalLight3D` nodes in tree order (capped at 4,
+/// matching Godot's sky directional-light limit), reading each one's direction,
+/// color, energy, and angular size — so the viewport lights the scene *and*
+/// draws sun discs exactly like the light configured in the scene, not just a
+/// generic sun. Empty when the scene has no directional light (the caller then
+/// falls back to the preview sun).
+fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
+    let mut lights = Vec::new();
+    for nid in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(nid) else { continue };
         if !node.is_class("DirectionalLight3D") {
-            return None;
+            continue;
         }
         let z = gdscene::node3d::get_global_transform(tree, nid).basis.z;
         let dir = Vector3::new(-z.x, -z.y, -z.z);
         let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
-        (len > 1e-6).then(|| Vector3::new(dir.x / len, dir.y / len, dir.z / len))
-    })
+        if len <= 1e-6 {
+            continue;
+        }
+        lights.push(SceneLight3D {
+            direction: Vector3::new(dir.x / len, dir.y / len, dir.z / len),
+            color: gdscene::node3d::get_light_color(tree, nid),
+            energy: gdscene::node3d::get_light_energy(tree, nid) as f32,
+            angular_distance: gdscene::node3d::get_light_angular_distance(tree, nid) as f32,
+        });
+        if lights.len() >= 4 {
+            break;
+        }
+    }
+    lights
 }
 
 // ---------------------------------------------------------------------------
@@ -735,23 +785,49 @@ struct EditorOverlays3D {
     collision_gizmos: Vec<(Transform3D, CollisionShapeKind, Vector3)>,
 }
 
+/// Snapshot of the tree-dependent inputs the editor 3D render needs: the render
+/// list and the scene's key-light direction. Built **under the editor state lock**
+/// (both read the scene tree) so the actual render — GPU submit, blocking
+/// readback, overlay rasterization, BMP encode — can run *after* releasing the
+/// lock, keeping `/api` handlers (orbit/select/gizmo) responsive during
+/// interaction (pat-ism62 lock-hold reduction).
+pub struct Editor3DRenderInputs {
+    /// The drawable spatial nodes (meshes + primitive markers) for this frame.
+    pub items: Vec<Render3DItem>,
+    /// The scene's `DirectionalLight3D` lights (direction + color/energy/angular
+    /// size), in tree order, capped at 4. Empty → fall back to the preview sun.
+    pub scene_lights: Vec<SceneLight3D>,
+}
+
+/// Builds [`Editor3DRenderInputs`] from the viewport + scene tree. This is the
+/// only step that touches the tree, so callers run *just this* under the state
+/// lock and render from the returned owned snapshot afterward.
+pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Editor3DRenderInputs {
+    Editor3DRenderInputs {
+        items: viewport.build_render_list(tree),
+        scene_lights: scene_directional_lights(tree),
+    }
+}
+
 /// Populates `renderer` with one solid instance per drawable spatial node (mesh
 /// or primitive marker) at its global transform, and returns the overlay geometry
 /// (selection outlines + node/collision gizmos) to draw over the frame afterward.
 ///
 /// Written against `&mut dyn RenderingServer3D` so the software and GPU editor
 /// paths share the exact same scene-building logic — only the concrete rasterizer
-/// differs. Collision shapes are wireframe-only (recorded, not instanced).
+/// differs. Collision shapes are wireframe-only (recorded, not instanced). Takes a
+/// pre-built render list (see [`Editor3DRenderInputs`]) so no tree read happens
+/// here — the GPU path calls this off the state lock.
 fn populate_editor_scene_3d(
     renderer: &mut dyn RenderingServer3D,
     viewport: &Viewport3D,
-    tree: &SceneTree,
+    items: &[Render3DItem],
 ) -> EditorOverlays3D {
     let mut selected_tfs: Vec<Transform3D> = Vec::new();
     let mut primary_tf: Option<Transform3D> = None;
     let mut node_gizmos: Vec<(Transform3D, PrimitiveShape)> = Vec::new();
     let mut collision_gizmos: Vec<(Transform3D, CollisionShapeKind, Vector3)> = Vec::new();
-    for item in viewport.build_render_list(tree) {
+    for item in items {
         // Collision shapes are wireframe-only; record selection and skip the
         // solid mesh instance.
         if let Render3DKind::Collision { shape, half_extents } = &item.kind {
@@ -797,37 +873,52 @@ fn populate_editor_scene_3d(
     EditorOverlays3D { selected_tfs, primary_tf, node_gizmos, collision_gizmos }
 }
 
-/// Adds the editor's key light to `renderer`: the scene's first
-/// `DirectionalLight3D` (its local −Z) like Godot, or the preview sun otherwise.
-/// Godot's "Preview Sun" toggle dims the sun to a flat fill when off. Shared by
-/// both editor render paths.
+/// Adds the editor's key lighting to `renderer`: every scene
+/// `DirectionalLight3D` (up to 4) with its real color, energy, and angular size
+/// like Godot, or the preview sun when the scene has none. Each contributes to
+/// both surface shading and the sky's sun disc. Godot's "Preview Sun" toggle
+/// dims the sun to a flat fill (and hides its sky disc) when off. Shared by both
+/// editor render paths.
 fn setup_editor_lighting_3d(
     renderer: &mut dyn RenderingServer3D,
     viewport: &Viewport3D,
-    tree: &SceneTree,
+    scene_lights: &[SceneLight3D],
 ) {
-    let light_id = Light3DId(9_000_001);
-    renderer.add_light(light_id);
-    let mut light = Light3D::directional(light_id);
-    if let Some(dir) = scene_directional_light_dir(tree) {
-        light.direction = dir;
-    } else {
-        // No scene light: shine the preview sun from its configured direction
-        // (Godot's Sun and Environment settings), so editing it is visible.
+    if scene_lights.is_empty() {
+        // No scene light: shine the preview sun from its configured direction,
+        // color, and energy (Godot's Sun and Environment settings).
+        let mut light = Light3D::directional(Light3DId(9_000_001));
         light.direction = viewport.environment.sun_direction;
+        light.color = viewport.environment.sun_color;
+        light.energy = if viewport.environment.sun_enabled {
+            viewport.environment.sun_energy.max(0.0)
+        } else {
+            // Godot removes the preview sun when toggled off; the dim fill light
+            // is an editor-only shading aid and must not draw a sky sun disc.
+            light.sky = false;
+            0.18
+        };
+        renderer.add_light(light.id);
+        renderer.update_light(&light);
+        return;
     }
-    light.energy = if viewport.environment.sun_enabled {
-        viewport.environment.sun_energy.max(0.0)
-    } else {
-        0.18
-    };
-    renderer.update_light(&light);
+
+    // Scene directional lights: add each with its authored properties so the
+    // sky sun disc(s) and surface shading match the light in the scene.
+    for (i, sl) in scene_lights.iter().enumerate() {
+        let mut light = Light3D::directional(Light3DId(9_000_001 + i as u64));
+        light.direction = sl.direction;
+        light.color = sl.color;
+        light.energy = sl.energy.max(0.0);
+        light.angular_distance = sl.angular_distance;
+        renderer.add_light(light.id);
+        renderer.update_light(&light);
+    }
 }
 
 /// Builds the `RenderViewport3D` (editor camera + clip planes) at `width`×
-/// `height`. The background/environment is applied by the caller: the software
-/// path sets a Sky/ClearColor env on the returned viewport; the GPU path clears
-/// the target to a color instead.
+/// `height`. The background/environment is applied by the caller via
+/// [`editor_render_environment`].
 fn editor_render_viewport(viewport: &Viewport3D, width: u32, height: u32) -> RenderViewport3D {
     let mut rv = RenderViewport3D::new(width, height);
     rv.camera_transform = viewport.camera.transform();
@@ -835,6 +926,38 @@ fn editor_render_viewport(viewport: &Viewport3D, width: u32, height: u32) -> Ren
     rv.near = 0.05;
     rv.far = 2000.0;
     rv
+}
+
+/// The environment for the editor viewport render: Godot's "Preview
+/// Environment" toolbar toggle shows a procedural sky gradient (bluish top →
+/// light horizon → ground) when on, and the flat editor void color when off.
+///
+/// Shared by the software and GPU render paths so their backgrounds match
+/// 1:1 — this environment is the single source of truth; neither path decides
+/// its background on its own. The flat backdrop uses `CustomColor` (not
+/// `ClearColor`) because the renderer's background fill paints `ClearColor`
+/// black; `CustomColor` carries the actual void color through both backends.
+pub(crate) fn editor_render_environment(
+    viewport: &Viewport3D,
+) -> gdserver3d::environment::Environment3D {
+    // Start from the preview's own environment so its post-processing settings
+    // (Godot's editor default: filmic tonemapping + glow, plus ambient/fog)
+    // reach the renderer — not just the background. Then override the
+    // background per the Preview Environment / Preview Sky toggles.
+    let mut env = viewport.environment.environment.clone();
+    if viewport.environment.enabled && viewport.environment.sky_visible {
+        env.background_mode = gdserver3d::environment::BackgroundMode::Sky;
+        if env.sky.is_none() {
+            env.sky = Some(gdserver3d::sky::Sky::default());
+        }
+    } else {
+        // Preview sky hidden: flat editor backdrop, no sky resource (so nothing
+        // — background or ambient — samples it). Tonemap/glow still apply.
+        env.background_mode = gdserver3d::environment::BackgroundMode::CustomColor;
+        env.background_color = VIEWPORT_BG_3D;
+        env.sky = None;
+    }
+    env
 }
 
 /// Draws all editor overlays over a rasterized mesh frame `fb`: the ground grid +
@@ -886,27 +1009,29 @@ fn draw_editor_overlays_3d(fb: &mut impl Raster, viewport: &Viewport3D, overlays
 /// This is the reference path (and the fallback for the GPU path); the
 /// GPU-accelerated twin is [`render_editor_3d_frame_gpu`].
 pub fn render_editor_3d_frame(viewport: &Viewport3D, tree: &SceneTree) -> FrameBuffer {
+    let inputs = editor_3d_render_inputs(viewport, tree);
+    render_editor_3d_frame_from_inputs(viewport, &inputs)
+}
+
+/// Core software render from a pre-built [`Editor3DRenderInputs`] snapshot — the
+/// no-tree-read body shared by [`render_editor_3d_frame`] and the GPU path's
+/// software fallback, so neither touches the scene tree while rendering.
+fn render_editor_3d_frame_from_inputs(
+    viewport: &Viewport3D,
+    inputs: &Editor3DRenderInputs,
+) -> FrameBuffer {
     let width = viewport.width.max(1);
     let height = viewport.height.max(1);
     let mut renderer = SoftwareRenderer3D::new();
 
-    let overlays = populate_editor_scene_3d(&mut renderer, viewport, tree);
-    setup_editor_lighting_3d(&mut renderer, viewport, tree);
+    let overlays = populate_editor_scene_3d(&mut renderer, viewport, &inputs.items);
+    setup_editor_lighting_3d(&mut renderer, viewport, &inputs.scene_lights);
 
     // --- Render from the editor camera. Godot's "Preview Environment" toolbar
     //     toggle shows a procedural sky gradient (bluish top → light horizon →
     //     ground) when on, and a flat editor backdrop when off. ---
     let mut rv = editor_render_viewport(viewport, width, height);
-    let mut env = gdserver3d::environment::Environment3D::default();
-    if viewport.environment.enabled && viewport.environment.sky_visible {
-        env.background_mode = gdserver3d::environment::BackgroundMode::Sky;
-        env.sky = Some(gdserver3d::sky::Sky::default());
-    } else {
-        // Flat backdrop, matching the uniform viewport void color.
-        env.background_mode = gdserver3d::environment::BackgroundMode::ClearColor;
-        env.background_color = VIEWPORT_BG_3D;
-    }
-    rv.environment = Some(env);
+    rv.environment = Some(editor_render_environment(viewport));
     let frame = renderer.render_frame(&rv);
 
     // --- FrameData3D -> editor FrameBuffer (both are row-major RGBA Color). ---
@@ -939,7 +1064,10 @@ pub fn render_editor_3d_frame(viewport: &Viewport3D, tree: &SceneTree) -> FrameB
 /// Only compiled with the `gpu-render` feature (the default editor build); the
 /// `software-render` build has only [`render_editor_3d_frame`].
 #[cfg(feature = "gpu-render")]
-pub fn render_editor_3d_frame_gpu(viewport: &Viewport3D, tree: &SceneTree) -> Bgra8Image {
+pub fn render_editor_3d_frame_gpu(
+    viewport: &Viewport3D,
+    inputs: &Editor3DRenderInputs,
+) -> Bgra8Image {
     use gdrender3d::wgpu_pipeline::GpuRenderer3D;
     use std::cell::RefCell;
 
@@ -957,6 +1085,14 @@ pub fn render_editor_3d_frame_gpu(viewport: &Viewport3D, tree: &SceneTree) -> Bg
     let width = viewport.width.max(1);
     let height = viewport.height.max(1);
 
+    // Fog is applied per-fragment in the software renderer's linear pass (it
+    // needs a depth buffer, which the GPU editor path doesn't read back). When
+    // the environment enables fog, render on the software path so fog is
+    // correct; fog is off by default so the GPU fast path stays the norm.
+    if editor_render_environment(viewport).fog_enabled {
+        return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs));
+    }
+
     GPU.with(|cell| {
         // Lazy init on the first call for this thread.
         {
@@ -973,20 +1109,25 @@ pub fn render_editor_3d_frame_gpu(viewport: &Viewport3D, tree: &SceneTree) -> Bg
             GpuSlot::Ready(r) => r,
             // No GPU adapter → software reference path, converted to bytes (the
             // software path doesn't touch this thread-local, so the borrow is fine).
-            _ => return framebuffer_to_bgra(&render_editor_3d_frame(viewport, tree)),
+            _ => return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs)),
         };
 
         // The persistent renderer accumulates instances/lights across calls, so
         // reset it before rebuilding this frame's scene. Reborrow (`&mut *`) for
         // the shared `&mut dyn RenderingServer3D` helpers so `renderer` stays
-        // usable for the render call below.
+        // usable for the render call below. All of this runs OFF the editor state
+        // lock (the caller snapshotted `inputs` under it), so `/api` handlers stay
+        // responsive during the render.
         renderer.reset_scene();
-        let overlays = populate_editor_scene_3d(&mut *renderer, viewport, tree);
-        setup_editor_lighting_3d(&mut *renderer, viewport, tree);
-        let rv = editor_render_viewport(viewport, width, height);
-        // Clear to the flat editor backdrop (matching the software ClearColor
-        // path); the linear `Bgra8Unorm` target keeps mesh bytes consistent with
-        // the software overlays drawn next.
+        let overlays = populate_editor_scene_3d(&mut *renderer, viewport, &inputs.items);
+        setup_editor_lighting_3d(&mut *renderer, viewport, &inputs.scene_lights);
+        let mut rv = editor_render_viewport(viewport, width, height);
+        // Same environment as the software path: the GPU renderer draws the
+        // procedural sky gradient (or flat void color) from it, so the two
+        // backends produce identical backgrounds. The linear `Bgra8Unorm`
+        // target keeps mesh bytes consistent with the software overlays drawn
+        // next.
+        rv.environment = Some(editor_render_environment(viewport));
         let (w, h, data) = renderer.render_editor_color_bgra(&rv, VIEWPORT_BG_3D);
         let mut img = Bgra8Image::from_bgra(w, h, data);
         // Composite the grid/gizmos/selection directly onto the BGRA bytes.
@@ -1000,8 +1141,11 @@ pub fn render_editor_3d_frame_gpu(viewport: &Viewport3D, tree: &SceneTree) -> Bg
 /// the "GPU" entry point renders in software and converts to bytes. Lets callers
 /// (the editor example) call one name regardless of which backend is compiled in.
 #[cfg(not(feature = "gpu-render"))]
-pub fn render_editor_3d_frame_gpu(viewport: &Viewport3D, tree: &SceneTree) -> Bgra8Image {
-    framebuffer_to_bgra(&render_editor_3d_frame(viewport, tree))
+pub fn render_editor_3d_frame_gpu(
+    viewport: &Viewport3D,
+    inputs: &Editor3DRenderInputs,
+) -> Bgra8Image {
+    framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs))
 }
 
 /// Converts a float [`FrameBuffer`] to a byte [`Bgra8Image`] (top-down BGRA).
@@ -1042,6 +1186,30 @@ mod tests {
 
     fn find<'a>(items: &'a [Render3DItem], node_id: u64) -> Option<&'a Render3DItem> {
         items.iter().find(|i| i.node_id == node_id)
+    }
+
+    /// Both render paths take their background from this one environment: the
+    /// preview toggle on yields a procedural sky, off yields the flat void
+    /// color carried as `CustomColor` (the renderer paints `ClearColor` black,
+    /// which is not the editor backdrop). Regression guard for the GPU path
+    /// ignoring the environment and clearing flat while the software path drew
+    /// the sky.
+    #[test]
+    fn editor_environment_is_sky_when_preview_enabled_flat_otherwise() {
+        use gdserver3d::environment::BackgroundMode;
+
+        let mut viewport = Viewport3D::new(64, 64);
+        viewport.environment.enabled = true;
+        viewport.environment.sky_visible = true;
+        let env = editor_render_environment(&viewport);
+        assert_eq!(env.background_mode, BackgroundMode::Sky);
+        assert!(env.sky.is_some(), "sky mode must carry a sky resource");
+
+        viewport.environment.sky_visible = false;
+        let env = editor_render_environment(&viewport);
+        assert_eq!(env.background_mode, BackgroundMode::CustomColor);
+        assert_eq!(env.background_color, VIEWPORT_BG_3D);
+        assert!(env.sky.is_none());
     }
 
     /// Every Godot geometric primitive resolves to its own real geometry; only
@@ -1129,13 +1297,49 @@ mod tests {
         gdobject::class_db::register_3d_classes();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        assert!(scene_directional_light_dir(&tree).is_none(), "no light → None");
+        assert!(scene_directional_lights(&tree).is_empty(), "no light → empty");
         tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
-        let dir = scene_directional_light_dir(&tree).expect("light direction");
+        let lights = scene_directional_lights(&tree);
+        assert_eq!(lights.len(), 1);
+        let dir = lights[0].direction;
         assert!(
             dir.x.abs() < 1e-4 && dir.y.abs() < 1e-4 && (dir.z + 1.0).abs() < 1e-4,
             "an identity DirectionalLight3D shines along -Z: {dir:?}"
         );
+        // Defaults when the node carries no light_* properties.
+        assert_eq!(lights[0].color, gdcore::math::Color::WHITE);
+        assert!((lights[0].energy - 1.0).abs() < 1e-6);
+        assert!(lights[0].angular_distance.abs() < 1e-6);
+    }
+
+    /// A scene DirectionalLight3D's authored color, energy, and angular size
+    /// flow into the render inputs (so its sky sun disc and shading match).
+    #[test]
+    fn scene_light_reads_color_energy_angular() {
+        gdobject::class_db::register_3d_classes();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let id = tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+        gdscene::node3d::set_light_color(&mut tree, id, gdcore::math::Color::new(1.0, 0.8, 0.5, 1.0));
+        gdscene::node3d::set_light_energy(&mut tree, id, 3.0);
+        gdscene::node3d::set_light_angular_distance(&mut tree, id, 2.5);
+        let lights = scene_directional_lights(&tree);
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].color, gdcore::math::Color::new(1.0, 0.8, 0.5, 1.0));
+        assert!((lights[0].energy - 3.0).abs() < 1e-6);
+        assert!((lights[0].angular_distance - 2.5).abs() < 1e-6);
+    }
+
+    /// Godot caps sky directional lights at 4; the collector does too.
+    #[test]
+    fn scene_lights_capped_at_four() {
+        gdobject::class_db::register_3d_classes();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        for i in 0..6 {
+            tree.add_child(root, Node::new(&format!("Sun{i}"), "DirectionalLight3D")).unwrap();
+        }
+        assert_eq!(scene_directional_lights(&tree).len(), 4);
     }
 
     /// A mesh's resolved `albedo_color` flows into its render item, so the

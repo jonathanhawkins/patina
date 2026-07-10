@@ -4,10 +4,10 @@
 //! Supports wireframe rendering (mesh edges) and solid rendering
 //! with a programmable vertex/fragment shader pipeline.
 
-use gdcore::math::{Color, Vector3};
+use gdcore::math::{srgb_to_linear_channel, Color, Vector3};
 use gdcore::math3d::Transform3D;
 
-use gdserver3d::environment::{BackgroundMode, Environment3D};
+use gdserver3d::environment::{BackgroundMode, Environment3D, FogMode};
 use gdserver3d::instance::{Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
@@ -243,7 +243,7 @@ impl SoftwareRenderer3D {
         // Fill background from environment.
         let mut pixels = if let Some(ref env) = viewport.environment {
             let inv_proj = invert_projection(&proj);
-            Self::fill_background(w, h, env, &inv_proj, &viewport.camera_transform)
+            Self::fill_background(w, h, env, &inv_proj, &viewport.camera_transform, &sky_suns_from_lights(&self.lights))
         } else {
             vec![Color::BLACK; pixel_count]
         };
@@ -262,7 +262,8 @@ impl SoftwareRenderer3D {
                 .material
                 .as_ref()
                 .map(|m| m.albedo)
-                .unwrap_or(Color::new(1.0, 1.0, 1.0, 1.0));
+                .unwrap_or(Color::new(1.0, 1.0, 1.0, 1.0))
+                .srgb_to_linear();
 
             let indices = &mesh.indices;
             let verts = &mesh.vertices;
@@ -312,10 +313,22 @@ impl SoftwareRenderer3D {
 
         let depth_normalized = depth_buf.into_normalized();
 
-        // Apply fog post-processing.
-        if let Some(ref env) = viewport.environment {
-            Self::apply_fog_pass(&mut pixels, &depth_normalized, w, h, env);
-        }
+        // Fog then the camera post-process (linear HDR → display sRGB), matching
+        // the solid path; the default env applies when the viewport has none.
+        let default_env = Environment3D::default();
+        let env = viewport.environment.as_ref().unwrap_or(&default_env);
+        let fog_inv_proj = invert_projection(&proj);
+        Self::apply_fog_pass(
+            &mut pixels,
+            &depth_normalized,
+            w,
+            h,
+            env,
+            &fog_inv_proj,
+            &viewport.camera_transform,
+            &sky_suns_from_lights(&self.lights),
+        );
+        crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
         FrameData3D {
             width: w,
@@ -342,13 +355,21 @@ impl SoftwareRenderer3D {
         // Fill background from environment.
         let mut pixels = if let Some(ref env) = viewport.environment {
             let inv_proj = invert_projection(&proj);
-            Self::fill_background(w, h, env, &inv_proj, &viewport.camera_transform)
+            Self::fill_background(w, h, env, &inv_proj, &viewport.camera_transform, &sky_suns_from_lights(&self.lights))
         } else {
             vec![Color::BLACK; pixel_count]
         };
 
         let mut depth_buf = DepthBuffer::new(w, h);
         let view_matrix = Self::transform_to_view_matrix(&viewport.camera_transform);
+
+        // Ambient light color (linear) from the environment, applied per surface
+        // as `ambient * albedo`. Defaults to a small grey when there is no
+        // environment (matching the old flat ambient for the bare renderer).
+        let ambient = match viewport.environment.as_ref() {
+            Some(env) => environment_ambient_color(env),
+            None => Color::new(0.1, 0.1, 0.1, 1.0),
+        };
 
         // Build light uniforms from stored lights.
         let light_uniforms: Vec<LightUniform> = self
@@ -373,10 +394,12 @@ impl SoftwareRenderer3D {
                 LightUniform {
                     kind,
                     direction,
+                    // Light color is sRGB authoring → linear, times energy
+                    // (Godot shades in linear space).
                     color: Color::new(
-                        l.color.r * l.energy,
-                        l.color.g * l.energy,
-                        l.color.b * l.energy,
+                        srgb_to_linear_channel(l.color.r) * l.energy,
+                        srgb_to_linear_channel(l.color.g) * l.energy,
+                        srgb_to_linear_channel(l.color.b) * l.energy,
                         1.0,
                     ),
                     position: l.position,
@@ -485,8 +508,11 @@ impl SoftwareRenderer3D {
                     model_matrix,
                     view_matrix,
                     projection_matrix: proj,
-                    albedo: entry.material.albedo,
-                    emission: entry.material.emission,
+                    // Material colors are sRGB authoring values; shade in linear
+                    // (the camera post-process encodes back to sRGB).
+                    albedo: entry.material.albedo.srgb_to_linear(),
+                    emission: entry.material.emission.srgb_to_linear(),
+                    ambient,
                     roughness: entry.material.roughness,
                     metallic: entry.material.metallic,
                     camera_position: viewport.camera_transform.origin,
@@ -564,10 +590,25 @@ impl SoftwareRenderer3D {
 
         let depth_normalized = depth_buf.into_normalized();
 
-        // Apply fog post-processing.
-        if let Some(ref env) = viewport.environment {
-            Self::apply_fog_pass(&mut pixels, &depth_normalized, w, h, env);
-        }
+        // Fog (linear scene space) then the camera post-process. The scene is
+        // rendered in linear HDR; the post-process (glow → tonemap →
+        // linear→sRGB) always runs — even with no environment it applies the
+        // default (Linear tonemap, glow off), i.e. just the sRGB encode — so an
+        // sRGB scene converted to linear on input round-trips to display sRGB.
+        let default_env = Environment3D::default();
+        let env = viewport.environment.as_ref().unwrap_or(&default_env);
+        let fog_inv_proj = invert_projection(&proj);
+        Self::apply_fog_pass(
+            &mut pixels,
+            &depth_normalized,
+            w,
+            h,
+            env,
+            &fog_inv_proj,
+            &viewport.camera_transform,
+            &sky_suns_from_lights(&self.lights),
+        );
+        crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
         FrameData3D {
             width: w,
@@ -584,11 +625,13 @@ impl SoftwareRenderer3D {
         env: &Environment3D,
         inv_proj: &[[f32; 4]; 4],
         camera_transform: &Transform3D,
+        suns: &[SkySun],
     ) -> Vec<Color> {
         let pixel_count = (w * h) as usize;
         match env.background_mode {
             BackgroundMode::CustomColor => {
-                vec![env.background_color; pixel_count]
+                // sRGB authoring color → linear (the post-process encodes back).
+                vec![env.background_color.srgb_to_linear(); pixel_count]
             }
             BackgroundMode::Sky if env.sky.is_some() => {
                 let mut pixels = vec![Color::BLACK; pixel_count];
@@ -602,6 +645,7 @@ impl SoftwareRenderer3D {
                             ndc_y,
                             inv_proj,
                             camera_transform,
+                            suns,
                         );
                     }
                 }
@@ -611,17 +655,78 @@ impl SoftwareRenderer3D {
         }
     }
 
-    /// Post-processes pixels with distance-based fog from the environment.
-    fn apply_fog_pass(pixels: &mut [Color], depth: &[f32], w: u32, h: u32, env: &Environment3D) {
-        if !env.fog_enabled || env.fog_density <= 0.0 {
+    /// Applies Godot's fog to a linear HDR frame in place: distance/height fog
+    /// (with sun scatter + aerial perspective) over geometry, and `fog_sky_affect`
+    /// over the sky background. Reconstructs each fragment's view-space position
+    /// from its depth via the inverse projection, so distances and heights are
+    /// world-accurate rather than a raw depth fraction. Runs before the camera
+    /// post-process, in linear space.
+    fn apply_fog_pass(
+        pixels: &mut [Color],
+        depth: &[f32],
+        w: u32,
+        h: u32,
+        env: &Environment3D,
+        inv_proj: &[[f32; 4]; 4],
+        camera_transform: &Transform3D,
+        suns: &[SkySun],
+    ) {
+        if !env.fog_enabled {
             return;
         }
-        let total = (w * h) as usize;
-        for i in 0..total {
-            let d = depth[i];
-            // Only apply fog to pixels that had geometry written (depth < 1.0).
-            if d < 1.0 {
-                pixels[i] = apply_fog(pixels[i], d, env);
+        for y in 0..h {
+            let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
+            for x in 0..w {
+                let ndc_x = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
+                let i = (y * w + x) as usize;
+                let d = depth[i];
+
+                // World-space view direction through this pixel (for scatter,
+                // aerial perspective, and sky-color sampling).
+                let far_view = pixel_view_position(ndc_x, ndc_y, 1.0, inv_proj);
+                let view_dir_world = camera_transform.basis.xform(far_view).normalized();
+
+                if d < 1.0 {
+                    // Geometry: reconstruct the fragment's view/world position.
+                    let view_pos = pixel_view_position(ndc_x, ndc_y, d, inv_proj);
+                    let distance = view_pos.length();
+                    let world_pos = camera_transform.xform(view_pos);
+                    // Aerial perspective samples the sky along the view ray.
+                    let sky_in_view = env.sky.as_ref().map(|s| {
+                        sample_sky_color(
+                            &s.material,
+                            &view_dir_world,
+                            env.background_energy_multiplier,
+                            suns,
+                        )
+                    });
+                    let (fog_color, amount) = fog_process(
+                        env,
+                        distance,
+                        world_pos.y,
+                        &view_dir_world,
+                        suns,
+                        sky_in_view,
+                    );
+                    pixels[i] = Color::new(
+                        lerp(pixels[i].r, fog_color.r, amount),
+                        lerp(pixels[i].g, fog_color.g, amount),
+                        lerp(pixels[i].b, fog_color.b, amount),
+                        pixels[i].a,
+                    );
+                } else if env.fog_sky_affect > 0.0 {
+                    // Sky background: blend toward the fog color (base + sun
+                    // scatter, no aerial — it *is* the sky) by fog_sky_affect.
+                    let (fog_color, _) =
+                        fog_process(env, 1.0, 0.0, &view_dir_world, suns, None);
+                    let a = env.fog_sky_affect;
+                    pixels[i] = Color::new(
+                        lerp(pixels[i].r, fog_color.r, a),
+                        lerp(pixels[i].g, fog_color.g, a),
+                        lerp(pixels[i].b, fog_color.b, a),
+                        pixels[i].a,
+                    );
+                }
             }
         }
     }
@@ -661,13 +766,14 @@ fn environment_background_color(
     ndc_y: f32,
     inv_proj: &[[f32; 4]; 4],
     camera_transform: &Transform3D,
+    suns: &[SkySun],
 ) -> Color {
     match env.background_mode {
-        BackgroundMode::CustomColor => env.background_color,
+        BackgroundMode::CustomColor => env.background_color.srgb_to_linear(),
         BackgroundMode::Sky => {
             if let Some(ref sky) = env.sky {
                 let dir = pixel_view_direction(ndc_x, ndc_y, inv_proj, camera_transform);
-                sample_sky_color(&sky.material, &dir, env.background_energy_multiplier)
+                sample_sky_color(&sky.material, &dir, env.background_energy_multiplier, suns)
             } else {
                 Color::BLACK
             }
@@ -703,108 +809,338 @@ fn pixel_view_direction(
     camera_transform.basis.xform(view_dir).normalized()
 }
 
+/// A directional light's contribution to sky rendering — Godot's
+/// `LIGHT0..3_*` sky-shader inputs (`SkyDirectionalLightData` in
+/// `servers/rendering/renderer_rd/environment/sky.cpp`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkySun {
+    /// World-space direction **toward** the light
+    /// (`light_transform.basis.xform(Vector3(0, 0, 1))` in Godot — the
+    /// opposite of the direction the light shines).
+    pub direction: Vector3,
+    /// Light color (`LIGHTn_COLOR`).
+    pub color: Color,
+    /// Light energy multiplier (`LIGHTn_ENERGY`).
+    pub energy: f32,
+    /// Angular diameter in radians (`LIGHTn_SIZE`, from the light's
+    /// `angular_distance` degrees). 0 draws no hard disc, only the halo.
+    pub size: f32,
+}
+
+/// Computes the environment's ambient light color in **linear** space, applied
+/// to surfaces as `ambient * albedo`. Mirrors Godot's `AmbientSource`:
+///
+/// * `Sky` — a cheap estimate of the sky's diffuse irradiance: the average of
+///   the procedural sky sampled over the 6 axis directions (no sun disc, so the
+///   ambient is the soft dome color, not a hotspot), times `ambient_energy`.
+/// * `Color` — the flat `ambient_color` (sRGB→linear) times energy.
+/// * `Background` — the sky average if there is a sky, else the background color.
+/// * `Disabled` — black.
+///
+/// This replaces the old flat grey ambient so sky-lit surfaces take on the
+/// sky's tint (and brightness) the way Godot's editor viewport shows them.
+pub fn environment_ambient_color(env: &Environment3D) -> Color {
+    use gdserver3d::environment::AmbientSource;
+    let energy = env.ambient_energy;
+
+    let sky_average = |env: &Environment3D| -> Option<Color> {
+        let sky = env.sky.as_ref()?;
+        let dirs = [
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.0, 0.0, -1.0),
+        ];
+        let (mut r, mut g, mut b) = (0.0, 0.0, 0.0);
+        for d in &dirs {
+            let c = sample_sky_color(&sky.material, d, env.background_energy_multiplier, &[]);
+            r += c.r;
+            g += c.g;
+            b += c.b;
+        }
+        let n = dirs.len() as f32;
+        Some(Color::new(r / n, g / n, b / n, 1.0))
+    };
+
+    let scaled = |c: Color| Color::new(c.r * energy, c.g * energy, c.b * energy, 1.0);
+
+    match env.ambient_source {
+        AmbientSource::Disabled => Color::BLACK,
+        AmbientSource::Color => scaled(env.ambient_color.srgb_to_linear()),
+        AmbientSource::Sky => scaled(sky_average(env).unwrap_or(Color::BLACK)),
+        AmbientSource::Background => match sky_average(env) {
+            Some(avg) => scaled(avg),
+            None => scaled(env.background_color.srgb_to_linear()),
+        },
+    }
+}
+
+/// Collects the sky-visible directional lights the way Godot's sky renderer
+/// does: scene order, capped at 4 (`MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS`).
+pub fn sky_suns_from_lights(lights: &[Light3D]) -> Vec<SkySun> {
+    lights
+        .iter()
+        .filter(|l| l.light_type == LightType::Directional && l.sky)
+        .take(4)
+        .map(|l| SkySun {
+            direction: (Vector3::ZERO - l.direction).normalized(),
+            color: l.color,
+            energy: l.energy,
+            size: l.angular_distance.to_radians(),
+        })
+        .collect()
+}
+
 /// Samples a sky material color for the given world-space view direction.
-fn sample_sky_color(material: &SkyMaterial, dir: &Vector3, energy: f32) -> Color {
+fn sample_sky_color(material: &SkyMaterial, dir: &Vector3, energy: f32, suns: &[SkySun]) -> Color {
     match material {
-        SkyMaterial::Procedural(mat) => sample_procedural_sky(mat, dir, energy),
+        SkyMaterial::Procedural(mat) => sample_procedural_sky(mat, dir, energy, suns),
         SkyMaterial::Physical(mat) => sample_physical_sky(mat, dir, energy),
         SkyMaterial::Panoramic(_) => {
-            // Panoramic sky requires texture lookup — show a neutral color.
-            Color::new(0.3, 0.3, 0.35, 1.0)
+            // Panoramic sky requires texture lookup — show a neutral color
+            // (linear, since the sampler outputs linear HDR).
+            Color::new(
+                srgb_to_linear_channel(0.3),
+                srgb_to_linear_channel(0.3),
+                srgb_to_linear_channel(0.35),
+                1.0,
+            )
         }
     }
 }
 
-/// Evaluates the procedural sky gradient for a view direction.
+/// Evaluates the procedural sky for a view direction — a port of Godot 4.6's
+/// generated `ProceduralSkyMaterial` sky shader
+/// (`scene/resources/3d/sky_material.cpp`):
 ///
-/// The Y component of the direction determines the blend between sky/ground
-/// colors and horizon colors, matching Godot's `ProceduralSkyMaterial` behavior.
-fn sample_procedural_sky(mat: &ProceduralSkyMaterial, dir: &Vector3, energy: f32) -> Color {
-    let y = dir.y.clamp(-1.0, 1.0);
+/// ```glsl
+/// vec3 sky = mix(sky_top_color, sky_horizon_color,
+///                clamp(pow(1.0 - v_angle, inv_sky_curve), 0.0, 1.0));
+/// // per enabled directional light:
+/// //   full LIGHT_COLOR * LIGHT_ENERGY inside the disc (dot > cos(LIGHT_SIZE)),
+/// //   halo falloff pow(1.0 - c2, inv_sun_curve) out to sun_angle_max
+/// vec3 ground = mix(ground_bottom_color, ground_horizon_color,
+///                   clamp(pow(1.0 + v_angle, inv_ground_curve), 0.0, 1.0));
+/// COLOR = mix(ground, sky, step(0.0, EYEDIR.y));
+/// ```
+///
+/// with Godot's uniform mappings `inv_sky_curve = 0.6 / sky_curve`,
+/// `inv_ground_curve = 0.6 / ground_curve`, `sun_angle_max` as
+/// `cos(deg_to_rad(degrees))`, and `inv_sun_curve = 1.6 / pow(sun_curve, 1.4)`.
+///
+/// **Output is linear scene-referred HDR, not display sRGB.** The material's
+/// `source_color` uniforms are sRGB authoring values, so each is premultiplied
+/// by its hemisphere energy and converted sRGB→linear exactly as Godot's
+/// setter + `source_color` binding does (`srgb_to_linear(color * energy)`), the
+/// gradient/sun mix happens in linear space, and the result is *not* clamped —
+/// a bright sun (`LIGHT_COLOR * LIGHT_ENERGY > 1`) stays HDR so the camera
+/// post-process can bloom and tonemap it. The final `linear_to_srgb` encode is
+/// the post-process's job, not the sky's.
+fn sample_procedural_sky(
+    mat: &ProceduralSkyMaterial,
+    dir: &Vector3,
+    energy: f32,
+    suns: &[SkySun],
+) -> Color {
+    let v_angle = dir.y.clamp(-1.0, 1.0);
+    // Godot applies hemisphere energy in sRGB space, then the `source_color`
+    // bind converts to linear: `srgb_to_linear(channel * energy)`.
+    let lin = |c: f32, e: f32| srgb_to_linear_channel(c * e);
 
-    let (top, horizon, curve, mat_energy) = if y >= 0.0 {
-        // Sky hemisphere
-        (
-            &mat.sky_top_color,
-            &mat.sky_horizon_color,
-            mat.sky_curve,
-            mat.sky_energy_multiplier,
-        )
+    let (r, g, b) = if v_angle >= 0.0 {
+        // Sky hemisphere: horizon→top gradient, then sun discs/halos on top.
+        let inv_sky_curve = 0.6 / mat.sky_curve.max(1e-4);
+        let t = (1.0 - v_angle).powf(inv_sky_curve).clamp(0.0, 1.0);
+        let e = mat.sky_energy_multiplier;
+        let mut rgb = (
+            lerp(lin(mat.sky_top_color.r, e), lin(mat.sky_horizon_color.r, e), t),
+            lerp(lin(mat.sky_top_color.g, e), lin(mat.sky_horizon_color.g, e), t),
+            lerp(lin(mat.sky_top_color.b, e), lin(mat.sky_horizon_color.b, e), t),
+        );
+
+        let cos_angle_max = mat.sun_angle_max.to_radians().cos();
+        let inv_sun_curve = 1.6 / mat.sun_curve.max(1e-4).powf(1.4);
+        for sun in suns.iter().take(4) {
+            let sun_angle = sun.direction.dot(*dir);
+            let sun_size = sun.size.cos();
+            // LIGHTn_COLOR is the light color converted to linear (sky.cpp:
+            // `light_get_color(base).srgb_to_linear()`), times LIGHTn_ENERGY.
+            let sun_rgb = (
+                srgb_to_linear_channel(sun.color.r) * sun.energy,
+                srgb_to_linear_channel(sun.color.g) * sun.energy,
+                srgb_to_linear_channel(sun.color.b) * sun.energy,
+            );
+            if sun_angle > sun_size {
+                rgb = sun_rgb;
+            } else if sun_angle > cos_angle_max && sun_size > cos_angle_max {
+                let c2 = (sun_size - sun_angle) / (sun_size - cos_angle_max);
+                let f = (1.0 - c2).powf(inv_sun_curve).clamp(0.0, 1.0);
+                rgb = (
+                    lerp(rgb.0, sun_rgb.0, f),
+                    lerp(rgb.1, sun_rgb.1, f),
+                    lerp(rgb.2, sun_rgb.2, f),
+                );
+            }
+        }
+        rgb
     } else {
-        // Ground hemisphere
+        // Ground hemisphere: bottom→horizon gradient (no sun below horizon).
+        let inv_ground_curve = 0.6 / mat.ground_curve.max(1e-4);
+        let t = (1.0 + v_angle).powf(inv_ground_curve).clamp(0.0, 1.0);
+        let e = mat.ground_energy_multiplier;
         (
-            &mat.ground_bottom_color,
-            &mat.ground_horizon_color,
-            mat.ground_curve,
-            mat.ground_energy_multiplier,
+            lerp(lin(mat.ground_bottom_color.r, e), lin(mat.ground_horizon_color.r, e), t),
+            lerp(lin(mat.ground_bottom_color.g, e), lin(mat.ground_horizon_color.g, e), t),
+            lerp(lin(mat.ground_bottom_color.b, e), lin(mat.ground_horizon_color.b, e), t),
         )
     };
 
-    // Godot uses pow(abs(y), curve) to blend from horizon to top/bottom.
-    let t = y.abs().powf(curve.max(0.001));
-    let r = lerp(horizon.r, top.r, t) * mat_energy * energy;
-    let g = lerp(horizon.g, top.g, t) * mat_energy * energy;
-    let b = lerp(horizon.b, top.b, t) * mat_energy * energy;
-
-    Color::new(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0)
+    // Environment background energy (the shader's `* exposure`), in linear.
+    Color::new(r * energy, g * energy, b * energy, 1.0)
 }
 
 /// Simplified physical sky approximation using Rayleigh-like scattering.
+///
+/// Like [`sample_procedural_sky`], this outputs linear HDR: the `source_color`
+/// material colors are converted sRGB→linear and the result is left unclamped
+/// for the camera post-process to tonemap.
 fn sample_physical_sky(mat: &PhysicalSkyMaterial, dir: &Vector3, energy: f32) -> Color {
     let y = dir.y.clamp(-1.0, 1.0);
 
     if y < 0.0 {
-        // Below horizon — return ground color.
+        // Below horizon — return ground color (linear).
         return Color::new(
-            mat.ground_color.r * energy,
-            mat.ground_color.g * energy,
-            mat.ground_color.b * energy,
+            srgb_to_linear_channel(mat.ground_color.r) * energy,
+            srgb_to_linear_channel(mat.ground_color.g) * energy,
+            srgb_to_linear_channel(mat.ground_color.b) * energy,
             1.0,
         );
     }
 
-    // Simplified atmospheric scattering: blend from horizon to zenith.
+    // Simplified atmospheric scattering: blend from horizon to zenith, in linear.
     let t = y.powf(0.5);
-    let zenith = &mat.rayleigh_color;
+    let zr = srgb_to_linear_channel(mat.rayleigh_color.r);
+    let zg = srgb_to_linear_channel(mat.rayleigh_color.g);
+    let zb = srgb_to_linear_channel(mat.rayleigh_color.b);
     let horizon_factor = 1.0 / (1.0 + mat.turbidity * 0.1);
-    let hr = lerp(1.0, zenith.r, t) * horizon_factor;
-    let hg = lerp(1.0, zenith.g, t) * horizon_factor;
-    let hb = lerp(1.0, zenith.b, t) * horizon_factor;
+    let hr = lerp(1.0, zr, t) * horizon_factor;
+    let hg = lerp(1.0, zg, t) * horizon_factor;
+    let hb = lerp(1.0, zb, t) * horizon_factor;
 
     let e = mat.energy_multiplier * energy;
-    Color::new(
-        (hr * e).clamp(0.0, 1.0),
-        (hg * e).clamp(0.0, 1.0),
-        (hb * e).clamp(0.0, 1.0),
-        1.0,
+    Color::new(hr * e, hg * e, hb * e, 1.0)
+}
+
+/// Reconstructs a view-space position from a pixel's NDC coordinates and depth,
+/// using the inverse projection. `ndc_z` is the stored (GL-convention) depth.
+fn pixel_view_position(
+    ndc_x: f32,
+    ndc_y: f32,
+    ndc_z: f32,
+    inv_proj: &[[f32; 4]; 4],
+) -> Vector3 {
+    let x = inv_proj[0][0] * ndc_x + inv_proj[1][0] * ndc_y + inv_proj[2][0] * ndc_z + inv_proj[3][0];
+    let y = inv_proj[0][1] * ndc_x + inv_proj[1][1] * ndc_y + inv_proj[2][1] * ndc_z + inv_proj[3][1];
+    let z = inv_proj[0][2] * ndc_x + inv_proj[1][2] * ndc_y + inv_proj[2][2] * ndc_z + inv_proj[3][2];
+    let w = inv_proj[0][3] * ndc_x + inv_proj[1][3] * ndc_y + inv_proj[2][3] * ndc_z + inv_proj[3][3];
+    if w.abs() > 1e-9 {
+        Vector3::new(x / w, y / w, z / w)
+    } else {
+        Vector3::new(x, y, z)
+    }
+}
+
+/// The fog color and amount for a fragment, a port of Godot 4.6's `fog_process`
+/// (`scene_forward_clustered.glsl`). All colors are **linear** (fog runs in
+/// linear scene space, before tonemapping).
+///
+/// * `view_distance` — distance from the camera to the fragment.
+/// * `world_y` — the fragment's world-space height (for height fog).
+/// * `view_dir_world` — normalized direction from the camera to the fragment
+///   (for sun scatter and aerial perspective).
+/// * `suns` — sky-visible directional lights (for sun scatter).
+/// * `sky_in_view` — the linear sky color along `view_dir_world`, or `None`
+///   (for aerial perspective).
+fn fog_process(
+    env: &Environment3D,
+    view_distance: f32,
+    world_y: f32,
+    view_dir_world: &Vector3,
+    suns: &[SkySun],
+    sky_in_view: Option<Color>,
+) -> (Color, f32) {
+    // Base fog color: sRGB authoring → linear, times energy.
+    let base = env.fog_light_color.srgb_to_linear();
+    let mut fog = [
+        base.r * env.fog_light_energy,
+        base.g * env.fog_light_energy,
+        base.b * env.fog_light_energy,
+    ];
+
+    // Aerial perspective: blend the fog color toward the sky in the view dir.
+    if env.fog_aerial_perspective > 0.0 {
+        if let Some(sky) = sky_in_view {
+            let a = env.fog_aerial_perspective;
+            fog = [
+                lerp(fog[0], sky.r, a),
+                lerp(fog[1], sky.g, a),
+                lerp(fog[2], sky.b, a),
+            ];
+        }
+    }
+
+    // Sun scatter: directional lights bleed into the fog toward the viewer.
+    if env.fog_sun_scatter > 0.001 {
+        for sun in suns {
+            let amt = view_dir_world.dot(sun.direction).max(0.0).powf(8.0) * env.fog_sun_scatter;
+            fog[0] += srgb_to_linear_channel(sun.color.r) * sun.energy * amt;
+            fog[1] += srgb_to_linear_channel(sun.color.g) * sun.energy * amt;
+            fog[2] += srgb_to_linear_channel(sun.color.b) * sun.energy * amt;
+        }
+    }
+
+    // Fog amount from distance.
+    let mut amount = match env.fog_mode {
+        FogMode::Exponential => {
+            // Godot: 1 - exp(min(0, -distance * density)).
+            1.0 - (-view_distance * env.fog_density).min(0.0).exp()
+        }
+        FogMode::Depth => {
+            let z = smoothstep(env.fog_depth_begin, env.fog_depth_end, view_distance);
+            z.powf(env.fog_depth_curve.max(1e-4)) * env.fog_density
+        }
+    };
+
+    // Height fog: strongest below `fog_height`, combined by max.
+    if env.fog_height_density.abs() >= 0.0001 {
+        let y_dist = world_y - env.fog_height;
+        let vfog = 1.0 - (y_dist * env.fog_height_density).min(0.0).exp();
+        amount = vfog.max(amount);
+    }
+
+    (
+        Color::new(fog[0], fog[1], fog[2], 1.0),
+        amount.clamp(0.0, 1.0),
     )
 }
 
-/// Applies distance-based fog to a pixel color.
-///
-/// Blends the fragment color toward the fog color based on the linear
-/// depth fraction and the environment's fog density.
-fn apply_fog(fragment: Color, depth_fraction: f32, env: &Environment3D) -> Color {
-    if !env.fog_enabled || env.fog_density <= 0.0 {
-        return fragment;
+/// GLSL `smoothstep`.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if (edge1 - edge0).abs() < 1e-9 {
+        return if x < edge0 { 0.0 } else { 1.0 };
     }
-    // Exponential fog: factor = exp(-density * distance).
-    // depth_fraction is 0..1 where 1 is the far plane.
-    let fog_amount = 1.0 - (-env.fog_density * depth_fraction * 100.0).exp();
-    let fog_amount = fog_amount.clamp(0.0, 1.0);
-    let fc = &env.fog_light_color;
-    Color::new(
-        lerp(fragment.r, fc.r, fog_amount),
-        lerp(fragment.g, fc.g, fog_amount),
-        lerp(fragment.b, fc.b, fog_amount),
-        fragment.a,
-    )
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Inverts a column-major 4x4 projection matrix.
 ///
 /// Uses a simplified inversion that works for typical perspective matrices.
-fn invert_projection(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+/// `pub(crate)` so the GPU sky pass unprojects pixels with the exact same
+/// matrix as the software background fill.
+pub(crate) fn invert_projection(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     // For a standard perspective matrix the structure is simple enough
     // that we can invert element-wise with the known layout.
     let mut inv = [[0.0f32; 4]; 4];
@@ -1481,6 +1817,195 @@ mod tests {
         assert!(avg.g < 0.1, "Expected no green, got g={:.3}", avg.g);
     }
 
+    /// Regression: the procedural sky must use Godot's gradient formula
+    /// `mix(top, horizon, pow(1 ∓ y, 0.6 / curve))`, not `pow(|y|, curve)`.
+    /// The old formula raced to the top/bottom colors right at the horizon,
+    /// erasing the bright horizon haze band ("fog") Godot shows.
+    ///
+    /// The sampler outputs **linear** HDR, so expected values are computed with
+    /// the same sRGB→linear conversion the implementation uses.
+    #[test]
+    fn procedural_sky_horizon_band_matches_godot() {
+        use gdcore::math::srgb_to_linear_channel as s2l;
+        let mat = ProceduralSkyMaterial::default();
+
+        // Slightly above the horizon: pow(0.9, 4) ≈ 0.656 → still mostly the
+        // whitish horizon color (0.646), not the darker top color (0.385).
+        // Endpoints are linearized (Godot's source_color), then mixed in linear.
+        let just_above = sample_procedural_sky(&mat, &Vector3::new(0.0, 0.1, -1.0).normalized(), 1.0, &[]);
+        let t = (1.0f32 - 0.099_503_72).powf(0.6 / 0.15);
+        let expected_r = s2l(0.385) + (s2l(0.646) - s2l(0.385)) * t;
+        assert!(
+            (just_above.r - expected_r).abs() < 1e-3,
+            "sky gradient must follow Godot's pow(1-y, 0.6/curve) in linear: got r={:.4}, want {:.4}",
+            just_above.r,
+            expected_r
+        );
+        // The horizon band must be visibly brighter than the zenith.
+        let zenith = sample_procedural_sky(&mat, &Vector3::new(0.0, 1.0, 0.0), 1.0, &[]);
+        assert!(
+            just_above.r > zenith.r + 0.05,
+            "horizon haze must be brighter than zenith: horizon r={:.3}, zenith r={:.3}",
+            just_above.r,
+            zenith.r
+        );
+
+        // Just below the horizon: pow(0.98, 30) ≈ 0.545 → a whitish band, not
+        // the dark ground_bottom color the old formula produced immediately.
+        let just_below = sample_procedural_sky(&mat, &Vector3::new(0.0, -0.02, -1.0).normalized(), 1.0, &[]);
+        assert!(
+            just_below.r > s2l(0.4),
+            "ground horizon band must stay bright just below the horizon, got r={:.3}",
+            just_below.r
+        );
+        // Far below: pure ground_bottom_color (dark brown), in linear.
+        let far_below = sample_procedural_sky(&mat, &Vector3::new(0.0, -1.0, 0.0), 1.0, &[]);
+        assert!(
+            (far_below.r - s2l(0.2)).abs() < 1e-3 && (far_below.b - s2l(0.133)).abs() < 1e-3,
+            "nadir must be ground_bottom_color (linear), got {:?}",
+            far_below
+        );
+    }
+
+    /// The sky draws a sun disc + halo per directional light exactly like
+    /// Godot's ProceduralSkyMaterial shader (LIGHT0..3 blocks).
+    #[test]
+    fn procedural_sky_renders_sun_disc_and_halo() {
+        let mat = ProceduralSkyMaterial::default();
+        let sun = SkySun {
+            direction: Vector3::new(0.0, 1.0, 0.0),
+            color: Color::WHITE,
+            energy: 1.0,
+            size: 0.0,
+        };
+
+        // Looking straight at the sun: c2 = 0 → full sun color.
+        let center = sample_procedural_sky(&mat, &Vector3::new(0.0, 1.0, 0.0), 1.0, &[sun]);
+        assert!(
+            center.r > 0.99 && center.g > 0.99 && center.b > 0.99,
+            "sun center must be the light color, got {:?}",
+            center
+        );
+
+        // Same direction without the sun: the plain zenith gradient.
+        let no_sun = sample_procedural_sky(&mat, &Vector3::new(0.0, 1.0, 0.0), 1.0, &[]);
+        assert!(
+            no_sun.r < 0.5,
+            "zenith without a sun must stay the gradient color, got {:?}",
+            no_sun
+        );
+
+        // 2° off-center (inside sun_angle_max=30°, where the tight default
+        // falloff pow(1-c2, 22.78) still contributes ~90%): partial halo —
+        // brighter than the gradient, dimmer than the disc.
+        let off = Vector3::new(2f32.to_radians().sin(), 2f32.to_radians().cos(), 0.0);
+        let halo = sample_procedural_sky(&mat, &off, 1.0, &[sun]);
+        let base = sample_procedural_sky(&mat, &off, 1.0, &[]);
+        assert!(
+            halo.r > base.r + 0.01 && halo.r < 1.0,
+            "halo must blend toward the sun color: halo r={:.3}, base r={:.3}",
+            halo.r,
+            base.r
+        );
+
+        // 45° off-center (outside sun_angle_max): no contribution.
+        let far = Vector3::new(45f32.to_radians().sin(), 45f32.to_radians().cos(), 0.0);
+        let outside = sample_procedural_sky(&mat, &far, 1.0, &[sun]);
+        let outside_base = sample_procedural_sky(&mat, &far, 1.0, &[]);
+        assert!(
+            (outside.r - outside_base.r).abs() < 1e-6,
+            "outside sun_angle_max the sky must be untouched"
+        );
+
+        // The ground hemisphere never shows the sun (Godot mixes the sun into
+        // the sky term only).
+        let below = sample_procedural_sky(
+            &mat,
+            &Vector3::new(0.0, -1.0, 0.0),
+            1.0,
+            &[SkySun { direction: Vector3::new(0.0, -1.0, 0.0), ..sun }],
+        );
+        assert!(
+            below.r < 0.3,
+            "sun must not render below the horizon, got {:?}",
+            below
+        );
+    }
+
+    /// `sky_suns_from_lights` mirrors Godot's sky light collection: scene
+    /// order, directional + sky-visible only, capped at 4, direction negated
+    /// to point toward the sun.
+    #[test]
+    fn sky_suns_collected_like_godot() {
+        use gdserver3d::light::{Light3D, Light3DId};
+
+        let mut dir_light = Light3D::directional(Light3DId(1));
+        dir_light.direction = Vector3::new(0.0, -1.0, 0.0);
+        dir_light.angular_distance = 0.5;
+
+        let mut no_sky = Light3D::directional(Light3DId(2));
+        no_sky.sky = false;
+
+        let point = Light3D::point(Light3DId(3), Vector3::ZERO);
+
+        let suns = sky_suns_from_lights(&[dir_light, no_sky, point]);
+        assert_eq!(suns.len(), 1, "only sky-visible directional lights count");
+        assert!((suns[0].direction.y - 1.0).abs() < 1e-6, "direction points toward the sun");
+        assert!((suns[0].size - 0.5f32.to_radians()).abs() < 1e-6);
+
+        let many: Vec<_> = (0..6)
+            .map(|i| Light3D::directional(Light3DId(10 + i)))
+            .collect();
+        assert_eq!(sky_suns_from_lights(&many).len(), 4, "capped at 4 like Godot");
+    }
+
+    /// End-to-end: a directional light aimed at the camera puts a sun disc in
+    /// the rendered sky background.
+    #[test]
+    fn rendered_frame_contains_sun_from_directional_light() {
+        use gdserver3d::light::{Light3D, Light3DId};
+
+        let mut renderer = SoftwareRenderer3D::new();
+        let env = Environment3D {
+            background_mode: BackgroundMode::Sky,
+            sky: Some(gdserver3d::sky::Sky::default()),
+            ..Default::default()
+        };
+        // Default camera looks down -Z; a light travelling +Z and slightly
+        // down has its sun just above the horizon at -Z, in the upper half of
+        // the viewport (the exact center ray sits a hair below the horizon,
+        // where Godot never draws the sun).
+        let lid = Light3DId(1);
+        renderer.add_light(lid);
+        let mut light = Light3D::directional(lid);
+        light.direction = Vector3::new(0.0, -0.15, 1.0).normalized();
+        renderer.update_light(&light);
+
+        let brightest = |pixels: &[Color]| {
+            pixels
+                .iter()
+                .map(|c| c.r.min(c.g).min(c.b))
+                .fold(0.0f32, f32::max)
+        };
+
+        let vp = viewport_with_env(env.clone());
+        let frame = renderer.render_frame(&vp);
+        assert!(
+            brightest(&frame.pixels) > 0.9,
+            "the sky must contain a near-white sun disc, brightest={:.3}",
+            brightest(&frame.pixels)
+        );
+
+        // Without the light the sky is the plain gradient — no white pixel.
+        let mut bare = SoftwareRenderer3D::new();
+        let frame_bare = bare.render_frame(&viewport_with_env(env));
+        assert!(
+            brightest(&frame_bare.pixels) < 0.8,
+            "without a directional light there must be no sun, brightest={:.3}",
+            brightest(&frame_bare.pixels)
+        );
+    }
+
     #[test]
     fn sky_mode_without_sky_resource_is_black() {
         let mut renderer = SoftwareRenderer3D::new();
@@ -1543,6 +2068,95 @@ mod tests {
             }
         }
         assert!(fog_shifted, "Fog should shift geometry toward fog color");
+    }
+
+    /// `environment_ambient_color` derives a sky-tinted ambient (linear) from
+    /// the environment, replacing the old flat grey — matching Godot's
+    /// AmbientSource modes.
+    #[test]
+    fn ambient_color_from_environment() {
+        use gdcore::math::srgb_to_linear_channel as s2l;
+        use gdserver3d::environment::AmbientSource;
+
+        // Sky source: soft dome average of the procedural sky, × energy. The
+        // default sky is bluish, so ambient is non-zero and blue-biased.
+        let mut env = Environment3D {
+            background_mode: BackgroundMode::Sky,
+            sky: Some(gdserver3d::sky::Sky::default()),
+            ambient_source: AmbientSource::Sky,
+            ambient_energy: 0.5,
+            ..Default::default()
+        };
+        let amb = environment_ambient_color(&env);
+        assert!(amb.r > 0.0 && amb.b > amb.r, "sky ambient must be soft and blue-biased: {amb:?}");
+        // Halving energy halves the ambient.
+        env.ambient_energy = 0.25;
+        let amb_half = environment_ambient_color(&env);
+        assert!((amb_half.b - amb.b * 0.5).abs() < 1e-4, "ambient scales with energy");
+
+        // Color source: flat ambient_color (sRGB→linear) × energy.
+        let env_c = Environment3D {
+            ambient_source: AmbientSource::Color,
+            ambient_color: Color::new(0.5, 0.25, 0.1, 1.0),
+            ambient_energy: 1.0,
+            ..Default::default()
+        };
+        let amb_c = environment_ambient_color(&env_c);
+        assert!((amb_c.r - s2l(0.5)).abs() < 1e-4 && (amb_c.g - s2l(0.25)).abs() < 1e-4);
+
+        // Disabled: black.
+        let env_d = Environment3D { ambient_source: AmbientSource::Disabled, ..Default::default() };
+        assert_eq!(environment_ambient_color(&env_d), Color::BLACK);
+    }
+
+    /// `fog_process` (the pure Godot fog math) — exponential falloff, height
+    /// fog, sun scatter, aerial perspective, and linear fog color.
+    #[test]
+    fn fog_process_math_matches_godot() {
+        use gdcore::math::srgb_to_linear_channel as s2l;
+        let mut env = Environment3D {
+            fog_enabled: true,
+            fog_density: 0.1,
+            ..Default::default()
+        };
+        let up = Vector3::new(0.0, 1.0, 0.0);
+
+        // Exponential fog grows with distance: 1 - exp(-dist*density).
+        let (color, near) = fog_process(&env, 1.0, 0.0, &up, &[], None);
+        let (_, far) = fog_process(&env, 20.0, 0.0, &up, &[], None);
+        assert!((near - (1.0 - (-0.1f32).exp())).abs() < 1e-5, "near amount {near}");
+        assert!(far > near, "fog must deepen with distance: {near} -> {far}");
+        // Fog color is the sRGB fog_light_color in linear (default 0.518,...).
+        assert!((color.r - s2l(0.518)).abs() < 1e-4, "fog color must be linear");
+
+        // Height fog: below fog_height with positive density it dominates.
+        env.fog_height = 0.0;
+        env.fog_height_density = 1.0;
+        let (_, low) = fog_process(&env, 1.0, -5.0, &up, &[], None); // well below
+        let (_, high) = fog_process(&env, 1.0, 5.0, &up, &[], None); // above
+        assert!(low > high, "height fog must be denser below fog_height: {low} vs {high}");
+
+        // Sun scatter adds the sun color when looking toward the sun.
+        env.fog_height_density = 0.0;
+        env.fog_sun_scatter = 1.0;
+        let sun = SkySun {
+            direction: Vector3::new(0.0, 0.0, -1.0),
+            color: Color::WHITE,
+            energy: 1.0,
+            size: 0.0,
+        };
+        let toward = Vector3::new(0.0, 0.0, -1.0); // straight at the sun
+        let away = Vector3::new(0.0, 0.0, 1.0);
+        let (c_toward, _) = fog_process(&env, 1.0, 0.0, &toward, &[sun], None);
+        let (c_away, _) = fog_process(&env, 1.0, 0.0, &away, &[sun], None);
+        assert!(c_toward.r > c_away.r + 0.3, "sun scatter must brighten fog toward the sun");
+
+        // Aerial perspective blends fog toward the sampled sky color.
+        env.fog_sun_scatter = 0.0;
+        env.fog_aerial_perspective = 1.0;
+        let sky = Color::new(0.05, 0.1, 0.9, 1.0); // vivid blue sky
+        let (c_aerial, _) = fog_process(&env, 1.0, 0.0, &up, &[], Some(sky));
+        assert!((c_aerial.b - 0.9).abs() < 1e-4, "aerial=1 → fog color becomes the sky color");
     }
 
     #[test]

@@ -208,6 +208,15 @@ pub struct Light3D {
     pub shadow_enabled: bool,
     /// Shadow mode for OmniLight3D (ignored for other light types).
     pub omni_shadow_mode: OmniShadowMode,
+    /// Angular size of the light in degrees (Godot's `light_angular_distance`).
+    /// For directional lights this is the apparent diameter of the sun disc
+    /// drawn by sky materials; 0 means a point-like sun (halo only).
+    pub angular_distance: f32,
+    /// Whether the light contributes to sky rendering (Godot's
+    /// `DirectionalLight3D.sky_mode` LIGHT_AND_SKY vs LIGHT_ONLY). The editor
+    /// uses this to keep its dim fill light out of the sky when the preview
+    /// sun is toggled off.
+    pub sky: bool,
 }
 
 impl Light3D {
@@ -226,6 +235,8 @@ impl Light3D {
             spot_angle_attenuation: 1.0,
             shadow_enabled: false,
             omni_shadow_mode: OmniShadowMode::default(),
+            angular_distance: 0.0,
+            sky: true,
         }
     }
 
@@ -244,6 +255,8 @@ impl Light3D {
             spot_angle_attenuation: 1.0,
             shadow_enabled: false,
             omni_shadow_mode: OmniShadowMode::default(),
+            angular_distance: 0.0,
+            sky: true,
         }
     }
 
@@ -262,6 +275,8 @@ impl Light3D {
             spot_angle_attenuation: 1.0,
             shadow_enabled: false,
             omni_shadow_mode: OmniShadowMode::default(),
+            angular_distance: 0.0,
+            sky: true,
         }
     }
 }

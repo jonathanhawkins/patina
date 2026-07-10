@@ -548,6 +548,59 @@ impl Color {
             self.a + (to.a - self.a) * t,
         )
     }
+
+    /// Converts this color from sRGB gamma space to linear space.
+    ///
+    /// Matches Godot's `Color::srgb_to_linear` (the standard sRGB EOTF): a
+    /// linear segment below 0.04045 and a `pow(_, 2.4)` curve above. Rendering
+    /// math (light transport, gradient mixing, tonemapping) is done in linear
+    /// space; authoring colors (`source_color` in Godot) are sRGB and must be
+    /// converted first. Alpha is left unchanged. The RGB channels are converted
+    /// even outside `[0, 1]` (HDR authoring), so the transform is exact and
+    /// invertible via [`linear_to_srgb`](Self::linear_to_srgb).
+    pub fn srgb_to_linear(self) -> Self {
+        Self::new(
+            srgb_to_linear_channel(self.r),
+            srgb_to_linear_channel(self.g),
+            srgb_to_linear_channel(self.b),
+            self.a,
+        )
+    }
+
+    /// Converts this color from linear space back to sRGB gamma space.
+    ///
+    /// Matches Godot's `Color::linear_to_srgb` (the standard sRGB OETF), the
+    /// inverse of [`srgb_to_linear`](Self::srgb_to_linear). This is the final
+    /// step of the camera pipeline: after linear rendering + tonemapping the
+    /// image is encoded to sRGB for display. Alpha is left unchanged.
+    pub fn linear_to_srgb(self) -> Self {
+        Self::new(
+            linear_to_srgb_channel(self.r),
+            linear_to_srgb_channel(self.g),
+            linear_to_srgb_channel(self.b),
+            self.a,
+        )
+    }
+}
+
+/// sRGB→linear transfer function for a single channel (Godot's exact curve).
+#[inline]
+pub fn srgb_to_linear_channel(c: f32) -> f32 {
+    if c < 0.04045 {
+        c * (1.0 / 12.92)
+    } else {
+        ((c + 0.055) * (1.0 / 1.055)).powf(2.4)
+    }
+}
+
+/// linear→sRGB transfer function for a single channel (Godot's exact curve).
+#[inline]
+pub fn linear_to_srgb_channel(c: f32) -> f32 {
+    if c < 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +624,47 @@ mod tests {
 
         let n = v.normalized();
         assert!(approx_eq(n.length(), 1.0));
+    }
+
+    #[test]
+    fn srgb_linear_endpoints_and_known_values() {
+        // 0 and 1 are fixed points of both directions.
+        assert!(approx_eq(srgb_to_linear_channel(0.0), 0.0));
+        assert!(approx_eq(srgb_to_linear_channel(1.0), 1.0));
+        assert!(approx_eq(linear_to_srgb_channel(0.0), 0.0));
+        assert!(approx_eq(linear_to_srgb_channel(1.0), 1.0));
+
+        // Godot's ProceduralSkyMaterial default sky_top_color 0.385 (sRGB) is
+        // ~0.12260 linear (matches Godot's Color(0.385,...).srgb_to_linear()).
+        assert!((srgb_to_linear_channel(0.385) - 0.122_60).abs() < 1e-4);
+        // Mid-gray 0.5 sRGB → ~0.2140 linear.
+        assert!((srgb_to_linear_channel(0.5) - 0.214_04).abs() < 1e-4);
+        // The linear segment near black: 0.04 sRGB (< 0.04045) is a straight
+        // 1/12.92 slope.
+        assert!((srgb_to_linear_channel(0.04) - 0.04 / 12.92).abs() < 1e-7);
+    }
+
+    #[test]
+    fn srgb_linear_round_trip_is_identity() {
+        // The two transfer functions are exact inverses across the range,
+        // including HDR values above 1.0 (used for bright authoring colors).
+        for &c in &[0.0f32, 0.002, 0.05, 0.25, 0.385, 0.5, 0.75, 1.0, 2.5, 12.0] {
+            let round = linear_to_srgb_channel(srgb_to_linear_channel(c));
+            assert!(
+                (round - c).abs() < 1e-5,
+                "srgb→linear→srgb not identity for {c}: got {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn color_srgb_linear_preserves_alpha() {
+        let c = Color::new(0.385, 0.5, 0.75, 0.42);
+        let lin = c.srgb_to_linear();
+        assert_eq!(lin.a, 0.42, "alpha must pass through unchanged");
+        let back = lin.linear_to_srgb();
+        assert!(approx_eq(back.r, 0.385) && approx_eq(back.g, 0.5) && approx_eq(back.b, 0.75));
+        assert_eq!(back.a, 0.42);
     }
 
     #[test]

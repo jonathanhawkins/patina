@@ -98,6 +98,12 @@ pub struct PackedScene {
     /// External resources: id -> entry.
     #[allow(dead_code)]
     ext_resources: HashMap<String, ExtResourceEntry>,
+    /// Inline sub-resource types: id -> class name (e.g. `"Environment"`).
+    sub_resources: HashMap<String, String>,
+    /// Inline sub-resource properties: id -> parsed key/value pairs. Lets
+    /// callers resolve a node's `prop = SubResource("id")` to the concrete
+    /// resource's fields (e.g. a `WorldEnvironment`'s `Environment`).
+    sub_resource_props: HashMap<String, HashMap<String, Variant>>,
 }
 
 impl PackedScene {
@@ -377,7 +383,22 @@ impl PackedScene {
             templates,
             connections,
             ext_resources,
+            sub_resources,
+            sub_resource_props,
         })
+    }
+
+    /// Returns the class name of the inline sub-resource with `id`, if any
+    /// (e.g. `"Environment"`, `"Sky"`, `"ProceduralSkyMaterial"`).
+    pub fn sub_resource_type(&self, id: &str) -> Option<&str> {
+        self.sub_resources.get(id).map(String::as_str)
+    }
+
+    /// Returns the parsed properties of the inline sub-resource with `id`, if
+    /// any. Used to resolve a node's `SubResource(...)` reference to concrete
+    /// resource fields.
+    pub fn sub_resource_props(&self, id: &str) -> Option<&HashMap<String, Variant>> {
+        self.sub_resource_props.get(id)
     }
 
     /// Instantiates the packed scene, returning the root node and a flat

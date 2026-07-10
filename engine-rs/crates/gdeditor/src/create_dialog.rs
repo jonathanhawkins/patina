@@ -405,8 +405,13 @@ fn build_class_subtree(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilteredClassNode {
     class_name: String,
-    /// The `[start, end)` byte range of the matched query within `class_name`,
-    /// or `None` when this node is kept only as an ancestor of a match.
+    /// Whether this node itself matched the query as a creatable candidate
+    /// (vs. being kept only as an ancestor of a match). Matching follows
+    /// Godot's `is_subsequence_ofn` — the span below may be `None` even for
+    /// a match when the subsequence is not contiguous.
+    matched: bool,
+    /// The `[start, end)` byte range of the query as a contiguous substring
+    /// within `class_name`, when one exists (used for highlighting).
     match_span: Option<(usize, usize)>,
     children: Vec<FilteredClassNode>,
 }
@@ -417,15 +422,15 @@ impl FilteredClassNode {
         &self.class_name
     }
 
-    /// The highlighted `[start, end)` span within the class name, if this node
-    /// itself matched the search query.
+    /// The highlighted `[start, end)` span within the class name, if the
+    /// query occurs contiguously in this matching node's name.
     pub fn match_span(&self) -> Option<(usize, usize)> {
         self.match_span
     }
 
     /// Whether this node itself matched the query (vs. being a kept ancestor).
     pub fn is_match(&self) -> bool {
-        self.match_span.is_some()
+        self.matched
     }
 
     /// The retained subclasses of this class.
@@ -469,20 +474,137 @@ fn match_span_of(name: &str, query: &str) -> Option<(usize, usize)> {
         .map(|start| (start, start + needle.len()))
 }
 
+/// Case-insensitive subsequence test — Godot's `String::is_subsequence_ofn`.
+///
+/// Every character of `search` must appear in `target` in order, but not
+/// necessarily contiguously: `"mesh"` matches `MultiplayerSynchronizer`
+/// (M…e…S…h) as well as `MeshInstance3D`. An empty search matches everything.
+pub fn is_subsequence_ofn(search: &str, target: &str) -> bool {
+    let target_chars: Vec<char> = target.to_lowercase().chars().collect();
+    let mut ti = 0usize;
+    for sc in search.to_lowercase().chars() {
+        loop {
+            if ti >= target_chars.len() {
+                return false;
+            }
+            let tc = target_chars[ti];
+            ti += 1;
+            if tc == sc {
+                break;
+            }
+        }
+    }
+    true
+}
+
+/// Editor-API classes hidden from the Create Node dialog, mirroring Godot's
+/// default-off "Show Editor" type filter (`ClassDB::API_EDITOR`).
+const EDITOR_ONLY_CLASSES: &[&str] = &["EditorPlugin", "EditorInterface"];
+
+/// Godot's brief class description for the dialog's Description panel,
+/// matching the `EditorHelpBit` text shown under the Matches tree.
+pub fn brief_description(class_name: &str) -> Option<&'static str> {
+    Some(match class_name {
+        "Object" => "Base class for all other classes in the engine.",
+        "Node" => "Base class for all scene objects.",
+        "CanvasItem" => "Abstract base class for everything in 2D space.",
+        "Node2D" => "A 2D game object, inherited by all 2D-related nodes. Has a position, rotation, scale, and skew.",
+        "Sprite2D" => "General-purpose sprite node.",
+        "AnimatedSprite2D" => "Sprite node that contains multiple textures as frames to play for animation.",
+        "Camera2D" => "Camera node for 2D scenes.",
+        "TileMapLayer" => "Node for 2D tile-based maps.",
+        "GPUParticles2D" => "A 2D particle emitter.",
+        "CPUParticles2D" => "A CPU-based 2D particle emitter.",
+        "Line2D" => "A 2D polyline that can optionally be textured.",
+        "Polygon2D" => "A 2D polygon.",
+        "Path2D" => "Contains a Curve2D path for PathFollow2D nodes to follow.",
+        "PathFollow2D" => "Point sampler for a Path2D.",
+        "NavigationRegion2D" => "A traversable 2D region that defines a navigation mesh.",
+        "Control" => "Base class for all GUI controls. Adapts its position and size based on its parent control.",
+        "Button" => "A themed button that can contain text and an icon.",
+        "Label" => "A control for displaying plain text.",
+        "LineEdit" => "An input field for single-line text.",
+        "TextEdit" => "A multiline text editor.",
+        "Panel" => "A GUI control that displays a StyleBox.",
+        "ColorRect" => "A control that displays a solid color rectangle.",
+        "Container" => "Base class for all GUI containers.",
+        "HBoxContainer" => "A container that arranges its child controls horizontally.",
+        "VBoxContainer" => "A container that arranges its child controls vertically.",
+        "CollisionObject2D" => "Abstract base class for 2D physics objects.",
+        "PhysicsBody2D" => "Abstract base class for 2D game objects affected by physics.",
+        "StaticBody2D" => "A 2D physics body that can't be moved by external forces.",
+        "RigidBody2D" => "A 2D physics body that is moved by a physics simulation.",
+        "CharacterBody2D" => "A 2D physics body specialized for characters moved by script.",
+        "Area2D" => "A region of 2D space that detects other CollisionObject2Ds entering or exiting it.",
+        "CollisionShape2D" => "A node that provides a Shape2D to a CollisionObject2D parent.",
+        "Node3D" => "Base object in 3D space, inherited by all 3D nodes.",
+        "Camera3D" => "Camera node, displays from a point of view.",
+        "MeshInstance3D" => "Node that instances meshes into a scenario.",
+        "MultiMeshInstance3D" => "Node that instances a MultiMesh.",
+        "Light3D" => "Provides a base class for different kinds of light nodes.",
+        "DirectionalLight3D" => "Directional light from a distance, as from the Sun.",
+        "OmniLight3D" => "Omnidirectional light, such as a light bulb or a candle.",
+        "SpotLight3D" => "A spotlight, such as a reflector spotlight or a lantern.",
+        "CollisionObject3D" => "Abstract base class for 3D physics objects.",
+        "PhysicsBody3D" => "Abstract base class for 3D game objects affected by physics.",
+        "StaticBody3D" => "A 3D physics body that can't be moved by external forces.",
+        "RigidBody3D" => "A 3D physics body that is moved by a physics simulation.",
+        "CharacterBody3D" => "A 3D physics body specialized for characters moved by script.",
+        "Area3D" => "A region of 3D space that detects other CollisionObject3Ds entering or exiting it.",
+        "CollisionShape3D" => "A node that provides a Shape3D to a CollisionObject3D parent.",
+        "WorldEnvironment" => "Default environment properties for the entire scene.",
+        "Marker3D" => "Generic 3D position hint for editing.",
+        "NavigationRegion3D" => "A traversable 3D region that defines a navigation mesh.",
+        "Skeleton3D" => "A node containing a bone hierarchy, used to create a 3D skeletal animation.",
+        "BoneAttachment3D" => "A node that dynamically copies or overrides the 3D transform of a bone in its parent Skeleton3D.",
+        "AnimationPlayer" => "A node used for animation playback.",
+        "AnimationTree" => "A node used for advanced animation transitions in an AnimationPlayer.",
+        "GPUParticles3D" => "A 3D particle emitter.",
+        "CPUParticles3D" => "A CPU-based 3D particle emitter.",
+        "Decal" => "Node that projects a texture onto a MeshInstance3D.",
+        "FogVolume" => "A region that contributes to the default volumetric fog from the world environment.",
+        "ReflectionProbe" => "Captures its surroundings to create fast, accurate reflections from a specific point.",
+        "VoxelGI" => "Real-time global illumination (GI) probe.",
+        "LightmapGI" => "Computes and stores baked lightmaps for fast global illumination.",
+        "VisualInstance3D" => "Parent of all visual 3D nodes.",
+        "CSGShape3D" => "The CSG base class.",
+        "CSGBox3D" => "A CSG Box shape.",
+        "CSGSphere3D" => "A CSG Sphere shape.",
+        "CSGCylinder3D" => "A CSG Cylinder shape.",
+        "CSGCombiner3D" => "A CSG node that allows you to combine other CSG modifiers.",
+        "HTTPRequest" => "A node with the ability to send HTTP(S) requests.",
+        "Resource" => "Base class for serializable objects.",
+        "RefCounted" => "Base class for reference-counted objects.",
+        _ => return None,
+    })
+}
+
 /// Filters `node` to the subtree retaining classes that match `query` (by
-/// case-insensitive substring) plus their ancestors for context. A node is kept
-/// if it matches or any descendant is kept; matching nodes carry the highlight
-/// span. Returns `None` when nothing in this subtree matches.
-fn filter_class_subtree(node: &ClassTreeNode, query: &str) -> Option<FilteredClassNode> {
-    let span = match_span_of(node.class_name(), query);
+/// Godot's case-insensitive subsequence rule) plus their ancestors for
+/// context. Only creatable candidates (per `is_candidate`) count as matches —
+/// abstract bases like `VisualInstance3D` are retained solely as ancestors,
+/// exactly as in Godot's `_add_type` chain. Returns `None` when nothing in
+/// this subtree matches.
+fn filter_class_subtree(
+    node: &ClassTreeNode,
+    query: &str,
+    is_candidate: &dyn Fn(&str) -> bool,
+) -> Option<FilteredClassNode> {
+    let matched = is_candidate(node.class_name()) && is_subsequence_ofn(query, node.class_name());
+    let span = if matched {
+        match_span_of(node.class_name(), query)
+    } else {
+        None
+    };
     let children: Vec<FilteredClassNode> = node
         .children()
         .iter()
-        .filter_map(|child| filter_class_subtree(child, query))
+        .filter_map(|child| filter_class_subtree(child, query, is_candidate))
         .collect();
-    if span.is_some() || !children.is_empty() {
+    if matched || !children.is_empty() {
         Some(FilteredClassNode {
             class_name: node.class_name().to_string(),
+            matched,
             match_span: span,
             children,
         })
@@ -516,6 +638,12 @@ pub struct CreateNodeDialog {
     visible: bool,
     /// Optional 2D node catalog for descriptions and categories.
     catalog: Option<NodeCatalog2D>,
+    /// Preferred search-result base type — Godot boosts scores of types that
+    /// inherit from it (e.g. `Node3D` when a 3D scene is being edited).
+    preferred_type: Option<String>,
+    /// Directory where favorites/recent are persisted (Godot writes
+    /// `favorites.Node` and `create_recent.Node` in the project settings dir).
+    persist_dir: Option<std::path::PathBuf>,
 }
 
 impl CreateNodeDialog {
@@ -528,9 +656,12 @@ impl CreateNodeDialog {
             selected: None,
             favorites: Vec::new(),
             recent: Vec::new(),
-            max_recent: 10,
+            // Godot's RECENT_HISTORY_SIZE.
+            max_recent: 15,
             visible: false,
             catalog: None,
+            preferred_type: None,
+            persist_dir: None,
         }
     }
 
@@ -631,17 +762,23 @@ impl CreateNodeDialog {
         let class_name = self.selected.clone()?;
         let info = class_db::get_class_info(&class_name)?;
 
-        // Track in recent list (move to front, dedup, cap).
-        self.recent.retain(|r| r != &class_name);
-        self.recent.insert(0, class_name.clone());
-        self.recent.truncate(self.max_recent);
-
+        let created = class_name.clone();
+        self.record_created(&created);
         self.close();
 
         Some(CreateDialogResult {
             class_name,
             parent_class: info.parent_class,
         })
+    }
+
+    /// Records a created class in the recent list (move to front, dedup, cap)
+    /// and persists it — Godot writes `create_recent.<base>` on every confirm.
+    pub fn record_created(&mut self, class_name: &str) {
+        self.recent.retain(|r| r != class_name);
+        self.recent.insert(0, class_name.to_string());
+        self.recent.truncate(self.max_recent);
+        self.save_recent();
     }
 
     /// Adds a class to the favorites list. Returns `false` if already favorited.
@@ -651,6 +788,7 @@ impl CreateNodeDialog {
             return false;
         }
         self.favorites.push(name);
+        self.save_favorites();
         true
     }
 
@@ -658,7 +796,11 @@ impl CreateNodeDialog {
     pub fn remove_favorite(&mut self, class_name: &str) -> bool {
         let len_before = self.favorites.len();
         self.favorites.retain(|f| f != class_name);
-        self.favorites.len() < len_before
+        let removed = self.favorites.len() < len_before;
+        if removed {
+            self.save_favorites();
+        }
+        removed
     }
 
     /// Toggles the favorite state of a class: favorites it if it isn't already,
@@ -666,13 +808,22 @@ impl CreateNodeDialog {
     /// is now a favorite, `false` if it was removed.
     pub fn toggle_favorite(&mut self, class_name: impl Into<String>) -> bool {
         let name = class_name.into();
-        if self.favorites.contains(&name) {
+        let now_favorite = if self.favorites.contains(&name) {
             self.favorites.retain(|f| f != &name);
             false
         } else {
             self.favorites.push(name);
             true
-        }
+        };
+        self.save_favorites();
+        now_favorite
+    }
+
+    /// Replaces the favorites list wholesale, preserving the given order —
+    /// backs drag-reordering in the Favorites pane.
+    pub fn set_favorites(&mut self, favorites: Vec<String>) {
+        self.favorites = favorites;
+        self.save_favorites();
     }
 
     /// Whether a class is currently a favorite.
@@ -688,6 +839,191 @@ impl CreateNodeDialog {
     /// Returns the recently selected classes (most recent first).
     pub fn recent(&self) -> &[String] {
         &self.recent
+    }
+
+    /// Sets the preferred search-result base type (e.g. `Node3D` while a 3D
+    /// scene is active). Types inheriting from it score slightly higher,
+    /// mirroring Godot's `_is_type_preferred`.
+    pub fn set_preferred_type(&mut self, preferred: Option<String>) {
+        self.preferred_type = preferred;
+    }
+
+    /// Whether `class_name` may be created from the dialog: registered,
+    /// non-abstract, not an editor-API type, and inheriting the base class
+    /// (when one is set). Mirrors Godot's `_should_hide_type` for native types.
+    pub fn is_candidate(&self, class_name: &str) -> bool {
+        if !class_db::class_exists(class_name) || class_db::is_abstract(class_name) {
+            return false;
+        }
+        if EDITOR_ONLY_CLASSES.contains(&class_name) {
+            return false;
+        }
+        match &self.base_class {
+            Some(base) => class_db::is_parent_class(class_name, base),
+            None => true,
+        }
+    }
+
+    /// Godot's `CreateDialog::_score_type`, ported verbatim: ranks a candidate
+    /// type against the search term, weighting exact matches, matches near the
+    /// start of the name, shorter names, preferred bases, favorites, and the
+    /// first few recent items.
+    pub fn score_type(&self, type_name: &str, search: &str) -> f32 {
+        if search.is_empty() {
+            return 0.0;
+        }
+        if !is_subsequence_ofn(search, type_name) {
+            return -1.0;
+        }
+        if type_name == search {
+            // Always favor an exact match (case-sensitive), since clicking a
+            // favorite sets the search text to the type.
+            return 1.0;
+        }
+
+        let inverse_length = 1.0 / type_name.len() as f32;
+
+        // Favor types where the search term is a substring close to the start.
+        let w = 0.5f32;
+        let pos = type_name
+            .to_lowercase()
+            .find(&search.to_lowercase())
+            .map(|byte_pos| type_name[..byte_pos].chars().count());
+        let mut score = match pos {
+            Some(p) => 1.0 - w * (3.0 * p as f32 * inverse_length).min(1.0),
+            None => (0.9f32 - w).max(0.0),
+        };
+
+        // Favor shorter items: they resemble the search term more.
+        let w = 0.9f32;
+        score *= (1.0 - w) + w * (search.len() as f32 * inverse_length).min(1.0);
+
+        let preferred = self
+            .preferred_type
+            .as_deref()
+            .map(|p| class_db::is_parent_class(type_name, p))
+            .unwrap_or(false);
+        score *= if preferred { 1.0 } else { 0.9 };
+
+        // Add score for being a favorite type.
+        score *= if self.favorites.iter().any(|f| f == type_name) {
+            1.0
+        } else {
+            0.8
+        };
+
+        // Look through at most the first 4 recent items (Godot's
+        // RECENT_COMPLETION_SIZE - 1).
+        let in_recent = self.recent.iter().take(4).any(|r| r == type_name);
+        score *= if in_recent { 1.0 } else { 0.9 };
+
+        score
+    }
+
+    /// The best-scoring creatable candidate for `search`, mirroring the
+    /// auto-select in Godot's `_update_search`. Candidates are visited in
+    /// alphabetical order and only a strictly higher score replaces the
+    /// current best, so ties keep the alphabetically-first type. Returns
+    /// `None` for an empty search or when nothing matches.
+    pub fn best_match(&self, search: &str) -> Option<String> {
+        if search.is_empty() {
+            return None;
+        }
+        let mut highest_score = 0.0f32;
+        let mut best: Option<String> = None;
+        for name in class_db::get_class_list() {
+            if !self.is_candidate(&name) {
+                continue;
+            }
+            let score = self.score_type(&name, search);
+            if score < 0.0 {
+                continue;
+            }
+            if score > highest_score {
+                highest_score = score;
+                best = Some(name);
+            }
+        }
+        best
+    }
+
+    /// Sets (or clears) the directory used to persist favorites and recent
+    /// lists, then loads any existing entries from it. Files follow Godot's
+    /// naming: `favorites.<base>` and `create_recent.<base>`, one class name
+    /// per line.
+    pub fn set_persist_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        self.persist_dir = dir;
+        self.load_persisted();
+    }
+
+    /// Returns the current persistence directory, if set.
+    pub fn persist_dir(&self) -> Option<&std::path::Path> {
+        self.persist_dir.as_deref()
+    }
+
+    /// The base-type suffix Godot appends to persistence file names.
+    fn persist_suffix(&self) -> &str {
+        self.base_class.as_deref().unwrap_or("Node")
+    }
+
+    fn favorites_path(&self) -> Option<std::path::PathBuf> {
+        self.persist_dir
+            .as_ref()
+            .map(|d| d.join(format!("favorites.{}", self.persist_suffix())))
+    }
+
+    fn recent_path(&self) -> Option<std::path::PathBuf> {
+        self.persist_dir
+            .as_ref()
+            .map(|d| d.join(format!("create_recent.{}", self.persist_suffix())))
+    }
+
+    /// Loads favorites and recent lists from the persistence directory.
+    /// Missing files leave the in-memory lists untouched (so seeded defaults
+    /// survive a first run); unknown classes are dropped like Godot's
+    /// `is_type_recognized` check.
+    pub fn load_persisted(&mut self) {
+        if let Some(path) = self.favorites_path() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                self.favorites = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && class_db::class_exists(l))
+                    .map(String::from)
+                    .collect();
+            }
+        }
+        if let Some(path) = self.recent_path() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                self.recent = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && class_db::class_exists(l))
+                    .map(String::from)
+                    .collect();
+                self.recent.truncate(self.max_recent);
+            }
+        }
+    }
+
+    /// Best-effort write of the favorites file (no-op without a persist dir).
+    fn save_favorites(&self) {
+        if let Some(path) = self.favorites_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, self.favorites.join("\n"));
+        }
+    }
+
+    /// Best-effort write of the recent file (no-op without a persist dir).
+    fn save_recent(&self) {
+        if let Some(path) = self.recent_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, self.recent.join("\n"));
+        }
     }
 
     /// Returns the active filter based on the current search text and base class.
@@ -716,6 +1052,12 @@ impl CreateNodeDialog {
 
         let mut results: Vec<ClassEntry> = all_classes
             .into_iter()
+            // Only creatable types are listed — abstract and editor-API
+            // classes appear solely as tree ancestors (Godot's
+            // `_should_hide_type`).
+            .filter(|name| {
+                !class_db::is_abstract(name) && !EDITOR_ONLY_CLASSES.contains(&name.as_str())
+            })
             .filter(|name| matches_filter(name, &filter))
             .filter_map(|name| {
                 let info = class_db::get_class_info(&name)?;
@@ -723,11 +1065,13 @@ impl CreateNodeDialog {
                 let (description, category) = if let Some(cat) = &self.catalog {
                     let entry = cat.get(&name);
                     (
-                        entry.map(|e| e.description.clone()),
+                        brief_description(&name)
+                            .map(String::from)
+                            .or_else(|| entry.map(|e| e.description.clone())),
                         entry.map(|e| e.category),
                     )
                 } else {
-                    (None, None)
+                    (brief_description(&name).map(String::from), None)
                 };
                 Some(ClassEntry {
                     class_name: name.clone(),
@@ -773,11 +1117,13 @@ impl CreateNodeDialog {
                 let (description, category) = if let Some(cat) = &self.catalog {
                     let entry = cat.get(name);
                     (
-                        entry.map(|e| e.description.clone()),
+                        brief_description(name)
+                            .map(String::from)
+                            .or_else(|| entry.map(|e| e.description.clone())),
                         entry.map(|e| e.category),
                     )
                 } else {
-                    (None, None)
+                    (brief_description(name).map(String::from), None)
                 };
                 Some(ClassEntry {
                     class_name: name.clone(),
@@ -805,11 +1151,13 @@ impl CreateNodeDialog {
                 let (description, category) = if let Some(cat) = &self.catalog {
                     let entry = cat.get(name);
                     (
-                        entry.map(|e| e.description.clone()),
+                        brief_description(name)
+                            .map(String::from)
+                            .or_else(|| entry.map(|e| e.description.clone())),
                         entry.map(|e| e.category),
                     )
                 } else {
-                    (None, None)
+                    (brief_description(name).map(String::from), None)
                 };
                 Some(ClassEntry {
                     class_name: name.clone(),
@@ -846,6 +1194,11 @@ impl CreateNodeDialog {
         let mut children_of: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for name in &all {
+            // Editor-API classes never appear in the dialog tree (Godot's
+            // "Show Editor" filter defaults to off).
+            if EDITOR_ONLY_CLASSES.contains(&name.as_str()) {
+                continue;
+            }
             if let Some(info) = class_db::get_class_info(name) {
                 if !info.parent_class.is_empty() {
                     children_of
@@ -882,7 +1235,8 @@ impl CreateNodeDialog {
             // No filter: mirror the full tree with no matched spans.
             return Some(no_highlight(&tree));
         }
-        filter_class_subtree(&tree, query)
+        let is_candidate = |name: &str| self.is_candidate(name);
+        filter_class_subtree(&tree, query, &is_candidate)
     }
 
     /// The incrementally filtered tree rooted at this dialog's base class, or
@@ -898,6 +1252,7 @@ impl CreateNodeDialog {
 fn no_highlight(node: &ClassTreeNode) -> FilteredClassNode {
     FilteredClassNode {
         class_name: node.class_name().to_string(),
+        matched: false,
         match_span: None,
         children: node.children().iter().map(no_highlight).collect(),
     }
@@ -909,15 +1264,17 @@ impl Default for CreateNodeDialog {
     }
 }
 
-/// Tests whether a class name passes the given filter.
+/// Tests whether a class name passes the given filter. Search terms use
+/// Godot's case-insensitive subsequence rule (`is_subsequence_ofn`), not
+/// plain substring containment.
 fn matches_filter(class_name: &str, filter: &ClassFilter) -> bool {
     match filter {
         ClassFilter::None => true,
         ClassFilter::InheritsFrom(base) => class_db::is_parent_class(class_name, base),
-        ClassFilter::Search(search) => class_name.to_lowercase().contains(&search.to_lowercase()),
+        ClassFilter::Search(search) => is_subsequence_ofn(search, class_name),
         ClassFilter::SearchWithBase { search, base_class } => {
             class_db::is_parent_class(class_name, base_class)
-                && class_name.to_lowercase().contains(&search.to_lowercase())
+                && is_subsequence_ofn(search, class_name)
         }
     }
 }
@@ -1537,14 +1894,23 @@ mod tests {
     }
 
     #[test]
-    fn without_catalog_no_descriptions() {
+    fn without_catalog_uses_godot_brief_descriptions() {
         let _g = setup();
         let d = CreateNodeDialog::new();
         let classes = d.filtered_classes();
         for c in &classes {
-            assert!(c.description.is_none());
+            // Godot's doc-driven brief descriptions apply regardless of the
+            // 2D catalog; categories still require it.
+            assert_eq!(
+                c.description.as_deref(),
+                brief_description(&c.class_name),
+                "description for {} must come from the Godot doc table",
+                c.class_name
+            );
             assert!(c.category.is_none());
         }
+        let sprite = classes.iter().find(|c| c.class_name == "Sprite2D").unwrap();
+        assert_eq!(sprite.description.as_deref(), Some("General-purpose sprite node."));
     }
 
     #[test]
@@ -1606,5 +1972,206 @@ mod tests {
             assert!(!h.root_class.is_empty());
             assert!(!h.children.is_empty());
         }
+    }
+
+    // ---- Godot CreateDialog parity: subsequence, scoring, abstract,
+    // persistence (create_dialog.cpp) ----
+
+    #[test]
+    fn subsequence_matching_rules() {
+        assert!(is_subsequence_ofn("", "anything"));
+        assert!(is_subsequence_ofn("mesh", "MeshInstance3D"));
+        // Non-contiguous subsequence — not a substring.
+        assert!(is_subsequence_ofn("mi3d", "MeshInstance3D"));
+        // The Godot classic: "mesh" matches M..e..S..h in
+        // MultiplayerSynchronizer.
+        assert!(is_subsequence_ofn("mesh", "MultiplayerSynchronizer"));
+        assert!(!is_subsequence_ofn("mesh", "Node2D"));
+        assert!(!is_subsequence_ofn("xyz", "MeshInstance3D"));
+        // Case-insensitive both ways.
+        assert!(is_subsequence_ofn("MESH", "meshinstance3d"));
+    }
+
+    #[test]
+    fn search_filter_uses_subsequence() {
+        let _g = setup();
+        let mut d = CreateNodeDialog::new();
+        d.set_search("mi3d");
+        let names: Vec<String> = d
+            .filtered_classes()
+            .into_iter()
+            .map(|c| c.class_name)
+            .collect();
+        assert!(
+            names.contains(&"MeshInstance3D".to_string()),
+            "subsequence must match: {names:?}"
+        );
+    }
+
+    #[test]
+    fn score_type_matches_godot_formula() {
+        let _g = setup();
+        let d = CreateNodeDialog::new();
+        // Exact match (case-sensitive) always scores 1.0.
+        assert_eq!(d.score_type("Node", "Node"), 1.0);
+        // Empty search is neutral, non-match is negative.
+        assert_eq!(d.score_type("Node", ""), 0.0);
+        assert!(d.score_type("Node2D", "xyz") < 0.0);
+        // A match at the start of a shorter name outranks a late match in a
+        // longer one.
+        assert!(d.score_type("Sprite2D", "sprite") > d.score_type("AnimatedSprite2D", "sprite"));
+    }
+
+    #[test]
+    fn favorites_recent_and_preferred_boost_scores() {
+        let _g = setup();
+        let base = CreateNodeDialog::new().score_type("Sprite2D", "sprite");
+
+        let mut fav = CreateNodeDialog::new();
+        fav.add_favorite("Sprite2D");
+        assert!(fav.score_type("Sprite2D", "sprite") > base);
+
+        let mut rec = CreateNodeDialog::new();
+        rec.record_created("Sprite2D");
+        assert!(rec.score_type("Sprite2D", "sprite") > base);
+
+        let mut pref = CreateNodeDialog::new();
+        pref.set_preferred_type(Some("Node2D".into()));
+        assert!(pref.score_type("Sprite2D", "sprite") > base);
+    }
+
+    #[test]
+    fn recent_boost_only_first_four_entries() {
+        let _g = setup();
+        let mut d = CreateNodeDialog::new();
+        // Push Sprite2D beyond the RECENT_COMPLETION_SIZE-1 window.
+        d.record_created("Sprite2D");
+        d.record_created("Button");
+        d.record_created("Label");
+        d.record_created("Node2D");
+        d.record_created("Node3D");
+        let outside_window = d.score_type("Sprite2D", "sprite");
+        let base = CreateNodeDialog::new().score_type("Sprite2D", "sprite");
+        assert_eq!(outside_window, base, "5th recent entry gets no boost");
+    }
+
+    #[test]
+    fn best_match_auto_select() {
+        let _g = setup();
+        let d = CreateNodeDialog::with_base_class("Node");
+        assert_eq!(d.best_match("sprite").as_deref(), Some("Sprite2D"));
+        // Exact match beats prefix matches on longer names.
+        assert_eq!(d.best_match("Node").as_deref(), Some("Node"));
+        assert!(d.best_match("").is_none());
+        assert!(d.best_match("zzzz").is_none());
+    }
+
+    #[test]
+    fn abstract_classes_are_ancestors_not_candidates() {
+        let _g = setup();
+        register_class(
+            ClassRegistration::new("PhysicsBody2D")
+                .parent("Node2D")
+                .abstract_class(),
+        );
+        register_class(ClassRegistration::new("StaticBody2D").parent("PhysicsBody2D"));
+
+        let mut d = CreateNodeDialog::with_base_class("Node");
+        assert!(!d.is_candidate("PhysicsBody2D"));
+        assert!(d.is_candidate("StaticBody2D"));
+
+        // Flat candidate list excludes the abstract base even though it
+        // matches the search text.
+        d.set_search("body");
+        let names: Vec<String> = d
+            .filtered_classes()
+            .into_iter()
+            .map(|c| c.class_name)
+            .collect();
+        assert!(names.contains(&"StaticBody2D".to_string()));
+        assert!(!names.contains(&"PhysicsBody2D".to_string()));
+
+        // The tree keeps it as a greyed, unmatched ancestor.
+        let tree = d.filtered_class_tree("Node", "static").unwrap();
+        let pb = tree.find("PhysicsBody2D").expect("ancestor retained");
+        assert!(!pb.is_match());
+        assert!(tree.find("StaticBody2D").unwrap().is_match());
+        // No best-match ever lands on an abstract type.
+        assert_ne!(d.best_match("body").as_deref(), Some("PhysicsBody2D"));
+    }
+
+    #[test]
+    fn editor_only_classes_hidden_from_tree_and_candidates() {
+        let _g = setup();
+        register_class(ClassRegistration::new("EditorPlugin").parent("Node"));
+        let d = CreateNodeDialog::with_base_class("Node");
+        assert!(!d.is_candidate("EditorPlugin"));
+        let tree = d.filtered_class_tree("Node", "").unwrap();
+        assert!(tree.find("EditorPlugin").is_none());
+    }
+
+    #[test]
+    fn recent_capped_at_godot_history_size() {
+        let _g = setup();
+        let mut d = CreateNodeDialog::new();
+        for i in 0..20 {
+            d.record_created(&format!("Type{i}"));
+        }
+        assert_eq!(d.recent().len(), 15, "RECENT_HISTORY_SIZE is 15");
+        assert_eq!(d.recent()[0], "Type19", "most recent first");
+    }
+
+    #[test]
+    fn persistence_roundtrip_godot_file_format() {
+        let _g = setup();
+        let dir = std::env::temp_dir().join(format!(
+            "patina_create_dialog_persist_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let mut d = CreateNodeDialog::new();
+            d.set_persist_dir(Some(dir.clone()));
+            d.add_favorite("Sprite2D");
+            d.add_favorite("Label");
+            d.record_created("Button");
+            d.record_created("Node2D");
+        }
+        // Godot file naming: favorites.<base> / create_recent.<base>.
+        assert!(dir.join("favorites.Node").is_file());
+        assert!(dir.join("create_recent.Node").is_file());
+
+        let mut d2 = CreateNodeDialog::new();
+        d2.set_persist_dir(Some(dir.clone()));
+        assert_eq!(d2.favorites(), ["Sprite2D".to_string(), "Label".to_string()]);
+        assert_eq!(d2.recent(), ["Node2D".to_string(), "Button".to_string()]);
+
+        // Unregistered classes in the files are dropped on load, like
+        // Godot's is_type_recognized check.
+        std::fs::write(dir.join("favorites.Node"), "Sprite2D\nNoSuchClass\n").unwrap();
+        let mut d3 = CreateNodeDialog::new();
+        d3.set_persist_dir(Some(dir.clone()));
+        assert_eq!(d3.favorites(), ["Sprite2D".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toggle_favorite_persists_immediately() {
+        let _g = setup();
+        let dir = std::env::temp_dir().join(format!(
+            "patina_create_dialog_favtoggle_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut d = CreateNodeDialog::new();
+        d.set_persist_dir(Some(dir.clone()));
+        assert!(d.toggle_favorite("Sprite2D"));
+        let text = std::fs::read_to_string(dir.join("favorites.Node")).unwrap();
+        assert!(text.contains("Sprite2D"));
+        assert!(!d.toggle_favorite("Sprite2D"));
+        let text = std::fs::read_to_string(dir.join("favorites.Node")).unwrap();
+        assert!(!text.contains("Sprite2D"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

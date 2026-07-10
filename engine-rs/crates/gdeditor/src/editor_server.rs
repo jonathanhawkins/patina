@@ -2073,6 +2073,9 @@ fn handle_connection(
         ("POST", "/api/node/create_dialog/toggle_favorite") => {
             api_create_dialog_toggle_favorite(state, &req.body, &mut stream)
         }
+        ("POST", "/api/node/create_dialog/favorites") => {
+            api_create_dialog_set_favorites(state, &req.body, &mut stream)
+        }
         ("POST", "/api/node/create_dialog/confirm") => {
             api_create_dialog_confirm(state, &req.body, &mut stream)
         }
@@ -3173,9 +3176,21 @@ fn node_properties_json(
             } else {
                 ep.default.clone()
             };
-            // A property is "default" when its shown value equals the class
-            // default the schema declares (pat-ghfv0.36).
-            let is_default = value == ep.default;
+            // A property is "default" when its shown value equals Godot's TRUE
+            // class default (`ClassDB.class_get_property_default_value`) — the
+            // exact criterion `editor_inspector_probe.gd` captures (pat-ghfv0.41).
+            // `Variant` equality is variant-typed, so a value whose type differs
+            // from the default is correctly not-default (matching Godot's
+            // `typeof(value) == typeof(default)` guard).
+            let is_default = if ep.name.starts_with("surface_material_override/") {
+                // Dynamic per-surface override slots are not ClassDB-registered
+                // properties, so Godot's typed (possibly-null) Object value never
+                // equals the Nil default — the slot is always reported as an
+                // override, even when empty.
+                false
+            } else {
+                value == ep.true_default
+            };
             props.push(property_entry(
                 ep.name,
                 ep.type_name,
@@ -3440,6 +3455,11 @@ fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStr
     // "Add Child Node" behavior where the new node becomes the selection.
     state.selected_node = Some(created_id);
     state.selected_nodes = vec![created_id];
+    // Track the class in the Create dialog's Recent list, as Godot's
+    // CreateDialog does on every confirmed create.
+    if gdobject::class_db::class_exists(&class_name_str) {
+        state.create_node_dialog.record_created(&class_name_str);
+    }
     state.add_log(
         "info",
         format!("Added {} node '{}'", class_name_str, name_str),
@@ -4404,11 +4424,49 @@ fn api_duplicate_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     send_json(stream, &json);
 }
 
+/// Serializes a filtered class-tree node for the Create New Node dialog UI:
+/// the nested hierarchy plus per-node instantiability (abstract ancestors are
+/// greyed out client-side), Godot's brief description, and inheritance chain.
+fn create_dialog_tree_json(
+    dlg: &CreateNodeDialog,
+    node: &crate::create_dialog::FilteredClassNode,
+) -> serde_json::Value {
+    let name = node.class_name();
+    let children: Vec<serde_json::Value> = node
+        .children()
+        .iter()
+        .map(|c| create_dialog_tree_json(dlg, c))
+        .collect();
+    serde_json::json!({
+        "class_name": name,
+        "matched": node.is_match(),
+        "instantiable": dlg.is_candidate(name),
+        "description": crate::create_dialog::brief_description(name).unwrap_or(""),
+        "inheritance_chain": gdobject::class_db::inheritance_chain(name),
+        "children": children,
+    })
+}
+
 /// `POST /api/node/create_dialog` — returns classes from ClassDB with search, filter, favorites, and recent.
+///
+/// Response mirrors Godot's `CreateDialog::_update_search`: `tree` is the
+/// hierarchy rooted at the base type (matches plus their ancestors, Godot's
+/// subsequence rule), and `best_match` is the auto-selected highest-scoring
+/// candidate for the current search.
 fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     use crate::create_dialog::NodeCategory;
 
     let mut st = state.lock().unwrap();
+    // Persist favorites/recent under the project (Godot: project settings
+    // dir). Lazily initialized once a real project root is known; without one
+    // (e.g. unit-test servers) the lists stay in-memory only.
+    if st.create_node_dialog.persist_dir().is_none() {
+        if let Some(root) = st.project_root.clone() {
+            st.create_node_dialog.set_persist_dir(Some(
+                std::path::PathBuf::from(root).join(".patina").join("editor"),
+            ));
+        }
+    }
     let dlg = &mut st.create_node_dialog;
     if !body.is_empty() {
         if let Some(parsed) = parse_json_body(body) {
@@ -4422,6 +4480,13 @@ fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
                     dlg.set_base_class(None);
                 } else {
                     dlg.set_base_class(Some(base.to_string()));
+                }
+            }
+            if let Some(preferred) = parsed.get("preferred").and_then(|v| v.as_str()) {
+                if preferred.is_empty() {
+                    dlg.set_preferred_type(None);
+                } else {
+                    dlg.set_preferred_type(Some(preferred.to_string()));
                 }
             }
             if let Some(cat) = parsed.get("category").and_then(|v| v.as_str()) {
@@ -4460,9 +4525,18 @@ fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         .iter()
         .map(|c| serde_json::json!({ "class_name": c.class_name, "parent_class": c.parent_class }))
         .collect();
+    // The Matches tree is always rooted at the dialog's base type ("Node"
+    // for the scene dock), regardless of the flat-list filters above.
+    let tree_base = dlg.base_class().unwrap_or("Node").to_string();
+    let search_text = dlg.search_text().to_string();
+    let tree = dlg
+        .filtered_class_tree(&tree_base, &search_text)
+        .map(|t| create_dialog_tree_json(dlg, &t));
+    let best_match = dlg.best_match(&search_text);
     let json = serde_json::json!({
         "classes": class_names, "class_entries": class_entries, "favorites": favorites,
         "recent": recent_json, "match_count": class_names.len(),
+        "tree": tree, "best_match": best_match, "search": search_text,
     })
     .to_string();
     send_json(stream, &json);
@@ -4529,16 +4603,42 @@ fn api_create_dialog_toggle_favorite(
     };
     let mut st = state.lock().unwrap();
     let dlg = &mut st.create_node_dialog;
-    let is_favorite = if dlg.favorites().contains(&class_name) {
-        dlg.remove_favorite(&class_name);
-        false
-    } else {
-        dlg.add_favorite(&class_name);
-        true
-    };
+    let is_favorite = dlg.toggle_favorite(&class_name);
     let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
     let json =
         serde_json::json!({ "is_favorite": is_favorite, "favorites": favorites }).to_string();
+    send_json(stream, &json);
+}
+
+/// `POST /api/node/create_dialog/favorites` — replace the favorites list,
+/// preserving order. Backs drag-reordering in the dialog's Favorites pane.
+fn api_create_dialog_set_favorites(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let favorites: Vec<String> = match parsed.get("favorites").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        None => {
+            send_error(stream, 400, "missing favorites");
+            return;
+        }
+    };
+    let mut st = state.lock().unwrap();
+    let dlg = &mut st.create_node_dialog;
+    dlg.set_favorites(favorites);
+    let favorites: Vec<&str> = dlg.favorites().iter().map(|s| s.as_str()).collect();
+    let json = serde_json::json!({ "favorites": favorites }).to_string();
     send_json(stream, &json);
 }
 
@@ -5315,6 +5415,81 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
 }
 
 /// `POST /api/scene/load` — loads a .tscn file into the scene tree.
+/// Resolves the scene's `WorldEnvironment` node (if any) into an
+/// [`Environment3D`](gdserver3d::environment::Environment3D), following Godot's
+/// resource indirection: the node's `environment = SubResource(...)` →
+/// `Environment` fields → its `sky = SubResource(...)` → `Sky` →
+/// `sky_material = SubResource(...)` → the concrete sky material. This lets the
+/// editor viewport preview a scene's *own* environment (background, tonemap,
+/// glow, fog, ambient) exactly as it would render at runtime, instead of the
+/// generic preview environment. Returns `None` when the scene has no
+/// `WorldEnvironment` or its environment can't be resolved.
+fn world_environment_from_scene(
+    scene: &gdscene::packed_scene::PackedScene,
+    tree: &gdscene::SceneTree,
+) -> Option<gdserver3d::environment::Environment3D> {
+    use gdserver3d::environment::Environment3D;
+    use gdserver3d::sky::{Sky, SkyMaterial};
+
+    // Parse a `"Class::id"` resref (from `__resref__<prop>`) or a raw
+    // `"SubResource:id"` value into the sub-resource id.
+    let resref_id = |v: &gdvariant::Variant| -> Option<String> {
+        if let gdvariant::Variant::String(s) = v {
+            if let Some((_, id)) = s.rsplit_once("::") {
+                return Some(id.to_string());
+            }
+            if let Some(id) = s.strip_prefix("SubResource:") {
+                return Some(id.to_string());
+            }
+        }
+        None
+    };
+
+    // Find the first WorldEnvironment node and its `environment` sub-resource.
+    let env_id = tree.all_nodes_in_tree_order().into_iter().find_map(|nid| {
+        let node = tree.get_node(nid)?;
+        if !node.is_class("WorldEnvironment") {
+            return None;
+        }
+        resref_id(&node.get_property("__resref__environment"))
+            .or_else(|| resref_id(&node.get_property("environment")))
+    })?;
+
+    let env_props = scene.sub_resource_props(&env_id)?;
+    let mut env =
+        Environment3D::from_properties(env_props.iter().map(|(k, v)| (k.as_str(), v)));
+
+    // Resolve the nested Sky → sky material.
+    if let Some(sky_id) = env_props.get("sky").and_then(resref_id) {
+        if let Some(sky_props) = scene.sub_resource_props(&sky_id) {
+            let material = sky_props
+                .get("sky_material")
+                .and_then(resref_id)
+                .and_then(|mat_id| {
+                    let mat_props = scene.sub_resource_props(&mat_id)?;
+                    let props = mat_props.iter().map(|(k, v)| (k.as_str(), v));
+                    Some(match scene.sub_resource_type(&mat_id) {
+                        Some("PhysicalSkyMaterial") => SkyMaterial::Physical(
+                            gdserver3d::sky::PhysicalSkyMaterial::from_properties(props),
+                        ),
+                        Some("PanoramaSkyMaterial") => SkyMaterial::Panoramic(
+                            gdserver3d::sky::PanoramicSkyMaterial::from_properties(props),
+                        ),
+                        _ => SkyMaterial::Procedural(
+                            gdserver3d::sky::ProceduralSkyMaterial::from_properties(props),
+                        ),
+                    })
+                })
+                .unwrap_or_else(|| {
+                    SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default())
+                });
+            env.sky = Some(Sky { material, ..Sky::default() });
+        }
+    }
+
+    Some(env)
+}
+
 fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -5356,6 +5531,17 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
 
     match add_packed_scene_to_tree(&mut new_tree, root_id, &scene) {
         Ok(_) => {
+            // If the scene has a WorldEnvironment, preview *its* environment
+            // (background, tonemap, glow, fog, ambient) like Godot; otherwise
+            // restore the default editor preview environment. Only the inner
+            // Environment3D is swapped — the preview sun/toggles are kept.
+            match world_environment_from_scene(&scene, &new_tree) {
+                Some(env) => state.editor_viewport_3d.environment.load_from_environment(env),
+                None => {
+                    state.editor_viewport_3d.environment.environment =
+                        crate::viewport_3d::EnvironmentPreview3D::default().environment;
+                }
+            }
             state.scene_tree = new_tree;
             state.selected_node = None;
             state.selected_nodes.clear();
@@ -7449,6 +7635,10 @@ fn api_open_project(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         s.asset_browser = dock;
         s.texture_cache.set_project_root(root_str.clone());
         s.project_root = Some(root_str.clone());
+        // Create-dialog favorites/recent follow the project, like Godot's
+        // per-project settings dir.
+        s.create_node_dialog
+            .set_persist_dir(Some(dir.join(".patina").join("editor")));
     }
     send_json(
         stream,
@@ -13761,6 +13951,69 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
     use std::time::Duration;
+
+    /// A scene's `WorldEnvironment` is resolved into an `Environment3D`, walking
+    /// the Godot resource chain (WorldEnvironment → Environment → Sky → material)
+    /// so the editor previews the scene's own environment, not the generic one.
+    #[test]
+    fn world_environment_resolves_from_scene() {
+        use gdscene::packed_scene::PackedScene;
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="ProceduralSkyMaterial" id="mat1"]
+sky_top_color = Color(0.1, 0.2, 0.9, 1)
+
+[sub_resource type="Sky" id="sky1"]
+sky_material = SubResource("mat1")
+
+[sub_resource type="Environment" id="env1"]
+background_mode = 2
+tonemap_mode = 2
+fog_enabled = true
+fog_density = 0.05
+sky = SubResource("sky1")
+
+[node name="World" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env1")
+"#;
+        gdobject::class_db::register_3d_classes();
+        let scene = PackedScene::from_tscn(tscn).expect("parse tscn");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
+
+        let env = world_environment_from_scene(&scene, &tree).expect("world env");
+        assert_eq!(
+            env.background_mode,
+            gdserver3d::environment::BackgroundMode::Sky
+        );
+        assert_eq!(env.tone_mapper, gdserver3d::environment::ToneMapper::Filmic);
+        assert!(env.fog_enabled);
+        assert!((env.fog_density - 0.05).abs() < 1e-5);
+        // The nested sky material resolved to the blue-topped procedural sky.
+        match env.sky.as_ref().map(|s| &s.material) {
+            Some(gdserver3d::sky::SkyMaterial::Procedural(m)) => {
+                assert!((m.sky_top_color.b - 0.9).abs() < 1e-3, "resolved sky_top blue");
+            }
+            other => panic!("expected procedural sky, got {other:?}"),
+        }
+    }
+
+    /// A scene with no `WorldEnvironment` resolves to `None` (the editor keeps
+    /// its default preview environment).
+    #[test]
+    fn no_world_environment_is_none() {
+        use gdscene::packed_scene::PackedScene;
+        let tscn = "[gd_scene format=3]\n\n[node name=\"World\" type=\"Node3D\"]\n";
+        gdobject::class_db::register_3d_classes();
+        let scene = PackedScene::from_tscn(tscn).expect("parse");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
+        assert!(world_environment_from_scene(&scene, &tree).is_none());
+    }
 
     /// The rate-limit exemption covers exactly the editor's own real-time view
     /// traffic (frame stream + 2D/3D camera navigation) so a fast spin/drag never

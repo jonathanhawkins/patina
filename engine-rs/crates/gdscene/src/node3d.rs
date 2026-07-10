@@ -306,6 +306,25 @@ pub fn get_light_color(tree: &SceneTree, node_id: NodeId) -> Color {
         .unwrap_or(Color::WHITE)
 }
 
+/// Sets the `"light_angular_distance"` property (DirectionalLight3D, degrees).
+pub fn set_light_angular_distance(tree: &mut SceneTree, node_id: NodeId, degrees: f64) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("light_angular_distance", Variant::Float(degrees));
+    }
+}
+
+/// Reads the `"light_angular_distance"` property (degrees), defaulting to `0.0`
+/// (a point-like sun disc). This is the apparent angular diameter a sky
+/// material uses to size the sun.
+pub fn get_light_angular_distance(tree: &SceneTree, node_id: NodeId) -> f64 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("light_angular_distance") {
+            Variant::Float(f) => f,
+            _ => 0.0,
+        })
+        .unwrap_or(0.0)
+}
+
 /// Sets the `"shadow_enabled"` property on a light.
 pub fn set_shadow_enabled(tree: &mut SceneTree, node_id: NodeId, enabled: bool) {
     if let Some(node) = tree.get_node_mut(node_id) {

@@ -14,6 +14,7 @@
 
 pub mod compare;
 pub mod depth_buffer;
+pub mod postprocess;
 pub mod rasterizer;
 pub mod renderer;
 pub mod shader;

@@ -44,14 +44,19 @@ const HEIGHT: u32 = 480;
 /// CPU, high enough that nothing stays stale for long.
 const IDLE_KEEPALIVE: Duration = Duration::from_secs(2);
 
-/// A rendered editor frame ready to publish. The GPU 3D path yields pre-rendered
-/// BGRA bytes (published cheaply via `update_frame_bmp`); the 2D path yields a
-/// float `FrameBuffer` (published via `update_frame_ex`). Kept as an enum so the
-/// frame is computed *under* the state lock and published *after* releasing it.
-enum RenderedFrame {
-    /// GPU-rendered 3D viewport: BGRA bytes with overlays already composited.
-    Gpu(gdrender2d::Bgra8Image),
-    /// Software-rendered 2D viewport.
+/// A render job produced under the editor state lock and finished after releasing
+/// it. For 3D, only the tree-dependent inputs are snapshotted under the lock (a
+/// viewport clone + render list); the GPU submit, blocking readback, overlay
+/// rasterization, and BMP encode run **off the lock** so `/api` handlers stay
+/// responsive during interaction (pat-ism62 lock-hold reduction). The 2D path is
+/// cheap and stays rendered under the lock.
+enum RenderJob {
+    /// GPU 3D viewport: snapshot to render off the lock (viewport + render list).
+    Gpu {
+        vp: gdeditor::viewport_3d::Viewport3D,
+        inputs: gdeditor::viewport_3d_render::Editor3DRenderInputs,
+    },
+    /// Software-rendered 2D viewport (already rasterized under the lock).
     Cpu(gdrender2d::FrameBuffer),
 }
 
@@ -131,6 +136,9 @@ fn main() {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| ".".to_string());
     state.texture_cache = gdeditor::texture_cache::TextureCache::new(&project_root);
+    // Give the Create Node dialog a project root so favorites/recent persist
+    // under <root>/.patina/editor, like Godot's per-project settings dir.
+    state.project_root = Some(project_root.clone());
 
     // Start the editor server.
     let handle = EditorServerHandle::start(port, state);
@@ -205,7 +213,7 @@ fn main() {
                 }
                 state.clear_frame_input();
             }
-            let fb = {
+            let job = {
                 let state = handle.state().lock().unwrap();
                 let zoom = state.viewport_zoom;
                 let pan = state.viewport_pan;
@@ -214,31 +222,47 @@ fn main() {
                 // of letterboxing a fixed 640x480 box into a centered square.
                 let (rw, rh) = (state.render_width.clamp(64, 2048), state.render_height.clamp(64, 2048));
                 // Render the running scene the way its game would: a 3D scene
-                // (Node3D) through the spatial renderer, a 2D scene through the
-                // canvas rasterizer. Previously the run loop always used the 2D
-                // rasterizer, so pressing Play on a 3D scene showed a blank Game
-                // view (nothing for the canvas to draw) even though it was running.
-                if let Some(ref main_loop) = state.run_main_loop {
-                    gdeditor::scene_renderer::render_runtime_frame(
-                        main_loop.tree(),
-                        &state.editor_viewport_3d,
-                        rw,
-                        rh,
-                        zoom,
-                        pan,
-                    )
+                // (Node3D) through the GPU spatial path (pat-ism62 #3 — the same
+                // persistent GPU renderer the editor viewport uses), a 2D scene
+                // through the canvas rasterizer. Previously the running 3D view
+                // rasterized in software at full res; routing it through the GPU
+                // makes Play-on-a-3D-scene match the editor viewport's speed.
+                let running_tree: &SceneTree = state
+                    .run_main_loop
+                    .as_ref()
+                    .map(|ml| ml.tree())
+                    .unwrap_or(&state.scene_tree);
+                if gdeditor::scene_renderer::scene_is_3d(running_tree) {
+                    // Snapshot the tree-dependent inputs under the lock; GPU-render
+                    // off it (same lock-hold reduction as the editor path).
+                    let mut vp = state.editor_viewport_3d.clone();
+                    vp.width = rw.max(1);
+                    vp.height = rh.max(1);
+                    let inputs =
+                        gdeditor::viewport_3d_render::editor_3d_render_inputs(&vp, running_tree);
+                    RenderJob::Gpu { vp, inputs }
                 } else {
-                    gdeditor::scene_renderer::render_runtime_frame(
-                        &state.scene_tree,
+                    RenderJob::Cpu(gdeditor::scene_renderer::render_runtime_frame(
+                        running_tree,
                         &state.editor_viewport_3d,
                         rw,
                         rh,
                         zoom,
                         pan,
-                    )
+                    ))
                 }
             };
-            handle.update_frame(fb);
+            match job {
+                // Running 3D scene: GPU-render off the lock, then publish BMP (the
+                // Game view streams BMP, like the editor viewport).
+                RenderJob::Gpu { vp, inputs } => {
+                    let img = gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
+                    let bmp = gdrender2d::encode_bmp_bgra(&img);
+                    handle.update_frame_bmp(bmp, img.width, img.height);
+                }
+                // 2D running scene: canvas rasterizer, full-quality publish.
+                RenderJob::Cpu(fb) => handle.update_frame(fb),
+            }
         } else {
             // Poll fast while an interaction is actively producing new frames,
             // otherwise idle at 50ms. The interaction cadence is a live perf knob
@@ -311,7 +335,7 @@ fn main() {
                     } else {
                         None
                     };
-                    let fb = if state.editor_mode == "3d" {
+                    let job = if state.editor_mode == "3d" {
                         // pat-7i8u4 / pat-3dnav: in 3D mode the viewport shows a
                         // perspective render from the *persistent* editor camera
                         // (so orbit/pan/zoom accumulate), not the 2D rasterizer.
@@ -329,22 +353,23 @@ fn main() {
                         let ids: Vec<u64> =
                             state.selected_nodes.iter().map(|id| id.raw()).collect();
                         state.editor_viewport_3d.selection.selected_nodes = ids;
-                        let sref = &*state;
-                        let raster_t = std::time::Instant::now();
-                        let f = gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(
-                            &sref.editor_viewport_3d,
-                            &sref.scene_tree,
+                        // pat-ism62 lock-hold reduction: snapshot only the
+                        // tree-dependent inputs (viewport clone + render list) under
+                        // the lock; the GPU submit, blocking readback, overlay
+                        // rasterization, and BMP encode run AFTER the lock releases,
+                        // so orbit/select/gizmo POSTs aren't serialized behind the
+                        // full-res render.
+                        let vp = state.editor_viewport_3d.clone();
+                        let inputs = gdeditor::viewport_3d_render::editor_3d_render_inputs(
+                            &vp,
+                            &state.scene_tree,
                         );
-                        gdeditor::editor_server::PERF_LAST_RASTER_US.store(
-                            raster_t.elapsed().as_micros().min(u32::MAX as u128) as u32,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        RenderedFrame::Gpu(f)
+                        RenderJob::Gpu { vp, inputs }
                     } else {
                         let selected = state.selected_node;
                         let zoom = state.viewport_zoom;
                         let pan = state.viewport_pan;
-                        RenderedFrame::Cpu(gdeditor::scene_renderer::render_scene_with_zoom_pan(
+                        RenderJob::Cpu(gdeditor::scene_renderer::render_scene_with_zoom_pan(
                             &state.scene_tree,
                             selected,
                             rw,
@@ -357,22 +382,29 @@ fn main() {
                         state.editor_viewport_3d.grid.visible = saved;
                     }
                     last_render_sig = Some(sig);
-                    Some((fb, this_lowres))
+                    Some((job, this_lowres))
                 } else {
                     None
                 }
             };
-            if let Some((rendered, this_lowres)) = maybe_fb {
+            if let Some((job, this_lowres)) = maybe_fb {
                 // For the 2D path, stream BMP-only while actively interacting: BMP
                 // encodes far cheaper than PNG deflate, so refreshing PNG every
                 // frame would cap the rate well under 60fps. The settle frame after
                 // motion stops (interaction_active clears) refreshes the PNG too.
                 let full_quality = !this_lowres && !interaction_active;
-                match rendered {
-                    // GPU 3D path: the frame is already BGRA with overlays baked in.
-                    // Encode BMP with a cheap per-row copy (no per-pixel Color pass)
-                    // and publish. Only BMP is streamed live, so PNG is skipped.
-                    RenderedFrame::Gpu(img) => {
+                match job {
+                    // GPU 3D path: the render (submit + blocking readback + overlay
+                    // compositing) runs HERE, off the state lock, from the snapshot.
+                    // Then encode BMP with a cheap per-row copy (no per-pixel Color
+                    // pass) and publish. Only BMP is streamed live, so PNG is skipped.
+                    RenderJob::Gpu { vp, inputs } => {
+                        let raster_t = std::time::Instant::now();
+                        let img = gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
+                        gdeditor::editor_server::PERF_LAST_RASTER_US.store(
+                            raster_t.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                         let (w, h) = (img.width, img.height);
                         let enc_t = std::time::Instant::now();
                         let bmp = gdrender2d::encode_bmp_bgra(&img);
@@ -383,7 +415,7 @@ fn main() {
                         handle.update_frame_bmp(bmp, w, h);
                     }
                     // 2D path: the float FrameBuffer encodes BMP (+ PNG on settle).
-                    RenderedFrame::Cpu(fb) => handle.update_frame_ex(fb, full_quality),
+                    RenderJob::Cpu(fb) => handle.update_frame_ex(fb, full_quality),
                 }
                 last_render_at = std::time::Instant::now();
                 last_frame_lowres = this_lowres;

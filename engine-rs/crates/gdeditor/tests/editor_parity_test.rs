@@ -1499,48 +1499,59 @@ fn test_x8i15_add_node_search_input() {
         b.contains("add-node-search"),
         "Dialog must have search input"
     );
+    // Godot's CreateDialog labels the search box with "Search:" and pairs it
+    // with the (un)favorite star toggle.
+    assert!(b.contains("Search:"), "Dialog must have Search: label");
     assert!(
-        b.contains("Search node type"),
-        "Search input must have placeholder text"
+        b.contains("add-node-fav-btn"),
+        "Dialog must have the favorite star toggle next to the search box"
     );
     handle.stop();
 }
 
 #[test]
-fn test_x8i15_2d_node_catalog() {
+fn test_x8i15_godot_dialog_layout() {
+    // Godot CreateDialog layout parity: Favorites/Recent split on the left,
+    // Search + Matches tree + Description on the right (create_dialog.cpp).
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
-    // Must have core 2D node types in the catalog
-    assert!(b.contains("'Node2D'"), "Catalog must include Node2D");
-    assert!(b.contains("'Sprite2D'"), "Catalog must include Sprite2D");
-    assert!(b.contains("'Camera2D'"), "Catalog must include Camera2D");
+    for label in ["Favorites:", "Recent:", "Search:", "Matches:", "Description:"] {
+        assert!(b.contains(label), "Dialog must have the {label} pane label");
+    }
+    for id in ["add-node-favorites", "add-node-recent", "add-node-list"] {
+        assert!(b.contains(id), "Dialog must have the {id} pane");
+    }
     assert!(
-        b.contains("'CharacterBody2D'"),
-        "Catalog must include CharacterBody2D"
-    );
-    assert!(
-        b.contains("'AnimatedSprite2D'"),
-        "Catalog must include AnimatedSprite2D"
+        b.contains("Create New Node"),
+        "Dialog title must be Create New Node"
     );
     handle.stop();
 }
 
 #[test]
-fn test_x8i15_node_categories() {
+fn test_x8i15_dialog_server_driven_tree() {
+    // The Matches tree is server-driven (ClassDB hierarchy + Godot scoring),
+    // not a hardcoded client-side catalog.
     let (handle, port) = make_server();
     let html = http_get(port, "/editor");
     let b = extract_body(&html);
     assert!(
-        b.contains("CATEGORY_DISPLAY_ORDER"),
-        "Must define category display order"
+        b.contains("/api/node/create_dialog"),
+        "Dialog must query the create_dialog API"
     );
-    assert!(b.contains("'2D'"), "Categories must include 2D");
     assert!(
-        b.contains("'Physics 2D'"),
-        "Categories must include Physics 2D"
+        b.contains("best_match"),
+        "Dialog must auto-select the server's best-scoring match"
     );
-    assert!(b.contains("'UI'"), "Categories must include UI");
+    assert!(
+        !b.contains("CATEGORY_DISPLAY_ORDER"),
+        "Old client-side category catalog must be gone"
+    );
+    assert!(
+        !b.contains("prompt('Node name:'"),
+        "Godot creates nodes without a name prompt"
+    );
     handle.stop();
 }
 

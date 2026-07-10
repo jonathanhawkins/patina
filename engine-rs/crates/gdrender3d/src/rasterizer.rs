@@ -171,6 +171,7 @@ mod tests {
             projection_matrix: identity_matrix(),
             albedo: Color::new(1.0, 0.0, 0.0, 1.0),
             emission: Color::new(0.0, 0.0, 0.0, 0.0),
+            ambient: Color::new(0.1, 0.1, 0.1, 1.0),
             roughness: 0.5,
             metallic: 0.0,
             camera_position: Vector3::ZERO,

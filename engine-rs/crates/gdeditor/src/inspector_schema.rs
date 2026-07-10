@@ -41,8 +41,19 @@ pub struct EditorProp {
     pub hint: i32,
     /// Godot `hint_string` (e.g. an enum's `"Inherit,Pausable,…"` list), `""` if none.
     pub hint_string: &'static str,
-    /// The class default value shown when the node stores no override.
+    /// The value Godot's inspector *shows* when the node stores no override.
+    /// Usually this is the class default, but for a few properties it is a
+    /// project-settings-/context-derived display value (e.g. CollisionShape
+    /// `debug_color`) that differs from the true ClassDB default below. Kept as
+    /// the display fallback so served values match Godot's shown values.
     pub default: Variant,
+    /// Godot's TRUE class default (`ClassDB.class_get_property_default_value`),
+    /// used to decide `is_default` — whether the shown value is an override. This
+    /// is the exact criterion the oracle capture (`editor_inspector_probe.gd`)
+    /// uses. Separated from [`Self::default`] so a shown value can match Godot's
+    /// display (keeping value-parity) while still being reported as an override
+    /// when it differs from the real class default (pat-ghfv0.41).
+    pub true_default: Variant,
 }
 
 impl EditorProp {
@@ -52,6 +63,7 @@ impl EditorProp {
         hint: i32,
         hint_string: &'static str,
         default: Variant,
+        true_default: Variant,
     ) -> Self {
         Self {
             name,
@@ -59,6 +71,7 @@ impl EditorProp {
             hint,
             hint_string,
             default,
+            true_default,
         }
     }
 }
@@ -209,6 +222,41 @@ mod tests {
         assert!(matches!(&scale.default, Variant::Vector3(v) if v.x == 1.0 && v.y == 1.0 && v.z == 1.0));
         let order = s.iter().find(|p| p.name == "rotation_order").unwrap();
         assert!(matches!(&order.default, Variant::Int(2)));
+    }
+
+    #[test]
+    fn true_default_models_godot_classdb_default_not_shown_value() {
+        // pat-ghfv0.41: `is_default` must reflect Godot's real ClassDB default
+        // (`ClassDB.class_get_property_default_value`), which for a few props
+        // differs from the value the inspector shows.
+        //
+        // Camera3D.current: every captured camera is `current=true` (so the shown
+        // default is true, keeping value-parity), but the ClassDB default is
+        // false — a current camera is therefore an override, not a default.
+        let cam = editor_schema("Camera3D").unwrap();
+        let current = cam.iter().find(|p| p.name == "current").unwrap();
+        assert!(matches!(&current.default, Variant::Bool(true)));
+        assert!(matches!(&current.true_default, Variant::Bool(false)));
+
+        // CollisionShape3D.debug_color: the shown value is the project-settings
+        // color (value-parity), but the true ClassDB default is transparent black.
+        let cs = editor_schema("CollisionShape3D").unwrap();
+        let dc = cs.iter().find(|p| p.name == "debug_color").unwrap();
+        assert!(matches!(&dc.true_default, Variant::Color(c)
+            if c.r == 0.0 && c.g == 0.0 && c.b == 0.0 && c.a == 0.0));
+
+        // A single-golden-sample transform (Marker3D.position) must take the
+        // origin as its true default, not the one captured (overridden) value.
+        let m = editor_schema("Marker3D").unwrap();
+        let pos = m.iter().find(|p| p.name == "position").unwrap();
+        assert!(matches!(&pos.true_default, Variant::Vector3(v)
+            if v.x == 0.0 && v.y == 0.0 && v.z == 0.0));
+
+        // FogVolume.scale: true default is the unit vector, not the captured (20,4,20).
+        let fog = editor_schema("FogVolume").unwrap();
+        let scale = fog.iter().find(|p| p.name == "scale").unwrap();
+        assert!(matches!(&scale.true_default, Variant::Vector3(v)
+            if v.x == 1.0 && v.y == 1.0 && v.z == 1.0));
     }
 
     #[test]

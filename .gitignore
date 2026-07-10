@@ -81,3 +81,6 @@ storage.sqlite3-wal
 **/.editor/
 # Orchestrator runtime build lock
 .orchestrator/rust-build.lock*
+# Create Node dialog per-project state (favorites/recent), like Godot's .godot/
+.patina/
+**/.patina/

@@ -74,6 +74,12 @@ pub struct ClassInfo {
     pub properties: Vec<PropertyInfo>,
     /// Registered methods.
     pub methods: Vec<MethodInfo>,
+    /// Whether the class is abstract (cannot be instantiated in Godot).
+    ///
+    /// Mirrors `!ClassDB::can_instantiate()` in Godot: abstract bases like
+    /// `CanvasItem` or `PhysicsBody2D` appear in the Create Node dialog only
+    /// as greyed-out ancestors and cannot be created directly.
+    pub is_abstract: bool,
 }
 
 /// A builder for registering a class with the database.
@@ -82,6 +88,7 @@ pub struct ClassRegistration {
     parent_class: String,
     properties: Vec<PropertyInfo>,
     methods: Vec<MethodInfo>,
+    is_abstract: bool,
 }
 
 impl ClassRegistration {
@@ -92,12 +99,19 @@ impl ClassRegistration {
             parent_class: String::new(),
             properties: Vec::new(),
             methods: Vec::new(),
+            is_abstract: false,
         }
     }
 
     /// Sets the parent class name.
     pub fn parent(mut self, parent: impl Into<String>) -> Self {
         self.parent_class = parent.into();
+        self
+    }
+
+    /// Marks the class as abstract — it cannot be instantiated directly.
+    pub fn abstract_class(mut self) -> Self {
+        self.is_abstract = true;
         self
     }
 
@@ -144,6 +158,7 @@ impl ClassDB {
             parent_class: reg.parent_class,
             properties: reg.properties,
             methods: reg.methods,
+            is_abstract: reg.is_abstract,
         };
 
         self.by_id.insert(id, reg.class_name.clone());
@@ -318,6 +333,28 @@ pub fn get_method_list(class_name: &str) -> Vec<MethodInfo> {
     methods
 }
 
+/// Returns `true` if the class is registered and marked abstract.
+pub fn is_abstract(class_name: &str) -> bool {
+    global_db()
+        .lock()
+        .expect("ClassDB lock poisoned")
+        .get_by_name(class_name)
+        .map(|info| info.is_abstract)
+        .unwrap_or(false)
+}
+
+/// Returns `true` if the class is registered and not abstract — i.e. the
+/// Create Node dialog may instantiate it. Mirrors Godot's
+/// `ClassDB::can_instantiate`.
+pub fn can_instantiate(class_name: &str) -> bool {
+    global_db()
+        .lock()
+        .expect("ClassDB lock poisoned")
+        .get_by_name(class_name)
+        .map(|info| !info.is_abstract)
+        .unwrap_or(false)
+}
+
 /// Returns `true` if `child` inherits from `parent` (or is `parent` itself).
 pub fn is_parent_class(child: &str, parent: &str) -> bool {
     global_db()
@@ -414,6 +451,7 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("Light3D")
             .parent("Node3D")
+            .abstract_class()
             .property(PropertyInfo::new("light_energy", Variant::Float(1.0)))
             .property(PropertyInfo::new(
                 "light_color",
@@ -468,11 +506,16 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("CollisionObject3D")
             .parent("Node3D")
+            .abstract_class()
             .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
             .property(PropertyInfo::new("collision_mask", Variant::Int(1))),
     );
 
-    register_class(ClassRegistration::new("PhysicsBody3D").parent("CollisionObject3D"));
+    register_class(
+        ClassRegistration::new("PhysicsBody3D")
+            .parent("CollisionObject3D")
+            .abstract_class(),
+    );
 
     register_class(ClassRegistration::new("StaticBody3D").parent("PhysicsBody3D"));
 
@@ -527,8 +570,16 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("ReflectionProbe").parent("Node3D"));
     register_class(ClassRegistration::new("VoxelGI").parent("Node3D"));
     register_class(ClassRegistration::new("LightmapGI").parent("Node3D"));
-    register_class(ClassRegistration::new("VisualInstance3D").parent("Node3D"));
-    register_class(ClassRegistration::new("CSGShape3D").parent("Node3D"));
+    register_class(
+        ClassRegistration::new("VisualInstance3D")
+            .parent("Node3D")
+            .abstract_class(),
+    );
+    register_class(
+        ClassRegistration::new("CSGShape3D")
+            .parent("Node3D")
+            .abstract_class(),
+    );
     register_class(ClassRegistration::new("CSGBox3D").parent("CSGShape3D"));
     register_class(ClassRegistration::new("CSGSphere3D").parent("CSGShape3D"));
     register_class(ClassRegistration::new("CSGCylinder3D").parent("CSGShape3D"));
@@ -562,6 +613,7 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("CanvasItem")
                 .parent("Node")
+                .abstract_class()
                 .property(PropertyInfo::new("visible", Variant::Bool(true)))
                 .property(PropertyInfo::new(
                     "modulate",
@@ -664,12 +716,17 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("CollisionObject2D")
                 .parent("Node2D")
+                .abstract_class()
                 .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
                 .property(PropertyInfo::new("collision_mask", Variant::Int(1))),
         );
     }
     if !class_exists("PhysicsBody2D") {
-        register_class(ClassRegistration::new("PhysicsBody2D").parent("CollisionObject2D"));
+        register_class(
+            ClassRegistration::new("PhysicsBody2D")
+                .parent("CollisionObject2D")
+                .abstract_class(),
+        );
     }
     if !class_exists("StaticBody2D") {
         register_class(ClassRegistration::new("StaticBody2D").parent("PhysicsBody2D"));
@@ -736,7 +793,11 @@ pub fn register_networking_classes() {
         register_class(ClassRegistration::new("Node").parent("Object"));
     }
     if !class_exists("PacketPeer") {
-        register_class(ClassRegistration::new("PacketPeer").parent("RefCounted"));
+        register_class(
+            ClassRegistration::new("PacketPeer")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
     }
 
     // -- HTTPClient : RefCounted --

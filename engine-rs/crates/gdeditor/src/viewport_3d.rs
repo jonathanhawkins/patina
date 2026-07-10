@@ -523,11 +523,16 @@ pub struct EnvironmentPreview3D {
 
 impl Default for EnvironmentPreview3D {
     fn default() -> Self {
-        // Default environment: procedural sky, mild ambient, sun at 45°
+        // Default environment: procedural sky, mild ambient, sun at 45°.
+        // Godot's editor preview (`_load_default_preview_settings`) also turns
+        // on filmic tonemapping and glow (in Forward+/Mobile), so the viewport
+        // shows the same tonemapped, bloomed image the runtime would.
         let mut env = Environment3D::default();
         env.background_mode = BackgroundMode::Sky;
         env.ambient_source = AmbientSource::Sky;
         env.ambient_energy = 0.5;
+        env.tone_mapper = ToneMapper::Filmic;
+        env.glow_enabled = true;
         env.sky = Some(Sky {
             material: SkyMaterial::Procedural(ProceduralSkyMaterial::default()),
             process_mode: SkyProcessMode::Automatic,
@@ -540,8 +545,10 @@ impl Default for EnvironmentPreview3D {
             sky_visible: true,
             fog_visible: true,
             sun_enabled: true,
-            // Default sun direction: ~45° elevation, slight yaw — matches Godot's default.
-            sun_direction: Vector3::new(-0.5, -0.707, -0.5).normalized(),
+            // Godot's preview sun default (`_load_default_preview_settings`):
+            // angular altitude 60°, azimuth 150° — the light travels
+            // (-sin(az)·cos(alt), -sin(alt), -cos(az)·cos(alt)).
+            sun_direction: Vector3::new(-0.25, -0.866_025, 0.433_013).normalized(),
             sun_color: Color::WHITE,
             sun_energy: 1.0,
             fog_volumes: Vec::new(),

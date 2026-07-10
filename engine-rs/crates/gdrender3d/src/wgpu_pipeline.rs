@@ -11,9 +11,10 @@
 
 use std::collections::HashMap;
 
-use gdcore::math::{Color, Vector3};
+use gdcore::math::{srgb_to_linear_channel, Color, Vector3};
 use gdcore::math3d::Transform3D;
 
+use gdserver3d::environment::{BackgroundMode, Environment3D};
 use gdserver3d::instance::{Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::{Material3D, ShadingMode};
@@ -22,7 +23,10 @@ use gdserver3d::projection::perspective_projection_matrix;
 use gdserver3d::reflection_probe::{sample_probes_at, ReflectionProbe, ReflectionProbeId};
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
 use gdserver3d::shader::ShaderMaterial3D;
+use gdserver3d::sky::SkyMaterial;
 use gdserver3d::viewport::Viewport3D;
+
+use crate::renderer::invert_projection;
 
 // ── WGSL shader source ──────────────────────────────────────────────
 
@@ -41,6 +45,7 @@ struct CameraUniforms {
     projection_matrix: mat4x4<f32>,
     camera_position: vec3<f32>,
     _pad0: f32,
+    ambient: vec4<f32>,
 };
 @group(0) @binding(0)
 var<uniform> camera: CameraUniforms;
@@ -184,11 +189,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let normal = normalize(in.world_normal);
-    let ambient = 0.1;
     var color = vec3<f32>(
-        ambient * albedo.r,
-        ambient * albedo.g,
-        ambient * albedo.b,
+        camera.ambient.r * albedo.r,
+        camera.ambient.g * albedo.g,
+        camera.ambient.b * albedo.b,
     );
 
     let num_lights = min(model.num_lights, 16u);
@@ -225,6 +229,106 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         min(color.b + emission.b, 1.0),
         albedo.a,
     );
+}
+"#;
+
+/// Fullscreen procedural-sky background shader in WGSL.
+///
+/// Draws one fullscreen triangle and evaluates the exact math of the software
+/// rasterizer's background fill per pixel: `pixel_view_direction` (unproject
+/// the pixel's NDC through the inverse projection, rotate by the camera
+/// basis) followed by `sample_procedural_sky` — the Godot 4.6
+/// `ProceduralSkyMaterial` shader port: `mix(top, horizon, pow(1 ∓ y,
+/// inv_curve))` gradients per hemisphere plus up to 4 directional-light sun
+/// discs/halos on the sky half. Keeping the math identical is what makes the
+/// GPU editor viewport background match the software reference 1:1.
+pub const SKY_WGSL: &str = r#"
+struct SkyUniforms {
+    inv_projection: mat4x4<f32>,
+    // Camera world basis (rotation only) in the upper-left 3x3.
+    camera_basis: mat4x4<f32>,
+    sky_top: vec4<f32>,
+    sky_horizon: vec4<f32>,
+    ground_bottom: vec4<f32>,
+    ground_horizon: vec4<f32>,
+    // x = inv_sky_curve (0.6 / sky_curve), y = inv_ground_curve,
+    // z = sky material energy, w = ground material energy
+    params: vec4<f32>,
+    // x = viewport width, y = viewport height
+    size: vec4<f32>,
+    // Per directional light: xyz = world direction toward the sun, w = energy.
+    sun_dir_energy: array<vec4<f32>, 4>,
+    // Per directional light: rgb = color, w = angular size in radians.
+    sun_color_size: array<vec4<f32>, 4>,
+    // x = cos(sun_angle_max), y = inv_sun_curve (1.6 / pow(sun_curve, 1.4)),
+    // z = enabled sun count, w = environment background energy.
+    sun_params: vec4<f32>,
+};
+@group(0) @binding(0)
+var<uniform> sky: SkyUniforms;
+
+struct SkyVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+};
+
+@vertex
+fn vs_sky(@builtin(vertex_index) vi: u32) -> SkyVertexOutput {
+    // Fullscreen triangle, no vertex buffer.
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    var out: SkyVertexOutput;
+    out.clip_position = vec4<f32>(pos[vi], 1.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
+    // Framebuffer coords are pixel centers (x+0.5, y+0.5) — the same sample
+    // points the software fill uses when it computes NDC per pixel.
+    let ndc_x = 2.0 * in.clip_position.x / sky.size.x - 1.0;
+    let ndc_y = 1.0 - 2.0 * in.clip_position.y / sky.size.y;
+
+    // Unproject NDC to a view-space direction (software pixel_view_direction).
+    let v = sky.inv_projection * vec4<f32>(ndc_x, ndc_y, -1.0, 1.0);
+    var view_dir = v.xyz;
+    if (abs(v.w) > 1e-6) {
+        view_dir = v.xyz / v.w;
+    }
+    let world = normalize((sky.camera_basis * vec4<f32>(view_dir, 0.0)).xyz);
+
+    // Godot ProceduralSkyMaterial (software sample_procedural_sky).
+    let y = clamp(world.y, -1.0, 1.0);
+    var rgb: vec3<f32>;
+    if (y >= 0.0) {
+        // Sky hemisphere: horizon→top gradient, then sun discs/halos.
+        let t = clamp(pow(1.0 - y, sky.params.x), 0.0, 1.0);
+        rgb = mix(sky.sky_top.rgb, sky.sky_horizon.rgb, t) * sky.params.z;
+        let count = u32(sky.sun_params.z);
+        for (var i = 0u; i < count; i = i + 1u) {
+            let de = sky.sun_dir_energy[i];
+            let cs = sky.sun_color_size[i];
+            let sun_angle = dot(de.xyz, world);
+            let sun_size = cos(cs.w);
+            let sun_rgb = cs.rgb * de.w;
+            if (sun_angle > sun_size) {
+                rgb = sun_rgb;
+            } else if (sun_angle > sky.sun_params.x && sun_size > sky.sun_params.x) {
+                let c2 = (sun_size - sun_angle) / (sun_size - sky.sun_params.x);
+                let f = clamp(pow(1.0 - c2, sky.sun_params.y), 0.0, 1.0);
+                rgb = mix(rgb, sun_rgb, f);
+            }
+        }
+    } else {
+        // Ground hemisphere: bottom→horizon gradient (no sun below horizon).
+        let t = clamp(pow(1.0 + y, sky.params.y), 0.0, 1.0);
+        rgb = mix(sky.ground_bottom.rgb, sky.ground_horizon.rgb, t) * sky.params.w;
+    }
+    // Output linear scene-referred HDR (background energy applied, no clamp):
+    // the sun can exceed 1.0 so the camera post-process can bloom/tonemap it.
+    return vec4<f32>(rgb * sky.sun_params.w, 1.0);
 }
 "#;
 
@@ -284,6 +388,9 @@ pub struct CameraUniformData {
     pub camera_position: [f32; 3],
     /// Padding.
     pub _pad0: f32,
+    /// Environment ambient light color (linear); `rgb` used, `a` unused. Applied
+    /// as `ambient * albedo` in the fragment shader, matching the software path.
+    pub ambient: [f32; 4],
 }
 
 /// Per-object model + material uniform data (bind group 1).
@@ -338,6 +445,41 @@ pub struct GpuLightData {
 pub struct LightArrayData {
     /// Up to 16 lights.
     pub lights: [GpuLightData; 16],
+}
+
+/// Sky-pass uniform (group 0 of the sky pipeline). Mirrors `SkyUniforms` in
+/// [`SKY_WGSL`]: the pixel-ray reconstruction matrices plus the procedural
+/// gradient parameters, all taken verbatim from the environment so the GPU
+/// background matches the software fill exactly.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SkyUniformData {
+    /// Inverse of the viewport's perspective projection (column-major).
+    pub inv_projection: [[f32; 4]; 4],
+    /// Camera world basis in the upper-left 3x3 (column-major).
+    pub camera_basis: [[f32; 4]; 4],
+    /// `ProceduralSkyMaterial::sky_top_color`.
+    pub sky_top: [f32; 4],
+    /// `ProceduralSkyMaterial::sky_horizon_color`.
+    pub sky_horizon: [f32; 4],
+    /// `ProceduralSkyMaterial::ground_bottom_color`.
+    pub ground_bottom: [f32; 4],
+    /// `ProceduralSkyMaterial::ground_horizon_color`.
+    pub ground_horizon: [f32; 4],
+    /// x = `0.6 / sky_curve`, y = `0.6 / ground_curve` (Godot's
+    /// `inv_sky_curve`/`inv_ground_curve` uniform mapping), z/w = sky/ground
+    /// material energy multipliers.
+    pub params: [f32; 4],
+    /// x = viewport width, y = viewport height (z, w unused).
+    pub size: [f32; 4],
+    /// Up to 4 sky suns: xyz = world direction toward the light, w = energy.
+    pub sun_dir_energy: [[f32; 4]; 4],
+    /// Up to 4 sky suns: rgb = color, w = angular size in radians.
+    pub sun_color_size: [[f32; 4]; 4],
+    /// x = `cos(sun_angle_max)`, y = `1.6 / pow(sun_curve, 1.4)` (Godot's
+    /// `inv_sun_curve`), z = enabled sun count, w = environment background
+    /// energy multiplier.
+    pub sun_params: [f32; 4],
 }
 
 // ── GPU context ─────────────────────────────────────────────────────
@@ -527,6 +669,91 @@ impl RenderPipeline3D {
     }
 }
 
+/// Fullscreen procedural-sky background pipeline (see [`SKY_WGSL`]).
+///
+/// Drawn as the first 3 vertices of a render pass, before the meshes: the
+/// depth test is disabled and the depth write off, so scene geometry always
+/// rasterizes over the sky exactly like meshes drawn over the software
+/// background fill.
+pub struct SkyPipeline3D {
+    /// The wgpu render pipeline.
+    pub pipeline: wgpu::RenderPipeline,
+    /// Bind group layout for [`SkyUniformData`] (group 0).
+    pub layout: wgpu::BindGroupLayout,
+}
+
+impl SkyPipeline3D {
+    /// Creates the sky background pipeline targeting `target_format`.
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("patina-sky-shader"),
+            source: wgpu::ShaderSource::Wgsl(SKY_WGSL.into()),
+        });
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky-bind-group-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("patina-sky-pipeline-layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("patina-sky-render-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_sky"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_sky"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        Self { pipeline, layout }
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /// Converts a [`Transform3D`] into the inverse view matrix as column-major 4x4.
@@ -558,22 +785,167 @@ fn light_to_gpu(light: &Light3D) -> GpuLightData {
         LightType::Spot => 2u32,
     };
 
+    // A directional light's stored direction is the direction it *travels*,
+    // but the shader's `dot(N, L)` wants the direction *toward* the source —
+    // negate it, exactly like the software rasterizer's light uniforms. Spot
+    // lights keep the forward direction for cone math; point lights derive
+    // their direction per-fragment from the position.
+    let direction = match light.light_type {
+        LightType::Directional => {
+            Vector3::new(-light.direction.x, -light.direction.y, -light.direction.z).normalized()
+        }
+        LightType::Spot => light.direction.normalized(),
+        LightType::Point => Vector3::ZERO,
+    };
+
     GpuLightData {
         kind,
         shadow_enabled: if light.shadow_enabled { 1 } else { 0 },
         range: light.range,
         attenuation: light.attenuation,
-        direction: [light.direction.x, light.direction.y, light.direction.z],
+        direction: [direction.x, direction.y, direction.z],
         spot_angle: light.spot_angle,
+        // Light color is sRGB authoring → linear, times energy — the scene is
+        // shaded in linear space (matches the software `LightUniform`).
         color: [
-            light.color.r * light.energy,
-            light.color.g * light.energy,
-            light.color.b * light.energy,
+            srgb_to_linear_channel(light.color.r) * light.energy,
+            srgb_to_linear_channel(light.color.g) * light.energy,
+            srgb_to_linear_channel(light.color.b) * light.energy,
         ],
         spot_angle_attenuation: light.spot_angle_attenuation,
         position: [light.position.x, light.position.y, light.position.z],
         _pad: 0.0,
     }
+}
+
+/// Bytes per pixel for the editor color/readback formats used here.
+fn bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
+    match format {
+        wgpu::TextureFormat::Rgba16Float => 8,
+        wgpu::TextureFormat::Rgba32Float => 16,
+        // Bgra8Unorm / Rgba8Unorm and friends.
+        _ => 4,
+    }
+}
+
+/// Decodes an IEEE-754 binary16 (half) bit pattern to `f32`. Used to unpack the
+/// `Rgba16Float` HDR readback buffer.
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) & 0x1;
+    let exp = (bits >> 10) & 0x1f;
+    let frac = bits & 0x3ff;
+    let sign_f = if sign == 1 { -1.0f32 } else { 1.0f32 };
+    match exp {
+        0 => {
+            // Subnormal or zero: value = frac / 2^10 * 2^(-14).
+            sign_f * (frac as f32) * 2.0f32.powi(-24)
+        }
+        0x1f => {
+            // Inf/NaN — clamp to a finite large value so downstream math is safe.
+            if frac == 0 {
+                sign_f * f32::MAX
+            } else {
+                0.0
+            }
+        }
+        _ => {
+            // Normalized: value = (1 + frac/2^10) * 2^(exp-15).
+            sign_f * (1.0 + (frac as f32) / 1024.0) * 2.0f32.powi(exp as i32 - 15)
+        }
+    }
+}
+
+/// Builds the sky-pass uniform for `env` if (and only if) its background is a
+/// procedural sky: `BackgroundMode::Sky` with a `SkyMaterial::Procedural`
+/// material. Everything the WGSL sky needs is taken from the same inputs
+/// the software background fill reads — the viewport's projection (inverted),
+/// the camera basis, the material's colors/curves/energies with Godot's
+/// uniform mappings applied, and the sky-visible directional lights — so the
+/// two paths compute identical pixels. Returns `None` for any other
+/// background (the caller clears to a flat color instead, like the software
+/// fill's non-sky arms).
+fn sky_uniform_for_env(
+    env: &Environment3D,
+    viewport: &Viewport3D,
+    w: u32,
+    h: u32,
+    suns: &[crate::renderer::SkySun],
+) -> Option<SkyUniformData> {
+    if env.background_mode != BackgroundMode::Sky {
+        return None;
+    }
+    let sky = env.sky.as_ref()?;
+    let SkyMaterial::Procedural(mat) = &sky.material else {
+        return None;
+    };
+
+    let proj = perspective_projection_matrix(
+        viewport.fov,
+        viewport.aspect(),
+        viewport.near,
+        viewport.far,
+    );
+    let inv_projection = invert_projection(&proj);
+    let b = &viewport.camera_transform.basis;
+    let energy = env.background_energy_multiplier;
+
+    let mut sun_dir_energy = [[0.0f32; 4]; 4];
+    let mut sun_color_size = [[0.0f32; 4]; 4];
+    let sun_count = suns.len().min(4);
+    for (i, sun) in suns.iter().take(4).enumerate() {
+        sun_dir_energy[i] = [sun.direction.x, sun.direction.y, sun.direction.z, sun.energy];
+        // LIGHTn_COLOR is the light color in linear space (sky.cpp), * energy
+        // applied in the shader via `de.w`.
+        sun_color_size[i] = [
+            srgb_to_linear_channel(sun.color.r),
+            srgb_to_linear_channel(sun.color.g),
+            srgb_to_linear_channel(sun.color.b),
+            sun.size,
+        ];
+    }
+
+    // The gradient endpoints are `source_color` uniforms: Godot premultiplies
+    // each by its hemisphere energy in sRGB space, then binds it as linear —
+    // `srgb_to_linear(channel * energy)`. Folding the energy into the color
+    // here (and leaving the shader's per-hemisphere energy at 1.0) makes the
+    // GPU sky mix identical to the software `sample_procedural_sky`.
+    let lin4 = |c: &Color, e: f32| {
+        [
+            srgb_to_linear_channel(c.r * e),
+            srgb_to_linear_channel(c.g * e),
+            srgb_to_linear_channel(c.b * e),
+            1.0,
+        ]
+    };
+    Some(SkyUniformData {
+        inv_projection,
+        camera_basis: [
+            [b.x.x, b.x.y, b.x.z, 0.0],
+            [b.y.x, b.y.y, b.y.z, 0.0],
+            [b.z.x, b.z.y, b.z.z, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        sky_top: lin4(&mat.sky_top_color, mat.sky_energy_multiplier),
+        sky_horizon: lin4(&mat.sky_horizon_color, mat.sky_energy_multiplier),
+        ground_bottom: lin4(&mat.ground_bottom_color, mat.ground_energy_multiplier),
+        ground_horizon: lin4(&mat.ground_horizon_color, mat.ground_energy_multiplier),
+        params: [
+            0.6 / mat.sky_curve.max(1e-4),
+            0.6 / mat.ground_curve.max(1e-4),
+            // Hemisphere energy is already folded into the colors above.
+            1.0,
+            1.0,
+        ],
+        size: [w as f32, h as f32, 0.0, 0.0],
+        sun_dir_energy,
+        sun_color_size,
+        sun_params: [
+            mat.sun_angle_max.to_radians().cos(),
+            1.6 / mat.sun_curve.max(1e-4).powf(1.4),
+            sun_count as f32,
+            energy,
+        ],
+    })
 }
 
 /// Creates a buffer and writes initial data to it.
@@ -641,6 +1013,10 @@ pub struct GpuRenderer3D {
     /// drawn around them. Separate from `pipeline` so the sRGB `render_frame`
     /// trait path and its tests are unaffected.
     editor_pipeline: Option<RenderPipeline3D>,
+    /// Lazily-built fullscreen sky pipeline for the editor path (same non-sRGB
+    /// target as `editor_pipeline`). Draws the environment's procedural sky
+    /// gradient behind the meshes, matching the software background fill.
+    editor_sky_pipeline: Option<SkyPipeline3D>,
     /// Cached editor render targets, reused across frames and recreated only on
     /// resize — the per-frame texture/readback-buffer churn is a real cost at
     /// 60fps.
@@ -694,7 +1070,7 @@ impl EditorTargets {
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_row = (w * 4 + align - 1) / align * align;
+        let padded_row = (w * bytes_per_pixel(color_format) + align - 1) / align * align;
         let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("editor-color-readback"),
             size: (padded_row * h) as u64,
@@ -733,6 +1109,7 @@ impl GpuRenderer3D {
             next_id: 1,
             target_format: format,
             editor_pipeline: None,
+            editor_sky_pipeline: None,
             editor_targets: None,
         })
     }
@@ -776,12 +1153,20 @@ impl GpuRenderer3D {
     ) -> (u32, u32, Vec<u8>) {
         let w = viewport.width.max(1);
         let h = viewport.height.max(1);
-        let format = wgpu::TextureFormat::Bgra8Unorm;
+        // The editor scene is rendered to a linear **HDR** target so the sky's
+        // bright sun and any emissive materials keep values above 1.0 for the
+        // camera post-process (glow + tonemap) to work on. The post-process
+        // (shared with the software path) collapses it to display sRGB on
+        // readback, so the two backends produce identical images.
+        let format = wgpu::TextureFormat::Rgba16Float;
 
-        // Lazily build the editor (non-sRGB) pipeline and (re)build cached targets
-        // on first use or resize. Done before borrowing device/queue immutably.
+        // Lazily build the editor HDR pipelines and (re)build cached targets on
+        // first use or resize. Done before borrowing device/queue immutably.
         if self.editor_pipeline.is_none() {
             self.editor_pipeline = Some(RenderPipeline3D::new(&self.ctx.device, format));
+        }
+        if self.editor_sky_pipeline.is_none() {
+            self.editor_sky_pipeline = Some(SkyPipeline3D::new(&self.ctx.device, format));
         }
         let need_new = match &self.editor_targets {
             Some(t) => t.width != w || t.height != h,
@@ -794,7 +1179,47 @@ impl GpuRenderer3D {
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
         let pipeline = self.editor_pipeline.as_ref().unwrap();
+        let sky_pipeline = self.editor_sky_pipeline.as_ref().unwrap();
         let targets = self.editor_targets.as_ref().unwrap();
+
+        // Resolve the background from the viewport environment the way the
+        // software rasterizer's `fill_background` does: a procedural sky draws
+        // a fullscreen gradient pass behind the meshes, a custom color clears
+        // to it, and anything else clears to the caller-provided backdrop.
+        let sky_suns = crate::renderer::sky_suns_from_lights(&self.lights);
+        let sky_bind = viewport
+            .environment
+            .as_ref()
+            .and_then(|env| sky_uniform_for_env(env, viewport, w, h, &sky_suns))
+            .map(|data| {
+                let buf = create_buffer_init(
+                    device,
+                    queue,
+                    "editor-sky-uniform",
+                    bytemuck::bytes_of(&data),
+                    wgpu::BufferUsages::UNIFORM,
+                );
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("editor-sky-bind-group"),
+                    layout: &sky_pipeline.layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buf.as_entire_binding(),
+                    }],
+                });
+                (buf, bg)
+            });
+        // `clear` stays the display-sRGB backdrop (used for the device-lost
+        // fallback); `clear_linear` is what actually clears the linear HDR
+        // target, so after the post-process's linear→sRGB encode the flat
+        // backdrop comes back out at its authored sRGB value.
+        let clear = match viewport.environment.as_ref() {
+            Some(env) if env.background_mode == BackgroundMode::CustomColor => {
+                env.background_color
+            }
+            _ => clear,
+        };
+        let clear_linear = clear.srgb_to_linear();
 
         // Camera uniforms.
         let view_matrix = transform_to_view_matrix(&viewport.camera_transform);
@@ -805,11 +1230,19 @@ impl GpuRenderer3D {
             viewport.far,
         );
         let cam_pos = viewport.camera_transform.origin;
+        // Environment ambient (linear), so the GPU shades surfaces with the
+        // sky's tint like the software path.
+        let ambient = viewport
+            .environment
+            .as_ref()
+            .map(crate::renderer::environment_ambient_color)
+            .unwrap_or(Color::new(0.1, 0.1, 0.1, 1.0));
         let camera_data = CameraUniformData {
             view_matrix,
             projection_matrix,
             camera_position: [cam_pos.x, cam_pos.y, cam_pos.z],
             _pad0: 0.0,
+            ambient: [ambient.r, ambient.g, ambient.b, 1.0],
         };
         let camera_buf = create_buffer_init(
             device,
@@ -867,10 +1300,10 @@ impl GpuRenderer3D {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: clear.r as f64,
-                            g: clear.g as f64,
-                            b: clear.b as f64,
-                            a: clear.a as f64,
+                            r: clear_linear.r as f64,
+                            g: clear_linear.g as f64,
+                            b: clear_linear.b as f64,
+                            a: clear_linear.a as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -885,6 +1318,15 @@ impl GpuRenderer3D {
                 }),
                 ..Default::default()
             });
+
+            // Sky background first (depth-test off, depth-write off), so the
+            // meshes drawn next rasterize over it — the GPU equivalent of the
+            // software path's background fill before rasterization.
+            if let Some((_sky_buf, sky_bg)) = &sky_bind {
+                pass.set_pipeline(&sky_pipeline.pipeline);
+                pass.set_bind_group(0, sky_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
 
             pass.set_pipeline(&pipeline.pipeline);
             pass.set_bind_group(0, &camera_bg, &[]);
@@ -922,15 +1364,15 @@ impl GpuRenderer3D {
                     ShadingMode::Lambert => 1u32,
                     ShadingMode::Phong => 2u32,
                 };
+                // Material colors are sRGB authoring values; upload them in
+                // linear so the WGSL shades in linear (the HDR target + camera
+                // post-process encode back to sRGB), matching the software path.
+                let alb = material.albedo.srgb_to_linear();
+                let emis = material.emission.srgb_to_linear();
                 let model_data = ModelUniformData {
                     model_matrix: transform_to_model_matrix(&inst.transform),
-                    albedo: [material.albedo.r, material.albedo.g, material.albedo.b, material.albedo.a],
-                    emission: [
-                        material.emission.r,
-                        material.emission.g,
-                        material.emission.b,
-                        material.emission.a,
-                    ],
+                    albedo: [alb.r, alb.g, alb.b, material.albedo.a],
+                    emission: [emis.r, emis.g, emis.b, material.emission.a],
                     roughness: material.roughness,
                     metallic: material.metallic,
                     shading_mode,
@@ -980,19 +1422,61 @@ impl GpuRenderer3D {
         // per-row copy (no per-pixel float work): the caller composites overlays
         // and encodes BMP directly on these bytes.
         let slice = targets.readback_buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r.is_ok());
+        });
         device
             .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
             .ok();
+        // Device-lost hardening (pat-ism62 #4): if the map failed (e.g. the GPU
+        // device was lost on sleep/wake), degrade gracefully — return a flat
+        // cleared frame instead of panicking the (indefinitely-running) editor
+        // render loop inside `get_mapped_range`. A failed map leaves the buffer
+        // unmapped, so the next frame can retry.
+        if !matches!(rx.try_recv(), Ok(true)) {
+            let px = [
+                (clear.b.clamp(0.0, 1.0) * 255.0) as u8,
+                (clear.g.clamp(0.0, 1.0) * 255.0) as u8,
+                (clear.r.clamp(0.0, 1.0) * 255.0) as u8,
+                255,
+            ];
+            let data: Vec<u8> = px.iter().copied().cycle().take((w * h * 4) as usize).collect();
+            return (w, h, data);
+        }
+        // Decode the Rgba16Float HDR readback (8 bytes/pixel, top-down) into a
+        // linear `Color` buffer, run the shared camera post-process (glow →
+        // tonemap → linear→sRGB — identical code to the software path, so the
+        // two backends match), then pack the display image to BGRA bytes.
         let mapped = slice.get_mapped_range();
-        let unpadded = (w * 4) as usize;
-        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        let mut pixels: Vec<Color> = Vec::with_capacity((w * h) as usize);
         for row in 0..h as usize {
             let start = row * targets.padded_row as usize;
-            data.extend_from_slice(&mapped[start..start + unpadded]);
+            let row_bytes = &mapped[start..start + (w * 8) as usize];
+            for px in row_bytes.chunks_exact(8) {
+                let r = f16_to_f32(u16::from_le_bytes([px[0], px[1]]));
+                let g = f16_to_f32(u16::from_le_bytes([px[2], px[3]]));
+                let b = f16_to_f32(u16::from_le_bytes([px[4], px[5]]));
+                let a = f16_to_f32(u16::from_le_bytes([px[6], px[7]]));
+                pixels.push(Color::new(r, g, b, a));
+            }
         }
         drop(mapped);
         targets.readback_buf.unmap();
+
+        let default_env = Environment3D::default();
+        let env = viewport.environment.as_ref().unwrap_or(&default_env);
+        crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
+
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for c in &pixels {
+            // Stored order is B, G, R, A (the format the caller's BMP encode
+            // expects). Post-process already clamped to [0, 1].
+            data.push((c.b * 255.0) as u8);
+            data.push((c.g * 255.0) as u8);
+            data.push((c.r * 255.0) as u8);
+            data.push((c.a * 255.0) as u8);
+        }
 
         (w, h, data)
     }
@@ -1082,11 +1566,17 @@ impl GpuRenderer3D {
             viewport.far,
         );
         let cam_pos = viewport.camera_transform.origin;
+        let ambient = viewport
+            .environment
+            .as_ref()
+            .map(crate::renderer::environment_ambient_color)
+            .unwrap_or(Color::new(0.1, 0.1, 0.1, 1.0));
         let camera_data = CameraUniformData {
             view_matrix,
             projection_matrix,
             camera_position: [cam_pos.x, cam_pos.y, cam_pos.z],
             _pad0: 0.0,
+            ambient: [ambient.r, ambient.g, ambient.b, 1.0],
         };
         let camera_buf = create_buffer_init(
             device,
@@ -1493,6 +1983,95 @@ mod tests {
     }
 
     #[test]
+    fn sky_shader_source_compiles() {
+        let result = wgpu::naga::front::wgsl::parse_str(SKY_WGSL);
+        assert!(result.is_ok(), "sky WGSL parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn sky_uniform_size_and_alignment() {
+        // 2 mat4x4 (128) + 4 vec4 colors (64) + params (16) + size (16)
+        // + 2×4 sun vec4s (128) + sun_params (16) = 352.
+        assert_eq!(std::mem::size_of::<SkyUniformData>(), 352);
+    }
+
+    /// The sky pass runs only for a procedural-sky environment; every other
+    /// background resolves to a flat clear, mirroring the software
+    /// `fill_background` arms.
+    #[test]
+    fn sky_uniform_only_for_procedural_sky() {
+        use gdserver3d::sky::Sky;
+
+        let vp = Viewport3D::new(64, 64);
+
+        // Default environment: ClearColor → no sky pass.
+        let env = Environment3D::default();
+        assert!(sky_uniform_for_env(&env, &vp, 64, 64, &[]).is_none());
+
+        // Sky mode without a sky resource → no sky pass.
+        let mut env = Environment3D::default();
+        env.background_mode = BackgroundMode::Sky;
+        assert!(sky_uniform_for_env(&env, &vp, 64, 64, &[]).is_none());
+
+        // Sky mode with the default (procedural) sky → sky pass with Godot's
+        // uniform mappings and the background energy multiplier.
+        env.sky = Some(Sky::default());
+        env.background_energy_multiplier = 2.0;
+        let data = sky_uniform_for_env(&env, &vp, 64, 64, &[]).expect("procedural sky pass");
+        assert_eq!(data.size[0], 64.0);
+        assert_eq!(data.size[1], 64.0);
+        // Defaults: sky_curve 0.15 → inv 4.0, ground_curve 0.02 → inv 30.0
+        // (Godot's `0.6 / curve` mapping); material energies stay 1.0 and the
+        // environment background multiplier rides in sun_params.w.
+        assert!((data.params[0] - 4.0).abs() < 1e-4);
+        assert!((data.params[1] - 30.0).abs() < 1e-4);
+        // Hemisphere energy is folded into the colors, so params.z/w stay 1.0.
+        assert!((data.params[2] - 1.0).abs() < 1e-6);
+        assert!((data.params[3] - 1.0).abs() < 1e-6);
+        // Default ProceduralSkyMaterial top color, linearized (source_color).
+        assert!((data.sky_top[0] - srgb_to_linear_channel(0.385)).abs() < 1e-5);
+        assert!((data.sky_top[1] - srgb_to_linear_channel(0.454)).abs() < 1e-5);
+        assert!((data.sky_top[2] - srgb_to_linear_channel(0.55)).abs() < 1e-5);
+        // Sun uniforms: no suns → count 0; Godot's sun_angle_max default 30°
+        // → cos ≈ 0.866, sun_curve 0.15 → inv_sun_curve = 1.6/0.15^1.4 ≈ 22.78.
+        assert_eq!(data.sun_params[2], 0.0);
+        assert!((data.sun_params[0] - 30f32.to_radians().cos()).abs() < 1e-6);
+        assert!((data.sun_params[1] - 22.78).abs() < 0.05);
+        assert!((data.sun_params[3] - 2.0).abs() < 1e-6);
+    }
+
+    /// Sky suns flow into the uniform the way Godot feeds `LIGHTn_*` to the
+    /// sky shader: direction toward the light, energy in w, color + angular
+    /// size packed per light, count in sun_params.z.
+    #[test]
+    fn sky_uniform_packs_directional_suns() {
+        use crate::renderer::SkySun;
+        use gdcore::math::Vector3;
+        use gdserver3d::sky::Sky;
+
+        let vp = Viewport3D::new(64, 64);
+        let mut env = Environment3D::default();
+        env.background_mode = BackgroundMode::Sky;
+        env.sky = Some(Sky::default());
+
+        let suns = [SkySun {
+            direction: Vector3::new(0.0, 1.0, 0.0),
+            color: Color::new(1.0, 0.9, 0.8, 1.0),
+            energy: 2.5,
+            size: 0.5f32.to_radians(),
+        }];
+        let data = sky_uniform_for_env(&env, &vp, 64, 64, &suns).expect("sky pass");
+        assert_eq!(data.sun_params[2], 1.0);
+        assert_eq!(data.sun_dir_energy[0][1], 1.0);
+        assert!((data.sun_dir_energy[0][3] - 2.5).abs() < 1e-6);
+        // Sun color is linearized (LIGHTn_COLOR); energy rides in dir_energy.w.
+        assert!((data.sun_color_size[0][1] - srgb_to_linear_channel(0.9)).abs() < 1e-5);
+        assert!((data.sun_color_size[0][3] - 0.5f32.to_radians()).abs() < 1e-6);
+        // Unused slots stay zeroed.
+        assert_eq!(data.sun_dir_energy[1], [0.0; 4]);
+    }
+
+    #[test]
     fn gpu_vertex_layout_size() {
         // position (3*4) + normal (3*4) + uv (2*4) = 32 bytes.
         assert_eq!(std::mem::size_of::<GpuVertex>(), 32);
@@ -1500,8 +2079,8 @@ mod tests {
 
     #[test]
     fn camera_uniform_size() {
-        // 2 mat4x4 (2*64) + vec3 (12) + pad (4) = 144 bytes.
-        assert_eq!(std::mem::size_of::<CameraUniformData>(), 144);
+        // 2 mat4x4 (2*64) + vec3 (12) + pad (4) + ambient vec4 (16) = 160 bytes.
+        assert_eq!(std::mem::size_of::<CameraUniformData>(), 160);
     }
 
     #[test]
@@ -1559,11 +2138,24 @@ mod tests {
 
     #[test]
     fn light_to_gpu_directional() {
+        // A sun shining straight down (travel −Y) must reach the shader as the
+        // toward-the-source direction (+Y), matching the software rasterizer —
+        // the unnegated direction made every sun-facing surface ambient-black.
         let mut light = Light3D::directional(Light3DId(1));
         light.direction = Vector3::new(0.0, -1.0, 0.0);
         let gpu = light_to_gpu(&light);
         assert_eq!(gpu.kind, 0);
-        assert_eq!(gpu.direction, [0.0, -1.0, 0.0]);
+        assert_eq!(gpu.direction, [0.0, 1.0, 0.0]);
         assert_eq!(gpu.color, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn light_to_gpu_directional_normalizes() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.direction = Vector3::new(-3.0, -4.0, 0.0);
+        let gpu = light_to_gpu(&light);
+        assert!((gpu.direction[0] - 0.6).abs() < 1e-6);
+        assert!((gpu.direction[1] - 0.8).abs() < 1e-6);
+        assert!((gpu.direction[2] - 0.0).abs() < 1e-6);
     }
 }

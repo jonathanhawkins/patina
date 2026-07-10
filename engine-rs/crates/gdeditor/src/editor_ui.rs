@@ -1021,6 +1021,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 .scene-tab .modified-indicator { color: var(--accent); font-size: 14px; }
 
 /* Add node dialog */
+/* Create New Node dialog — 1:1 with Godot's CreateDialog layout:
+   Favorites/Recent split on the left, Search + Matches tree + Description
+   on the right (editor/gui/create_dialog.cpp). */
 #add-node-dialog {
   display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
   background: rgba(0,0,0,0.5); z-index: 300; align-items: center; justify-content: center;
@@ -1028,8 +1031,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 #add-node-dialog.open { display: flex; }
 #add-node-dialog-inner {
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-  width: 420px; max-height: 500px; display: flex; flex-direction: column;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  width: 900px; max-width: 80vw; height: 700px; max-height: 80vh;
+  display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
 }
 #add-node-dialog-header {
   padding: 10px 14px; font-weight: bold; font-size: 13px; border-bottom: 1px solid var(--border);
@@ -1039,11 +1042,51 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   background: transparent; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; padding: 0 4px;
 }
 #add-node-dialog-header button:hover { color: var(--text); background: transparent; border: none; }
+#add-node-body { flex: 1; display: flex; gap: 12px; padding: 10px 14px; min-height: 0; }
+#add-node-left { width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+.add-node-pane-label { font-size: 11px; font-weight: bold; color: var(--text); padding: 2px 0; }
+#add-node-favorites, #add-node-recent {
+  flex: 1; overflow: auto; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 3px; min-height: 60px;
+}
+.add-node-side-item { display: flex; align-items: center; gap: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; color: var(--text); }
+.add-node-side-item:hover { background: var(--hover); }
+.add-node-side-item.selected { background: var(--selected); }
+.add-node-side-item.drag-over { border-top: 2px solid var(--accent); }
+#add-node-right { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; min-height: 0; }
+#add-node-search-row { display: flex; gap: 6px; align-items: center; }
+#add-node-search-wrap { flex: 1; position: relative; }
 #add-node-search {
-  margin: 8px 12px 4px 12px; padding: 6px 10px; font-size: 12px; border-radius: 3px;
+  width: 100%; box-sizing: border-box; padding: 6px 26px 6px 10px; font-size: 12px; border-radius: 3px;
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
 }
-#add-node-search:focus { border-color: var(--accent); }
+#add-node-search:focus { border-color: var(--accent); outline: none; }
+#add-node-search-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  background: transparent; border: none; color: var(--text-dim); cursor: pointer;
+  font-size: 13px; padding: 0 4px; display: none;
+}
+#add-node-search-clear:hover { color: var(--text); }
+#add-node-search-wrap.has-text #add-node-search-clear { display: block; }
+#add-node-fav-btn {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+  color: var(--text-dim); cursor: pointer; font-size: 13px; padding: 4px 9px; flex-shrink: 0;
+}
+#add-node-fav-btn.pressed { color: #e0c050; }
+#add-node-fav-btn:disabled { opacity: 0.4; cursor: default; }
+.add-node-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; cursor: pointer; font-size: 12px; white-space: nowrap; color: var(--text); }
+.add-node-row:hover { background: var(--hover); }
+.add-node-row.selected { background: var(--selected); }
+.add-node-row.disabled-class > .add-node-name { color: var(--text-dim); }
+.add-node-row .add-node-twist { width: 14px; text-align: center; color: var(--text-dim); font-size: 9px; flex-shrink: 0; }
+.add-node-row .node-type-icon { width: 16px; text-align: center; font-size: 12px; flex-shrink: 0; }
+#add-node-description {
+  height: 96px; flex-shrink: 0; overflow: auto; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 3px; padding: 8px 10px;
+  font-size: 11px; color: var(--text-dim); line-height: 1.5;
+}
+#add-node-description .desc-class-chain { color: var(--text); margin-bottom: 4px; }
+#add-node-description .desc-class-chain b { color: var(--accent); }
 /* Open Scene picker dialog */
 #open-scene-dialog { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 320; align-items: center; justify-content: center; }
 #open-scene-dialog.open { display: flex; }
@@ -1096,27 +1139,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 #open-project-error { color: var(--danger, #e05252); font-size: 11px; min-height: 14px; }
 #open-project-footer { padding: 8px 14px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 6px; }
 #add-node-list {
-  flex: 1; overflow: auto; padding: 4px 0; min-height: 200px; max-height: 340px;
-}
-.add-node-category {
-  padding: 4px 14px 2px 14px; font-size: 10px; font-weight: bold; text-transform: uppercase;
-  color: var(--text-dim); letter-spacing: 0.5px;
-}
-.add-node-item {
-  padding: 4px 14px 4px 24px; cursor: pointer; font-size: 12px;
-  display: flex; align-items: center; gap: 6px;
-}
-.add-node-item:hover { background: var(--hover); }
-.add-node-item.selected { background: var(--selected); color: var(--accent); }
-.add-node-item .node-type-icon { width: 16px; text-align: center; font-size: 12px; }
-#add-node-description {
-  padding: 8px 14px; border-top: 1px solid var(--border); font-size: 11px;
-  color: var(--text-dim); min-height: 40px; line-height: 1.4;
+  flex: 1; overflow: auto; padding: 2px 0; min-height: 120px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
 }
 #add-node-dialog-footer {
-  padding: 8px 14px; border-top: 1px solid var(--border); display: flex;
-  justify-content: flex-end; gap: 6px;
+  padding: 10px 14px; border-top: 1px solid var(--border); display: flex;
+  justify-content: center; gap: 40px;
 }
+#add-node-dialog-footer button { min-width: 100px; }
+#add-node-create:disabled { opacity: 0.4; cursor: default; }
 
 /* Play buttons */
 .play-buttons {
@@ -1955,16 +1986,35 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <div class="ctx-item" data-action="attach-script">Attach Script</div>
 </div>
 
-<!-- Add Node Dialog -->
+<!-- Add Node Dialog — 1:1 with Godot's Create New Node (CreateDialog) -->
 <div id="add-node-dialog">
   <div id="add-node-dialog-inner">
     <div id="add-node-dialog-header">
       <span>Create New Node</span>
       <button id="add-node-close" title="Close">&times;</button>
     </div>
-    <input type="text" id="add-node-search" placeholder="Search node type..." autocomplete="off">
-    <div id="add-node-list"></div>
-    <div id="add-node-description">Select a node type to see its description.</div>
+    <div id="add-node-body">
+      <div id="add-node-left">
+        <div class="add-node-pane-label">Favorites:</div>
+        <div id="add-node-favorites"></div>
+        <div class="add-node-pane-label">Recent:</div>
+        <div id="add-node-recent"></div>
+      </div>
+      <div id="add-node-right">
+        <div class="add-node-pane-label">Search:</div>
+        <div id="add-node-search-row">
+          <div id="add-node-search-wrap">
+            <input type="text" id="add-node-search" autocomplete="off" spellcheck="false">
+            <button id="add-node-search-clear" title="Clear" tabindex="-1">&times;</button>
+          </div>
+          <button id="add-node-fav-btn" title="(Un)favorite selected item." disabled>&#9733;</button>
+        </div>
+        <div class="add-node-pane-label">Matches:</div>
+        <div id="add-node-list"></div>
+        <div class="add-node-pane-label">Description:</div>
+        <div id="add-node-description">Select a node type to see its description.</div>
+      </div>
+    </div>
     <div id="add-node-dialog-footer">
       <button id="add-node-cancel">Cancel</button>
       <button id="add-node-create" style="border-color:var(--accent);color:var(--accent)">Create</button>
@@ -7011,52 +7061,28 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
   }
 
-  // ---- Add Node Dialog ----
-  var NODE_TYPES = {
-    'Node': { category: 'Node', desc: 'Base class for all scene objects. A node can contain other nodes as children.' },
-    'Node2D': { category: '2D', desc: 'A 2D game object. Base node for 2D game entities with position, rotation, and scale.' },
-    'Sprite2D': { category: '2D', desc: 'Displays a 2D texture. Can be used as a visual representation for game objects.' },
-    'AnimatedSprite2D': { category: '2D', desc: 'Sprite node that contains multiple textures as animation frames.' },
-    'Camera2D': { category: '2D', desc: 'Camera node for 2D scenes. Controls the viewport view.' },
-    'Light2D': { category: '2D', desc: 'Casts light in a 2D environment. Can be used for dynamic lighting effects.' },
-    'CanvasModulate': { category: '2D', desc: 'Applies a color tint to the entire canvas. Useful for day/night cycles.' },
-    'CharacterBody2D': { category: 'Physics 2D', desc: 'Specialized 2D physics body for characters controlled by script.' },
-    'RigidBody2D': { category: 'Physics 2D', desc: 'A 2D physics body that is moved by the physics engine simulation.' },
-    'StaticBody2D': { category: 'Physics 2D', desc: 'A 2D physics body that cannot be moved. Used for walls and floors.' },
-    'Area2D': { category: 'Physics 2D', desc: 'A 2D area that detects overlapping bodies and areas.' },
-    'CollisionShape2D': { category: 'Physics 2D', desc: 'Provides collision shape for 2D physics bodies.' },
-    'Control': { category: 'UI', desc: 'Base class for all UI-related nodes. Handles input events and anchoring.' },
-    'Button': { category: 'UI', desc: 'A standard themed button that can contain text and an icon.' },
-    'Label': { category: 'UI', desc: 'Displays plain text. Supports wrapping and alignment.' },
-    'TextEdit': { category: 'UI', desc: 'A multi-line text editing control with syntax highlighting support.' },
-    'LineEdit': { category: 'UI', desc: 'A single-line text input field.' },
-    'Panel': { category: 'UI', desc: 'A UI panel that draws a background style box.' },
-    'TextureRect': { category: 'UI', desc: 'Displays a texture inside a UI layout. Supports stretch modes.' },
-    'VBoxContainer': { category: 'UI', desc: 'Arranges child controls vertically.' },
-    'HBoxContainer': { category: 'UI', desc: 'Arranges child controls horizontally.' },
-    'GridContainer': { category: 'UI', desc: 'Arranges child controls in a grid pattern.' },
-    'ScrollContainer': { category: 'UI', desc: 'A container that provides scrollbars when content exceeds bounds.' },
-    'TabContainer': { category: 'UI', desc: 'A container with tabs at the top for switching between child controls.' },
-    'AudioStreamPlayer': { category: 'Audio', desc: 'Plays audio non-positionally. Useful for background music and UI sounds.' },
-    'AudioStreamPlayer2D': { category: 'Audio', desc: 'Plays audio with 2D positional effects.' },
-    'Timer': { category: 'Other', desc: 'Counts down a specified interval and emits a signal when it reaches 0.' },
-    'AnimationPlayer': { category: 'Other', desc: 'Plays animations. Can animate any property of any node.' },
-    'NavigationAgent2D': { category: 'Other', desc: 'Provides navigation and pathfinding for 2D characters.' },
-    'Node3D': { category: 'Other', desc: 'Base node for 3D game entities with 3D transform.' }
-  };
-
-  var CATEGORY_DISPLAY_ORDER = ['Node', '2D', 'Physics 2D', 'UI', 'Audio', 'Other'];
+  // ---- Add Node Dialog (1:1 port of Godot's CreateDialog, create_dialog.cpp) ----
+  // The server (/api/node/create_dialog) mirrors _update_search: it returns the
+  // hierarchy tree of subsequence matches plus their ancestors, and the
+  // best-scoring candidate to auto-select. Favorites and Recent persist
+  // per-project like Godot's favorites.Node / create_recent.Node files.
   var addNodeSelectedType = null;
-  // pat-4mc: Recent and favorite node types
+  var favoriteNodeTypes = [];
   var recentNodeTypes = [];
-  var favoriteNodeTypes = ['Node2D', 'Sprite2D', 'CharacterBody2D', 'Control', 'Label'];
+  var addNodeTreeData = null;    // {class_name, matched, instantiable, description, inheritance_chain, children}
+  var addNodeBestMatch = null;
+  var addNodeInfo = {};          // class_name -> tree node
+  var addNodeFetchSeq = 0;
+  var addNodeDragFav = null;
 
   function openAddNodeDialog() {
     addNodeSelectedType = null;
-    document.getElementById('add-node-search').value = '';
-    renderAddNodeList('');
+    var input = document.getElementById('add-node-search');
+    input.value = '';
+    updateAddNodeSearchClear();
     document.getElementById('add-node-dialog').classList.add('open');
-    setTimeout(function() { document.getElementById('add-node-search').focus(); }, 50);
+    setTimeout(function() { input.focus(); }, 50);
+    fetchAddNodeDialog('');
   }
 
   function closeAddNodeDialog() {
@@ -7064,114 +7090,307 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     addNodeSelectedType = null;
   }
 
-  // pat-4mc: Helper to append a node type item to the list
-  function appendNodeTypeItem(list, typeName) {
-    var item = document.createElement('div');
-    item.className = 'add-node-item' + (typeName === addNodeSelectedType ? ' selected' : '');
-    var icon = document.createElement('span');
-    icon.className = 'node-type-icon';
-    icon.innerHTML = classIconHtml(typeName).replace('tree-icon', 'node-type-icon');
-    var nameSpan = document.createElement('span');
-    nameSpan.textContent = typeName;
-    item.appendChild(icon);
-    item.appendChild(nameSpan);
-    item.addEventListener('click', function() {
-      addNodeSelectedType = typeName;
-      list.querySelectorAll('.add-node-item').forEach(function(el) { el.classList.remove('selected'); });
-      item.classList.add('selected');
-      document.getElementById('add-node-description').textContent = NODE_TYPES[typeName].desc;
-    });
-    item.addEventListener('dblclick', function() {
-      addNodeSelectedType = typeName;
-      createSelectedNode();
-    });
-    list.appendChild(item);
+  function updateAddNodeSearchClear() {
+    var input = document.getElementById('add-node-search');
+    document.getElementById('add-node-search-wrap').classList.toggle('has-text', input.value.length > 0);
   }
 
-  function renderAddNodeList(filter) {
+  // Godot boosts search scores for types matching the active editor context
+  // (preferred_search_result_type set by the scene tree dock).
+  function addNodePreferredType() {
+    return (typeof editorMode !== 'undefined' && editorMode === '3d') ? 'Node3D' : 'Node2D';
+  }
+
+  async function fetchAddNodeDialog(search) {
+    var seq = ++addNodeFetchSeq;
+    var resp = await api('POST', '/api/node/create_dialog', {
+      search: search, base_class: 'Node', preferred: addNodePreferredType()
+    });
+    if (seq !== addNodeFetchSeq || !resp) return; // stale or failed response
+    addNodeTreeData = resp.tree || null;
+    addNodeBestMatch = resp.best_match || null;
+    favoriteNodeTypes = resp.favorites || [];
+    recentNodeTypes = (resp.recent || []).map(function(r) { return r.class_name; });
+    renderAddNodeSidebar();
+    renderAddNodeTree(search);
+    // Selection mirrors _update_search: empty search selects the base type,
+    // otherwise the best-scoring match; nothing matching disables the dialog.
+    if (!search) selectAddNodeType('Node', false);
+    else if (addNodeBestMatch) selectAddNodeType(addNodeBestMatch, true);
+    else setAddNodeNoResults(search);
+  }
+
+  // Godot collapse rule (_configure_search_option_item): searching expands
+  // everything; otherwise only the root and abstract first-level types stay
+  // expanded.
+  function addNodeDefaultCollapsed(node, parentName, searching) {
+    if (searching) return false;
+    if (node.class_name === 'Node') return false;
+    return parentName !== 'Node' || node.instantiable;
+  }
+
+  function renderAddNodeTree(search) {
     var list = document.getElementById('add-node-list');
     list.innerHTML = '';
-    var lower = filter.toLowerCase();
+    addNodeInfo = {};
+    if (addNodeTreeData) appendAddNodeRow(list, addNodeTreeData, null, 0, !!search);
+  }
 
-    // pat-4mc: Show Favorites and Recent sections when no filter
-    if (!lower) {
-      if (favoriteNodeTypes.length > 0) {
-        var favCat = document.createElement('div');
-        favCat.className = 'add-node-category';
-        favCat.textContent = '\u2605 Favorites';
-        list.appendChild(favCat);
-        for (var fi = 0; fi < favoriteNodeTypes.length; fi++) {
-          if (NODE_TYPES[favoriteNodeTypes[fi]]) {
-            appendNodeTypeItem(list, favoriteNodeTypes[fi]);
-          }
-        }
-      }
-      if (recentNodeTypes.length > 0) {
-        var recCat = document.createElement('div');
-        recCat.className = 'add-node-category';
-        recCat.textContent = '\u23F0 Recent';
-        list.appendChild(recCat);
-        for (var ri = 0; ri < recentNodeTypes.length; ri++) {
-          if (NODE_TYPES[recentNodeTypes[ri]]) {
-            appendNodeTypeItem(list, recentNodeTypes[ri]);
-          }
-        }
-      }
-    }
+  function appendAddNodeRow(container, node, parentName, depth, searching) {
+    addNodeInfo[node.class_name] = node;
+    var row = document.createElement('div');
+    row.className = 'add-node-row' + (node.instantiable ? '' : ' disabled-class');
+    row.dataset.className = node.class_name;
+    row.style.paddingLeft = (6 + depth * 16) + 'px';
 
-    var byCategory = {};
-    var types = Object.keys(NODE_TYPES);
-    for (var i = 0; i < types.length; i++) {
-      var t = types[i];
-      if (lower && t.toLowerCase().indexOf(lower) < 0) continue;
-      var cat = NODE_TYPES[t].category;
-      if (!byCategory[cat]) byCategory[cat] = [];
-      byCategory[cat].push(t);
-    }
-    for (var ci = 0; ci < CATEGORY_DISPLAY_ORDER.length; ci++) {
-      var catName = CATEGORY_DISPLAY_ORDER[ci];
-      var items = byCategory[catName];
-      if (!items || items.length === 0) continue;
-      var catEl = document.createElement('div');
-      catEl.className = 'add-node-category';
-      catEl.textContent = catName;
-      list.appendChild(catEl);
-      for (var j = 0; j < items.length; j++) {
-        appendNodeTypeItem(list, items[j]);
+    var twist = document.createElement('span');
+    twist.className = 'add-node-twist';
+    var hasKids = node.children && node.children.length > 0;
+    twist.textContent = hasKids ? '\u25BC' : '';
+    row.appendChild(twist);
+
+    var icon = document.createElement('span');
+    icon.className = 'node-type-icon';
+    icon.innerHTML = classIconHtml(node.class_name).replace('tree-icon', 'node-type-icon');
+    row.appendChild(icon);
+
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'add-node-name';
+    nameSpan.textContent = node.class_name;
+    row.appendChild(nameSpan);
+
+    row.addEventListener('click', function() { selectAddNodeType(node.class_name, false); });
+    row.addEventListener('dblclick', function() {
+      selectAddNodeType(node.class_name, false);
+      createSelectedNode();
+    });
+    container.appendChild(row);
+
+    if (hasKids) {
+      var kids = document.createElement('div');
+      kids.className = 'add-node-children';
+      for (var i = 0; i < node.children.length; i++) {
+        appendAddNodeRow(kids, node.children[i], node.class_name, depth + 1, searching);
       }
+      container.appendChild(kids);
+      var collapsed = addNodeDefaultCollapsed(node, parentName, searching);
+      if (collapsed) { kids.style.display = 'none'; twist.textContent = '\u25B6'; }
+      twist.addEventListener('click', function(e) {
+        e.stopPropagation();
+        toggleAddNodeRowCollapse(row, kids, twist);
+      });
     }
-    // Auto-select first if filter narrows
-    if (filter && !addNodeSelectedType) {
-      var first = list.querySelector('.add-node-item');
-      if (first) first.click();
+  }
+
+  function toggleAddNodeRowCollapse(row, kids, twist) {
+    var hidden = kids.style.display === 'none';
+    kids.style.display = hidden ? '' : 'none';
+    twist.textContent = hidden ? '\u25BC' : '\u25B6';
+  }
+
+  function addNodeRowEl(name) {
+    var rows = document.querySelectorAll('#add-node-list .add-node-row');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].dataset.className === name) return rows[i];
     }
+    return null;
+  }
+
+  function selectAddNodeType(name, scroll) {
+    var info = addNodeInfo[name];
+    if (!info) return;
+    addNodeSelectedType = name;
+    document.querySelectorAll('#add-node-list .add-node-row').forEach(function(el) {
+      el.classList.toggle('selected', el.dataset.className === name);
+    });
+    var row = addNodeRowEl(name);
+    if (row && scroll) row.scrollIntoView({ block: 'nearest' });
+    renderAddNodeDescription(info);
+    var favBtn = document.getElementById('add-node-fav-btn');
+    favBtn.disabled = false;
+    favBtn.classList.toggle('pressed', favoriteNodeTypes.indexOf(name) >= 0);
+    var createBtn = document.getElementById('add-node-create');
+    createBtn.disabled = !info.instantiable;
+    createBtn.title = info.instantiable ? '' : "The selected class can't be instantiated.";
+  }
+
+  // Description panel mirrors Godot's EditorHelpBit: "Class X < Parent < ... "
+  // inheritance chain, then the class's brief description.
+  function renderAddNodeDescription(info) {
+    var d = document.getElementById('add-node-description');
+    var chainHtml = 'Class <b>' + escapeHtml(info.class_name) + '</b>';
+    var chain = info.inheritance_chain || [];
+    for (var i = 1; i < chain.length; i++) chainHtml += ' &lt; ' + escapeHtml(chain[i]);
+    d.innerHTML = '<div class="desc-class-chain">' + chainHtml + '</div><div>' +
+      escapeHtml(info.description || 'No description available.') + '</div>';
+  }
+
+  function setAddNodeNoResults(search) {
+    addNodeSelectedType = null;
+    document.getElementById('add-node-description').textContent = 'No results for "' + search + '".';
+    var favBtn = document.getElementById('add-node-fav-btn');
+    favBtn.disabled = true;
+    favBtn.classList.remove('pressed');
+    document.getElementById('add-node-create').disabled = true;
+  }
+
+  // Arrow keys in the search box drive the Matches tree, like Godot's
+  // FilterLineEdit forwarding navigation events to the Tree control.
+  function addNodeVisibleRows() {
+    var out = [];
+    var rows = document.querySelectorAll('#add-node-list .add-node-row');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].offsetParent !== null) out.push(rows[i]);
+    }
+    return out;
+  }
+
+  function moveAddNodeSelection(delta) {
+    var rows = addNodeVisibleRows();
+    if (!rows.length) return;
+    var idx = -1;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].dataset.className === addNodeSelectedType) { idx = i; break; }
+    }
+    var next = Math.max(0, Math.min(rows.length - 1, idx < 0 ? 0 : idx + delta));
+    selectAddNodeType(rows[next].dataset.className, true);
+  }
+
+  // ---- Favorites / Recent side panes ----
+  function renderAddNodeSidebar() {
+    var favBox = document.getElementById('add-node-favorites');
+    favBox.innerHTML = '';
+    favoriteNodeTypes.forEach(function(name) {
+      favBox.appendChild(makeAddNodeSideItem(name, true));
+    });
+    var recBox = document.getElementById('add-node-recent');
+    recBox.innerHTML = '';
+    recentNodeTypes.forEach(function(name) {
+      recBox.appendChild(makeAddNodeSideItem(name, false));
+    });
+  }
+
+  function makeAddNodeSideItem(name, isFavorite) {
+    var item = document.createElement('div');
+    item.className = 'add-node-side-item';
+    item.dataset.className = name;
+    var icon = document.createElement('span');
+    icon.className = 'node-type-icon';
+    icon.innerHTML = classIconHtml(name).replace('tree-icon', 'node-type-icon');
+    var nameSpan = document.createElement('span');
+    nameSpan.textContent = name;
+    item.appendChild(icon);
+    item.appendChild(nameSpan);
+    // Clicking a favorite/recent sets the search text to the type \u2014 the exact
+    // match then scores 1.0 and is auto-selected (Godot _favorite_selected /
+    // _history_selected). Double-click confirms.
+    item.addEventListener('click', function() { pickAddNodeSideItem(name); });
+    item.addEventListener('dblclick', function() {
+      pickAddNodeSideItem(name).then(function() { createSelectedNode(); });
+    });
+    if (isFavorite) {
+      item.draggable = true;
+      item.addEventListener('dragstart', function(e) {
+        addNodeDragFav = name;
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      item.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        item.classList.add('drag-over');
+      });
+      item.addEventListener('dragleave', function() { item.classList.remove('drag-over'); });
+      item.addEventListener('drop', function(e) {
+        e.preventDefault();
+        item.classList.remove('drag-over');
+        dropAddNodeFavorite(name);
+      });
+    }
+    return item;
+  }
+
+  function pickAddNodeSideItem(name) {
+    var input = document.getElementById('add-node-search');
+    input.value = name;
+    updateAddNodeSearchClear();
+    return fetchAddNodeDialog(name);
+  }
+
+  async function dropAddNodeFavorite(targetName) {
+    if (!addNodeDragFav || addNodeDragFav === targetName) return;
+    var from = favoriteNodeTypes.indexOf(addNodeDragFav);
+    var to = favoriteNodeTypes.indexOf(targetName);
+    if (from < 0 || to < 0) return;
+    favoriteNodeTypes.splice(from, 1);
+    favoriteNodeTypes.splice(to > from ? to - 1 : to, 0, addNodeDragFav);
+    addNodeDragFav = null;
+    renderAddNodeSidebar();
+    await api('POST', '/api/node/create_dialog/favorites', { favorites: favoriteNodeTypes });
+  }
+
+  async function toggleAddNodeFavorite() {
+    if (!addNodeSelectedType) return;
+    var resp = await api('POST', '/api/node/create_dialog/toggle_favorite', { class_name: addNodeSelectedType });
+    if (!resp) return;
+    favoriteNodeTypes = resp.favorites || [];
+    renderAddNodeSidebar();
+    document.getElementById('add-node-fav-btn').classList.toggle('pressed', resp.is_favorite);
+  }
+
+  // Godot creates the node named after its class and de-duplicates against
+  // siblings (Sprite2D, Sprite2D2, ...) \u2014 no name prompt.
+  function uniqueChildName(parentId, className) {
+    var parent = findNodeInTree(sceneData ? sceneData.nodes : null, parentId);
+    var siblings = {};
+    if (parent && parent.children) {
+      for (var i = 0; i < parent.children.length; i++) siblings[parent.children[i].name] = true;
+    }
+    if (!siblings[className]) return className;
+    var n = 2;
+    while (siblings[className + n]) n++;
+    return className + n;
   }
 
   async function createSelectedNode() {
     if (!addNodeSelectedType) return;
-    var name = prompt('Node name:', addNodeSelectedType);
-    if (!name) return;
+    var info = addNodeInfo[addNodeSelectedType];
+    if (info && !info.instantiable) return;
     var parentId = selectedNodeId || (sceneData && sceneData.nodes ? sceneData.nodes.id : null);
     if (parentId === null) return;
+    var name = uniqueChildName(parentId, addNodeSelectedType);
     await api('POST', '/api/node/add', { parent_id: parentId, name: name, class_name: addNodeSelectedType });
-    // pat-4mc: Track recent node types (max 5, most recent first)
-    var idx = recentNodeTypes.indexOf(addNodeSelectedType);
-    if (idx >= 0) recentNodeTypes.splice(idx, 1);
-    recentNodeTypes.unshift(addNodeSelectedType);
-    if (recentNodeTypes.length > 5) recentNodeTypes.length = 5;
     if (selectedNodeId) expandedNodes.add(selectedNodeId);
     closeAddNodeDialog();
     await fetchScene();
   }
 
   function setupAddNodeDialog() {
-    document.getElementById('add-node-search').addEventListener('input', function() {
-      renderAddNodeList(this.value.trim());
+    var input = document.getElementById('add-node-search');
+    input.addEventListener('input', function() {
+      updateAddNodeSearchClear();
+      fetchAddNodeDialog(this.value.trim());
     });
-    document.getElementById('add-node-search').addEventListener('keydown', function(e) {
+    input.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') { e.preventDefault(); createSelectedNode(); }
-      if (e.key === 'Escape') { e.preventDefault(); closeAddNodeDialog(); }
+      else if (e.key === 'Escape') { e.preventDefault(); closeAddNodeDialog(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); moveAddNodeSelection(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); moveAddNodeSelection(-1); }
+      else if (e.key === ' ' && addNodeSelectedType) {
+        // Godot's ui_select in the search box toggles the selected item's
+        // collapse without inserting a space.
+        e.preventDefault();
+        var row = addNodeRowEl(addNodeSelectedType);
+        if (row && row.nextElementSibling && row.nextElementSibling.className === 'add-node-children') {
+          toggleAddNodeRowCollapse(row, row.nextElementSibling, row.querySelector('.add-node-twist'));
+        }
+      }
     });
+    document.getElementById('add-node-search-clear').addEventListener('click', function() {
+      input.value = '';
+      updateAddNodeSearchClear();
+      input.focus();
+      fetchAddNodeDialog('');
+    });
+    document.getElementById('add-node-fav-btn').addEventListener('click', toggleAddNodeFavorite);
     document.getElementById('add-node-close').addEventListener('click', closeAddNodeDialog);
     document.getElementById('add-node-cancel').addEventListener('click', closeAddNodeDialog);
     document.getElementById('add-node-create').addEventListener('click', createSelectedNode);

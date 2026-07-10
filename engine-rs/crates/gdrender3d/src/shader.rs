@@ -117,6 +117,10 @@ pub struct ShaderUniforms {
     pub albedo: Color,
     /// Material emission color.
     pub emission: Color,
+    /// Ambient light color (linear) applied as `ambient * albedo`. Derived from
+    /// the environment (sky irradiance, flat color, or background); replaces the
+    /// old hardcoded grey ambient so surfaces pick up the sky's tint like Godot.
+    pub ambient: Color,
     /// Material roughness.
     pub roughness: f32,
     /// Material metallic factor.
@@ -377,11 +381,10 @@ pub struct LambertFragmentShader;
 impl FragmentShader for LambertFragmentShader {
     fn process(&self, input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
         let normal = input.world_normal.normalized();
-        let ambient = 0.1_f32;
 
-        let mut diffuse_r = ambient * uniforms.albedo.r;
-        let mut diffuse_g = ambient * uniforms.albedo.g;
-        let mut diffuse_b = ambient * uniforms.albedo.b;
+        let mut diffuse_r = uniforms.ambient.r * uniforms.albedo.r;
+        let mut diffuse_g = uniforms.ambient.g * uniforms.albedo.g;
+        let mut diffuse_b = uniforms.ambient.b * uniforms.albedo.b;
 
         for (i, light) in uniforms.lights.iter().enumerate() {
             let (light_dir, intensity) = light.evaluate(input.world_position);
@@ -410,12 +413,11 @@ impl FragmentShader for PhongFragmentShader {
     fn process(&self, input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
         let normal = input.world_normal.normalized();
         let view_dir = (uniforms.camera_position - input.world_position).normalized();
-        let ambient = 0.1_f32;
         let shininess = ((1.0 - uniforms.roughness) * 128.0).max(1.0);
 
-        let mut r = ambient * uniforms.albedo.r;
-        let mut g = ambient * uniforms.albedo.g;
-        let mut b = ambient * uniforms.albedo.b;
+        let mut r = uniforms.ambient.r * uniforms.albedo.r;
+        let mut g = uniforms.ambient.g * uniforms.albedo.g;
+        let mut b = uniforms.ambient.b * uniforms.albedo.b;
 
         for (i, light) in uniforms.lights.iter().enumerate() {
             let (light_dir, intensity) = light.evaluate(input.world_position);
@@ -587,6 +589,7 @@ mod tests {
             projection_matrix: identity_matrix(),
             albedo: Color::new(1.0, 1.0, 1.0, 1.0),
             emission: Color::new(0.0, 0.0, 0.0, 0.0),
+            ambient: Color::new(0.1, 0.1, 0.1, 1.0),
             roughness: 0.5,
             metallic: 0.0,
             camera_position: Vector3::ZERO,
