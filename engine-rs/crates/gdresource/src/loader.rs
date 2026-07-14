@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
-use gdcore::math3d::{Basis, Transform3D};
+use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
+use gdcore::string_name::StringName;
 use gdcore::ResourceUid;
 use gdvariant::Variant;
 
@@ -79,7 +80,7 @@ impl TresLoader {
                 } else if inner == "resource" {
                     current_section = Section::Resource;
                 } else {
-                    current_section = Section::None;
+                    current_section = Section::Unknown;
                 }
                 continue;
             }
@@ -100,6 +101,13 @@ impl TresLoader {
                         if let Some(ref mut sub) = current_sub {
                             sub.set_property(key, value);
                         }
+                    }
+                    // A property before any section means the file has no
+                    // `[gd_resource]`/`[resource]` header — not a valid .tres.
+                    Section::None => {
+                        return Err(EngineError::Parse(format!(
+                            "property '{key}' outside any section (missing [gd_resource]/[resource] header) at line {line_num} in {path}"
+                        )));
                     }
                     _ => {}
                 }
@@ -128,11 +136,15 @@ impl ResourceLoader for TresLoader {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Section {
+    /// No section opened yet (before any `[...]` header).
     None,
     GdResource,
     ExtResource,
     SubResource,
     Resource,
+    /// A recognized `[...]` header that is not one Patina models; its
+    /// properties are ignored rather than treated as a malformed stray.
+    Unknown,
 }
 
 /// Extracts key="value" pairs from a section header string.
@@ -209,18 +221,12 @@ fn parse_sub_resource_header(header: &str) -> EngineResult<(String, String)> {
 
 /// Converts a `uid://...` string into a [`ResourceUid`].
 ///
-/// For simplicity we hash the string portion to produce a numeric UID.
-/// Also available as [`parse_uid_string`] for public use.
+/// Uses Godot's base-34 codec ([`crate::uid::text_to_id`]), so the numeric UID
+/// matches the value Godot itself computes. Returns [`ResourceUid::INVALID`] for
+/// strings without a `uid://` prefix, the `uid://<invalid>` sentinel, or any
+/// character outside `[a-z0-9]`.
 pub fn parse_uid_string(uid_str: &str) -> ResourceUid {
-    if let Some(rest) = uid_str.strip_prefix("uid://") {
-        // Simple hash to produce a stable numeric UID.
-        let hash: i64 = rest
-            .bytes()
-            .fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
-        ResourceUid::new(hash)
-    } else {
-        ResourceUid::INVALID
-    }
+    crate::uid::text_to_id(uid_str)
 }
 
 /// Parses a single property value string into a [`Variant`].
@@ -381,21 +387,22 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
     }
 
     // Packed typed arrays: PackedByteArray(), PackedInt32Array(), etc.
-    // Stored as Variant::Array with the appropriate element types.
+    // Parsed into the matching `Variant::Packed*Array` variant so the packed
+    // type is preserved through a parse → save round-trip (pat-u3l8c.11).
     if let Some(inner) = try_strip_call(s, "PackedByteArray") {
-        return parse_packed_int_array(inner);
+        return parse_packed_byte_array(inner);
     }
     if let Some(inner) = try_strip_call(s, "PackedInt32Array") {
-        return parse_packed_int_array(inner);
+        return parse_packed_int32_array(inner);
     }
     if let Some(inner) = try_strip_call(s, "PackedInt64Array") {
-        return parse_packed_int_array(inner);
+        return parse_packed_int64_array(inner);
     }
     if let Some(inner) = try_strip_call(s, "PackedFloat32Array") {
-        return parse_packed_float_array(inner);
+        return parse_packed_float32_array(inner);
     }
     if let Some(inner) = try_strip_call(s, "PackedFloat64Array") {
-        return parse_packed_float_array(inner);
+        return parse_packed_float64_array(inner);
     }
     if let Some(inner) = try_strip_call(s, "PackedStringArray") {
         return parse_packed_string_array(inner);
@@ -431,6 +438,110 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
             return Ok(Variant::Vector3(Vector3::new(x, y, z)));
         }
         return Err(EngineError::Parse(format!("invalid Vector3i: {s}")));
+    }
+
+    // Quaternion(x, y, z, w)
+    if let Some(inner) = try_strip_call(s, "Quaternion") {
+        let parts = split_args(inner);
+        if parts.len() == 4 {
+            return Ok(Variant::Quaternion(Quaternion {
+                x: parse_f32(&parts[0])?,
+                y: parse_f32(&parts[1])?,
+                z: parse_f32(&parts[2])?,
+                w: parse_f32(&parts[3])?,
+            }));
+        }
+        return Err(EngineError::Parse(format!("invalid Quaternion: {s}")));
+    }
+
+    // Plane(a, b, c, d) — normal (a, b, c) and signed distance d
+    if let Some(inner) = try_strip_call(s, "Plane") {
+        let parts = split_args(inner);
+        if parts.len() == 4 {
+            return Ok(Variant::Plane(Plane {
+                normal: Vector3::new(
+                    parse_f32(&parts[0])?,
+                    parse_f32(&parts[1])?,
+                    parse_f32(&parts[2])?,
+                ),
+                d: parse_f32(&parts[3])?,
+            }));
+        }
+        return Err(EngineError::Parse(format!("invalid Plane: {s}")));
+    }
+
+    // AABB(px, py, pz, sx, sy, sz) — position and size
+    if let Some(inner) = try_strip_call(s, "AABB") {
+        let parts = split_args(inner);
+        if parts.len() == 6 {
+            return Ok(Variant::Aabb(Aabb {
+                position: Vector3::new(
+                    parse_f32(&parts[0])?,
+                    parse_f32(&parts[1])?,
+                    parse_f32(&parts[2])?,
+                ),
+                size: Vector3::new(
+                    parse_f32(&parts[3])?,
+                    parse_f32(&parts[4])?,
+                    parse_f32(&parts[5])?,
+                ),
+            }));
+        }
+        return Err(EngineError::Parse(format!("invalid AABB: {s}")));
+    }
+
+    // Basis(xx, xy, xz, yx, yy, yz, zx, zy, zz) — three row vectors (matches the
+    // basis embedded in Transform3D above).
+    if let Some(inner) = try_strip_call(s, "Basis") {
+        let parts = split_args(inner);
+        if parts.len() == 9 {
+            let f: Result<Vec<f32>, _> = parts.iter().map(|p| parse_f32(p)).collect();
+            let f = f?;
+            return Ok(Variant::Basis(Basis {
+                x: Vector3::new(f[0], f[1], f[2]),
+                y: Vector3::new(f[3], f[4], f[5]),
+                z: Vector3::new(f[6], f[7], f[8]),
+            }));
+        }
+        return Err(EngineError::Parse(format!("invalid Basis: {s}")));
+    }
+
+    // StringName("name") — the call-style form.
+    if let Some(inner) = try_strip_call(s, "StringName") {
+        let inner = inner.trim();
+        if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
+            let name = unescape_string(&inner[1..inner.len() - 1]);
+            return Ok(Variant::StringName(StringName::new(&name)));
+        }
+        return Err(EngineError::Parse(format!("invalid StringName: {s}")));
+    }
+
+    // StringName literal: &"name" (Godot's `&`-prefixed form).
+    if let Some(rest) = s.strip_prefix('&') {
+        let rest = rest.trim();
+        if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
+            let name = unescape_string(&rest[1..rest.len() - 1]);
+            return Ok(Variant::StringName(StringName::new(&name)));
+        }
+        return Err(EngineError::Parse(format!("invalid StringName literal: {s}")));
+    }
+
+    // Typed array: `Array[Type]([elem, ...])`. The element type annotation is
+    // accepted but not retained (stored as a plain Variant::Array).
+    if let Some(rest) = s.strip_prefix("Array[") {
+        if let Some(close) = rest.find(']') {
+            let after = rest[close + 1..].trim();
+            if let Some(call) = after
+                .strip_prefix('(')
+                .and_then(|c| c.strip_suffix(')'))
+            {
+                let call = call.trim();
+                if let Some(elems) = call.strip_prefix('[').and_then(|c| c.strip_suffix(']')) {
+                    return parse_array(elems);
+                }
+            }
+        }
+        return Err(EngineError::Parse(format!("invalid typed Array: {s}")));
     }
 
     // Array: [elem, elem, ...]
@@ -631,66 +742,115 @@ fn parse_dictionary(s: &str) -> EngineResult<Variant> {
     Ok(Variant::Dictionary(map))
 }
 
-/// Parses a packed integer array body (e.g. `"1, 2, 3"` or `""`) into `Variant::Array`.
-fn parse_packed_int_array(s: &str) -> EngineResult<Variant> {
+/// Parses a `PackedByteArray` body (e.g. `"1, 2, 3"` or `""`) — elements must
+/// be in `0..=255`.
+fn parse_packed_byte_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Array(Vec::new()));
+        return Ok(Variant::PackedByteArray(Vec::new()));
+    }
+    let parts = split_args(s);
+    let mut result = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let b = part.trim().parse::<u8>().map_err(|_| {
+            EngineError::Parse(format!("expected byte (0-255) in PackedByteArray, got: {part}"))
+        })?;
+        result.push(b);
+    }
+    Ok(Variant::PackedByteArray(result))
+}
+
+/// Parses a `PackedInt32Array` body into `Variant::PackedInt32Array`.
+fn parse_packed_int32_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::PackedInt32Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    let mut result = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let i = part.trim().parse::<i32>().map_err(|_| {
+            EngineError::Parse(format!("expected i32 in PackedInt32Array, got: {part}"))
+        })?;
+        result.push(i);
+    }
+    Ok(Variant::PackedInt32Array(result))
+}
+
+/// Parses a `PackedInt64Array` body into `Variant::PackedInt64Array`.
+fn parse_packed_int64_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::PackedInt64Array(Vec::new()));
     }
     let parts = split_args(s);
     let mut result = Vec::with_capacity(parts.len());
     for part in &parts {
         let i = part.trim().parse::<i64>().map_err(|_| {
-            EngineError::Parse(format!("expected int in packed array, got: {part}"))
+            EngineError::Parse(format!("expected i64 in PackedInt64Array, got: {part}"))
         })?;
-        result.push(Variant::Int(i));
+        result.push(i);
     }
-    Ok(Variant::Array(result))
+    Ok(Variant::PackedInt64Array(result))
 }
 
-/// Parses a packed float array body into `Variant::Array`.
-fn parse_packed_float_array(s: &str) -> EngineResult<Variant> {
+/// Parses a `PackedFloat32Array` body into `Variant::PackedFloat32Array`.
+fn parse_packed_float32_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Array(Vec::new()));
+        return Ok(Variant::PackedFloat32Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    let mut result = Vec::with_capacity(parts.len());
+    for part in &parts {
+        result.push(parse_f32(part)?);
+    }
+    Ok(Variant::PackedFloat32Array(result))
+}
+
+/// Parses a `PackedFloat64Array` body into `Variant::PackedFloat64Array`.
+fn parse_packed_float64_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::PackedFloat64Array(Vec::new()));
     }
     let parts = split_args(s);
     let mut result = Vec::with_capacity(parts.len());
     for part in &parts {
         let f = part.trim().parse::<f64>().map_err(|_| {
-            EngineError::Parse(format!("expected float in packed array, got: {part}"))
+            EngineError::Parse(format!("expected f64 in PackedFloat64Array, got: {part}"))
         })?;
-        result.push(Variant::Float(f));
+        result.push(f);
     }
-    Ok(Variant::Array(result))
+    Ok(Variant::PackedFloat64Array(result))
 }
 
-/// Parses a packed string array body into `Variant::Array`.
+/// Parses a `PackedStringArray` body into `Variant::PackedStringArray`.
 fn parse_packed_string_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Array(Vec::new()));
+        return Ok(Variant::PackedStringArray(Vec::new()));
     }
     let parts = split_args(s);
     let mut result = Vec::with_capacity(parts.len());
     for part in &parts {
         let part = part.trim();
         if part.starts_with('"') && part.ends_with('"') && part.len() >= 2 {
-            result.push(Variant::String(unescape_string(&part[1..part.len() - 1])));
+            result.push(unescape_string(&part[1..part.len() - 1]));
         } else {
             return Err(EngineError::Parse(format!(
-                "expected quoted string in packed array, got: {part}"
+                "expected quoted string in PackedStringArray, got: {part}"
             )));
         }
     }
-    Ok(Variant::Array(result))
+    Ok(Variant::PackedStringArray(result))
 }
 
-/// Parses a packed Vector2 array body (flat pairs: `x1, y1, x2, y2, ...`) into `Variant::Array`.
+/// Parses a `PackedVector2Array` body (flat pairs: `x1, y1, x2, y2, ...`).
 fn parse_packed_vector2_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Array(Vec::new()));
+        return Ok(Variant::PackedVector2Array(Vec::new()));
     }
     let parts = split_args(s);
     if !parts.len().is_multiple_of(2) {
@@ -703,16 +863,16 @@ fn parse_packed_vector2_array(s: &str) -> EngineResult<Variant> {
     for chunk in parts.chunks(2) {
         let x = parse_f32(&chunk[0])?;
         let y = parse_f32(&chunk[1])?;
-        result.push(Variant::Vector2(Vector2::new(x, y)));
+        result.push(Vector2::new(x, y));
     }
-    Ok(Variant::Array(result))
+    Ok(Variant::PackedVector2Array(result))
 }
 
-/// Parses a packed Vector3 array body (flat triples: `x1, y1, z1, ...`) into `Variant::Array`.
+/// Parses a `PackedVector3Array` body (flat triples: `x1, y1, z1, ...`).
 fn parse_packed_vector3_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Array(Vec::new()));
+        return Ok(Variant::PackedVector3Array(Vec::new()));
     }
     let parts = split_args(s);
     if !parts.len().is_multiple_of(3) {
@@ -726,16 +886,16 @@ fn parse_packed_vector3_array(s: &str) -> EngineResult<Variant> {
         let x = parse_f32(&chunk[0])?;
         let y = parse_f32(&chunk[1])?;
         let z = parse_f32(&chunk[2])?;
-        result.push(Variant::Vector3(Vector3::new(x, y, z)));
+        result.push(Vector3::new(x, y, z));
     }
-    Ok(Variant::Array(result))
+    Ok(Variant::PackedVector3Array(result))
 }
 
-/// Parses a packed Color array body (flat quads: `r1, g1, b1, a1, ...`) into `Variant::Array`.
+/// Parses a `PackedColorArray` body (flat quads: `r1, g1, b1, a1, ...`).
 fn parse_packed_color_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Array(Vec::new()));
+        return Ok(Variant::PackedColorArray(Vec::new()));
     }
     let parts = split_args(s);
     if !parts.len().is_multiple_of(4) {
@@ -750,9 +910,9 @@ fn parse_packed_color_array(s: &str) -> EngineResult<Variant> {
         let g = parse_f32(&chunk[1])?;
         let b = parse_f32(&chunk[2])?;
         let a = parse_f32(&chunk[3])?;
-        result.push(Variant::Color(Color::new(r, g, b, a)));
+        result.push(Color::new(r, g, b, a));
     }
-    Ok(Variant::Array(result))
+    Ok(Variant::PackedColorArray(result))
 }
 
 /// Finds the index of the closing quote in a string, starting search at `start`.
@@ -865,6 +1025,83 @@ mod tests {
     fn parse_sub_resource_value() {
         let v = parse_variant_value(r#"SubResource("StyleBoxFlat_abc")"#).unwrap();
         assert_eq!(v, Variant::String("SubResource:StyleBoxFlat_abc".into()));
+    }
+
+    // pat-u3l8c.86 — parser completeness for 3D math + StringName + typed arrays.
+
+    #[test]
+    fn parse_quaternion_value() {
+        let v = parse_variant_value("Quaternion(0, 0, 0, 1)").unwrap();
+        assert_eq!(
+            v,
+            Variant::Quaternion(Quaternion {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_plane_value() {
+        let v = parse_variant_value("Plane(0, 1, 0, 5)").unwrap();
+        assert_eq!(
+            v,
+            Variant::Plane(Plane {
+                normal: Vector3::new(0.0, 1.0, 0.0),
+                d: 5.0,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_aabb_value() {
+        let v = parse_variant_value("AABB(1, 2, 3, 4, 5, 6)").unwrap();
+        assert_eq!(
+            v,
+            Variant::Aabb(Aabb {
+                position: Vector3::new(1.0, 2.0, 3.0),
+                size: Vector3::new(4.0, 5.0, 6.0),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_basis_value() {
+        let v = parse_variant_value("Basis(1, 0, 0, 0, 1, 0, 0, 0, 1)").unwrap();
+        assert_eq!(
+            v,
+            Variant::Basis(Basis {
+                x: Vector3::new(1.0, 0.0, 0.0),
+                y: Vector3::new(0.0, 1.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 1.0),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_string_name_call_and_literal() {
+        let call = parse_variant_value(r#"StringName("idle")"#).unwrap();
+        assert_eq!(call, Variant::StringName(StringName::new("idle")));
+        // Godot's `&"name"` shorthand parses to the same StringName.
+        let lit = parse_variant_value(r#"&"idle""#).unwrap();
+        assert_eq!(lit, Variant::StringName(StringName::new("idle")));
+    }
+
+    #[test]
+    fn parse_typed_array_value() {
+        // `Array[int]([...])` parses identically to the plain `[...]` array.
+        let typed = parse_variant_value("Array[int]([1, 2, 3])").unwrap();
+        let plain = parse_variant_value("[1, 2, 3]").unwrap();
+        assert_eq!(typed, plain);
+    }
+
+    #[test]
+    fn unrecognized_value_errors_not_silently_dropped() {
+        // parse_variant_value returns a loud Err for unknown constructs so that
+        // packed_scene can warn instead of silently dropping data.
+        assert!(parse_variant_value("Frobnicate(1, 2)").is_err());
     }
 
     #[test]

@@ -8,13 +8,16 @@ repository.workspace = true
 [dependencies]
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
+gdserver2d = { path = "../gdserver2d" }
 gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
 gdscript-interop = { path = "../gdscript-interop" }
 gdphysics2d = { path = "../gdphysics2d" }
 gdphysics3d = { path = "../gdphysics3d" }
+gdaudio = { path = "../gdaudio" }
 gdserver3d = { path = "../gdserver3d" }
 gdrender3d = { path = "../gdrender3d" }
+gdrender2d = { path = "../gdrender2d" }
 gdplatform = { path = "../gdplatform" }
 thiserror.workspace = true
 tracing.workspace = true

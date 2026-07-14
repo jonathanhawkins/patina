@@ -2167,12 +2167,132 @@ fn determine_phase_default(gates: &GateReport, parity: &ParityReport) -> Phase {
     }
 }
 
+// ─── Gardener (queue hygiene while the planner is idle) ──────────────────
+
+/// Red flags worth interrupting the operator for. Empty = healthy queue.
+pub fn hygiene_flags(h: &crate::db::HygieneCounts, p0_dilution_threshold: usize) -> Vec<String> {
+    let mut flags = Vec::new();
+    if p0_dilution_threshold > 0 && h.open_p0 > p0_dilution_threshold {
+        flags.push(format!(
+            "P0 dilution: {} open P0s (threshold {}) — P0-first scheduling means \
+             little when everything is P0; re-triage priorities",
+            h.open_p0, p0_dilution_threshold
+        ));
+    }
+    if h.open_unassigned > 0 && h.blocked_open * 2 > h.open_unassigned {
+        flags.push(format!(
+            "queue mostly blocked: {}/{} open unassigned beads sit behind live dependencies",
+            h.blocked_open, h.open_unassigned
+        ));
+    }
+    if h.truly_ready == 0 && h.open_unassigned > 0 {
+        flags.push(format!(
+            "zero assignable beads despite {} open unassigned — all blocked, deferred, or epics",
+            h.open_unassigned
+        ));
+    }
+    // A handful of stale beads in a big backlog is normal for this repo
+    // (100+-bead audit epics); only flag when staleness is a significant
+    // share, or an hourly boss nag never stops firing.
+    if h.open_total > 0 && h.stale_open * 5 > h.open_total {
+        flags.push(format!(
+            "{}/{} open beads untouched beyond the stale window (>20%) — close or re-scope them",
+            h.stale_open, h.open_total
+        ));
+    }
+    flags
+}
+
+/// Compact digest for logs and (when flags are present) the boss pane.
+pub fn hygiene_digest(h: &crate::db::HygieneCounts, flags: &[String]) -> String {
+    let mut msg = format!(
+        "gardener: open={} (P0={}) unassigned={} ready={} blocked={} stale={}",
+        h.open_total, h.open_p0, h.open_unassigned, h.truly_ready, h.blocked_open, h.stale_open
+    );
+    if !h.top_blockers.is_empty() {
+        let tops: Vec<String> = h
+            .top_blockers
+            .iter()
+            .map(|(id, n)| format!("{id} (unblocks {n})"))
+            .collect();
+        msg.push_str(&format!("; close-first: {}", tops.join(", ")));
+    }
+    for f in flags {
+        msg.push_str(&format!("\n  WARNING: {f}"));
+    }
+    msg
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    fn hygiene(
+        open_p0: usize,
+        open_unassigned: usize,
+        truly_ready: usize,
+        blocked_open: usize,
+        stale_open: usize,
+    ) -> crate::db::HygieneCounts {
+        crate::db::HygieneCounts {
+            open_total: open_unassigned,
+            open_p0,
+            open_unassigned,
+            truly_ready,
+            blocked_open,
+            stale_open,
+            top_blockers: Vec::new(),
+        }
+    }
+
+    /// Healthy queue produces no flags; each pathology produces its flag.
+    #[test]
+    fn test_hygiene_flags_fire_per_pathology() {
+        assert!(hygiene_flags(&hygiene(5, 40, 30, 2, 0), 15).is_empty());
+
+        let dilution = hygiene_flags(&hygiene(30, 40, 30, 2, 0), 15);
+        assert_eq!(dilution.len(), 1);
+        assert!(dilution[0].contains("P0 dilution"));
+
+        let blocked = hygiene_flags(&hygiene(5, 40, 10, 25, 0), 15);
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].contains("mostly blocked"));
+
+        let starved = hygiene_flags(&hygiene(5, 40, 0, 10, 0), 15);
+        assert!(starved.iter().any(|f| f.contains("zero assignable")));
+
+        let stale = hygiene_flags(&hygiene(5, 40, 30, 2, 9), 15);
+        assert_eq!(stale.len(), 1);
+        assert!(stale[0].contains("9/40 open beads untouched"));
+        assert!(
+            hygiene_flags(&hygiene(5, 40, 30, 2, 7), 15).is_empty(),
+            "a small stale share (7/40 = 17%) is not a red flag"
+        );
+
+        assert!(
+            hygiene_flags(&hygiene(500, 40, 30, 2, 0), 0).is_empty(),
+            "threshold 0 disables the dilution flag"
+        );
+    }
+
+    /// Digest includes the counters, top blockers, and appended flags.
+    #[test]
+    fn test_hygiene_digest_format() {
+        let mut h = hygiene(3, 10, 8, 1, 0);
+        h.top_blockers = vec![("pat-x".to_string(), 5), ("pat-y".to_string(), 2)];
+        let flags = vec!["something is off".to_string()];
+        let digest = hygiene_digest(&h, &flags);
+        assert!(digest.contains("open=10 (P0=3)"));
+        assert!(digest.contains("pat-x (unblocks 5)"));
+        assert!(digest.contains("WARNING: something is off"));
+
+        let clean = hygiene_digest(&hygiene(1, 2, 2, 0, 0), &[]);
+        assert!(!clean.contains("WARNING"));
+        assert!(!clean.contains("close-first"));
+    }
 
     #[test]
     fn test_tick_criteria_on_pass_writes_x_for_passing() {

@@ -11,6 +11,7 @@ pub mod environment;
 pub mod fog_volume;
 pub mod gi;
 pub mod instance;
+pub mod label3d;
 pub mod light;
 pub mod material;
 pub mod mesh;
@@ -23,6 +24,7 @@ pub mod projection;
 pub mod reflection_probe;
 pub mod server;
 pub mod shader;
+pub mod skin;
 pub mod sky;
 pub mod sprite3d;
 pub mod viewport;
@@ -39,6 +41,7 @@ pub use light::{CubeFace, Light3D, Light3DId, LightType, OmniShadowMode, ShadowC
 pub use material::{Material3D, ShadingMode, StandardMaterial3D, TextureSlot};
 pub use mesh::Surface3D;
 pub use mesh::{Mesh3D, PrimitiveType};
+pub use skin::{skin_matrices, skin_mesh, skin_normal, skin_position, Skin, SkinBind};
 pub use multimesh::{MultiMesh3D, TransformFormat};
 pub use navigation::{
     bake_navigation_mesh, BakeSourceGeometry3D, NavPolygon3D, NavigationMesh3D, NavigationRegion3D,
@@ -61,7 +64,8 @@ pub use shader::{
     ShaderMaterial3D, ShaderProcessor3D, ShaderType3D, ShaderUniform3D, UniformType,
 };
 pub use sky::{
-    PanoramicSkyMaterial, PhysicalSkyMaterial, ProceduralSkyMaterial, Sky, SkyMaterial,
+    PanoramaTexture, PanoramicSkyMaterial, PhysicalSkyMaterial, ProceduralSkyMaterial, Sky,
+    SkyMaterial,
     SkyProcessMode,
 };
 pub use viewport::Viewport3D;

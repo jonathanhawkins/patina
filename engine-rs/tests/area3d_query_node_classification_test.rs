@@ -5,8 +5,8 @@
 //! 1. Area3D is "Implemented, not yet measured" (not "Measured" or "Full")
 //! 2. PhysicsRayQueryParameters3D / PhysicsShapeQueryParameters3D are classified
 //!    separately from RayCast3D / ShapeCast3D
-//! 3. RayCast3D and ShapeCast3D are not labeled "Measured"
-//! 4. The parity report distinguishes query-object from node parity
+//! 3. RayCast3D and ShapeCast3D are labeled "Measured" (pat-nwt9y node parity)
+//! 4. The parity report still mentions the query-object layer distinctly
 //! 5. All five entities are separately classified in the matrix
 
 use std::fs;
@@ -89,32 +89,30 @@ fn query_params_and_cast_nodes_are_separate_rows() {
 }
 
 // ===========================================================================
-// 3. RayCast3D and ShapeCast3D are NOT labeled "Measured"
+// 3. RayCast3D and ShapeCast3D ARE labeled "Measured" (node parity landed)
 // ===========================================================================
 
 #[test]
-fn raycast3d_not_measured() {
+fn raycast3d_is_measured() {
     let audit = read_file(AUDIT_PATH);
     let section = extract_matrix_section(&audit, "### scene/3d/physics — Physics Families");
     let row = find_matrix_row(&section, "RayCast3D").expect("RayCast3D must be in matrix");
 
-    assert_ne!(
+    assert_eq!(
         row[2], "Measured",
-        "RayCast3D should not be 'Measured' — only low-level query objects exist, \
-         no node-level integration"
+        "RayCast3D should be 'Measured' after pat-nwt9y node + ClassDB + parity test"
     );
 }
 
 #[test]
-fn shapecast3d_not_measured() {
+fn shapecast3d_is_measured() {
     let audit = read_file(AUDIT_PATH);
     let section = extract_matrix_section(&audit, "### scene/3d/physics — Physics Families");
     let row = find_matrix_row(&section, "ShapeCast3D").expect("ShapeCast3D must be in matrix");
 
-    assert_ne!(
+    assert_eq!(
         row[2], "Measured",
-        "ShapeCast3D should not be 'Measured' — only low-level query objects exist, \
-         no node-level integration"
+        "ShapeCast3D should be 'Measured' after pat-nwt9y node + ClassDB + parity test"
     );
 }
 
@@ -153,14 +151,22 @@ fn physics_shape_query_is_measured() {
 // ===========================================================================
 
 #[test]
-fn parity_report_clarifies_query_not_node() {
+fn parity_report_lists_raycast_as_measured() {
     let report = read_file(PARITY_REPORT_PATH);
-
+    let measured_start = report
+        .find("### Measured")
+        .expect("parity report must have Measured section");
+    let implemented_start = report
+        .find("### Implemented")
+        .expect("parity report must have Implemented section");
+    let measured_section = &report[measured_start..implemented_start];
     assert!(
-        report.contains("query-object layer, not `RayCast3D` node parity")
-            || report.contains("query-object layer"),
-        "parity report must clarify that PhysicsRayQuery3D is query-object level, \
-         not RayCast3D node parity"
+        measured_section.contains("RayCast3D"),
+        "RayCast3D should appear in the Measured section after pat-nwt9y"
+    );
+    assert!(
+        measured_section.contains("ShapeCast3D"),
+        "ShapeCast3D should appear in the Measured section after pat-nwt9y"
     );
 }
 

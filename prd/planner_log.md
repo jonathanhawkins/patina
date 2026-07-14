@@ -1,5 +1,18 @@
 # Planner Cycle Log
 
+## 2026-07-11 04:01 UTC — Manual source/docs scan (queue was empty)
+- Active phase: post-V1 gap refill (human-requested scan after finishing prior beads)
+- Open before: 0 (+ deferred pat-ism62)
+- Method: migration-guide unsupported table, ClassDB presence, stub grep (call_deferred, MultiplayerSpawner, spot shadows), editor VF exit checkboxes, UPSTREAM_GAP_MATRIX reconciliation
+- Explicitly skipped: reopening pat-ism62; editor-agent exit items that already have test binaries; duplicate scene-tree/inspector chrome (pat-l695a / pat-5b63c already closed)
+- Beads created (15 open after dedup closes):
+  - P1: pat-w8apa call_deferred queue
+  - P2: pat-f5o9v GDScript docs, pat-rzs4o NavigationAgent ClassDB, pat-ikq04 Spawner/Synchronizer, pat-72jn7 PacketPeerUDP/StreamPeerTCP, pat-bt77r Spot shadows, pat-zx775 SubViewport, pat-ig21c signals/groups chrome, pat-8y71p bottom panels chrome, pat-9bh6y viewport toolbar chrome
+  - P3: pat-n1gh1 Vehicle/SoftBody ClassDB, pat-mst61 GPU shadow atlas, pat-coz7r GPU equirect sky, pat-z26jd ENet slice, pat-u2e5p FS exit tick
+- Closed as duplicate same cycle: pat-ft72o → pat-l695a, pat-z2xc7 → pat-5b63c
+- Criteria checked off this cycle: none (creation only)
+- Parity/gates: not re-measured (no full suite; planner binary not run)
+
 ## 2026-03-29 17:40 UTC — SKIPPED (queue healthy: 21 open, 0 in-progress — swarm idle 40min)
 
 ## 2026-03-29 17:30 UTC — SKIPPED (queue healthy: 21 open, 0 in-progress — swarm idle 3 cycles)

@@ -5,8 +5,11 @@
 
 pub mod bus;
 pub mod decode;
+pub mod effects;
 pub mod import;
 pub mod mixer;
+pub mod output;
+pub mod player;
 pub mod sample;
 pub mod server;
 pub mod spatial;
@@ -14,8 +17,16 @@ pub mod stream;
 pub mod wav;
 
 pub use bus::AudioBus;
-pub use decode::{AudioBuffer, DecodeError};
+pub use decode::{decode_mp3, is_mp3, AudioBuffer, AudioStreamGenerator, DecodeError, PolyphonicPlayer};
+pub use effects::{
+    process_buffer, AudioEffect, AudioEffectAmplify, AudioEffectEQ, AudioEffectReverb,
+    EffectChain,
+};
 pub use mixer::AudioMixer;
+pub use output::{
+    mix_and_write, CaptureAudioOutput, PlatformAudioError, PlatformAudioOutput,
+};
+pub use player::AudioStreamPlayer;
 pub use sample::{AudioOutputStream, AudioSampleBuffer, ChannelLayout, NullAudioOutput};
 pub use server::{AudioServer, PlaybackId};
 pub use stream::{AudioStreamPlayback, LoopMode, PlaybackState};

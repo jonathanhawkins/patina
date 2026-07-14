@@ -553,12 +553,125 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("disabled", Variant::Bool(false))),
     );
 
+    // -- RayCast3D / ShapeCast3D (scene query nodes over PhysicsServer3D) --
+    register_class(
+        ClassRegistration::new("RayCast3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+            .property(PropertyInfo::new(
+                "target_position",
+                Variant::Vector3(Vector3::new(0.0, -1.0, 0.0)),
+            ))
+            .property(PropertyInfo::new("collision_mask", Variant::Int(0xFFFF_FFFF)))
+            .property(PropertyInfo::new("exclude_parent", Variant::Bool(true)))
+            .property(PropertyInfo::new("collide_with_bodies", Variant::Bool(true)))
+            .property(PropertyInfo::new("collide_with_areas", Variant::Bool(false))),
+    );
+    register_class(
+        ClassRegistration::new("ShapeCast3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+            .property(PropertyInfo::new(
+                "target_position",
+                Variant::Vector3(Vector3::new(0.0, -1.0, 0.0)),
+            ))
+            .property(PropertyInfo::new("collision_mask", Variant::Int(0xFFFF_FFFF)))
+            .property(PropertyInfo::new("exclude_parent", Variant::Bool(true)))
+            .property(PropertyInfo::new("collide_with_bodies", Variant::Bool(true)))
+            .property(PropertyInfo::new("collide_with_areas", Variant::Bool(false)))
+            .property(PropertyInfo::new("max_results", Variant::Int(32))),
+    );
+    register_class(
+        ClassRegistration::new("SpringArm3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("spring_length", Variant::Float(1.0)))
+            .property(PropertyInfo::new("margin", Variant::Float(0.01)))
+            .property(PropertyInfo::new("collision_mask", Variant::Int(0xFFFF_FFFF))),
+    );
+
     // -- Environment / World --
     register_class(ClassRegistration::new("WorldEnvironment").parent("Node3D"));
     register_class(ClassRegistration::new("Marker3D").parent("Node3D"));
 
     // -- Additional 3D types --
     register_class(ClassRegistration::new("NavigationRegion3D").parent("Node3D"));
+    // NavigationAgent3D — scene-tree pathfinding agent (pat-rzs4o).
+    register_class(
+        ClassRegistration::new("NavigationAgent3D")
+            .parent("Node")
+            .property(PropertyInfo::new(
+                "target_position",
+                Variant::Vector3(Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new(
+                "path_desired_distance",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "avoidance_enabled",
+                Variant::Bool(false),
+            ))
+            // pat-nzgdu.10 — full NavigationAgent3D property surface (Godot parity).
+            .property(PropertyInfo::new("target_desired_distance", Variant::Float(10.0)))
+            .property(PropertyInfo::new("path_height_offset", Variant::Float(0.0)))
+            .property(PropertyInfo::new("path_max_distance", Variant::Float(5.0)))
+            .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
+            .property(PropertyInfo::new("pathfinding_algorithm", Variant::Int(0)))
+            .property(PropertyInfo::new("path_postprocessing", Variant::Int(0)))
+            .property(PropertyInfo::new("path_metadata_flags", Variant::Int(7)))
+            .property(PropertyInfo::new("simplify_path", Variant::Bool(false)))
+            .property(PropertyInfo::new("simplify_epsilon", Variant::Float(0.0)))
+            .property(PropertyInfo::new("path_return_max_length", Variant::Float(0.0)))
+            .property(PropertyInfo::new("path_return_max_radius", Variant::Float(0.0)))
+            .property(PropertyInfo::new("path_search_max_polygons", Variant::Int(4096)))
+            .property(PropertyInfo::new("path_search_max_distance", Variant::Float(0.0)))
+            .property(PropertyInfo::new("velocity", Variant::Vector3(Vector3::ZERO)))
+            .property(PropertyInfo::new("height", Variant::Float(1.0)))
+            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("neighbor_distance", Variant::Float(50.0)))
+            .property(PropertyInfo::new("max_neighbors", Variant::Int(10)))
+            .property(PropertyInfo::new("time_horizon_agents", Variant::Float(1.0)))
+            .property(PropertyInfo::new("time_horizon_obstacles", Variant::Float(0.0)))
+            .property(PropertyInfo::new("max_speed", Variant::Float(10.0)))
+            .property(PropertyInfo::new("use_3d_avoidance", Variant::Bool(false)))
+            .property(PropertyInfo::new("keep_y_velocity", Variant::Bool(true)))
+            .property(PropertyInfo::new("avoidance_layers", Variant::Int(1)))
+            .property(PropertyInfo::new("avoidance_mask", Variant::Int(1)))
+            .property(PropertyInfo::new("avoidance_priority", Variant::Float(1.0)))
+            .property(PropertyInfo::new("debug_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new("debug_use_custom", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "debug_path_custom_color",
+                Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+            ))
+            .property(PropertyInfo::new("debug_path_custom_point_size", Variant::Float(4.0))),
+    );
+    // Vehicle / soft body scene types (physics sim lives in gdphysics2d; pat-n1gh1).
+    register_class(
+        ClassRegistration::new("VehicleBody3D")
+            .parent("RigidBody3D")
+            .property(PropertyInfo::new("engine_force", Variant::Float(0.0)))
+            .property(PropertyInfo::new("brake", Variant::Float(0.0)))
+            .property(PropertyInfo::new("steering", Variant::Float(0.0))),
+    );
+    register_class(
+        ClassRegistration::new("VehicleWheel3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("engine_force", Variant::Float(0.0)))
+            .property(PropertyInfo::new("brake", Variant::Float(0.0)))
+            .property(PropertyInfo::new("steering", Variant::Float(0.0)))
+            .property(PropertyInfo::new("use_as_traction", Variant::Bool(false)))
+            .property(PropertyInfo::new("use_as_steering", Variant::Bool(false))),
+    );
+    register_class(
+        ClassRegistration::new("SoftBody3D")
+            .parent("MeshInstance3D")
+            .property(PropertyInfo::new("simulation_precision", Variant::Int(5)))
+            .property(PropertyInfo::new("total_mass", Variant::Float(1.0)))
+            .property(PropertyInfo::new("linear_stiffness", Variant::Float(0.5)))
+            .property(PropertyInfo::new("pressure_coefficient", Variant::Float(0.0)))
+            .property(PropertyInfo::new("damping_coefficient", Variant::Float(0.01))),
+    );
     register_class(ClassRegistration::new("Skeleton3D").parent("Node3D"));
     register_class(ClassRegistration::new("BoneAttachment3D").parent("Node3D"));
     register_class(ClassRegistration::new("AnimationPlayer").parent("Node"));
@@ -589,6 +702,40 @@ pub fn register_3d_classes() {
         register_class(ClassRegistration::new("Resource").parent("Object"));
     }
     register_class(ClassRegistration::new("VisualScript").parent("Resource"));
+
+    // Material / Shader hierarchy (Godot: Material → Resource; ShaderMaterial →
+    // Material; BaseMaterial3D → Material; StandardMaterial3D → BaseMaterial3D).
+    // ShaderMaterial exposes the `shader` property plus set/get_shader and the
+    // per-parameter set/get_shader_parameter methods that GDScript calls.
+    register_class(
+        ClassRegistration::new("Material")
+            .parent("Resource")
+            .abstract_class(),
+    );
+    register_class(
+        ClassRegistration::new("Shader")
+            .parent("Resource")
+            .method(MethodInfo::new("get_mode", 0))
+            .method(MethodInfo::new("set_code", 1))
+            .method(MethodInfo::new("get_code", 0))
+            .method(MethodInfo::new("set_default_texture_parameter", 2))
+            .method(MethodInfo::new("get_default_texture_parameter", 1)),
+    );
+    register_class(
+        ClassRegistration::new("ShaderMaterial")
+            .parent("Material")
+            .method(MethodInfo::new("set_shader", 1))
+            .method(MethodInfo::new("get_shader", 0))
+            .method(MethodInfo::new("set_shader_parameter", 2))
+            .method(MethodInfo::new("get_shader_parameter", 1)),
+    );
+    register_class(
+        ClassRegistration::new("BaseMaterial3D")
+            .parent("Material")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("StandardMaterial3D").parent("BaseMaterial3D"));
+    register_class(ClassRegistration::new("ORMMaterial3D").parent("BaseMaterial3D"));
 }
 
 /// Registers the standard Godot 2D class hierarchy in the ClassDB.
@@ -668,8 +815,138 @@ pub fn register_2d_classes() {
     if !class_exists("PathFollow2D") {
         register_class(ClassRegistration::new("PathFollow2D").parent("Node2D"));
     }
+    // 2D lights + occluder (pat-p0s82.6)
+    if !class_exists("Path3D") {
+        register_class(ClassRegistration::new("Path3D").parent("Node3D"));
+    }
+    if !class_exists("PathFollow3D") {
+        register_class(ClassRegistration::new("PathFollow3D").parent("Node3D"));
+    }
+    if !class_exists("GridMap") {
+        register_class(ClassRegistration::new("GridMap").parent("Node3D"));
+    }
+    if !class_exists("NavigationLink3D") {
+        register_class(ClassRegistration::new("NavigationLink3D").parent("Node3D"));
+    }
+    if !class_exists("NavigationLink2D") {
+        register_class(ClassRegistration::new("NavigationLink2D").parent("Node2D"));
+    }
+    if !class_exists("RemoteTransform3D") {
+        register_class(ClassRegistration::new("RemoteTransform3D").parent("Node3D"));
+    }
+    if !class_exists("RemoteTransform2D") {
+        register_class(ClassRegistration::new("RemoteTransform2D").parent("Node2D"));
+    }
+    if !class_exists("VisibleOnScreenNotifier3D") {
+        register_class(ClassRegistration::new("VisibleOnScreenNotifier3D").parent("Node3D"));
+    }
+    if !class_exists("Label3D") {
+        register_class(ClassRegistration::new("Label3D").parent("Node3D"));
+    }
+    if !class_exists("RichTextLabel") {
+        register_class(ClassRegistration::new("RichTextLabel").parent("Control"));
+    }
+    if !class_exists("ScrollContainer") {
+        register_class(ClassRegistration::new("ScrollContainer").parent("Container"));
+    }
+    if !class_exists("TabContainer") {
+        register_class(ClassRegistration::new("TabContainer").parent("Container"));
+    }
+    if !class_exists("ProgressBar") {
+        register_class(ClassRegistration::new("ProgressBar").parent("Control"));
+    }
+    if !class_exists("CheckBox") {
+        register_class(ClassRegistration::new("CheckBox").parent("Button"));
+    }
+    if !class_exists("OptionButton") {
+        register_class(ClassRegistration::new("OptionButton").parent("Button"));
+    }
+    if !class_exists("TextureRect") {
+        register_class(ClassRegistration::new("TextureRect").parent("Control"));
+    }
+    if !class_exists("GridContainer") {
+        register_class(ClassRegistration::new("GridContainer").parent("Container"));
+    }
+    if !class_exists("MarginContainer") {
+        register_class(ClassRegistration::new("MarginContainer").parent("Container"));
+    }
+    if !class_exists("AudioEffectAmplify") {
+        register_class(ClassRegistration::new("AudioEffectAmplify").parent("Resource"));
+    }
+    if !class_exists("AudioEffectReverb") {
+        register_class(ClassRegistration::new("AudioEffectReverb").parent("Resource"));
+    }
+    if !class_exists("AudioEffectEQ") {
+        register_class(ClassRegistration::new("AudioEffectEQ").parent("Resource"));
+    }
+    
+    if !class_exists("Light2D") {
+        register_class(ClassRegistration::new("Light2D").parent("Node2D"));
+    }
+    if !class_exists("PointLight2D") {
+        register_class(ClassRegistration::new("PointLight2D").parent("Light2D"));
+    }
+    if !class_exists("DirectionalLight2D") {
+        register_class(ClassRegistration::new("DirectionalLight2D").parent("Light2D"));
+    }
+    if !class_exists("LightOccluder2D") {
+        register_class(ClassRegistration::new("LightOccluder2D").parent("Node2D"));
+    }
     if !class_exists("NavigationRegion2D") {
         register_class(ClassRegistration::new("NavigationRegion2D").parent("Node2D"));
+    }
+    // NavigationAgent2D — scene-tree pathfinding agent (pat-rzs4o).
+    if !class_exists("NavigationAgent2D") {
+        register_class(
+            ClassRegistration::new("NavigationAgent2D")
+                .parent("Node")
+                .property(PropertyInfo::new(
+                    "target_position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "path_desired_distance",
+                    Variant::Float(4.0),
+                ))
+                .property(PropertyInfo::new(
+                    "avoidance_enabled",
+                    Variant::Bool(false),
+                ))
+                // pat-nzgdu.10 — full NavigationAgent2D property surface (Godot parity).
+                .property(PropertyInfo::new("target_desired_distance", Variant::Float(10.0)))
+                .property(PropertyInfo::new("path_max_distance", Variant::Float(100.0)))
+                .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
+                .property(PropertyInfo::new("pathfinding_algorithm", Variant::Int(0)))
+                .property(PropertyInfo::new("path_postprocessing", Variant::Int(0)))
+                .property(PropertyInfo::new("path_metadata_flags", Variant::Int(7)))
+                .property(PropertyInfo::new("simplify_path", Variant::Bool(false)))
+                .property(PropertyInfo::new("simplify_epsilon", Variant::Float(0.0)))
+                .property(PropertyInfo::new("path_return_max_length", Variant::Float(0.0)))
+                .property(PropertyInfo::new("path_return_max_radius", Variant::Float(0.0)))
+                .property(PropertyInfo::new("path_search_max_polygons", Variant::Int(4096)))
+                .property(PropertyInfo::new("path_search_max_distance", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "velocity",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("radius", Variant::Float(10.0)))
+                .property(PropertyInfo::new("neighbor_distance", Variant::Float(500.0)))
+                .property(PropertyInfo::new("max_neighbors", Variant::Int(10)))
+                .property(PropertyInfo::new("time_horizon_agents", Variant::Float(1.0)))
+                .property(PropertyInfo::new("time_horizon_obstacles", Variant::Float(0.0)))
+                .property(PropertyInfo::new("max_speed", Variant::Float(100.0)))
+                .property(PropertyInfo::new("avoidance_layers", Variant::Int(1)))
+                .property(PropertyInfo::new("avoidance_mask", Variant::Int(1)))
+                .property(PropertyInfo::new("avoidance_priority", Variant::Float(1.0)))
+                .property(PropertyInfo::new("debug_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("debug_use_custom", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "debug_path_custom_color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("debug_path_custom_point_size", Variant::Float(4.0)))
+                .property(PropertyInfo::new("debug_path_custom_line_width", Variant::Float(-1.0))),
+        );
     }
 
     // -- Control (UI) hierarchy --
@@ -769,6 +1046,122 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("disabled", Variant::Bool(false))),
         );
     }
+    // Timer node (pat-u3l8c.3). Countdown runs in SceneTree::process_timer_nodes.
+    if !class_exists("Timer") {
+        register_class(
+            ClassRegistration::new("Timer")
+                .parent("Node")
+                .property(PropertyInfo::new("wait_time", Variant::Float(1.0)))
+                .property(PropertyInfo::new("one_shot", Variant::Bool(false)))
+                .property(PropertyInfo::new("autostart", Variant::Bool(false)))
+                .property(PropertyInfo::new("paused", Variant::Bool(false)))
+                // TIMER_PROCESS_IDLE
+                .property(PropertyInfo::new("process_callback", Variant::Int(1))),
+        );
+    }
+
+    // Viewport / SubViewport / ViewportTexture (pat-zx775).
+    register_viewport_classes();
+}
+
+/// Registers Viewport, SubViewport, Texture2D, and ViewportTexture in ClassDB.
+///
+/// Hierarchy (Godot 4 slice):
+/// * `Viewport : Node` (abstract base; owns render-target contract)
+/// * `SubViewport : Viewport` — off-screen render target with size/update/clear modes
+/// * `Texture2D : Resource` — base 2D texture type
+/// * `ViewportTexture : Texture2D` — samples a SubViewport color buffer
+///
+/// Defaults match Godot 4's `scene/main/viewport.h`:
+/// * `size` = (512, 512)
+/// * `render_target_update_mode` = `UPDATE_WHEN_VISIBLE` (2)
+/// * `render_target_clear_mode` = `CLEAR_MODE_ALWAYS` (0)
+/// * `transparent_bg` = false
+///
+/// Idempotent — each class is only registered if not already present.
+pub fn register_viewport_classes() {
+    use gdcore::math::Vector2;
+
+    if !class_exists("Object") {
+        register_class(ClassRegistration::new("Object"));
+    }
+    if !class_exists("Node") {
+        register_class(ClassRegistration::new("Node").parent("Object"));
+    }
+    if !class_exists("Resource") {
+        register_class(ClassRegistration::new("Resource").parent("Object"));
+    }
+
+    // Viewport is abstract in Godot (Window / SubViewport are concrete).
+    if !class_exists("Viewport") {
+        register_class(
+            ClassRegistration::new("Viewport")
+                .parent("Node")
+                .abstract_class()
+                .property(PropertyInfo::new("transparent_bg", Variant::Bool(false)))
+                .method(MethodInfo::new("get_texture", 0)),
+        );
+    }
+
+    // SubViewport — default size 512×512, update when visible, clear always.
+    // `size` is Vector2i in Godot; Patina stores it as Vector2 until Vector2i
+    // lands in Variant (integer components 512.0, 512.0).
+    if !class_exists("SubViewport") {
+        register_class(
+            ClassRegistration::new("SubViewport")
+                .parent("Viewport")
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2(Vector2::new(512.0, 512.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "size_2d_override",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "size_2d_override_stretch",
+                    Variant::Bool(false),
+                ))
+                // UPDATE_DISABLED=0, ONCE=1, WHEN_VISIBLE=2, WHEN_PARENT_VISIBLE=3, ALWAYS=4
+                .property(PropertyInfo::new(
+                    "render_target_update_mode",
+                    Variant::Int(2), // UPDATE_WHEN_VISIBLE
+                ))
+                // CLEAR_MODE_ALWAYS=0, NEVER=1, ONCE=2
+                .property(PropertyInfo::new(
+                    "render_target_clear_mode",
+                    Variant::Int(0), // CLEAR_MODE_ALWAYS
+                ))
+                .property(PropertyInfo::new("transparent_bg", Variant::Bool(false)))
+                .method(MethodInfo::new("get_texture", 0))
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_size", 0)),
+        );
+    }
+
+    if !class_exists("Texture2D") {
+        register_class(
+            ClassRegistration::new("Texture2D")
+                .parent("Resource")
+                .method(MethodInfo::new("get_width", 0))
+                .method(MethodInfo::new("get_height", 0))
+                .method(MethodInfo::new("get_size", 0)),
+        );
+    }
+
+    if !class_exists("ViewportTexture") {
+        register_class(
+            ClassRegistration::new("ViewportTexture")
+                .parent("Texture2D")
+                .property(PropertyInfo::new(
+                    "viewport_path",
+                    Variant::NodePath(gdcore::NodePath::new("")),
+                ))
+                .method(MethodInfo::new("get_width", 0))
+                .method(MethodInfo::new("get_height", 0))
+                .method(MethodInfo::new("get_size", 0)),
+        );
+    }
 }
 
 /// Registers the networking node/class hierarchy in the ClassDB.
@@ -776,6 +1169,137 @@ pub fn register_2d_classes() {
 /// Adds Godot's HTTP and WebSocket types so GDScript referencing
 /// `HTTPRequest`, `HTTPClient`, or `WebSocketPeer` resolves against ClassDB:
 ///
+/// Registers audio player node classes matching Godot's scene/audio hierarchy.
+///
+/// * `AudioStreamPlayer : Node`
+/// * `AudioStreamPlayer2D : Node2D`
+/// * `AudioStreamPlayer3D : Node3D`
+///
+/// Idempotent — each class is only registered if not already present.
+pub fn register_audio_classes() {
+    if !class_exists("Object") {
+        register_class(ClassRegistration::new("Object"));
+    }
+    if !class_exists("Node") {
+        register_class(ClassRegistration::new("Node").parent("Object"));
+    }
+
+    // Ensure 2D/3D bases exist for the positional players.
+    if !class_exists("Node2D") {
+        register_2d_classes();
+    }
+    if !class_exists("Node3D") {
+        register_3d_classes();
+    }
+
+    if !class_exists("AudioStreamPlayer") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlayer")
+                .parent("Node")
+                .property(PropertyInfo::new("stream", Variant::String(String::new())))
+                .property(PropertyInfo::new("volume_db", Variant::Float(0.0)))
+                .property(PropertyInfo::new("pitch_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("autoplay", Variant::Bool(false)))
+                .property(PropertyInfo::new("bus", Variant::String("Master".into())))
+                .property(PropertyInfo::new("playing", Variant::Bool(false)))
+                .method(MethodInfo::new("play", 1))
+                .method(MethodInfo::new("stop", 0))
+                .method(MethodInfo::new("is_playing", 0)),
+        );
+    }
+    if !class_exists("AudioStreamPlayer2D") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlayer2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("stream", Variant::String(String::new())))
+                .property(PropertyInfo::new("volume_db", Variant::Float(0.0)))
+                .property(PropertyInfo::new("pitch_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("autoplay", Variant::Bool(false)))
+                .property(PropertyInfo::new("bus", Variant::String("Master".into())))
+                .property(PropertyInfo::new("playing", Variant::Bool(false)))
+                .property(PropertyInfo::new("max_distance", Variant::Float(2000.0)))
+                .method(MethodInfo::new("play", 1))
+                .method(MethodInfo::new("stop", 0))
+                .method(MethodInfo::new("is_playing", 0)),
+        );
+    }
+    if !class_exists("AudioStreamPlayer3D") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlayer3D")
+                .parent("Node3D")
+                .property(PropertyInfo::new("stream", Variant::String(String::new())))
+                .property(PropertyInfo::new("volume_db", Variant::Float(0.0)))
+                .property(PropertyInfo::new("pitch_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("autoplay", Variant::Bool(false)))
+                .property(PropertyInfo::new("bus", Variant::String("Master".into())))
+                .property(PropertyInfo::new("playing", Variant::Bool(false)))
+                .property(PropertyInfo::new("max_distance", Variant::Float(0.0)))
+                .property(PropertyInfo::new("unit_size", Variant::Float(10.0)))
+                .method(MethodInfo::new("play", 1))
+                .method(MethodInfo::new("stop", 0))
+                .method(MethodInfo::new("is_playing", 0)),
+        );
+    }
+}
+
+/// Registers core IO utility classes matching Godot's `FileAccess` / `DirAccess`.
+///
+/// * `FileAccess : RefCounted` (core/io/file_access)
+/// * `DirAccess : RefCounted` (core/io/dir_access)
+///
+/// Idempotent — each class is only registered if not already present.
+pub fn register_io_classes() {
+    if !class_exists("Object") {
+        register_class(ClassRegistration::new("Object"));
+    }
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+    if !class_exists("FileAccess") {
+        register_class(
+            ClassRegistration::new("FileAccess")
+                .parent("RefCounted")
+                .method(MethodInfo::new("open", 2))
+                .method(MethodInfo::new("get_as_text", 0))
+                .method(MethodInfo::new("get_buffer", 1))
+                .method(MethodInfo::new("store_string", 1))
+                .method(MethodInfo::new("store_buffer", 1))
+                .method(MethodInfo::new("get_error", 0))
+                .method(MethodInfo::new("close", 0))
+                .method(MethodInfo::new("file_exists", 1)),
+        );
+    }
+    if !class_exists("DirAccess") {
+        register_class(
+            ClassRegistration::new("DirAccess")
+                .parent("RefCounted")
+                .method(MethodInfo::new("open", 1))
+                .method(MethodInfo::new("list_dir_begin", 0))
+                .method(MethodInfo::new("get_next", 0))
+                .method(MethodInfo::new("current_is_dir", 0))
+                .method(MethodInfo::new("list_dir_end", 0))
+                .method(MethodInfo::new("make_dir", 1))
+                .method(MethodInfo::new("remove", 1))
+                .method(MethodInfo::new("rename", 2)),
+        );
+    }
+    if !class_exists("ConfigFile") {
+        register_class(
+            ClassRegistration::new("ConfigFile")
+                .parent("RefCounted")
+                .method(MethodInfo::new("set_value", 3))
+                .method(MethodInfo::new("get_value", 3))
+                .method(MethodInfo::new("has_section", 1))
+                .method(MethodInfo::new("has_section_key", 2))
+                .method(MethodInfo::new("get_sections", 0))
+                .method(MethodInfo::new("get_section_keys", 1))
+                .method(MethodInfo::new("load", 1))
+                .method(MethodInfo::new("save", 1))
+                .method(MethodInfo::new("clear", 0)),
+        );
+    }
+}
+
 /// * `HTTPRequest : Node` (scene/main/http_request)
 /// * `HTTPClient : RefCounted` (core/io/http_client)
 /// * `WebSocketPeer : PacketPeer : RefCounted` (modules/websocket)
@@ -862,15 +1386,213 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("get_close_reason", 0)),
         );
     }
+
+    // -- Multiplayer peer surface (pat-fg8dk) --
+    if !class_exists("MultiplayerPeer") {
+        register_class(
+            ClassRegistration::new("MultiplayerPeer")
+                .parent("PacketPeer")
+                .abstract_class()
+                .method(MethodInfo::new("get_connection_status", 0))
+                .method(MethodInfo::new("get_unique_id", 0))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("close", 0)),
+        );
+    }
+    if !class_exists("TcpMultiplayerPeer") {
+        register_class(
+            ClassRegistration::new("TcpMultiplayerPeer")
+                .parent("MultiplayerPeer")
+                .method(MethodInfo::new("create_server", 1))
+                .method(MethodInfo::new("create_client", 1))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("close", 0)),
+        );
+    }
+    // ENetMultiplayerPeer (pat-z26jd): ClassDB-compatible alias that delegates
+    // to TcpMultiplayerPeer. Channel + transfer-mode metadata are preserved in
+    // packet headers; transport is TCP-reliable (not native ENet UDP).
+    if !class_exists("ENetMultiplayerPeer") {
+        register_class(
+            ClassRegistration::new("ENetMultiplayerPeer")
+                .parent("MultiplayerPeer")
+                .method(MethodInfo::new("create_server", 1))
+                .method(MethodInfo::new("create_client", 1))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("close", 0)),
+        );
+    }
+    if !class_exists("MultiplayerAPI") {
+        register_class(
+            ClassRegistration::new("MultiplayerAPI")
+                .parent("RefCounted")
+                .method(MethodInfo::new("set_multiplayer_peer", 1))
+                .method(MethodInfo::new("is_server", 0)),
+        );
+    }
+
+    // -- MultiplayerSpawner / MultiplayerSynchronizer (pat-ikq04) --
+    // Upstream: modules/multiplayer/multiplayer_spawner.* / multiplayer_synchronizer.*
+    if !class_exists("MultiplayerSpawner") {
+        register_class(
+            ClassRegistration::new("MultiplayerSpawner")
+                .parent("Node")
+                .property(PropertyInfo::new(
+                    "spawn_path",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new("spawn_limit", Variant::Int(0)))
+                .method(MethodInfo::new("add_spawnable_scene", 1))
+                .method(MethodInfo::new("get_spawnable_scene_count", 0))
+                .method(MethodInfo::new("get_spawnable_scene", 1))
+                .method(MethodInfo::new("clear_spawnable_scenes", 0))
+                .method(MethodInfo::new("spawn", 1))
+                .method(MethodInfo::new("get_spawn_path", 0))
+                .method(MethodInfo::new("set_spawn_path", 1))
+                .method(MethodInfo::new("get_spawn_limit", 0))
+                .method(MethodInfo::new("set_spawn_limit", 1)),
+        );
+    }
+    if !class_exists("MultiplayerSynchronizer") {
+        register_class(
+            ClassRegistration::new("MultiplayerSynchronizer")
+                .parent("Node")
+                .property(PropertyInfo::new(
+                    "root_path",
+                    Variant::String(String::from("..")),
+                ))
+                .property(PropertyInfo::new(
+                    "replication_interval",
+                    Variant::Float(0.0),
+                ))
+                .method(MethodInfo::new("get_root_path", 0))
+                .method(MethodInfo::new("set_root_path", 1))
+                .method(MethodInfo::new("get_replication_interval", 0))
+                .method(MethodInfo::new("set_replication_interval", 1))
+                .method(MethodInfo::new("get_net_id", 0))
+                .method(MethodInfo::new("set_net_id", 1)),
+        );
+    }
+
+    // -- PacketPeerUDP / StreamPeerTCP (pat-72jn7) --
+    if !class_exists("PacketPeerUDP") {
+        register_class(
+            ClassRegistration::new("PacketPeerUDP")
+                .parent("PacketPeer")
+                .method(MethodInfo::new("bind", 2))
+                .method(MethodInfo::new("set_dest_address", 2))
+                .method(MethodInfo::new("put_packet", 1))
+                .method(MethodInfo::new("get_packet", 0))
+                .method(MethodInfo::new("get_available_packet_count", 0))
+                .method(MethodInfo::new("close", 0)),
+        );
+    }
+    if !class_exists("StreamPeer") {
+        register_class(
+            ClassRegistration::new("StreamPeer")
+                .parent("RefCounted")
+                .abstract_class()
+                .method(MethodInfo::new("put_data", 1))
+                .method(MethodInfo::new("get_data", 1))
+                .method(MethodInfo::new("get_available_bytes", 0)),
+        );
+    }
+    if !class_exists("StreamPeerTCP") {
+        register_class(
+            ClassRegistration::new("StreamPeerTCP")
+                .parent("StreamPeer")
+                .method(MethodInfo::new("connect_to_host", 2))
+                .method(MethodInfo::new("get_status", 0))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("put_data", 1))
+                .method(MethodInfo::new("get_data", 1))
+                .method(MethodInfo::new("get_available_bytes", 0))
+                .method(MethodInfo::new("disconnect_from_host", 0)),
+        );
+    }
 }
 
 /// Registers all core, 2D, and 3D classes for the editor.
 ///
 /// Convenience function that ensures the full class hierarchy is available.
 /// Safe to call multiple times — each class is only registered if not already present.
+/// Registers Godot's script-callable pathfinding graph classes: `AStar2D`,
+/// `AStar3D`, and `AStarGrid2D` (all `RefCounted`). The runtime implementations
+/// live in `gdscene::astar`; this records their ClassDB metadata so scripts and
+/// the editor can discover the types and their methods.
+pub fn register_navigation_classes() {
+    if !class_exists("Object") {
+        register_class(ClassRegistration::new("Object"));
+    }
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // AStar2D and AStar3D share the same graph API (differing only in the
+    // dimensionality of point positions), so register both with one method set.
+    for name in ["AStar2D", "AStar3D"] {
+        if !class_exists(name) {
+            register_class(
+                ClassRegistration::new(name)
+                    .parent("RefCounted")
+                    .method(MethodInfo::new("add_point", 3))
+                    .method(MethodInfo::new("has_point", 1))
+                    .method(MethodInfo::new("remove_point", 1))
+                    .method(MethodInfo::new("get_point_position", 1))
+                    .method(MethodInfo::new("set_point_position", 2))
+                    .method(MethodInfo::new("get_point_weight_scale", 1))
+                    .method(MethodInfo::new("set_point_weight_scale", 2))
+                    .method(MethodInfo::new("set_point_disabled", 2))
+                    .method(MethodInfo::new("is_point_disabled", 1))
+                    .method(MethodInfo::new("get_point_count", 0))
+                    .method(MethodInfo::new("get_point_ids", 0))
+                    .method(MethodInfo::new("connect_points", 3))
+                    .method(MethodInfo::new("disconnect_points", 3))
+                    .method(MethodInfo::new("are_points_connected", 3))
+                    .method(MethodInfo::new("get_point_connections", 1))
+                    .method(MethodInfo::new("get_id_path", 3))
+                    .method(MethodInfo::new("get_point_path", 3))
+                    .method(MethodInfo::new("get_closest_point", 2))
+                    .method(MethodInfo::new("clear", 0)),
+            );
+        }
+    }
+
+    if !class_exists("AStarGrid2D") {
+        register_class(
+            ClassRegistration::new("AStarGrid2D")
+                .parent("RefCounted")
+                .method(MethodInfo::new("set_region", 1))
+                .method(MethodInfo::new("get_region", 0))
+                .method(MethodInfo::new("set_cell_size", 1))
+                .method(MethodInfo::new("set_offset", 1))
+                .method(MethodInfo::new("update", 0))
+                .method(MethodInfo::new("is_in_bounds", 2))
+                .method(MethodInfo::new("is_in_boundsv", 1))
+                .method(MethodInfo::new("set_diagonal_mode", 1))
+                .method(MethodInfo::new("get_diagonal_mode", 0))
+                .method(MethodInfo::new("set_default_compute_heuristic", 1))
+                .method(MethodInfo::new("set_default_estimate_heuristic", 1))
+                .method(MethodInfo::new("set_jumping_enabled", 1))
+                .method(MethodInfo::new("is_jumping_enabled", 0))
+                .method(MethodInfo::new("set_point_solid", 2))
+                .method(MethodInfo::new("is_point_solid", 1))
+                .method(MethodInfo::new("set_point_weight_scale", 2))
+                .method(MethodInfo::new("get_point_weight_scale", 1))
+                .method(MethodInfo::new("get_point_position", 1))
+                .method(MethodInfo::new("get_id_path", 3))
+                .method(MethodInfo::new("get_point_path", 3)),
+        );
+    }
+}
+
 pub fn register_editor_classes() {
     register_2d_classes();
     register_3d_classes();
+    register_audio_classes();
+    register_io_classes();
+    register_networking_classes();
+    register_navigation_classes();
 
     // -- EditorPlugin --
     if !class_exists("EditorPlugin") {
@@ -932,6 +1654,56 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    #[test]
+    fn navigation_classes_registered() {
+        let _guard = setup();
+        register_navigation_classes();
+
+        for cls in ["AStar2D", "AStar3D", "AStarGrid2D"] {
+            assert!(class_exists(cls), "{cls} should be registered");
+            assert!(
+                is_parent_class(cls, "RefCounted"),
+                "{cls} should inherit RefCounted"
+            );
+        }
+
+        // AStar2D/3D core graph API.
+        for cls in ["AStar2D", "AStar3D"] {
+            for method in [
+                "add_point",
+                "connect_points",
+                "are_points_connected",
+                "get_id_path",
+                "get_point_path",
+                "get_closest_point",
+                "set_point_disabled",
+                "set_point_weight_scale",
+            ] {
+                assert!(
+                    class_has_method(cls, method),
+                    "{cls} should have method {method}"
+                );
+            }
+        }
+
+        // AStarGrid2D grid API.
+        for method in [
+            "set_region",
+            "set_cell_size",
+            "set_diagonal_mode",
+            "set_default_compute_heuristic",
+            "set_point_solid",
+            "set_jumping_enabled",
+            "get_id_path",
+            "get_point_path",
+        ] {
+            assert!(
+                class_has_method("AStarGrid2D", method),
+                "AStarGrid2D should have method {method}"
+            );
+        }
     }
 
     #[test]
@@ -1075,6 +1847,109 @@ mod tests {
         assert!(is_parent_class("TestSelf", "TestSelf"));
     }
 
+    /// pat-rzs4o: NavigationAgent2D/3D must be registered for scene load / create dialog.
+    #[test]
+    fn navigation_agents_registered_in_default_classdb() {
+        let _g = setup();
+        register_2d_classes();
+        register_3d_classes();
+        assert!(
+            class_exists("NavigationAgent2D"),
+            "NavigationAgent2D must be in ClassDB"
+        );
+        assert!(
+            class_exists("NavigationAgent3D"),
+            "NavigationAgent3D must be in ClassDB"
+        );
+        assert!(is_parent_class("NavigationAgent2D", "Node"));
+        assert!(is_parent_class("NavigationAgent3D", "Node"));
+
+        let info2 = get_class_info("NavigationAgent2D").expect("NavigationAgent2D info");
+        let props2: Vec<&str> = info2.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            props2.contains(&"target_position"),
+            "NavigationAgent2D needs target_position: {props2:?}"
+        );
+        assert!(props2.contains(&"path_desired_distance"));
+        assert!(props2.contains(&"avoidance_enabled"));
+
+        let info3 = get_class_info("NavigationAgent3D").expect("NavigationAgent3D info");
+        let props3: Vec<&str> = info3.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(props3.contains(&"target_position"));
+        assert!(props3.contains(&"path_desired_distance"));
+        assert!(props3.contains(&"avoidance_enabled"));
+
+        // pat-nzgdu.10 — the full Godot NavigationAgent property surface.
+        // Shared across 2D and 3D.
+        for p in [
+            "target_desired_distance",
+            "path_max_distance",
+            "navigation_layers",
+            "pathfinding_algorithm",
+            "path_postprocessing",
+            "path_metadata_flags",
+            "simplify_path",
+            "simplify_epsilon",
+            "radius",
+            "neighbor_distance",
+            "max_neighbors",
+            "time_horizon_agents",
+            "time_horizon_obstacles",
+            "max_speed",
+            "avoidance_layers",
+            "avoidance_mask",
+            "avoidance_priority",
+            "velocity",
+        ] {
+            assert!(
+                class_has_property("NavigationAgent2D", p),
+                "NavigationAgent2D missing {p}"
+            );
+            assert!(
+                class_has_property("NavigationAgent3D", p),
+                "NavigationAgent3D missing {p}"
+            );
+        }
+        // 3D-only properties.
+        assert!(class_has_property("NavigationAgent3D", "path_height_offset"));
+        assert!(class_has_property("NavigationAgent3D", "height"));
+        assert!(class_has_property("NavigationAgent3D", "use_3d_avoidance"));
+        assert!(class_has_property("NavigationAgent3D", "keep_y_velocity"));
+        // 2D-only property.
+        assert!(class_has_property(
+            "NavigationAgent2D",
+            "debug_path_custom_line_width"
+        ));
+        // 3D must NOT carry the 2D-only line-width property.
+        assert!(!class_has_property(
+            "NavigationAgent3D",
+            "debug_path_custom_line_width"
+        ));
+    }
+
+    /// pat-n1gh1: VehicleBody3D / VehicleWheel3D / SoftBody3D ClassDB surface.
+    #[test]
+    fn vehicle_and_softbody_registered_in_classdb() {
+        let _g = setup();
+        register_3d_classes();
+        assert!(class_exists("VehicleBody3D"));
+        assert!(class_exists("VehicleWheel3D"));
+        assert!(class_exists("SoftBody3D"));
+        assert!(is_parent_class("VehicleBody3D", "RigidBody3D"));
+        assert!(is_parent_class("VehicleWheel3D", "Node3D"));
+        assert!(is_parent_class("SoftBody3D", "MeshInstance3D"));
+
+        let vb = get_class_info("VehicleBody3D").unwrap();
+        let names: Vec<&str> = vb.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"engine_force"));
+        assert!(names.contains(&"brake"));
+        assert!(names.contains(&"steering"));
+
+        let sb = get_class_info("SoftBody3D").unwrap();
+        let snames: Vec<&str> = sb.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(snames.contains(&"linear_stiffness") || snames.contains(&"total_mass"));
+    }
+
     #[test]
     fn instantiate_applies_inherited_defaults() {
         let _g = setup();
@@ -1124,5 +1999,137 @@ mod tests {
         assert_eq!(info.methods.len(), 2);
         assert_eq!(info.methods[0].name, "take_damage");
         assert_eq!(info.methods[0].argument_count, 1);
+    }
+
+    /// pat-zx775: SubViewport + ViewportTexture must be in ClassDB with Godot defaults.
+    #[test]
+    fn subviewport_and_viewport_texture_registered() {
+        let _g = setup();
+        register_viewport_classes();
+
+        assert!(class_exists("Viewport"), "Viewport base must be in ClassDB");
+        assert!(class_exists("SubViewport"), "SubViewport must be in ClassDB");
+        assert!(class_exists("Texture2D"), "Texture2D must be in ClassDB");
+        assert!(
+            class_exists("ViewportTexture"),
+            "ViewportTexture must be in ClassDB"
+        );
+
+        assert!(is_parent_class("SubViewport", "Viewport"));
+        assert!(is_parent_class("SubViewport", "Node"));
+        assert!(is_parent_class("ViewportTexture", "Texture2D"));
+        assert!(is_parent_class("ViewportTexture", "Resource"));
+
+        let sv = get_class_info("SubViewport").expect("SubViewport info");
+        let props: Vec<&str> = sv.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(props.contains(&"size"), "missing size: {props:?}");
+        assert!(
+            props.contains(&"render_target_update_mode"),
+            "missing render_target_update_mode: {props:?}"
+        );
+        assert!(
+            props.contains(&"render_target_clear_mode"),
+            "missing render_target_clear_mode: {props:?}"
+        );
+        assert!(
+            props.contains(&"transparent_bg"),
+            "missing transparent_bg: {props:?}"
+        );
+
+        // Defaults match Godot: size 512×512, update WHEN_VISIBLE (2), clear ALWAYS (0).
+        let size = sv
+            .properties
+            .iter()
+            .find(|p| p.name == "size")
+            .map(|p| &p.default_value)
+            .expect("size prop");
+        match size {
+            Variant::Vector2(v) => {
+                assert!((v.x - 512.0).abs() < 0.01, "size.x default {v:?}");
+                assert!((v.y - 512.0).abs() < 0.01, "size.y default {v:?}");
+            }
+            other => panic!("size default should be Vector2, got {other:?}"),
+        }
+        let update = sv
+            .properties
+            .iter()
+            .find(|p| p.name == "render_target_update_mode")
+            .map(|p| &p.default_value)
+            .expect("update mode");
+        assert_eq!(update, &Variant::Int(2), "UPDATE_WHEN_VISIBLE default");
+        let clear = sv
+            .properties
+            .iter()
+            .find(|p| p.name == "render_target_clear_mode")
+            .map(|p| &p.default_value)
+            .expect("clear mode");
+        assert_eq!(clear, &Variant::Int(0), "CLEAR_MODE_ALWAYS default");
+
+        // Instantiation produces SubViewport with defaults applied.
+        let inst = instantiate("SubViewport").expect("instantiate SubViewport");
+        match inst.get_property("size") {
+            Variant::Vector2(v) => {
+                assert!((v.x - 512.0).abs() < 0.01);
+                assert!((v.y - 512.0).abs() < 0.01);
+            }
+            other => panic!("inst size {other:?}"),
+        }
+        assert_eq!(
+            inst.get_property("render_target_update_mode"),
+            Variant::Int(2)
+        );
+
+        // Also registered via register_2d_classes for editor/runtime convenience.
+        clear_for_testing();
+        register_2d_classes();
+        assert!(class_exists("SubViewport"));
+        assert!(class_exists("ViewportTexture"));
+    }
+
+    /// pat-u3l8c.43: Shader / ShaderMaterial classes with set/get_shader_parameter.
+    #[test]
+    fn shader_classes_registered_with_parameter_methods() {
+        let _g = setup();
+        register_3d_classes();
+
+        assert!(class_exists("Shader"), "Shader must be in ClassDB");
+        assert!(
+            class_exists("ShaderMaterial"),
+            "ShaderMaterial must be in ClassDB"
+        );
+        assert!(class_exists("Material"), "Material must be in ClassDB");
+        assert!(class_exists("StandardMaterial3D"));
+
+        // Godot hierarchy: ShaderMaterial → Material → Resource.
+        assert!(is_parent_class("ShaderMaterial", "Material"));
+        assert!(is_parent_class("ShaderMaterial", "Resource"));
+        assert!(is_parent_class("Shader", "Resource"));
+        assert!(is_parent_class("StandardMaterial3D", "BaseMaterial3D"));
+        assert!(is_parent_class("StandardMaterial3D", "Material"));
+
+        // Material is abstract; ShaderMaterial is instantiable.
+        assert!(is_abstract("Material"));
+        assert!(can_instantiate("ShaderMaterial"));
+
+        // ShaderMaterial exposes the shader-parameter methods GDScript calls.
+        let methods: Vec<String> = get_method_list("ShaderMaterial")
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert!(
+            methods.contains(&"set_shader_parameter".to_string()),
+            "ShaderMaterial needs set_shader_parameter: {methods:?}"
+        );
+        assert!(methods.contains(&"get_shader_parameter".to_string()));
+        assert!(methods.contains(&"set_shader".to_string()));
+        assert!(methods.contains(&"get_shader".to_string()));
+
+        // Shader exposes get_code / set_code / get_mode.
+        let shader_methods: Vec<String> = get_method_list("Shader")
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert!(shader_methods.contains(&"get_code".to_string()));
+        assert!(shader_methods.contains(&"get_mode".to_string()));
     }
 }

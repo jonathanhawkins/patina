@@ -54,6 +54,72 @@ fn no_shadow_map_for_point_light() {
     );
 }
 
+// ── Spot light shadows (pat-bt77r) ───────────────────────────────────
+
+#[test]
+fn spot_shadow_map_generated_for_enabled_light() {
+    let mut light = Light3D::spot(
+        Light3DId(1),
+        Vector3::new(0.0, 5.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+    );
+    light.shadow_enabled = true;
+    let maps = generate_shadow_maps(&[light], &[]);
+    assert_eq!(maps.len(), 1, "one shadow map for one enabled spot light");
+    assert_eq!(maps[0].size, SHADOW_MAP_SIZE);
+}
+
+#[test]
+fn spot_point_behind_occluder_is_shadowed() {
+    let mut light = Light3D::spot(
+        Light3DId(1),
+        Vector3::new(0.0, 8.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+    );
+    light.shadow_enabled = true;
+    light.spot_angle = std::f32::consts::FRAC_PI_3;
+    light.range = 20.0;
+
+    let mut inst = Instance3D::new(Instance3DId(1));
+    inst.mesh = Some(Mesh3D::cube(3.0));
+    inst.visible = true;
+    inst.transform = Transform3D {
+        basis: Basis::IDENTITY,
+        origin: Vector3::new(0.0, 4.0, 0.0),
+    };
+
+    let maps = generate_shadow_maps(&[light], &[inst]);
+    assert_eq!(maps.len(), 1);
+    let shadow = maps[0].sample(Vector3::new(0.0, 0.0, 0.0));
+    assert!(
+        shadow > 0.5,
+        "spot: point below occluder should be shadowed, got {shadow}"
+    );
+}
+
+#[test]
+fn spot_point_outside_frustum_is_lit() {
+    let mut light = Light3D::spot(
+        Light3DId(1),
+        Vector3::new(0.0, 8.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+    );
+    light.shadow_enabled = true;
+    light.range = 20.0;
+
+    let mut inst = Instance3D::new(Instance3DId(1));
+    inst.mesh = Some(Mesh3D::cube(2.0));
+    inst.visible = true;
+    inst.transform = Transform3D::IDENTITY;
+
+    let maps = generate_shadow_maps(&[light], &[inst]);
+    let shadow = maps[0].sample(Vector3::new(40.0, 0.0, 40.0));
+    assert!(
+        shadow < 0.5,
+        "spot: outside frustum should be lit, got {shadow}"
+    );
+}
+
 #[test]
 fn shadow_map_captures_occluder_depth() {
     let mut light = Light3D::directional(Light3DId(1));

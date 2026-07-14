@@ -46,8 +46,26 @@ fn float_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// Reads a `PackedVector3Array` (or an `Array` of `Vector3`) property from a
+/// node, returning its points. Returns an empty vec when the property is
+/// absent or not a vector array — used to populate convex-hull / trimesh
+/// geometry from `CollisionShape3D` sub-resources (pat-u3l8c.56).
+fn vec3_array_prop_3d(node: &crate::node::Node, key: &str) -> Vec<Vector3> {
+    match node.get_property(key) {
+        Variant::PackedVector3Array(pts) => pts,
+        Variant::Array(items) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Variant::Vector3(p) => Some(p),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Extracts a 3D collision shape from a `CollisionShape3D` node's properties.
-fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Shape3D> {
+pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Shape3D> {
     let node = tree.get_node(node_id)?;
     if node.class_name() != "CollisionShape3D" {
         return None;
@@ -83,8 +101,21 @@ fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Shape3D> {
                 let height = float_prop_3d(tree, node_id, "height", 1.0) as f32;
                 Some(Shape3D::CylinderShape { radius, height })
             }
-            "ConvexPolygonShape3D" => Some(Shape3D::ConvexPolygonShape { points: vec![] }),
-            "ConcavePolygonShape3D" => Some(Shape3D::ConcavePolygonShape { faces: vec![] }),
+            "ConvexPolygonShape3D" => Some(Shape3D::ConvexPolygonShape {
+                points: vec3_array_prop_3d(node, "points"),
+            }),
+            "ConcavePolygonShape3D" => Some(Shape3D::ConcavePolygonShape {
+                // Godot stores the triangle soup in `data` (every 3 vertices =
+                // one triangle); accept `faces` as an alias.
+                faces: {
+                    let data = vec3_array_prop_3d(node, "data");
+                    if data.is_empty() {
+                        vec3_array_prop_3d(node, "faces")
+                    } else {
+                        data
+                    }
+                },
+            }),
             "WorldBoundaryShape3D" => Some(Shape3D::WorldBoundaryShape {
                 normal: Vector3::new(0.0, 1.0, 0.0),
                 distance: 0.0,
@@ -403,6 +434,72 @@ mod tests {
         let mut server = PhysicsServer3D::new();
         server.sync_to_physics(&tree);
         assert_eq!(server.body_count(), 1);
+    }
+
+    #[test]
+    fn convex_shape_populates_points_from_resource() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut shape_node = Node::new("Shape", "CollisionShape3D");
+        shape_node.set_property("shape", Variant::String("ConvexPolygonShape3D".to_owned()));
+        shape_node.set_property(
+            "points",
+            Variant::PackedVector3Array(vec![
+                Vector3::new(-1.0, -1.0, -1.0),
+                Vector3::new(1.0, -1.0, -1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ]),
+        );
+        let nid = tree.add_child(root, shape_node).unwrap();
+
+        match shape_from_node_3d(&tree, nid) {
+            Some(Shape3D::ConvexPolygonShape { points }) => {
+                assert_eq!(points.len(), 3, "convex hull points must be populated");
+            }
+            other => panic!("expected populated ConvexPolygonShape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concave_shape_populates_faces_from_data() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut shape_node = Node::new("Shape", "CollisionShape3D");
+        shape_node.set_property("shape", Variant::String("ConcavePolygonShape3D".to_owned()));
+        shape_node.set_property(
+            "data",
+            Variant::PackedVector3Array(vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ]),
+        );
+        let nid = tree.add_child(root, shape_node).unwrap();
+
+        match shape_from_node_3d(&tree, nid) {
+            Some(Shape3D::ConcavePolygonShape { faces }) => {
+                assert_eq!(faces.len(), 3, "trimesh faces must be populated from `data`");
+            }
+            other => panic!("expected populated ConcavePolygonShape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convex_shape_empty_without_points() {
+        // Missing `points` yields empty geometry rather than a panic.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut shape_node = Node::new("Shape", "CollisionShape3D");
+        shape_node.set_property("shape", Variant::String("ConvexPolygonShape3D".to_owned()));
+        let nid = tree.add_child(root, shape_node).unwrap();
+
+        match shape_from_node_3d(&tree, nid) {
+            Some(Shape3D::ConvexPolygonShape { points }) => assert!(points.is_empty()),
+            other => panic!("expected ConvexPolygonShape, got {other:?}"),
+        }
     }
 
     #[test]

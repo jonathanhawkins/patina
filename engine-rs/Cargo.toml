@@ -17,6 +17,7 @@ members = [
     "crates/gdrender3d",
     "crates/gdeditor",
     "crates/patina-runner",
+    "crates/patina-web",
 ]
 
 [workspace.package]

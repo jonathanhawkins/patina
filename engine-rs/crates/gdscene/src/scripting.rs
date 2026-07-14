@@ -124,6 +124,8 @@ impl ScriptInstance for GDScriptNodeInstance {
                 name: name.clone(),
                 property_type: val.variant_type(),
                 default_value: val.clone(),
+                hint: 0,
+                hint_string: String::new(),
             })
             .collect()
     }
@@ -153,6 +155,45 @@ impl ScriptInstance for GDScriptNodeInstance {
     fn clear_scene_access(&mut self) {
         self.interpreter.clear_scene_access();
     }
+
+    fn poll_coroutines(&mut self, _delta: f32) {
+        // Advance frame-based awaits (e.g. `await RenderingServer.frame_post_draw`)
+        // by one frame and resume any that are ready. Timer-based awaits are
+        // driven centrally by the SceneTree once per frame (via
+        // `notify_await_signal`), so we deliberately do NOT re-process the shared
+        // SceneTree timers here — doing so per attached script would advance them
+        // N times per frame (pat-nzgdu.6). The instance is threaded in as `self`
+        // so resumed `self.x = ...` writes land on this script's properties.
+        let _ = self
+            .interpreter
+            .tick_instance_coroutine_frames(&mut self.instance);
+    }
+
+    fn notify_await_signal(&mut self, name: &str, args: &[Variant]) {
+        // Wake `await`s parked on this signal name; the interpreter's coroutine
+        // host resumes the matching suspended frames, binding the first emitted
+        // argument as the awaited value for `var v = await sig` (pat-nzgdu.6).
+        // The instance is threaded in as `self` so resumed property writes and
+        // declared-signal lookups resolve against this script.
+        let _ = self
+            .interpreter
+            .notify_instance_await_signal(&mut self.instance, name, args);
+    }
+
+    fn notification(&mut self, what: i64) {
+        // Deliver the engine notification to the script's `_notification(what)`
+        // virtual, matching Godot's GDScriptInstance::notification. Only scripts
+        // that override `_notification` receive it (pat-nzgdu.13). The caller
+        // (SceneTree::notify_script) has already installed scene access, so a
+        // `_notification` body can call get_node/emit_signal like any callback.
+        if self.instance.class_def.methods.contains_key("_notification") {
+            let _ = self.interpreter.call_instance_method(
+                &mut self.instance,
+                "_notification",
+                &[Variant::Int(what)],
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +210,8 @@ pub struct InputSnapshot {
     pub pressed_keys: HashSet<String>,
     /// Keys that were first pressed this frame.
     pub just_pressed_keys: HashSet<String>,
+    /// Keys that were released this frame (pat-nzgdu.9).
+    pub just_released_keys: HashSet<String>,
     /// Action name → list of key names.
     pub input_map: std::collections::HashMap<String, Vec<String>>,
     /// Current mouse position in screen coordinates.
@@ -191,6 +234,16 @@ impl InputSnapshot {
     pub fn is_action_just_pressed(&self, action: &str) -> bool {
         if let Some(keys) = self.input_map.get(action) {
             keys.iter().any(|k| self.just_pressed_keys.contains(k))
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if any key mapped to `action` was released this frame
+    /// (pat-nzgdu.9).
+    pub fn is_action_just_released(&self, action: &str) -> bool {
+        if let Some(keys) = self.input_map.get(action) {
+            keys.iter().any(|k| self.just_released_keys.contains(k))
         } else {
             false
         }
@@ -375,6 +428,13 @@ impl SceneAccess for SceneTreeAccessor {
             .unwrap_or(false)
     }
 
+    fn is_input_action_just_released(&self, action: &str) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_action_just_released(action))
+            .unwrap_or(false)
+    }
+
     fn is_input_key_pressed(&self, key: &str) -> bool {
         self.input
             .as_ref()
@@ -405,11 +465,19 @@ impl SceneAccess for SceneTreeAccessor {
         let pid = NodeId::from_object_id(ObjectId::from_raw(parent_id));
         let cid = NodeId::from_object_id(ObjectId::from_raw(child_id));
 
-        // The node was created by create_node and already lives in the arena.
-        // We extract it, then re-insert via SceneTree::add_child which wires
-        // up the parent-child relationship and lifecycle events.
         let tree = self.tree_mut();
-        if let Some(node) = tree.take_node(cid) {
+        // A node produced by `instantiate_packed_scene` is already in the tree
+        // (parented under the root), so move its whole subtree with `reparent`.
+        // A freshly `create_node`d node is detached (no parent) and is inserted
+        // via `take_node` + `add_child`, which wires up the parent-child
+        // relationship and lifecycle events.
+        let already_parented = tree
+            .get_node(cid)
+            .map(|n| n.parent().is_some())
+            .unwrap_or(false);
+        if already_parented {
+            tree.reparent(cid, pid).is_ok()
+        } else if let Some(node) = tree.take_node(cid) {
             tree.add_child(pid, node).is_ok()
         } else {
             false
@@ -421,11 +489,52 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree_mut().queue_free(nid);
     }
 
+    fn call_deferred(&mut self, node_id: u64, method: &str, args: &[Variant]) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
+        self.tree_mut().call_deferred(nid, method, args);
+    }
+
+    fn create_timer(&mut self, seconds: f64) -> Option<(u64, String)> {
+        let id = self.tree_mut().create_timer(seconds);
+        let signal = self
+            .tree()
+            .get_timer(id)
+            .map(|t| t.signal_name.clone())
+            .unwrap_or_else(|| format!("timeout_{id}"));
+        Some((id, signal))
+    }
+
+    fn process_timers(&mut self, delta: f64) -> Vec<String> {
+        self.tree_mut().process_timers(delta);
+        self.tree_mut().take_timeout_signals()
+    }
+
     fn get_class(&self, node: u64) -> Option<String> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree()
             .get_node(nid)
             .map(|n| n.class_name().to_string())
+    }
+
+    fn instantiate_packed_scene(&mut self, path: &str) -> Option<u64> {
+        // Resolve `res://` to a filesystem path. No project root is available
+        // on the accessor, so `res://X` maps to the CWD-relative `X`.
+        let fs_path = path.strip_prefix("res://").unwrap_or(path);
+        let source = std::fs::read_to_string(fs_path).ok()?;
+        let scene = crate::packed_scene::PackedScene::from_tscn(&source).ok()?;
+        // Recursively resolve `instance=ExtResource` sub-scenes from disk.
+        let resolve = |sub: &str| -> Option<crate::packed_scene::PackedScene> {
+            let sub_fs = sub.strip_prefix("res://").unwrap_or(sub);
+            let src = std::fs::read_to_string(sub_fs).ok()?;
+            crate::packed_scene::PackedScene::from_tscn(&src).ok()
+        };
+        let tree = self.tree_mut();
+        let root = tree.root_id();
+        // The subtree is attached under the root here; the script's follow-up
+        // `add_child` reparents it to the desired parent (see `add_child`).
+        crate::packed_scene::add_packed_scene_to_tree_with_subscenes(tree, root, &scene, &resolve)
+            .ok()
+            .map(|id| id.raw())
     }
 }
 

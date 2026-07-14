@@ -555,3 +555,557 @@ fn websocket_peer_registered_in_classdb() {
     assert!(class_db::class_has_method("WebSocketPeer", "send_text"));
     assert!(class_db::class_has_method("WebSocketPeer", "get_packet"));
 }
+
+// ===========================================================================
+// pat-fg8dk: TcpMultiplayerPeer — real loopback multiplayer beyond MockNetwork
+// ===========================================================================
+
+use gdplatform::network::{
+    decode_spawn_packet, decode_sync_packet, ConnectionStatus, MultiplayerAPI, MultiplayerSpawner,
+    MultiplayerSynchronizer, NetworkPeer, Packet, PeerId, TransferMode,
+};
+use gdplatform::TcpMultiplayerPeer;
+
+fn multiplayer_pump_handshake(server: &mut TcpMultiplayerPeer, client: &mut TcpMultiplayerPeer) {
+    for _ in 0..100 {
+        let _ = server.poll();
+        let _ = client.poll();
+        if client.get_connection_status() == ConnectionStatus::Connected {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!(
+        "TCP multiplayer handshake timed out (client status={:?})",
+        client.get_connection_status()
+    );
+}
+
+#[test]
+fn multiplayer_tcp_server_client_packet_round_trip() {
+    let mut server = TcpMultiplayerPeer::new();
+    let addr = server
+        .create_server("127.0.0.1:0")
+        .expect("bind loopback server");
+    assert!(server.is_server());
+    assert_eq!(server.get_connection_status(), ConnectionStatus::Connected);
+
+    let mut client = TcpMultiplayerPeer::new();
+    client.create_client(addr).expect("connect client");
+    assert_eq!(client.get_connection_status(), ConnectionStatus::Connecting);
+
+    multiplayer_pump_handshake(&mut server, &mut client);
+    assert!(!client.is_server());
+    assert_ne!(client.get_unique_id(), PeerId::SERVER);
+
+    let hello = b"pat-fg8dk-hello".to_vec();
+    client
+        .send_packet(
+            PeerId::SERVER,
+            Packet {
+                sender: client.get_unique_id(),
+                channel: 3,
+                data: hello.clone(),
+                transfer_mode: TransferMode::Reliable,
+            },
+        )
+        .expect("client send");
+
+    let mut received = None;
+    for _ in 0..80 {
+        let _ = client.poll();
+        for p in server.poll() {
+            if p.data == hello {
+                received = Some(p);
+                break;
+            }
+        }
+        if received.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let p = received.expect("server must receive client packet over TCP");
+    assert_eq!(p.sender, client.get_unique_id());
+    assert_eq!(p.channel, 3);
+
+    let ack = b"pat-fg8dk-ack".to_vec();
+    server
+        .send_packet(
+            client.get_unique_id(),
+            Packet {
+                sender: PeerId::SERVER,
+                channel: 4,
+                data: ack.clone(),
+                transfer_mode: TransferMode::Reliable,
+            },
+        )
+        .expect("server send");
+
+    let mut ack_rx = None;
+    for _ in 0..80 {
+        let _ = server.poll();
+        for p in client.poll() {
+            if p.data == ack {
+                ack_rx = Some(p);
+                break;
+            }
+        }
+        if ack_rx.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let p = ack_rx.expect("client must receive server packet over TCP");
+    assert_eq!(p.sender, PeerId::SERVER);
+    assert_eq!(p.channel, 4);
+
+    client.close();
+    server.close();
+}
+
+#[test]
+fn multiplayer_api_accepts_tcp_peer() {
+    let mut server = TcpMultiplayerPeer::new();
+    let addr = server.create_server("127.0.0.1:0").unwrap();
+    let mut client = TcpMultiplayerPeer::new();
+    client.create_client(addr).unwrap();
+    multiplayer_pump_handshake(&mut server, &mut client);
+
+    let mut api = MultiplayerAPI::new();
+    api.set_multiplayer_peer(Box::new(server));
+    assert!(api.is_server());
+
+    let mut api_c = MultiplayerAPI::new();
+    api_c.set_multiplayer_peer(Box::new(client));
+    assert!(!api_c.is_server());
+}
+
+#[test]
+fn multiplayer_tcp_registered_in_classdb() {
+    let _guard = CLASSDB_LOCK.lock().unwrap();
+    class_db::clear_for_testing();
+    class_db::register_networking_classes();
+
+    assert!(class_db::class_exists("TcpMultiplayerPeer"));
+    assert!(class_db::class_exists("MultiplayerPeer"));
+    assert!(class_db::class_exists("MultiplayerAPI"));
+    assert!(class_db::is_parent_class("TcpMultiplayerPeer", "MultiplayerPeer"));
+    assert!(class_db::is_parent_class("TcpMultiplayerPeer", "PacketPeer"));
+    assert!(class_db::class_has_method("TcpMultiplayerPeer", "create_server"));
+    assert!(class_db::class_has_method("TcpMultiplayerPeer", "create_client"));
+}
+
+// ===========================================================================
+// pat-z26jd: ENetMultiplayerPeer — ClassDB alias over TcpMultiplayerPeer
+// ===========================================================================
+
+use gdplatform::ENetMultiplayerPeer;
+
+fn enet_pump_handshake(server: &mut ENetMultiplayerPeer, client: &mut ENetMultiplayerPeer) {
+    for _ in 0..100 {
+        let _ = server.poll();
+        let _ = client.poll();
+        if client.get_connection_status() == ConnectionStatus::Connected {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!(
+        "ENet multiplayer handshake timed out (client status={:?})",
+        client.get_connection_status()
+    );
+}
+
+#[test]
+fn multiplayer_enet_server_client_reliable_packet() {
+    let mut server = ENetMultiplayerPeer::new();
+    let addr = server
+        .create_server("127.0.0.1:0")
+        .expect("bind ENet (TCP-backed) server");
+    assert!(server.is_server());
+    assert_eq!(server.get_connection_status(), ConnectionStatus::Connected);
+
+    let mut client = ENetMultiplayerPeer::new();
+    client.create_client(addr).expect("connect ENet client");
+    assert_eq!(client.get_connection_status(), ConnectionStatus::Connecting);
+
+    enet_pump_handshake(&mut server, &mut client);
+    assert!(!client.is_server());
+    assert_ne!(client.get_unique_id(), PeerId::SERVER);
+
+    let hello = b"pat-z26jd-enet-hello".to_vec();
+    client
+        .send_packet(
+            PeerId::SERVER,
+            Packet {
+                sender: client.get_unique_id(),
+                channel: 5,
+                data: hello.clone(),
+                transfer_mode: TransferMode::Reliable,
+            },
+        )
+        .expect("client send reliable");
+
+    let mut received = None;
+    for _ in 0..80 {
+        let _ = client.poll();
+        for p in server.poll() {
+            if p.data == hello {
+                received = Some(p);
+                break;
+            }
+        }
+        if received.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let p = received.expect("server must receive reliable packet via ENetMultiplayerPeer");
+    assert_eq!(p.sender, client.get_unique_id());
+    assert_eq!(p.channel, 5);
+    assert_eq!(p.transfer_mode, TransferMode::Reliable);
+
+    let ack = b"pat-z26jd-enet-ack".to_vec();
+    server
+        .send_packet(
+            client.get_unique_id(),
+            Packet {
+                sender: PeerId::SERVER,
+                channel: 2,
+                data: ack.clone(),
+                transfer_mode: TransferMode::Ordered,
+            },
+        )
+        .expect("server send");
+
+    let mut ack_rx = None;
+    for _ in 0..80 {
+        let _ = server.poll();
+        for p in client.poll() {
+            if p.data == ack {
+                ack_rx = Some(p);
+                break;
+            }
+        }
+        if ack_rx.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let p = ack_rx.expect("client must receive server packet via ENetMultiplayerPeer");
+    assert_eq!(p.sender, PeerId::SERVER);
+    assert_eq!(p.channel, 2);
+    assert_eq!(p.transfer_mode, TransferMode::Ordered);
+
+    client.close();
+    server.close();
+}
+
+#[test]
+fn multiplayer_enet_preserves_channel_metadata() {
+    let mut server = ENetMultiplayerPeer::new();
+    let addr = server.create_server("127.0.0.1:0").unwrap();
+    let mut client = ENetMultiplayerPeer::new();
+    client.create_client(addr).unwrap();
+    enet_pump_handshake(&mut server, &mut client);
+
+    // Unreliable mode is metadata-only over TCP; channel must still round-trip.
+    let payload = b"pat-z26jd-ch-meta".to_vec();
+    client
+        .send_packet(
+            PeerId::SERVER,
+            Packet {
+                sender: client.get_unique_id(),
+                channel: 9,
+                data: payload.clone(),
+                transfer_mode: TransferMode::Unreliable,
+            },
+        )
+        .unwrap();
+
+    let mut got = None;
+    for _ in 0..80 {
+        let _ = client.poll();
+        for p in server.poll() {
+            if p.data == payload {
+                got = Some(p);
+                break;
+            }
+        }
+        if got.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let p = got.expect("channel metadata preserved in ENet alias packet headers");
+    assert_eq!(p.channel, 9);
+    assert_eq!(p.transfer_mode, TransferMode::Unreliable);
+}
+
+#[test]
+fn multiplayer_api_accepts_enet_peer() {
+    let mut server = ENetMultiplayerPeer::new();
+    let addr = server.create_server("127.0.0.1:0").unwrap();
+    let mut client = ENetMultiplayerPeer::new();
+    client.create_client(addr).unwrap();
+    enet_pump_handshake(&mut server, &mut client);
+
+    let mut api = MultiplayerAPI::new();
+    api.set_multiplayer_peer(Box::new(server));
+    assert!(api.is_server());
+
+    let mut api_c = MultiplayerAPI::new();
+    api_c.set_multiplayer_peer(Box::new(client));
+    assert!(!api_c.is_server());
+}
+
+#[test]
+fn multiplayer_enet_registered_in_classdb() {
+    let _guard = CLASSDB_LOCK.lock().unwrap();
+    class_db::clear_for_testing();
+    class_db::register_networking_classes();
+
+    assert!(class_db::class_exists("ENetMultiplayerPeer"));
+    assert!(class_db::class_exists("MultiplayerPeer"));
+    assert!(class_db::is_parent_class("ENetMultiplayerPeer", "MultiplayerPeer"));
+    assert!(class_db::is_parent_class("ENetMultiplayerPeer", "PacketPeer"));
+    assert!(class_db::class_has_method("ENetMultiplayerPeer", "create_server"));
+    assert!(class_db::class_has_method("ENetMultiplayerPeer", "create_client"));
+    assert!(class_db::class_has_method("ENetMultiplayerPeer", "poll"));
+    assert!(class_db::class_has_method("ENetMultiplayerPeer", "close"));
+}
+
+// ===========================================================================
+// MultiplayerSpawner / MultiplayerSynchronizer — bead pat-ikq04
+// Filters: multiplayer_spawner, multiplayer_synchronizer
+// ===========================================================================
+
+#[test]
+fn multiplayer_spawner_host_spawn_packet_observed_by_client() {
+    // Host spawns a scene path over TcpMultiplayerPeer; client decodes the
+    // spawn packet (bounded multiplayer replication slice).
+    let mut server = TcpMultiplayerPeer::new();
+    let addr = server
+        .create_server("127.0.0.1:0")
+        .expect("bind loopback server");
+    let mut client = TcpMultiplayerPeer::new();
+    client.create_client(addr).expect("connect client");
+    multiplayer_pump_handshake(&mut server, &mut client);
+
+    let client_id = client.get_unique_id();
+    let mut host_spawner = MultiplayerSpawner::new(0);
+    host_spawner.add_spawnable_scene("res://player.tscn");
+    host_spawner.set_spawn_path(".");
+    let req = host_spawner
+        .spawn_and_notify(&mut server, client_id, "team=blue")
+        .expect("host spawn_and_notify");
+    assert_eq!(req.scene_path, "res://player.tscn");
+    assert_eq!(host_spawner.spawn_count(), 1);
+
+    let mut observed = None;
+    for _ in 0..80 {
+        let _ = server.poll();
+        for p in client.poll() {
+            if let Some(spawn) = decode_spawn_packet(&p.data) {
+                observed = Some((p, spawn));
+                break;
+            }
+        }
+        if observed.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (packet, spawn) = observed.expect("client must observe host spawn packet");
+    assert_eq!(spawn.scene_path, "res://player.tscn");
+    assert_eq!(spawn.data, "team=blue");
+    assert_eq!(spawn.net_id, req.net_id);
+    assert_eq!(packet.sender, PeerId::SERVER);
+
+    let mut client_spawner = MultiplayerSpawner::new(0);
+    let applied = client_spawner
+        .observe_spawn_packet(&packet)
+        .expect("client spawner applies spawn packet");
+    assert_eq!(applied.scene_path, "res://player.tscn");
+    assert_eq!(client_spawner.spawn_count(), 1);
+
+    client.close();
+    server.close();
+}
+
+#[test]
+fn multiplayer_synchronizer_property_sync_once() {
+    // Authority writes position, polls outbound once; remote applies the sync.
+    let mut server = TcpMultiplayerPeer::new();
+    let addr = server
+        .create_server("127.0.0.1:0")
+        .expect("bind loopback server");
+    let mut client = TcpMultiplayerPeer::new();
+    client.create_client(addr).expect("connect client");
+    multiplayer_pump_handshake(&mut server, &mut client);
+
+    let client_id = client.get_unique_id();
+    let mut auth = MultiplayerSynchronizer::new(16);
+    auth.set_root_path("..");
+    auth.set_net_id(9);
+    auth.add_property("position");
+    auth.set_property_value("position", "12.5,-3.0");
+    assert!(
+        auth.poll_outbound(&mut server, client_id, 1000, true)
+            .expect("poll_outbound"),
+        "authority should emit a sync packet"
+    );
+
+    let mut applied = None;
+    for _ in 0..80 {
+        let _ = server.poll();
+        for p in client.poll() {
+            if decode_sync_packet(&p.data).is_some() {
+                applied = Some(p);
+                break;
+            }
+        }
+        if applied.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let packet = applied.expect("client must receive property sync packet");
+    assert_eq!(packet.sender, PeerId::SERVER);
+
+    let mut remote = MultiplayerSynchronizer::new(16);
+    remote.add_property("position");
+    let sync = remote
+        .apply_sync_packet(&packet)
+        .expect("apply_sync_packet");
+    assert_eq!(sync.net_id, 9);
+    assert_eq!(remote.get_property_value("position"), Some("12.5,-3.0"));
+    assert_eq!(remote.get_net_id(), 9);
+
+    client.close();
+    server.close();
+}
+
+#[test]
+fn multiplayer_spawner_synchronizer_registered_in_classdb() {
+    let _guard = CLASSDB_LOCK.lock().unwrap();
+    class_db::clear_for_testing();
+    class_db::register_networking_classes();
+
+    assert!(class_db::class_exists("MultiplayerSpawner"));
+    assert!(class_db::class_exists("MultiplayerSynchronizer"));
+    assert!(class_db::is_parent_class("MultiplayerSpawner", "Node"));
+    assert!(class_db::is_parent_class("MultiplayerSynchronizer", "Node"));
+    assert_eq!(
+        class_db::inheritance_chain("MultiplayerSpawner"),
+        vec!["MultiplayerSpawner", "Node", "Object"]
+    );
+    assert_eq!(
+        class_db::inheritance_chain("MultiplayerSynchronizer"),
+        vec!["MultiplayerSynchronizer", "Node", "Object"]
+    );
+
+    assert!(class_db::class_has_method("MultiplayerSpawner", "spawn"));
+    assert!(class_db::class_has_method(
+        "MultiplayerSpawner",
+        "add_spawnable_scene"
+    ));
+    assert!(class_db::class_has_method(
+        "MultiplayerSpawner",
+        "get_spawnable_scene_count"
+    ));
+    assert!(class_db::class_has_property("MultiplayerSpawner", "spawn_path"));
+    assert!(class_db::class_has_property("MultiplayerSpawner", "spawn_limit"));
+
+    assert!(class_db::class_has_method(
+        "MultiplayerSynchronizer",
+        "set_root_path"
+    ));
+    assert!(class_db::class_has_method(
+        "MultiplayerSynchronizer",
+        "get_replication_interval"
+    ));
+    assert!(class_db::class_has_property(
+        "MultiplayerSynchronizer",
+        "root_path"
+    ));
+    assert!(class_db::class_has_property(
+        "MultiplayerSynchronizer",
+        "replication_interval"
+    ));
+}
+
+// ===========================================================================
+// PacketPeerUDP / StreamPeerTCP — bead pat-72jn7
+// ===========================================================================
+
+#[test]
+fn packet_peer_udp_loopback_echo() {
+    use gdplatform::PacketPeerUDP;
+
+    let mut server = PacketPeerUDP::new();
+    let local = server.bind("127.0.0.1:0").unwrap();
+
+    let mut client = PacketPeerUDP::new();
+    client.bind("127.0.0.1:0").unwrap();
+    client.set_dest_address(local).unwrap();
+    client.put_packet(b"udp-ping").unwrap();
+
+    let start = Instant::now();
+    while server.get_available_packet_count() == 0 && start.elapsed() < Duration::from_secs(2) {
+        server.poll();
+        client.poll();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(server.get_packet(), b"udp-ping");
+}
+
+#[test]
+fn stream_peer_tcp_loopback_byte_stream() {
+    use gdplatform::{StreamPeerTCP, StreamPeerTcpStatus};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let mut client = StreamPeerTCP::new();
+    client.connect_to_addr(addr).unwrap();
+    assert_eq!(client.get_status(), StreamPeerTcpStatus::Connected);
+
+    let start = Instant::now();
+    let mut server = loop {
+        match StreamPeerTCP::accept_from_listener(&listener) {
+            Ok(s) => break s,
+            Err(_) if start.elapsed() < Duration::from_secs(2) => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => panic!("accept: {e}"),
+        }
+    };
+
+    client.put_data(b"stream-data").unwrap();
+    let start = Instant::now();
+    while server.get_available_bytes() < 11 && start.elapsed() < Duration::from_secs(2) {
+        server.poll();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(server.get_data(64), b"stream-data");
+}
+
+#[test]
+fn packet_stream_peers_registered_in_classdb() {
+    let _guard = CLASSDB_LOCK.lock().unwrap();
+    class_db::clear_for_testing();
+    class_db::register_networking_classes();
+
+    assert!(class_db::class_exists("PacketPeerUDP"));
+    assert!(class_db::class_exists("StreamPeerTCP"));
+    assert!(class_db::class_exists("StreamPeer"));
+    assert!(class_db::is_parent_class("PacketPeerUDP", "PacketPeer"));
+    assert!(class_db::is_parent_class("StreamPeerTCP", "StreamPeer"));
+    assert!(class_db::class_has_method("PacketPeerUDP", "bind"));
+    assert!(class_db::class_has_method("PacketPeerUDP", "put_packet"));
+    assert!(class_db::class_has_method("StreamPeerTCP", "connect_to_host"));
+    assert!(class_db::class_has_method("StreamPeerTCP", "get_status"));
+}

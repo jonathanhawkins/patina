@@ -18,7 +18,16 @@
 
 use std::collections::HashMap;
 
+use crate::audio_server_bridge::AudioServerBridge;
 use crate::physics_server::PhysicsServer;
+use crate::physics_server_3d::PhysicsServer3D;
+use crate::node::NodeId;
+use crate::navigation::{
+    NavMesh2D, NavMesh3D, NavPolygon, NavPolygon3D, NavigationAgent2D, NavigationAgent3D,
+    NavigationServer2D, NavigationServer3D,
+};
+use crate::particle::{ParticleEmitter, ParticleSimulator};
+use crate::path3d::{Curve2D, Curve3D, PathFollow2D, PathFollow3D, PathFollowRotation};
 use crate::scene_tree::SceneTree;
 use crate::scripting::InputSnapshot;
 use crate::trace::{TraceEvent, TraceEventType};
@@ -141,6 +150,11 @@ pub struct MainLoop {
     tree: SceneTree,
     /// Physics server bridging scene nodes to gdphysics2d.
     physics_server: PhysicsServer,
+    /// Physics server bridging scene nodes to gdphysics3d (pat-u3l8c.1).
+    physics_server_3d: PhysicsServer3D,
+    /// Audio bridge driving AudioStreamPlayer nodes through gdaudio
+    /// (pat-u3l8c.2).
+    audio_bridge: AudioServerBridge,
     /// Number of physics ticks per second (default 60).
     physics_ticks_per_second: u32,
     /// Maximum number of physics steps allowed in a single frame (default 8).
@@ -158,6 +172,14 @@ pub struct MainLoop {
     /// Engine-owned input state. Receives events via [`push_event`](Self::push_event)
     /// and produces the script-facing [`InputSnapshot`] each frame.
     input_state: InputState,
+    /// CPU particle simulators for emitting particle nodes, keyed by node id
+    /// (pat-u3l8c.4). Built on demand in [`process_particles`](Self::process_particles).
+    particles: HashMap<NodeId, ParticleSimulator>,
+    /// Per-node 2D navigation agents, keyed by node id (pat-u3l8c.5). Hold the
+    /// computed path + waypoint index across frames so agents advance smoothly.
+    nav_agents_2d: HashMap<NodeId, NavigationAgent2D>,
+    /// Per-node 3D navigation agents, keyed by node id (pat-u3l8c.5).
+    nav_agents_3d: HashMap<NodeId, NavigationAgent3D>,
 }
 
 impl MainLoop {
@@ -166,6 +188,8 @@ impl MainLoop {
         Self {
             tree,
             physics_server: PhysicsServer::new(),
+            physics_server_3d: PhysicsServer3D::new(),
+            audio_bridge: AudioServerBridge::new(),
             physics_ticks_per_second: 60,
             max_physics_steps_per_frame: 8,
             frame_counter: 0,
@@ -174,6 +198,578 @@ impl MainLoop {
             physics_accumulator: 0.0,
             paused: false,
             input_state: InputState::new(),
+            particles: HashMap::new(),
+            nav_agents_2d: HashMap::new(),
+            nav_agents_3d: HashMap::new(),
+        }
+    }
+
+    /// Advances CPU particle simulators for every emitting particle node.
+    ///
+    /// `GPUParticles2D`/`GPUParticles3D`/`CPUParticles2D`/`CPUParticles3D`
+    /// nodes each get (or reuse) a [`ParticleSimulator`] keyed by node id,
+    /// configured from the node's `amount`/`lifetime`/`one_shot` properties and
+    /// stepped by `dt`. The resulting live-particle count is written back to the
+    /// node's `particle_count` property. Simulators for nodes that vanished or
+    /// stopped emitting are dropped once their remaining particles die out.
+    pub fn process_particles(&mut self, dt: f32) {
+        const PARTICLE_CLASSES: [&str; 4] = [
+            "GPUParticles2D",
+            "GPUParticles3D",
+            "CPUParticles2D",
+            "CPUParticles3D",
+        ];
+
+        // Collect every particle node's config (emitting flag + emitter params)
+        // while the tree is borrowed immutably.
+        let mut configs: Vec<(NodeId, bool, ParticleEmitter)> = Vec::new();
+        let mut present: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            if !PARTICLE_CLASSES.contains(&node.class_name()) {
+                continue;
+            }
+            present.insert(id);
+            // Godot's particle nodes default `emitting` to true.
+            let is_emitting = !matches!(node.get_property("emitting"), Variant::Bool(false));
+            let mut emitter = ParticleEmitter::default();
+            if let Variant::Int(a) = node.get_property("amount") {
+                if a > 0 {
+                    emitter.amount = a as u32;
+                }
+            }
+            if let Variant::Float(l) = node.get_property("lifetime") {
+                if l > 0.0 {
+                    emitter.lifetime = l as f32;
+                }
+            }
+            emitter.one_shot = matches!(node.get_property("one_shot"), Variant::Bool(true));
+            configs.push((id, is_emitting, emitter));
+        }
+
+        // Drop simulators for nodes that no longer exist.
+        self.particles.retain(|id, _| present.contains(id));
+
+        // Step every particle node's simulator: emitting nodes spawn new
+        // particles, non-emitting nodes just age their remaining particles out.
+        for (id, is_emitting, emitter) in configs {
+            let sim = self
+                .particles
+                .entry(id)
+                .or_insert_with(|| ParticleSimulator::new(emitter.clone()));
+            // Sync config from the node each frame. Preserve one-shot emitters
+            // that have already fired their full burst (don't re-enable them).
+            let one_shot_finished =
+                emitter.one_shot && sim.total_emitted >= emitter.amount as u64;
+            sim.emitter.amount = emitter.amount;
+            sim.emitter.lifetime = emitter.lifetime;
+            sim.emitter.one_shot = emitter.one_shot;
+            sim.emitter.emitting = is_emitting && !one_shot_finished;
+            sim.step(dt);
+        }
+
+        // Publish live counts back onto the nodes.
+        let counts: Vec<(NodeId, i64)> = self
+            .particles
+            .iter()
+            .map(|(id, sim)| (*id, sim.active_particles.len() as i64))
+            .collect();
+        for (id, count) in counts {
+            if let Some(node) = self.tree.get_node_mut(id) {
+                node.set_property("particle_count", Variant::Int(count));
+            }
+        }
+    }
+
+    /// Returns the number of live particles currently simulated for `node_id`
+    /// (0 if the node has no active particle simulator).
+    pub fn particle_count(&self, node_id: NodeId) -> usize {
+        self.particles
+            .get(&node_id)
+            .map(|s| s.active_particles.len())
+            .unwrap_or(0)
+    }
+
+    /// Drives `PathFollow2D`/`PathFollow3D` nodes along their parent Path's
+    /// curve each frame (pat-u3l8c.6).
+    ///
+    /// The parent `Path2D`/`Path3D` exposes its baked polyline via a
+    /// `curve_points` property (`PackedVector2Array` / `PackedVector3Array`).
+    /// Each follow node's `progress` is advanced by `path_speed * dt` (a Patina
+    /// convenience — Godot drives `progress` from animation/script) then
+    /// projected onto the curve, updating the node's `position` and, per its
+    /// rotation mode (`rotation_mode` for 3D, `rotates` for 2D), its rotation.
+    /// Closes the audit gap where `PathFollow3D::advance`/`position_on` were
+    /// never called from the loop and PathFollow2D was defaults-only.
+    pub fn process_path_follows(&mut self, dt: f32) {
+        use gdcore::math::{Vector2, Vector3};
+
+        struct Update3 {
+            id: NodeId,
+            progress: f32,
+            pos: Vector3,
+            rot: Option<Vector3>,
+        }
+        struct Update2 {
+            id: NodeId,
+            progress: f32,
+            pos: Vector2,
+            rot: Option<f32>,
+        }
+        let mut updates3: Vec<Update3> = Vec::new();
+        let mut updates2: Vec<Update2> = Vec::new();
+
+        // Gather phase: read follow nodes + their parent curves (immutable).
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            let is3 = node.class_name() == "PathFollow3D";
+            let is2 = node.class_name() == "PathFollow2D";
+            if !is3 && !is2 {
+                continue;
+            }
+            let Some(parent_id) = node.parent() else {
+                continue;
+            };
+            let Some(parent) = self.tree.get_node(parent_id) else {
+                continue;
+            };
+
+            let progress = match node.get_property("progress") {
+                Variant::Float(f) => f as f32,
+                Variant::Int(i) => i as f32,
+                _ => 0.0,
+            };
+            let speed = match node.get_property("path_speed") {
+                Variant::Float(f) => f as f32,
+                Variant::Int(i) => i as f32,
+                _ => 0.0,
+            };
+            // Godot's PathFollow defaults `loop` to true.
+            let loop_path = !matches!(node.get_property("loop"), Variant::Bool(false));
+
+            if is3 {
+                if parent.class_name() != "Path3D" {
+                    continue;
+                }
+                let pts = match parent.get_property("curve_points") {
+                    Variant::PackedVector3Array(v) => v,
+                    _ => continue,
+                };
+                if pts.len() < 2 {
+                    continue;
+                }
+                let mut curve = Curve3D::new();
+                for p in &pts {
+                    curve.add_point(*p);
+                }
+                let rotation_mode = match node.get_property("rotation_mode") {
+                    Variant::Int(1) => PathFollowRotation::Y,
+                    Variant::Int(2) => PathFollowRotation::Xy,
+                    Variant::Int(3) => PathFollowRotation::Xyz,
+                    _ => PathFollowRotation::None,
+                };
+                let mut follow = PathFollow3D {
+                    progress,
+                    loop_path,
+                    rotation_mode,
+                };
+                follow.advance(&curve, speed * dt);
+                let pos = follow.position_on(&curve);
+                let rot = if rotation_mode == PathFollowRotation::None {
+                    None
+                } else {
+                    let t = curve.sample_tangent(follow.progress);
+                    // Heading about +Y using +Z as forward (internally
+                    // consistent Patina convention).
+                    let yaw = t.x.atan2(t.z);
+                    let euler = match rotation_mode {
+                        PathFollowRotation::Y => Vector3::new(0.0, yaw, 0.0),
+                        // Xy / Xyz also pitch toward the tangent's vertical
+                        // component; roll (Xyz torsion) is not modeled yet.
+                        _ => Vector3::new(t.y.clamp(-1.0, 1.0).asin(), yaw, 0.0),
+                    };
+                    Some(euler)
+                };
+                updates3.push(Update3 {
+                    id,
+                    progress: follow.progress,
+                    pos,
+                    rot,
+                });
+            } else {
+                if parent.class_name() != "Path2D" {
+                    continue;
+                }
+                let pts = match parent.get_property("curve_points") {
+                    Variant::PackedVector2Array(v) => v,
+                    _ => continue,
+                };
+                if pts.len() < 2 {
+                    continue;
+                }
+                let mut curve = Curve2D::default();
+                for p in &pts {
+                    curve.add_point(*p);
+                }
+                let rotates = !matches!(node.get_property("rotates"), Variant::Bool(false));
+                let mut follow = PathFollow2D {
+                    progress,
+                    loop_path,
+                    rotates,
+                };
+                follow.advance(&curve, speed * dt);
+                let pos = follow.position_on(&curve);
+                let rot = if rotates {
+                    let t = curve.sample_tangent(follow.progress);
+                    Some(t.y.atan2(t.x))
+                } else {
+                    None
+                };
+                updates2.push(Update2 {
+                    id,
+                    progress: follow.progress,
+                    pos,
+                    rot,
+                });
+            }
+        }
+
+        // Apply phase: write progress + transform back onto the nodes.
+        for u in updates3 {
+            if let Some(node) = self.tree.get_node_mut(u.id) {
+                node.set_property("progress", Variant::Float(u.progress as f64));
+            }
+            crate::node3d::set_position(&mut self.tree, u.id, u.pos);
+            if let Some(euler) = u.rot {
+                crate::node3d::set_rotation(&mut self.tree, u.id, euler);
+            }
+        }
+        for u in updates2 {
+            if let Some(node) = self.tree.get_node_mut(u.id) {
+                node.set_property("progress", Variant::Float(u.progress as f64));
+            }
+            crate::node2d::set_position(&mut self.tree, u.id, u.pos);
+            if let Some(r) = u.rot {
+                crate::node2d::set_rotation(&mut self.tree, u.id, r);
+            }
+        }
+    }
+
+    /// Drives `NavigationAgent2D`/`NavigationAgent3D` nodes along their computed
+    /// paths each frame (pat-u3l8c.5).
+    ///
+    /// A local `NavigationServer2D`/`NavigationServer3D` is (re)built from every
+    /// `NavigationRegion2D`/`NavigationRegion3D` node — each contributes one
+    /// convex navmesh polygon via a `navmesh_vertices` packed-array property,
+    /// merged into a single connected mesh. For each agent node the path is
+    /// (re)computed only when its `target_position` property changes, then the
+    /// agent is integrated toward its next waypoint (default max_speed) and the
+    /// resulting `next_path_position` is published onto the node. Agents stop
+    /// once within `path_desired_distance` of the target so they rest cleanly.
+    /// Closes the audit gap where navigation.rs was never called from the loop.
+    pub fn process_navigation(&mut self, dt: f32) {
+        use gdcore::math::{Vector2, Vector3};
+
+        let mut polys2: Vec<NavPolygon> = Vec::new();
+        let mut polys3: Vec<NavPolygon3D> = Vec::new();
+        let mut agents2: Vec<(NodeId, Vector2, Vector2)> = Vec::new();
+        let mut agents3: Vec<(NodeId, Vector3, Vector3)> = Vec::new();
+
+        // Gather navmesh regions + agent nodes (immutable tree read).
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            match node.class_name() {
+                "NavigationRegion2D" => {
+                    if let Variant::PackedVector2Array(v) = node.get_property("navmesh_vertices") {
+                        if v.len() >= 3 {
+                            polys2.push(NavPolygon::new(v));
+                        }
+                    }
+                }
+                "NavigationRegion3D" => {
+                    if let Variant::PackedVector3Array(v) = node.get_property("navmesh_vertices") {
+                        if v.len() >= 3 {
+                            polys3.push(NavPolygon3D::new(v));
+                        }
+                    }
+                }
+                "NavigationAgent2D" => {
+                    let current = crate::node2d::get_position(&self.tree, id);
+                    let target = match node.get_property("target_position") {
+                        Variant::Vector2(v) => v,
+                        _ => Vector2::ZERO,
+                    };
+                    agents2.push((id, current, target));
+                }
+                "NavigationAgent3D" => {
+                    let current = crate::node3d::get_position(&self.tree, id);
+                    let target = match node.get_property("target_position") {
+                        Variant::Vector3(v) => v,
+                        _ => Vector3::ZERO,
+                    };
+                    agents3.push((id, current, target));
+                }
+                _ => {}
+            }
+        }
+
+        let mut server2 = NavigationServer2D::new();
+        if !polys2.is_empty() {
+            server2.add_region(NavMesh2D::new(polys2, 0.5));
+        }
+        let mut server3 = NavigationServer3D::new();
+        if !polys3.is_empty() {
+            let conns = Self::nav3d_connections(&polys3, 0.5);
+            server3.add_region(NavMesh3D::new(polys3, conns));
+        }
+
+        // Drop agents whose node vanished.
+        let present2: std::collections::HashSet<NodeId> =
+            agents2.iter().map(|(id, _, _)| *id).collect();
+        let present3: std::collections::HashSet<NodeId> =
+            agents3.iter().map(|(id, _, _)| *id).collect();
+        self.nav_agents_2d.retain(|id, _| present2.contains(id));
+        self.nav_agents_3d.retain(|id, _| present3.contains(id));
+
+        // Step 2D agents.
+        let mut updates2: Vec<(NodeId, Vector2, Vector2)> = Vec::new();
+        // Nodes whose agent reached its goal this frame (emit signals once).
+        let mut finished2: Vec<NodeId> = Vec::new();
+        for (id, current, target) in &agents2 {
+            let agent = self
+                .nav_agents_2d
+                .entry(*id)
+                .or_insert_with(NavigationAgent2D::new);
+            // Recompute the path only when the target changes (or none exists),
+            // preserving waypoint progress across frames.
+            if agent.path.is_empty() || (agent.target_position - *target).length() > 0.01 {
+                agent.set_target_position(*target, *current, &server2);
+            }
+            let arrived = agent.is_navigation_finished()
+                || (agent.target_position - *current).length() <= agent.path_desired_distance;
+            let new_pos = if arrived {
+                *current
+            } else {
+                agent.step(*current, dt, &[])
+            };
+            let next = agent.get_next_path_position(new_pos);
+            // Fire `navigation_finished`/`target_reached` exactly once, the frame
+            // the agent first reaches within `path_desired_distance` of the goal.
+            let arrived_now = agent.is_navigation_finished()
+                || (agent.target_position - new_pos).length() <= agent.path_desired_distance;
+            if arrived_now && !agent.finished_emitted {
+                agent.finished_emitted = true;
+                finished2.push(*id);
+            }
+            updates2.push((*id, new_pos, next));
+        }
+        for (id, new_pos, next) in updates2 {
+            crate::node2d::set_position(&mut self.tree, id, new_pos);
+            if let Some(node) = self.tree.get_node_mut(id) {
+                node.set_property("next_path_position", Variant::Vector2(next));
+            }
+        }
+        for id in finished2 {
+            self.tree.emit_signal(id, "target_reached", &[]);
+            self.tree.emit_signal(id, "navigation_finished", &[]);
+        }
+
+        // Step 3D agents.
+        let mut updates3: Vec<(NodeId, Vector3, Vector3)> = Vec::new();
+        let mut finished3: Vec<NodeId> = Vec::new();
+        for (id, current, target) in &agents3 {
+            let agent = self
+                .nav_agents_3d
+                .entry(*id)
+                .or_insert_with(NavigationAgent3D::new);
+            if agent.path.is_empty() || (agent.target_position - *target).length() > 0.01 {
+                agent.set_target_position(*target, *current, &server3);
+            }
+            let arrived = agent.is_navigation_finished()
+                || (agent.target_position - *current).length() <= agent.path_desired_distance;
+            let new_pos = if arrived {
+                *current
+            } else {
+                agent.step(*current, dt, &[])
+            };
+            let next = agent.get_next_path_position(new_pos);
+            let arrived_now = agent.is_navigation_finished()
+                || (agent.target_position - new_pos).length() <= agent.path_desired_distance;
+            if arrived_now && !agent.finished_emitted {
+                agent.finished_emitted = true;
+                finished3.push(*id);
+            }
+            updates3.push((*id, new_pos, next));
+        }
+        for (id, new_pos, next) in updates3 {
+            crate::node3d::set_position(&mut self.tree, id, new_pos);
+            if let Some(node) = self.tree.get_node_mut(id) {
+                node.set_property("next_path_position", Variant::Vector3(next));
+            }
+        }
+        for id in finished3 {
+            self.tree.emit_signal(id, "target_reached", &[]);
+            self.tree.emit_signal(id, "navigation_finished", &[]);
+        }
+    }
+
+    /// Shared-edge adjacency for 3D navmesh polygons (connected when they share
+    /// >= 2 vertices within `tol`), mirroring NavMesh2D's auto-connection since
+    /// `NavMesh3D::new` takes explicit connections.
+    fn nav3d_connections(polys: &[NavPolygon3D], tol: f32) -> Vec<Vec<usize>> {
+        let n = polys.len();
+        let tol_sq = tol * tol;
+        let mut conns = vec![Vec::new(); n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let mut shared = 0;
+                let mut connected = false;
+                'outer: for va in &polys[i].vertices {
+                    for vb in &polys[j].vertices {
+                        if (*va - *vb).length_squared() < tol_sq {
+                            shared += 1;
+                            if shared >= 2 {
+                                connected = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                if connected {
+                    conns[i].push(j);
+                    conns[j].push(i);
+                }
+            }
+        }
+        conns
+    }
+
+    /// Number of path waypoints currently held by a 2D navigation agent node
+    /// (0 if it has no active agent) (pat-u3l8c.5).
+    pub fn nav_agent_path_len_2d(&self, node_id: NodeId) -> usize {
+        self.nav_agents_2d
+            .get(&node_id)
+            .map(|a| a.path.len())
+            .unwrap_or(0)
+    }
+
+    /// Number of path waypoints currently held by a 3D navigation agent node.
+    pub fn nav_agent_path_len_3d(&self, node_id: NodeId) -> usize {
+        self.nav_agents_3d
+            .get(&node_id)
+            .map(|a| a.path.len())
+            .unwrap_or(0)
+    }
+
+    /// Drives every `RayCast3D` / `ShapeCast3D` / `SpringArm3D` node each frame:
+    /// re-runs its query against the (already-synced) 3D physics world and
+    /// publishes the `_hit_*` result properties that scripts read (pat-nzgdu.12).
+    ///
+    /// Godot updates these query nodes every physics frame; before this nothing
+    /// called the (already-implemented) `force_*_update` / `process` functions, so
+    /// `is_colliding()` never became true at runtime without a manual force call.
+    /// Each query self-guards on the node's `enabled` flag, so disabled nodes are
+    /// cleared. Runs after the physics phase so the world reflects this frame's
+    /// body positions.
+    pub fn process_queries_3d(&mut self) {
+        // Collect ids first (immutable tree read), then update (needs &mut tree).
+        let mut raycasts: Vec<NodeId> = Vec::new();
+        let mut shapecasts: Vec<NodeId> = Vec::new();
+        let mut springarms: Vec<NodeId> = Vec::new();
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            match node.class_name() {
+                "RayCast3D" => raycasts.push(id),
+                "ShapeCast3D" => shapecasts.push(id),
+                "SpringArm3D" => springarms.push(id),
+                _ => {}
+            }
+        }
+        for id in raycasts {
+            crate::raycast3d::force_raycast_update(&mut self.tree, &self.physics_server_3d, id);
+        }
+        for id in shapecasts {
+            crate::shapecast3d::force_shapecast_update(&mut self.tree, &self.physics_server_3d, id);
+        }
+        for id in springarms {
+            crate::springarm3d::process(&mut self.tree, &self.physics_server_3d, id);
+        }
+    }
+
+    /// Casts every enabled `RayCast2D` node against the 2D physics world and
+    /// publishes `is_colliding` (Bool) and `collider` (the hit node's id, or Nil)
+    /// back onto the node (pat-u3l8c.49).
+    ///
+    /// The ray starts at the node's position and extends along its
+    /// `target_position` (Godot default `(0, 50)`); it must run after the
+    /// physics phase so the world reflects this frame's body positions.
+    pub fn process_raycasts(&mut self) {
+        use gdcore::math::Vector2;
+
+        struct RayJob {
+            id: NodeId,
+            origin: Vector2,
+            dir: Vector2,
+            max_dist: f32,
+        }
+        let mut jobs: Vec<RayJob> = Vec::new();
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            if node.class_name() != "RayCast2D" {
+                continue;
+            }
+            // Godot's RayCast2D defaults `enabled` to true.
+            if matches!(node.get_property("enabled"), Variant::Bool(false)) {
+                continue;
+            }
+            let target = match node.get_property("target_position") {
+                Variant::Vector2(v) => v,
+                _ => Vector2::new(0.0, 50.0),
+            };
+            let len = (target.x * target.x + target.y * target.y).sqrt();
+            if len < 1e-6 {
+                continue;
+            }
+            let origin = crate::node2d::get_position(&self.tree, id);
+            jobs.push(RayJob {
+                id,
+                origin,
+                dir: Vector2::new(target.x / len, target.y / len),
+                max_dist: len,
+            });
+        }
+
+        let mut updates: Vec<(NodeId, bool, Option<NodeId>)> = Vec::new();
+        for job in &jobs {
+            let hit = self
+                .physics_server
+                .world()
+                .raycast(job.origin, job.dir, job.max_dist);
+            let collider = hit
+                .as_ref()
+                .and_then(|h| self.physics_server.node_for_body(h.body_id));
+            updates.push((job.id, hit.is_some(), collider));
+        }
+
+        for (id, colliding, collider) in updates {
+            if let Some(node) = self.tree.get_node_mut(id) {
+                node.set_property("is_colliding", Variant::Bool(colliding));
+                let collider_val = match collider {
+                    Some(cid) => Variant::Int(cid.raw() as i64),
+                    None => Variant::Nil,
+                };
+                node.set_property("collider", collider_val);
+            }
         }
     }
 
@@ -226,6 +822,9 @@ impl MainLoop {
             if let Some(node) = self.tree.get_node_mut(id) {
                 node.receive_notification(notification);
             }
+            // Deliver PAUSED/UNPAUSED to the script's `_notification` virtual
+            // (pat-nzgdu.13).
+            self.tree.notify_script(id, notification.code() as i64);
         }
     }
 
@@ -247,6 +846,26 @@ impl MainLoop {
     /// Returns a mutable reference to the physics server.
     pub fn physics_server_mut(&mut self) -> &mut PhysicsServer {
         &mut self.physics_server
+    }
+
+    /// Returns a reference to the 3D physics server.
+    pub fn physics_server_3d(&self) -> &PhysicsServer3D {
+        &self.physics_server_3d
+    }
+
+    /// Returns a mutable reference to the 3D physics server.
+    pub fn physics_server_3d_mut(&mut self) -> &mut PhysicsServer3D {
+        &mut self.physics_server_3d
+    }
+
+    /// Returns a reference to the audio bridge.
+    pub fn audio_bridge(&self) -> &AudioServerBridge {
+        &self.audio_bridge
+    }
+
+    /// Returns a mutable reference to the audio bridge.
+    pub fn audio_bridge_mut(&mut self) -> &mut AudioServerBridge {
+        &mut self.audio_bridge
     }
 
     /// Registers physics bodies from the scene tree.
@@ -335,6 +954,7 @@ impl MainLoop {
             let script_snap = InputSnapshot {
                 pressed_keys: platform_snap.pressed_key_names().into_iter().collect(),
                 just_pressed_keys: platform_snap.just_pressed_key_names().into_iter().collect(),
+                just_released_keys: platform_snap.just_released_key_names().into_iter().collect(),
                 input_map: platform_snap.action_pressed_key_map(),
                 mouse_position: mouse_pos,
                 mouse_buttons_pressed,
@@ -374,6 +994,11 @@ impl MainLoop {
 
             self.physics_server.record_trace(&self.tree);
 
+            // 3D physics: sync -> step -> sync (pat-u3l8c.1).
+            self.physics_server_3d.sync_to_physics(&self.tree);
+            self.physics_server_3d.step(physics_dt as f32);
+            self.physics_server_3d.sync_from_physics(&mut self.tree);
+
             self.tree.process_internal_physics_frame();
             self.tree.process_physics_frame_with_scripts(physics_dt);
             self.physics_accumulator -= physics_dt;
@@ -390,15 +1015,63 @@ impl MainLoop {
         self.tree.process_animations(delta_secs);
         self.tree.process_tweens(delta_secs);
 
+        // -- particle phase (pat-u3l8c.4) --
+        // Advance CPU particle simulators for emitting particle nodes so that
+        // GPUParticles2D/3D and CPUParticles2D/3D actually simulate at runtime.
+        self.process_particles(delta_secs as f32);
+
+        // -- path-follow phase (pat-u3l8c.6) --
+        // Project PathFollow2D/3D nodes onto their parent Path's curve each
+        // frame so their transform tracks `progress` (and any auto-advance).
+        self.process_path_follows(delta_secs as f32);
+
+        // -- navigation phase (pat-u3l8c.5) --
+        // Drive NavigationAgent2D/3D nodes along their computed paths so agents
+        // with a target_position advance across frames at runtime.
+        self.process_navigation(delta_secs as f32);
+
+        // -- raycast phase (pat-u3l8c.49) --
+        // Cast each RayCast2D against the (already-synced) physics world and
+        // publish is_colliding / collider so scripts can read them this frame.
+        self.process_raycasts();
+
+        // -- 3D query-node phase (pat-nzgdu.12) --
+        // Drive RayCast3D/ShapeCast3D/SpringArm3D against the synced 3D physics
+        // world so is_colliding()/get_collider()/hit_length update at runtime.
+        self.process_queries_3d();
+
+        // -- Timer nodes (Godot Timer, idle process mode) (pat-u3l8c.3) --
+        self.tree.process_timer_nodes(delta_secs);
+
+        // -- multiplayer poll (pat-u3l8c.75) --
+        // Decode inbound RPCs and dispatch them to node scripts before the
+        // process phase, so `_process` sees RPC-driven state this frame.
+        self.tree.poll_multiplayer();
+
         // -- process phase --
         // Godot per-frame order: INTERNAL_PROCESS -> PROCESS
         // Script calls are interleaved per-node to match Godot's dispatch.
         self.tree.process_internal_frame();
         self.tree.process_frame_with_scripts(delta_secs);
 
+        // -- coroutine resume phase (pat-nzgdu.6) --
+        // Drive GDScript `await` coroutines: advance SceneTreeTimers once,
+        // deliver their timeout signals to parked awaits, and tick frame-based
+        // awaits so `await get_tree().create_timer(t).timeout` resumes at
+        // runtime instead of hanging forever.
+        self.tree.process_script_coroutines(delta_secs as f32);
+
         // -- collision detection phase --
         // Run after scripts so collision properties are set before next frame's _process.
         self.tree.process_collisions();
+
+        // -- audio phase (pat-u3l8c.2) --
+        // After scripts so same-frame `playing` changes are heard immediately.
+        self.audio_bridge.process(&mut self.tree, delta_secs);
+
+        // -- deferred call phase (Godot MessageQueue flush) --
+        // After process notifications; before queue_free deletions.
+        self.tree.process_deferred_calls();
 
         // -- deferred deletion phase --
         // Remove nodes that called queue_free() during this frame.
@@ -584,6 +1257,777 @@ mod tests {
         let child = Node::new("Child", "Node");
         let child_id = tree.add_child(root, child).unwrap();
         (MainLoop::new(tree), child_id)
+    }
+
+    /// App-level: a RigidBody3D in the tree must fall under gravity when the
+    /// game is driven only through `MainLoop::step` (pat-u3l8c.1).
+    #[test]
+    fn physics_3d_rigid_body_falls_via_main_loop() {
+        use gdcore::math::Vector3;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let body = Node::new("Ball", "RigidBody3D");
+        let body_id = tree.add_child(root, body).unwrap();
+        crate::node3d::set_position(&mut tree, body_id, Vector3::new(0.0, 10.0, 0.0));
+
+        let mut ml = MainLoop::new(tree);
+        for _ in 0..30 {
+            ml.step(1.0 / 60.0);
+        }
+
+        assert!(ml.physics_server_3d().body_count() >= 1);
+        let pos = crate::node3d::get_position(ml.tree(), body_id);
+        assert!(
+            pos.y < 9.9,
+            "RigidBody3D should fall via MainLoop::step, got y={}",
+            pos.y,
+        );
+    }
+
+    /// App-level: an emitting particle node advances its CPU simulator every
+    /// frame when driven only through `MainLoop::step`, accumulating live
+    /// particles and publishing the count back onto the node (pat-u3l8c.4).
+    #[test]
+    fn mainloop_emitting_particle_node_advances_and_count_positive() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Sparks", "GPUParticles2D");
+        node.set_property("emitting", gdvariant::Variant::Bool(true));
+        node.set_property("amount", gdvariant::Variant::Int(64));
+        node.set_property("lifetime", gdvariant::Variant::Float(2.0));
+        let pid = tree.add_child(root, node).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        // No live particles before stepping.
+        assert_eq!(ml.particle_count(pid), 0);
+        for _ in 0..60 {
+            ml.step(1.0 / 60.0);
+        }
+
+        // The simulator must have emitted and be tracking live particles.
+        let live = ml.particle_count(pid);
+        assert!(
+            live > 0,
+            "emitting particle node should have live particles after stepping, got {}",
+            live,
+        );
+
+        // And the live count must be published back onto the node so game code
+        // / the editor can observe it.
+        match ml.tree().get_node(pid).map(|n| n.get_property("particle_count")) {
+            Some(gdvariant::Variant::Int(c)) => assert!(
+                c > 0,
+                "particle_count property should be published > 0, got {}",
+                c,
+            ),
+            other => panic!("expected particle_count Int property, got {:?}", other),
+        }
+    }
+
+    /// App-level: a particle node with `emitting = false` produces no live
+    /// particles when stepped through `MainLoop::step` (pat-u3l8c.4).
+    #[test]
+    fn mainloop_non_emitting_particle_node_stays_empty() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Idle", "CPUParticles2D");
+        node.set_property("emitting", gdvariant::Variant::Bool(false));
+        node.set_property("amount", gdvariant::Variant::Int(32));
+        node.set_property("lifetime", gdvariant::Variant::Float(2.0));
+        let pid = tree.add_child(root, node).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        for _ in 0..60 {
+            ml.step(1.0 / 60.0);
+        }
+
+        assert_eq!(
+            ml.particle_count(pid),
+            0,
+            "non-emitting particle node must not accumulate particles",
+        );
+    }
+
+    /// App-level: a PathFollow3D child projects onto its parent Path3D curve so
+    /// its transform tracks `progress` as it changes, including Y-mode rotation
+    /// that faces the direction of travel (pat-u3l8c.6).
+    #[test]
+    fn mainloop_pathfollow3d_projects_progress_with_rotation() {
+        use gdcore::math::Vector3;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Straight path from the origin along +X, arc length 10.
+        let mut path = Node::new("Path", "Path3D");
+        path.set_property(
+            "curve_points",
+            gdvariant::Variant::PackedVector3Array(vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(10.0, 0.0, 0.0),
+            ]),
+        );
+        let path_id = tree.add_child(root, path).unwrap();
+
+        let mut follow = Node::new("Follow", "PathFollow3D");
+        follow.set_property("progress", gdvariant::Variant::Float(0.0));
+        follow.set_property("rotation_mode", gdvariant::Variant::Int(1)); // Y
+        let fid = tree.add_child(path_id, follow).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.step(1.0 / 60.0);
+        let p0 = crate::node3d::get_position(ml.tree(), fid);
+        assert!(
+            p0.x.abs() < 1e-2,
+            "progress 0 should place follow at curve start, got x={}",
+            p0.x,
+        );
+
+        // Change progress; the projected transform must track it next frame.
+        ml.tree_mut()
+            .get_node_mut(fid)
+            .unwrap()
+            .set_property("progress", gdvariant::Variant::Float(5.0));
+        ml.step(1.0 / 60.0);
+        let p1 = crate::node3d::get_position(ml.tree(), fid);
+        assert!(
+            (p1.x - 5.0).abs() < 1e-2,
+            "follow transform should track progress to x=5, got x={}",
+            p1.x,
+        );
+
+        // Y rotation faces the +X tangent: yaw = atan2(1, 0) = PI/2.
+        let rot = crate::node3d::get_rotation(ml.tree(), fid);
+        assert!(
+            (rot.y - std::f32::consts::FRAC_PI_2).abs() < 1e-2,
+            "Y rotation should face the +X tangent (~PI/2), got {}",
+            rot.y,
+        );
+    }
+
+    /// App-level: `path_speed` auto-advances a PathFollow3D along its parent
+    /// curve every frame via `MainLoop::step` (exercises the previously-unused
+    /// `PathFollow3D::advance`) (pat-u3l8c.6).
+    #[test]
+    fn mainloop_pathfollow3d_auto_advances_with_path_speed() {
+        use gdcore::math::Vector3;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut path = Node::new("Path", "Path3D");
+        path.set_property(
+            "curve_points",
+            gdvariant::Variant::PackedVector3Array(vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(10.0, 0.0, 0.0),
+            ]),
+        );
+        let path_id = tree.add_child(root, path).unwrap();
+
+        let mut follow = Node::new("Follow", "PathFollow3D");
+        follow.set_property("path_speed", gdvariant::Variant::Float(60.0)); // units/sec
+        follow.set_property("loop", gdvariant::Variant::Bool(false));
+        let fid = tree.add_child(path_id, follow).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.step(1.0 / 60.0); // advances 60 * (1/60) = 1 unit
+        let p1 = crate::node3d::get_position(ml.tree(), fid);
+        assert!(
+            (p1.x - 1.0).abs() < 1e-2,
+            "after one frame follow should be ~1 unit along, got x={}",
+            p1.x,
+        );
+
+        ml.step(1.0 / 60.0); // advances another unit
+        let p2 = crate::node3d::get_position(ml.tree(), fid);
+        assert!(
+            p2.x > p1.x + 0.5,
+            "follow should keep moving along the path each frame ({} -> {})",
+            p1.x,
+            p2.x,
+        );
+    }
+
+    /// App-level: a PathFollow2D child tracks its parent Path2D curve and
+    /// rotates to face travel when `rotates` is set (pat-u3l8c.6).
+    #[test]
+    fn mainloop_pathfollow2d_follows_curve_and_rotates() {
+        use gdcore::math::Vector2;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Straight path from the origin along +Y, arc length 10.
+        let mut path = Node::new("Path", "Path2D");
+        path.set_property(
+            "curve_points",
+            gdvariant::Variant::PackedVector2Array(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(0.0, 10.0),
+            ]),
+        );
+        let path_id = tree.add_child(root, path).unwrap();
+
+        let mut follow = Node::new("Follow", "PathFollow2D");
+        follow.set_property("progress", gdvariant::Variant::Float(0.0));
+        follow.set_property("rotates", gdvariant::Variant::Bool(true));
+        let fid = tree.add_child(path_id, follow).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.step(1.0 / 60.0);
+        let p0 = crate::node2d::get_position(ml.tree(), fid);
+        assert!(p0.length() < 1e-2, "progress 0 should be at curve start, got {:?}", p0);
+
+        ml.tree_mut()
+            .get_node_mut(fid)
+            .unwrap()
+            .set_property("progress", gdvariant::Variant::Float(5.0));
+        ml.step(1.0 / 60.0);
+        let p1 = crate::node2d::get_position(ml.tree(), fid);
+        assert!(
+            (p1.y - 5.0).abs() < 1e-2 && p1.x.abs() < 1e-2,
+            "follow should track progress to (0,5), got {:?}",
+            p1,
+        );
+
+        // Rotation faces the +Y tangent: atan2(1, 0) = PI/2.
+        let rot = crate::node2d::get_rotation(ml.tree(), fid);
+        assert!(
+            (rot - std::f32::consts::FRAC_PI_2).abs() < 1e-2,
+            "2D rotation should face the +Y tangent (~PI/2), got {}",
+            rot,
+        );
+    }
+
+    /// App-level: rotation mode `None` positions the PathFollow3D child but
+    /// leaves its rotation untouched (pat-u3l8c.6).
+    #[test]
+    fn mainloop_pathfollow3d_rotation_none_leaves_rotation() {
+        use gdcore::math::Vector3;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut path = Node::new("Path", "Path3D");
+        path.set_property(
+            "curve_points",
+            gdvariant::Variant::PackedVector3Array(vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(10.0, 0.0, 0.0),
+            ]),
+        );
+        let path_id = tree.add_child(root, path).unwrap();
+
+        let mut follow = Node::new("Follow", "PathFollow3D");
+        follow.set_property("progress", gdvariant::Variant::Float(5.0));
+        // rotation_mode defaults to None; seed a distinctive rotation.
+        follow.set_property("rotation", gdvariant::Variant::Vector3(Vector3::new(0.5, 0.5, 0.5)));
+        let fid = tree.add_child(path_id, follow).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.step(1.0 / 60.0);
+
+        // Position still projects onto the curve...
+        let p = crate::node3d::get_position(ml.tree(), fid);
+        assert!((p.x - 5.0).abs() < 1e-2, "None mode still positions, got x={}", p.x);
+        // ...but rotation is left as seeded.
+        let rot = crate::node3d::get_rotation(ml.tree(), fid);
+        assert!(
+            (rot.x - 0.5).abs() < 1e-6
+                && (rot.y - 0.5).abs() < 1e-6
+                && (rot.z - 0.5).abs() < 1e-6,
+            "rotation mode None must not modify rotation, got {:?}",
+            rot,
+        );
+    }
+
+    /// App-level: a NavigationAgent2D with a target advances along a computed
+    /// multi-waypoint path across frames, its `get_next_path_position` guidance
+    /// progressing from an intermediate waypoint to the target (pat-u3l8c.5).
+    #[test]
+    fn mainloop_navigation_agent_2d_paths_across_frames() {
+        use gdcore::math::Vector2;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Three adjacent navmesh polygons forming a corridor along +X.
+        let regions = [
+            vec![
+                Vector2::new(-10.0, -10.0),
+                Vector2::new(30.0, -10.0),
+                Vector2::new(30.0, 10.0),
+                Vector2::new(-10.0, 10.0),
+            ],
+            vec![
+                Vector2::new(30.0, -10.0),
+                Vector2::new(70.0, -10.0),
+                Vector2::new(70.0, 10.0),
+                Vector2::new(30.0, 10.0),
+            ],
+            vec![
+                Vector2::new(70.0, -10.0),
+                Vector2::new(110.0, -10.0),
+                Vector2::new(110.0, 10.0),
+                Vector2::new(70.0, 10.0),
+            ],
+        ];
+        for verts in regions {
+            let mut r = Node::new("Region", "NavigationRegion2D");
+            r.set_property(
+                "navmesh_vertices",
+                gdvariant::Variant::PackedVector2Array(verts),
+            );
+            tree.add_child(root, r).unwrap();
+        }
+
+        let mut agent = Node::new("Agent", "NavigationAgent2D");
+        agent.set_property("position", gdvariant::Variant::Vector2(Vector2::new(0.0, 0.0)));
+        agent.set_property(
+            "target_position",
+            gdvariant::Variant::Vector2(Vector2::new(100.0, 0.0)),
+        );
+        let aid = tree.add_child(root, agent).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+
+        // Read helper for the published `next_path_position` property.
+        fn next2(ml: &MainLoop, id: crate::node::NodeId) -> gdcore::math::Vector2 {
+            match ml
+                .tree()
+                .get_node(id)
+                .map(|n| n.get_property("next_path_position"))
+            {
+                Some(gdvariant::Variant::Vector2(v)) => v,
+                other => panic!("expected next_path_position Vector2, got {:?}", other),
+            }
+        }
+
+        // Early: a 3-waypoint path exists; guidance is the first intermediate
+        // waypoint (~(50,0)) and the agent has begun moving along +X.
+        for _ in 0..5 {
+            ml.step(1.0 / 60.0);
+        }
+        assert!(
+            ml.nav_agent_path_len_2d(aid) >= 3,
+            "expected a multi-waypoint path, got {}",
+            ml.nav_agent_path_len_2d(aid),
+        );
+        let next_early = next2(&ml, aid);
+        let pos_early = crate::node2d::get_position(ml.tree(), aid);
+        assert!(
+            pos_early.x > 0.0 && pos_early.x < 50.0,
+            "agent should have started moving, x={}",
+            pos_early.x,
+        );
+        assert!(
+            (next_early.x - 50.0).abs() < 1e-2,
+            "first guidance should be the intermediate waypoint ~(50,0), got {:?}",
+            next_early,
+        );
+
+        // Later: the intermediate waypoint is consumed, so guidance advances to
+        // the target and the agent has moved further along.
+        for _ in 0..90 {
+            ml.step(1.0 / 60.0);
+        }
+        let next_late = next2(&ml, aid);
+        let pos_late = crate::node2d::get_position(ml.tree(), aid);
+        assert!(
+            pos_late.x > pos_early.x,
+            "agent should keep advancing ({} -> {})",
+            pos_early.x,
+            pos_late.x,
+        );
+        assert!(
+            (next_late.x - 100.0).abs() < 1e-2,
+            "guidance should advance to the target ~(100,0), got {:?}",
+            next_late,
+        );
+        assert!(
+            (next_late.x - next_early.x).abs() > 1.0,
+            "get_next_path_position must change across frames ({:?} -> {:?})",
+            next_early,
+            next_late,
+        );
+        assert!(pos_late.x > 90.0, "agent should reach near the target, x={}", pos_late.x);
+    }
+
+    /// pat-nzgdu.10 acceptance: a scene with a NavigationRegion2D + a
+    /// NavigationAgent2D, its `target_position` set, produces a
+    /// monotonically-advancing `get_next_path_position` sequence and emits
+    /// `navigation_finished` exactly once when the MainLoop ticks the agent to
+    /// the goal — driven by `MainLoop::step`, not a direct struct call.
+    #[test]
+    fn navigation_agent_runtime_paths_from_scene() {
+        use gdcore::math::Vector2;
+        use gdobject::signal::Connection;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Three adjacent navmesh polygons forming a corridor along +X, so the
+        // path carries an intermediate waypoint and guidance advances 50 -> 100.
+        for verts in [
+            vec![
+                Vector2::new(-10.0, -10.0),
+                Vector2::new(30.0, -10.0),
+                Vector2::new(30.0, 10.0),
+                Vector2::new(-10.0, 10.0),
+            ],
+            vec![
+                Vector2::new(30.0, -10.0),
+                Vector2::new(70.0, -10.0),
+                Vector2::new(70.0, 10.0),
+                Vector2::new(30.0, 10.0),
+            ],
+            vec![
+                Vector2::new(70.0, -10.0),
+                Vector2::new(110.0, -10.0),
+                Vector2::new(110.0, 10.0),
+                Vector2::new(70.0, 10.0),
+            ],
+        ] {
+            let mut region = Node::new("Region", "NavigationRegion2D");
+            region.set_property(
+                "navmesh_vertices",
+                gdvariant::Variant::PackedVector2Array(verts),
+            );
+            tree.add_child(root, region).unwrap();
+        }
+
+        let mut agent = Node::new("Agent", "NavigationAgent2D");
+        agent.set_property("position", gdvariant::Variant::Vector2(Vector2::new(0.0, 0.0)));
+        agent.set_property(
+            "target_position",
+            gdvariant::Variant::Vector2(Vector2::new(100.0, 0.0)),
+        );
+        let aid = tree.add_child(root, agent).unwrap();
+
+        // Count `navigation_finished` emissions via a callback connection.
+        let finished = Arc::new(AtomicU32::new(0));
+        let finished_cb = finished.clone();
+        tree.connect_signal(
+            aid,
+            "navigation_finished",
+            Connection::with_callback(aid.object_id(), "_on_nav_finished", move |_| {
+                finished_cb.fetch_add(1, Ordering::SeqCst);
+                gdvariant::Variant::Nil
+            }),
+        );
+
+        let mut ml = MainLoop::new(tree);
+
+        fn next_x(ml: &MainLoop, id: crate::node::NodeId) -> f32 {
+            match ml
+                .tree()
+                .get_node(id)
+                .map(|n| n.get_property("next_path_position"))
+            {
+                Some(gdvariant::Variant::Vector2(v)) => v.x,
+                other => panic!("expected next_path_position Vector2, got {other:?}"),
+            }
+        }
+
+        // Tick to the goal, sampling guidance to confirm monotonic advancement.
+        let mut samples: Vec<f32> = Vec::new();
+        for i in 0..200 {
+            ml.step(1.0 / 60.0);
+            if i % 10 == 0 {
+                samples.push(next_x(&ml, aid));
+            }
+            if finished.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+        }
+
+        // navigation_finished fired exactly once at the goal.
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "navigation_finished must fire exactly once",
+        );
+        // The agent reached near the target.
+        let pos = crate::node2d::get_position(ml.tree(), aid);
+        assert!(pos.x > 90.0, "agent should reach near the target, x={}", pos.x);
+        // Guidance advanced monotonically toward +X (never regressed).
+        assert!(samples.len() >= 2, "expected multiple guidance samples");
+        for w in samples.windows(2) {
+            assert!(
+                w[1] >= w[0] - 1e-3,
+                "get_next_path_position must not regress ({} -> {})",
+                w[0],
+                w[1],
+            );
+        }
+        assert!(
+            samples.last().unwrap() - samples.first().unwrap() > 1.0,
+            "guidance must progress across frames ({:?})",
+            samples,
+        );
+    }
+
+    /// App-level: a NavigationAgent3D advances toward its target across frames
+    /// on a flat navmesh, coming to rest near the target (pat-u3l8c.5).
+    #[test]
+    fn mainloop_navigation_agent_3d_advances_to_target() {
+        use gdcore::math::Vector3;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // One flat navmesh polygon on the XZ plane covering the route.
+        let mut region = Node::new("Region", "NavigationRegion3D");
+        region.set_property(
+            "navmesh_vertices",
+            gdvariant::Variant::PackedVector3Array(vec![
+                Vector3::new(-10.0, 0.0, -10.0),
+                Vector3::new(110.0, 0.0, -10.0),
+                Vector3::new(110.0, 0.0, 10.0),
+                Vector3::new(-10.0, 0.0, 10.0),
+            ]),
+        );
+        tree.add_child(root, region).unwrap();
+
+        let mut agent = Node::new("Agent", "NavigationAgent3D");
+        agent.set_property(
+            "position",
+            gdvariant::Variant::Vector3(Vector3::new(0.0, 0.0, 0.0)),
+        );
+        agent.set_property(
+            "target_position",
+            gdvariant::Variant::Vector3(Vector3::new(50.0, 0.0, 0.0)),
+        );
+        let aid = tree.add_child(root, agent).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+
+        let start = crate::node3d::get_position(ml.tree(), aid);
+        for _ in 0..30 {
+            ml.step(1.0 / 60.0);
+        }
+        let mid = crate::node3d::get_position(ml.tree(), aid);
+        assert!(
+            ml.nav_agent_path_len_3d(aid) >= 2,
+            "expected a computed path, got {}",
+            ml.nav_agent_path_len_3d(aid),
+        );
+        assert!(
+            mid.x > start.x + 1.0,
+            "3D agent should advance toward the target ({} -> {})",
+            start.x,
+            mid.x,
+        );
+
+        // Enough frames (3D default max_speed is 10) to arrive.
+        for _ in 0..600 {
+            ml.step(1.0 / 60.0);
+        }
+        let end = crate::node3d::get_position(ml.tree(), aid);
+        assert!(
+            (end.x - 50.0).abs() < 2.0,
+            "3D agent should come to rest near the target x=50, got {}",
+            end.x,
+        );
+    }
+
+    /// App-level: a RayCast2D detects a body in its path via `MainLoop::step`,
+    /// reporting `is_colliding` and the collider node (pat-u3l8c.49).
+    #[test]
+    fn mainloop_raycast2d_detects_body_and_collider() {
+        use gdcore::math::Vector2;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Static wall body centered at x=100 (a 10x200 box → left edge at x=95).
+        let mut wall = Node::new("Wall", "StaticBody2D");
+        wall.set_property("position", Variant::Vector2(Vector2::new(100.0, 0.0)));
+        let wall_id = tree.add_child(root, wall).unwrap();
+        let mut ws = Node::new("Shape", "CollisionShape2D");
+        ws.set_property("size", Variant::Vector2(Vector2::new(10.0, 200.0)));
+        tree.add_child(wall_id, ws).unwrap();
+
+        // RayCast2D at the origin pointing right, long enough to reach the wall.
+        let mut ray = Node::new("Ray", "RayCast2D");
+        ray.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        ray.set_property("target_position", Variant::Vector2(Vector2::new(150.0, 0.0)));
+        let ray_id = tree.add_child(root, ray).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+        ml.step(1.0 / 60.0);
+
+        let colliding = ml
+            .tree()
+            .get_node(ray_id)
+            .map(|n| n.get_property("is_colliding"));
+        assert!(
+            matches!(colliding, Some(Variant::Bool(true))),
+            "RayCast2D should hit the wall, got {:?}",
+            colliding,
+        );
+        match ml.tree().get_node(ray_id).map(|n| n.get_property("collider")) {
+            Some(Variant::Int(raw)) => {
+                assert_eq!(raw as u64, wall_id.raw(), "collider should be the wall node")
+            }
+            other => panic!("expected collider Int, got {:?}", other),
+        }
+    }
+
+    /// App-level: a RayCast2D with nothing in its path reports not colliding.
+    #[test]
+    fn mainloop_raycast2d_misses_empty_path() {
+        use gdcore::math::Vector2;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut ray = Node::new("Ray", "RayCast2D");
+        ray.set_property("target_position", Variant::Vector2(Vector2::new(0.0, 50.0)));
+        let ray_id = tree.add_child(root, ray).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+        ml.step(1.0 / 60.0);
+
+        let colliding = ml
+            .tree()
+            .get_node(ray_id)
+            .map(|n| n.get_property("is_colliding"));
+        assert!(
+            matches!(colliding, Some(Variant::Bool(false))),
+            "empty-scene ray should not collide, got {:?}",
+            colliding,
+        );
+    }
+
+    /// Helper: build a MainLoop containing a Timer node with the given
+    /// properties and a counter incremented on each `timeout` emission.
+    fn make_timer_loop(
+        wait_time: f64,
+        one_shot: bool,
+        autostart: bool,
+        paused: bool,
+    ) -> (MainLoop, std::sync::Arc<std::sync::atomic::AtomicU32>) {
+        use gdobject::signal::Connection;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut timer = Node::new("Timer", "Timer");
+        timer.set_property("wait_time", gdvariant::Variant::Float(wait_time));
+        timer.set_property("one_shot", gdvariant::Variant::Bool(one_shot));
+        timer.set_property("autostart", gdvariant::Variant::Bool(autostart));
+        timer.set_property("paused", gdvariant::Variant::Bool(paused));
+        let timer_id = tree.add_child(root, timer).unwrap();
+
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let fired_in_cb = fired.clone();
+        tree.connect_signal(
+            timer_id,
+            "timeout",
+            Connection::with_callback(timer_id.object_id(), "on_timeout", move |_args| {
+                fired_in_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                gdvariant::Variant::Nil
+            }),
+        );
+
+        (MainLoop::new(tree), fired)
+    }
+
+    /// App-level: an autostarted one-shot Timer emits `timeout` exactly once
+    /// (pat-u3l8c.3).
+    #[test]
+    fn timer_one_shot_fires_timeout_once_via_main_loop() {
+        let (mut ml, fired) = make_timer_loop(0.05, true, true, false);
+        for _ in 0..60 {
+            ml.step(1.0 / 60.0);
+        }
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// App-level: a repeating Timer keeps emitting `timeout` (pat-u3l8c.3).
+    #[test]
+    fn timer_repeating_fires_timeout_repeatedly_via_main_loop() {
+        let (mut ml, fired) = make_timer_loop(0.05, false, true, false);
+        for _ in 0..60 {
+            ml.step(1.0 / 60.0);
+        }
+        let count = fired.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(count >= 15, "repeating timer should fire ~20 times, got {count}");
+    }
+
+    /// App-level: a paused Timer never fires; without autostart it stays
+    /// stopped (pat-u3l8c.3).
+    #[test]
+    fn timer_paused_or_stopped_does_not_fire() {
+        let (mut ml, fired) = make_timer_loop(0.05, false, true, true);
+        for _ in 0..30 {
+            ml.step(1.0 / 60.0);
+        }
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let (mut ml2, fired2) = make_timer_loop(0.05, false, false, false);
+        for _ in 0..30 {
+            ml2.step(1.0 / 60.0);
+        }
+        assert_eq!(fired2.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// App-level: an autoplaying AudioStreamPlayer produces non-silent mixed
+    /// audio when the game is driven only through `MainLoop::step`
+    /// (pat-u3l8c.2).
+    #[test]
+    fn audio_autoplay_mixes_via_main_loop() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut sfx = Node::new("Sfx", "AudioStreamPlayer");
+        sfx.set_property("autoplay", gdvariant::Variant::Bool(true));
+        let sfx_id = tree.add_child(root, sfx).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        let samples: Vec<f32> = (0..44100usize)
+            .flat_map(|i| {
+                let s = (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 44100.0).sin() * 0.5;
+                [s, s]
+            })
+            .collect();
+        ml.audio_bridge_mut().set_stream_buffer(
+            sfx_id,
+            gdaudio::AudioBuffer {
+                samples,
+                sample_rate: 44100,
+                channels: 2,
+            },
+        );
+
+        for _ in 0..3 {
+            ml.step(1.0 / 60.0);
+        }
+
+        assert!(
+            ml.audio_bridge().last_mix().iter().any(|s| s.abs() > 0.01),
+            "autoplayed AudioStreamPlayer should mix non-silent samples via MainLoop",
+        );
+    }
+
+    /// Timer exposes a decreasing `time_left` property while running
+    /// (pat-u3l8c.3).
+    #[test]
+    fn timer_time_left_counts_down() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut timer = Node::new("Timer", "Timer");
+        timer.set_property("wait_time", gdvariant::Variant::Float(10.0));
+        timer.set_property("autostart", gdvariant::Variant::Bool(true));
+        let timer_id = tree.add_child(root, timer).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.step(1.0 / 60.0);
+
+        let time_left = match ml.tree().get_node(timer_id).unwrap().get_property("time_left") {
+            gdvariant::Variant::Float(f) => f,
+            other => panic!("expected Float time_left, got {other:?}"),
+        };
+        assert!(
+            time_left > 9.0 && time_left < 10.0,
+            "time_left should have started counting down, got {time_left}",
+        );
     }
 
     #[test]
@@ -1285,11 +2729,46 @@ mod tests {
     }
 
     #[test]
-    fn call_deferred_stub_does_not_panic() {
-        // The call_deferred stub should accept calls without panicking.
+    fn call_deferred_queues_without_panic() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         tree.call_deferred(root, "some_method", &[]);
+        assert_eq!(tree.pending_deferred_count(), 1);
+        tree.process_deferred_calls();
+        assert_eq!(tree.pending_deferred_count(), 0);
+    }
+
+    #[test]
+    fn call_deferred_set_runs_after_step() {
+        use gdvariant::Variant;
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let child = tree
+            .add_child(root, crate::node::Node::new("C", "Node2D"))
+            .unwrap();
+        // Property starts true (Node default visible).
+        tree.get_node_mut(child)
+            .unwrap()
+            .set_property("visible", Variant::Bool(true));
+
+        tree.call_deferred(
+            child,
+            "set",
+            &[Variant::String("visible".into()), Variant::Bool(false)],
+        );
+        // Not applied yet.
+        assert_eq!(
+            tree.get_node(child).unwrap().get_property("visible"),
+            Variant::Bool(true)
+        );
+
+        let mut ml = MainLoop::new(tree);
+        ml.step(1.0 / 60.0);
+        assert_eq!(
+            ml.tree().get_node(child).unwrap().get_property("visible"),
+            Variant::Bool(false),
+            "call_deferred set must apply after MainLoop::step"
+        );
     }
 
     // ── B012: Engine-owned input routing tests ────────────────────────────
@@ -1825,5 +3304,163 @@ mod tests {
             ),
             _ => panic!("expected Vector2 position"),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // pat-u3l8c.48 — app-level platformer regression: velocity stays in
+    // pixels-per-second across many MainLoop frames, and a grounded body
+    // rides a floor while preserving horizontal speed.
+    //
+    // The original bug wrote the per-tick displacement (velocity * dt) back
+    // into `velocity`, so speed collapsed toward zero after the first frame.
+    // A single-step test can't catch that — only iterating the MainLoop over
+    // many physics ticks exposes the decay.
+    // -------------------------------------------------------------------
+
+    fn char_velocity(ml: &MainLoop, id: crate::node::NodeId) -> gdcore::math::Vector2 {
+        match ml
+            .tree()
+            .get_node(id)
+            .map(|n| n.get_property("velocity"))
+            .unwrap_or(Variant::Nil)
+        {
+            Variant::Vector2(v) => v,
+            _ => panic!("expected Vector2 velocity"),
+        }
+    }
+
+    fn char_position(ml: &MainLoop, id: crate::node::NodeId) -> gdcore::math::Vector2 {
+        match ml
+            .tree()
+            .get_node(id)
+            .map(|n| n.get_property("position"))
+            .unwrap_or(Variant::Nil)
+        {
+            Variant::Vector2(v) => v,
+            _ => panic!("expected Vector2 position"),
+        }
+    }
+
+    #[test]
+    fn mainloop_character_velocity_stays_px_per_second_over_many_frames() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut char_node = Node::new("Player", "CharacterBody2D");
+        char_node.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+        );
+        char_node.set_property(
+            "velocity",
+            Variant::Vector2(gdcore::math::Vector2::new(120.0, 0.0)),
+        );
+        let char_id = tree.add_child(root, char_node).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(8.0));
+        tree.add_child(char_id, s).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+
+        // 30 physics ticks at 60 Hz = 0.5 s of travel at 120 px/s = ~60 px.
+        for _ in 0..30 {
+            ml.step(1.0 / 60.0);
+        }
+
+        let vel = char_velocity(&ml, char_id);
+        let pos = char_position(&ml, char_id);
+
+        // The core regression: velocity must remain in px/s (≈120), NOT decay
+        // toward the per-tick displacement (~2 px) as the original bug did.
+        assert!(
+            (vel.x - 120.0).abs() < 1.0,
+            "velocity must stay px/s across frames, got {:.3} (bug would collapse to ~2)",
+            vel.x
+        );
+        // And the travelled distance must reflect an undiminished speed.
+        assert!(
+            pos.x > 50.0,
+            "should travel ~60px in 30 frames at 120 px/s, got x={:.2} (bug asymptotes near ~2)",
+            pos.x
+        );
+    }
+
+    #[test]
+    fn mainloop_platformer_rides_floor_preserving_horizontal_speed() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Wide static floor: center y=20, size (2000, 20) => top edge at y=10.
+        let mut ground = Node::new("Ground", "StaticBody2D");
+        ground.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 20.0)),
+        );
+        let ground_id = tree.add_child(root, ground).unwrap();
+        let mut gs = Node::new("Shape", "CollisionShape2D");
+        gs.set_property(
+            "size",
+            Variant::Vector2(gdcore::math::Vector2::new(2000.0, 20.0)),
+        );
+        tree.add_child(ground_id, gs).unwrap();
+
+        // Player circle radius 8. Start at y=2.5 so it overlaps the floor top
+        // (bottom edge at y=10.5) and is grounded on frame 1. Move right (120)
+        // with a small downward bias (40) to stay pressed onto the floor.
+        let mut char_node = Node::new("Player", "CharacterBody2D");
+        char_node.set_property(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(0.0, 2.5)),
+        );
+        char_node.set_property(
+            "velocity",
+            Variant::Vector2(gdcore::math::Vector2::new(120.0, 40.0)),
+        );
+        char_node.set_property("floor_snap_length", Variant::Float(4.0));
+        let char_id = tree.add_child(root, char_node).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(8.0));
+        tree.add_child(char_id, s).unwrap();
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+
+        for _ in 0..30 {
+            ml.step(1.0 / 60.0);
+        }
+
+        let vel = char_velocity(&ml, char_id);
+        let pos = char_position(&ml, char_id);
+        let on_floor = match ml
+            .tree()
+            .get_node(char_id)
+            .map(|n| n.get_property("is_on_floor"))
+            .unwrap_or(Variant::Nil)
+        {
+            Variant::Bool(b) => b,
+            _ => false,
+        };
+
+        // Grounded: floor snap keeps the body glued to the floor top (center
+        // y≈2) rather than sinking or drifting off.
+        assert!(on_floor, "body should ride the floor, got is_on_floor=false");
+        assert!(
+            (pos.y - 2.0).abs() < 1.0,
+            "body should rest on floor top (center y≈2), got y={:.2}",
+            pos.y
+        );
+        // Horizontal speed is preserved while grounded (the floor slide zeroes
+        // only the downward component).
+        assert!(
+            vel.x > 100.0,
+            "horizontal speed should be preserved on the floor, got vx={:.2}",
+            vel.x
+        );
+        assert!(
+            pos.x > 40.0,
+            "grounded body should travel horizontally, got x={:.2}",
+            pos.x
+        );
     }
 }

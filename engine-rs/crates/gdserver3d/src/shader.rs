@@ -288,6 +288,12 @@ pub struct CompiledShader3D {
     pub render_modes: RenderModeFlags,
     /// Diagnostics (warnings/errors) emitted during compilation.
     pub diagnostics: Vec<ShaderDiagnostic>,
+    /// Parsed `fragment()` body instructions for CPU (software) evaluation.
+    ///
+    /// Populated by [`parse_fragment_body_3d`]; empty when the shader has no
+    /// recognised fragment statements (uniform-only shaders still evaluate via
+    /// [`ShaderProcessor3D::apply_shader`]).
+    pub fragment_body: Vec<FragmentInstruction3D>,
 }
 
 impl CompiledShader3D {
@@ -362,6 +368,7 @@ impl ShaderCompiler3D {
             wgsl_program,
             render_modes,
             diagnostics,
+            fragment_body: parse_fragment_body_3d(source),
         }
     }
 
@@ -667,6 +674,613 @@ impl Default for FragmentContext3D {
             time: 0.0,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 3D fragment AST, parser, and evaluation
+// ---------------------------------------------------------------------------
+
+/// A single instruction extracted from a Godot spatial (3D) shader fragment
+/// body.
+///
+/// This is a small but real AST: it captures the most common Godot spatial
+/// shader assignment patterns (writing `ALBEDO`, `ALPHA`, `COLOR`) so the
+/// software fallback can evaluate them per-fragment. Right-hand sides are
+/// [`ColorExpr3D`] / [`FloatExpr3D`] trees supporting UV math, `TIME`, and
+/// texture sampling.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FragmentInstruction3D {
+    /// `COLOR = <expr>` — sets the full RGBA output color.
+    SetColor(ColorExpr3D),
+    /// `COLOR.rgb = <expr>` — sets only the RGB channels of the output.
+    SetColorRgb(ColorExpr3D),
+    /// `COLOR.a = <expr>` — sets only the alpha channel of the output.
+    SetColorAlpha(FloatExpr3D),
+    /// `ALBEDO = <expr>` — sets the surface albedo RGB (alpha preserved).
+    SetAlbedo(ColorExpr3D),
+    /// `ALPHA = <expr>` — sets the surface alpha (Godot's scalar `ALPHA`).
+    SetAlpha(FloatExpr3D),
+    /// `ALBEDO.rgb *= <float>` / `COLOR.rgb *= <float>` — scales RGB.
+    MultiplyColorRgb(FloatExpr3D),
+}
+
+/// An expression that evaluates to a color value in a 3D fragment shader.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColorExpr3D {
+    /// A `vec4(r, g, b, a)` literal.
+    Literal(f32, f32, f32, f32),
+    /// A `vec4(v)` shorthand (all four components the same).
+    Splat(f32),
+    /// A `vec3(a, b, c)` with float-expression components (alpha = 1.0).
+    Vec3(FloatExpr3D, FloatExpr3D, FloatExpr3D),
+    /// Reference to a uniform by name.
+    Uniform(String),
+    /// The built-in `COLOR` variable.
+    BuiltinColor,
+    /// The built-in `ALBEDO` variable.
+    BuiltinAlbedo,
+    /// `mix(a, b, t)` — linear interpolation of two colors by `t`.
+    Mix(Box<ColorExpr3D>, Box<ColorExpr3D>, FloatExpr3D),
+    /// `texture(sampler, uv)` — sampler name plus the `u` and `v` coordinates.
+    Texture(String, Box<FloatExpr3D>, Box<FloatExpr3D>),
+}
+
+/// An expression that evaluates to a float value in a 3D fragment shader.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FloatExpr3D {
+    /// A literal float.
+    Literal(f32),
+    /// A reference to a uniform.
+    Uniform(String),
+    /// The built-in `TIME` variable.
+    BuiltinTime,
+    /// `UV.x` or `UV.y`.
+    UvComponent(UvAxis3D),
+    /// `sin(expr)`.
+    Sin(Box<FloatExpr3D>),
+    /// `cos(expr)`.
+    Cos(Box<FloatExpr3D>),
+    /// `fract(expr)` — fractional part (`x - floor(x)`).
+    Fract(Box<FloatExpr3D>),
+    /// `a + b`.
+    Add(Box<FloatExpr3D>, Box<FloatExpr3D>),
+    /// `a - b`.
+    Sub(Box<FloatExpr3D>, Box<FloatExpr3D>),
+    /// `a * b`.
+    Mul(Box<FloatExpr3D>, Box<FloatExpr3D>),
+    /// `-a`.
+    Neg(Box<FloatExpr3D>),
+}
+
+/// Which component of `UV` (a spatial shader's `vec2` texture coordinate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UvAxis3D {
+    /// The `x` (horizontal) component.
+    X,
+    /// The `y` (vertical) component.
+    Y,
+}
+
+/// Parses a Godot spatial shader's `fragment()` function body into
+/// instructions for software evaluation.
+///
+/// Returns an empty vec if no `fragment()` body is found. Statements the
+/// parser does not recognise are skipped rather than causing a panic.
+pub fn parse_fragment_body_3d(source: &str) -> Vec<FragmentInstruction3D> {
+    let mut instructions = Vec::new();
+
+    let body = match extract_function_body_3d(source, "fragment") {
+        Some(b) => b,
+        None => return instructions,
+    };
+
+    for line in body.lines() {
+        let trimmed = line.trim().trim_end_matches(';').trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(inst) = parse_fragment_statement_3d(trimmed) {
+            instructions.push(inst);
+        }
+    }
+
+    instructions
+}
+
+/// Extracts the body of a named function from shader source (private copy for
+/// this crate — mirrors the 2D helper).
+fn extract_function_body_3d<'a>(source: &'a str, func_name: &str) -> Option<&'a str> {
+    let pattern = format!("{func_name}(");
+    let func_pos = source.find(&pattern)?;
+
+    let after_sig = &source[func_pos..];
+    let brace_pos = after_sig.find('{')?;
+    let body_start = func_pos + brace_pos + 1;
+
+    let mut depth = 1;
+    let mut end = body_start;
+    for ch in source[body_start..].chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&source[body_start..end]);
+                }
+            }
+            _ => {}
+        }
+        end += ch.len_utf8();
+    }
+    None
+}
+
+/// Parses a single fragment statement into an instruction, or `None` if the
+/// statement is not recognised.
+fn parse_fragment_statement_3d(s: &str) -> Option<FragmentInstruction3D> {
+    // ALBEDO.rgb = / *=  (checked before plain ALBEDO).
+    if let Some(rest) = s.strip_prefix("ALBEDO.rgb") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix("*=") {
+            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
+                val.trim(),
+            )));
+        }
+        if let Some(val) = rest.strip_prefix('=') {
+            return Some(FragmentInstruction3D::SetColorRgb(parse_color_expr_3d(
+                val.trim(),
+            )));
+        }
+    }
+
+    // ALBEDO = / *=
+    if let Some(rest) = s.strip_prefix("ALBEDO") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix("*=") {
+            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
+                val.trim(),
+            )));
+        }
+        if let Some(val) = rest.strip_prefix('=') {
+            return Some(FragmentInstruction3D::SetAlbedo(parse_color_expr_3d(
+                val.trim(),
+            )));
+        }
+    }
+
+    // ALPHA = <float>
+    if let Some(rest) = s.strip_prefix("ALPHA") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix('=') {
+            return Some(FragmentInstruction3D::SetAlpha(parse_float_expr_3d(
+                val.trim(),
+            )));
+        }
+    }
+
+    // COLOR.a = <float>
+    if let Some(rest) = s.strip_prefix("COLOR.a") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix('=') {
+            return Some(FragmentInstruction3D::SetColorAlpha(parse_float_expr_3d(
+                val.trim(),
+            )));
+        }
+    }
+
+    // COLOR.rgb = / *=
+    if let Some(rest) = s.strip_prefix("COLOR.rgb") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix("*=") {
+            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
+                val.trim(),
+            )));
+        }
+        if let Some(val) = rest.strip_prefix('=') {
+            return Some(FragmentInstruction3D::SetColorRgb(parse_color_expr_3d(
+                val.trim(),
+            )));
+        }
+    }
+
+    // COLOR = / *=
+    if let Some(rest) = s.strip_prefix("COLOR") {
+        let rest = rest.trim();
+        if let Some(val) = rest.strip_prefix("*=") {
+            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
+                val.trim(),
+            )));
+        }
+        if let Some(val) = rest.strip_prefix('=') {
+            return Some(FragmentInstruction3D::SetColor(parse_color_expr_3d(
+                val.trim(),
+            )));
+        }
+    }
+
+    None
+}
+
+/// Parses a color expression from source text.
+fn parse_color_expr_3d(s: &str) -> ColorExpr3D {
+    let s = s.trim();
+
+    // vec4(r, g, b, a) or vec4(v) — literal components only.
+    if let Some(inner) = strip_func_call_3d(s, "vec4") {
+        let parts = split_top_level_commas_3d(inner);
+        if parts.len() == 4 {
+            if let (Ok(r), Ok(g), Ok(b), Ok(a)) = (
+                parts[0].trim().parse::<f32>(),
+                parts[1].trim().parse::<f32>(),
+                parts[2].trim().parse::<f32>(),
+                parts[3].trim().parse::<f32>(),
+            ) {
+                return ColorExpr3D::Literal(r, g, b, a);
+            }
+        } else if parts.len() == 1 {
+            if let Ok(v) = parts[0].trim().parse::<f32>() {
+                return ColorExpr3D::Splat(v);
+            }
+        }
+    }
+
+    // vec3(a, b, c) with float-expression components (alpha = 1.0).
+    if let Some(inner) = strip_func_call_3d(s, "vec3") {
+        let parts = split_top_level_commas_3d(inner);
+        if parts.len() == 3 {
+            return ColorExpr3D::Vec3(
+                parse_float_expr_3d(parts[0]),
+                parse_float_expr_3d(parts[1]),
+                parse_float_expr_3d(parts[2]),
+            );
+        } else if parts.len() == 1 {
+            // vec3(x) shorthand → (x, x, x).
+            let e = parse_float_expr_3d(parts[0]);
+            return ColorExpr3D::Vec3(e.clone(), e.clone(), e);
+        }
+    }
+
+    // mix(a, b, t)
+    if let Some(inner) = strip_func_call_3d(s, "mix") {
+        let parts = split_top_level_commas_3d(inner);
+        if parts.len() == 3 {
+            let a = parse_color_expr_3d(parts[0]);
+            let b = parse_color_expr_3d(parts[1]);
+            let t = parse_float_expr_3d(parts[2]);
+            return ColorExpr3D::Mix(Box::new(a), Box::new(b), t);
+        }
+    }
+
+    // texture(sampler, uvexpr) where uvexpr is `UV` or `vec2(u, v)`.
+    if let Some(inner) = strip_func_call_3d(s, "texture") {
+        let parts = split_top_level_commas_3d(inner);
+        if parts.len() == 2 {
+            let sampler = parts[0].trim().to_string();
+            let uv = parts[1].trim();
+            let (u, v) = if uv == "UV" {
+                (
+                    FloatExpr3D::UvComponent(UvAxis3D::X),
+                    FloatExpr3D::UvComponent(UvAxis3D::Y),
+                )
+            } else if let Some(vec_inner) = strip_func_call_3d(uv, "vec2") {
+                let uv_parts = split_top_level_commas_3d(vec_inner);
+                if uv_parts.len() == 2 {
+                    (
+                        parse_float_expr_3d(uv_parts[0]),
+                        parse_float_expr_3d(uv_parts[1]),
+                    )
+                } else {
+                    (
+                        FloatExpr3D::UvComponent(UvAxis3D::X),
+                        FloatExpr3D::UvComponent(UvAxis3D::Y),
+                    )
+                }
+            } else {
+                // Best-effort default: sample at the interpolated UV.
+                (
+                    FloatExpr3D::UvComponent(UvAxis3D::X),
+                    FloatExpr3D::UvComponent(UvAxis3D::Y),
+                )
+            };
+            return ColorExpr3D::Texture(sampler, Box::new(u), Box::new(v));
+        }
+    }
+
+    if s == "ALBEDO" {
+        return ColorExpr3D::BuiltinAlbedo;
+    }
+    if s == "COLOR" {
+        return ColorExpr3D::BuiltinColor;
+    }
+
+    // Uniform reference (a bare identifier).
+    if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return ColorExpr3D::Uniform(s.to_string());
+    }
+
+    // Unrecognised → treat as an albedo passthrough.
+    ColorExpr3D::BuiltinAlbedo
+}
+
+/// Parses a float expression, supporting left-associative binary arithmetic
+/// (`+`, `-`, `*`) with `*` binding tighter than `+`/`-`, unary functions
+/// (`sin`, `cos`, `fract`), unary negation, `TIME`, `UV.x`/`UV.y`, numeric
+/// literals, and uniform identifiers.
+fn parse_float_expr_3d(s: &str) -> FloatExpr3D {
+    let s = strip_outer_parens_3d(s.trim());
+
+    // A bare numeric literal (also handles negatives / scientific notation).
+    if let Ok(v) = s.parse::<f32>() {
+        return FloatExpr3D::Literal(v);
+    }
+
+    // Top-level binary operator (lowest precedence, rightmost occurrence).
+    if let Some((idx, op)) = find_top_level_binop_3d(s) {
+        let left = parse_float_expr_3d(&s[..idx]);
+        let right = parse_float_expr_3d(&s[idx + 1..]);
+        return match op {
+            '+' => FloatExpr3D::Add(Box::new(left), Box::new(right)),
+            '-' => FloatExpr3D::Sub(Box::new(left), Box::new(right)),
+            _ => FloatExpr3D::Mul(Box::new(left), Box::new(right)),
+        };
+    }
+
+    // Unary negation (e.g. `-UV.x`, `-sin(TIME)`).
+    if let Some(rest) = s.strip_prefix('-') {
+        return FloatExpr3D::Neg(Box::new(parse_float_expr_3d(rest)));
+    }
+
+    // Unary functions.
+    if let Some(inner) = strip_func_call_3d(s, "sin") {
+        return FloatExpr3D::Sin(Box::new(parse_float_expr_3d(inner)));
+    }
+    if let Some(inner) = strip_func_call_3d(s, "cos") {
+        return FloatExpr3D::Cos(Box::new(parse_float_expr_3d(inner)));
+    }
+    if let Some(inner) = strip_func_call_3d(s, "fract") {
+        return FloatExpr3D::Fract(Box::new(parse_float_expr_3d(inner)));
+    }
+
+    if s == "TIME" {
+        return FloatExpr3D::BuiltinTime;
+    }
+    if s == "UV.x" {
+        return FloatExpr3D::UvComponent(UvAxis3D::X);
+    }
+    if s == "UV.y" {
+        return FloatExpr3D::UvComponent(UvAxis3D::Y);
+    }
+
+    if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return FloatExpr3D::Uniform(s.to_string());
+    }
+
+    FloatExpr3D::Literal(0.0)
+}
+
+/// Strips a function call wrapper like `func(inner)` and returns `inner`.
+fn strip_func_call_3d<'a>(s: &'a str, func: &str) -> Option<&'a str> {
+    let prefix = format!("{func}(");
+    if s.starts_with(&prefix) && s.ends_with(')') {
+        Some(&s[prefix.len()..s.len() - 1])
+    } else {
+        None
+    }
+}
+
+/// Splits a string by commas, but only at the top level (respecting parens).
+fn split_top_level_commas_3d(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Removes one or more layers of fully-enclosing parentheses from `s`.
+///
+/// Only strips when the leading `(` matches the trailing `)` (i.e. they wrap
+/// the entire expression), so `(a+b)*(c+d)` is left untouched.
+fn strip_outer_parens_3d(s: &str) -> &str {
+    let s = s.trim();
+    if !(s.starts_with('(') && s.ends_with(')')) {
+        return s;
+    }
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    // If the matching close paren is the last char, strip and recurse.
+                    if i == s.len() - ch.len_utf8() {
+                        return strip_outer_parens_3d(&s[1..s.len() - 1]);
+                    }
+                    return s;
+                }
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
+/// Finds the split point for a top-level binary operator in `s`.
+///
+/// Returns `(byte_index, operator)` for the rightmost top-level additive
+/// operator (`+`/`-`); if none is present, the rightmost top-level `*`.
+/// Unary signs (an operator with no preceding operand) are ignored so
+/// expressions like `-UV.x + 1.0` split at the `+`.
+fn find_top_level_binop_3d(s: &str) -> Option<(usize, char)> {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let mut depth = 0i32;
+    let mut add_split: Option<(usize, char)> = None;
+    let mut mul_split: Option<usize> = None;
+
+    for k in 0..chars.len() {
+        let (i, ch) = chars[k];
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '+' | '-' if depth == 0 && is_binary_op_position_3d(&chars, k) => {
+                add_split = Some((i, ch)); // rightmost wins
+            }
+            '*' if depth == 0 && is_binary_op_position_3d(&chars, k) => {
+                mul_split = Some(i); // rightmost wins
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(split) = add_split {
+        return Some(split);
+    }
+    mul_split.map(|i| (i, '*'))
+}
+
+/// Returns `true` if the operator at index `k` is a binary operator (has a
+/// preceding operand) rather than a unary sign.
+fn is_binary_op_position_3d(chars: &[(usize, char)], k: usize) -> bool {
+    let mut j = k;
+    while j > 0 {
+        j -= 1;
+        let c = chars[j].1;
+        if c.is_whitespace() {
+            continue;
+        }
+        return !matches!(c, '+' | '-' | '*' | '/' | '(' | ',');
+    }
+    false
+}
+
+/// Evaluates a float expression against a fragment context and uniforms.
+pub fn eval_float_expr_3d(
+    expr: &FloatExpr3D,
+    ctx: &FragmentContext3D,
+    uniforms: &HashMap<String, Variant>,
+) -> f32 {
+    match expr {
+        FloatExpr3D::Literal(v) => *v,
+        FloatExpr3D::BuiltinTime => ctx.time,
+        FloatExpr3D::UvComponent(UvAxis3D::X) => ctx.uv.0,
+        FloatExpr3D::UvComponent(UvAxis3D::Y) => ctx.uv.1,
+        FloatExpr3D::Uniform(name) => match uniforms.get(name) {
+            Some(Variant::Float(f)) => *f as f32,
+            Some(Variant::Int(i)) => *i as f32,
+            _ => 0.0,
+        },
+        FloatExpr3D::Sin(inner) => eval_float_expr_3d(inner, ctx, uniforms).sin(),
+        FloatExpr3D::Cos(inner) => eval_float_expr_3d(inner, ctx, uniforms).cos(),
+        FloatExpr3D::Fract(inner) => {
+            let x = eval_float_expr_3d(inner, ctx, uniforms);
+            x - x.floor()
+        }
+        FloatExpr3D::Add(a, b) => {
+            eval_float_expr_3d(a, ctx, uniforms) + eval_float_expr_3d(b, ctx, uniforms)
+        }
+        FloatExpr3D::Sub(a, b) => {
+            eval_float_expr_3d(a, ctx, uniforms) - eval_float_expr_3d(b, ctx, uniforms)
+        }
+        FloatExpr3D::Mul(a, b) => {
+            eval_float_expr_3d(a, ctx, uniforms) * eval_float_expr_3d(b, ctx, uniforms)
+        }
+        FloatExpr3D::Neg(inner) => -eval_float_expr_3d(inner, ctx, uniforms),
+    }
+}
+
+/// Evaluates a color expression against a fragment context and uniforms.
+///
+/// `sample_texture` abstracts texture lookup (name, u, v) → color so this
+/// crate needs no image dependencies; the software renderer supplies a
+/// closure that samples the bound texture maps.
+pub fn eval_color_expr_3d(
+    expr: &ColorExpr3D,
+    ctx: &FragmentContext3D,
+    uniforms: &HashMap<String, Variant>,
+    sample_texture: &dyn Fn(&str, f32, f32) -> Color,
+) -> Color {
+    match expr {
+        ColorExpr3D::Literal(r, g, b, a) => Color::new(*r, *g, *b, *a),
+        ColorExpr3D::Splat(v) => Color::new(*v, *v, *v, *v),
+        ColorExpr3D::Vec3(a, b, c) => Color::new(
+            eval_float_expr_3d(a, ctx, uniforms),
+            eval_float_expr_3d(b, ctx, uniforms),
+            eval_float_expr_3d(c, ctx, uniforms),
+            1.0,
+        ),
+        ColorExpr3D::BuiltinColor | ColorExpr3D::BuiltinAlbedo => ctx.albedo,
+        ColorExpr3D::Uniform(name) => match uniforms.get(name) {
+            Some(Variant::Color(c)) => *c,
+            _ => ctx.albedo,
+        },
+        ColorExpr3D::Mix(a, b, t) => {
+            let ca = eval_color_expr_3d(a, ctx, uniforms, sample_texture);
+            let cb = eval_color_expr_3d(b, ctx, uniforms, sample_texture);
+            let t = eval_float_expr_3d(t, ctx, uniforms).clamp(0.0, 1.0);
+            Color::new(
+                ca.r * (1.0 - t) + cb.r * t,
+                ca.g * (1.0 - t) + cb.g * t,
+                ca.b * (1.0 - t) + cb.b * t,
+                ca.a * (1.0 - t) + cb.a * t,
+            )
+        }
+        ColorExpr3D::Texture(name, u, v) => {
+            let uu = eval_float_expr_3d(u, ctx, uniforms);
+            let vv = eval_float_expr_3d(v, ctx, uniforms);
+            sample_texture(name.as_str(), uu, vv)
+        }
+    }
+}
+
+/// Executes parsed 3D fragment instructions against a context, returning the
+/// resulting output color.
+///
+/// The base color starts from `ctx.albedo`. Texture sampling is delegated to
+/// `sample_texture` so this crate carries no image dependencies.
+pub fn execute_fragment_3d(
+    instructions: &[FragmentInstruction3D],
+    ctx: &FragmentContext3D,
+    uniforms: &HashMap<String, Variant>,
+    sample_texture: &dyn Fn(&str, f32, f32) -> Color,
+) -> Color {
+    let mut color = ctx.albedo;
+
+    for inst in instructions {
+        match inst {
+            FragmentInstruction3D::SetColor(expr) => {
+                color = eval_color_expr_3d(expr, ctx, uniforms, sample_texture);
+            }
+            FragmentInstruction3D::SetColorRgb(expr) | FragmentInstruction3D::SetAlbedo(expr) => {
+                let c = eval_color_expr_3d(expr, ctx, uniforms, sample_texture);
+                color.r = c.r;
+                color.g = c.g;
+                color.b = c.b;
+            }
+            FragmentInstruction3D::SetColorAlpha(expr) | FragmentInstruction3D::SetAlpha(expr) => {
+                color.a = eval_float_expr_3d(expr, ctx, uniforms);
+            }
+            FragmentInstruction3D::MultiplyColorRgb(expr) => {
+                let f = eval_float_expr_3d(expr, ctx, uniforms);
+                color.r *= f;
+                color.g *= f;
+                color.b *= f;
+            }
+        }
+    }
+
+    color
 }
 
 /// Evaluates compiled 3D shaders against fragment data.
@@ -1034,6 +1648,7 @@ uniform bool enabled = true;
             wgsl_program: None,
             render_modes: RenderModeFlags::default(),
             diagnostics: Vec::new(),
+            fragment_body: Vec::new(),
         };
         let ctx = FragmentContext3D::default();
         let result = processor.apply_shader(&compiled, &HashMap::new(), &ctx);
@@ -1192,6 +1807,7 @@ uniform bool enabled = true;
                 ..Default::default()
             },
             diagnostics: Vec::new(),
+            fragment_body: Vec::new(),
         };
         let mut params = HashMap::new();
         params.insert(
@@ -1219,6 +1835,7 @@ uniform bool enabled = true;
             wgsl_program: None,
             render_modes: RenderModeFlags::default(),
             diagnostics: Vec::new(),
+            fragment_body: Vec::new(),
         };
         let mut params = HashMap::new();
         params.insert("speed".to_string(), Variant::Float(5.0));
@@ -1241,6 +1858,7 @@ uniform bool enabled = true;
             wgsl_program: None,
             render_modes: RenderModeFlags::default(),
             diagnostics: Vec::new(),
+            fragment_body: Vec::new(),
         };
         let params = HashMap::new();
 
@@ -1257,6 +1875,7 @@ uniform bool enabled = true;
             wgsl_program: None,
             render_modes: RenderModeFlags::default(),
             diagnostics: Vec::new(),
+            fragment_body: Vec::new(),
         };
         let params = HashMap::new();
 
@@ -1495,5 +2114,243 @@ uniform bool enabled = true;
         let result = processor.apply_shader(&compiled, &mat.parameters, &ctx);
         assert_eq!(result.r, 1.0);
         assert!((result.a - 0.5).abs() < 0.01);
+    }
+
+    // ── 3D fragment AST parsing ──
+
+    /// A texture sampler stub that ignores its arguments and returns black.
+    fn no_texture(_name: &str, _u: f32, _v: f32) -> Color {
+        Color::new(0.0, 0.0, 0.0, 1.0)
+    }
+
+    #[test]
+    fn parse_albedo_vec3_literal() {
+        let source = "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 0.0, 0.0);\n}";
+        let body = parse_fragment_body_3d(source);
+        assert_eq!(
+            body,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Vec3(
+                FloatExpr3D::Literal(1.0),
+                FloatExpr3D::Literal(0.0),
+                FloatExpr3D::Literal(0.0),
+            ))]
+        );
+    }
+
+    #[test]
+    fn parse_albedo_uniform() {
+        let source = "shader_type spatial;\nvoid fragment() {\n    ALBEDO = my_color;\n}";
+        let body = parse_fragment_body_3d(source);
+        assert_eq!(
+            body,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Uniform(
+                "my_color".to_string()
+            ))]
+        );
+    }
+
+    #[test]
+    fn parse_albedo_uv_math() {
+        let source =
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(UV.x, UV.y, 0.0);\n}";
+        let body = parse_fragment_body_3d(source);
+        assert_eq!(
+            body,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Vec3(
+                FloatExpr3D::UvComponent(UvAxis3D::X),
+                FloatExpr3D::UvComponent(UvAxis3D::Y),
+                FloatExpr3D::Literal(0.0),
+            ))]
+        );
+    }
+
+    #[test]
+    fn parse_alpha_sin_time() {
+        let source = "shader_type spatial;\nvoid fragment() {\n    ALPHA = sin(TIME);\n}";
+        let body = parse_fragment_body_3d(source);
+        assert_eq!(
+            body,
+            vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::Sin(Box::new(
+                FloatExpr3D::BuiltinTime
+            )))]
+        );
+    }
+
+    #[test]
+    fn parse_texture_uv() {
+        let source =
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = texture(tex, UV);\n}";
+        let body = parse_fragment_body_3d(source);
+        assert_eq!(
+            body,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Texture(
+                "tex".to_string(),
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::Y)),
+            ))]
+        );
+    }
+
+    #[test]
+    fn parse_unsupported_statement_skipped() {
+        // `NORMAL = ...` and a local `float` declaration are unsupported and
+        // must be skipped, while the ALBEDO assignment is still parsed.
+        let source = "shader_type spatial;\nvoid fragment() {\n    float k = 0.5;\n    NORMAL = vec3(0.0, 0.0, 1.0);\n    ALBEDO = vec3(0.2, 0.2, 0.2);\n}";
+        let body = parse_fragment_body_3d(source);
+        assert_eq!(
+            body,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Vec3(
+                FloatExpr3D::Literal(0.2),
+                FloatExpr3D::Literal(0.2),
+                FloatExpr3D::Literal(0.2),
+            ))]
+        );
+    }
+
+    #[test]
+    fn parse_float_expr_precedence_and_parens() {
+        // `a + b * c` must parse as Add(a, Mul(b, c)).
+        assert_eq!(
+            parse_float_expr_3d("UV.x + UV.y * 2.0"),
+            FloatExpr3D::Add(
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
+                Box::new(FloatExpr3D::Mul(
+                    Box::new(FloatExpr3D::UvComponent(UvAxis3D::Y)),
+                    Box::new(FloatExpr3D::Literal(2.0)),
+                )),
+            )
+        );
+        // Parentheses override precedence.
+        assert_eq!(
+            parse_float_expr_3d("(UV.x + UV.y) * 2.0"),
+            FloatExpr3D::Mul(
+                Box::new(FloatExpr3D::Add(
+                    Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
+                    Box::new(FloatExpr3D::UvComponent(UvAxis3D::Y)),
+                )),
+                Box::new(FloatExpr3D::Literal(2.0)),
+            )
+        );
+    }
+
+    // ── 3D fragment execution ──
+
+    #[test]
+    fn eval_albedo_uv_math_varies_with_uv() {
+        let body = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(UV.x, UV.y, 0.0);\n}",
+        );
+        let ctx = FragmentContext3D {
+            uv: (0.25, 0.75),
+            ..Default::default()
+        };
+        let out = execute_fragment_3d(&body, &ctx, &HashMap::new(), &no_texture);
+        assert!((out.r - 0.25).abs() < 1e-6, "r={}", out.r);
+        assert!((out.g - 0.75).abs() < 1e-6, "g={}", out.g);
+        assert!(out.b.abs() < 1e-6, "b={}", out.b);
+        // SetAlbedo preserves the original alpha (default white = 1.0).
+        assert!((out.a - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn eval_time_animates_alpha() {
+        let body = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALPHA = sin(TIME);\n}",
+        );
+        let at0 = execute_fragment_3d(
+            &body,
+            &FragmentContext3D {
+                time: 0.0,
+                ..Default::default()
+            },
+            &HashMap::new(),
+            &no_texture,
+        );
+        let at_half_pi = execute_fragment_3d(
+            &body,
+            &FragmentContext3D {
+                time: std::f32::consts::FRAC_PI_2,
+                ..Default::default()
+            },
+            &HashMap::new(),
+            &no_texture,
+        );
+        assert!(at0.a.abs() < 1e-6, "sin(0) alpha={}", at0.a);
+        assert!((at_half_pi.a - 1.0).abs() < 1e-6, "sin(pi/2) alpha={}", at_half_pi.a);
+    }
+
+    #[test]
+    fn eval_uniform_albedo() {
+        let body = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = tint;\n}",
+        );
+        let mut uniforms = HashMap::new();
+        uniforms.insert(
+            "tint".to_string(),
+            Variant::Color(Color::new(0.1, 0.2, 0.3, 0.5)),
+        );
+        let ctx = FragmentContext3D::default();
+        let out = execute_fragment_3d(&body, &ctx, &uniforms, &no_texture);
+        assert!((out.r - 0.1).abs() < 1e-6);
+        assert!((out.g - 0.2).abs() < 1e-6);
+        assert!((out.b - 0.3).abs() < 1e-6);
+        // SetAlbedo keeps the context alpha, not the uniform's alpha.
+        assert!((out.a - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn eval_texture_sample_uses_closure() {
+        let body = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = texture(tex, UV);\n}",
+        );
+        let ctx = FragmentContext3D {
+            uv: (0.4, 0.6),
+            ..Default::default()
+        };
+        // Stub returns a color encoding the (name, u, v) it was called with.
+        let out = execute_fragment_3d(
+            &body,
+            &ctx,
+            &HashMap::new(),
+            &|name: &str, u: f32, v: f32| {
+                assert_eq!(name, "tex");
+                Color::new(u, v, 0.0, 1.0)
+            },
+        );
+        assert!((out.r - 0.4).abs() < 1e-6, "r={}", out.r);
+        assert!((out.g - 0.6).abs() < 1e-6, "g={}", out.g);
+    }
+
+    #[test]
+    fn eval_float_expr_precedence_matches_math() {
+        // Confirm evaluation (not just parsing) respects precedence.
+        let expr = parse_float_expr_3d("UV.x + UV.y * 2.0");
+        let ctx = FragmentContext3D {
+            uv: (0.5, 0.25),
+            ..Default::default()
+        };
+        // 0.5 + 0.25 * 2.0 = 1.0 (not (0.5 + 0.25) * 2.0 = 1.5).
+        let v = eval_float_expr_3d(&expr, &ctx, &HashMap::new());
+        assert!((v - 1.0).abs() < 1e-6, "v={v}");
+    }
+
+    #[test]
+    fn eval_fract_and_neg() {
+        let ctx = FragmentContext3D {
+            time: 2.75,
+            ..Default::default()
+        };
+        let fract = eval_float_expr_3d(&parse_float_expr_3d("fract(TIME)"), &ctx, &HashMap::new());
+        assert!((fract - 0.75).abs() < 1e-6, "fract={fract}");
+        let neg = eval_float_expr_3d(&parse_float_expr_3d("-UV.x"), &ctx, &HashMap::new());
+        assert!(neg.abs() < 1e-6);
+    }
+
+    #[test]
+    fn compile_populates_fragment_body() {
+        let compiler = ShaderCompiler3D::new();
+        let source = "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 0.0, 0.0);\n}";
+        let compiled = compiler.compile(ShaderType3D::Spatial, source);
+        assert_eq!(compiled.fragment_body.len(), 1);
     }
 }

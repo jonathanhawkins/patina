@@ -1,3 +1,5 @@
+//! CPU-sim particle system (GPUParticles* names are API-compatible; simulation is CPU).
+//! Collision bounce optional (pat-z35r2.19).
 //! GPUParticles3D: 3D particle system with basic emitter and material.
 //!
 //! Mirrors Godot's `GPUParticles3D` node surface including:

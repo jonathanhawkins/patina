@@ -2,7 +2,36 @@
 
 This document tracks the implementation and compatibility status of each Patina Engine subsystem relative to upstream Godot behavior.
 
-**Last updated**: 2026-03-28 (pat-cygub: improved compatibility matrix — updated stale test counts, added patina-runner, corrected totals)
+**Last updated**: 2026-07-12 (fresh-eyes source audit — see warning below)
+
+---
+
+## ⚠️ Fresh-Eyes Audit 2026-07-11 — READ FIRST
+
+A 15-subsystem code audit against the vendored Godot 4.6.1 source
+(**[docs/PARITY_AUDIT_2026-07-11.md](docs/PARITY_AUDIT_2026-07-11.md)**, epic `pat-u3l8c`,
+117 beads) found that the per-subsystem "Measured / ~N%" rows below systematically overstate
+runtime parity. Unit-test counts measure **library code in isolation**; `MainLoop::step`
+wires in only the 2D physics server. Concretely, at runtime today:
+
+- **3D physics is never stepped** (a RigidBody3D never falls in a running game).
+- **No audio can play** (`gdaudio` has zero reverse dependencies; nothing pumps `mix()`).
+- **Scene nodes emit no 2D draw commands** (Play renders class-glyph icons, not sprites);
+  rotated sprites rasterize as AABBs; TileMaps render as a dot.
+- **3D materials never sample textures; no skinning** reaches either renderer.
+- **Custom `.gdshader` neither loads nor executes** on any path.
+- **2D physics has no gravity** and no rotated-shape collision.
+- **Navigation/particles/AnimationTree/GUI layout/PathFollow run only in their own tests.**
+- **No GUI control is functional** (no draw-from-tree, input, signals, TTF fonts).
+- **Real exported Godot projects cannot load** (binary `.res` stub, PCK layout mismatch,
+  no `.ctex`, wrong UID codec).
+- **The browser target is structurally absent** (no wasm build anywhere; the "browser demo"
+  is BMP frames streamed from a native server to an `<img>` tag).
+- **GDScript rejects `const`, `*=`, `is`, `as`, `assert`**; match arms bind instead of compare.
+
+A subsystem may only claim runtime parity when an **app-level test drives it through
+`MainLoop::step` / `patina-runner` on a `.tscn` scene**. The rows below remain accurate as
+*library/unit-test inventories* until re-scored per this bar.
 
 ---
 
@@ -10,7 +39,7 @@ This document tracks the implementation and compatibility status of each Patina 
 
 | Status | Meaning |
 |--------|---------|
-| **Measured** | Automated tests compare Patina output against Godot oracle fixtures or deterministic goldens. Test files are cited. |
+| **Measured** | Automated tests compare Patina output against Godot oracle fixtures or deterministic goldens. Test files are cited. **Caveat (2026-07-11 audit): unless the tests are app-level, this measures the library, not the running engine — see warning above.** |
 | **Claimed** | Code exists and appears to work, but no dedicated parity test proves it matches Godot behavior. |
 | **Deferred** | Not started or explicitly out of scope for the current milestone. |
 
@@ -37,7 +66,7 @@ This document tracks the implementation and compatibility status of each Patina 
 | 2D Physics | `gdphysics2d` | **Measured** | 111 + integration | 17 | Deterministic | `gdphysics2d` units (111), `physics_integration_test` |
 | Input / Platform Stable Layer | `gdplatform` | **Measured** | 504 + integration | — | Measured for bounded slice | `gdplatform` units (504) — input, timers, OS info, target metadata, export config; `platform_first_stable_layer_test`, `platform_targets_validation_test`, `ci_build_matrix_platform_test`, `startup_runtime_packaging_flow_test` |
 | 2D Vertical Slice | all | **Measured** | integration | — | End-to-end | `vertical_slice_test`: scene→scripts→input→physics→process→render |
-| Audio | `gdaudio` | **Claimed** | 88 | — | N/A | Bus routing, playback state, WAV decode. No real audio output. See `AUDIO_MILESTONE.md`. |
+| Audio | `gdaudio` | **Claimed** | 100+ | — | Partial | Platform output (cpal), WAV/OGG decode, Amplify/Reverb/EQ effect resources, bus volume/mute/solo. Bus-to-bus send routing, MP3, and project.godot bus-layout load are NOT yet wired (send fields exist but `mix()` ignores them). See `AUDIO_MILESTONE.md` + scorecard. |
 | Editor-Facing Compatibility Layer | `gdeditor` | **Measured** | 1963 + integration | — | Measured for bounded slice | `gdeditor` units (1963), `editor_smoke_test`, `editor_461_revalidation_test`, `editor_interface_compat_test`, `editor_menu_parity_test`, `editor_systems_parity_test` — browser editor shell, compatibility layer, selected tooling slices |
 | 3D Rendering | `gdrender3d` | **Measured** | 95 + integration | 64 render | Golden-based | `gdrender3d` units (95), `render_3d_parity_test`, `comparison_tooling_3d_test` — software renderer, framebuffer comparison, diff imaging |
 | 3D Rendering Server | `gdserver3d` | **Measured** | 338 | — | Measured | `gdserver3d` units (338) — mesh, camera, lighting, viewport, material |

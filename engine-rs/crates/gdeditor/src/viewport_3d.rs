@@ -521,6 +521,27 @@ pub struct EnvironmentPreview3D {
     pub fog_volumes: Vec<FogVolume>,
 }
 
+/// Builds the editor preview sky exactly like Godot's
+/// `Node3DEditor::_preview_settings_changed`: the horizon color is **derived**
+/// from the sky/ground picker colors — averaged, then desaturated halfway
+/// toward `luminance × 3.333` — rather than the stock ProceduralSkyMaterial
+/// horizon. With the default pickers this yields a slightly brighter horizon
+/// (≈0.662, 0.672, 0.687) than the material default (0.6463, 0.6558, 0.6708).
+pub(crate) fn preview_sky_material(sky_color: Color, ground_color: Color) -> ProceduralSkyMaterial {
+    let mut hz = sky_color.lerp(ground_color, 0.5);
+    // Godot Color::get_luminance() (Rec. 709 weights on the raw sRGB values).
+    let hz_lum = (0.2126 * hz.r + 0.7152 * hz.g + 0.0722 * hz.b) * 3.333;
+    hz = hz.lerp(Color::new(hz_lum, hz_lum, hz_lum, 1.0), 0.5);
+    hz.a = 1.0;
+    ProceduralSkyMaterial {
+        sky_top_color: sky_color,
+        sky_horizon_color: hz,
+        ground_bottom_color: ground_color,
+        ground_horizon_color: hz,
+        ..ProceduralSkyMaterial::default()
+    }
+}
+
 impl Default for EnvironmentPreview3D {
     fn default() -> Self {
         // Default environment: procedural sky, mild ambient, sun at 45°.
@@ -534,7 +555,12 @@ impl Default for EnvironmentPreview3D {
         env.tone_mapper = ToneMapper::Filmic;
         env.glow_enabled = true;
         env.sky = Some(Sky {
-            material: SkyMaterial::Procedural(ProceduralSkyMaterial::default()),
+            material: SkyMaterial::Procedural(preview_sky_material(
+                // Godot's preview pickers default to the stock sky top /
+                // ground colors (`_load_default_preview_settings`).
+                Color::new(0.385, 0.454, 0.55, 1.0),
+                Color::new(0.2, 0.169, 0.133, 1.0),
+            )),
             process_mode: SkyProcessMode::Automatic,
             radiance_size: 256,
         });
@@ -3199,6 +3225,36 @@ mod tests {
         assert!(preview.environment.sky.is_some());
     }
 
+    /// The preview sky's horizon is Godot's *derived* color — sky/ground
+    /// averaged, then desaturated halfway toward luminance × 3.333
+    /// (`Node3DEditor::_preview_settings_changed`) — not the stock
+    /// ProceduralSkyMaterial horizon. With the default pickers that is
+    /// ≈(0.662, 0.672, 0.687).
+    #[test]
+    fn preview_sky_horizon_is_derived_like_godot() {
+        let mat = preview_sky_material(
+            Color::new(0.385, 0.454, 0.55, 1.0),
+            Color::new(0.2, 0.169, 0.133, 1.0),
+        );
+        assert!((mat.sky_horizon_color.r - 0.66224).abs() < 1e-3, "r={}", mat.sky_horizon_color.r);
+        assert!((mat.sky_horizon_color.g - 0.67174).abs() < 1e-3, "g={}", mat.sky_horizon_color.g);
+        assert!((mat.sky_horizon_color.b - 0.68674).abs() < 1e-3, "b={}", mat.sky_horizon_color.b);
+        // Both horizons share the derived color; top/bottom flow from pickers.
+        assert_eq!(mat.sky_horizon_color, mat.ground_horizon_color);
+        assert!((mat.sky_top_color.g - 0.454).abs() < 1e-6);
+        assert!((mat.ground_bottom_color.b - 0.133).abs() < 1e-6);
+
+        // And the default preview environment actually uses the derivation.
+        let preview = EnvironmentPreview3D::default();
+        let Some(sky) = &preview.environment.sky else {
+            panic!("preview must carry a sky")
+        };
+        let SkyMaterial::Procedural(m) = &sky.material else {
+            panic!("preview sky must be procedural")
+        };
+        assert!((m.sky_horizon_color.r - 0.66224).abs() < 1e-3);
+    }
+
     #[test]
     fn test_environment_preview_toggle() {
         let mut preview = EnvironmentPreview3D::default();
@@ -3391,9 +3447,9 @@ mod tests {
     fn test_viewport3d_effective_background_color_sky() {
         let vp = Viewport3D::default();
         let bg = vp.effective_background_color();
-        // Should be the procedural sky horizon color
-        let proc_default = ProceduralSkyMaterial::default();
-        assert!(approx_eq(bg.r, proc_default.sky_horizon_color.r, 1e-4));
+        // The preview sky's horizon — Godot's *derived* preview horizon
+        // (≈0.662), not the stock ProceduralSkyMaterial default (0.6463).
+        assert!(approx_eq(bg.r, 0.66224, 1e-3), "got {}", bg.r);
     }
 
     #[test]

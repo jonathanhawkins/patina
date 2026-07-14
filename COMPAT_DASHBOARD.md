@@ -1,36 +1,51 @@
 # Compatibility Dashboard
 
-**Last updated**: 2026-03-28 (pat-cygub: improved compatibility matrix — updated stale test counts, added patina-runner, corrected totals)
+**Last updated**: 2026-07-12 (fresh-eyes source audit correction)
 **Test suite**: 15,700 tests passing across workspace (6,355 crate units + 9,338 integration tests in 393 files)
 **Golden files**: 150 (17 physics, 23 traces, 37 scenes, 5 resources, 64 render, 3 signals, 1 version)
 **Oracle outputs**: 115 files (measured against Godot 4.6.1)
+
+> **⚠️ Audit 2026-07-11** ([docs/PARITY_AUDIT_2026-07-11.md](docs/PARITY_AUDIT_2026-07-11.md),
+> epic `pat-u3l8c`): the table below reports **library/unit-test status**, not runtime parity.
+> At runtime, `MainLoop::step` wires only 2D physics — 3D physics, audio, navigation,
+> particles, AnimationTree, GUI, and node-driven 2D rendering do not execute in a running
+> game; custom shaders don't load; real exported Godot projects can't be read; there is no
+> wasm/browser build. See the "Runtime reality" column added below.
 
 ---
 
 ## Subsystem Status at a Glance
 
-| Subsystem | Status | Test Count | Goldens | Parity |
-|-----------|--------|------------|---------|--------|
-| Core Runtime | Measured | 828 | — | ~100% |
-| Variant System | Measured | 131 | — | ~100% |
-| Object Model | Measured | 75+ | — | ~80% |
-| Signals | Measured | integration | 3 | ~60% |
-| Notifications | Measured | integration | — | ~85% |
-| Resources | Measured | 319+ | 5 | ~95% |
-| Scene System | Measured | 959+ | 37 | ~90% |
-| GDScript Interop | Measured | 464+ | — | ~85% |
-| 2D Rendering | Measured | 168+ | 64 | Golden-based |
-| 2D Rendering Server | Measured | 108 | — | Measured |
-| 2D Physics | Measured | 111+ | 17 | Deterministic |
-| Input / Platform | Measured | 504 | — | Measured |
-| Vertical Slice | Measured | integration | — | End-to-end |
-| Audio | Claimed | 88 | — | Stub only |
-| Editor | Measured | 1963+ | — | Parity |
-| 3D Rendering | Measured | 95+ | 64 | Golden-based |
-| 3D Rendering Server | Measured | 338 | — | Measured |
-| 3D Physics | Measured | 124+ | — | Deterministic |
-| 3D Comparison Tooling | Measured | 44 | — | Tooling |
-| Runner | Measured | 80 | — | N/A |
+| Subsystem | Status | Test Count | Goldens | Parity | Runtime reality (audit 2026-07-11) |
+|-----------|--------|------------|---------|--------|-------------------------------------|
+| Core Runtime | Measured | 828 | — | ~100% | Solid; Packed*Array/int-vector Variants missing (`.11/.16`) |
+| Variant System | Measured | 131 | — | ~100% | Common types OK; no Packed arrays, RID, Signal-as-value |
+| Object Model | Measured | 75+ | — | ~80% | Solid backend; much never exposed to scripts (`.21`) |
+| Signals | Measured | integration | 3 | ~60% | Backend solid; Godot-4 connect style + flags missing (`.17`) |
+| Notifications | Measured | integration | — | ~85% | Solid |
+| Resources | Measured | 319+ | 5 | ~95% | Text subset only — binary .res/.scn, real .pck, .ctex, UID codec all fail (`.83–.87`) |
+| Scene System | Measured | 959+ | 37 | ~90% | Lifecycle solid; Timer node missing; most 3D nodes shells (`.3`, audit §scene) |
+| GDScript Interop | Measured | 464+ | — | ~85% | const/*=/is/as/assert rejected; match broken; ~10-15% method surface (`.7–.15`) |
+| 2D Rendering | Measured | 168+ | 64 | Golden-based | Scene nodes emit no draw commands; rotation→AABB; no TileMap render (`.23–.25`) |
+| 2D Rendering Server | Measured | 108 | — | Measured | Library only; WgpuRenderer2D is software in disguise |
+| 2D Physics | Measured | 111+ | 17 | Deterministic | **No gravity**; no rotated collision; no floor snap (`.46–.48`) |
+| Input / Platform | Measured | 504 | — | Measured | State machine solid; InputEvent not exposed to _input (`.22`) |
+| Vertical Slice | Measured | integration | — | End-to-end | Exercises the narrow wired path only |
+| Audio | Claimed | 88+ | — | Library-only | **Orphaned crate — no runtime wiring, no sound in games** (`.2`) |
+| Editor | Measured | 1963+ | — | Parity | Editor shell real; its web UI ≠ runtime GUI |
+| 3D Rendering | Measured | 95+ | 64 | Golden-based | No texture sampling; no skinning; GPU path lacks fog/omni shadows (`.32–.35`) |
+| 3D Rendering Server | Measured | 338 | — | Measured | Library only |
+| 3D Physics | Measured | 124+ | — | Deterministic | **Never stepped by MainLoop**; capsule/plane don't collide (`.1`, `.54`) |
+| 3D Comparison Tooling | Measured | 44 | — | Tooling | Solid |
+| Networking | Measured | integration | — | HTTP/WS/TcpMultiplayerPeer | Not wired to SceneTree/GDScript; zero Godot wire compat; no TLS (`.75–.78`) |
+| Runner | Measured | 80 | — | N/A | Headless JSON dumper — no render/audio/input loop |
+| GUI (runtime) | Deferred | 0 | — | 0 functional controls | No draw-from-tree/input/signals/TTF (`.67–.70`) |
+| Shaders | Deferred | tokenizer only | — | Non-functional | .gdshader doesn't load; bodies never execute (`.43–.44`) |
+| Navigation | Claimed | unit | — | Library-only | No AStar classes; centroid paths; never stepped (`.61–.64`) |
+| Animation | Measured | unit | — | Library-only | Tracks only animate the player's own node; AnimationTree dead (`.94–.96`) |
+| Web / Browser | Deferred | 0 | — | ~0% | No wasm build exists; browser shows streamed BMPs (`.109–.115`) |
+
+Bead ids `.N` = `pat-u3l8c.N`.
 
 ---
 
@@ -87,7 +102,7 @@ All oracle golden outputs regenerated against **Godot 4.6.1** (v4.6.1.stable.off
 
 | Gap | Category | Impact |
 |-----|----------|--------|
-| Audio playback | Deferred | Low — stub only, no Godot behavior to compare |
+| Device audio backend | Partial | Mixer/server measured; OS device output varies by platform |
 
 ---
 

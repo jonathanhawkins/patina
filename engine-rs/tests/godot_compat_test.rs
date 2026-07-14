@@ -227,7 +227,7 @@ fn tilemap_packed_byte_array_empty() {
 
     let tilemap = nodes.iter().find(|n| n.name() == "TileMapLayer").unwrap();
     let data = tilemap.get_property("tile_map_data");
-    assert_eq!(data, Variant::Array(vec![]));
+    assert_eq!(data, Variant::PackedByteArray(vec![]));
 }
 
 #[test]
@@ -239,18 +239,15 @@ fn tilemap_packed_vector2_array() {
     let spawns = nodes.iter().find(|n| n.name() == "SpawnPoints").unwrap();
     let positions = spawns.get_property("metadata/spawn_positions");
     match positions {
-        Variant::Array(items) => {
+        // PackedVector2Array(64, 320, 512, 320, 256, 64) -> 3 Vector2s
+        Variant::PackedVector2Array(items) => {
             assert_eq!(items.len(), 3);
-            // PackedVector2Array(64, 320, 512, 320, 256, 64) -> 3 Vector2s
-            match &items[0] {
-                Variant::Vector2(v) => {
-                    assert_eq!(v.x, 64.0);
-                    assert_eq!(v.y, 320.0);
-                }
-                other => panic!("expected Vector2, got {other:?}"),
-            }
+            assert_eq!(items[0].x, 64.0);
+            assert_eq!(items[0].y, 320.0);
+            assert_eq!(items[2].x, 256.0);
+            assert_eq!(items[2].y, 64.0);
         }
-        other => panic!("expected Array, got {other:?}"),
+        other => panic!("expected PackedVector2Array, got {other:?}"),
     }
 }
 
@@ -263,13 +260,13 @@ fn tilemap_packed_string_array() {
     let spawns = nodes.iter().find(|n| n.name() == "SpawnPoints").unwrap();
     let types = spawns.get_property("metadata/enemy_types");
     match types {
-        Variant::Array(items) => {
+        Variant::PackedStringArray(items) => {
             assert_eq!(items.len(), 3);
-            assert_eq!(items[0], Variant::String("slime".into()));
-            assert_eq!(items[1], Variant::String("bat".into()));
-            assert_eq!(items[2], Variant::String("skeleton".into()));
+            assert_eq!(items[0], "slime");
+            assert_eq!(items[1], "bat");
+            assert_eq!(items[2], "skeleton");
         }
-        other => panic!("expected Array, got {other:?}"),
+        other => panic!("expected PackedStringArray, got {other:?}"),
     }
 }
 
@@ -282,12 +279,12 @@ fn tilemap_packed_float32_array() {
     let bounds = nodes.iter().find(|n| n.name() == "Boundaries").unwrap();
     let level_bounds = bounds.get_property("metadata/level_bounds");
     match level_bounds {
-        Variant::Array(items) => {
+        Variant::PackedFloat32Array(items) => {
             assert_eq!(items.len(), 4);
-            assert_eq!(items[0], Variant::Float(0.0));
-            assert_eq!(items[3], Variant::Float(640.0));
+            assert_eq!(items[0], 0.0);
+            assert_eq!(items[3], 640.0);
         }
-        other => panic!("expected Array, got {other:?}"),
+        other => panic!("expected PackedFloat32Array, got {other:?}"),
     }
 }
 
@@ -300,12 +297,12 @@ fn tilemap_packed_int32_array() {
     let bounds = nodes.iter().find(|n| n.name() == "Boundaries").unwrap();
     let indices = bounds.get_property("metadata/tile_indices");
     match indices {
-        Variant::Array(items) => {
+        Variant::PackedInt32Array(items) => {
             assert_eq!(items.len(), 10);
-            assert_eq!(items[0], Variant::Int(0));
-            assert_eq!(items[9], Variant::Int(9));
+            assert_eq!(items[0], 0);
+            assert_eq!(items[9], 9);
         }
-        other => panic!("expected Array, got {other:?}"),
+        other => panic!("expected PackedInt32Array, got {other:?}"),
     }
 }
 

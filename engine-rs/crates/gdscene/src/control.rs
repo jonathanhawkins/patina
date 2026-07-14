@@ -110,6 +110,40 @@ impl FocusMode {
     }
 }
 
+/// Mouse filter mode matching Godot's `Control.MouseFilter`.
+///
+/// Controls whether a Control receives mouse/touch events during viewport
+/// hit-testing and whether those events keep propagating to nodes behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseFilter {
+    /// Receives mouse events and stops propagation to controls behind it.
+    Stop,
+    /// Receives mouse events but also lets them pass to controls behind it.
+    Pass,
+    /// Ignores mouse events entirely; they pass through to controls behind it.
+    Ignore,
+}
+
+impl MouseFilter {
+    /// Returns the Godot integer representation.
+    fn to_int(self) -> i64 {
+        match self {
+            MouseFilter::Stop => 0,
+            MouseFilter::Pass => 1,
+            MouseFilter::Ignore => 2,
+        }
+    }
+
+    /// Converts from Godot integer representation.
+    fn from_int(v: i64) -> Self {
+        match v {
+            1 => MouseFilter::Pass,
+            2 => MouseFilter::Ignore,
+            _ => MouseFilter::Stop,
+        }
+    }
+}
+
 /// Horizontal/vertical text alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlign {
@@ -411,6 +445,172 @@ pub fn get_position(tree: &SceneTree, node_id: NodeId) -> Vector2 {
             _ => Vector2::ZERO,
         })
         .unwrap_or(Vector2::ZERO)
+}
+
+// -- Mouse filter / hit-testing ---------------------------------------------
+
+/// Sets the `"mouse_filter"` property on a Control node.
+pub fn set_mouse_filter(tree: &mut SceneTree, node_id: NodeId, filter: MouseFilter) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("mouse_filter", Variant::Int(filter.to_int()));
+    }
+}
+
+/// Gets the `"mouse_filter"` property, defaulting to [`MouseFilter::Stop`]
+/// (Godot's default, `MOUSE_FILTER_STOP`).
+pub fn get_mouse_filter(tree: &SceneTree, node_id: NodeId) -> MouseFilter {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("mouse_filter") {
+            Variant::Int(i) => MouseFilter::from_int(i),
+            _ => MouseFilter::Stop,
+        })
+        .unwrap_or(MouseFilter::Stop)
+}
+
+/// Returns `true` if `point` lies within the axis-aligned rect at `position`
+/// with the given `size` (half-open: includes the top-left edge, excludes the
+/// bottom-right edge, matching Godot's `Rect2::has_point`).
+pub fn rect_has_point(position: Vector2, size: Vector2, point: Vector2) -> bool {
+    point.x >= position.x
+        && point.y >= position.y
+        && point.x < position.x + size.x
+        && point.y < position.y + size.y
+}
+
+/// Returns `true` if `point` (in the control's coordinate space) lies within
+/// this Control's rect (`position` + `size`). Used for viewport hit-testing
+/// before routing a mouse event to the control.
+pub fn control_has_point(tree: &SceneTree, node_id: NodeId, point: Vector2) -> bool {
+    rect_has_point(get_position(tree, node_id), get_size(tree, node_id), point)
+}
+
+/// Recursively finds the topmost (front-most, last-drawn) Control whose global
+/// rect contains `point` and whose `mouse_filter` is not [`MouseFilter::Ignore`].
+///
+/// `parent_global` is the accumulated global position of `node_id`'s parent.
+/// Children are drawn on top of their parent, and later children on top of
+/// earlier ones, so the search visits children in reverse order first and
+/// returns the first (front-most) hit before testing the node itself.
+fn hit_test_control(
+    tree: &SceneTree,
+    node_id: NodeId,
+    point: Vector2,
+    parent_global: Vector2,
+) -> Option<NodeId> {
+    let (is_ctrl, children) = match tree.get_node(node_id) {
+        Some(n) => (
+            n.is_class("Control") || CONTROL_HIT_CLASSES.contains(&n.class_name()),
+            n.children().to_vec(),
+        ),
+        None => return None,
+    };
+    let global_pos = if is_ctrl {
+        parent_global + get_position(tree, node_id)
+    } else {
+        parent_global
+    };
+    for &child in children.iter().rev() {
+        if let Some(hit) = hit_test_control(tree, child, point, global_pos) {
+            return Some(hit);
+        }
+    }
+    if is_ctrl
+        && get_mouse_filter(tree, node_id) != MouseFilter::Ignore
+        && rect_has_point(global_pos, get_size(tree, node_id), point)
+    {
+        return Some(node_id);
+    }
+    None
+}
+
+/// Returns the topmost Control at `point` (in the viewport's global coordinate
+/// space), respecting `mouse_filter`: [`MouseFilter::Ignore`] controls are
+/// transparent to the mouse and skipped. Walks the whole tree from the root in
+/// front-to-back draw order. This is the entry point for viewport mouse
+/// hit-testing before an event is routed to a control.
+pub fn control_at_point(tree: &SceneTree, point: Vector2) -> Option<NodeId> {
+    hit_test_control(tree, tree.root_id(), point, Vector2::ZERO)
+}
+
+/// Control-family classes recognized during mouse hit-testing. Used as a
+/// fallback to ClassDB (`is_class("Control")`) so hit-testing works even when
+/// the ClassDB inheritance table has not been populated (e.g. bare unit tests),
+/// mirroring [`crate::control_render`]'s control detection.
+const CONTROL_HIT_CLASSES: &[&str] = &[
+    "Control",
+    "Panel",
+    "PanelContainer",
+    "Label",
+    "RichTextLabel",
+    "ColorRect",
+    "TextureRect",
+    "NinePatchRect",
+    "BaseButton",
+    "Button",
+    "CheckBox",
+    "CheckButton",
+    "OptionButton",
+    "MenuButton",
+    "LinkButton",
+    "TextureButton",
+    "LineEdit",
+    "TextEdit",
+    "HSlider",
+    "VSlider",
+    "SpinBox",
+    "ProgressBar",
+    "ScrollBar",
+    "HScrollBar",
+    "VScrollBar",
+    "ItemList",
+    "Tree",
+    "TabBar",
+    "TabContainer",
+    "VBoxContainer",
+    "HBoxContainer",
+    "BoxContainer",
+    "GridContainer",
+    "MarginContainer",
+    "CenterContainer",
+    "ScrollContainer",
+];
+
+/// Button-family classes whose click emits the `pressed` signal.
+const BUTTON_CLASSES: &[&str] = &[
+    "BaseButton",
+    "Button",
+    "CheckBox",
+    "CheckButton",
+    "OptionButton",
+    "MenuButton",
+    "LinkButton",
+    "TextureButton",
+];
+
+/// Returns `true` if the node is a `BaseButton` (or a subclass such as
+/// `Button`/`CheckBox`). Checks ClassDB inheritance first, then falls back to a
+/// known-class list (mirroring [`crate::control_render`]'s control detection).
+fn node_is_base_button(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.is_class("BaseButton") || BUTTON_CLASSES.contains(&n.class_name()))
+        .unwrap_or(false)
+}
+
+/// Routes a mouse click at `point` (viewport global coordinates) to the topmost
+/// Control under it, honoring `mouse_filter`. If that control is a
+/// [`BaseButton`](node_is_base_button), emits its `pressed` signal (Godot's
+/// default release action). Returns the control that received the click, or
+/// `None` if the point is over no control.
+///
+/// This is the runtime entry point exercised by the app-level test: connecting
+/// a callback to a Button's `pressed` signal and calling this on the button's
+/// rect fires the callback.
+pub fn click_at_point(tree: &mut SceneTree, point: Vector2) -> Option<NodeId> {
+    let hit = control_at_point(tree, point)?;
+    if node_is_base_button(tree, hit) {
+        tree.emit_signal(hit, "pressed", &[]);
+    }
+    Some(hit)
 }
 
 // -- Grow direction ---------------------------------------------------------
@@ -1499,6 +1699,164 @@ mod tests {
 
         set_focus_mode(&mut tree, id, FocusMode::Click);
         assert_eq!(get_focus_mode(&tree, id), FocusMode::Click);
+    }
+
+    #[test]
+    fn mouse_filter_default_is_stop() {
+        let tree = make_tree();
+        assert_eq!(get_mouse_filter(&tree, tree.root_id()), MouseFilter::Stop);
+    }
+
+    #[test]
+    fn set_get_mouse_filter() {
+        let mut tree = make_tree();
+        let id = add_control(&mut tree, "Panel", "Control");
+        set_mouse_filter(&mut tree, id, MouseFilter::Pass);
+        assert_eq!(get_mouse_filter(&tree, id), MouseFilter::Pass);
+        set_mouse_filter(&mut tree, id, MouseFilter::Ignore);
+        assert_eq!(get_mouse_filter(&tree, id), MouseFilter::Ignore);
+    }
+
+    #[test]
+    fn rect_has_point_is_half_open() {
+        let pos = Vector2::new(10.0, 20.0);
+        let size = Vector2::new(100.0, 50.0);
+        assert!(rect_has_point(pos, size, Vector2::new(10.0, 20.0))); // top-left inclusive
+        assert!(rect_has_point(pos, size, Vector2::new(50.0, 40.0)));
+        assert!(!rect_has_point(pos, size, Vector2::new(110.0, 40.0))); // right edge exclusive
+        assert!(!rect_has_point(pos, size, Vector2::new(50.0, 70.0))); // bottom edge exclusive
+        assert!(!rect_has_point(pos, size, Vector2::new(9.0, 40.0)));
+    }
+
+    #[test]
+    fn control_has_point_uses_position_and_size() {
+        let mut tree = make_tree();
+        let id = add_control(&mut tree, "Btn", "Button");
+        set_position(&mut tree, id, Vector2::new(5.0, 5.0));
+        set_size(&mut tree, id, Vector2::new(20.0, 10.0));
+        assert!(control_has_point(&tree, id, Vector2::new(6.0, 6.0)));
+        assert!(!control_has_point(&tree, id, Vector2::new(30.0, 6.0)));
+    }
+
+    #[test]
+    fn control_at_point_finds_topmost() {
+        let mut tree = make_tree();
+        let back = add_control(&mut tree, "Back", "Control");
+        set_position(&mut tree, back, Vector2::new(0.0, 0.0));
+        set_size(&mut tree, back, Vector2::new(100.0, 100.0));
+        let front = add_control(&mut tree, "Front", "Control");
+        set_position(&mut tree, front, Vector2::new(10.0, 10.0));
+        set_size(&mut tree, front, Vector2::new(50.0, 50.0));
+
+        // Inside both → the later-added (front-most) control wins.
+        assert_eq!(control_at_point(&tree, Vector2::new(20.0, 20.0)), Some(front));
+        // Inside only the back control.
+        assert_eq!(control_at_point(&tree, Vector2::new(80.0, 80.0)), Some(back));
+        // Outside both.
+        assert_eq!(control_at_point(&tree, Vector2::new(200.0, 200.0)), None);
+    }
+
+    #[test]
+    fn control_at_point_respects_mouse_filter_ignore() {
+        let mut tree = make_tree();
+        let back = add_control(&mut tree, "Back", "Control");
+        set_position(&mut tree, back, Vector2::new(0.0, 0.0));
+        set_size(&mut tree, back, Vector2::new(100.0, 100.0));
+        let front = add_control(&mut tree, "Front", "Control");
+        set_position(&mut tree, front, Vector2::new(0.0, 0.0));
+        set_size(&mut tree, front, Vector2::new(100.0, 100.0));
+        set_mouse_filter(&mut tree, front, MouseFilter::Ignore);
+
+        // Front ignores the mouse → the event falls through to the back control.
+        assert_eq!(control_at_point(&tree, Vector2::new(20.0, 20.0)), Some(back));
+    }
+
+    #[test]
+    fn control_at_point_uses_global_position_of_nested_child() {
+        let mut tree = make_tree();
+        let parent = add_control(&mut tree, "Parent", "Control");
+        set_position(&mut tree, parent, Vector2::new(50.0, 50.0));
+        set_size(&mut tree, parent, Vector2::new(100.0, 100.0));
+        let child = tree
+            .add_child(parent, Node::new("Child", "Control"))
+            .unwrap();
+        set_position(&mut tree, child, Vector2::new(10.0, 10.0));
+        set_size(&mut tree, child, Vector2::new(20.0, 20.0));
+
+        // Child global rect is (60,60)..(80,80).
+        assert_eq!(control_at_point(&tree, Vector2::new(65.0, 65.0)), Some(child));
+        // Inside parent but outside child.
+        assert_eq!(control_at_point(&tree, Vector2::new(55.0, 55.0)), Some(parent));
+    }
+
+    #[test]
+    fn click_on_button_emits_pressed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut tree = make_tree();
+        let btn = add_control(&mut tree, "Btn", "Button");
+        set_position(&mut tree, btn, Vector2::new(10.0, 10.0));
+        set_size(&mut tree, btn, Vector2::new(40.0, 20.0));
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_cb = Arc::clone(&count);
+        let conn = gdobject::signal::Connection::with_callback(
+            btn.object_id(),
+            "on_pressed",
+            move |_args| {
+                count_cb.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            },
+        );
+        tree.connect_signal(btn, "pressed", conn);
+
+        // Clicking inside the button emits `pressed`; the observer fires once.
+        assert_eq!(click_at_point(&mut tree, Vector2::new(20.0, 15.0)), Some(btn));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // A click outside the button emits nothing.
+        assert_eq!(click_at_point(&mut tree, Vector2::new(200.0, 200.0)), None);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn clicking_button_emits_pressed_observed_from_gdscript() {
+        // App-level test: a GDScript-connected handler observes a Button's
+        // `pressed` signal when the button is clicked via viewport hit-testing.
+        let mut tree = make_tree();
+        let root = tree.root_id();
+
+        let btn = tree.add_child(root, Node::new("Btn", "Button")).unwrap();
+        set_position(&mut tree, btn, Vector2::new(10.0, 10.0));
+        set_size(&mut tree, btn, Vector2::new(80.0, 30.0));
+
+        // Listener node whose GDScript observes the button's `pressed`.
+        let listener = tree.add_child(root, Node::new("Listener", "Node")).unwrap();
+        let script = "\
+extends Node
+var clicked = false
+func _on_pressed():
+    self.clicked = true
+";
+        let inst = crate::scripting::GDScriptNodeInstance::from_source(script, listener).unwrap();
+        tree.attach_script(listener, Box::new(inst));
+
+        // Connect the Button's `pressed` to the listener's method (script dispatch).
+        tree.connect_signal(
+            btn,
+            "pressed",
+            gdobject::signal::Connection::new(listener.object_id(), "_on_pressed"),
+        );
+
+        // Simulate a mouse click inside the button's rect.
+        click_at_point(&mut tree, Vector2::new(20.0, 20.0));
+
+        // GDScript observed the press via the emitted `pressed` signal.
+        assert_eq!(
+            tree.get_script(listener).unwrap().get_property("clicked"),
+            Some(Variant::Bool(true))
+        );
     }
 
     #[test]

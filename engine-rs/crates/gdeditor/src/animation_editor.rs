@@ -81,6 +81,10 @@ impl TrackDescriptor {
             TrackType::Property => "",
             TrackType::Method => "[Method] ",
             TrackType::Audio => "[Audio] ",
+            TrackType::Position3D => "[Position] ",
+            TrackType::Rotation3D => "[Rotation] ",
+            TrackType::Scale3D => "[Scale] ",
+            TrackType::BlendShape => "[Blend Shape] ",
         };
         format!("{}{}:{}", prefix, self.node_path, self.target_path)
     }

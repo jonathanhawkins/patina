@@ -411,6 +411,7 @@ impl Sprite3D {
             indices: vec![0, 1, 2, 0, 2, 3],
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         }
     }
 }

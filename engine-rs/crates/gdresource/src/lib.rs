@@ -21,7 +21,10 @@
 #![warn(clippy::all)]
 
 pub mod cache;
+pub mod config_file;
+pub mod ctex;
 pub mod fuzz_res;
+pub mod gltf_import;
 pub mod importers;
 pub mod loader;
 pub mod pck;
@@ -35,6 +38,7 @@ pub mod unified;
 
 // Re-export the most-used types at the crate root.
 pub use cache::ResourceCache;
+pub use config_file::{is_config_file_handle, ConfigFile};
 pub use importers::{
     import_font, import_image, import_wav, load_import_file, parse_import_file, resolve_res_path,
     ImportFile, ResourceFormatLoader,
@@ -46,17 +50,13 @@ pub use res_loader::{
 };
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
-pub use uid::UidRegistry;
+pub use uid::{id_to_text, parse_uid_sidecar, text_to_id, UidRegistry, UID_INVALID_TEXT};
 pub use unified::UnifiedLoader;
 
-/// Stub glTF importer — returns an error since glTF import is not yet implemented.
-pub fn import_gltf(
-    _path: &std::path::Path,
-) -> gdcore::error::EngineResult<std::sync::Arc<Resource>> {
-    Err(gdcore::error::EngineError::NotFound(
-        "glTF import not yet implemented".to_string(),
-    ))
-}
+/// Import a glTF 2.0 (`.gltf` / `.glb`) asset into a mesh document resource.
+///
+/// See [`gltf_import`] for supported features and the unsupported-extension list.
+pub use gltf_import::{import_gltf, import_gltf_bytes};
 
 #[cfg(test)]
 mod integration_tests {

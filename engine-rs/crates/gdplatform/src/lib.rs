@@ -17,12 +17,18 @@ pub mod http_request;
 pub mod input;
 pub mod native_menu;
 pub mod network;
+pub mod packet_peer_udp;
+pub mod stream_peer_tcp;
+pub mod tcp_multiplayer;
+pub mod enet_multiplayer;
 pub mod os;
 pub mod platform_targets;
 pub mod signing;
 pub mod thread;
 pub mod time;
 pub mod websocket_peer;
+pub mod webrtc_peer;
+pub mod xr;
 pub mod window;
 
 // Platform-specific modules (always compiled, but may be stubs on unsupported targets).
@@ -52,10 +58,16 @@ pub use websocket_peer::{
     Frame, Opcode, WebSocketError, WebSocketPeer, WebSocketState, WriteMode,
 };
 pub use network::{
-    ConnectionStatus, MockNetwork, MockNetworkPeer, MultiplayerAPI, MultiplayerSpawner,
-    MultiplayerSynchronizer, NetworkError, NetworkPeer, Packet, PeerId, RPCCall, RPCConfig,
-    RPCMode, TransferMode,
+    decode_rpc_packet, decode_spawn_packet, decode_sync_packet, encode_rpc_packet,
+    encode_spawn_packet, encode_sync_packet, ConnectionStatus, DecodedRPC, MockNetwork,
+    MockNetworkPeer, MultiplayerAPI, MultiplayerSpawner, MultiplayerSynchronizer, NetworkError,
+    NetworkPeer, Packet, PeerId, RPCCall, RPCConfig, RPCMode, SpawnPacket, SpawnRequest,
+    SyncPacket, TransferMode, REPLICATION_KIND_SPAWN, REPLICATION_KIND_SYNC, RPC_MAGIC,
 };
+pub use packet_peer_udp::{PacketPeerUDP, PacketPeerUdpError};
+pub use stream_peer_tcp::{StreamPeerTCP, StreamPeerTcpError, StreamPeerTcpStatus};
+pub use tcp_multiplayer::TcpMultiplayerPeer;
+pub use enet_multiplayer::ENetMultiplayerPeer;
 pub use os::{current_platform, get_ticks_msec, get_ticks_usec, is_debug_build, OsInfo, Platform};
 pub use platform_targets::{
     current_target, find_target_by_triple, Architecture, DesktopTarget, PlatformCapability,
@@ -66,3 +78,6 @@ pub use signing::{
 };
 pub use time::Timer;
 pub use window::{HeadlessWindow, WindowConfig, WindowEvent, WindowId, WindowManager};
+
+pub use webrtc_peer::{WebRTCMultiplayerPeer, WebRtcState};
+pub use xr::{XrPose, XrServer};

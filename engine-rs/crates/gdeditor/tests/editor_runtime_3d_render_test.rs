@@ -129,19 +129,38 @@ fn runtime_3d_scene_renders_content_not_blank() {
     );
 }
 
-/// A 2D scene's Game view must still use the canvas rasterizer unchanged — the
-/// 3D detection must not divert 2D scenes.
+/// A 2D scene's Game view must use the 2D **canvas rasterizer** — the runtime
+/// pixel path (pat-u3l8c.23) that draws the real CanvasItem pixels the game
+/// shows — NOT the 3D spatial renderer. `render_runtime_frame` therefore
+/// delegates a 2D scene to `render_runtime_canvas` (real pixels, no editor
+/// grid/rulers/gizmos), which is distinct from the editor viewport's
+/// class-glyph preview (`render_scene_with_zoom_pan`).
 #[test]
-fn runtime_2d_scene_uses_canvas_rasterizer_unchanged() {
+fn runtime_2d_scene_uses_canvas_rasterizer() {
+    use gdeditor::viewport_2d_render::{render_runtime_canvas, RUNTIME_CLEAR_COLOR};
+
     let tree = scene_2d();
     let vp = Viewport3D::new(320, 240);
     let (w, h) = (320, 240);
 
     let runtime = render_runtime_frame(&tree, &vp, w, h, 1.0, (0.0, 0.0));
-    let two_d = render_scene_with_zoom_pan(&tree, None, w, h, 1.0, (0.0, 0.0));
+    let canvas = render_runtime_canvas(&tree, w, h, RUNTIME_CLEAR_COLOR, None);
 
     assert_eq!(
-        runtime.pixels, two_d.pixels,
-        "a 2D scene's Game view renders identically to the canvas rasterizer"
+        (runtime.width, runtime.height),
+        (w, h),
+        "the Game-view frame is the requested size"
+    );
+    assert_eq!(
+        runtime.pixels, canvas.pixels,
+        "a 2D scene's Game view renders through the runtime canvas rasterizer"
+    );
+
+    // The runtime path is the real-pixel rasterizer, NOT the editor viewport's
+    // grid/ruler/marker preview — the two must differ.
+    let editor_preview = render_scene_with_zoom_pan(&tree, None, w, h, 1.0, (0.0, 0.0));
+    assert!(
+        runtime.pixels != editor_preview.pixels,
+        "the running Game view is not the editor's class-glyph/grid preview"
     );
 }

@@ -21,6 +21,15 @@ use crate::tokenizer::tokenize;
 /// Maximum call-stack depth before we bail out.
 const MAX_RECURSION_DEPTH: usize = 64;
 
+/// Remaining native stack (bytes) below which script calls grow the stack
+/// instead of risking overflow — debug-build interpreter frames are large
+/// enough that `MAX_RECURSION_DEPTH` script frames can exceed the default
+/// thread stack.
+const STACK_RED_ZONE: usize = 128 * 1024;
+
+/// How much native stack to allocate when growing.
+const STACK_GROWTH: usize = 4 * 1024 * 1024;
+
 /// Source location for error reporting.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
@@ -66,6 +75,8 @@ pub enum RuntimeErrorKind {
     ParseError(String),
     #[error("lex error: {0}")]
     LexError(String),
+    #[error("assertion failed: {0}")]
+    AssertionFailed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -157,25 +168,37 @@ impl fmt::Display for ScriptWarning {
 #[derive(Debug, Clone)]
 struct Environment {
     scopes: Vec<HashMap<String, Variant>>,
+    /// Parallel to `scopes`: names declared with `const` in each scope, which
+    /// may not be reassigned.
+    consts: Vec<std::collections::HashSet<String>>,
 }
 
 impl Environment {
     fn new() -> Self {
         Self {
             scopes: vec![HashMap::new()],
+            consts: vec![std::collections::HashSet::new()],
         }
     }
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.consts.push(std::collections::HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.consts.pop();
     }
 
     /// Define a new variable in the current (innermost) scope.
     fn define(&mut self, name: String, value: Variant) {
+        self.scopes.last_mut().unwrap().insert(name, value);
+    }
+
+    /// Define a constant in the current scope; reassigning it later is an error.
+    fn define_const(&mut self, name: String, value: Variant) {
+        self.consts.last_mut().unwrap().insert(name.clone());
         self.scopes.last_mut().unwrap().insert(name, value);
     }
 
@@ -193,9 +216,14 @@ impl Environment {
 
     /// Set an existing variable. Searches scopes from inner to outer.
     fn set(&mut self, name: &str, value: Variant) -> Result<(), RuntimeError> {
-        for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                scope.insert(name.to_string(), value);
+        for i in (0..self.scopes.len()).rev() {
+            if self.scopes[i].contains_key(name) {
+                if self.consts[i].contains(name) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot assign to constant '{name}'"
+                    ))));
+                }
+                self.scopes[i].insert(name.to_string(), value);
                 return Ok(());
             }
         }
@@ -244,6 +272,8 @@ enum ControlFlow {
     Return(Option<Variant>),
     Break,
     Continue,
+    /// Suspend the current function at an `await` (pat-p0s82.7).
+    Suspend(crate::coroutine::AwaitTarget),
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +309,13 @@ pub struct Interpreter {
     pub(crate) scene_access: Option<Box<dyn SceneAccess>>,
     /// The raw NodeId of the node this script is attached to.
     pub(crate) current_node_id: Option<u64>,
+    /// Suspended / ready coroutines for `await` (pat-p0s82.7).
+    pub coroutine_host: crate::coroutine::CoroutineHost,
+    /// The local name that a suspending `var v = await sig` wants bound to the
+    /// resumed value. Set when the `await` statement suspends, consumed by
+    /// `park_coroutine` as it parks the frame, and bound in `resume_one` on
+    /// resume. `None` for a bare `await` whose result is discarded (pat-nzgdu.6).
+    pending_await_bind: Option<String>,
 }
 
 impl fmt::Debug for Interpreter {
@@ -308,6 +345,8 @@ impl Clone for Interpreter {
             warnings: self.warnings.clone(),
             scene_access: None,
             current_node_id: self.current_node_id,
+            coroutine_host: crate::coroutine::CoroutineHost::new(),
+            pending_await_bind: None,
         }
     }
 }
@@ -349,6 +388,57 @@ pub struct ExportInfo {
     pub name: String,
     /// Optional type hint.
     pub type_hint: Option<String>,
+    /// Godot `PROPERTY_HINT_*` code derived from the `@export*` annotation
+    /// (0 = `PROPERTY_HINT_NONE`). Drives the inspector editor for this property.
+    pub hint: i64,
+    /// Hint string paired with [`hint`](Self::hint), e.g. `"0,100,5"` for
+    /// `@export_range(0,100,5)` or `"Idle,Run"` for `@export_enum("Idle","Run")`.
+    pub hint_string: String,
+}
+
+// Godot 4 `PropertyHint` codes (core/object/object.h) used by the inspector.
+/// No hint (`@export`).
+pub const PROPERTY_HINT_NONE: i64 = 0;
+/// Numeric range (`@export_range(min,max,step,...)`).
+pub const PROPERTY_HINT_RANGE: i64 = 1;
+/// Enumerated choices (`@export_enum("A","B")`).
+pub const PROPERTY_HINT_ENUM: i64 = 2;
+/// Bit flags (`@export_flags("A","B")`).
+pub const PROPERTY_HINT_FLAGS: i64 = 6;
+/// File path with optional filter (`@export_file("*.png")`).
+pub const PROPERTY_HINT_FILE: i64 = 13;
+/// Directory path (`@export_dir`).
+pub const PROPERTY_HINT_DIR: i64 = 14;
+/// Multiline text (`@export_multiline`).
+pub const PROPERTY_HINT_MULTILINE_TEXT: i64 = 18;
+/// Placeholder text (`@export_placeholder("text")`).
+pub const PROPERTY_HINT_PLACEHOLDER_TEXT: i64 = 20;
+/// Color without alpha (`@export_color_no_alpha`).
+pub const PROPERTY_HINT_COLOR_NO_ALPHA: i64 = 21;
+/// NodePath restricted to node types (`@export_node_path("Node2D")`).
+pub const PROPERTY_HINT_NODE_PATH_VALID_TYPES: i64 = 24;
+
+/// Maps an `@export*` annotation to its Godot `(PROPERTY_HINT_*, hint_string)`
+/// pair. The `hint_string` is the annotation's arguments joined with commas,
+/// matching Godot's inspector encoding (e.g. `@export_range(0,100,5)` ->
+/// `(PROPERTY_HINT_RANGE, "0,100,5")`). Returns `None` for non-export
+/// annotations so callers can `find_map` the first export in a list.
+pub fn export_hint_from_annotation(ann: &Annotation) -> Option<(i64, String)> {
+    let joined = || ann.args.join(",");
+    let hint = match ann.name.as_str() {
+        "export" => (PROPERTY_HINT_NONE, String::new()),
+        "export_range" => (PROPERTY_HINT_RANGE, joined()),
+        "export_enum" => (PROPERTY_HINT_ENUM, joined()),
+        "export_flags" => (PROPERTY_HINT_FLAGS, joined()),
+        "export_file" | "export_global_file" => (PROPERTY_HINT_FILE, joined()),
+        "export_dir" | "export_global_dir" => (PROPERTY_HINT_DIR, String::new()),
+        "export_multiline" => (PROPERTY_HINT_MULTILINE_TEXT, String::new()),
+        "export_placeholder" => (PROPERTY_HINT_PLACEHOLDER_TEXT, joined()),
+        "export_color_no_alpha" => (PROPERTY_HINT_COLOR_NO_ALPHA, String::new()),
+        "export_node_path" => (PROPERTY_HINT_NODE_PATH_VALID_TYPES, joined()),
+        _ => return None,
+    };
+    Some(hint)
 }
 
 /// Instance variable declaration with default.
@@ -393,6 +483,8 @@ pub struct ClassDef {
     pub is_tool: bool,
     /// Inner class definitions: name → ClassDef.
     pub inner_classes: HashMap<String, ClassDef>,
+    /// Class-level `const` declarations, in declaration order.
+    pub constants: Vec<(String, Expr)>,
 }
 
 /// A live instance of a class.
@@ -423,6 +515,8 @@ impl Interpreter {
             warnings: Vec::new(),
             scene_access: None,
             current_node_id: None,
+            coroutine_host: crate::coroutine::CoroutineHost::new(),
+            pending_await_bind: None,
         }
     }
 
@@ -526,6 +620,12 @@ impl Interpreter {
                 Ok(None)
             }
 
+            Stmt::ConstDecl { name, value, .. } => {
+                let v = self.eval_expr(value)?;
+                self.environment.define_const(name.clone(), v);
+                Ok(None)
+            }
+
             Stmt::Assignment { target, op, value } => {
                 let rhs = self.eval_expr(value)?;
                 self.exec_assignment(target, op, rhs)?;
@@ -564,7 +664,9 @@ impl Interpreter {
                         match cf {
                             ControlFlow::Break => break,
                             ControlFlow::Continue => continue,
-                            ControlFlow::Return(_) => return Ok(Some(cf)),
+                            ControlFlow::Return(_) | ControlFlow::Suspend(_) => {
+                                return Ok(Some(cf))
+                            }
                         }
                     }
                 }
@@ -579,6 +681,9 @@ impl Interpreter {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = match iter_val {
                     Variant::Array(a) => a,
+                    // Godot iterates an int as range(n): 0, 1, ..., n-1
+                    // (empty when n <= 0). Mirrors `for i in 5:`.
+                    Variant::Int(n) => (0..n).map(Variant::Int).collect(),
                     other => {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot iterate over {}",
@@ -592,7 +697,9 @@ impl Interpreter {
                         match cf {
                             ControlFlow::Break => break,
                             ControlFlow::Continue => continue,
-                            ControlFlow::Return(_) => return Ok(Some(cf)),
+                            ControlFlow::Return(_) | ControlFlow::Suspend(_) => {
+                                return Ok(Some(cf))
+                            }
                         }
                     }
                 }
@@ -633,24 +740,46 @@ impl Interpreter {
             Stmt::Match { value, arms } => {
                 let val = self.eval_expr(value)?;
                 for arm in arms {
-                    if let Some(bindings) = self.match_pattern(&arm.pattern, &val) {
-                        self.environment.push_scope();
-                        for (n, v) in bindings {
-                            self.environment.define(n, v);
+                    for pattern in &arm.patterns {
+                        if let Some(bindings) = self.match_pattern(pattern, &val)? {
+                            // Bind in a fresh scope so the guard and body can
+                            // see the pattern binds.
+                            self.environment.push_scope();
+                            for (n, v) in bindings {
+                                self.environment.define(n, v);
+                            }
+                            let guard_ok = match &arm.guard {
+                                Some(g) => self.eval_expr(g)?.is_truthy(),
+                                None => true,
+                            };
+                            if guard_ok {
+                                let r = self.exec_block_no_scope(&arm.body);
+                                self.environment.pop_scope();
+                                return r;
+                            }
+                            // Guard failed: discard binds and try the next
+                            // pattern / arm.
+                            self.environment.pop_scope();
                         }
-                        let r = self.exec_block_no_scope(&arm.body);
-                        self.environment.pop_scope();
-                        return r;
                     }
                 }
                 Ok(None)
             }
 
-            Stmt::Await(expr) => {
-                // Simplified v1: evaluate the expression, warn, return Nil.
-                let _ = self.eval_expr(expr)?;
-                self.output
-                    .push("[warning] await: coroutines not fully supported; yielded expression evaluated synchronously".to_string());
+            Stmt::Await { expr, bind } => {
+                let awaited = self.eval_expr(expr)?;
+                if let Some(target) = crate::coroutine::AwaitTarget::from_variant(&awaited) {
+                    // Real suspension — record the optional binding target so the
+                    // parked frame binds the resumed value on resume, then bubble
+                    // the suspension to the calling function frame (pat-nzgdu.6).
+                    self.pending_await_bind = bind.clone();
+                    return Ok(Some(ControlFlow::Suspend(target)));
+                }
+                // Non-awaitable value: Godot treats await on a non-signal as
+                // immediate; bind Nil if a target was requested (pat-nzgdu.6).
+                if let Some(name) = bind {
+                    self.environment.define(name.clone(), Variant::Nil);
+                }
                 Ok(None)
             }
 
@@ -670,6 +799,7 @@ impl Interpreter {
         let mut result = None;
         for stmt in stmts {
             if let Some(cf) = self.exec_stmt(stmt)? {
+                // Return and Suspend both leave the block early.
                 result = Some(cf);
                 break;
             }
@@ -686,40 +816,346 @@ impl Interpreter {
         }
         Ok(None)
     }
+
+    /// Snapshot all currently visible bindings for coroutine resume.
+    fn snapshot_locals(&self) -> HashMap<String, Variant> {
+        let mut map = HashMap::new();
+        for scope in &self.environment.scopes {
+            for (k, v) in scope {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        map
+    }
+
+    /// Register a suspended coroutine with remaining statements.
+    fn park_coroutine(
+        &mut self,
+        remaining: Vec<Stmt>,
+        wait: crate::coroutine::AwaitTarget,
+        function_name: &str,
+        is_instance_method: bool,
+    ) {
+        let locals = self.snapshot_locals();
+        let instance_props = self
+            .self_instance
+            .as_ref()
+            .map(|i| i.properties.clone())
+            .unwrap_or_default();
+        // Take the `var v = await ...` binding target recorded by the suspending
+        // await statement so the resumed frame binds the value (pat-nzgdu.6).
+        let bind_target = self.pending_await_bind.take();
+        self.coroutine_host
+            .suspend(crate::coroutine::SuspendedCoroutine {
+                id: crate::coroutine::CoroutineId(0),
+                remaining,
+                locals,
+                instance_props,
+                function_name: function_name.to_string(),
+                is_instance_method,
+                wait,
+                bind_target,
+                resume_value: Variant::Nil,
+                prior_output: self.output.clone(),
+            });
+    }
+
+    /// Advance timer-based awaits by `delta` seconds, then resume any ready
+    /// coroutines. Returns print-lines emitted by resumed bodies this tick.
+    pub fn poll_coroutines(&mut self, delta: f32) -> Result<Vec<String>, RuntimeError> {
+        // SceneTree timers (pat-z35r2.3): fire timeout signals then resume awaiters.
+        if let Some(ref mut access) = self.scene_access {
+            let fired = access.process_timers(delta as f64);
+            for sig in fired {
+                // Timer timeouts carry no argument (Godot `timeout` is void).
+                self.coroutine_host.notify_signal(&sig, Variant::Nil);
+            }
+        }
+        self.coroutine_host.poll(delta);
+        self.resume_ready_coroutines()
+    }
+
+    /// Advance frame-based awaits by one frame, then resume ready coroutines.
+    pub fn tick_coroutine_frames(&mut self) -> Result<Vec<String>, RuntimeError> {
+        self.coroutine_host.tick_frame();
+        self.resume_ready_coroutines()
+    }
+
+    /// Wake coroutines waiting on `signal_name` and resume them, binding the
+    /// signal's first emitted argument (`args[0]`, or `Nil`) as the awaited value
+    /// so `var v = await sig` sees it (pat-nzgdu.6).
+    pub fn notify_await_signal(
+        &mut self,
+        signal_name: &str,
+        args: &[Variant],
+    ) -> Result<Vec<String>, RuntimeError> {
+        let value = args.first().cloned().unwrap_or(Variant::Nil);
+        self.coroutine_host.notify_signal(signal_name, value);
+        self.resume_ready_coroutines()
+    }
+
+    /// Resume this class instance's frame-based coroutines for one frame,
+    /// threading `instance` in as `self` so resumed bodies read/mutate instance
+    /// properties, then writing the mutations back. A coroutine resumed off the
+    /// SceneTree tick must see the same `self` a normal method call would;
+    /// without this the resumed `self.x = ...` writes and declared-signal
+    /// lookups are lost because `self_instance` is torn down after the original
+    /// call returns (pat-nzgdu.6).
+    pub fn tick_instance_coroutine_frames(
+        &mut self,
+        instance: &mut ClassInstance,
+    ) -> Result<Vec<String>, RuntimeError> {
+        if self.coroutine_host.suspended_count() == 0 {
+            return Ok(Vec::new());
+        }
+        self.resume_with_instance_self(instance, |i| i.tick_coroutine_frames())
+    }
+
+    /// Wake this class instance's coroutines parked on `signal_name`, threading
+    /// `instance` in as `self` (see [`tick_instance_coroutine_frames`]) and
+    /// binding the emitted argument as the awaited value (pat-nzgdu.6).
+    pub fn notify_instance_await_signal(
+        &mut self,
+        instance: &mut ClassInstance,
+        signal_name: &str,
+        args: &[Variant],
+    ) -> Result<Vec<String>, RuntimeError> {
+        if self.coroutine_host.suspended_count() == 0 {
+            return Ok(Vec::new());
+        }
+        self.resume_with_instance_self(instance, |i| i.notify_await_signal(signal_name, args))
+    }
+
+    /// Installs `instance` as `self_instance` (registering its methods so a
+    /// resumed body can call siblings), runs `f`, writes any property mutations
+    /// back to `instance`, and restores the prior `self`. Mirrors the self
+    /// setup/writeback in `call_instance_method` (pat-nzgdu.6).
+    fn resume_with_instance_self<R>(
+        &mut self,
+        instance: &mut ClassInstance,
+        f: impl FnOnce(&mut Self) -> Result<R, RuntimeError>,
+    ) -> Result<R, RuntimeError> {
+        let prev_self = self.self_instance.take();
+        self.self_instance = Some(instance.clone());
+        for (name, func_def) in &instance.class_def.methods {
+            self.function_registry.insert(name.clone(), func_def.clone());
+        }
+        let result = f(self);
+        if let Some(ref updated) = self.self_instance {
+            instance.properties = updated.properties.clone();
+        }
+        self.self_instance = prev_self;
+        result
+    }
+
+    /// How many coroutines are currently suspended (not ready).
+    pub fn suspended_coroutine_count(&self) -> usize {
+        self.coroutine_host.suspended_count()
+    }
+
+    fn resume_ready_coroutines(&mut self) -> Result<Vec<String>, RuntimeError> {
+        let mut emitted = Vec::new();
+        // Loop in case a resume immediately re-awaits zero-time work.
+        loop {
+            let ready = self.coroutine_host.take_ready();
+            if ready.is_empty() {
+                break;
+            }
+            for co in ready {
+                let before = self.output.len();
+                self.resume_one(co)?;
+                emitted.extend(self.output[before..].iter().cloned());
+            }
+        }
+        Ok(emitted)
+    }
+
+    fn resume_one(
+        &mut self,
+        co: crate::coroutine::SuspendedCoroutine,
+    ) -> Result<Variant, RuntimeError> {
+        // Restore local environment
+        self.environment.push_scope();
+        for (k, v) in &co.locals {
+            self.environment.define(k.clone(), v.clone());
+        }
+        if co.is_instance_method {
+            if let Some(ref mut inst) = self.self_instance {
+                inst.properties = co.instance_props.clone();
+            } else {
+                // Reconstruct a minimal self shell so property writes work.
+                // Class methods already re-bind self in call_instance_method;
+                // free-standing resume uses properties map only.
+            }
+        }
+
+        // Bind the resumed value (the emitted signal argument) to the target of
+        // `var v = await sig` before running the remaining statements (pat-nzgdu.6).
+        if let Some(ref name) = co.bind_target {
+            self.environment.define(name.clone(), co.resume_value.clone());
+        }
+
+        let mut return_val = Variant::Nil;
+        let mut i = 0;
+        while i < co.remaining.len() {
+            match self.exec_stmt(&co.remaining[i])? {
+                Some(ControlFlow::Return(v)) => {
+                    return_val = v.unwrap_or(Variant::Nil);
+                    break;
+                }
+                Some(ControlFlow::Suspend(target)) => {
+                    let rest = co.remaining[i + 1..].to_vec();
+                    self.park_coroutine(rest, target, &co.function_name, co.is_instance_method);
+                    self.environment.pop_scope();
+                    return Ok(Variant::Nil);
+                }
+                Some(ControlFlow::Break) | Some(ControlFlow::Continue) => {
+                    // Not meaningful at top-level of a resumed function body.
+                }
+                None => {}
+            }
+            i += 1;
+        }
+        self.environment.pop_scope();
+        Ok(return_val)
+    }
+    /// Attempts to match `value` against `pattern`. Returns `Ok(Some(binds))`
+    /// with any `var` bindings when the pattern matches, `Ok(None)` when it
+    /// does not, and propagates evaluation errors from constant-reference or
+    /// dictionary-key expressions.
     fn match_pattern(
-        &self,
+        &mut self,
         pattern: &MatchPattern,
         value: &Variant,
-    ) -> Option<Vec<(String, Variant)>> {
+    ) -> Result<Option<Vec<(String, Variant)>>, RuntimeError> {
         match pattern {
-            MatchPattern::Wildcard => Some(vec![]),
-            MatchPattern::Variable(name) => Some(vec![(name.clone(), value.clone())]),
-            MatchPattern::Literal(lit) => {
-                if variant_eq(lit, value) {
+            // `..` outside an array/dict pattern (handled inline there) matches
+            // anything.
+            MatchPattern::Wildcard | MatchPattern::Rest => Ok(Some(vec![])),
+            MatchPattern::Binding(name) => Ok(Some(vec![(name.clone(), value.clone())])),
+            MatchPattern::Literal(lit) => Ok(if variant_eq(lit, value) {
+                Some(vec![])
+            } else {
+                None
+            }),
+            // Bare identifier / expression: evaluate and compare by value.
+            MatchPattern::ConstantRef(expr) => {
+                let expected = self.eval_expr(expr)?;
+                Ok(if variant_eq(&expected, value) {
                     Some(vec![])
                 } else {
                     None
-                }
+                })
             }
             MatchPattern::Array(patterns) => {
-                if let Variant::Array(arr) = value {
+                let Variant::Array(arr) = value else {
+                    return Ok(None);
+                };
+                let has_rest = matches!(patterns.last(), Some(MatchPattern::Rest));
+                if has_rest {
+                    // Match all fixed sub-patterns (everything before the rest)
+                    // against a prefix; extra elements are allowed.
+                    let fixed = &patterns[..patterns.len() - 1];
+                    if arr.len() < fixed.len() {
+                        return Ok(None);
+                    }
+                    let mut bindings = vec![];
+                    for (pat, val) in fixed.iter().zip(arr.iter()) {
+                        match self.match_pattern(pat, val)? {
+                            Some(b) => bindings.extend(b),
+                            None => return Ok(None),
+                        }
+                    }
+                    Ok(Some(bindings))
+                } else {
                     if arr.len() != patterns.len() {
-                        return None;
+                        return Ok(None);
                     }
                     let mut bindings = vec![];
                     for (pat, val) in patterns.iter().zip(arr.iter()) {
-                        match self.match_pattern(pat, val) {
+                        match self.match_pattern(pat, val)? {
                             Some(b) => bindings.extend(b),
-                            None => return None,
+                            None => return Ok(None),
                         }
                     }
-                    Some(bindings)
-                } else {
-                    None
+                    Ok(Some(bindings))
                 }
+            }
+            MatchPattern::Dictionary { entries, rest } => {
+                let Variant::Dictionary(dict) = value else {
+                    return Ok(None);
+                };
+                // Without a `..` rest, the key set must match exactly.
+                if !rest && dict.len() != entries.len() {
+                    return Ok(None);
+                }
+                let mut bindings = vec![];
+                for (key_expr, sub) in entries {
+                    let key = self.eval_expr(key_expr)?;
+                    let key_str = match key {
+                        Variant::String(s) => s,
+                        other => format!("{other}"),
+                    };
+                    let Some(entry_val) = dict.get(&key_str) else {
+                        return Ok(None);
+                    };
+                    if let Some(sub_pat) = sub {
+                        match self.match_pattern(sub_pat, &entry_val.clone())? {
+                            Some(b) => bindings.extend(b),
+                            None => return Ok(None),
+                        }
+                    }
+                }
+                Ok(Some(bindings))
             }
         }
     }
+    /// Applies a compound-assignment operator to the current value and the
+    /// right-hand side, returning the value to store. For a plain `=` this is
+    /// just `rhs`.
+    fn apply_assign_op(
+        &self,
+        op: &AssignOp,
+        cur: &Variant,
+        rhs: &Variant,
+    ) -> Result<Variant, RuntimeError> {
+        let binop = match op {
+            AssignOp::Assign => return Ok(rhs.clone()),
+            AssignOp::AddAssign => BinOp::Add,
+            AssignOp::SubAssign => BinOp::Sub,
+            AssignOp::MulAssign => BinOp::Mul,
+            AssignOp::DivAssign => BinOp::Div,
+            AssignOp::ModAssign => BinOp::Mod,
+            AssignOp::PowAssign => BinOp::Pow,
+            AssignOp::BitAndAssign => BinOp::BitAnd,
+            AssignOp::BitOrAssign => BinOp::BitOr,
+            AssignOp::BitXorAssign => BinOp::BitXor,
+            AssignOp::ShlAssign => BinOp::Shl,
+            AssignOp::ShrAssign => BinOp::Shr,
+        };
+        self.eval_binary_op(&binop, cur, rhs)
+    }
+
+    /// Writes `value` into the place described by `target`, supporting nested
+    /// index/member chains via read-modify-write. This is the general lvalue
+    /// write path used by indexed assignment and mutating container methods so
+    /// that `self.grid[i] = x`, `arr[i][j] = x`, and `self.items.append(x)` all
+    /// persist to the underlying variable / instance property.
+    fn write_place(&mut self, target: &Expr, value: Variant) -> Result<(), RuntimeError> {
+        match target {
+            Expr::Index { object, index } => {
+                let idx = self.eval_expr(index)?;
+                let mut container = self.eval_expr(object)?;
+                set_index(&mut container, &idx, value)?;
+                self.write_place(object, container)
+            }
+            // Idents, `self.member`, node properties and dictionary members are
+            // handled by the existing plain-assignment logic. This also serves
+            // as the recursion base for the index chain above.
+            _ => self.exec_assignment(target, &AssignOp::Assign, value),
+        }
+    }
+
     fn exec_assignment(
         &mut self,
         target: &Expr,
@@ -746,46 +1182,26 @@ impl Interpreter {
                         false
                     };
 
-                let final_val = match op {
-                    AssignOp::Assign => rhs,
-                    AssignOp::AddAssign => {
-                        let cur = if is_instance_prop {
-                            self.self_instance
-                                .as_ref()
-                                .unwrap()
-                                .properties
-                                .get(name.as_str())
-                                .cloned()
-                                .unwrap_or(Variant::Nil)
-                        } else if is_node_prop {
-                            self.scene_access
-                                .as_ref()
-                                .unwrap()
-                                .get_node_property(self.current_node_id.unwrap(), name)
-                        } else {
-                            self.environment.get(name)?
-                        };
-                        self.binary_add(&cur, &rhs)?
-                    }
-                    AssignOp::SubAssign => {
-                        let cur = if is_instance_prop {
-                            self.self_instance
-                                .as_ref()
-                                .unwrap()
-                                .properties
-                                .get(name.as_str())
-                                .cloned()
-                                .unwrap_or(Variant::Nil)
-                        } else if is_node_prop {
-                            self.scene_access
-                                .as_ref()
-                                .unwrap()
-                                .get_node_property(self.current_node_id.unwrap(), name)
-                        } else {
-                            self.environment.get(name)?
-                        };
-                        self.binary_sub(&cur, &rhs)?
-                    }
+                let final_val = if matches!(op, AssignOp::Assign) {
+                    rhs
+                } else {
+                    let cur = if is_instance_prop {
+                        self.self_instance
+                            .as_ref()
+                            .unwrap()
+                            .properties
+                            .get(name.as_str())
+                            .cloned()
+                            .unwrap_or(Variant::Nil)
+                    } else if is_node_prop {
+                        self.scene_access
+                            .as_ref()
+                            .unwrap()
+                            .get_node_property(self.current_node_id.unwrap(), name)
+                    } else {
+                        self.environment.get(name)?
+                    };
+                    self.apply_assign_op(op, &cur, &rhs)?
                 };
 
                 if is_instance_prop {
@@ -822,29 +1238,18 @@ impl Interpreter {
             }
             Expr::Index { object, index } => {
                 let idx = self.eval_expr(index)?;
-                // We need to get the container, mutate it, and set it back.
-                let container_name = match object.as_ref() {
-                    Expr::Ident(n) => n.clone(),
-                    _ => {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "indexed assignment only supported on variables".into(),
-                        )));
-                    }
-                };
-                let mut container = self.environment.get(&container_name)?;
-                let final_val = match op {
-                    AssignOp::Assign => rhs,
-                    AssignOp::AddAssign => {
-                        let cur = index_into(&container, &idx)?;
-                        self.binary_add(&cur, &rhs)?
-                    }
-                    AssignOp::SubAssign => {
-                        let cur = index_into(&container, &idx)?;
-                        self.binary_sub(&cur, &rhs)?
-                    }
+                // Read the container by evaluating its (possibly nested) base
+                // expression, mutate the element, then write the whole container
+                // back to its place. Supports `arr[i][j] = x`, `self.grid[i] = x`.
+                let mut container = self.eval_expr(object)?;
+                let final_val = if matches!(op, AssignOp::Assign) {
+                    rhs
+                } else {
+                    let cur = index_into(&container, &idx)?;
+                    self.apply_assign_op(op, &cur, &rhs)?
                 };
                 set_index(&mut container, &idx, final_val)?;
-                self.environment.set(&container_name, container)
+                self.write_place(object, container)
             }
             Expr::MemberAccess { object, member } => {
                 if self.try_exec_value_member_assignment(object, member, op, rhs.clone())? {
@@ -880,16 +1285,11 @@ impl Interpreter {
                         }
                         Variant::Nil
                     };
-                    let final_val = match op {
-                        AssignOp::Assign => rhs,
-                        AssignOp::AddAssign => {
-                            let cur = get_current(self, member);
-                            self.binary_add(&cur, &rhs)?
-                        }
-                        AssignOp::SubAssign => {
-                            let cur = get_current(self, member);
-                            self.binary_sub(&cur, &rhs)?
-                        }
+                    let final_val = if matches!(op, AssignOp::Assign) {
+                        rhs
+                    } else {
+                        let cur = get_current(self, member);
+                        self.apply_assign_op(op, &cur, &rhs)?
                     };
                     // Check for setter function (avoid recursion if inside setter)
                     if let Some(setter_name) = self
@@ -907,6 +1307,9 @@ impl Interpreter {
                         .unwrap()
                         .properties
                         .insert(member.clone(), final_val.clone());
+                    // Keep any environment binding in sync so bare-name reads
+                    // in the same call observe the write (mirrors the Ident arm).
+                    let _ = self.environment.set(member, final_val.clone());
                     // Also write through scene_access for Node properties (position, rotation, etc.)
                     if let Some(ref mut access) = self.scene_access {
                         if let Some(node_id) = self.current_node_id {
@@ -943,52 +1346,32 @@ impl Interpreter {
                 // Check if the object evaluates to an ObjectId
                 let obj_val = self.eval_expr(object)?;
                 if let Variant::ObjectId(oid) = &obj_val {
-                    let final_val = match op {
-                        AssignOp::Assign => rhs,
-                        AssignOp::AddAssign => {
-                            let cur = if let Some(ref access) = self.scene_access {
-                                access.get_node_property(oid.raw(), member)
-                            } else {
-                                Variant::Nil
-                            };
-                            self.binary_add(&cur, &rhs)?
-                        }
-                        AssignOp::SubAssign => {
-                            let cur = if let Some(ref access) = self.scene_access {
-                                access.get_node_property(oid.raw(), member)
-                            } else {
-                                Variant::Nil
-                            };
-                            self.binary_sub(&cur, &rhs)?
-                        }
+                    let final_val = if matches!(op, AssignOp::Assign) {
+                        rhs
+                    } else {
+                        let cur = if let Some(ref access) = self.scene_access {
+                            access.get_node_property(oid.raw(), member)
+                        } else {
+                            Variant::Nil
+                        };
+                        self.apply_assign_op(op, &cur, &rhs)?
                     };
                     if let Some(ref mut access) = self.scene_access {
                         access.set_node_property(oid.raw(), member, final_val);
                     }
                     return Ok(());
                 }
-                let obj_name = match object.as_ref() {
-                    Expr::Ident(n) => n.clone(),
-                    _ => {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "member assignment only supported on variables".into(),
-                        )));
-                    }
-                };
-                let mut container = self.environment.get(&obj_name)?;
-                let final_val = match op {
-                    AssignOp::Assign => rhs,
-                    AssignOp::AddAssign => {
-                        let cur = index_into(&container, &Variant::String(member.clone()))?;
-                        self.binary_add(&cur, &rhs)?
-                    }
-                    AssignOp::SubAssign => {
-                        let cur = index_into(&container, &Variant::String(member.clone()))?;
-                        self.binary_sub(&cur, &rhs)?
-                    }
+                // Generic member write on a container value (e.g. a dictionary
+                // `d.key = v`), including nested/indexed bases via write_place.
+                let mut container = self.eval_expr(object)?;
+                let final_val = if matches!(op, AssignOp::Assign) {
+                    rhs
+                } else {
+                    let cur = index_into(&container, &Variant::String(member.clone()))?;
+                    self.apply_assign_op(op, &cur, &rhs)?
                 };
                 set_index(&mut container, &Variant::String(member.clone()), final_val)?;
-                self.environment.set(&obj_name, container)
+                self.write_place(object, container)
             }
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                 "invalid assignment target".into(),
@@ -1042,11 +1425,7 @@ impl Interpreter {
             return Ok(false);
         };
 
-        let final_field = match op {
-            AssignOp::Assign => rhs,
-            AssignOp::AddAssign => self.binary_add(&current_field, &rhs)?,
-            AssignOp::SubAssign => self.binary_sub(&current_field, &rhs)?,
-        };
+        let final_field = self.apply_assign_op(op, &current_field, &rhs)?;
         let new_float = to_float(&final_field)? as f32;
 
         let modified = match intermediate {
@@ -1128,11 +1507,7 @@ impl Interpreter {
         }?;
 
         // Step 3: Compute final value based on assignment operator
-        let final_val = match op {
-            AssignOp::Assign => rhs,
-            AssignOp::AddAssign => self.binary_add(&current_field, &rhs)?,
-            AssignOp::SubAssign => self.binary_sub(&current_field, &rhs)?,
-        };
+        let final_val = self.apply_assign_op(op, &current_field, &rhs)?;
 
         let new_float = to_float(&final_val)? as f32;
 
@@ -1221,6 +1596,22 @@ impl Interpreter {
                             return Ok(value);
                         }
                     }
+                    // A bareword naming a signal declared on this script yields a
+                    // signal awaitable, so `await my_signal` suspends until that
+                    // signal fires — Godot resolves `await sig` the same way. A
+                    // same-named local shadows it (checked above). (pat-nzgdu.6)
+                    if let Some(ref inst) = self.self_instance {
+                        if inst.class_def.signals.iter().any(|s| s == name) {
+                            return Ok(crate::coroutine::AwaitTarget::signal_variant(name));
+                        }
+                    }
+                    // @GlobalScope named constants (KEY_*/OK/ERR_*/TYPE_*/...) are
+                    // barewords in GDScript. Resolve them last, after user locals,
+                    // members, `const`s, and node properties — matching Godot, where
+                    // a local of the same name shadows the global constant. (pat-nzgdu.7)
+                    if let Some(value) = crate::global_constants::global_constant(name) {
+                        return Ok(value);
+                    }
                     Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
                         name.clone(),
                     )))
@@ -1263,6 +1654,13 @@ impl Interpreter {
                         )))),
                     },
                     UnaryOp::Not => Ok(Variant::Bool(!val.is_truthy())),
+                    UnaryOp::BitNot => match val {
+                        Variant::Int(i) => Ok(Variant::Int(!i)),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "cannot apply bitwise '~' to {}",
+                            val.variant_type()
+                        )))),
+                    },
                 }
             }
 
@@ -1298,9 +1696,34 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
                             return self.call_input_method(member, &evaluated_args);
                         }
-                        // Handle ClassName.new() — runtime node creation
+                        // FileAccess / DirAccess static methods (Godot core/io).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "FileAccess") {
+                            return call_file_access_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "DirAccess") {
+                            return call_dir_access_static(member, &evaluated_args);
+                        }
+                        // Godot singletons: OS / Engine / Time / JSON.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "OS") {
+                            return call_os_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Engine") {
+                            return call_engine_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Time") {
+                            return call_time_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "JSON") {
+                            return call_json_static(member, &evaluated_args);
+                        }
+                        // Handle ClassName.new() — runtime node creation / RefCounted helpers
                         if member == "new" {
                             if let Expr::Ident(class_name) = object.as_ref() {
+                                if class_name == "ConfigFile" {
+                                    return Ok(Variant::ObjectId(
+                                        gdresource::ConfigFile::new_handle(),
+                                    ));
+                                }
                                 if is_node_class_name(class_name) {
                                     if let Some(ref mut access) = self.scene_access {
                                         if let Some(raw_id) =
@@ -1315,6 +1738,17 @@ impl Interpreter {
                                         format!("{class_name}.new() requires scene access"),
                                     )));
                                 }
+                            }
+                        }
+                        // `get_tree().create_timer(t)` / `get_tree().<method>()`:
+                        // the SceneTree's methods dispatch to the same builtins as
+                        // the bare calls, so `await get_tree().create_timer(t).timeout`
+                        // (the ubiquitous Godot idiom) resolves (pat-nzgdu.6).
+                        if matches!(object.as_ref(), Expr::Call { callee, .. }
+                            if matches!(callee.as_ref(), Expr::Ident(n) if n == "get_tree"))
+                        {
+                            if let Some(result) = self.try_builtin(member, &evaluated_args)? {
+                                return Ok(result);
                             }
                         }
                         let obj = self.eval_expr(object)?;
@@ -1516,6 +1950,94 @@ impl Interpreter {
                     body: body_arc,
                 })))
             }
+
+            Expr::TypeTest { value, type_name } => {
+                let v = self.eval_expr(value)?;
+                Ok(Variant::Bool(self.value_is_type(&v, type_name)))
+            }
+
+            Expr::Cast { value, type_name } => {
+                let v = self.eval_expr(value)?;
+                Ok(self.cast_value(v, type_name))
+            }
+        }
+    }
+
+    /// Set of built-in *value* type names understood by `is`/`as` (as opposed
+    /// to native/script class names, which reference objects).
+    fn is_builtin_type_name(type_name: &str) -> bool {
+        matches!(
+            type_name,
+            "bool"
+                | "int"
+                | "float"
+                | "String"
+                | "StringName"
+                | "NodePath"
+                | "Array"
+                | "Dictionary"
+                | "Vector2"
+                | "Vector3"
+                | "Color"
+                | "Rect2"
+                | "Callable"
+        )
+    }
+
+    /// Implements the `is` operator: does `v` have type `type_name`?
+    fn value_is_type(&self, v: &Variant, type_name: &str) -> bool {
+        match type_name {
+            "int" => matches!(v, Variant::Int(_)),
+            "float" => matches!(v, Variant::Float(_)),
+            "bool" => matches!(v, Variant::Bool(_)),
+            "String" => matches!(v, Variant::String(_)),
+            "Array" => matches!(v, Variant::Array(_)),
+            "Dictionary" => matches!(v, Variant::Dictionary(_)),
+            "Vector2" => matches!(v, Variant::Vector2(_)),
+            "Vector3" => matches!(v, Variant::Vector3(_)),
+            "Color" => matches!(v, Variant::Color(_)),
+            "Callable" => matches!(v, Variant::Callable(_)),
+            // Objects match `Object` and any class the resource reports.
+            "Object" => matches!(v, Variant::ObjectId(_) | Variant::Resource(_)),
+            other => {
+                if let Variant::Resource(r) = v {
+                    r.class_name.as_str() == other
+                } else {
+                    // Native/script class checks on live nodes aren't tracked
+                    // as Variant types; fall back to a type-name string match.
+                    format!("{}", v.variant_type()).as_str() == other
+                }
+            }
+        }
+    }
+
+    /// Implements the `as` operator with Godot semantics: numeric int<->float
+    /// coercion, no-op for matching types, and `null` for failed object casts.
+    fn cast_value(&self, v: Variant, type_name: &str) -> Variant {
+        if self.value_is_type(&v, type_name) {
+            return v;
+        }
+        match type_name {
+            "int" => match &v {
+                Variant::Float(f) => Variant::Int(*f as i64),
+                Variant::Bool(b) => Variant::Int(*b as i64),
+                _ => Variant::Nil,
+            },
+            "float" => match &v {
+                Variant::Int(i) => Variant::Float(*i as f64),
+                Variant::Bool(b) => Variant::Float(*b as i64 as f64),
+                _ => Variant::Nil,
+            },
+            _ => {
+                if Self::is_builtin_type_name(type_name) {
+                    // Mismatched value-type cast: keep the value (lenient),
+                    // mirroring how Godot leaves incompatible value casts.
+                    v
+                } else {
+                    // Object/class cast that didn't match → null.
+                    Variant::Nil
+                }
+            }
         }
     }
 
@@ -1531,6 +2053,12 @@ impl Interpreter {
             BinOp::Mul => self.binary_mul(lhs, rhs),
             BinOp::Div => self.binary_div(lhs, rhs),
             BinOp::Mod => self.binary_mod(lhs, rhs),
+            BinOp::Pow => self.binary_pow(lhs, rhs),
+            BinOp::BitAnd => self.binary_bitwise(lhs, rhs, "&", |a, b| a & b),
+            BinOp::BitOr => self.binary_bitwise(lhs, rhs, "|", |a, b| a | b),
+            BinOp::BitXor => self.binary_bitwise(lhs, rhs, "^", |a, b| a ^ b),
+            BinOp::Shl => self.binary_bitwise(lhs, rhs, "<<", |a, b| a.wrapping_shl(b as u32)),
+            BinOp::Shr => self.binary_bitwise(lhs, rhs, ">>", |a, b| a.wrapping_shr(b as u32)),
             BinOp::Eq => Ok(Variant::Bool(variant_eq(lhs, rhs))),
             BinOp::Ne => Ok(Variant::Bool(!variant_eq(lhs, rhs))),
             BinOp::Lt => self.binary_cmp(lhs, rhs, |o| o.is_lt()),
@@ -1716,6 +2244,48 @@ impl Interpreter {
         }
     }
 
+    fn binary_pow(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
+        match (lhs, rhs) {
+            // int ** int → int for non-negative exponents, else float.
+            (Variant::Int(a), Variant::Int(b)) => {
+                if *b >= 0 {
+                    match u32::try_from(*b).ok().and_then(|e| a.checked_pow(e)) {
+                        Some(r) => Ok(Variant::Int(r)),
+                        None => Ok(Variant::Float((*a as f64).powf(*b as f64))),
+                    }
+                } else {
+                    Ok(Variant::Float((*a as f64).powf(*b as f64)))
+                }
+            }
+            // Any float operand → float.
+            (Variant::Int(_) | Variant::Float(_), Variant::Int(_) | Variant::Float(_)) => {
+                Ok(Variant::Float(to_float(lhs)?.powf(to_float(rhs)?)))
+            }
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "cannot raise {} to {}",
+                lhs.variant_type(),
+                rhs.variant_type()
+            )))),
+        }
+    }
+
+    fn binary_bitwise(
+        &self,
+        lhs: &Variant,
+        rhs: &Variant,
+        sym: &str,
+        op: fn(i64, i64) -> i64,
+    ) -> Result<Variant, RuntimeError> {
+        match (lhs, rhs) {
+            (Variant::Int(a), Variant::Int(b)) => Ok(Variant::Int(op(*a, *b))),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "bitwise '{sym}' requires int operands, got {} and {}",
+                lhs.variant_type(),
+                rhs.variant_type()
+            )))),
+        }
+    }
+
     fn binary_cmp(
         &self,
         lhs: &Variant,
@@ -1759,6 +2329,81 @@ impl Interpreter {
                 let line: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
                 self.output.push(line.join(" "));
                 Ok(Some(Variant::Nil))
+            }
+            // Awaitable factories (pat-p0s82.7 / pat-z35r2.3).
+            // Godot: `await get_tree().create_timer(t).timeout`
+            // Patina: `await create_timer(t)` or `await create_timer(t).timeout`
+            "create_timer" | "wait_seconds" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "create_timer() takes exactly 1 argument".into(),
+                    )));
+                }
+                let secs = match &args[0] {
+                    Variant::Float(f) => *f,
+                    Variant::Int(i) => *i as f64,
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "create_timer() expects number, got {}",
+                            other.variant_type()
+                        ))))
+                    }
+                };
+                // Prefer SceneTree-backed timer when scene access is available.
+                if let Some(ref mut access) = self.scene_access {
+                    if let Some((id, signal_name)) = access.create_timer(secs) {
+                        let mut d = std::collections::HashMap::new();
+                        d.insert(
+                            "__await_kind".into(),
+                            Variant::String("signal".into()),
+                        );
+                        d.insert("name".into(), Variant::String(signal_name.clone()));
+                        d.insert("timer_id".into(), Variant::Int(id as i64));
+                        // Property `.timeout` is itself awaitable (Godot idiom).
+                        d.insert(
+                            "timeout".into(),
+                            crate::coroutine::AwaitTarget::signal_variant(&signal_name),
+                        );
+                        d.insert("time_left".into(), Variant::Float(secs));
+                        return Ok(Some(Variant::Dictionary(d)));
+                    }
+                }
+                Ok(Some(crate::coroutine::AwaitTarget::timer_variant(secs)))
+            }
+            "wait_signal" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "wait_signal() takes exactly 1 argument".into(),
+                    )));
+                }
+                let name = match &args[0] {
+                    Variant::String(s) => s.clone(),
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "wait_signal() expects string, got {}",
+                            other.variant_type()
+                        ))))
+                    }
+                };
+                Ok(Some(crate::coroutine::AwaitTarget::signal_variant(&name)))
+            }
+            "wait_frames" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "wait_frames() takes exactly 1 argument".into(),
+                    )));
+                }
+                let n = match &args[0] {
+                    Variant::Int(i) => *i,
+                    Variant::Float(f) => *f as i64,
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "wait_frames() expects number, got {}",
+                            other.variant_type()
+                        ))))
+                    }
+                };
+                Ok(Some(crate::coroutine::AwaitTarget::frames_variant(n)))
             }
             "str" => {
                 if args.len() != 1 {
@@ -1823,7 +2468,8 @@ impl Interpreter {
                     )));
                 }
                 match &args[0] {
-                    Variant::String(s) => Ok(Some(Variant::Int(s.len() as i64))),
+                    // Character count, not byte count (multibyte-safe).
+                    Variant::String(s) => Ok(Some(Variant::Int(s.chars().count() as i64))),
                     Variant::Array(a) => Ok(Some(Variant::Int(a.len() as i64))),
                     Variant::Dictionary(d) => Ok(Some(Variant::Int(d.len() as i64))),
                     other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
@@ -1887,7 +2533,11 @@ impl Interpreter {
                         "typeof() takes exactly 1 argument".into(),
                     )));
                 }
-                Ok(Some(Variant::String(format!("{}", args[0].variant_type()))))
+                // Godot `typeof()` returns the `Variant.Type` integer (comparable
+                // against the `TYPE_*` @GlobalScope constants). (pat-nzgdu.7)
+                Ok(Some(Variant::Int(
+                    crate::global_constants::variant_type_code(&args[0]),
+                )))
             }
             "abs" => {
                 if args.len() != 1 {
@@ -1928,6 +2578,8 @@ impl Interpreter {
                             "Font"
                         } else if path.ends_with(".gd") {
                             "GDScript"
+                        } else if path.ends_with(".gdshader") || path.ends_with(".gdshaderinc") {
+                            "Shader"
                         } else {
                             "Resource"
                         };
@@ -2235,6 +2887,33 @@ impl Interpreter {
                     )))
                 }
             }
+            "call_deferred" => {
+                // Godot: call_deferred(method: StringName, ...) queues a method call.
+                if args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "call_deferred() requires a method name".into(),
+                    )));
+                }
+                let method = match &args[0] {
+                    Variant::String(s) => s.clone(),
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "call_deferred() method name must be a String, got {other:?}"
+                        ))))
+                    }
+                };
+                let rest = &args[1..];
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.call_deferred(node_id, &method, rest);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "call_deferred() requires scene access".into(),
+                    )))
+                }
+            }
             "deg_to_rad" => {
                 if args.len() != 1 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -2290,6 +2969,42 @@ impl Interpreter {
                     "Color() takes 3 or 4 arguments".into(),
                 ))),
             },
+            "PackedByteArray" => Ok(Some(build_packed_array(
+                Variant::PackedByteArray(Vec::new()),
+                args,
+            )?)),
+            "PackedInt32Array" => Ok(Some(build_packed_array(
+                Variant::PackedInt32Array(Vec::new()),
+                args,
+            )?)),
+            "PackedInt64Array" => Ok(Some(build_packed_array(
+                Variant::PackedInt64Array(Vec::new()),
+                args,
+            )?)),
+            "PackedFloat32Array" => Ok(Some(build_packed_array(
+                Variant::PackedFloat32Array(Vec::new()),
+                args,
+            )?)),
+            "PackedFloat64Array" => Ok(Some(build_packed_array(
+                Variant::PackedFloat64Array(Vec::new()),
+                args,
+            )?)),
+            "PackedStringArray" => Ok(Some(build_packed_array(
+                Variant::PackedStringArray(Vec::new()),
+                args,
+            )?)),
+            "PackedVector2Array" => Ok(Some(build_packed_array(
+                Variant::PackedVector2Array(Vec::new()),
+                args,
+            )?)),
+            "PackedVector3Array" => Ok(Some(build_packed_array(
+                Variant::PackedVector3Array(Vec::new()),
+                args,
+            )?)),
+            "PackedColorArray" => Ok(Some(build_packed_array(
+                Variant::PackedColorArray(Vec::new()),
+                args,
+            )?)),
             "move_toward" => {
                 if args.len() != 3 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -2351,11 +3066,239 @@ impl Interpreter {
                 }
                 Ok(Some(Variant::Bool(!args[0].is_nil())))
             }
+            "assert" => {
+                // assert(condition, message = "")
+                if args.is_empty() || args.len() > 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "assert() takes 1 or 2 arguments".into(),
+                    )));
+                }
+                if !args[0].is_truthy() {
+                    let msg = match args.get(1) {
+                        Some(Variant::String(s)) => s.clone(),
+                        Some(other) => format!("{other}"),
+                        None => "assertion failed".to_string(),
+                    };
+                    return Err(RuntimeError::new(RuntimeErrorKind::AssertionFailed(msg)));
+                }
+                Ok(Some(Variant::Nil))
+            }
+            "fmod" => {
+                Self::require_args("fmod", args, 2)?;
+                Ok(Some(Variant::Float(to_float(&args[0])? % to_float(&args[1])?)))
+            }
+            "posmod" => {
+                Self::require_args("posmod", args, 2)?;
+                let a = to_int(&args[0])?;
+                let b = to_int(&args[1])?;
+                if b == 0 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
+                }
+                let mut value = a % b;
+                if (value < 0 && b > 0) || (value > 0 && b < 0) {
+                    value += b;
+                }
+                Ok(Some(Variant::Int(value)))
+            }
+            "tan" => {
+                Self::require_args("tan", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.tan())))
+            }
+            "asin" => {
+                Self::require_args("asin", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.asin())))
+            }
+            "acos" => {
+                Self::require_args("acos", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.acos())))
+            }
+            "atan" => {
+                Self::require_args("atan", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.atan())))
+            }
+            "atan2" => {
+                Self::require_args("atan2", args, 2)?;
+                Ok(Some(Variant::Float(
+                    to_float(&args[0])?.atan2(to_float(&args[1])?),
+                )))
+            }
+            "exp" => {
+                Self::require_args("exp", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.exp())))
+            }
+            "log" => {
+                Self::require_args("log", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.ln())))
+            }
+            "snapped" => {
+                Self::require_args("snapped", args, 2)?;
+                let value = to_float(&args[0])?;
+                let step = to_float(&args[1])?;
+                let result = if step != 0.0 {
+                    (value / step + 0.5).floor() * step
+                } else {
+                    value
+                };
+                Ok(Some(float_or_int(result, &args[0], &args[1])))
+            }
+            "smoothstep" => {
+                Self::require_args("smoothstep", args, 3)?;
+                let from = to_float(&args[0])?;
+                let to = to_float(&args[1])?;
+                let s = to_float(&args[2])?;
+                Ok(Some(Variant::Float(smoothstep(from, to, s))))
+            }
+            "remap" => {
+                Self::require_args("remap", args, 5)?;
+                let value = to_float(&args[0])?;
+                let istart = to_float(&args[1])?;
+                let istop = to_float(&args[2])?;
+                let ostart = to_float(&args[3])?;
+                let ostop = to_float(&args[4])?;
+                let t = (value - istart) / (istop - istart);
+                Ok(Some(Variant::Float(ostart + (ostop - ostart) * t)))
+            }
+            "inverse_lerp" => {
+                Self::require_args("inverse_lerp", args, 3)?;
+                let from = to_float(&args[0])?;
+                let to = to_float(&args[1])?;
+                let value = to_float(&args[2])?;
+                Ok(Some(Variant::Float((value - from) / (to - from))))
+            }
+            "lerp_angle" => {
+                Self::require_args("lerp_angle", args, 3)?;
+                let from = to_float(&args[0])?;
+                let to = to_float(&args[1])?;
+                let weight = to_float(&args[2])?;
+                Ok(Some(Variant::Float(from + angle_difference(from, to) * weight)))
+            }
+            "wrapi" => {
+                Self::require_args("wrapi", args, 3)?;
+                let value = to_int(&args[0])?;
+                let min = to_int(&args[1])?;
+                let max = to_int(&args[2])?;
+                let range = max - min;
+                let result = if range == 0 {
+                    min
+                } else {
+                    min + (((value - min) % range) + range) % range
+                };
+                Ok(Some(Variant::Int(result)))
+            }
+            "wrapf" => {
+                Self::require_args("wrapf", args, 3)?;
+                let value = to_float(&args[0])?;
+                let min = to_float(&args[1])?;
+                let max = to_float(&args[2])?;
+                let range = max - min;
+                let result = if range.abs() < 1e-5 {
+                    min
+                } else {
+                    let r = value - (range * ((value - min) / range).floor());
+                    if is_equal_approx(r, max) {
+                        min
+                    } else {
+                        r
+                    }
+                };
+                Ok(Some(Variant::Float(result)))
+            }
+            "pingpong" => {
+                Self::require_args("pingpong", args, 2)?;
+                let value = to_float(&args[0])?;
+                let length = to_float(&args[1])?;
+                let result = if length != 0.0 {
+                    let x = (value - length) / (length * 2.0);
+                    ((x - x.floor()) * length * 2.0 - length).abs()
+                } else {
+                    0.0
+                };
+                Ok(Some(Variant::Float(result)))
+            }
+            "ease" => {
+                Self::require_args("ease", args, 2)?;
+                let x = to_float(&args[0])?;
+                let curve = to_float(&args[1])?;
+                Ok(Some(Variant::Float(ease(x, curve))))
+            }
+            "is_equal_approx" => {
+                Self::require_args("is_equal_approx", args, 2)?;
+                Ok(Some(Variant::Bool(is_equal_approx(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                ))))
+            }
+            "is_zero_approx" => {
+                Self::require_args("is_zero_approx", args, 1)?;
+                Ok(Some(Variant::Bool(to_float(&args[0])?.abs() < 1e-5)))
+            }
+            "is_nan" => {
+                Self::require_args("is_nan", args, 1)?;
+                Ok(Some(Variant::Bool(to_float(&args[0])?.is_nan())))
+            }
+            "is_inf" => {
+                Self::require_args("is_inf", args, 1)?;
+                Ok(Some(Variant::Bool(to_float(&args[0])?.is_infinite())))
+            }
+            "nearest_po2" => {
+                Self::require_args("nearest_po2", args, 1)?;
+                let x = to_int(&args[0])?;
+                Ok(Some(Variant::Int(nearest_po2(x))))
+            }
+            "db_to_linear" => {
+                Self::require_args("db_to_linear", args, 1)?;
+                Ok(Some(Variant::Float(
+                    (to_float(&args[0])? * 0.11512925464970228).exp(),
+                )))
+            }
+            "linear_to_db" => {
+                Self::require_args("linear_to_db", args, 1)?;
+                Ok(Some(Variant::Float(
+                    to_float(&args[0])?.ln() * 8.685889638065037,
+                )))
+            }
             _ => Ok(None), // Not a built-in
         }
     }
 
+    /// Validates that a built-in received exactly `n` arguments.
+    fn require_args(name: &str, args: &[Variant], n: usize) -> Result<(), RuntimeError> {
+        if args.len() != n {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{name}() takes {n} argument(s), got {}",
+                args.len()
+            ))));
+        }
+        Ok(())
+    }
+
+    /// Validates that a built-in received between `min` and `max` arguments.
+    fn require_args_range(
+        name: &str,
+        args: &[Variant],
+        min: usize,
+        max: usize,
+    ) -> Result<(), RuntimeError> {
+        if args.len() < min || args.len() > max {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{name}() takes {min} to {max} arguments, got {}",
+                args.len()
+            ))));
+        }
+        Ok(())
+    }
+
     fn call_user_func(&mut self, name: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
+            self.call_user_func_impl(name, args)
+        })
+    }
+
+    fn call_user_func_impl(
+        &mut self,
+        name: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
         self.call_stack_frames.push(StackFrame {
             function_name: name.to_string(),
             source_location: Some(self.make_location()),
@@ -2396,11 +3339,27 @@ impl Interpreter {
         }
 
         let mut return_val = Variant::Nil;
-        for stmt in &func.body {
-            if let Some(ControlFlow::Return(v)) = self.exec_stmt(stmt)? {
-                return_val = v.unwrap_or(Variant::Nil);
-                break;
+        let body = func.body.clone();
+        let mut i = 0;
+        while i < body.len() {
+            match self.exec_stmt(&body[i])? {
+                Some(ControlFlow::Return(v)) => {
+                    return_val = v.unwrap_or(Variant::Nil);
+                    break;
+                }
+                Some(ControlFlow::Suspend(target)) => {
+                    let remaining = body[i + 1..].to_vec();
+                    self.park_coroutine(remaining, target, name, false);
+                    self.environment.pop_scope();
+                    self.call_depth -= 1;
+                    self.current_function = prev_function;
+                    self.call_stack_frames.pop();
+                    return Ok(Variant::Nil);
+                }
+                Some(ControlFlow::Break) | Some(ControlFlow::Continue) => {}
+                None => {}
             }
+            i += 1;
         }
 
         self.environment.pop_scope();
@@ -2528,13 +3487,84 @@ impl Interpreter {
                     Ok(Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)))
                 }
             }
+            // pat-nzgdu.9 — analog/axis/just-released polling.
+            "get_axis" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_axis() takes 2 arguments".into(),
+                    )));
+                }
+                let neg = Self::input_action_arg("get_axis", &args[0])?;
+                let pos = Self::input_action_arg("get_axis", &args[1])?;
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Float(access.get_input_axis(neg, pos) as f64))
+                } else {
+                    Ok(Variant::Float(0.0))
+                }
+            }
+            "get_action_strength" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_action_strength() takes 1 argument".into(),
+                    )));
+                }
+                let action = Self::input_action_arg("get_action_strength", &args[0])?;
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Float(access.get_action_strength(action) as f64))
+                } else {
+                    Ok(Variant::Float(0.0))
+                }
+            }
+            "is_action_just_released" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.is_action_just_released() takes 1 argument".into(),
+                    )));
+                }
+                let action = Self::input_action_arg("is_action_just_released", &args[0])?;
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Bool(access.is_input_action_just_released(action)))
+                } else {
+                    Ok(Variant::Bool(false))
+                }
+            }
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("Input.{other}"),
             ))),
         }
     }
 
+    /// Extracts a string action-name argument for an `Input.*` method.
+    fn input_action_arg<'a>(method: &str, arg: &'a Variant) -> Result<&'a str, RuntimeError> {
+        match arg {
+            Variant::String(s) => Ok(s.as_str()),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Input.{method}() argument must be a string"
+            )))),
+        }
+    }
+
     /// Call a method on a value (e.g. array.push_back, array.size, etc.)
+    /// Clones the array, applies `f` (which mutates it and yields a return
+    /// value), then writes the whole array back to its place. This is how every
+    /// mutating Array method (`append`, `sort`, `insert`, …) persists through
+    /// the general lvalue write path, so `self.items.append(x)` and
+    /// `grid[i].append(x)` work.
+    fn array_mutate<F>(
+        &mut self,
+        arr: &[Variant],
+        object_expr: &Expr,
+        f: F,
+    ) -> Result<Variant, RuntimeError>
+    where
+        F: FnOnce(&mut Vec<Variant>) -> Variant,
+    {
+        let mut items = arr.to_vec();
+        let ret = f(&mut items);
+        self.write_place(object_expr, Variant::Array(items))?;
+        Ok(ret)
+    }
+
     fn call_method_on(
         &mut self,
         obj: &Variant,
@@ -2542,58 +3572,82 @@ impl Interpreter {
         args: &[Variant],
         object_expr: &Expr,
     ) -> Result<Variant, RuntimeError> {
+        // FileAccess / DirAccess / ConfigFile handle methods.
+        if let Variant::ObjectId(oid) = obj {
+            if gdcore::is_file_access_handle(*oid) {
+                return call_file_access_instance(*oid, method, args);
+            }
+            if gdcore::is_dir_access_handle(*oid) {
+                return call_dir_access_instance(*oid, method, args);
+            }
+            if gdresource::is_config_file_handle(*oid) {
+                return call_config_file_instance(*oid, method, args);
+            }
+        }
         match obj {
             Variant::Array(arr) => match method {
                 "size" | "length" => Ok(Variant::Int(arr.len() as i64)),
+                "is_empty" => Ok(Variant::Bool(arr.is_empty())),
                 "push_back" | "append" => {
-                    if args.len() != 1 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                            "{method}() takes 1 argument"
-                        ))));
-                    }
-                    let vn = var_name_from_expr(object_expr)?;
-                    let mut c = self.environment.get(&vn)?;
-                    if let Variant::Array(ref mut a) = c {
+                    Self::require_args(method, args, 1)?;
+                    self.array_mutate(arr, object_expr, |a| {
                         a.push(args[0].clone());
-                    }
-                    self.environment.set(&vn, c)?;
-                    Ok(Variant::Nil)
-                }
-                "pop_back" => {
-                    let vn = var_name_from_expr(object_expr)?;
-                    let mut c = self.environment.get(&vn)?;
-                    let r = if let Variant::Array(ref mut a) = c {
-                        a.pop().unwrap_or(Variant::Nil)
-                    } else {
                         Variant::Nil
-                    };
-                    self.environment.set(&vn, c)?;
-                    Ok(r)
+                    })
                 }
-                "sort" => {
-                    let vn = var_name_from_expr(object_expr)?;
-                    let mut c = self.environment.get(&vn)?;
-                    if let Variant::Array(ref mut a) = c {
-                        a.sort_by(variant_cmp);
+                "push_front" => {
+                    Self::require_args("push_front", args, 1)?;
+                    self.array_mutate(arr, object_expr, |a| {
+                        a.insert(0, args[0].clone());
+                        Variant::Nil
+                    })
+                }
+                "pop_back" => self.array_mutate(arr, object_expr, |a| a.pop().unwrap_or(Variant::Nil)),
+                "pop_front" => self.array_mutate(arr, object_expr, |a| {
+                    if a.is_empty() {
+                        Variant::Nil
+                    } else {
+                        a.remove(0)
                     }
-                    self.environment.set(&vn, c)?;
-                    Ok(Variant::Nil)
+                }),
+                "pop_at" => {
+                    Self::require_args("pop_at", args, 1)?;
+                    let i = to_int(&args[0])?;
+                    self.array_mutate(arr, object_expr, |a| {
+                        let idx = if i < 0 { i + a.len() as i64 } else { i };
+                        if idx >= 0 && (idx as usize) < a.len() {
+                            a.remove(idx as usize)
+                        } else {
+                            Variant::Nil
+                        }
+                    })
                 }
-                "reverse" => {
-                    let vn = var_name_from_expr(object_expr)?;
-                    let mut c = self.environment.get(&vn)?;
-                    if let Variant::Array(ref mut a) = c {
-                        a.reverse();
-                    }
-                    self.environment.set(&vn, c)?;
-                    Ok(Variant::Nil)
+                "remove_at" => {
+                    Self::require_args("remove_at", args, 1)?;
+                    let idx = to_int(&args[0])?;
+                    self.array_mutate(arr, object_expr, |a| {
+                        if idx >= 0 && (idx as usize) < a.len() {
+                            a.remove(idx as usize);
+                        }
+                        Variant::Nil
+                    })
                 }
+                "front" => Ok(arr.first().cloned().unwrap_or(Variant::Nil)),
+                "back" => Ok(arr.last().cloned().unwrap_or(Variant::Nil)),
+                "clear" => self.array_mutate(arr, object_expr, |a| {
+                    a.clear();
+                    Variant::Nil
+                }),
+                "sort" => self.array_mutate(arr, object_expr, |a| {
+                    a.sort_by(variant_cmp);
+                    Variant::Nil
+                }),
+                "reverse" => self.array_mutate(arr, object_expr, |a| {
+                    a.reverse();
+                    Variant::Nil
+                }),
                 "find" => {
-                    if args.len() != 1 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "find() takes 1 argument".into(),
-                        )));
-                    }
+                    Self::require_args("find", args, 1)?;
                     Ok(Variant::Int(
                         arr.iter()
                             .position(|v| variant_eq(v, &args[0]))
@@ -2601,129 +3655,309 @@ impl Interpreter {
                             .unwrap_or(-1),
                     ))
                 }
+                "rfind" => {
+                    Self::require_args("rfind", args, 1)?;
+                    Ok(Variant::Int(
+                        arr.iter()
+                            .rposition(|v| variant_eq(v, &args[0]))
+                            .map(|idx| idx as i64)
+                            .unwrap_or(-1),
+                    ))
+                }
+                "count" => {
+                    Self::require_args("count", args, 1)?;
+                    Ok(Variant::Int(
+                        arr.iter().filter(|v| variant_eq(v, &args[0])).count() as i64,
+                    ))
+                }
                 "has" => {
-                    if args.len() != 1 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "has() takes 1 argument".into(),
-                        )));
-                    }
+                    Self::require_args("has", args, 1)?;
                     Ok(Variant::Bool(arr.iter().any(|v| variant_eq(v, &args[0]))))
                 }
                 "erase" => {
-                    if args.len() != 1 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "erase() takes 1 argument".into(),
-                        )));
-                    }
-                    let vn = var_name_from_expr(object_expr)?;
-                    let mut c = self.environment.get(&vn)?;
-                    if let Variant::Array(ref mut a) = c {
+                    Self::require_args("erase", args, 1)?;
+                    self.array_mutate(arr, object_expr, |a| {
                         if let Some(pos) = a.iter().position(|v| variant_eq(v, &args[0])) {
                             a.remove(pos);
                         }
-                    }
-                    self.environment.set(&vn, c)?;
-                    Ok(Variant::Nil)
+                        Variant::Nil
+                    })
                 }
                 "insert" => {
-                    if args.len() != 2 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "insert() takes 2 arguments".into(),
-                        )));
-                    }
-                    let vn = var_name_from_expr(object_expr)?;
-                    let idx = match &args[0] {
-                        Variant::Int(ii) => *ii as usize,
-                        _ => {
-                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                "insert() index must be int".into(),
-                            )))
-                        }
-                    };
-                    let mut c = self.environment.get(&vn)?;
-                    if let Variant::Array(ref mut a) = c {
+                    Self::require_args("insert", args, 2)?;
+                    let idx = to_int(&args[0])?.max(0) as usize;
+                    self.array_mutate(arr, object_expr, |a| {
                         if idx <= a.len() {
                             a.insert(idx, args[1].clone());
                         }
-                    }
-                    self.environment.set(&vn, c)?;
-                    Ok(Variant::Nil)
+                        Variant::Nil
+                    })
                 }
-                "slice" => {
-                    if args.len() != 2 {
+                "append_array" => {
+                    Self::require_args("append_array", args, 1)?;
+                    let Variant::Array(other) = &args[0] else {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "slice() takes 2 arguments".into(),
+                            "append_array() argument must be an Array".into(),
+                        )));
+                    };
+                    self.array_mutate(arr, object_expr, |a| {
+                        a.extend(other.iter().cloned());
+                        Variant::Nil
+                    })
+                }
+                "resize" => {
+                    Self::require_args("resize", args, 1)?;
+                    let n = to_int(&args[0])?.max(0) as usize;
+                    self.array_mutate(arr, object_expr, |a| {
+                        a.resize(n, Variant::Nil);
+                        Variant::Int(0)
+                    })
+                }
+                "fill" => {
+                    Self::require_args("fill", args, 1)?;
+                    self.array_mutate(arr, object_expr, |a| {
+                        for e in a.iter_mut() {
+                            *e = args[0].clone();
+                        }
+                        Variant::Nil
+                    })
+                }
+                "duplicate" => {
+                    // Value semantics make shallow and deep copies identical.
+                    Ok(Variant::Array(arr.clone()))
+                }
+                "max" => {
+                    let mut best: Option<Variant> = None;
+                    for v in arr {
+                        best = Some(match best {
+                            None => v.clone(),
+                            Some(b) => {
+                                if variant_cmp(v, &b) == std::cmp::Ordering::Greater {
+                                    v.clone()
+                                } else {
+                                    b
+                                }
+                            }
+                        });
+                    }
+                    Ok(best.unwrap_or(Variant::Nil))
+                }
+                "min" => {
+                    let mut best: Option<Variant> = None;
+                    for v in arr {
+                        best = Some(match best {
+                            None => v.clone(),
+                            Some(b) => {
+                                if variant_cmp(v, &b) == std::cmp::Ordering::Less {
+                                    v.clone()
+                                } else {
+                                    b
+                                }
+                            }
+                        });
+                    }
+                    Ok(best.unwrap_or(Variant::Nil))
+                }
+                "bsearch" => {
+                    Self::require_args("bsearch", args, 1)?;
+                    let mut lo = 0usize;
+                    let mut hi = arr.len();
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if variant_cmp(&arr[mid], &args[0]) == std::cmp::Ordering::Less {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    Ok(Variant::Int(lo as i64))
+                }
+                "pick_random" => {
+                    if arr.is_empty() {
+                        Ok(Variant::Nil)
+                    } else {
+                        let idx = (deterministic_randi().unsigned_abs() as usize) % arr.len();
+                        Ok(arr[idx].clone())
+                    }
+                }
+                "shuffle" => self.array_mutate(arr, object_expr, |a| {
+                    let n = a.len();
+                    if n > 1 {
+                        for i in (1..n).rev() {
+                            let j = (deterministic_randi().unsigned_abs() as usize) % (i + 1);
+                            a.swap(i, j);
+                        }
+                    }
+                    Variant::Nil
+                }),
+                "slice" => {
+                    if args.is_empty() || args.len() > 4 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "slice() takes 1 to 4 arguments".into(),
                         )));
                     }
-                    match (&args[0], &args[1]) {
-                        (Variant::Int(from), Variant::Int(to)) => {
-                            let f = (*from).max(0) as usize;
-                            let t = ((*to).max(0) as usize).min(arr.len());
-                            let f = f.min(t);
-                            Ok(Variant::Array(arr[f..t].to_vec()))
-                        }
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "slice() arguments must be int".into(),
-                        ))),
+                    let begin = to_int(&args[0])?;
+                    let end = if args.len() >= 2 {
+                        to_int(&args[1])?
+                    } else {
+                        i64::MAX
+                    };
+                    let step = if args.len() >= 3 { to_int(&args[2])? } else { 1 };
+                    Ok(Variant::Array(array_slice(arr, begin, end, step)?))
+                }
+                "map" => {
+                    Self::require_args("map", args, 1)?;
+                    let callable = extract_callable(&args[0])?;
+                    let mut out = Vec::with_capacity(arr.len());
+                    for elem in arr {
+                        out.push(self.invoke_callable(&callable, &[elem.clone()])?);
                     }
+                    Ok(Variant::Array(out))
+                }
+                "filter" => {
+                    Self::require_args("filter", args, 1)?;
+                    let callable = extract_callable(&args[0])?;
+                    let mut out = Vec::new();
+                    for elem in arr {
+                        if self.invoke_callable(&callable, &[elem.clone()])?.is_truthy() {
+                            out.push(elem.clone());
+                        }
+                    }
+                    Ok(Variant::Array(out))
+                }
+                "any" => {
+                    Self::require_args("any", args, 1)?;
+                    let callable = extract_callable(&args[0])?;
+                    for elem in arr {
+                        if self.invoke_callable(&callable, &[elem.clone()])?.is_truthy() {
+                            return Ok(Variant::Bool(true));
+                        }
+                    }
+                    Ok(Variant::Bool(false))
+                }
+                "all" => {
+                    Self::require_args("all", args, 1)?;
+                    let callable = extract_callable(&args[0])?;
+                    for elem in arr {
+                        if !self.invoke_callable(&callable, &[elem.clone()])?.is_truthy() {
+                            return Ok(Variant::Bool(false));
+                        }
+                    }
+                    Ok(Variant::Bool(true))
+                }
+                "reduce" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "reduce() takes 1 or 2 arguments".into(),
+                        )));
+                    }
+                    let callable = extract_callable(&args[0])?;
+                    let mut ret = if args.len() == 2 {
+                        args[1].clone()
+                    } else {
+                        Variant::Nil
+                    };
+                    let mut start = 0;
+                    if matches!(ret, Variant::Nil) && !arr.is_empty() {
+                        ret = arr[0].clone();
+                        start = 1;
+                    }
+                    for elem in &arr[start..] {
+                        ret = self.invoke_callable(&callable, &[ret, elem.clone()])?;
+                    }
+                    Ok(ret)
+                }
+                "sort_custom" => {
+                    Self::require_args("sort_custom", args, 1)?;
+                    let callable = extract_callable(&args[0])?;
+                    let mut items = arr.to_vec();
+                    // Stable insertion sort; comparator returns true when the
+                    // first argument should sort before the second (Godot).
+                    for i in 1..items.len() {
+                        let mut j = i;
+                        while j > 0 {
+                            let before = self
+                                .invoke_callable(
+                                    &callable,
+                                    &[items[j].clone(), items[j - 1].clone()],
+                                )?
+                                .is_truthy();
+                            if before {
+                                items.swap(j, j - 1);
+                                j -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.write_place(object_expr, Variant::Array(items))?;
+                    Ok(Variant::Nil)
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("Array.{method}"),
                 ))),
             },
             Variant::String(s) => match method {
-                "length" => Ok(Variant::Int(s.len() as i64)),
+                // Character count, not byte count (multibyte-safe).
+                "length" => Ok(Variant::Int(s.chars().count() as i64)),
+                "is_empty" => Ok(Variant::Bool(s.is_empty())),
                 "to_upper" => Ok(Variant::String(s.to_uppercase())),
                 "to_lower" => Ok(Variant::String(s.to_lowercase())),
                 "begins_with" => {
-                    if args.len() != 1 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "begins_with() takes 1 argument".into(),
-                        )));
-                    }
-                    match &args[0] {
-                        Variant::String(pp) => Ok(Variant::Bool(s.starts_with(pp.as_str()))),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "begins_with() arg must be string".into(),
-                        ))),
-                    }
+                    Self::require_args("begins_with", args, 1)?;
+                    Ok(Variant::Bool(s.starts_with(&arg_str(&args[0]))))
                 }
                 "ends_with" => {
-                    if args.len() != 1 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "ends_with() takes 1 argument".into(),
-                        )));
-                    }
-                    match &args[0] {
-                        Variant::String(pp) => Ok(Variant::Bool(s.ends_with(pp.as_str()))),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "ends_with() arg must be string".into(),
-                        ))),
-                    }
+                    Self::require_args("ends_with", args, 1)?;
+                    Ok(Variant::Bool(s.ends_with(&arg_str(&args[0]))))
+                }
+                "contains" => {
+                    Self::require_args("contains", args, 1)?;
+                    Ok(Variant::Bool(s.contains(&arg_str(&args[0]))))
+                }
+                "containsn" => {
+                    Self::require_args("containsn", args, 1)?;
+                    Ok(Variant::Bool(
+                        s.to_lowercase()
+                            .contains(&arg_str(&args[0]).to_lowercase()),
+                    ))
                 }
                 "split" => {
-                    if args.len() != 1 {
+                    if args.is_empty() {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "split() takes 1 argument".into(),
+                            "split() takes at least 1 argument".into(),
                         )));
                     }
-                    match &args[0] {
-                        Variant::String(d) => Ok(Variant::Array(
-                            s.split(d.as_str())
-                                .map(|pp| Variant::String(pp.to_string()))
-                                .collect(),
-                        )),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "split() arg must be string".into(),
-                        ))),
+                    let d = arg_str(&args[0]);
+                    let parts: Vec<Variant> = if d.is_empty() {
+                        s.chars().map(|c| Variant::String(c.to_string())).collect()
+                    } else {
+                        s.split(d.as_str())
+                            .map(|pp| Variant::String(pp.to_string()))
+                            .collect()
+                    };
+                    Ok(Variant::Array(parts))
+                }
+                "rsplit" => {
+                    if args.is_empty() {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "rsplit() takes at least 1 argument".into(),
+                        )));
                     }
+                    let d = arg_str(&args[0]);
+                    // Without a maxsplit limit, rsplit produces the same
+                    // (left-to-right) segments as split.
+                    let parts: Vec<Variant> = if d.is_empty() {
+                        vec![Variant::String(s.clone())]
+                    } else {
+                        s.split(d.as_str())
+                            .map(|pp| Variant::String(pp.to_string()))
+                            .collect()
+                    };
+                    Ok(Variant::Array(parts))
                 }
                 "join" => {
-                    if args.len() != 1 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "join() takes 1 argument".into(),
-                        )));
-                    }
+                    Self::require_args("join", args, 1)?;
                     match &args[0] {
                         Variant::Array(a) => {
                             let parts: Vec<String> = a.iter().map(|v| format!("{v}")).collect();
@@ -2735,49 +3969,331 @@ impl Interpreter {
                     }
                 }
                 "replace" => {
-                    if args.len() != 2 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "replace() takes 2 arguments".into(),
-                        )));
-                    }
-                    match (&args[0], &args[1]) {
-                        (Variant::String(from), Variant::String(to)) => {
-                            Ok(Variant::String(s.replace(from.as_str(), to.as_str())))
-                        }
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "replace() args must be strings".into(),
-                        ))),
-                    }
+                    Self::require_args("replace", args, 2)?;
+                    Ok(Variant::String(
+                        s.replace(&arg_str(&args[0]), &arg_str(&args[1])),
+                    ))
                 }
                 "find" => {
-                    if args.len() != 1 {
+                    if args.is_empty() || args.len() > 2 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "find() takes 1 argument".into(),
+                            "find() takes 1 or 2 arguments".into(),
                         )));
                     }
-                    match &args[0] {
-                        Variant::String(n) => Ok(Variant::Int(
-                            s.find(n.as_str()).map(|idx| idx as i64).unwrap_or(-1),
-                        )),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "find() arg must be string".into(),
-                        ))),
-                    }
+                    let needle: Vec<char> = arg_str(&args[0]).chars().collect();
+                    let from = args
+                        .get(1)
+                        .map(|v| to_int(v).unwrap_or(0).max(0) as usize)
+                        .unwrap_or(0);
+                    let chars: Vec<char> = s.chars().collect();
+                    Ok(Variant::Int(str_find(&chars, &needle, from)))
+                }
+                "findn" => {
+                    Self::require_args_range("findn", args, 1, 2)?;
+                    let needle: Vec<char> =
+                        arg_str(&args[0]).to_lowercase().chars().collect();
+                    let from = args
+                        .get(1)
+                        .map(|v| to_int(v).unwrap_or(0).max(0) as usize)
+                        .unwrap_or(0);
+                    let chars: Vec<char> = s.to_lowercase().chars().collect();
+                    Ok(Variant::Int(str_find(&chars, &needle, from)))
+                }
+                "rfind" => {
+                    Self::require_args_range("rfind", args, 1, 2)?;
+                    let needle: Vec<char> = arg_str(&args[0]).chars().collect();
+                    let chars: Vec<char> = s.chars().collect();
+                    let from = match args.get(1).map(|v| to_int(v).unwrap_or(-1)) {
+                        Some(f) if f >= 0 => Some(f as usize),
+                        _ => None,
+                    };
+                    Ok(Variant::Int(str_rfind(&chars, &needle, from)))
+                }
+                "rfindn" => {
+                    Self::require_args_range("rfindn", args, 1, 2)?;
+                    let needle: Vec<char> =
+                        arg_str(&args[0]).to_lowercase().chars().collect();
+                    let chars: Vec<char> = s.to_lowercase().chars().collect();
+                    let from = match args.get(1).map(|v| to_int(v).unwrap_or(-1)) {
+                        Some(f) if f >= 0 => Some(f as usize),
+                        _ => None,
+                    };
+                    Ok(Variant::Int(str_rfind(&chars, &needle, from)))
+                }
+                "count" => {
+                    Self::require_args_range("count", args, 1, 3)?;
+                    let needle: Vec<char> = arg_str(&args[0]).chars().collect();
+                    let chars: Vec<char> = s.chars().collect();
+                    let from = args
+                        .get(1)
+                        .map(|v| to_int(v).unwrap_or(0).max(0) as usize)
+                        .unwrap_or(0);
+                    let to = args
+                        .get(2)
+                        .map(|v| to_int(v).unwrap_or(0).max(0) as usize)
+                        .unwrap_or(0);
+                    Ok(Variant::Int(str_count(&chars, &needle, from, to)))
+                }
+                "countn" => {
+                    Self::require_args_range("countn", args, 1, 3)?;
+                    let needle: Vec<char> =
+                        arg_str(&args[0]).to_lowercase().chars().collect();
+                    let chars: Vec<char> = s.to_lowercase().chars().collect();
+                    let from = args
+                        .get(1)
+                        .map(|v| to_int(v).unwrap_or(0).max(0) as usize)
+                        .unwrap_or(0);
+                    let to = args
+                        .get(2)
+                        .map(|v| to_int(v).unwrap_or(0).max(0) as usize)
+                        .unwrap_or(0);
+                    Ok(Variant::Int(str_count(&chars, &needle, from, to)))
                 }
                 "substr" => {
-                    if args.len() != 2 {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "substr() takes 2 arguments".into(),
-                        )));
+                    Self::require_args_range("substr", args, 1, 2)?;
+                    let from = to_int(&args[0])?.max(0) as usize;
+                    let len = args
+                        .get(1)
+                        .map(|v| to_int(v).unwrap_or(-1))
+                        .unwrap_or(-1);
+                    let take = if len < 0 { usize::MAX } else { len as usize };
+                    Ok(Variant::String(
+                        s.chars().skip(from).take(take).collect(),
+                    ))
+                }
+                "left" => {
+                    Self::require_args("left", args, 1)?;
+                    Ok(Variant::String(str_left(s, to_int(&args[0])?)))
+                }
+                "right" => {
+                    Self::require_args("right", args, 1)?;
+                    Ok(Variant::String(str_right(s, to_int(&args[0])?)))
+                }
+                "repeat" => {
+                    Self::require_args("repeat", args, 1)?;
+                    let n = to_int(&args[0])?;
+                    Ok(Variant::String(if n <= 0 {
+                        String::new()
+                    } else {
+                        s.repeat(n as usize)
+                    }))
+                }
+                "strip_edges" => {
+                    let left = args.first().map(|v| v.is_truthy()).unwrap_or(true);
+                    let right = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+                    let mut r = s.as_str();
+                    if left {
+                        r = r.trim_start();
                     }
-                    match (&args[0], &args[1]) {
-                        (Variant::Int(from), Variant::Int(len)) => Ok(Variant::String(
-                            s.chars().skip(*from as usize).take(*len as usize).collect(),
-                        )),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "substr() args must be int".into(),
-                        ))),
+                    if right {
+                        r = r.trim_end();
                     }
+                    Ok(Variant::String(r.to_string()))
+                }
+                "strip_escapes" => Ok(Variant::String(
+                    s.chars().filter(|c| (*c as u32) >= 32).collect(),
+                )),
+                "lstrip" => {
+                    Self::require_args("lstrip", args, 1)?;
+                    let set: Vec<char> = arg_str(&args[0]).chars().collect();
+                    Ok(Variant::String(
+                        s.trim_start_matches(|c| set.contains(&c)).to_string(),
+                    ))
+                }
+                "rstrip" => {
+                    Self::require_args("rstrip", args, 1)?;
+                    let set: Vec<char> = arg_str(&args[0]).chars().collect();
+                    Ok(Variant::String(
+                        s.trim_end_matches(|c| set.contains(&c)).to_string(),
+                    ))
+                }
+                "trim_prefix" => {
+                    Self::require_args("trim_prefix", args, 1)?;
+                    let p = arg_str(&args[0]);
+                    Ok(Variant::String(
+                        s.strip_prefix(&p).unwrap_or(s.as_str()).to_string(),
+                    ))
+                }
+                "trim_suffix" => {
+                    Self::require_args("trim_suffix", args, 1)?;
+                    let p = arg_str(&args[0]);
+                    Ok(Variant::String(
+                        s.strip_suffix(&p).unwrap_or(s.as_str()).to_string(),
+                    ))
+                }
+                "to_int" => Ok(Variant::Int(str_to_int(s))),
+                "to_float" => Ok(Variant::Float(str_to_float(s))),
+                "is_valid_int" => Ok(Variant::Bool(str_is_valid_int(s))),
+                "is_valid_float" => Ok(Variant::Bool(str_is_valid_float(s))),
+                "hex_to_int" => {
+                    let mut t = s.trim();
+                    let mut sign = 1i64;
+                    if let Some(r) = t.strip_prefix('-') {
+                        sign = -1;
+                        t = r;
+                    } else if let Some(r) = t.strip_prefix('+') {
+                        t = r;
+                    }
+                    let t = t
+                        .strip_prefix("0x")
+                        .or_else(|| t.strip_prefix("0X"))
+                        .unwrap_or(t);
+                    Ok(Variant::Int(sign * i64::from_str_radix(t, 16).unwrap_or(0)))
+                }
+                "bin_to_int" => {
+                    let mut t = s.trim();
+                    let mut sign = 1i64;
+                    if let Some(r) = t.strip_prefix('-') {
+                        sign = -1;
+                        t = r;
+                    } else if let Some(r) = t.strip_prefix('+') {
+                        t = r;
+                    }
+                    let t = t
+                        .strip_prefix("0b")
+                        .or_else(|| t.strip_prefix("0B"))
+                        .unwrap_or(t);
+                    Ok(Variant::Int(sign * i64::from_str_radix(t, 2).unwrap_or(0)))
+                }
+                "format" => {
+                    Self::require_args_range("format", args, 1, 2)?;
+                    Ok(Variant::String(gd_format(s, &args[0])))
+                }
+                "lpad" => {
+                    Self::require_args_range("lpad", args, 1, 2)?;
+                    let min = to_int(&args[0])?;
+                    let pad = args
+                        .get(1)
+                        .map(arg_str)
+                        .and_then(|p| p.chars().next())
+                        .unwrap_or(' ');
+                    let cur = s.chars().count() as i64;
+                    let mut out = String::new();
+                    for _ in 0..(min - cur).max(0) {
+                        out.push(pad);
+                    }
+                    out.push_str(s);
+                    Ok(Variant::String(out))
+                }
+                "rpad" => {
+                    Self::require_args_range("rpad", args, 1, 2)?;
+                    let min = to_int(&args[0])?;
+                    let pad = args
+                        .get(1)
+                        .map(arg_str)
+                        .and_then(|p| p.chars().next())
+                        .unwrap_or(' ');
+                    let cur = s.chars().count() as i64;
+                    let mut out = s.clone();
+                    for _ in 0..(min - cur).max(0) {
+                        out.push(pad);
+                    }
+                    Ok(Variant::String(out))
+                }
+                "pad_zeros" => {
+                    Self::require_args("pad_zeros", args, 1)?;
+                    let digits = to_int(&args[0])?;
+                    let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+                        ("-", r)
+                    } else if let Some(r) = s.strip_prefix('+') {
+                        ("+", r)
+                    } else {
+                        ("", s.as_str())
+                    };
+                    let (int_part, frac_part) = match rest.find('.') {
+                        Some(p) => (&rest[..p], &rest[p..]),
+                        None => (rest, ""),
+                    };
+                    let cur = int_part.chars().count() as i64;
+                    let mut ip = String::new();
+                    for _ in 0..(digits - cur).max(0) {
+                        ip.push('0');
+                    }
+                    ip.push_str(int_part);
+                    Ok(Variant::String(format!("{sign}{ip}{frac_part}")))
+                }
+                "pad_decimals" => {
+                    Self::require_args("pad_decimals", args, 1)?;
+                    let digits = to_int(&args[0])?.max(0) as usize;
+                    let out = match s.find('.') {
+                        Some(p) => {
+                            let int_part = &s[..p];
+                            let frac = &s[p + 1..];
+                            if digits == 0 {
+                                int_part.to_string()
+                            } else {
+                                let mut f: String = frac.chars().take(digits).collect();
+                                while f.chars().count() < digits {
+                                    f.push('0');
+                                }
+                                format!("{int_part}.{f}")
+                            }
+                        }
+                        None => {
+                            if digits == 0 {
+                                s.clone()
+                            } else {
+                                format!("{s}.{}", "0".repeat(digits))
+                            }
+                        }
+                    };
+                    Ok(Variant::String(out))
+                }
+                "capitalize" => Ok(Variant::String(gd_capitalize(s))),
+                "to_snake_case" => Ok(Variant::String(gd_to_snake_case(s))),
+                "to_camel_case" => Ok(Variant::String(gd_to_camel_case(s))),
+                "to_pascal_case" => Ok(Variant::String(gd_to_pascal_case(s))),
+                "dedent" => Ok(Variant::String(gd_dedent(s))),
+                "indent" => {
+                    Self::require_args("indent", args, 1)?;
+                    Ok(Variant::String(gd_indent(s, &arg_str(&args[0]))))
+                }
+                "get_extension" => Ok(Variant::String(path_get_extension(s))),
+                "get_basename" => Ok(Variant::String(path_get_basename(s))),
+                "get_file" => Ok(Variant::String(path_get_file(s))),
+                "get_base_dir" => Ok(Variant::String(path_get_base_dir(s))),
+                "path_join" => {
+                    Self::require_args("path_join", args, 1)?;
+                    Ok(Variant::String(path_join(s, &arg_str(&args[0]))))
+                }
+                "simplify_path" => Ok(Variant::String(gd_simplify_path(s))),
+                "is_absolute_path" => Ok(Variant::Bool(path_is_absolute(s))),
+                "is_relative_path" => Ok(Variant::Bool(!path_is_absolute(s))),
+                "xml_escape" => {
+                    let quotes = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+                    Ok(Variant::String(gd_xml_escape(s, quotes)))
+                }
+                "xml_unescape" => Ok(Variant::String(gd_xml_unescape(s))),
+                "c_escape" => Ok(Variant::String(gd_c_escape(s))),
+                "c_unescape" => Ok(Variant::String(gd_c_unescape(s))),
+                "json_escape" => Ok(Variant::String(gd_json_escape(s))),
+                "uri_encode" => Ok(Variant::String(gd_uri_encode(s))),
+                "uri_decode" => Ok(Variant::String(gd_uri_decode(s))),
+                "hash" => Ok(Variant::Int(str_hash(s))),
+                "sha256_text" => Ok(Variant::String(gdcore::crypto::sha256_hex(s.as_bytes()))),
+                "similarity" => {
+                    Self::require_args("similarity", args, 1)?;
+                    Ok(Variant::Float(str_similarity(s, &arg_str(&args[0]))))
+                }
+                "casecmp_to" => {
+                    Self::require_args("casecmp_to", args, 1)?;
+                    Ok(Variant::Int(ordering_to_int(
+                        s.as_str().cmp(arg_str(&args[0]).as_str()),
+                    )))
+                }
+                "nocasecmp_to" => {
+                    Self::require_args("nocasecmp_to", args, 1)?;
+                    Ok(Variant::Int(ordering_to_int(
+                        s.to_lowercase().cmp(&arg_str(&args[0]).to_lowercase()),
+                    )))
+                }
+                "naturalnocasecmp_to" => {
+                    Self::require_args("naturalnocasecmp_to", args, 1)?;
+                    Ok(Variant::Int(ordering_to_int(natural_cmp(
+                        s,
+                        &arg_str(&args[0]),
+                        true,
+                    ))))
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("String.{method}"),
@@ -2811,12 +4327,11 @@ impl Interpreter {
                         Variant::String(ss) => ss.clone(),
                         other => format!("{other}"),
                     };
-                    let vn = var_name_from_expr(object_expr)?;
-                    let mut c = self.environment.get(&vn)?;
+                    let mut c = self.eval_expr(object_expr)?;
                     if let Variant::Dictionary(ref mut dm) = c {
                         dm.remove(&key);
                     }
-                    self.environment.set(&vn, c)?;
+                    self.write_place(object_expr, c)?;
                     Ok(Variant::Nil)
                 }
                 "merge" => {
@@ -2827,14 +4342,13 @@ impl Interpreter {
                     }
                     match &args[0] {
                         Variant::Dictionary(other) => {
-                            let vn = var_name_from_expr(object_expr)?;
-                            let mut c = self.environment.get(&vn)?;
+                            let mut c = self.eval_expr(object_expr)?;
                             if let Variant::Dictionary(ref mut dm) = c {
                                 for (k, v) in other {
                                     dm.insert(k.clone(), v.clone());
                                 }
                             }
-                            self.environment.set(&vn, c)?;
+                            self.write_place(object_expr, c)?;
                             Ok(Variant::Nil)
                         }
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -3144,6 +4658,31 @@ impl Interpreter {
                             )))
                         }
                     }
+                    "call_deferred" => {
+                        if args.is_empty() {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "call_deferred() requires a method name".into(),
+                            )));
+                        }
+                        let method = match &args[0] {
+                            Variant::String(s) => s.clone(),
+                            other => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    format!(
+                                        "call_deferred() method name must be a String, got {other:?}"
+                                    ),
+                                )))
+                            }
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.call_deferred(id, &method, &args[1..]);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
                     "get_class" => {
                         if let Some(ref access) = self.scene_access {
                             match access.get_class(id) {
@@ -3156,6 +4695,144 @@ impl Interpreter {
                             )))
                         }
                     }
+                    // -- AudioStreamPlayer(2D/3D) playback control (pat-nzgdu.2) --
+                    // Godot scripts drive audio via method calls; route them to the
+                    // node properties that `AudioServerBridge::sync_player_node`
+                    // polls each frame. `playing` starts/stops the voice,
+                    // `stream_paused` pauses it, `seek_request` requests a seek, and
+                    // `playback_position` is read back. Before this, these calls hit
+                    // the `_` arm below and threw `UndefinedFunction("ObjectId.play")`.
+                    "play" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            // Optional `from` position: request a seek first.
+                            if let Some(from) = args.first() {
+                                let pos = match from {
+                                    Variant::Float(f) => *f,
+                                    Variant::Int(i) => *i as f64,
+                                    _ => 0.0,
+                                };
+                                if pos > 0.0 {
+                                    access.set_node_property(
+                                        id,
+                                        "seek_request",
+                                        Variant::Float(pos),
+                                    );
+                                }
+                            }
+                            access.set_node_property(id, "playing", Variant::Bool(true));
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "stop" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.set_node_property(id, "playing", Variant::Bool(false));
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "is_playing" => {
+                        if let Some(ref access) = self.scene_access {
+                            Ok(Variant::Bool(matches!(
+                                access.get_node_property(id, "playing"),
+                                Variant::Bool(true)
+                            )))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "seek" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            let pos = match args.first() {
+                                Some(Variant::Float(f)) => *f,
+                                Some(Variant::Int(i)) => *i as f64,
+                                _ => 0.0,
+                            };
+                            access.set_node_property(id, "seek_request", Variant::Float(pos));
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_playback_position" => {
+                        if let Some(ref access) = self.scene_access {
+                            Ok(match access.get_node_property(id, "playback_position") {
+                                v @ Variant::Float(_) => v,
+                                Variant::Int(i) => Variant::Float(i as f64),
+                                _ => Variant::Float(0.0),
+                            })
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "set_stream_paused" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            let paused = matches!(args.first(), Some(Variant::Bool(true)));
+                            access.set_node_property(id, "stream_paused", Variant::Bool(paused));
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    // -- RayCast3D / ShapeCast3D / SpringArm3D query results
+                    // (pat-nzgdu.12). The MainLoop's per-frame 3D query phase
+                    // publishes these `_hit_*` node properties; these methods read
+                    // them so `$RayCast3D.is_colliding()` works from GDScript.
+                    "is_colliding" => {
+                        if let Some(ref access) = self.scene_access {
+                            Ok(Variant::Bool(matches!(
+                                access.get_node_property(id, "_hit_colliding"),
+                                Variant::Bool(true)
+                            )))
+                        } else {
+                            Ok(Variant::Bool(false))
+                        }
+                    }
+                    "get_collider" => {
+                        if let Some(ref access) = self.scene_access {
+                            Ok(access.get_node_property(id, "_hit_collider"))
+                        } else {
+                            Ok(Variant::Nil)
+                        }
+                    }
+                    "get_collision_point" => {
+                        if let Some(ref access) = self.scene_access {
+                            Ok(access.get_node_property(id, "_hit_point"))
+                        } else {
+                            Ok(Variant::Nil)
+                        }
+                    }
+                    "get_collision_normal" => {
+                        if let Some(ref access) = self.scene_access {
+                            Ok(access.get_node_property(id, "_hit_normal"))
+                        } else {
+                            Ok(Variant::Nil)
+                        }
+                    }
+                    "get_hit_length" => {
+                        if let Some(ref access) = self.scene_access {
+                            Ok(access.get_node_property(id, "_hit_length"))
+                        } else {
+                            Ok(Variant::Nil)
+                        }
+                    }
+                    // The MainLoop already re-runs these queries every physics
+                    // frame, so a scripted force update is a no-op.
+                    "force_raycast_update" | "force_shapecast_update" => Ok(Variant::Nil),
                     _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                         format!("ObjectId.{method}"),
                     ))),
@@ -3232,10 +4909,126 @@ impl Interpreter {
                         .cloned()
                         .unwrap_or(Variant::Nil))
                 }
+                // PackedScene.instantiate() / .instance(): build the scene's
+                // node subtree via the scene-access hook and return a node
+                // reference (same representation `get_node` yields), so
+                // `preload("x.tscn").instantiate()` works end to end.
+                "instantiate" | "instance" => {
+                    if res_ref.class_name != "PackedScene" {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "cannot instantiate a {} resource",
+                            res_ref.class_name
+                        ))));
+                    }
+                    let path = res_ref.path.clone();
+                    match self.scene_access.as_mut() {
+                        Some(access) => match access.instantiate_packed_scene(&path) {
+                            // Missing / unloadable scene → null (Godot semantics).
+                            Some(raw) => {
+                                Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
+                            }
+                            None => Ok(Variant::Nil),
+                        },
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "instantiate() requires scene access".into(),
+                        ))),
+                    }
+                }
+                "can_instantiate" => {
+                    Ok(Variant::Bool(res_ref.class_name == "PackedScene"))
+                }
+                // ShaderMaterial.set_shader_parameter(name, value): stored under
+                // the `shader_parameter/<name>` property key so the value round-
+                // trips through tscn/tres and is picked up by the 3D render
+                // server's ShaderMaterial resolution. Mutates in place by writing
+                // the updated resource back to its lvalue.
+                "set_shader_parameter" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "set_shader_parameter() takes 2 arguments (name, value)".into(),
+                        )));
+                    }
+                    let name = match &args[0] {
+                        Variant::String(s) => s.clone(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "set_shader_parameter() name must be a string".into(),
+                            )));
+                        }
+                    };
+                    let mut new_ref = res_ref.clone();
+                    new_ref
+                        .properties
+                        .insert(format!("shader_parameter/{name}"), args[1].clone());
+                    self.write_place(object_expr, Variant::Resource(new_ref))?;
+                    Ok(Variant::Nil)
+                }
+                "get_shader_parameter" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "get_shader_parameter() takes 1 argument (name)".into(),
+                        )));
+                    }
+                    let name = match &args[0] {
+                        Variant::String(s) => s.clone(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "get_shader_parameter() name must be a string".into(),
+                            )));
+                        }
+                    };
+                    Ok(res_ref
+                        .properties
+                        .get(&format!("shader_parameter/{name}"))
+                        .cloned()
+                        .unwrap_or(Variant::Nil))
+                }
+                // ShaderMaterial.set_shader(shader) / get_shader() — the assigned
+                // Shader resource is kept under the `shader` property.
+                "set_shader" => {
+                    Self::require_args(method, args, 1)?;
+                    let mut new_ref = res_ref.clone();
+                    new_ref
+                        .properties
+                        .insert("shader".to_string(), args[0].clone());
+                    self.write_place(object_expr, Variant::Resource(new_ref))?;
+                    Ok(Variant::Nil)
+                }
+                "get_shader" => Ok(res_ref
+                    .properties
+                    .get("shader")
+                    .cloned()
+                    .unwrap_or(Variant::Nil)),
+                // Generic Resource.set(name, value) mirror of the existing get().
+                "set" => {
+                    if args.len() != 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Resource.set() takes 2 arguments".into(),
+                        )));
+                    }
+                    let key = match &args[0] {
+                        Variant::String(s) => s.clone(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "Resource.set() key must be a string".into(),
+                            )));
+                        }
+                    };
+                    let mut new_ref = res_ref.clone();
+                    new_ref.properties.insert(key, args[1].clone());
+                    self.write_place(object_expr, Variant::Resource(new_ref))?;
+                    Ok(Variant::Nil)
+                }
+                // GDScript resource `.new()` (script-class instantiation) isn't
+                // wired to a filesystem script loader yet; graceful Nil fallback.
+                "new" => Ok(Variant::Nil),
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("Resource.{method}"),
                 ))),
             },
+            packed if packed.is_packed_array() => {
+                self.call_packed_method(packed, method, args, object_expr)
+            }
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot call method on {}",
                 obj.variant_type()
@@ -3243,8 +5036,124 @@ impl Interpreter {
         }
     }
 
+    /// Dispatches `Packed*Array` methods (`size`, `append`, `resize`, `slice`,
+    /// `to_byte_array`, …). Mutating methods use the clone → mutate →
+    /// `write_place` pattern so `self.data.append(x)` persists, exactly like
+    /// [`array_mutate`].
+    fn call_packed_method(
+        &mut self,
+        obj: &Variant,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+    ) -> Result<Variant, RuntimeError> {
+        let len = obj.packed_len().unwrap_or(0);
+        // Resolves a (possibly negative) index against `len`; `None` if OOB.
+        let resolve = |i: i64| -> Option<usize> {
+            let idx = if i < 0 { i + len as i64 } else { i };
+            if idx < 0 || idx as usize >= len {
+                None
+            } else {
+                Some(idx as usize)
+            }
+        };
+        match method {
+            "size" => Ok(Variant::Int(len as i64)),
+            "is_empty" => Ok(Variant::Bool(len == 0)),
+            "get" => {
+                Self::require_args("get", args, 1)?;
+                let i = to_int(&args[0])?;
+                let idx = resolve(i).ok_or_else(|| {
+                    RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds { index: i, length: len })
+                })?;
+                Ok(obj.packed_get(idx).unwrap())
+            }
+            "set" => {
+                Self::require_args("set", args, 2)?;
+                let i = to_int(&args[0])?;
+                let idx = resolve(i).ok_or_else(|| {
+                    RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds { index: i, length: len })
+                })?;
+                let mut updated = obj.clone();
+                if !updated.packed_set(idx, &args[1]) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot store {} in {}",
+                        args[1].variant_type(),
+                        obj.variant_type()
+                    ))));
+                }
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "append" | "push_back" => {
+                Self::require_args(method, args, 1)?;
+                let mut updated = obj.clone();
+                if !updated.packed_push(&args[0]) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot append {} to {}",
+                        args[0].variant_type(),
+                        obj.variant_type()
+                    ))));
+                }
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "resize" => {
+                Self::require_args("resize", args, 1)?;
+                let n = to_int(&args[0])?;
+                if n < 0 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "resize() size must be >= 0".into(),
+                    )));
+                }
+                let mut updated = obj.clone();
+                updated.packed_resize(n as usize);
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "clear" => {
+                let mut updated = obj.clone();
+                updated.packed_resize(0);
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "slice" => {
+                let begin = if args.is_empty() { 0 } else { to_int(&args[0])? };
+                let end = if args.len() >= 2 { to_int(&args[1])? } else { len as i64 };
+                Ok(obj.packed_slice(begin, end).unwrap())
+            }
+            "to_byte_array" => obj.packed_to_byte_array().ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no to_byte_array()",
+                    obj.variant_type()
+                )))
+            }),
+            "duplicate" => Ok(obj.clone()),
+            "has" => {
+                Self::require_args("has", args, 1)?;
+                let elems = obj.packed_to_array().unwrap();
+                Ok(Variant::Bool(elems.iter().any(|e| e == &args[0])))
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{} has no method '{}'",
+                obj.variant_type(),
+                other
+            )))),
+        }
+    }
+
     /// Invokes a Callable (lambda or method reference).
     fn invoke_callable(
+        &mut self,
+        callable: &CallableRef,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
+            self.invoke_callable_impl(callable, args)
+        })
+    }
+
+    fn invoke_callable_impl(
         &mut self,
         callable: &CallableRef,
         args: &[Variant],
@@ -3317,10 +5226,14 @@ impl Interpreter {
             getters: HashMap::new(),
             is_tool: false,
             inner_classes: HashMap::new(),
+            constants: Vec::new(),
         };
 
         for stmt in &stmts {
             match stmt {
+                Stmt::ConstDecl { name, value, .. } => {
+                    class_def.constants.push((name.clone(), value.clone()));
+                }
                 Stmt::Extends { class_name } => {
                     class_def.parent_class = Some(class_name.clone());
                 }
@@ -3370,10 +5283,14 @@ impl Interpreter {
                     if let Some(g) = getter {
                         class_def.getters.insert(name.clone(), g.clone());
                     }
-                    if annotations.iter().any(|a| a.name == "export") {
+                    if let Some((hint, hint_string)) =
+                        annotations.iter().find_map(export_hint_from_annotation)
+                    {
                         class_def.exports.push(ExportInfo {
                             name: name.clone(),
                             type_hint: type_hint.clone(),
+                            hint,
+                            hint_string,
                         });
                     }
                     class_def.instance_vars.push(var_decl);
@@ -3396,9 +5313,13 @@ impl Interpreter {
                         getters: HashMap::new(),
                         is_tool: false,
                         inner_classes: HashMap::new(),
+                        constants: Vec::new(),
                     };
                     for inner_stmt in body {
                         match inner_stmt {
+                            Stmt::ConstDecl { name, value, .. } => {
+                                inner.constants.push((name.clone(), value.clone()));
+                            }
                             Stmt::VarDecl {
                                 name,
                                 type_hint,
@@ -3498,6 +5419,17 @@ impl Interpreter {
         method_name: &str,
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
+            self.call_instance_method_impl(instance, method_name, args)
+        })
+    }
+
+    fn call_instance_method_impl(
+        &mut self,
+        instance: &mut ClassInstance,
+        method_name: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
         let func = instance
             .class_def
             .methods
@@ -3545,16 +5477,42 @@ impl Interpreter {
         for (name, val) in &instance.properties {
             self.environment.define(name.clone(), val.clone());
         }
+        // Seed class-level constants so methods can reference them by name.
+        let class_constants = instance.class_def.constants.clone();
+        for (name, expr) in &class_constants {
+            let val = self.eval_expr(expr)?;
+            self.environment.define_const(name.clone(), val);
+        }
 
         // Push an inner scope for the method body so that local `var`
         // declarations correctly shadow instance properties / parameters.
         self.environment.push_scope();
         let mut return_val = Variant::Nil;
-        for stmt in &func.body {
-            if let Some(ControlFlow::Return(v)) = self.exec_stmt(stmt)? {
-                return_val = v.unwrap_or(Variant::Nil);
-                break;
+        let body = func.body.clone();
+        let mut i = 0;
+        while i < body.len() {
+            match self.exec_stmt(&body[i])? {
+                Some(ControlFlow::Return(v)) => {
+                    return_val = v.unwrap_or(Variant::Nil);
+                    break;
+                }
+                Some(ControlFlow::Suspend(target)) => {
+                    let remaining = body[i + 1..].to_vec();
+                    self.park_coroutine(remaining, target, method_name, true);
+                    // Write back any property mutations before parking.
+                    if let Some(ref updated) = self.self_instance {
+                        instance.properties = updated.properties.clone();
+                    }
+                    self.environment.pop_scope();
+                    self.environment.pop_scope();
+                    self.self_instance = prev_self;
+                    self.call_depth -= 1;
+                    return Ok(Variant::Nil);
+                }
+                Some(ControlFlow::Break) | Some(ControlFlow::Continue) => {}
+                None => {}
             }
+            i += 1;
         }
         self.environment.pop_scope();
 
@@ -3634,7 +5592,63 @@ impl Default for Interpreter {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Builds a `Packed*Array` from a GDScript constructor call. `empty` is the
+/// target packed variant (empty). Accepts zero args (empty) or a single `Array`
+/// / packed-array whose elements are coerced into the packed element type.
+fn build_packed_array(empty: Variant, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let mut out = empty;
+    match args.len() {
+        0 => Ok(out),
+        1 => {
+            let elems: Vec<Variant> = match &args[0] {
+                Variant::Array(a) => a.clone(),
+                v if v.is_packed_array() => v.packed_to_array().unwrap(),
+                other => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot construct {} from {}",
+                        out.variant_type(),
+                        other.variant_type()
+                    ))));
+                }
+            };
+            for e in &elems {
+                if !out.packed_push(e) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot add {} to {}",
+                        e.variant_type(),
+                        out.variant_type()
+                    ))));
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{} constructor takes 0 or 1 arguments",
+            out.variant_type()
+        )))),
+    }
+}
+
 fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeError> {
+    // Packed arrays index by int, with Python-style negative indices.
+    if container.is_packed_array() {
+        if let Variant::Int(i) = idx {
+            let len = container.packed_len().unwrap();
+            let index = if *i < 0 { *i + len as i64 } else { *i };
+            if index < 0 || index as usize >= len {
+                return Err(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                    index: *i,
+                    length: len,
+                }));
+            }
+            return Ok(container.packed_get(index as usize).unwrap());
+        }
+        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "cannot index {} with {}",
+            container.variant_type(),
+            idx.variant_type()
+        ))));
+    }
     match (container, idx) {
         (Variant::Array(a), Variant::Int(i)) => {
             let index = if *i < 0 {
@@ -3676,6 +5690,31 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
 }
 
 fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(), RuntimeError> {
+    // Packed arrays assign by int index, coercing `value` to the element type.
+    if container.is_packed_array() {
+        if let Variant::Int(i) = idx {
+            let len = container.packed_len().unwrap();
+            let index = if *i < 0 { *i + len as i64 } else { *i };
+            if index < 0 || index as usize >= len {
+                return Err(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                    index: *i,
+                    length: len,
+                }));
+            }
+            return if container.packed_set(index as usize, &value) {
+                Ok(())
+            } else {
+                Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "cannot store {} in {}",
+                    value.variant_type(),
+                    container.variant_type()
+                ))))
+            };
+        }
+        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+            "packed arrays are indexed by int".into(),
+        )));
+    }
     match (container, idx) {
         (Variant::Array(a), Variant::Int(i)) => {
             let index = if *i < 0 {
@@ -3702,12 +5741,698 @@ fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(
     }
 }
 
-fn var_name_from_expr(expr: &Expr) -> Result<String, RuntimeError> {
-    match expr {
-        Expr::Ident(n) => Ok(n.clone()),
-        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-            "method only supported on variables".into(),
-        ))),
+/// Extracts a [`CallableRef`] from a Variant argument (for `map`/`filter`/
+/// `reduce`/`sort_custom`/etc.).
+fn extract_callable(v: &Variant) -> Result<CallableRef, RuntimeError> {
+    match v {
+        Variant::Callable(cb) => Ok((**cb).clone()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "expected a Callable, got {}",
+            v.variant_type()
+        )))),
+    }
+}
+
+/// Godot `Array.slice(begin, end, step)` semantics, including negative indices
+/// and negative step. Mirrors `core/variant/array.cpp`.
+fn array_slice(arr: &[Variant], begin: i64, end: i64, step: i64) -> Result<Vec<Variant>, RuntimeError> {
+    if step == 0 {
+        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+            "slice() step cannot be zero".into(),
+        )));
+    }
+    let s = arr.len() as i64;
+    if s == 0 || (begin < -s && step < 0) || (begin >= s && step > 0) {
+        return Ok(Vec::new());
+    }
+    let mut b = begin.clamp(-s, s - 1);
+    if b < 0 {
+        b += s;
+    }
+    let mut e = end.clamp(-s - 1, s);
+    if e < 0 {
+        e += s;
+    }
+    if (step > 0 && b > e) || (step < 0 && b < e) {
+        return Ok(Vec::new());
+    }
+    let span = e - b;
+    let result_size = span / step + if span % step != 0 { 1 } else { 0 };
+    let mut out = Vec::new();
+    let mut src = b;
+    for _ in 0..result_size.max(0) {
+        if src >= 0 && (src as usize) < arr.len() {
+            out.push(arr[src as usize].clone());
+        }
+        src += step;
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// String method helpers (char-index based, Godot semantics)
+// ---------------------------------------------------------------------------
+
+/// Char-based forward substring search from char index `from`. Returns -1 when
+/// not found (Godot `String.find`).
+fn str_find(chars: &[char], needle: &[char], from: usize) -> i64 {
+    let n = chars.len();
+    let m = needle.len();
+    if m == 0 {
+        return from.min(n) as i64;
+    }
+    if m > n {
+        return -1;
+    }
+    let mut i = from;
+    while i + m <= n {
+        if chars[i..i + m] == *needle {
+            return i as i64;
+        }
+        i += 1;
+    }
+    -1
+}
+
+/// Char-based backward search. `from` is the highest start index to consider
+/// (Godot uses the string length minus needle length when `from < 0`).
+fn str_rfind(chars: &[char], needle: &[char], from: Option<usize>) -> i64 {
+    let n = chars.len();
+    let m = needle.len();
+    if m == 0 {
+        return n as i64;
+    }
+    if m > n {
+        return -1;
+    }
+    let start = from.unwrap_or(n - m).min(n - m);
+    let mut i = start as i64;
+    while i >= 0 {
+        let iu = i as usize;
+        if chars[iu..iu + m] == *needle {
+            return i;
+        }
+        i -= 1;
+    }
+    -1
+}
+
+/// Number of non-overlapping occurrences of `needle` in `chars[from..end]`.
+fn str_count(chars: &[char], needle: &[char], from: usize, to: usize) -> i64 {
+    if needle.is_empty() {
+        return 0;
+    }
+    let end = if to == 0 || to > chars.len() {
+        chars.len()
+    } else {
+        to
+    };
+    let mut cnt = 0i64;
+    let mut i = from;
+    while i + needle.len() <= end {
+        if chars[i..i + needle.len()] == *needle {
+            cnt += 1;
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    cnt
+}
+
+fn str_left(s: &str, mut n: i64) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len() as i64;
+    if n < 0 {
+        n = len + n;
+    }
+    if n <= 0 {
+        return String::new();
+    }
+    if n >= len {
+        return s.to_string();
+    }
+    chars[..n as usize].iter().collect()
+}
+
+fn str_right(s: &str, mut n: i64) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len() as i64;
+    if n < 0 {
+        n = len + n;
+    }
+    if n <= 0 {
+        return String::new();
+    }
+    if n >= len {
+        return s.to_string();
+    }
+    chars[(len - n) as usize..].iter().collect()
+}
+
+/// Parses a leading integer (skips leading whitespace, honors sign, stops at
+/// the first non-digit / decimal point). Godot `String.to_int`.
+fn str_to_int(s: &str) -> i64 {
+    let chars: Vec<char> = s.trim_start().chars().collect();
+    let mut i = 0;
+    let mut sign = 1i64;
+    if i < chars.len() && (chars[i] == '-' || chars[i] == '+') {
+        if chars[i] == '-' {
+            sign = -1;
+        }
+        i += 1;
+    }
+    let mut val: i64 = 0;
+    let mut any = false;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        val = val.wrapping_mul(10).wrapping_add((chars[i] as u8 - b'0') as i64);
+        i += 1;
+        any = true;
+    }
+    if any {
+        sign * val
+    } else {
+        0
+    }
+}
+
+/// Parses a leading float. Godot `String.to_float`.
+fn str_to_float(s: &str) -> f64 {
+    let chars: Vec<char> = s.trim_start().chars().collect();
+    let mut i = 0;
+    let mut seen_dot = false;
+    let mut seen_e = false;
+    if i < chars.len() && (chars[i] == '-' || chars[i] == '+') {
+        i += 1;
+    }
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() {
+            i += 1;
+        } else if c == '.' && !seen_dot && !seen_e {
+            seen_dot = true;
+            i += 1;
+        } else if (c == 'e' || c == 'E') && !seen_e && i > 0 {
+            seen_e = true;
+            i += 1;
+            if i < chars.len() && (chars[i] == '-' || chars[i] == '+') {
+                i += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    let prefix: String = chars[..i].iter().collect();
+    prefix.parse::<f64>().unwrap_or(0.0)
+}
+
+fn str_is_valid_int(s: &str) -> bool {
+    let mut chars = s.chars();
+    let mut c = chars.next();
+    if let Some(ch) = c {
+        if ch == '-' || ch == '+' {
+            c = chars.next();
+        }
+    }
+    match c {
+        Some(ch) if ch.is_ascii_digit() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_digit())
+}
+
+fn str_is_valid_float(s: &str) -> bool {
+    !s.is_empty() && s.trim().parse::<f64>().is_ok()
+}
+
+/// Godot bigram Sørensen–Dice similarity coefficient (char based).
+fn str_similarity(a: &str, b: &str) -> f64 {
+    if a == b {
+        return 1.0;
+    }
+    let ca: Vec<char> = a.chars().collect();
+    let cb: Vec<char> = b.chars().collect();
+    if ca.len() < 2 || cb.len() < 2 {
+        return 0.0;
+    }
+    let src = ca.len() - 1;
+    let tgt = cb.len() - 1;
+    let sum = (src + tgt) as f64;
+    let mut inter = 0;
+    for i in 0..src {
+        for j in 0..tgt {
+            if ca[i] == cb[j] && ca[i + 1] == cb[j + 1] {
+                inter += 1;
+                break;
+            }
+        }
+    }
+    (2.0 * inter as f64) / sum
+}
+
+/// djb2 string hash matching Godot's `String.hash`.
+fn str_hash(s: &str) -> i64 {
+    let mut h: u32 = 5381;
+    for c in s.chars() {
+        h = (h << 5).wrapping_add(h).wrapping_add(c as u32);
+    }
+    h as i64
+}
+
+/// Splits a compound word/identifier into space-separated lowercased words,
+/// matching Godot's `_separate_compound_words`.
+fn separate_compound_words(s: &str) -> String {
+    let cstr: Vec<char> = s.chars().collect();
+    if cstr.is_empty() {
+        return String::new();
+    }
+    let is_upper = |c: char| c.is_uppercase();
+    let is_lower = |c: char| c.is_lowercase();
+    let is_digit = |c: char| c.is_ascii_digit();
+    let mut out = String::new();
+    let mut start = 0;
+    let mut prev_upper = is_upper(cstr[0]);
+    let mut prev_lower = is_lower(cstr[0]);
+    let mut prev_digit = is_digit(cstr[0]);
+    for i in 1..cstr.len() {
+        let curr_upper = is_upper(cstr[i]);
+        let curr_lower = is_lower(cstr[i]);
+        let curr_digit = is_digit(cstr[i]);
+        let next_lower = i + 1 < cstr.len() && is_lower(cstr[i + 1]);
+        let cond_a = prev_lower && curr_upper;
+        let cond_b = (prev_upper || prev_digit) && curr_upper && next_lower;
+        let cond_c = prev_digit && curr_lower && next_lower;
+        let cond_d = (prev_upper || prev_lower) && curr_digit;
+        if cond_a || cond_b || cond_c || cond_d {
+            out.extend(cstr[start..i].iter());
+            out.push(' ');
+            start = i;
+        }
+        prev_upper = curr_upper;
+        prev_lower = curr_lower;
+        prev_digit = curr_digit;
+    }
+    out.extend(cstr[start..].iter());
+    let replaced: String = out
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || c == '_' || c == '-' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    replaced.to_lowercase()
+}
+
+/// Upper-cases the first char of `w`, leaving the rest unchanged.
+fn title_word(w: &str) -> String {
+    let mut ch = w.chars();
+    match ch.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+        None => String::new(),
+    }
+}
+
+fn gd_capitalize(s: &str) -> String {
+    separate_compound_words(s)
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(title_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn gd_to_snake_case(s: &str) -> String {
+    separate_compound_words(s).replace(' ', "_")
+}
+
+fn gd_to_camel_case(s: &str) -> String {
+    let words = separate_compound_words(s);
+    let mut ret = String::new();
+    for (i, w) in words.split(' ').filter(|w| !w.is_empty()).enumerate() {
+        if i == 0 {
+            ret.push_str(w);
+        } else {
+            ret.push_str(&title_word(w));
+        }
+    }
+    ret
+}
+
+fn gd_to_pascal_case(s: &str) -> String {
+    separate_compound_words(s)
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(title_word)
+        .collect()
+}
+
+fn path_get_file(s: &str) -> String {
+    match s.rfind(['/', '\\']) {
+        Some(p) => s[p + 1..].to_string(),
+        None => s.to_string(),
+    }
+}
+
+fn path_get_extension(s: &str) -> String {
+    let pos = match s.rfind('.') {
+        Some(p) => p as isize,
+        None => return String::new(),
+    };
+    let slash = s.rfind(['/', '\\']).map(|x| x as isize).unwrap_or(-1);
+    if pos < slash || pos == 0 {
+        return String::new();
+    }
+    s[pos as usize + 1..].to_string()
+}
+
+fn path_get_basename(s: &str) -> String {
+    let pos = s.rfind('.').map(|x| x as isize).unwrap_or(-1);
+    let slash = s.rfind(['/', '\\']).map(|x| x as isize).unwrap_or(-1);
+    if pos > slash {
+        s[..pos as usize].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn path_get_base_dir(s: &str) -> String {
+    match s.rfind(['/', '\\']) {
+        Some(p) => s[..p].to_string(),
+        None => String::new(),
+    }
+}
+
+fn path_join(a: &str, b: &str) -> String {
+    if a.is_empty() {
+        b.to_string()
+    } else if a.ends_with('/') {
+        format!("{a}{b}")
+    } else {
+        format!("{a}/{b}")
+    }
+}
+
+fn path_is_absolute(s: &str) -> bool {
+    s.starts_with('/')
+        || s.starts_with('\\')
+        || s.contains("://")
+        || (s.len() >= 2 && s.as_bytes()[1] == b':')
+}
+
+/// Simplified `String.simplify_path`: resolves `.`/`..` segments while
+/// preserving a leading `/` or `xxx://` protocol prefix.
+fn gd_simplify_path(s: &str) -> String {
+    let s = s.replace('\\', "/");
+    let mut prefix = String::new();
+    let mut rest = s.clone();
+    if let Some(p) = s.find("://") {
+        if p > 0 && s[..p].chars().all(|c| c.is_ascii_alphanumeric()) {
+            prefix = s[..p + 3].to_string();
+            rest = s[p + 3..].to_string();
+        }
+    }
+    if prefix.is_empty() && rest.starts_with('/') {
+        prefix = "/".to_string();
+        rest = rest[1..].to_string();
+    }
+    let absolute = !prefix.is_empty();
+    let mut out: Vec<&str> = Vec::new();
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if let Some(last) = out.last() {
+                    if *last == ".." {
+                        out.push("..");
+                    } else {
+                        out.pop();
+                    }
+                } else if !absolute {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    format!("{prefix}{}", out.join("/"))
+}
+
+fn gd_xml_escape(s: &str, escape_quotes: bool) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' if escape_quotes => out.push_str("&quot;"),
+            '\'' if escape_quotes => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn gd_xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+fn gd_c_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '"' => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn gd_c_unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('\'') => out.push('\''),
+                Some('0') => out.push('\0'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn gd_json_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn gd_uri_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        let c = b as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn gd_uri_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Godot `String.dedent`: removes the common leading whitespace of all lines.
+fn gd_dedent(s: &str) -> String {
+    let lines: Vec<&str> = s.split('\n').collect();
+    let mut common: Option<usize> = None;
+    for line in &lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ws = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        common = Some(common.map_or(ws, |c| c.min(ws)));
+    }
+    let common = common.unwrap_or(0);
+    lines
+        .iter()
+        .map(|line| {
+            if line.chars().take(common).all(|c| c == ' ' || c == '\t') && line.len() >= common {
+                line.chars().skip(common).collect::<String>()
+            } else {
+                line.trim_start().to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Godot `String.indent`: prepends `prefix` to every non-empty line.
+fn gd_indent(s: &str, prefix: &str) -> String {
+    s.split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                line.to_string()
+            } else {
+                format!("{prefix}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Godot `String.format` supporting `{0}`/`{1}` and `{}` (Array) and `{name}`
+/// (Dictionary) placeholders.
+fn gd_format(template: &str, values: &Variant) -> String {
+    match values {
+        Variant::Array(a) => {
+            let mut result = template.to_string();
+            for (i, v) in a.iter().enumerate() {
+                result = result.replace(&format!("{{{i}}}"), &format!("{v}"));
+            }
+            let mut out = String::new();
+            let mut idx = 0;
+            let mut chars = result.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '{' && chars.peek() == Some(&'}') {
+                    chars.next();
+                    if idx < a.len() {
+                        out.push_str(&format!("{}", a[idx]));
+                        idx += 1;
+                    } else {
+                        out.push_str("{}");
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        Variant::Dictionary(d) => {
+            let mut result = template.to_string();
+            for (k, v) in d {
+                result = result.replace(&format!("{{{k}}}"), &format!("{v}"));
+            }
+            result
+        }
+        other => template.replace("{}", &format!("{other}")),
+    }
+}
+
+/// Coerces a Variant method argument to a String (Godot accepts StringName /
+/// String interchangeably and stringifies most values).
+fn arg_str(v: &Variant) -> String {
+    match v {
+        Variant::String(s) => s.clone(),
+        other => format!("{other}"),
+    }
+}
+
+/// Natural-order comparison (numeric runs compared by value). Used by
+/// `naturalnocasecmp_to`.
+fn natural_cmp(a: &str, b: &str, case_insensitive: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let a = if case_insensitive {
+        a.to_lowercase()
+    } else {
+        a.to_string()
+    };
+    let b = if case_insensitive {
+        b.to_lowercase()
+    } else {
+        b.to_string()
+    };
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    let mut i = 0;
+    let mut j = 0;
+    while i < ac.len() && j < bc.len() {
+        if ac[i].is_ascii_digit() && bc[j].is_ascii_digit() {
+            let si = i;
+            while i < ac.len() && ac[i].is_ascii_digit() {
+                i += 1;
+            }
+            let sj = j;
+            while j < bc.len() && bc[j].is_ascii_digit() {
+                j += 1;
+            }
+            let na: String = ac[si..i].iter().collect();
+            let nb: String = bc[sj..j].iter().collect();
+            let na_t = na.trim_start_matches('0');
+            let nb_t = nb.trim_start_matches('0');
+            let ord = na_t.len().cmp(&nb_t.len()).then_with(|| na_t.cmp(nb_t));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else {
+            let ord = ac[i].cmp(&bc[j]);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    ac.len().cmp(&bc.len())
+}
+
+fn ordering_to_int(o: std::cmp::Ordering) -> i64 {
+    match o {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
     }
 }
 fn variant_cmp(a: &Variant, b: &Variant) -> std::cmp::Ordering {
@@ -3742,6 +6467,76 @@ fn float_or_int(val: f64, a: &Variant, b: &Variant) -> Variant {
     } else {
         Variant::Float(val)
     }
+}
+fn to_int(v: &Variant) -> Result<i64, RuntimeError> {
+    match v {
+        Variant::Int(i) => Ok(*i),
+        Variant::Float(f) => Ok(*f as i64),
+        Variant::Bool(b) => Ok(*b as i64),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "expected int, got {}",
+            v.variant_type()
+        )))),
+    }
+}
+/// Godot `is_equal_approx` with a magnitude-scaled tolerance (CMP_EPSILON).
+fn is_equal_approx(a: f64, b: f64) -> bool {
+    if a == b {
+        return true;
+    }
+    let tolerance = (1e-5 * a.abs()).max(1e-5);
+    (a - b).abs() < tolerance
+}
+/// Godot `smoothstep`.
+fn smoothstep(from: f64, to: f64, s: f64) -> f64 {
+    if is_equal_approx(from, to) {
+        return if s <= from { 0.0 } else { 1.0 };
+    }
+    let t = ((s - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+/// Godot `angle_difference` — shortest signed distance between two angles.
+fn angle_difference(from: f64, to: f64) -> f64 {
+    let difference = (to - from) % std::f64::consts::TAU;
+    (2.0 * difference) % std::f64::consts::TAU - difference
+}
+/// Godot `ease` curve function.
+fn ease(mut x: f64, curve: f64) -> f64 {
+    if x < 0.0 {
+        x = 0.0;
+    } else if x > 1.0 {
+        x = 1.0;
+    }
+    if curve > 0.0 {
+        if curve < 1.0 {
+            1.0 - (1.0 - x).powf(1.0 / curve)
+        } else {
+            x.powf(curve)
+        }
+    } else if curve < 0.0 {
+        if x < 0.5 {
+            (x * 2.0).powf(-curve) * 0.5
+        } else {
+            (1.0 - (1.0 - (x - 0.5) * 2.0).powf(-curve)) * 0.5 + 0.5
+        }
+    } else {
+        0.0
+    }
+}
+/// Godot `nearest_po2` — smallest power of two >= `x` (0 maps to 0).
+fn nearest_po2(x: i64) -> i64 {
+    let mut n = x as u64;
+    if n == 0 {
+        return 0;
+    }
+    n -= 1;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n |= n >> 32;
+    (n + 1) as i64
 }
 fn deterministic_randi() -> i64 {
     use std::sync::atomic::{AtomicI64, Ordering};
@@ -3837,7 +6632,660 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
             "BLUE" => Some(Variant::Color(Color::new(0.0, 0.0, 1.0, 1.0))),
             _ => None,
         },
-        _ => None,
+        // Godot FileAccess.ModeFlags
+        "FileAccess" => match member {
+            "READ" => Some(Variant::Int(1)),
+            "WRITE" => Some(Variant::Int(2)),
+            "READ_WRITE" => Some(Variant::Int(3)),
+            "WRITE_READ" => Some(Variant::Int(7)),
+            _ => None,
+        },
+        // @GlobalScope enum-qualified access (`Key.KEY_SPACE`, `Error.OK`, ...).
+        // The 20 bareword global-enum prefixes delegate their member to the flat
+        // @GlobalScope constant table. (pat-nzgdu.7)
+        _ => crate::global_constants::global_enum_member(type_name, member),
+    }
+}
+
+fn engine_err_to_runtime(err: gdcore::EngineError) -> RuntimeError {
+    RuntimeError::new(RuntimeErrorKind::TypeError(err.to_string()))
+}
+
+fn arg_as_string(args: &[Variant], idx: usize, ctx: &str) -> Result<String, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        Some(_) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{ctx}: argument {} must be a string",
+            idx + 1
+        )))),
+        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{ctx}: missing argument {}",
+            idx + 1
+        )))),
+    }
+}
+
+fn call_file_access_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    use gdcore::{FileAccess, FileMode};
+    match method {
+        "open" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "FileAccess.open() takes 2 arguments".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "FileAccess.open")?;
+            let mode_flags = match &args[1] {
+                Variant::Int(i) => *i as u32,
+                Variant::Float(f) => *f as u32,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "FileAccess.open() mode must be an integer".into(),
+                    )))
+                }
+            };
+            let mode = FileMode::from_godot(mode_flags).ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "FileAccess.open() invalid mode flags {mode_flags}"
+                )))
+            })?;
+            let id = FileAccess::open_handle(&path, mode).map_err(engine_err_to_runtime)?;
+            Ok(Variant::ObjectId(id))
+        }
+        "file_exists" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "FileAccess.file_exists() takes 1 argument".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "FileAccess.file_exists")?;
+            Ok(Variant::Bool(FileAccess::file_exists(&path)))
+        }
+        "get_file_as_string" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "FileAccess.get_file_as_string() takes 1 argument".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "FileAccess.get_file_as_string")?;
+            let mut fa = FileAccess::open(&path, FileMode::Read).map_err(engine_err_to_runtime)?;
+            let text = fa.get_as_text().map_err(engine_err_to_runtime)?;
+            Ok(Variant::String(text))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("FileAccess.{other}"),
+        ))),
+    }
+}
+
+fn call_file_access_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdcore::FileAccess;
+    match method {
+        "get_as_text" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "get_as_text() takes 0 arguments".into(),
+                )));
+            }
+            FileAccess::with_handle_mut(id, |fa| fa.get_as_text().map(Variant::String))
+                .map_err(engine_err_to_runtime)
+        }
+        "get_buffer" => {
+            let len = match args.first() {
+                Some(Variant::Int(i)) if *i >= 0 => *i as usize,
+                Some(Variant::Float(f)) if *f >= 0.0 => *f as usize,
+                None => usize::MAX,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_buffer() length must be a non-negative integer".into(),
+                    )))
+                }
+            };
+            FileAccess::with_handle_mut(id, |fa| {
+                fa.get_buffer(len)
+                    .map(|b| Variant::Array(b.into_iter().map(|x| Variant::Int(x as i64)).collect()))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "store_string" => {
+            let text = arg_as_string(args, 0, "store_string")?;
+            FileAccess::with_handle_mut(id, |fa| {
+                fa.store_string(&text)?;
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "store_buffer" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "store_buffer() takes 1 argument".into(),
+                )));
+            }
+            let bytes: Vec<u8> = match &args[0] {
+                Variant::Array(items) => items
+                    .iter()
+                    .map(|v| match v {
+                        Variant::Int(i) => Ok(*i as u8),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "store_buffer() array must contain integers".into(),
+                        ))),
+                    })
+                    .collect::<Result<_, _>>()?,
+                Variant::String(s) => s.as_bytes().to_vec(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "store_buffer() expects an Array or String".into(),
+                    )))
+                }
+            };
+            FileAccess::with_handle_mut(id, |fa| {
+                fa.store_buffer(&bytes)?;
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "close" => {
+            FileAccess::close_handle(id);
+            Ok(Variant::Nil)
+        }
+        "get_error" => FileAccess::with_handle_mut(id, |fa| {
+            Ok(match fa.get_error() {
+                Some(e) => Variant::String(e.to_string()),
+                None => Variant::Int(0), // Godot OK
+            })
+        })
+        .map_err(engine_err_to_runtime),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("FileAccess.{other}"),
+        ))),
+    }
+}
+
+fn call_dir_access_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    use gdcore::DirAccess;
+    match method {
+        "open" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "DirAccess.open() takes 1 argument".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "DirAccess.open")?;
+            let id = DirAccess::open_handle(&path).map_err(engine_err_to_runtime)?;
+            Ok(Variant::ObjectId(id))
+        }
+        "dir_exists" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "DirAccess.dir_exists() takes 1 argument".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "DirAccess.dir_exists")?;
+            Ok(Variant::Bool(DirAccess::dir_exists(&path)))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("DirAccess.{other}"),
+        ))),
+    }
+}
+
+fn call_dir_access_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdcore::DirAccess;
+    match method {
+        "list_dir_begin" => {
+            DirAccess::with_handle_mut(id, |da| {
+                da.list_dir_begin()?;
+                Ok(Variant::Int(0))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_next" => DirAccess::with_handle_mut(id, |da| Ok(Variant::String(da.get_next())))
+            .map_err(engine_err_to_runtime),
+        "current_is_dir" => {
+            DirAccess::with_handle_mut(id, |da| Ok(Variant::Bool(da.current_is_dir())))
+                .map_err(engine_err_to_runtime)
+        }
+        "list_dir_end" => DirAccess::with_handle_mut(id, |da| {
+            da.list_dir_end();
+            Ok(Variant::Nil)
+        })
+        .map_err(engine_err_to_runtime),
+        "make_dir" => {
+            let path = arg_as_string(args, 0, "make_dir")?;
+            DirAccess::with_handle_mut(id, |da| {
+                da.make_dir(&path)?;
+                Ok(Variant::Int(0))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "remove" => {
+            let path = arg_as_string(args, 0, "remove")?;
+            DirAccess::with_handle_mut(id, |da| {
+                da.remove(&path)?;
+                Ok(Variant::Int(0))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "rename" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "rename() takes 2 arguments".into(),
+                )));
+            }
+            let from = arg_as_string(args, 0, "rename")?;
+            let to = arg_as_string(args, 1, "rename")?;
+            DirAccess::with_handle_mut(id, |da| {
+                da.rename(&from, &to)?;
+                Ok(Variant::Int(0))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("DirAccess.{other}"),
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Godot singletons: OS / Engine / Time / JSON / ConfigFile
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+static PROCESS_EPOCH: OnceLock<Instant> = OnceLock::new();
+static ENGINE_EDITOR_HINT: AtomicBool = AtomicBool::new(false);
+static ENGINE_FPS_MILLI: AtomicU64 = AtomicU64::new(60_000); // fps * 1000
+
+fn process_epoch() -> &'static Instant {
+    PROCESS_EPOCH.get_or_init(Instant::now)
+}
+
+fn ticks_msec() -> i64 {
+    process_epoch().elapsed().as_millis() as i64
+}
+
+/// Test/runtime hook: set whether `Engine.is_editor_hint()` returns true.
+pub fn set_engine_editor_hint(hint: bool) {
+    ENGINE_EDITOR_HINT.store(hint, Ordering::Relaxed);
+}
+
+/// Test/runtime hook: set the FPS reported by `Engine.get_frames_per_second()`.
+pub fn set_engine_frames_per_second(fps: f64) {
+    let milli = (fps.max(0.0) * 1000.0) as u64;
+    ENGINE_FPS_MILLI.store(milli, Ordering::Relaxed);
+}
+
+fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "get_name" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "OS.get_name() takes 0 arguments".into(),
+                )));
+            }
+            let name = if cfg!(target_os = "macos") {
+                "macOS"
+            } else if cfg!(target_os = "windows") {
+                "Windows"
+            } else if cfg!(target_os = "linux") {
+                "Linux"
+            } else if cfg!(target_arch = "wasm32") {
+                "Web"
+            } else {
+                "Unknown"
+            };
+            Ok(Variant::String(name.into()))
+        }
+        "get_ticks_msec" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "OS.get_ticks_msec() takes 0 arguments".into(),
+                )));
+            }
+            Ok(Variant::Int(ticks_msec()))
+        }
+        "get_ticks_usec" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "OS.get_ticks_usec() takes 0 arguments".into(),
+                )));
+            }
+            Ok(Variant::Int(process_epoch().elapsed().as_micros() as i64))
+        }
+        "is_debug_build" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "OS.is_debug_build() takes 0 arguments".into(),
+                )));
+            }
+            Ok(Variant::Bool(cfg!(debug_assertions)))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("OS.{other}"),
+        ))),
+    }
+}
+
+fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "is_editor_hint" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Engine.is_editor_hint() takes 0 arguments".into(),
+                )));
+            }
+            Ok(Variant::Bool(ENGINE_EDITOR_HINT.load(Ordering::Relaxed)))
+        }
+        "get_frames_per_second" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Engine.get_frames_per_second() takes 0 arguments".into(),
+                )));
+            }
+            let milli = ENGINE_FPS_MILLI.load(Ordering::Relaxed);
+            Ok(Variant::Float(milli as f64 / 1000.0))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Engine.{other}"),
+        ))),
+    }
+}
+
+fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "get_ticks_msec" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_ticks_msec() takes 0 arguments".into(),
+                )));
+            }
+            Ok(Variant::Int(ticks_msec()))
+        }
+        "get_ticks_usec" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_ticks_usec() takes 0 arguments".into(),
+                )));
+            }
+            Ok(Variant::Int(process_epoch().elapsed().as_micros() as i64))
+        }
+        "get_unix_time_from_system" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_unix_time_from_system() takes 0 arguments".into(),
+                )));
+            }
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            Ok(Variant::Float(secs))
+        }
+        "get_datetime_dict_from_system" => {
+            // Bounded: return a dictionary with unix time fields; full local
+            // calendar decomposition is deferred.
+            if args.len() > 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_datetime_dict_from_system() takes 0 or 1 arguments".into(),
+                )));
+            }
+            let unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            // Approximate UTC breakdown without external chrono crate.
+            let days = unix / 86_400;
+            let day_secs = unix.rem_euclid(86_400);
+            let hour = day_secs / 3600;
+            let minute = (day_secs % 3600) / 60;
+            let second = day_secs % 60;
+            // Civil date from days since 1970-01-01 (Howard Hinnant algorithm).
+            let (year, month, day) = civil_from_days(days);
+            let mut dict = std::collections::HashMap::new();
+            dict.insert("year".into(), Variant::Int(year));
+            dict.insert("month".into(), Variant::Int(month));
+            dict.insert("day".into(), Variant::Int(day));
+            dict.insert("hour".into(), Variant::Int(hour));
+            dict.insert("minute".into(), Variant::Int(minute));
+            dict.insert("second".into(), Variant::Int(second));
+            Ok(Variant::Dictionary(dict))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Time.{other}"),
+        ))),
+    }
+}
+
+/// Converts days since Unix epoch to (year, month, day) in the proleptic Gregorian calendar.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as i64, d as i64)
+}
+
+fn json_value_to_variant(v: &serde_json::Value) -> Variant {
+    match v {
+        serde_json::Value::Null => Variant::Nil,
+        serde_json::Value::Bool(b) => Variant::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Variant::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Variant::Float(f)
+            } else {
+                Variant::Nil
+            }
+        }
+        serde_json::Value::String(s) => Variant::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            Variant::Array(arr.iter().map(json_value_to_variant).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut dict = std::collections::HashMap::new();
+            for (k, val) in map {
+                dict.insert(k.clone(), json_value_to_variant(val));
+            }
+            Variant::Dictionary(dict)
+        }
+    }
+}
+
+fn variant_to_json_value(v: &Variant) -> serde_json::Value {
+    match v {
+        Variant::Nil => serde_json::Value::Null,
+        Variant::Bool(b) => serde_json::Value::Bool(*b),
+        Variant::Int(i) => serde_json::json!(*i),
+        Variant::Float(f) => serde_json::json!(*f),
+        Variant::String(s) => serde_json::Value::String(s.clone()),
+        Variant::Array(items) => {
+            serde_json::Value::Array(items.iter().map(variant_to_json_value).collect())
+        }
+        Variant::Dictionary(map) => {
+            let mut obj = serde_json::Map::new();
+            for (k, val) in map {
+                obj.insert(k.clone(), variant_to_json_value(val));
+            }
+            serde_json::Value::Object(obj)
+        }
+        other => serde_json::Value::String(format!("{other:?}")),
+    }
+}
+
+fn call_json_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "parse" | "parse_string" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "JSON.parse() takes 1 argument".into(),
+                )));
+            }
+            let text = arg_as_string(args, 0, "JSON.parse")?;
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(val) => Ok(json_value_to_variant(&val)),
+                Err(e) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "JSON.parse error: {e}"
+                )))),
+            }
+        }
+        "stringify" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "JSON.stringify() takes 1 or 2 arguments".into(),
+                )));
+            }
+            let value = variant_to_json_value(&args[0]);
+            match serde_json::to_string(&value) {
+                Ok(s) => Ok(Variant::String(s)),
+                Err(e) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "JSON.stringify error: {e}"
+                )))),
+            }
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("JSON.{other}"),
+        ))),
+    }
+}
+
+fn call_config_file_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdresource::ConfigFile;
+    match method {
+        "set_value" => {
+            if args.len() != 3 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.set_value() takes 3 arguments".into(),
+                )));
+            }
+            let section = arg_as_string(args, 0, "set_value")?;
+            let key = arg_as_string(args, 1, "set_value")?;
+            let value = args[2].clone();
+            ConfigFile::with_handle_mut(id, |cfg| {
+                cfg.set_value(&section, &key, value);
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_value" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.get_value() takes 2 or 3 arguments".into(),
+                )));
+            }
+            let section = arg_as_string(args, 0, "get_value")?;
+            let key = arg_as_string(args, 1, "get_value")?;
+            let default = args.get(2).cloned().unwrap_or(Variant::Nil);
+            ConfigFile::with_handle_mut(id, |cfg| {
+                Ok(cfg
+                    .get_value(&section, &key)
+                    .cloned()
+                    .unwrap_or(default.clone()))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "has_section" => {
+            let section = arg_as_string(args, 0, "has_section")?;
+            ConfigFile::with_handle_mut(id, |cfg| Ok(Variant::Bool(cfg.has_section(&section))))
+                .map_err(engine_err_to_runtime)
+        }
+        "has_section_key" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.has_section_key() takes 2 arguments".into(),
+                )));
+            }
+            let section = arg_as_string(args, 0, "has_section_key")?;
+            let key = arg_as_string(args, 1, "has_section_key")?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                Ok(Variant::Bool(cfg.has_section_key(&section, &key)))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_sections" => ConfigFile::with_handle_mut(id, |cfg| {
+            let arr = cfg
+                .get_sections()
+                .into_iter()
+                .map(|s| Variant::String(s.to_string()))
+                .collect();
+            Ok(Variant::Array(arr))
+        })
+        .map_err(engine_err_to_runtime),
+        "get_section_keys" => {
+            let section = arg_as_string(args, 0, "get_section_keys")?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                let arr = cfg
+                    .get_section_keys(&section)
+                    .into_iter()
+                    .map(|s| Variant::String(s.to_string()))
+                    .collect();
+                Ok(Variant::Array(arr))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "clear" => ConfigFile::with_handle_mut(id, |cfg| {
+            cfg.clear();
+            Ok(Variant::Nil)
+        })
+        .map_err(engine_err_to_runtime),
+        "save" => {
+            // Save to a path via FileAccess when a path is given; otherwise return text.
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.save() takes 1 argument".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "save")?;
+            let text = ConfigFile::with_handle_mut(id, |cfg| Ok(cfg.save_to_string()))
+                .map_err(engine_err_to_runtime)?;
+            let mut fa = gdcore::FileAccess::open(&path, gdcore::FileMode::Write)
+                .map_err(engine_err_to_runtime)?;
+            fa.store_string(&text).map_err(engine_err_to_runtime)?;
+            Ok(Variant::Int(0)) // OK
+        }
+        "load" => {
+            if args.len() != 1 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.load() takes 1 argument".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "load")?;
+            let mut fa = gdcore::FileAccess::open(&path, gdcore::FileMode::Read)
+                .map_err(engine_err_to_runtime)?;
+            let text = fa.get_as_text().map_err(engine_err_to_runtime)?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                let loaded = ConfigFile::load_from_string(&text).map_err(|e| {
+                    gdcore::EngineError::Parse(format!("ConfigFile.load: {e}"))
+                })?;
+                *cfg = loaded;
+                Ok(Variant::Int(0))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("ConfigFile.{other}"),
+        ))),
     }
 }
 
@@ -3899,6 +7347,10 @@ fn variant_eq(a: &Variant, b: &Variant) -> bool {
 pub struct GDScriptInstance {
     interpreter: Interpreter,
     script_name: String,
+    /// Exported-variable hint metadata (`@export*` annotations), surfaced via
+    /// [`list_properties`](ScriptInstance::list_properties) so the editor
+    /// inspector can render the right property editor (pat-nzgdu.5).
+    exports: Vec<ExportInfo>,
 }
 
 impl GDScriptInstance {
@@ -3907,9 +7359,18 @@ impl GDScriptInstance {
     pub fn from_source(name: &str, source: &str) -> Result<Self, RuntimeError> {
         let mut interpreter = Interpreter::new();
         interpreter.run(source)?;
+        // Collect the script's `@export` hint metadata via a throwaway pass:
+        // `run_class` extracts the class structure (vars/exports) without
+        // disturbing the interpreter executed above. Empty for scripts with no
+        // class-level exports (pat-nzgdu.5).
+        let exports = Interpreter::new()
+            .run_class(source)
+            .map(|c| c.exports)
+            .unwrap_or_default();
         Ok(Self {
             interpreter,
             script_name: name.to_string(),
+            exports,
         })
     }
 }
@@ -3950,10 +7411,23 @@ impl ScriptInstance for GDScriptInstance {
         let scope = &self.interpreter.environment.scopes[0];
         scope
             .iter()
-            .map(|(name, val)| ScriptPropertyInfo {
-                name: name.clone(),
-                property_type: val.variant_type(),
-                default_value: val.clone(),
+            .map(|(name, val)| {
+                // Attach `@export` hint metadata (pat-nzgdu.5) when this
+                // property was exported, so the inspector renders the right
+                // editor; non-exported vars report PROPERTY_HINT_NONE.
+                let (hint, hint_string) = self
+                    .exports
+                    .iter()
+                    .find(|e| &e.name == name)
+                    .map(|e| (e.hint, e.hint_string.clone()))
+                    .unwrap_or((PROPERTY_HINT_NONE, String::new()));
+                ScriptPropertyInfo {
+                    name: name.clone(),
+                    property_type: val.variant_type(),
+                    default_value: val.clone(),
+                    hint,
+                    hint_string,
+                }
             })
             .collect()
     }
@@ -4019,6 +7493,60 @@ mod tests {
     fn parenthesized_precedence() {
         // (2 + 3) * 4 = 20
         assert_eq!(run_val("return (2 + 3) * 4\n"), Variant::Int(20));
+    }
+
+    // -- ShaderMaterial.set/get_shader_parameter (pat-u3l8c.43) -------------
+
+    #[test]
+    fn shader_material_set_get_parameter_roundtrips() {
+        // A ShaderMaterial resource variable: setting a parameter then reading
+        // it back yields the stored value (persisted via the lvalue write-back).
+        let v = run_val(
+            "var mat = preload(\"res://water.tres\")\n\
+             mat.set_shader_parameter(\"wave_height\", 0.5)\n\
+             return mat.get_shader_parameter(\"wave_height\")\n",
+        );
+        assert_eq!(v, Variant::Float(0.5));
+    }
+
+    #[test]
+    fn shader_parameter_stored_under_prefixed_key() {
+        // The value is stored under `shader_parameter/<name>` so it matches the
+        // tscn/tres representation the render server consumes.
+        let v = run_val(
+            "var mat = preload(\"res://water.tres\")\n\
+             mat.set_shader_parameter(\"tint\", 3)\n\
+             return mat.get(\"shader_parameter/tint\")\n",
+        );
+        assert_eq!(v, Variant::Int(3));
+    }
+
+    #[test]
+    fn get_shader_parameter_missing_returns_nil() {
+        let v = run_val(
+            "var mat = preload(\"res://water.tres\")\n\
+             return mat.get_shader_parameter(\"nope\")\n",
+        );
+        assert_eq!(v, Variant::Nil);
+    }
+
+    #[test]
+    fn preloaded_gdshader_is_shader_class() {
+        let v = run_val(
+            "var s = preload(\"res://outline.gdshader\")\n\
+             return s.get_class()\n",
+        );
+        assert_eq!(v, Variant::String("Shader".into()));
+    }
+
+    #[test]
+    fn shader_material_set_get_shader_roundtrips() {
+        let v = run_val(
+            "var mat = preload(\"res://water.tres\")\n\
+             mat.set_shader(preload(\"res://water.gdshader\"))\n\
+             return mat.get_shader().get_class()\n",
+        );
+        assert_eq!(v, Variant::String("Shader".into()));
     }
 
     #[test]
@@ -4323,13 +7851,14 @@ return d[\"b\"]
 
     #[test]
     fn builtin_typeof() {
+        // Godot `typeof()` returns the `Variant.Type` integer, matching the
+        // `TYPE_*` constants: TYPE_INT == 2, TYPE_STRING == 4. (pat-nzgdu.7)
+        assert_eq!(run_val("return typeof(42)\n"), Variant::Int(2));
+        assert_eq!(run_val("return typeof(\"hi\")\n"), Variant::Int(4));
+        assert_eq!(run_val("return typeof(42) == TYPE_INT\n"), Variant::Bool(true));
         assert_eq!(
-            run_val("return typeof(42)\n"),
-            Variant::String("int".into())
-        );
-        assert_eq!(
-            run_val("return typeof(\"hi\")\n"),
-            Variant::String("String".into())
+            run_val("return typeof(3.14) == TYPE_FLOAT\n"),
+            Variant::Bool(true)
         );
     }
 
@@ -4974,8 +8503,10 @@ var speed = 10
     }
     #[test]
     fn match_variable_binding() {
+        // A `var` pattern binds; a bare identifier is a constant reference
+        // (Godot semantics — see pat-u3l8c.9).
         assert_eq!(
-            run_val("match 7:\n    x:\n        return x * 2\n"),
+            run_val("match 7:\n    var x:\n        return x * 2\n"),
             Variant::Int(14)
         );
     }
@@ -4992,8 +8523,9 @@ var speed = 10
     }
     #[test]
     fn match_array_binding() {
+        // Array element binds require `var` in each slot (Godot semantics).
         assert_eq!(
-            run_val("match [10, 20]:\n    [a, b]:\n        return a + b\n"),
+            run_val("match [10, 20]:\n    [var a, var b]:\n        return a + b\n"),
             Variant::Int(30)
         );
     }
@@ -7019,5 +10551,1266 @@ func get_x():
             .call_instance_method(&mut inst, "get_x", &[])
             .unwrap();
         assert_eq!(result, Variant::Int(42));
+    }
+
+    // ----- await / coroutines (pat-p0s82.7) ---------------------------------
+
+    #[test]
+    fn await_timer_suspends_and_resumes_across_poll() {
+        let mut interp = Interpreter::new();
+        interp
+            .run(
+                r#"
+func go():
+    print("start")
+    await create_timer(0.5)
+    print("after")
+"#,
+            )
+            .unwrap();
+        interp.call_user_func("go", &[]).unwrap();
+        assert!(
+            interp.output.iter().any(|l| l == "start"),
+            "must print before await: {:?}",
+            interp.output
+        );
+        assert!(
+            !interp.output.iter().any(|l| l == "after"),
+            "must NOT print after await before poll: {:?}",
+            interp.output
+        );
+        assert_eq!(interp.suspended_coroutine_count(), 1);
+
+        // Partial poll — still waiting
+        interp.poll_coroutines(0.2).unwrap();
+        assert!(
+            !interp.output.iter().any(|l| l == "after"),
+            "still waiting after 0.2s"
+        );
+        assert_eq!(interp.suspended_coroutine_count(), 1);
+
+        // Complete the wait
+        interp.poll_coroutines(0.4).unwrap();
+        assert!(
+            interp.output.iter().any(|l| l == "after"),
+            "must resume after full timer: {:?}",
+            interp.output
+        );
+        assert_eq!(interp.suspended_coroutine_count(), 0);
+        // Must not have emitted the old sync-warning.
+        assert!(
+            !interp
+                .output
+                .iter()
+                .any(|l| l.contains("coroutines not fully supported")),
+            "sync await warning must be gone"
+        );
+    }
+
+    #[test]
+    fn await_signal_suspends_until_notify() {
+        let mut interp = Interpreter::new();
+        interp
+            .run(
+                r#"
+func worker():
+    print("waiting")
+    await wait_signal("ready")
+    print("got_it")
+"#,
+            )
+            .unwrap();
+        interp.call_user_func("worker", &[]).unwrap();
+        assert!(interp.output.iter().any(|l| l == "waiting"));
+        assert!(!interp.output.iter().any(|l| l == "got_it"));
+        assert_eq!(interp.suspended_coroutine_count(), 1);
+
+        interp.notify_await_signal("ready", &[]).unwrap();
+        assert!(
+            interp.output.iter().any(|l| l == "got_it"),
+            "signal must resume: {:?}",
+            interp.output
+        );
+        assert_eq!(interp.suspended_coroutine_count(), 0);
+    }
+
+    #[test]
+    fn concurrent_coroutines_on_different_timers() {
+        let mut interp = Interpreter::new();
+        interp
+            .run(
+                r#"
+func a():
+    print("a1")
+    await create_timer(0.1)
+    print("a2")
+func b():
+    print("b1")
+    await create_timer(0.3)
+    print("b2")
+"#,
+            )
+            .unwrap();
+        interp.call_user_func("a", &[]).unwrap();
+        interp.call_user_func("b", &[]).unwrap();
+        assert_eq!(interp.suspended_coroutine_count(), 2);
+
+        interp.poll_coroutines(0.15).unwrap();
+        assert!(interp.output.iter().any(|l| l == "a2"));
+        assert!(!interp.output.iter().any(|l| l == "b2"));
+        assert_eq!(interp.suspended_coroutine_count(), 1);
+
+        interp.poll_coroutines(0.2).unwrap();
+        assert!(interp.output.iter().any(|l| l == "b2"));
+        assert_eq!(interp.suspended_coroutine_count(), 0);
+    }
+
+    #[test]
+    fn await_frames_and_instance_method() {
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class(
+                r#"
+extends Node
+func start():
+    print("f1")
+    await wait_frames(2)
+    print("f2")
+"#,
+            )
+            .unwrap();
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        interp
+            .call_instance_method(&mut inst, "start", &[])
+            .unwrap();
+        assert!(interp.output.iter().any(|l| l == "f1"));
+        assert!(!interp.output.iter().any(|l| l == "f2"));
+        interp.tick_coroutine_frames().unwrap();
+        assert!(!interp.output.iter().any(|l| l == "f2"));
+        interp.tick_coroutine_frames().unwrap();
+        assert!(
+            interp.output.iter().any(|l| l == "f2"),
+            "frame await resume: {:?}",
+            interp.output
+        );
+    }
+
+    // =======================================================================
+    // pat-u3l8c.7 — const / assert / is / as
+    // =======================================================================
+
+    fn run_float(src: &str) -> f64 {
+        match run_val(src) {
+            Variant::Float(f) => f,
+            Variant::Int(i) => i as f64,
+            other => panic!("expected number, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn const_decl_and_use() {
+        assert_eq!(run_val("const MAX = 5\nreturn MAX + 1\n"), Variant::Int(6));
+    }
+
+    #[test]
+    fn const_reassignment_is_error() {
+        let err = run_err("const MAX = 5\nMAX = 6\n");
+        assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
+        assert!(err.to_string().contains("constant"));
+    }
+
+    #[test]
+    fn const_local_in_function() {
+        let src = "\
+func f():
+    const K = 3
+    return K * 2
+return f()
+";
+        assert_eq!(run_val(src), Variant::Int(6));
+    }
+
+    #[test]
+    fn class_level_const_visible_in_method() {
+        let mut interp = Interpreter::new();
+        let class_def = interp
+            .run_class(
+                "\
+const SPEED = 42
+func get_speed():
+    return SPEED
+",
+            )
+            .unwrap();
+        let mut inst = interp.instantiate_class(&class_def).unwrap();
+        let r = interp
+            .call_instance_method(&mut inst, "get_speed", &[])
+            .unwrap();
+        assert_eq!(r, Variant::Int(42));
+    }
+
+    #[test]
+    fn assert_true_passes() {
+        assert_eq!(run_val("assert(true)\nreturn 7\n"), Variant::Int(7));
+        assert_eq!(run_val("assert(1 < 2, \"ok\")\nreturn 7\n"), Variant::Int(7));
+    }
+
+    #[test]
+    fn assert_false_raises_with_message() {
+        let err = run_err("assert(false, \"boom\")\n");
+        match err.kind {
+            RuntimeErrorKind::AssertionFailed(msg) => assert_eq!(msg, "boom"),
+            other => panic!("expected AssertionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_operator_builtin_types() {
+        assert_eq!(run_val("return 5 is int\n"), Variant::Bool(true));
+        assert_eq!(run_val("return 5 is float\n"), Variant::Bool(false));
+        assert_eq!(run_val("return 5.0 is float\n"), Variant::Bool(true));
+        assert_eq!(run_val("return \"hi\" is String\n"), Variant::Bool(true));
+        assert_eq!(run_val("return [1, 2] is Array\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("return {\"a\": 1} is Dictionary\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(run_val("return 5 is String\n"), Variant::Bool(false));
+    }
+
+    #[test]
+    fn as_operator_numeric_coercion() {
+        assert_eq!(run_val("return 5 as float\n"), Variant::Float(5.0));
+        assert_eq!(run_val("return 5.7 as int\n"), Variant::Int(5));
+        // No-op when the type already matches.
+        assert_eq!(run_val("return 5 as int\n"), Variant::Int(5));
+        assert_eq!(run_val("return 2.5 as float\n"), Variant::Float(2.5));
+    }
+
+    // =======================================================================
+    // pat-u3l8c.8 — compound assignment / bitwise / power
+    // =======================================================================
+
+    #[test]
+    fn bitwise_operators() {
+        assert_eq!(run_val("return 6 & 3\n"), Variant::Int(2));
+        assert_eq!(run_val("return 6 | 1\n"), Variant::Int(7));
+        assert_eq!(run_val("return 6 ^ 3\n"), Variant::Int(5));
+        assert_eq!(run_val("return 1 << 4\n"), Variant::Int(16));
+        assert_eq!(run_val("return 16 >> 2\n"), Variant::Int(4));
+        assert_eq!(run_val("return ~0\n"), Variant::Int(-1));
+    }
+
+    #[test]
+    fn bitwise_precedence_below_comparison_above_addition() {
+        // `1 | 2 & 2` == `1 | (2 & 2)` == 3
+        assert_eq!(run_val("return 1 | 2 & 2\n"), Variant::Int(3));
+        // `&` binds looser than `+`: `1 & 2 + 1` == `1 & 3` == 1
+        assert_eq!(run_val("return 1 & 2 + 1\n"), Variant::Int(1));
+    }
+
+    #[test]
+    fn power_operator() {
+        assert_eq!(run_val("return 2 ** 10\n"), Variant::Int(1024));
+        assert_eq!(run_val("return 2.0 ** 3\n"), Variant::Float(8.0));
+        assert_eq!(run_val("return 2 ** -1\n"), Variant::Float(0.5));
+        // Power binds tighter than unary minus: -2 ** 2 == -4.
+        assert_eq!(run_val("return -2 ** 2\n"), Variant::Int(-4));
+        // Left-associative (matching Godot's implementation): (2**3)**2 == 64.
+        assert_eq!(run_val("return 2 ** 3 ** 2\n"), Variant::Int(64));
+    }
+
+    #[test]
+    fn power_tighter_than_multiplication() {
+        // 2 * 3 ** 2 == 2 * 9 == 18
+        assert_eq!(run_val("return 2 * 3 ** 2\n"), Variant::Int(18));
+    }
+
+    #[test]
+    fn bitwise_requires_int() {
+        let err = run_err("return 1.5 & 2\n");
+        assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
+    }
+
+    #[test]
+    fn compound_assignments_on_locals() {
+        assert_eq!(run_val("var x = 10\nx *= 3\nreturn x\n"), Variant::Int(30));
+        assert_eq!(run_val("var x = 12\nx /= 4\nreturn x\n"), Variant::Int(3));
+        assert_eq!(run_val("var x = 10\nx %= 3\nreturn x\n"), Variant::Int(1));
+        assert_eq!(run_val("var x = 3\nx **= 3\nreturn x\n"), Variant::Int(27));
+        assert_eq!(run_val("var x = 6\nx &= 3\nreturn x\n"), Variant::Int(2));
+        assert_eq!(run_val("var x = 4\nx |= 1\nreturn x\n"), Variant::Int(5));
+        assert_eq!(run_val("var x = 6\nx ^= 3\nreturn x\n"), Variant::Int(5));
+        assert_eq!(run_val("var x = 1\nx <<= 4\nreturn x\n"), Variant::Int(16));
+        assert_eq!(run_val("var x = 16\nx >>= 2\nreturn x\n"), Variant::Int(4));
+    }
+
+    #[test]
+    fn compound_assignment_on_index_target() {
+        assert_eq!(
+            run_val("var a = [1, 2, 3]\na[0] += 10\nreturn a[0]\n"),
+            Variant::Int(11)
+        );
+        assert_eq!(
+            run_val("var a = [1, 2, 3]\na[1] *= 3\nreturn a[1]\n"),
+            Variant::Int(6)
+        );
+    }
+
+    // =======================================================================
+    // pat-u3l8c.9 — match semantics
+    // =======================================================================
+
+    #[test]
+    fn match_bare_identifier_is_constant_ref_regression() {
+        // The old bug always bound bare identifiers, so this would match the
+        // first arm. Now `RED` is a constant reference compared by value.
+        let src = "\
+const RED = 1
+var x = 2
+match x:
+    RED:
+        return \"red\"
+    _:
+        return \"other\"
+";
+        assert_eq!(run_val(src), Variant::String("other".into()));
+    }
+
+    #[test]
+    fn match_constant_ref_matches_when_equal() {
+        let src = "\
+const RED = 1
+var x = 1
+match x:
+    RED:
+        return \"red\"
+    _:
+        return \"other\"
+";
+        assert_eq!(run_val(src), Variant::String("red".into()));
+    }
+
+    #[test]
+    fn match_var_binding() {
+        let src = "\
+var x = 42
+match x:
+    var y:
+        return y
+";
+        assert_eq!(run_val(src), Variant::Int(42));
+    }
+
+    #[test]
+    fn match_multiple_patterns() {
+        let src = "\
+match 2:
+    1, 2, 3:
+        return \"low\"
+    _:
+        return \"high\"
+";
+        assert_eq!(run_val(src), Variant::String("low".into()));
+    }
+
+    #[test]
+    fn match_array_rest_pattern() {
+        let src = "\
+match [1, 2, 3, 4]:
+    [1, ..]:
+        return \"starts\"
+    _:
+        return \"no\"
+";
+        assert_eq!(run_val(src), Variant::String("starts".into()));
+    }
+
+    #[test]
+    fn match_array_exact_length_without_rest() {
+        let src = "\
+match [1, 2, 3]:
+    [1, 2]:
+        return \"two\"
+    [1, 2, 3]:
+        return \"three\"
+    _:
+        return \"other\"
+";
+        assert_eq!(run_val(src), Variant::String("three".into()));
+    }
+
+    #[test]
+    fn match_array_binding_in_pattern() {
+        let src = "\
+match [1, 99]:
+    [1, var second]:
+        return second
+    _:
+        return -1
+";
+        assert_eq!(run_val(src), Variant::Int(99));
+    }
+
+    #[test]
+    fn match_dictionary_pattern_with_rest() {
+        let src = "\
+match {\"type\": \"a\", \"val\": 1}:
+    {\"type\": \"a\", ..}:
+        return \"typeA\"
+    _:
+        return \"no\"
+";
+        assert_eq!(run_val(src), Variant::String("typeA".into()));
+    }
+
+    #[test]
+    fn match_dictionary_pattern_exact() {
+        let src = "\
+match {\"a\": 1}:
+    {\"a\": 1}:
+        return \"yes\"
+    _:
+        return \"no\"
+";
+        assert_eq!(run_val(src), Variant::String("yes".into()));
+        // A dict with an extra key must not match an exact (rest-less) pattern.
+        let src2 = "\
+match {\"a\": 1, \"b\": 2}:
+    {\"a\": 1}:
+        return \"yes\"
+    _:
+        return \"no\"
+";
+        assert_eq!(run_val(src2), Variant::String("no".into()));
+    }
+
+    #[test]
+    fn match_when_guard() {
+        let src = "\
+var x = 5
+match x:
+    var n when n > 10:
+        return \"big\"
+    var n when n > 0:
+        return \"small\"
+    _:
+        return \"other\"
+";
+        assert_eq!(run_val(src), Variant::String("small".into()));
+    }
+
+    // =======================================================================
+    // pat-u3l8c.10 — math utility functions
+    // =======================================================================
+
+    #[test]
+    fn math_posmod_and_fmod() {
+        assert_eq!(run_val("return posmod(-1, 3)\n"), Variant::Int(2));
+        assert_eq!(run_val("return posmod(7, 3)\n"), Variant::Int(1));
+        assert!((run_float("return fmod(5.5, 2.0)\n") - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn math_snapped_smoothstep_remap() {
+        assert!((run_float("return snapped(0.3, 0.5)\n") - 0.5).abs() < 1e-9);
+        assert!((run_float("return smoothstep(0.0, 1.0, 0.5)\n") - 0.5).abs() < 1e-9);
+        assert!((run_float("return remap(5.0, 0.0, 10.0, 0.0, 100.0)\n") - 50.0).abs() < 1e-9);
+        assert!((run_float("return inverse_lerp(0.0, 10.0, 5.0)\n") - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn math_wrap_and_pingpong() {
+        assert_eq!(run_val("return wrapi(5, 0, 3)\n"), Variant::Int(2));
+        assert!((run_float("return wrapf(5.0, 0.0, 3.0)\n") - 2.0).abs() < 1e-9);
+        assert!((run_float("return pingpong(3.0, 2.0)\n") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn math_ease_and_approx() {
+        assert!((run_float("return ease(0.5, 1.0)\n") - 0.5).abs() < 1e-9);
+        assert!((run_float("return ease(0.5, 2.0)\n") - 0.25).abs() < 1e-9);
+        assert_eq!(
+            run_val("return is_equal_approx(1.0, 1.0)\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return is_equal_approx(1.0, 1.5)\n"),
+            Variant::Bool(false)
+        );
+        assert_eq!(run_val("return is_zero_approx(0.0)\n"), Variant::Bool(true));
+        assert_eq!(run_val("return is_zero_approx(0.1)\n"), Variant::Bool(false));
+    }
+
+    #[test]
+    fn math_nan_inf_and_po2() {
+        assert_eq!(run_val("return is_nan(sqrt(-1.0))\n"), Variant::Bool(true));
+        assert_eq!(run_val("return is_nan(1.0)\n"), Variant::Bool(false));
+        assert_eq!(run_val("return is_inf(INF)\n"), Variant::Bool(true));
+        assert_eq!(run_val("return is_inf(1.0)\n"), Variant::Bool(false));
+        assert_eq!(run_val("return nearest_po2(17)\n"), Variant::Int(32));
+        assert_eq!(run_val("return nearest_po2(16)\n"), Variant::Int(16));
+        assert_eq!(run_val("return nearest_po2(0)\n"), Variant::Int(0));
+    }
+
+    #[test]
+    fn math_trig_exp_log_db() {
+        assert!((run_float("return exp(0.0)\n") - 1.0).abs() < 1e-9);
+        assert!((run_float("return log(1.0)\n")).abs() < 1e-9);
+        assert!((run_float("return tan(0.0)\n")).abs() < 1e-9);
+        assert!((run_float("return atan2(1.0, 1.0)\n") - std::f64::consts::FRAC_PI_4).abs() < 1e-9);
+        assert!((run_float("return db_to_linear(0.0)\n") - 1.0).abs() < 1e-9);
+        assert!((run_float("return linear_to_db(1.0)\n")).abs() < 1e-9);
+    }
+
+    // =======================================================================
+    // pat-u3l8c.14 — general lvalue write path
+    // =======================================================================
+
+    fn run_str(src: &str) -> String {
+        match run_val(src) {
+            Variant::String(s) => s,
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lvalue_bare_index_assign() {
+        assert_eq!(
+            run_val("var a = [1, 2, 3]\na[1] = 99\nreturn a[1]\n"),
+            Variant::Int(99)
+        );
+    }
+
+    #[test]
+    fn lvalue_nested_index_assign() {
+        assert_eq!(
+            run_val("var g = [[1, 2], [3, 4]]\ng[0][1] = 99\nreturn g[0][1]\n"),
+            Variant::Int(99)
+        );
+        // Sibling elements are untouched.
+        assert_eq!(
+            run_val("var g = [[1, 2], [3, 4]]\ng[0][1] = 99\nreturn g[1][0]\n"),
+            Variant::Int(3)
+        );
+    }
+
+    #[test]
+    fn lvalue_dict_index_and_nested_method() {
+        assert_eq!(
+            run_val("var d = {}\nd[\"a\"] = 1\nreturn d[\"a\"]\n"),
+            Variant::Int(1)
+        );
+        // Mutating method through an index base persists.
+        assert_eq!(
+            run_val("var m = {\"list\": [1]}\nm[\"list\"].append(2)\nreturn m[\"list\"]\n"),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2)])
+        );
+    }
+
+    #[test]
+    fn lvalue_self_member_index_assign() {
+        let mut interp = Interpreter::new();
+        let cd = interp
+            .run_class(
+                "var grid = [0, 0, 0]\nfunc setit():\n    self.grid[1] = 7\n    return self.grid[1]\n",
+            )
+            .unwrap();
+        let mut inst = interp.instantiate_class(&cd).unwrap();
+        let r = interp.call_instance_method(&mut inst, "setit", &[]).unwrap();
+        assert_eq!(r, Variant::Int(7));
+        assert_eq!(
+            inst.properties.get("grid"),
+            Some(&Variant::Array(vec![
+                Variant::Int(0),
+                Variant::Int(7),
+                Variant::Int(0)
+            ]))
+        );
+    }
+
+    #[test]
+    fn lvalue_instance_prop_array_method_mutates() {
+        let mut interp = Interpreter::new();
+        let cd = interp
+            .run_class(
+                "var items = []\nfunc add():\n    items.append(5)\n    self.items.append(6)\n    return items.size()\n",
+            )
+            .unwrap();
+        let mut inst = interp.instantiate_class(&cd).unwrap();
+        let r = interp.call_instance_method(&mut inst, "add", &[]).unwrap();
+        assert_eq!(r, Variant::Int(2));
+        assert_eq!(
+            inst.properties.get("items"),
+            Some(&Variant::Array(vec![Variant::Int(5), Variant::Int(6)]))
+        );
+    }
+
+    // =======================================================================
+    // pat-u3l8c.14 — Array method surface
+    // =======================================================================
+
+    #[test]
+    fn array_stack_and_queue_ops() {
+        assert_eq!(
+            run_val("var a = [1, 2]\na.push_front(0)\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(0), Variant::Int(1), Variant::Int(2)])
+        );
+        assert_eq!(run_val("var a = [1, 2, 3]\nreturn a.pop_front()\n"), Variant::Int(1));
+        assert_eq!(run_val("var a = [1, 2, 3]\nreturn a.pop_at(1)\n"), Variant::Int(2));
+        assert_eq!(run_val("return [5, 6, 7].front()\n"), Variant::Int(5));
+        assert_eq!(run_val("return [5, 6, 7].back()\n"), Variant::Int(7));
+        assert_eq!(run_val("var a = [1, 2]\na.clear()\nreturn a.is_empty()\n"), Variant::Bool(true));
+    }
+
+    #[test]
+    fn array_query_and_resize_ops() {
+        assert_eq!(run_val("return [1, 2, 2, 3].count(2)\n"), Variant::Int(2));
+        assert_eq!(run_val("return [1, 2, 1].rfind(1)\n"), Variant::Int(2));
+        assert_eq!(run_val("return [3, 1, 2].max()\n"), Variant::Int(3));
+        assert_eq!(run_val("return [3, 1, 2].min()\n"), Variant::Int(1));
+        assert_eq!(run_val("return [1, 3, 5, 7].bsearch(4)\n"), Variant::Int(2));
+        assert_eq!(
+            run_val("var a = [1, 2]\na.append_array([3, 4])\nreturn a\n"),
+            Variant::Array((1..=4).map(Variant::Int).collect())
+        );
+        assert_eq!(
+            run_val("var a = [1, 2]\na.resize(4)\nreturn a\n"),
+            Variant::Array(vec![
+                Variant::Int(1),
+                Variant::Int(2),
+                Variant::Nil,
+                Variant::Nil
+            ])
+        );
+        assert_eq!(
+            run_val("var a = [1, 2, 3]\na.fill(0)\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(0), Variant::Int(0), Variant::Int(0)])
+        );
+    }
+
+    #[test]
+    fn array_slice_step_and_negative() {
+        assert_eq!(
+            run_val("return [0, 1, 2, 3, 4, 5].slice(1, 5, 2)\n"),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(3)])
+        );
+        // Negative indices.
+        assert_eq!(
+            run_val("return [0, 1, 2, 3, 4].slice(-2, 5)\n"),
+            Variant::Array(vec![Variant::Int(3), Variant::Int(4)])
+        );
+        // Single-arg slice to the end.
+        assert_eq!(
+            run_val("return [0, 1, 2, 3].slice(2)\n"),
+            Variant::Array(vec![Variant::Int(2), Variant::Int(3)])
+        );
+    }
+
+    #[test]
+    fn array_higher_order_methods() {
+        assert_eq!(
+            run_val("return [1, 2, 3].map(func(x): return x * 2)\n"),
+            Variant::Array(vec![Variant::Int(2), Variant::Int(4), Variant::Int(6)])
+        );
+        assert_eq!(
+            run_val("return [1, 2, 3, 4].filter(func(x): return x % 2 == 0)\n"),
+            Variant::Array(vec![Variant::Int(2), Variant::Int(4)])
+        );
+        assert_eq!(
+            run_val("return [1, 2, 3, 4].reduce(func(a, b): return a + b)\n"),
+            Variant::Int(10)
+        );
+        assert_eq!(
+            run_val("return [1, 2, 3].reduce(func(a, b): return a + b, 100)\n"),
+            Variant::Int(106)
+        );
+        assert_eq!(
+            run_val("return [1, 2, 3].any(func(x): return x > 2)\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return [1, 2, 3].all(func(x): return x > 0)\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return [1, 2, 3].all(func(x): return x > 1)\n"),
+            Variant::Bool(false)
+        );
+    }
+
+    #[test]
+    fn array_sort_custom() {
+        assert_eq!(
+            run_val("var a = [3, 1, 2]\na.sort_custom(func(x, y): return x < y)\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+        );
+        // Descending.
+        assert_eq!(
+            run_val("var a = [3, 1, 2]\na.sort_custom(func(x, y): return x > y)\nreturn a\n"),
+            Variant::Array(vec![Variant::Int(3), Variant::Int(2), Variant::Int(1)])
+        );
+    }
+
+    #[test]
+    fn array_pick_random_and_shuffle_deterministic() {
+        let v = run_val("return [10, 20, 30].pick_random()\n");
+        assert!(matches!(v, Variant::Int(x) if x == 10 || x == 20 || x == 30));
+        // Shuffle preserves the multiset of elements.
+        assert_eq!(
+            run_val("var a = [1, 2, 3, 4, 5]\na.shuffle()\na.sort()\nreturn a\n"),
+            Variant::Array((1..=5).map(Variant::Int).collect())
+        );
+    }
+
+    // =======================================================================
+    // pat-u3l8c.13 — String method surface + multibyte length
+    // =======================================================================
+
+    #[test]
+    fn string_length_is_char_count_multibyte() {
+        assert_eq!(run_val("return \"héllo\".length()\n"), Variant::Int(5));
+        assert_eq!(run_val("return len(\"héllo\")\n"), Variant::Int(5));
+        // substr is char-index based.
+        assert_eq!(run_str("return \"héllo\".substr(1, 3)\n"), "éll");
+        assert_eq!(run_str("return \"héllo\".left(2)\n"), "hé");
+        assert_eq!(run_str("return \"héllo\".right(2)\n"), "lo");
+    }
+
+    #[test]
+    fn string_search_methods() {
+        assert_eq!(run_val("return \"hello\".find(\"l\")\n"), Variant::Int(2));
+        assert_eq!(run_val("return \"hello\".find(\"l\", 3)\n"), Variant::Int(3));
+        assert_eq!(run_val("return \"hello\".rfind(\"l\")\n"), Variant::Int(3));
+        assert_eq!(run_val("return \"Hello\".findn(\"HELLO\")\n"), Variant::Int(0));
+        assert_eq!(run_val("return \"a-b-c\".count(\"-\")\n"), Variant::Int(2));
+        assert_eq!(run_val("return \"hello\".contains(\"ell\")\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("return \"Hello\".containsn(\"hello\")\n"),
+            Variant::Bool(true)
+        );
+    }
+
+    #[test]
+    fn string_edit_methods() {
+        assert_eq!(run_str("return \"  hi  \".strip_edges()\n"), "hi");
+        assert_eq!(run_str("return \"ab\".repeat(3)\n"), "ababab");
+        assert_eq!(run_str("return \"7\".lpad(3, \"0\")\n"), "007");
+        assert_eq!(run_str("return \"7\".rpad(3, \".\")\n"), "7..");
+        assert_eq!(run_str("return \"12\".pad_zeros(4)\n"), "0012");
+        assert_eq!(run_str("return \"3.5\".pad_decimals(3)\n"), "3.500");
+        assert_eq!(run_str("return \"3\".pad_decimals(2)\n"), "3.00");
+        assert_eq!(run_str("return \"pre_val\".trim_prefix(\"pre_\")\n"), "val");
+        assert_eq!(run_str("return \"val.txt\".trim_suffix(\".txt\")\n"), "val");
+    }
+
+    #[test]
+    fn string_number_conversions() {
+        assert_eq!(run_val("return \"42abc\".to_int()\n"), Variant::Int(42));
+        assert_eq!(run_val("return \"  -7x\".to_int()\n"), Variant::Int(-7));
+        assert_eq!(run_val("return \"abc\".to_int()\n"), Variant::Int(0));
+        assert!((run_float("return \"3.14xy\".to_float()\n") - 3.14).abs() < 1e-9);
+        assert_eq!(run_val("return \"42\".is_valid_int()\n"), Variant::Bool(true));
+        assert_eq!(run_val("return \"4a\".is_valid_int()\n"), Variant::Bool(false));
+        assert_eq!(run_val("return \"3.14\".is_valid_float()\n"), Variant::Bool(true));
+        assert_eq!(run_val("return \"ff\".hex_to_int()\n"), Variant::Int(255));
+        assert_eq!(run_val("return \"0xff\".hex_to_int()\n"), Variant::Int(255));
+        assert_eq!(run_val("return \"101\".bin_to_int()\n"), Variant::Int(5));
+        assert_eq!(run_val("return \"0b101\".bin_to_int()\n"), Variant::Int(5));
+    }
+
+    #[test]
+    fn string_case_conversions() {
+        assert_eq!(run_str("return \"hello_world\".capitalize()\n"), "Hello World");
+        assert_eq!(run_str("return \"helloWorld\".capitalize()\n"), "Hello World");
+        assert_eq!(run_str("return \"helloWorld\".to_snake_case()\n"), "hello_world");
+        assert_eq!(run_str("return \"hello_world\".to_camel_case()\n"), "helloWorld");
+        assert_eq!(run_str("return \"hello_world\".to_pascal_case()\n"), "HelloWorld");
+    }
+
+    #[test]
+    fn string_path_methods() {
+        assert_eq!(run_str("return \"a/b/c.txt\".get_extension()\n"), "txt");
+        assert_eq!(run_str("return \"a/b/c.txt\".get_file()\n"), "c.txt");
+        assert_eq!(run_str("return \"a/b/c.txt\".get_basename()\n"), "a/b/c");
+        assert_eq!(run_str("return \"a/b/c.txt\".get_base_dir()\n"), "a/b");
+        assert_eq!(run_str("return \"a\".path_join(\"b\")\n"), "a/b");
+        assert_eq!(run_str("return \"a/./b/../c\".simplify_path()\n"), "a/c");
+        assert_eq!(run_val("return \"/a/b\".is_absolute_path()\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("return \"a/b\".is_relative_path()\n"),
+            Variant::Bool(true)
+        );
+    }
+
+    #[test]
+    fn string_format_and_escapes() {
+        assert_eq!(run_str("return \"{0} {1}\".format([\"a\", \"b\"])\n"), "a b");
+        assert_eq!(run_str("return \"{} {}\".format([\"x\", \"y\"])\n"), "x y");
+        assert_eq!(
+            run_str("return \"{name}\".format({\"name\": \"Bob\"})\n"),
+            "Bob"
+        );
+        assert_eq!(run_str("return \"<a>\".xml_escape()\n"), "&lt;a&gt;");
+        assert_eq!(run_str("return \"&lt;a&gt;\".xml_unescape()\n"), "<a>");
+        assert_eq!(run_str("return \"a b\".uri_encode()\n"), "a%20b");
+        assert_eq!(run_str("return \"a%20b\".uri_decode()\n"), "a b");
+    }
+
+    #[test]
+    fn string_misc_methods() {
+        assert_eq!(run_val("return \"\".hash()\n"), Variant::Int(5381));
+        assert_eq!(
+            run_str("return \"abc\".sha256_text()\n"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!((run_float("return \"test\".similarity(\"test\")\n") - 1.0).abs() < 1e-9);
+        assert!((run_float("return \"abc\".similarity(\"xyz\")\n")).abs() < 1e-9);
+        assert_eq!(run_val("return \"a\".casecmp_to(\"b\")\n"), Variant::Int(-1));
+        assert_eq!(run_val("return \"b\".casecmp_to(\"a\")\n"), Variant::Int(1));
+        assert_eq!(
+            run_val("return \"file10\".naturalnocasecmp_to(\"file9\")\n"),
+            Variant::Int(1)
+        );
+        assert_eq!(run_str("return \"  a\\n  b\".dedent()\n"), "a\nb");
+    }
+
+    // =======================================================================
+    // pat-u3l8c.12 — preload/load → real PackedScene instantiation
+    // =======================================================================
+
+    #[derive(Default)]
+    struct MockSceneState {
+        next_id: u64,
+        /// parent id → child ids (records add_child / instantiate wiring).
+        children: std::collections::HashMap<u64, Vec<u64>>,
+        /// Scene paths that "exist" and can be instantiated.
+        known_scenes: std::collections::HashSet<String>,
+        /// (path, root_id) for each instantiate call.
+        instantiated: Vec<(String, u64)>,
+    }
+
+    /// Mock SceneAccess for scene-instantiation tests. Shares its state via an
+    /// `Rc<RefCell<..>>` so the test can inspect it after the interpreter run.
+    struct MockSceneAccess {
+        state: std::rc::Rc<std::cell::RefCell<MockSceneState>>,
+    }
+
+    impl SceneAccess for MockSceneAccess {
+        fn get_node(&self, _from: u64, _path: &str) -> Option<u64> {
+            None
+        }
+        fn get_parent(&self, _node: u64) -> Option<u64> {
+            None
+        }
+        fn get_children(&self, node: u64) -> Vec<u64> {
+            self.state
+                .borrow()
+                .children
+                .get(&node)
+                .cloned()
+                .unwrap_or_default()
+        }
+        fn get_node_property(&self, _node: u64, _prop: &str) -> Variant {
+            Variant::Nil
+        }
+        fn set_node_property(&mut self, _node: u64, _prop: &str, _value: Variant) {}
+        fn emit_signal(&mut self, _node: u64, _signal: &str, _args: &[Variant]) {}
+        fn connect_signal(&mut self, _source: u64, _signal: &str, _target: u64, _method: &str) {}
+        fn get_node_name(&self, _node: u64) -> Option<String> {
+            None
+        }
+        fn add_child(&mut self, parent_id: u64, child_id: u64) -> bool {
+            self.state
+                .borrow_mut()
+                .children
+                .entry(parent_id)
+                .or_default()
+                .push(child_id);
+            true
+        }
+        fn instantiate_packed_scene(&mut self, path: &str) -> Option<u64> {
+            let mut st = self.state.borrow_mut();
+            if !st.known_scenes.contains(path) {
+                return None;
+            }
+            st.next_id += 1;
+            let root = st.next_id;
+            st.instantiated.push((path.to_string(), root));
+            // Simulate a two-node subtree: root with one child.
+            let child = root + 10_000;
+            st.children.insert(root, vec![child]);
+            Some(root)
+        }
+    }
+
+    fn mock_scene_interp(known: &[&str]) -> (Interpreter, std::rc::Rc<std::cell::RefCell<MockSceneState>>) {
+        let mut state = MockSceneState::default();
+        state.next_id = 100; // keep instantiated ids clear of current_node_id
+        for s in known {
+            state.known_scenes.insert(s.to_string());
+        }
+        let state = std::rc::Rc::new(std::cell::RefCell::new(state));
+        let mut interp = Interpreter::new();
+        interp.set_scene_access(Box::new(MockSceneAccess { state: state.clone() }), 1);
+        (interp, state)
+    }
+
+    #[test]
+    fn preload_returns_packed_scene_resource() {
+        assert_eq!(
+            run_val("return preload(\"res://x.tscn\").get_class()\n"),
+            Variant::String("PackedScene".into())
+        );
+        assert_eq!(
+            run_val("return preload(\"res://x.tscn\").get_path()\n"),
+            Variant::String("res://x.tscn".into())
+        );
+        assert_eq!(
+            run_val("return preload(\"res://x.tscn\").can_instantiate()\n"),
+            Variant::Bool(true)
+        );
+    }
+
+    #[test]
+    fn preload_instantiate_add_child_spawns_subtree() {
+        let (mut interp, state) = mock_scene_interp(&["res://bullet.tscn"]);
+        let r = interp
+            .run("var b = preload(\"res://bullet.tscn\").instantiate()\nadd_child(b)\nreturn b\n")
+            .unwrap();
+        let root_id = match r.return_value {
+            Some(Variant::ObjectId(oid)) => oid.raw(),
+            other => panic!("expected ObjectId, got {other:?}"),
+        };
+        let st = state.borrow();
+        // instantiate was called with the scene path and produced the root.
+        assert_eq!(st.instantiated.len(), 1);
+        assert_eq!(st.instantiated[0].0, "res://bullet.tscn");
+        assert_eq!(st.instantiated[0].1, root_id);
+        // The subtree exists (root has a child).
+        assert!(!st.children.get(&root_id).unwrap().is_empty());
+        // add_child(self=1, root) wired the spawned root under the caller node.
+        assert!(st.children.get(&1).map(|c| c.contains(&root_id)).unwrap_or(false));
+    }
+
+    #[test]
+    fn load_instantiate_spawns_subtree() {
+        let (mut interp, state) = mock_scene_interp(&["res://enemy.tscn"]);
+        let r = interp
+            .run("var e = load(\"res://enemy.tscn\").instantiate()\nadd_child(e)\nreturn e\n")
+            .unwrap();
+        assert!(matches!(r.return_value, Some(Variant::ObjectId(_))));
+        assert_eq!(state.borrow().instantiated.len(), 1);
+    }
+
+    #[test]
+    fn load_missing_scene_instantiate_returns_nil() {
+        // Scene not registered → instantiate hook returns None → Nil.
+        let (mut interp, _state) = mock_scene_interp(&[]);
+        let r = interp
+            .run("return load(\"res://missing.tscn\").instantiate()\n")
+            .unwrap();
+        assert_eq!(r.return_value, Some(Variant::Nil));
+    }
+
+    #[test]
+    fn instantiate_without_scene_access_errors() {
+        let mut interp = Interpreter::new();
+        let err = interp
+            .run("return preload(\"res://x.tscn\").instantiate()\n")
+            .unwrap_err();
+        assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
+    }
+
+    // =======================================================================
+    // pat-nzgdu.2 — AudioStreamPlayer play/stop/seek/is_playing dispatched
+    // from GDScript to the bridge boundary.
+    //
+    // The interpreter routes `$Player.play()` / `stop()` / `seek()` /
+    // `is_playing()` / `get_playback_position()` / `set_stream_paused()` to the
+    // exact node properties that `AudioServerBridge::sync_player_node` polls each
+    // frame (`playing`, `seek_request`, `stream_paused`, `playback_position`).
+    // Before this bead these calls hit the ObjectId method catch-all and threw
+    // `UndefinedFunction("ObjectId.play")`; only the autoplay flag or a direct
+    // `playing = true` assignment produced sound.
+    //
+    // This mock stands in for that bridge boundary: it records every
+    // `set_node_property` write and serves stored values back through
+    // `get_node_property`, so the dispatch is asserted directly in-crate without
+    // needing the gdscene `MainLoop` (the full end-to-end mix path is covered by
+    // `gdscene/tests/audio_script_dispatch_test.rs`).
+    // =======================================================================
+
+    #[derive(Default)]
+    struct AudioDispatchState {
+        /// node id → (prop → last written value), captured from set_node_property.
+        props: std::collections::HashMap<u64, std::collections::HashMap<String, Variant>>,
+        /// Node id returned for `get_node("Player")`.
+        player_id: u64,
+    }
+
+    struct AudioDispatchAccess {
+        state: std::rc::Rc<std::cell::RefCell<AudioDispatchState>>,
+    }
+
+    impl AudioDispatchState {
+        fn prop(&self, node: u64, prop: &str) -> Option<Variant> {
+            self.props.get(&node).and_then(|p| p.get(prop)).cloned()
+        }
+    }
+
+    impl SceneAccess for AudioDispatchAccess {
+        fn get_node(&self, _from: u64, path: &str) -> Option<u64> {
+            if path == "Player" {
+                Some(self.state.borrow().player_id)
+            } else {
+                None
+            }
+        }
+        fn get_parent(&self, _node: u64) -> Option<u64> {
+            None
+        }
+        fn get_children(&self, _node: u64) -> Vec<u64> {
+            Vec::new()
+        }
+        fn get_node_property(&self, node: u64, prop: &str) -> Variant {
+            self.state.borrow().prop(node, prop).unwrap_or(Variant::Nil)
+        }
+        fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
+            self.state
+                .borrow_mut()
+                .props
+                .entry(node)
+                .or_default()
+                .insert(prop.to_string(), value);
+        }
+        fn emit_signal(&mut self, _node: u64, _signal: &str, _args: &[Variant]) {}
+        fn connect_signal(&mut self, _source: u64, _signal: &str, _target: u64, _method: &str) {}
+        fn get_node_name(&self, _node: u64) -> Option<String> {
+            None
+        }
+    }
+
+    /// Interpreter wired to the audio-dispatch mock, with the script's own node
+    /// id at 1 and the `Player` target at 42.
+    fn audio_dispatch_interp() -> (Interpreter, std::rc::Rc<std::cell::RefCell<AudioDispatchState>>) {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(AudioDispatchState {
+            player_id: 42,
+            ..Default::default()
+        }));
+        let mut interp = Interpreter::new();
+        interp.set_scene_access(Box::new(AudioDispatchAccess { state: state.clone() }), 1);
+        (interp, state)
+    }
+
+    #[test]
+    fn audio_play_dispatches_playing_true() {
+        let (mut interp, state) = audio_dispatch_interp();
+        interp
+            .run("var p = get_node(\"Player\")\np.play()\n")
+            .unwrap();
+        assert_eq!(
+            state.borrow().prop(42, "playing"),
+            Some(Variant::Bool(true)),
+            "play() must set the node `playing` property the bridge polls",
+        );
+    }
+
+    #[test]
+    fn audio_stop_dispatches_playing_false() {
+        let (mut interp, state) = audio_dispatch_interp();
+        interp
+            .run("var p = get_node(\"Player\")\np.play()\np.stop()\n")
+            .unwrap();
+        assert_eq!(
+            state.borrow().prop(42, "playing"),
+            Some(Variant::Bool(false)),
+            "stop() after play() must return `playing` to false",
+        );
+    }
+
+    #[test]
+    fn audio_is_playing_reads_live_playing_property() {
+        let (mut interp, state) = audio_dispatch_interp();
+        // is_playing() reads back the property the previous play()/stop() wrote.
+        let r = interp
+            .run(
+                "var p = get_node(\"Player\")\np.play()\nvar a = p.is_playing()\np.stop()\nvar b = p.is_playing()\nreturn [a, b]\n",
+            )
+            .unwrap();
+        let arr = match r.return_value {
+            Some(Variant::Array(a)) => a,
+            other => panic!("expected Array, got {other:?}"),
+        };
+        assert_eq!(arr.get(0), Some(&Variant::Bool(true)), "is_playing() true after play()");
+        assert_eq!(arr.get(1), Some(&Variant::Bool(false)), "is_playing() false after stop()");
+        // No lingering true state on the boundary.
+        assert_eq!(state.borrow().prop(42, "playing"), Some(Variant::Bool(false)));
+    }
+
+    #[test]
+    fn audio_seek_dispatches_seek_request() {
+        let (mut interp, state) = audio_dispatch_interp();
+        interp
+            .run("var p = get_node(\"Player\")\np.seek(1.5)\n")
+            .unwrap();
+        assert_eq!(
+            state.borrow().prop(42, "seek_request"),
+            Some(Variant::Float(1.5)),
+            "seek(pos) must request a seek at the given position",
+        );
+    }
+
+    #[test]
+    fn audio_play_from_position_requests_seek_then_plays() {
+        let (mut interp, state) = audio_dispatch_interp();
+        interp
+            .run("var p = get_node(\"Player\")\np.play(2.0)\n")
+            .unwrap();
+        let st = state.borrow();
+        assert_eq!(
+            st.prop(42, "seek_request"),
+            Some(Variant::Float(2.0)),
+            "play(from) must request a seek to `from` first",
+        );
+        assert_eq!(st.prop(42, "playing"), Some(Variant::Bool(true)));
+    }
+
+    #[test]
+    fn audio_set_stream_paused_dispatches_stream_paused() {
+        let (mut interp, state) = audio_dispatch_interp();
+        interp
+            .run("var p = get_node(\"Player\")\np.set_stream_paused(true)\n")
+            .unwrap();
+        assert_eq!(
+            state.borrow().prop(42, "stream_paused"),
+            Some(Variant::Bool(true)),
+            "set_stream_paused(true) must set the `stream_paused` property",
+        );
+    }
+
+    #[test]
+    fn audio_get_playback_position_reads_property() {
+        let (mut interp, state) = audio_dispatch_interp();
+        state
+            .borrow_mut()
+            .props
+            .entry(42)
+            .or_default()
+            .insert("playback_position".to_string(), Variant::Float(0.75));
+        let r = interp
+            .run("var p = get_node(\"Player\")\nreturn p.get_playback_position()\n")
+            .unwrap();
+        assert_eq!(
+            r.return_value,
+            Some(Variant::Float(0.75)),
+            "get_playback_position() must read back the `playback_position` property",
+        );
+    }
+
+    // -- Packed arrays: GDScript surface (pat-u3l8c.11) ---------------------
+
+    #[test]
+    fn packed_int32_construct_and_index() {
+        assert_eq!(
+            run_val("var a = PackedInt32Array([10, 20, 30])\nreturn a[1]\n"),
+            Variant::Int(20)
+        );
+    }
+
+    #[test]
+    fn packed_byte_array_empty_construct_size() {
+        assert_eq!(
+            run_val("var a = PackedByteArray()\nreturn a.size()\n"),
+            Variant::Int(0)
+        );
+    }
+
+    #[test]
+    fn packed_array_append_persists_size_and_element() {
+        assert_eq!(
+            run_val("var a = PackedInt32Array()\na.append(5)\na.append(7)\nreturn a.size()\n"),
+            Variant::Int(2)
+        );
+        assert_eq!(
+            run_val("var a = PackedInt32Array()\na.append(42)\nreturn a[0]\n"),
+            Variant::Int(42)
+        );
+    }
+
+    #[test]
+    fn packed_array_index_assignment() {
+        assert_eq!(
+            run_val("var a = PackedInt32Array([1, 2, 3])\na[1] = 99\nreturn a[1]\n"),
+            Variant::Int(99)
+        );
+    }
+
+    #[test]
+    fn packed_array_negative_index() {
+        assert_eq!(
+            run_val("var a = PackedInt32Array([1, 2, 3])\nreturn a[-1]\n"),
+            Variant::Int(3)
+        );
+    }
+
+    #[test]
+    fn packed_array_resize_fills_zero() {
+        assert_eq!(
+            run_val("var a = PackedInt32Array([1, 2])\na.resize(4)\nreturn a[3]\n"),
+            Variant::Int(0)
+        );
+    }
+
+    #[test]
+    fn packed_array_is_empty() {
+        assert_eq!(
+            run_val("return PackedByteArray().is_empty()\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return PackedByteArray([1]).is_empty()\n"),
+            Variant::Bool(false)
+        );
+    }
+
+    #[test]
+    fn packed_array_slice_keeps_type_and_len() {
+        assert_eq!(
+            run_val(
+                "var a = PackedInt32Array([0, 1, 2, 3, 4])\nvar b = a.slice(1, 3)\nreturn b.size()\n"
+            ),
+            Variant::Int(2)
+        );
+    }
+
+    #[test]
+    fn packed_int32_to_byte_array_len() {
+        assert_eq!(
+            run_val("var a = PackedInt32Array([1])\nreturn a.to_byte_array().size()\n"),
+            Variant::Int(4)
+        );
+    }
+
+    #[test]
+    fn packed_string_array_construct_and_index() {
+        assert_eq!(
+            run_val("var a = PackedStringArray([\"x\", \"y\"])\nreturn a[1]\n"),
+            Variant::String("y".into())
+        );
+    }
+
+    #[test]
+    fn packed_vector2_array_element_is_vector2() {
+        assert_eq!(
+            run_val("var a = PackedVector2Array([Vector2(1, 2)])\nreturn a[0]\n"),
+            Variant::Vector2(gdcore::math::Vector2::new(1.0, 2.0))
+        );
+    }
+
+    #[test]
+    fn packed_array_index_out_of_bounds_errors() {
+        let err = run_err("var a = PackedInt32Array([1])\nreturn a[5]\n");
+        assert!(matches!(err.kind, RuntimeErrorKind::IndexOutOfBounds { .. }));
     }
 }

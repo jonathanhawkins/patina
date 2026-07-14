@@ -721,26 +721,58 @@ impl RenderServer3DAdapter {
                 node.get_property("double_sided"),
                 gdvariant::Variant::Bool(true)
             ),
+            ..Material3D::default()
         })
     }
 
     /// Attempts to build a [`ShaderMaterial3D`] from properties set on a node.
     ///
-    /// Returns `Some` if the node has a `shader_code` property containing
-    /// non-empty shader source. Reads `shader_type` (0 = Spatial, 1 = Sky)
-    /// and any shader parameter properties prefixed with `shader_parameter/`.
+    /// Returns `Some` if the node carries a ShaderMaterial: either an inline
+    /// `shader_code` property (the source verbatim, e.g. flattened from a tscn
+    /// `[sub_resource type="Shader"]`) or a `shader_path` pointing at an
+    /// external `.gdshader` file (flattened from a Shader `[ext_resource]`),
+    /// which is loaded on demand. `shader_type` is honored as either a mode
+    /// string (`"spatial"`/`"sky"`, from the `.gdshader` source) or the legacy
+    /// integer form (`1` = Sky). Any `shader_parameter/*` properties become
+    /// bound uniform values.
     fn resolve_shader_material(tree: &SceneTree, nid: NodeId) -> Option<ShaderMaterial3D> {
         let node = tree.get_node(nid)?;
 
-        // Check for shader_code property — the presence of non-empty source
-        // indicates this node has a ShaderMaterial3D attached.
-        let shader_code = match node.get_property("shader_code") {
-            gdvariant::Variant::String(s) if !s.is_empty() => s,
-            _ => return None,
-        };
+        // Resolve shader source + type hint from an inline `shader_code` prop,
+        // or by loading the `.gdshader` named by `shader_path`.
+        let (shader_code, type_hint): (String, Option<String>) =
+            match node.get_property("shader_code") {
+                gdvariant::Variant::String(s) if !s.is_empty() => {
+                    let hint = match node.get_property("shader_type") {
+                        gdvariant::Variant::String(t) => Some(t),
+                        gdvariant::Variant::Int(1) => Some("sky".to_string()),
+                        _ => None,
+                    };
+                    (s, hint)
+                }
+                _ => match node.get_property("shader_path") {
+                    gdvariant::Variant::String(p) if !p.is_empty() => {
+                        // res:// paths resolve relative to the cwd (project root
+                        // at runtime), matching the rest of the engine.
+                        let fs = p.strip_prefix("res://").unwrap_or(p.as_str());
+                        let res =
+                            gdresource::importers::load_gdshader(std::path::Path::new(fs)).ok()?;
+                        let code = match res.get_property("code") {
+                            Some(gdvariant::Variant::String(c)) => c.clone(),
+                            _ => return None,
+                        };
+                        let hint = match res.get_property("shader_type") {
+                            Some(gdvariant::Variant::String(t)) => Some(t.clone()),
+                            _ => None,
+                        };
+                        (code, hint)
+                    }
+                    _ => return None,
+                },
+            };
 
-        let shader_type = match node.get_property("shader_type") {
-            gdvariant::Variant::Int(1) => ShaderType3D::Sky,
+        let shader_type = match type_hint.as_deref() {
+            Some("sky") => ShaderType3D::Sky,
             _ => ShaderType3D::Spatial,
         };
 
@@ -984,9 +1016,19 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         return None;
     }
 
-    let normals = extract_vector3_array(first_sub.get_property("normals")?).unwrap_or_default();
-    let uvs = extract_uv_array(first_sub.get_property("uvs")?).unwrap_or_default();
-    let indices = extract_index_array(first_sub.get_property("indices")?).unwrap_or_default();
+    // normals / uvs / indices are optional — missing keys must not abort conversion
+    let normals = first_sub
+        .get_property("normals")
+        .and_then(extract_vector3_array)
+        .unwrap_or_default();
+    let uvs = first_sub
+        .get_property("uvs")
+        .and_then(extract_uv_array)
+        .unwrap_or_default();
+    let indices = first_sub
+        .get_property("indices")
+        .and_then(extract_index_array)
+        .unwrap_or_default();
 
     let mut mesh = Mesh3D {
         vertices,
@@ -995,6 +1037,7 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         indices,
         primitive_type: PrimitiveType::Triangles,
         surfaces: Vec::new(),
+        ..Default::default()
     };
 
     // Additional sub-resources become extra surfaces.
@@ -1132,6 +1175,7 @@ mod tests {
     use crate::node::Node;
     use crate::scene_tree::SceneTree;
     use gdcore::math::Vector3;
+    use gdvariant::Variant;
 
     #[test]
     fn empty_scene_renders_black() {
@@ -1190,6 +1234,76 @@ mod tests {
 
         assert_eq!(snapshot.visible_mesh_count, 0);
         assert_eq!(snapshot.nonblack_pixel_count, 0);
+    }
+
+    // -- ShaderMaterial resolution (pat-u3l8c.43) ---------------------------
+
+    #[test]
+    fn resolve_shader_material_from_inline_code() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mesh = Node::new("Water", "MeshInstance3D");
+        let mesh_id = tree.add_child(root, mesh).unwrap();
+        {
+            let n = tree.get_node_mut(mesh_id).unwrap();
+            n.set_property(
+                "shader_code",
+                Variant::String("shader_type sky; void sky() {}".into()),
+            );
+            // String shader_type "sky" must map to ShaderType3D::Sky.
+            n.set_property("shader_type", Variant::String("sky".into()));
+            n.set_property("shader_parameter/wave_height", Variant::Float(0.5));
+        }
+
+        let mat = RenderServer3DAdapter::resolve_shader_material(&tree, mesh_id)
+            .expect("node with shader_code resolves a ShaderMaterial3D");
+        let shader = mat.shader.as_ref().expect("shader present");
+        assert_eq!(shader.shader_type, ShaderType3D::Sky);
+        assert!(shader.source_code.contains("shader_type sky"));
+        assert_eq!(
+            mat.get_shader_parameter("wave_height"),
+            Some(&Variant::Float(0.5))
+        );
+    }
+
+    #[test]
+    fn resolve_shader_material_from_gdshader_path() {
+        // A node carrying only `shader_path` loads the external .gdshader.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("surface.gdshader");
+        std::fs::write(&path, "shader_type spatial;\nvoid fragment() {}\n").unwrap();
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mesh = Node::new("Surf", "MeshInstance3D");
+        let mesh_id = tree.add_child(root, mesh).unwrap();
+        {
+            let n = tree.get_node_mut(mesh_id).unwrap();
+            n.set_property(
+                "shader_path",
+                Variant::String(path.to_string_lossy().into_owned()),
+            );
+            n.set_property("shader_parameter/roughness", Variant::Float(0.3));
+        }
+
+        let mat = RenderServer3DAdapter::resolve_shader_material(&tree, mesh_id)
+            .expect("shader_path resolves a ShaderMaterial3D");
+        let shader = mat.shader.as_ref().expect("shader present");
+        assert_eq!(shader.shader_type, ShaderType3D::Spatial);
+        assert!(shader.source_code.contains("shader_type spatial"));
+        assert_eq!(
+            mat.get_shader_parameter("roughness"),
+            Some(&Variant::Float(0.3))
+        );
+    }
+
+    #[test]
+    fn resolve_shader_material_none_without_shader() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mesh = Node::new("Plain", "MeshInstance3D");
+        let mesh_id = tree.add_child(root, mesh).unwrap();
+        assert!(RenderServer3DAdapter::resolve_shader_material(&tree, mesh_id).is_none());
     }
 
     #[test]
@@ -1669,13 +1783,15 @@ mod tests {
     }
 
     #[test]
-    fn mesh3d_from_gltf_resource_not_yet_implemented() {
-        // glTF import is not yet implemented — import_gltf always returns Err.
+    fn mesh3d_from_gltf_resource_loads_triangle() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("tri.glb");
         std::fs::write(&path, make_test_glb()).unwrap();
 
-        assert!(gdresource::import_gltf(&path).is_err());
+        let res = gdresource::import_gltf(&path).expect("import glb");
+        let mesh = mesh3d_from_gltf_resource(&res).expect("mesh from gltf resource");
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices.len(), 3);
     }
 
     #[test]
@@ -1685,13 +1801,17 @@ mod tests {
     }
 
     #[test]
-    fn material_from_gltf_resource_not_yet_implemented() {
-        // glTF import is not yet implemented — import_gltf always returns Err.
+    fn material_from_gltf_resource_loads_pbr() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("red.glb");
         std::fs::write(&path, make_test_glb_with_material()).unwrap();
 
-        assert!(gdresource::import_gltf(&path).is_err());
+        let res = gdresource::import_gltf(&path).expect("import glb");
+        let mat = material_from_gltf_resource(&res).expect("material from gltf");
+        assert!((mat.albedo.r - 1.0).abs() < 1e-5);
+        assert!((mat.metallic - 0.8).abs() < 1e-5);
+        assert!((mat.roughness - 0.3).abs() < 1e-5);
+        assert!(mat.double_sided);
     }
 
     #[test]
@@ -1714,17 +1834,17 @@ mod tests {
         node3d::set_mesh_path(&mut tree, mesh_id, glb_path.to_str().unwrap());
 
         let resolved = RenderServer3DAdapter::resolve_mesh(&tree, mesh_id);
-        // glTF import is not yet implemented, so resolve_mesh falls back to
-        // the default cube (24 vertices, 36 indices).
+        // glTF import loads the triangle mesh from the GLB (3 verts, 3 indices).
         assert_eq!(
             resolved.vertices.len(),
-            24,
-            "should fall back to default cube"
+            3,
+            "should load triangle from glb, got {} verts",
+            resolved.vertices.len()
         );
         assert_eq!(
             resolved.indices.len(),
-            36,
-            "should fall back to default cube"
+            3,
+            "should load triangle indices from glb"
         );
     }
 
@@ -1777,9 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn end_to_end_gltf_falls_back_to_default_cube() {
-        // glTF import is not yet implemented, so MeshInstance3D with a .glb path
-        // falls back to the default cube. Verify it still renders something.
+    fn end_to_end_gltf_with_material_renders_pixels() {
         let dir = tempfile::TempDir::new().unwrap();
         let glb_path = dir.path().join("red_model.glb");
         std::fs::write(&glb_path, make_test_glb_with_material()).unwrap();
@@ -1803,7 +1921,7 @@ mod tests {
         assert_eq!(snapshot.visible_mesh_count, 1);
         assert!(
             snapshot.nonblack_pixel_count > 0,
-            "fallback cube should produce visible pixels"
+            "gltf mesh with material should produce visible pixels"
         );
     }
 }

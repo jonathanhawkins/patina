@@ -806,6 +806,241 @@ pub mod circuit_breaker {
     }
 }
 
+/// ─── Crate-breakage circuit breaker ──────────────────────────────────────
+///
+/// A worker's uncommitted WIP that breaks a shared crate makes every verify
+/// whose build graph includes that crate fail with the same `could not
+/// compile` error. Without a breaker the single verify lane re-runs the same
+/// broken build for each queued bead — burning the build slot for zero new
+/// information (observed 2026-07-14: broken gdscene → four consecutive
+/// identical failures). This breaker counts consecutive compile failures per
+/// *broken* crate (the crate rustc names, not the crate the verify targets —
+/// a gdeditor test failing on its gdscene dep attributes to gdscene). At the
+/// threshold it alerts the operator once (rustc excerpt + dirty files) and
+/// halts the lane behind a throttled `cargo check -p <crate>` pre-flight
+/// until the crate builds again. Skipped verifies stay pending (the B3
+/// reaper is the backstop) — workers are never bounced for someone else's
+/// breakage.
+pub mod crate_breaker {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    use regex::Regex;
+
+    /// Crate a verify request targets, from its command list
+    /// (`-p X` / `--package X`). None for non-cargo or unscoped commands.
+    pub fn extract_request_crate(commands: &[String]) -> Option<String> {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        let re = RE
+            .get_or_init(|| Regex::new(r"(?:^|\s)(?:-p|--package)[=\s]+([A-Za-z0-9_-]+)").unwrap());
+        commands
+            .iter()
+            .find_map(|c| re.captures(c).map(|cap| cap[1].to_string()))
+    }
+
+    /// Crate named in a ``could not compile `X` `` failure output.
+    pub fn parse_broken_crate(failure_output: &str) -> Option<String> {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| Regex::new(r"could not compile `([A-Za-z0-9_-]+)`").unwrap());
+        re.captures(failure_output).map(|cap| cap[1].to_string())
+    }
+
+    /// Operator alert payload, emitted exactly once per trip transition.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct BreakageAlert {
+        pub crate_name: String,
+        pub consecutive_failures: u32,
+        pub error_excerpt: String,
+    }
+
+    impl BreakageAlert {
+        pub fn log_line(&self) -> String {
+            format!(
+                "CRATE-BROKEN: `{}` failed to compile in {} consecutive verifies — halting \
+                 verifies behind a `cargo check -p {}` pre-flight until it builds again",
+                self.crate_name, self.consecutive_failures, self.crate_name
+            )
+        }
+    }
+
+    /// Consecutive same-crate compile-failure tracking with a throttled
+    /// recovery pre-check. `threshold == 0` disables tripping entirely.
+    pub struct CrateBreaker {
+        threshold: u32,
+        precheck_interval: Duration,
+        streaks: HashMap<String, u32>,
+        /// Tripped crates → last pre-check attempt (throttling).
+        tripped: HashMap<String, Instant>,
+    }
+
+    impl CrateBreaker {
+        pub fn new(threshold: u32, precheck_interval: Duration) -> Self {
+            Self {
+                threshold,
+                precheck_interval,
+                streaks: HashMap::new(),
+                tripped: HashMap::new(),
+            }
+        }
+
+        /// Record a completed verify. `broken_crate` is the crate rustc blamed
+        /// (None for passes and non-compile failures); `request_crate` is the
+        /// crate the verify targeted. Returns the alert exactly when a crate's
+        /// streak crosses the threshold.
+        pub fn record(
+            &mut self,
+            request_crate: Option<&str>,
+            broken_crate: Option<&str>,
+            error_excerpt: &str,
+        ) -> Option<BreakageAlert> {
+            if let Some(broken) = broken_crate {
+                let n = self.streaks.entry(broken.to_string()).or_insert(0);
+                *n += 1;
+                if self.threshold > 0 && *n == self.threshold {
+                    self.tripped.insert(broken.to_string(), Instant::now());
+                    return Some(BreakageAlert {
+                        crate_name: broken.to_string(),
+                        consecutive_failures: *n,
+                        error_excerpt: error_excerpt.to_string(),
+                    });
+                }
+                return None;
+            }
+            // Completed without a compile error: the targeted crate built, so
+            // its streak (if any) is stale.
+            if let Some(rc) = request_crate {
+                self.clear(rc);
+            }
+            None
+        }
+
+        /// A crate proved buildable (pre-check or clean verify) — forget it.
+        pub fn clear(&mut self, crate_name: &str) {
+            self.streaks.remove(crate_name);
+            self.tripped.remove(crate_name);
+        }
+
+        pub fn any_tripped(&self) -> bool {
+            !self.tripped.is_empty()
+        }
+
+        pub fn tripped_crates(&self) -> Vec<String> {
+            let mut v: Vec<String> = self.tripped.keys().cloned().collect();
+            v.sort();
+            v
+        }
+
+        /// Run the recovery pre-check for every tripped crate whose throttle
+        /// window has elapsed; crates whose probe passes are cleared. Returns
+        /// the crates that recovered.
+        pub fn run_due_prechecks(&mut self, mut probe: impl FnMut(&str) -> bool) -> Vec<String> {
+            let due: Vec<String> = self
+                .tripped
+                .iter_mut()
+                .filter_map(|(krate, last)| {
+                    if last.elapsed() >= self.precheck_interval {
+                        *last = Instant::now();
+                        Some(krate.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let mut recovered = Vec::new();
+            for krate in due {
+                if probe(&krate) {
+                    self.clear(&krate);
+                    recovered.push(krate);
+                }
+            }
+            recovered
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn extracts_request_crate_from_commands() {
+            let cmds = vec![
+                "cd somewhere".to_string(),
+                "cargo nextest run -p gdscene --lib foo".to_string(),
+            ];
+            assert_eq!(extract_request_crate(&cmds).as_deref(), Some("gdscene"));
+            let pkg = vec!["cargo test --package gd-render2d --test t".to_string()];
+            assert_eq!(extract_request_crate(&pkg).as_deref(), Some("gd-render2d"));
+            assert_eq!(extract_request_crate(&["make check".to_string()]), None);
+        }
+
+        #[test]
+        fn parses_broken_crate_from_rustc_output() {
+            let out = "…\nerror: could not compile `gdscene` (lib) due to 2 previous errors";
+            assert_eq!(parse_broken_crate(out).as_deref(), Some("gdscene"));
+            assert_eq!(parse_broken_crate("test result: FAILED"), None);
+        }
+
+        /// Trips exactly once at the threshold, attributing to the BROKEN
+        /// crate even when the request targeted a dependent crate.
+        #[test]
+        fn trips_once_on_broken_crate_not_request_crate() {
+            let mut b = CrateBreaker::new(3, Duration::from_secs(120));
+            assert!(b.record(Some("gdeditor"), Some("gdscene"), "e1").is_none());
+            assert!(b.record(Some("gdrender2d"), Some("gdscene"), "e2").is_none());
+            let alert = b.record(Some("gdeditor"), Some("gdscene"), "e3");
+            assert_eq!(alert.unwrap().crate_name, "gdscene");
+            assert!(b.any_tripped());
+            // Further failures don't re-alert.
+            assert!(b.record(Some("gdeditor"), Some("gdscene"), "e4").is_none());
+            assert_eq!(b.tripped_crates(), vec!["gdscene".to_string()]);
+        }
+
+        #[test]
+        fn threshold_zero_never_trips() {
+            let mut b = CrateBreaker::new(0, Duration::from_secs(120));
+            for _ in 0..10 {
+                assert!(b.record(None, Some("gdscene"), "e").is_none());
+            }
+            assert!(!b.any_tripped());
+        }
+
+        /// A clean completion for the targeted crate clears its streak.
+        #[test]
+        fn clean_verify_clears_streak() {
+            let mut b = CrateBreaker::new(3, Duration::from_secs(120));
+            b.record(Some("gdscene"), Some("gdscene"), "e1");
+            b.record(Some("gdscene"), Some("gdscene"), "e2");
+            b.record(Some("gdscene"), None, ""); // passed (or failed non-compile)
+            let alert = b.record(Some("gdscene"), Some("gdscene"), "e3");
+            assert!(alert.is_none(), "streak must restart after a clean verify");
+        }
+
+        /// Pre-checks are throttled: the trip stamps the clock, so a probe
+        /// only runs after the interval — and a passing probe clears the trip.
+        #[test]
+        fn precheck_throttles_then_recovers() {
+            let mut b = CrateBreaker::new(1, Duration::from_secs(3600));
+            b.record(None, Some("gdscene"), "e");
+            assert!(b.any_tripped());
+            let mut probes = 0;
+            let recovered = b.run_due_prechecks(|_| {
+                probes += 1;
+                true
+            });
+            assert_eq!(probes, 0, "within the throttle window no probe runs");
+            assert!(recovered.is_empty());
+            assert!(b.any_tripped());
+
+            let mut b = CrateBreaker::new(1, Duration::from_secs(0));
+            b.record(None, Some("gdscene"), "e");
+            let recovered = b.run_due_prechecks(|krate| krate == "gdscene");
+            assert_eq!(recovered, vec!["gdscene".to_string()]);
+            assert!(!b.any_tripped());
+        }
+    }
+}
+
 /// Run each command via bash and return an error on failure or timeout.
 ///
 /// On failure the error carries a one-word category (see [`classify_failure`])

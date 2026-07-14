@@ -169,6 +169,8 @@ impl NativeScriptBuilder {
             name: name.clone(),
             property_type: default.variant_type(),
             default_value: default.clone(),
+            hint: 0,
+            hint_string: String::new(),
         });
         self.properties.insert(name, default);
         self

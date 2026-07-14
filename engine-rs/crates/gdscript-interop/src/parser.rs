@@ -73,6 +73,20 @@ pub enum Expr {
         /// Function body.
         body: Vec<Stmt>,
     },
+    /// Type test: `value is TypeName` (Godot `is` operator).
+    TypeTest {
+        /// The value being tested.
+        value: Box<Expr>,
+        /// The type name to test against.
+        type_name: String,
+    },
+    /// Type cast: `value as TypeName` (Godot `as` operator).
+    Cast {
+        /// The value being cast.
+        value: Box<Expr>,
+        /// The target type name.
+        type_name: String,
+    },
 }
 
 /// Binary operators.
@@ -106,6 +120,18 @@ pub enum BinOp {
     Or,
     /// `in`
     In,
+    /// `**`
+    Pow,
+    /// `&`
+    BitAnd,
+    /// `|`
+    BitOr,
+    /// `^`
+    BitXor,
+    /// `<<`
+    Shl,
+    /// `>>`
+    Shr,
 }
 
 /// Unary operators.
@@ -115,6 +141,8 @@ pub enum UnaryOp {
     Neg,
     /// `not`
     Not,
+    /// `~`
+    BitNot,
 }
 
 /// Assignment operators.
@@ -126,13 +154,36 @@ pub enum AssignOp {
     AddAssign,
     /// `-=`
     SubAssign,
+    /// `*=`
+    MulAssign,
+    /// `/=`
+    DivAssign,
+    /// `%=`
+    ModAssign,
+    /// `**=`
+    PowAssign,
+    /// `&=`
+    BitAndAssign,
+    /// `|=`
+    BitOrAssign,
+    /// `^=`
+    BitXorAssign,
+    /// `<<=`
+    ShlAssign,
+    /// `>>=`
+    ShrAssign,
 }
 
-/// An annotation on a declaration (e.g. `@export`, `@onready`).
+/// An annotation on a declaration (e.g. `@export`, `@onready`, `@rpc`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
-    /// Annotation name (e.g. "export", "onready").
+    /// Annotation name (e.g. "export", "onready", "rpc").
     pub name: String,
+    /// Parenthesised arguments captured verbatim (string literals unquoted),
+    /// e.g. `@rpc("any_peer", "call_local", "reliable", 0)` parses to
+    /// `["any_peer", "call_local", "reliable", "0"]`. Empty for bare annotations
+    /// like `@export` (pat-u3l8c.75).
+    pub args: Vec<String>,
 }
 
 /// A function parameter with optional type hint and default value.
@@ -149,6 +200,15 @@ pub struct FuncParam {
 /// A statement node in the GDScript AST.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    /// Constant declaration: `const NAME [: type] = value`
+    ConstDecl {
+        /// Constant name.
+        name: String,
+        /// Optional type hint.
+        type_hint: Option<String>,
+        /// The constant value expression.
+        value: Expr,
+    },
     /// Variable declaration: `var name [: type] [= value]`
     VarDecl {
         /// Variable name.
@@ -214,6 +274,8 @@ pub enum Stmt {
         body: Vec<Stmt>,
         /// Whether this is a static function.
         is_static: bool,
+        /// Annotations applied to the function, e.g. `@rpc(...)` (pat-u3l8c.75).
+        annotations: Vec<Annotation>,
     },
     /// `extends ClassName` or `extends "ClassName"`.
     Extends {
@@ -252,7 +314,15 @@ pub enum Stmt {
     /// `continue`
     Continue,
     /// `await expr` — yields execution until the awaited expression resolves.
-    Await(Expr),
+    /// `bind` is `Some(name)` for `var name = await expr`, binding the resumed
+    /// value (a signal's emitted argument) to `name` (pat-nzgdu.6); `None` for a
+    /// bare `await expr` whose result is discarded.
+    Await {
+        /// The awaited expression (produces an awaitable signal/timer/frames).
+        expr: Expr,
+        /// Optional local to bind the resumed value to.
+        bind: Option<String>,
+    },
     /// Inner class definition: `class InnerName:`
     InnerClass {
         /// The inner class name.
@@ -269,15 +339,35 @@ pub enum Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
-    pub pattern: MatchPattern,
+    /// One or more comma-separated patterns; the arm matches if any matches.
+    pub patterns: Vec<MatchPattern>,
+    /// Optional `when` guard expression evaluated after a pattern matches.
+    pub guard: Option<Expr>,
     pub body: Vec<Stmt>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchPattern {
+    /// A literal value compared by equality.
     Literal(Variant),
-    Variable(String),
+    /// `var name` — binds the matched value to `name`.
+    Binding(String),
+    /// A bare identifier or expression evaluated and compared by value
+    /// (a constant reference, e.g. `RED` or `Color.RED`).
+    ConstantRef(Expr),
+    /// `_` — matches anything without binding.
     Wildcard,
+    /// `..` — rest pattern (only meaningful inside array/dictionary patterns).
+    Rest,
+    /// `[a, b, ..]` — array pattern; a trailing [`MatchPattern::Rest`] allows
+    /// extra elements.
     Array(Vec<MatchPattern>),
+    /// `{ key: subpattern, .. }` — dictionary pattern.
+    Dictionary {
+        /// Key expression and optional value sub-pattern for each entry.
+        entries: Vec<(Expr, Option<MatchPattern>)>,
+        /// Whether a trailing `..` rest allows extra keys.
+        rest: bool,
+    },
 }
 
 /// A parse error.
@@ -410,11 +500,12 @@ impl Parser {
         match self.peek().clone() {
             Token::AtSign => self.parse_annotated_stmt(),
             Token::Var => self.parse_var_decl_with_annotations(vec![]),
+            Token::Const => self.parse_const_decl(),
             Token::If => self.parse_if(),
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
             Token::Return => self.parse_return(),
-            Token::Func => self.parse_func_def(false),
+            Token::Func => self.parse_func_def(false, Vec::new()),
             Token::Static => self.parse_static_func(),
             Token::Extends => self.parse_extends(),
             Token::ClassName => self.parse_class_name_decl(),
@@ -457,15 +548,39 @@ impl Parser {
                     n
                 }
             };
-            annotations.push(Annotation { name });
+            // Optional parenthesised arguments, e.g. `@rpc(mode, sync, transfer,
+            // channel)`. Captured verbatim (string literals unquoted) so the
+            // runtime can map them to an RPC configuration (pat-u3l8c.75).
+            let mut args = Vec::new();
+            if self.check(&Token::LParen) {
+                self.advance(); // consume '('
+                while !self.check(&Token::RParen) && !self.check(&Token::Eof) {
+                    let arg = match self.peek().clone() {
+                        Token::StringLit(s) => s,
+                        other => other.to_string(),
+                    };
+                    args.push(arg);
+                    self.advance();
+                    if self.check(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                if self.check(&Token::RParen) {
+                    self.advance(); // consume ')'
+                }
+            }
+            annotations.push(Annotation { name, args });
             self.skip_newlines();
         }
         // After annotations, expect a var decl, func def, or script-level annotation like @tool
         match self.peek().clone() {
             Token::Var => self.parse_var_decl_with_annotations(annotations),
             Token::Func => {
-                // Annotations on func defs are ignored for now but parsed
-                self.parse_func_def(false)
+                // Attach parsed annotations (e.g. `@rpc(...)`) to the function
+                // so the runtime can enforce their configuration (pat-u3l8c.75).
+                self.parse_func_def(false, annotations)
             }
             Token::Static => self.parse_static_func(),
             _ => {
@@ -520,6 +635,19 @@ impl Parser {
         };
         let value = if self.check(&Token::Assign) {
             self.advance();
+            if self.check(&Token::Await) {
+                // `var NAME = await EXPR` binds the resumed value (a signal's
+                // emitted argument) to NAME. It must lower to an `await`
+                // statement so it can suspend the frame — a plain VarDecl can't
+                // (expression evaluation cannot yield). Setter/getter and type
+                // hints are not combined with an awaited initializer (pat-nzgdu.6).
+                self.advance(); // consume `await`
+                let awaited = self.parse_expr()?;
+                return Ok(Stmt::Await {
+                    expr: awaited,
+                    bind: Some(name),
+                });
+            }
             Some(self.parse_expr()?)
         } else {
             None
@@ -539,6 +667,24 @@ impl Parser {
             annotations,
             setter,
             getter,
+        })
+    }
+
+    fn parse_const_decl(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // consume `const`
+        let name = self.eat_ident()?;
+        let type_hint = if self.check(&Token::Colon) {
+            self.advance();
+            Some(self.parse_type_hint()?)
+        } else {
+            None
+        };
+        self.expect(&Token::Assign)?;
+        let value = self.parse_expr()?;
+        Ok(Stmt::ConstDecl {
+            name,
+            type_hint,
+            value,
         })
     }
 
@@ -742,7 +888,7 @@ impl Parser {
                 source_line: None,
             });
         }
-        self.parse_func_def(true)
+        self.parse_func_def(true, Vec::new())
     }
 
     fn parse_func_param(&mut self) -> Result<FuncParam, ParseError> {
@@ -766,7 +912,11 @@ impl Parser {
         })
     }
 
-    fn parse_func_def(&mut self, is_static: bool) -> Result<Stmt, ParseError> {
+    fn parse_func_def(
+        &mut self,
+        is_static: bool,
+        annotations: Vec<Annotation>,
+    ) -> Result<Stmt, ParseError> {
         self.advance(); // consume `func`
         let name = self.eat_ident()?;
         self.expect(&Token::LParen)?;
@@ -796,6 +946,7 @@ impl Parser {
             return_type,
             body,
             is_static,
+            annotations,
         })
     }
 
@@ -808,10 +959,7 @@ impl Parser {
         let mut arms = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
-            let pattern = self.parse_match_pattern()?;
-            self.expect(&Token::Colon)?;
-            let body = self.parse_block()?;
-            arms.push(MatchArm { pattern, body });
+            arms.push(self.parse_match_branch()?);
             self.skip_newlines();
         }
         if self.check(&Token::Dedent) {
@@ -820,36 +968,52 @@ impl Parser {
         Ok(Stmt::Match { value, arms })
     }
 
+    /// Parses a single `match` branch: one or more comma-separated patterns,
+    /// an optional `when` guard, and a block body.
+    fn parse_match_branch(&mut self) -> Result<MatchArm, ParseError> {
+        let mut patterns = vec![self.parse_match_pattern()?];
+        while self.check(&Token::Comma) {
+            self.advance();
+            // Tolerate a trailing comma before `when`/`:`.
+            if self.check(&Token::When) || self.check(&Token::Colon) {
+                break;
+            }
+            patterns.push(self.parse_match_pattern()?);
+        }
+        let guard = if self.check(&Token::When) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect(&Token::Colon)?;
+        let body = self.parse_block()?;
+        Ok(MatchArm {
+            patterns,
+            guard,
+            body,
+        })
+    }
+
     fn parse_match_pattern(&mut self) -> Result<MatchPattern, ParseError> {
         match self.peek().clone() {
-            Token::IntLit(v) => {
+            // `var name` binding pattern.
+            Token::Var => {
                 self.advance();
-                Ok(MatchPattern::Literal(Variant::Int(v)))
+                let name = self.eat_ident()?;
+                Ok(MatchPattern::Binding(name))
             }
-            Token::FloatLit(v) => {
+            // `..` rest pattern.
+            Token::DotDot => {
                 self.advance();
-                Ok(MatchPattern::Literal(Variant::Float(v)))
+                Ok(MatchPattern::Rest)
             }
-            Token::StringLit(v) => {
-                self.advance();
-                Ok(MatchPattern::Literal(Variant::String(v)))
-            }
-            Token::BoolLit(v) => {
-                self.advance();
-                Ok(MatchPattern::Literal(Variant::Bool(v)))
-            }
-            Token::Null => {
-                self.advance();
-                Ok(MatchPattern::Literal(Variant::Nil))
-            }
+            // `_` wildcard.
             Token::Ident(name) if name == "_" => {
                 self.advance();
                 Ok(MatchPattern::Wildcard)
             }
-            Token::Ident(name) => {
-                self.advance();
-                Ok(MatchPattern::Variable(name))
-            }
+            // Array pattern `[p, p, ..]`.
             Token::LBracket => {
                 self.advance();
                 let mut pats = Vec::new();
@@ -866,89 +1030,91 @@ impl Parser {
                 self.expect(&Token::RBracket)?;
                 Ok(MatchPattern::Array(pats))
             }
-            Token::Minus => {
+            // Dictionary pattern `{ key: subpattern, key, .. }`.
+            Token::LBrace => {
                 self.advance();
-                match self.peek().clone() {
-                    Token::IntLit(v) => {
+                let mut entries = Vec::new();
+                let mut rest = false;
+                if !self.check(&Token::RBrace) {
+                    self.parse_dict_pattern_entry(&mut entries, &mut rest)?;
+                    while self.check(&Token::Comma) {
                         self.advance();
-                        Ok(MatchPattern::Literal(Variant::Int(-v)))
-                    }
-                    Token::FloatLit(v) => {
-                        self.advance();
-                        Ok(MatchPattern::Literal(Variant::Float(-v)))
-                    }
-                    _ => {
-                        let ts = self.tokens.get(self.pos);
-                        let (token, line, col) = match ts {
-                            Some(ts) => (ts.token.to_string(), ts.line, ts.col),
-                            None => ("EOF".to_string(), 0, 0),
-                        };
-                        Err(ParseError::UnexpectedToken {
-                            token,
-                            expected: "number after minus".to_string(),
-                            line,
-                            col,
-                            source_line: None,
-                        })
+                        if self.check(&Token::RBrace) {
+                            break;
+                        }
+                        self.parse_dict_pattern_entry(&mut entries, &mut rest)?;
                     }
                 }
+                self.expect(&Token::RBrace)?;
+                Ok(MatchPattern::Dictionary { entries, rest })
             }
+            // Everything else is an expression: a literal folds to a value
+            // comparison, anything else becomes a constant reference compared
+            // by value (fixes the bare-identifier binding bug).
             _ => {
-                let ts = self.tokens.get(self.pos);
-                let (token, line, col) = match ts {
-                    Some(ts) => (ts.token.to_string(), ts.line, ts.col),
-                    None => ("EOF".to_string(), 0, 0),
-                };
-                Err(ParseError::UnexpectedToken {
-                    token,
-                    expected: "match pattern".to_string(),
-                    line,
-                    col,
-                    source_line: None,
-                })
+                let expr = self.parse_expr()?;
+                match expr {
+                    Expr::Literal(v) => Ok(MatchPattern::Literal(v)),
+                    other => Ok(MatchPattern::ConstantRef(other)),
+                }
             }
         }
+    }
+
+    /// Parses one entry of a dictionary pattern, pushing it into `entries` or
+    /// setting `rest` for a trailing `..`.
+    fn parse_dict_pattern_entry(
+        &mut self,
+        entries: &mut Vec<(Expr, Option<MatchPattern>)>,
+        rest: &mut bool,
+    ) -> Result<(), ParseError> {
+        if self.check(&Token::DotDot) {
+            self.advance();
+            *rest = true;
+            return Ok(());
+        }
+        let key = self.parse_expr()?;
+        let sub = if self.check(&Token::Colon) {
+            self.advance();
+            Some(self.parse_match_pattern()?)
+        } else {
+            None
+        };
+        entries.push((key, sub));
+        Ok(())
     }
 
     fn parse_await(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // consume `await`
         let expr = self.parse_expr()?;
-        Ok(Stmt::Await(expr))
+        Ok(Stmt::Await { expr, bind: None })
     }
 
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, ParseError> {
         let expr = self.parse_expr()?;
 
-        match self.peek() {
-            Token::Assign => {
-                self.advance();
-                let value = self.parse_expr()?;
-                Ok(Stmt::Assignment {
-                    target: expr,
-                    op: AssignOp::Assign,
-                    value,
-                })
-            }
-            Token::PlusAssign => {
-                self.advance();
-                let value = self.parse_expr()?;
-                Ok(Stmt::Assignment {
-                    target: expr,
-                    op: AssignOp::AddAssign,
-                    value,
-                })
-            }
-            Token::MinusAssign => {
-                self.advance();
-                let value = self.parse_expr()?;
-                Ok(Stmt::Assignment {
-                    target: expr,
-                    op: AssignOp::SubAssign,
-                    value,
-                })
-            }
-            _ => Ok(Stmt::ExprStmt(expr)),
-        }
+        let op = match self.peek() {
+            Token::Assign => AssignOp::Assign,
+            Token::PlusAssign => AssignOp::AddAssign,
+            Token::MinusAssign => AssignOp::SubAssign,
+            Token::StarAssign => AssignOp::MulAssign,
+            Token::SlashAssign => AssignOp::DivAssign,
+            Token::PercentAssign => AssignOp::ModAssign,
+            Token::StarStarAssign => AssignOp::PowAssign,
+            Token::AmpAssign => AssignOp::BitAndAssign,
+            Token::PipeAssign => AssignOp::BitOrAssign,
+            Token::CaretAssign => AssignOp::BitXorAssign,
+            Token::ShlAssign => AssignOp::ShlAssign,
+            Token::ShrAssign => AssignOp::ShrAssign,
+            _ => return Ok(Stmt::ExprStmt(expr)),
+        };
+        self.advance();
+        let value = self.parse_expr()?;
+        Ok(Stmt::Assignment {
+            target: expr,
+            op,
+            value,
+        })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -969,12 +1135,29 @@ impl Parser {
     // --- Expression parsing (precedence climbing) ---
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        // `as` (cast) has the loosest precedence of any operator except
+        // assignment, so it wraps the whole ternary expression.
+        let mut value = self.parse_ternary()?;
+        while self.check(&Token::As) {
+            self.advance();
+            let type_name = self.parse_type_hint()?;
+            value = Expr::Cast {
+                value: Box::new(value),
+                type_name,
+            };
+        }
+        Ok(value)
+    }
+
+    fn parse_ternary(&mut self) -> Result<Expr, ParseError> {
         let value = self.parse_or()?;
         if self.check(&Token::If) {
             self.advance();
             let condition = self.parse_or()?;
             self.expect(&Token::Else)?;
-            let else_value = self.parse_expr()?;
+            // The else branch is another ternary (right-associative) but does
+            // not absorb a trailing `as` cast, matching Godot precedence.
+            let else_value = self.parse_ternary()?;
             return Ok(Expr::Ternary {
                 value: Box::new(value),
                 condition: Box::new(condition),
@@ -1013,7 +1196,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_addition()?;
+        let mut left = self.parse_bit_or()?;
         loop {
             let op = match self.peek() {
                 Token::EqEq => BinOp::Eq,
@@ -1023,6 +1206,69 @@ impl Parser {
                 Token::LtEq => BinOp::Le,
                 Token::GtEq => BinOp::Ge,
                 Token::In => BinOp::In,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_bit_or()?;
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    // Bitwise operators sit between comparison and addition, ordered (loosest
+    // to tightest): `|`, `^`, `&`, then `<<`/`>>`, matching Godot precedence.
+    fn parse_bit_or(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bit_xor()?;
+        while self.check(&Token::Pipe) {
+            self.advance();
+            let right = self.parse_bit_xor()?;
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinOp::BitOr,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_xor(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bit_and()?;
+        while self.check(&Token::Caret) {
+            self.advance();
+            let right = self.parse_bit_and()?;
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinOp::BitXor,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_and(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bit_shift()?;
+        while self.check(&Token::Amp) {
+            self.advance();
+            let right = self.parse_bit_shift()?;
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinOp::BitAnd,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_shift(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_addition()?;
+        loop {
+            let op = match self.peek() {
+                Token::Shl => BinOp::Shl,
+                Token::Shr => BinOp::Shr,
                 _ => break,
             };
             self.advance();
@@ -1093,8 +1339,68 @@ impl Parser {
                     expr: Box::new(expr),
                 })
             }
-            _ => self.parse_postfix(),
+            Token::Tilde => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr::UnaryOp {
+                    op: UnaryOp::BitNot,
+                    expr: Box::new(expr),
+                })
+            }
+            _ => self.parse_power(),
         }
+    }
+
+    /// `**` binds tighter than the unary sign/bit-not operators and is
+    /// left-associative (matching Godot's `parse_binary_operator`).
+    fn parse_power(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_type_test()?;
+        while self.check(&Token::StarStar) {
+            self.advance();
+            let right = self.parse_power_operand()?;
+            left = Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinOp::Pow,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    /// Right operand of `**`: allows unary prefixes (`2 ** -1`) without
+    /// re-entering the power loop, so `**` chains stay left-associative.
+    fn parse_power_operand(&mut self) -> Result<Expr, ParseError> {
+        let op = match self.peek() {
+            Token::Minus => Some(UnaryOp::Neg),
+            Token::Not => Some(UnaryOp::Not),
+            Token::Tilde => Some(UnaryOp::BitNot),
+            _ => None,
+        };
+        match op {
+            Some(op) => {
+                self.advance();
+                let expr = self.parse_power_operand()?;
+                Ok(Expr::UnaryOp {
+                    op,
+                    expr: Box::new(expr),
+                })
+            }
+            None => self.parse_type_test(),
+        }
+    }
+
+    /// `is` type-test binds tighter than `**` but looser than call/subscript.
+    fn parse_type_test(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_postfix()?;
+        while self.check(&Token::Is) {
+            self.advance();
+            let type_name = self.parse_type_hint()?;
+            left = Expr::TypeTest {
+                value: Box::new(left),
+                type_name,
+            };
+        }
+        Ok(left)
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
@@ -1680,6 +1986,216 @@ mod tests {
     fn parse_match_stmt() {
         let s = parse("match x:\n    1:\n        pass\n    _:\n        pass\n");
         assert!(matches!(&s[0], Stmt::Match { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // const / is / as / bitwise / power / compound assignment (pat-u3l8c.7-.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_const_decl() {
+        let stmts = parse("const MAX = 10\n");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::ConstDecl { name, type_hint: None, value: Expr::Literal(Variant::Int(10)) }
+            if name == "MAX"
+        ));
+    }
+
+    #[test]
+    fn parse_const_decl_with_type() {
+        let stmts = parse("const SPEED: float = 1.5\n");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::ConstDecl { name, type_hint: Some(t), .. }
+            if name == "SPEED" && t == "float"
+        ));
+    }
+
+    #[test]
+    fn parse_is_operator() {
+        let e = parse_expr_str("x is int");
+        assert!(matches!(
+            &e,
+            Expr::TypeTest { type_name, .. } if type_name == "int"
+        ));
+    }
+
+    #[test]
+    fn parse_as_operator() {
+        let e = parse_expr_str("x as float");
+        assert!(matches!(
+            &e,
+            Expr::Cast { type_name, .. } if type_name == "float"
+        ));
+    }
+
+    #[test]
+    fn parse_as_binds_loosely() {
+        // `a + b as int` == `(a + b) as int`
+        let e = parse_expr_str("a + b as int");
+        match e {
+            Expr::Cast { value, type_name } => {
+                assert_eq!(type_name, "int");
+                assert!(matches!(*value, Expr::BinaryOp { op: BinOp::Add, .. }));
+            }
+            other => panic!("expected cast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_is_binds_tightly() {
+        // `a + b is int` == `a + (b is int)`
+        let e = parse_expr_str("a + b is int");
+        match e {
+            Expr::BinaryOp { op: BinOp::Add, right, .. } => {
+                assert!(matches!(*right, Expr::TypeTest { .. }));
+            }
+            other => panic!("expected add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bitwise_precedence() {
+        // `a | b & c` == `a | (b & c)` since `&` binds tighter than `|`.
+        let e = parse_expr_str("a | b & c");
+        match e {
+            Expr::BinaryOp { op: BinOp::BitOr, right, .. } => {
+                assert!(matches!(*right, Expr::BinaryOp { op: BinOp::BitAnd, .. }));
+            }
+            other => panic!("expected bitor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_shift_between_bitand_and_addition() {
+        // `a & b << c` == `a & (b << c)`
+        let e = parse_expr_str("a & b << c");
+        match e {
+            Expr::BinaryOp { op: BinOp::BitAnd, right, .. } => {
+                assert!(matches!(*right, Expr::BinaryOp { op: BinOp::Shl, .. }));
+            }
+            other => panic!("expected bitand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_power_tighter_than_unary_minus() {
+        // `-2 ** 2` == `-(2 ** 2)`
+        let e = parse_expr_str("-2 ** 2");
+        match e {
+            Expr::UnaryOp { op: UnaryOp::Neg, expr } => {
+                assert!(matches!(*expr, Expr::BinaryOp { op: BinOp::Pow, .. }));
+            }
+            other => panic!("expected negation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tilde_unary() {
+        let e = parse_expr_str("~x");
+        assert!(matches!(e, Expr::UnaryOp { op: UnaryOp::BitNot, .. }));
+    }
+
+    #[test]
+    fn parse_compound_assignments() {
+        for (src, expect) in [
+            ("x *= 2\n", AssignOp::MulAssign),
+            ("x /= 2\n", AssignOp::DivAssign),
+            ("x %= 2\n", AssignOp::ModAssign),
+            ("x **= 2\n", AssignOp::PowAssign),
+            ("x &= 2\n", AssignOp::BitAndAssign),
+            ("x |= 2\n", AssignOp::BitOrAssign),
+            ("x ^= 2\n", AssignOp::BitXorAssign),
+            ("x <<= 2\n", AssignOp::ShlAssign),
+            ("x >>= 2\n", AssignOp::ShrAssign),
+        ] {
+            let stmts = parse(src);
+            match &stmts[0] {
+                Stmt::Assignment { op, .. } => assert_eq!(*op, expect, "for {src}"),
+                other => panic!("expected assignment for {src}, got {other:?}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // match pattern semantics (pat-u3l8c.9)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_match_bare_ident_is_constant_ref_not_binding() {
+        let s = parse("match x:\n    RED:\n        pass\n");
+        if let Stmt::Match { arms, .. } = &s[0] {
+            assert!(matches!(
+                arms[0].patterns[0],
+                MatchPattern::ConstantRef(Expr::Ident(ref n)) if n == "RED"
+            ));
+        } else {
+            panic!("expected match");
+        }
+    }
+
+    #[test]
+    fn parse_match_var_binding() {
+        let s = parse("match x:\n    var y:\n        pass\n");
+        if let Stmt::Match { arms, .. } = &s[0] {
+            assert!(matches!(
+                arms[0].patterns[0],
+                MatchPattern::Binding(ref n) if n == "y"
+            ));
+        } else {
+            panic!("expected match");
+        }
+    }
+
+    #[test]
+    fn parse_match_multiple_patterns() {
+        let s = parse("match x:\n    1, 2, 3:\n        pass\n");
+        if let Stmt::Match { arms, .. } = &s[0] {
+            assert_eq!(arms[0].patterns.len(), 3);
+        } else {
+            panic!("expected match");
+        }
+    }
+
+    #[test]
+    fn parse_match_array_rest() {
+        let s = parse("match x:\n    [1, ..]:\n        pass\n");
+        if let Stmt::Match { arms, .. } = &s[0] {
+            if let MatchPattern::Array(pats) = &arms[0].patterns[0] {
+                assert_eq!(pats.len(), 2);
+                assert!(matches!(pats[1], MatchPattern::Rest));
+            } else {
+                panic!("expected array pattern");
+            }
+        } else {
+            panic!("expected match");
+        }
+    }
+
+    #[test]
+    fn parse_match_dict_pattern_with_rest() {
+        let s = parse("match x:\n    {\"a\": 1, ..}:\n        pass\n");
+        if let Stmt::Match { arms, .. } = &s[0] {
+            if let MatchPattern::Dictionary { entries, rest } = &arms[0].patterns[0] {
+                assert_eq!(entries.len(), 1);
+                assert!(*rest);
+            } else {
+                panic!("expected dict pattern");
+            }
+        } else {
+            panic!("expected match");
+        }
+    }
+
+    #[test]
+    fn parse_match_when_guard() {
+        let s = parse("match x:\n    var y when y > 0:\n        pass\n");
+        if let Stmt::Match { arms, .. } = &s[0] {
+            assert!(arms[0].guard.is_some());
+        } else {
+            panic!("expected match");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2523,6 +3039,43 @@ mod tests {
             assert_eq!(annotations[0].name, "tool");
         } else {
             panic!("expected AnnotationStmt");
+        }
+    }
+
+    #[test]
+    fn parse_rpc_annotation_on_func_captures_args() {
+        // @rpc(mode, sync, transfer, channel) is parsed and attached to the func.
+        let stmts = parse(
+            "@rpc(\"any_peer\", \"call_local\", \"reliable\", 0)\nfunc take_damage(amount):\n    pass\n",
+        );
+        let annotations = stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::FuncDef {
+                    name, annotations, ..
+                } if name == "take_damage" => Some(annotations),
+                _ => None,
+            })
+            .expect("expected take_damage FuncDef");
+        let rpc = annotations
+            .iter()
+            .find(|a| a.name == "rpc")
+            .expect("expected @rpc annotation on func");
+        assert_eq!(
+            rpc.args,
+            vec!["any_peer", "call_local", "reliable", "0"],
+            "@rpc args parsed (string literals unquoted, int as text)"
+        );
+    }
+
+    #[test]
+    fn parse_bare_annotation_has_empty_args() {
+        let stmts = parse("@export\nvar health: int = 100\n");
+        if let Stmt::VarDecl { annotations, .. } = &stmts[0] {
+            assert_eq!(annotations[0].name, "export");
+            assert!(annotations[0].args.is_empty(), "bare @export has no args");
+        } else {
+            panic!("expected VarDecl");
         }
     }
 }

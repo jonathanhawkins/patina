@@ -2,10 +2,125 @@
 //!
 //! All drawing functions clip to the framebuffer bounds automatically.
 
-use gdcore::math::{Color, Rect2, Vector2};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 
 use crate::renderer::FrameBuffer;
 use crate::texture::Texture2D;
+
+/// Screen-space AABB of `rect` transformed by `xform`, clamped to the
+/// framebuffer, as inclusive-start/exclusive-end pixel bounds.
+fn transformed_pixel_bounds(
+    fb: &FrameBuffer,
+    xform: Transform2D,
+    rect: Rect2,
+) -> (u32, u32, u32, u32) {
+    let corners = [
+        xform.xform(rect.position),
+        xform.xform(Vector2::new(rect.position.x + rect.size.x, rect.position.y)),
+        xform.xform(Vector2::new(rect.position.x, rect.position.y + rect.size.y)),
+        xform.xform(Vector2::new(
+            rect.position.x + rect.size.x,
+            rect.position.y + rect.size.y,
+        )),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for c in &corners {
+        min_x = min_x.min(c.x);
+        min_y = min_y.min(c.y);
+        max_x = max_x.max(c.x);
+        max_y = max_y.max(c.y);
+    }
+    (
+        (min_x.floor() as i32).max(0) as u32,
+        (min_y.floor() as i32).max(0) as u32,
+        (max_x.ceil() as i32).max(0).min(fb.width as i32) as u32,
+        (max_y.ceil() as i32).max(0).min(fb.height as i32) as u32,
+    )
+}
+
+/// Fills `rect` under an arbitrary 2D transform (rotation/scale/skew) with
+/// source-over alpha blending. Pixels are inverse-mapped from screen space
+/// into the rect's local space (pat-u3l8c.24).
+pub fn fill_rect_transformed(fb: &mut FrameBuffer, xform: Transform2D, rect: Rect2, color: Color) {
+    if rect.size.x <= 0.0 || rect.size.y <= 0.0 || color.a <= 0.001 {
+        return;
+    }
+    let (x_start, y_start, x_end, y_end) = transformed_pixel_bounds(fb, xform, rect);
+    let inv = xform.affine_inverse();
+    for py in y_start..y_end {
+        for px in x_start..x_end {
+            let local = inv.xform(Vector2::new(px as f32 + 0.5, py as f32 + 0.5));
+            if local.x >= rect.position.x
+                && local.x <= rect.position.x + rect.size.x
+                && local.y >= rect.position.y
+                && local.y <= rect.position.y + rect.size.y
+            {
+                fb.blend_pixel(px, py, color);
+            }
+        }
+    }
+}
+
+/// Draws `texture` mapped onto `rect` under an arbitrary 2D transform with
+/// source-over alpha blending. When `source_rect` is `Some`, texels are
+/// sampled from that sub-region (texture-atlas semantics); otherwise the
+/// whole texture is mapped onto `rect` (pat-u3l8c.24).
+pub fn draw_texture_rect_transformed(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    xform: Transform2D,
+    rect: Rect2,
+    source_rect: Option<Rect2>,
+    modulate: Color,
+) {
+    if texture.width == 0 || texture.height == 0 {
+        return;
+    }
+    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return;
+    }
+    if let Some(sr) = source_rect {
+        if sr.size.x <= 0.0 || sr.size.y <= 0.0 {
+            return;
+        }
+    }
+
+    let (x_start, y_start, x_end, y_end) = transformed_pixel_bounds(fb, xform, rect);
+    let inv = xform.affine_inverse();
+    for py in y_start..y_end {
+        for px in x_start..x_end {
+            let local = inv.xform(Vector2::new(px as f32 + 0.5, py as f32 + 0.5));
+            let u = (local.x - rect.position.x) / rect.size.x;
+            let v = (local.y - rect.position.y) / rect.size.y;
+            if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+                continue;
+            }
+            let (tx, ty) = match source_rect {
+                Some(sr) => (
+                    ((sr.position.x + u * sr.size.x) as u32).min(texture.width - 1),
+                    ((sr.position.y + v * sr.size.y) as u32).min(texture.height - 1),
+                ),
+                None => (
+                    ((u * texture.width as f32) as u32).min(texture.width - 1),
+                    ((v * texture.height as f32) as u32).min(texture.height - 1),
+                ),
+            };
+            let texel = texture.get_pixel(tx, ty);
+            let final_color = Color::new(
+                texel.r * modulate.r,
+                texel.g * modulate.g,
+                texel.b * modulate.b,
+                texel.a * modulate.a,
+            );
+            if final_color.a > 0.001 {
+                fb.blend_pixel(px, py, final_color);
+            }
+        }
+    }
+}
 
 /// Fills a rectangular region of the framebuffer with `color`, clipping to bounds.
 pub fn fill_rect(fb: &mut FrameBuffer, rect: Rect2, color: Color) {

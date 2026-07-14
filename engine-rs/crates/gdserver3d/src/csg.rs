@@ -128,6 +128,7 @@ impl CSGBox3D {
             indices,
             primitive_type: crate::mesh::PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         }
     }
 }
@@ -223,6 +224,7 @@ impl CSGSphere3D {
             indices,
             primitive_type: crate::mesh::PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         }
     }
 }
@@ -365,6 +367,7 @@ impl CSGCylinder3D {
             indices,
             primitive_type: crate::mesh::PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         }
     }
 }
@@ -522,6 +525,7 @@ fn classify_triangles(mesh: &Mesh3D, other_aabb: &Aabb) -> (Mesh3D, Mesh3D) {
         indices: in_indices,
         primitive_type: crate::mesh::PrimitiveType::Triangles,
         surfaces: Vec::new(),
+        ..Default::default()
     };
     let outside = Mesh3D {
         vertices: out_verts,
@@ -530,6 +534,7 @@ fn classify_triangles(mesh: &Mesh3D, other_aabb: &Aabb) -> (Mesh3D, Mesh3D) {
         indices: out_indices,
         primitive_type: crate::mesh::PrimitiveType::Triangles,
         surfaces: Vec::new(),
+        ..Default::default()
     };
     (inside, outside)
 }
@@ -553,6 +558,7 @@ impl CSGCombiner3D {
             indices,
             primitive_type: crate::mesh::PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -639,6 +645,7 @@ fn invert_winding(mesh: &Mesh3D) -> Mesh3D {
         indices,
         primitive_type: mesh.primitive_type,
         surfaces: mesh.surfaces.clone(),
+        ..Default::default()
     }
 }
 
@@ -1130,6 +1137,7 @@ mod tests {
             indices: vec![0, 1, 2, 3, 4, 5],
             primitive_type: crate::mesh::PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         };
         let aabb = Aabb {
             min: Vector3::new(-1.0, -1.0, -1.0),

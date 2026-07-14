@@ -476,23 +476,25 @@ impl PackageExecutor {
         // Step 4: Dispatch to the platform-specific generator. The
         // dispatcher is best-effort: platforms without a native bundle
         // implementation fall back to the staging marker.
-        let final_path = match self.config.target_platform.as_str() {
-            "linux" => match self.generate_linux_appimage(binary) {
-                Ok(p) => p,
-                Err(e) => return PackageResult::err(e.to_string()),
-            },
-            "macos" => match self.generate_macos_bundle(binary) {
-                Ok(p) => p,
-                Err(e) => return PackageResult::err(e.to_string()),
-            },
-            "windows" => match self.generate_windows_exe(binary) {
-                Ok(p) => p,
-                Err(e) => return PackageResult::err(e.to_string()),
-            },
-            _ => marker_path,
+        let bundle = match self.config.target_platform.as_str() {
+            "linux" => self.generate_linux_appimage(binary),
+            "macos" => self.generate_macos_bundle(binary),
+            "windows" => self.generate_windows_exe(binary),
+            _ => Ok(marker_path.clone()),
         };
+        let bundle_path = match bundle {
+            Ok(p) => p,
+            Err(e) => return PackageResult::err(e.to_string()),
+        };
+        if bundle_path != marker_path {
+            self.messages
+                .push(format!("platform artifact: {}", bundle_path.display()));
+        }
 
-        let mut result = PackageResult::ok(final_path.display().to_string(), total_size);
+        // The reported output path is the canonical marker name
+        // (`<app>.<platform>.<profile>`); the platform-native bundle above is an
+        // additional artifact recorded in `messages`.
+        let mut result = PackageResult::ok(marker_path.display().to_string(), total_size);
         result.messages = self.messages.clone();
         result
     }

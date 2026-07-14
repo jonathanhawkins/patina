@@ -64,96 +64,163 @@ fn tf(x: f32, y: f32) -> Transform2D {
 }
 
 // ===========================================================================
-// 1. Unsupported shape pair completeness
+// 1. Extended shape pair support (segment and capsule combinations)
+//
+// These pairs previously returned None (unsupported). The rotation-aware SAT /
+// closest-distance narrow-phase (pat-u3l8c.47) implements the full pair table,
+// so every combination now produces a real collision result.
 // ===========================================================================
 
-/// All shape pairs involving Segment should return None from test_collision.
+/// Segment vs circle: overlaps when the circle reaches the segment.
 #[test]
-fn segment_circle_returns_none() {
-    let result = collision::test_collision(
+fn segment_circle_collides() {
+    // Horizontal segment through the origin; circle centered 3px above it.
+    let hit = collision::test_collision(
         &segment(-10.0, 0.0, 10.0, 0.0),
         &tf(0.0, 0.0),
         &circle(5.0),
+        &tf(0.0, 3.0),
+    )
+    .unwrap();
+    assert!(hit.colliding, "circle overlapping the segment should collide");
+    assert!((hit.depth - 2.0).abs() < 0.1, "depth ~2, got {}", hit.depth);
+
+    // A circle well clear of the segment does not collide.
+    let miss = collision::test_collision(
+        &segment(-10.0, 0.0, 10.0, 0.0),
         &tf(0.0, 0.0),
-    );
-    assert!(result.is_none(), "segment-circle should be unsupported");
+        &circle(5.0),
+        &tf(0.0, 20.0),
+    )
+    .unwrap();
+    assert!(!miss.colliding, "distant circle should not collide with segment");
 }
 
+/// Segment vs rect: a segment crossing the rectangle collides.
 #[test]
-fn segment_rect_returns_none() {
-    let result = collision::test_collision(
+fn segment_rect_collides() {
+    let hit = collision::test_collision(
         &segment(-10.0, 0.0, 10.0, 0.0),
         &tf(0.0, 0.0),
         &rect(10.0, 10.0),
         &tf(0.0, 0.0),
-    );
-    assert!(result.is_none(), "segment-rect should be unsupported");
+    )
+    .unwrap();
+    assert!(hit.colliding, "segment crossing the rect should collide");
+
+    // Segment entirely above the rect does not collide.
+    let miss = collision::test_collision(
+        &segment(-10.0, 0.0, 10.0, 0.0),
+        &tf(0.0, 20.0),
+        &rect(10.0, 10.0),
+        &tf(0.0, 0.0),
+    )
+    .unwrap();
+    assert!(!miss.colliding, "segment clear of the rect should not collide");
 }
 
+/// Segment vs segment: two crossing segments collide.
 #[test]
-fn segment_segment_returns_none() {
-    let result = collision::test_collision(
+fn segment_segment_collides() {
+    let hit = collision::test_collision(
         &segment(-10.0, 0.0, 10.0, 0.0),
         &tf(0.0, 0.0),
         &segment(0.0, -10.0, 0.0, 10.0),
         &tf(0.0, 0.0),
-    );
-    assert!(result.is_none(), "segment-segment should be unsupported");
+    )
+    .unwrap();
+    assert!(hit.colliding, "crossing segments should collide");
+
+    // Parallel segments far apart do not collide.
+    let miss = collision::test_collision(
+        &segment(-10.0, 0.0, 10.0, 0.0),
+        &tf(0.0, 0.0),
+        &segment(-10.0, 0.0, 10.0, 0.0),
+        &tf(0.0, 50.0),
+    )
+    .unwrap();
+    assert!(!miss.colliding, "far-apart parallel segments should not collide");
 }
 
+/// Capsule vs circle: overlapping shapes collide with combined-radius depth.
 #[test]
-fn capsule_circle_returns_none() {
-    let result = collision::test_collision(
+fn capsule_circle_collides() {
+    let hit = collision::test_collision(
         &capsule(5.0, 20.0),
         &tf(0.0, 0.0),
         &circle(5.0),
         &tf(0.0, 0.0),
-    );
-    assert!(result.is_none(), "capsule-circle should be unsupported");
+    )
+    .unwrap();
+    assert!(hit.colliding, "coincident capsule and circle should collide");
+    // Circle center lies on the capsule core → depth = r_capsule + r_circle.
+    assert!((hit.depth - 10.0).abs() < 0.1, "depth ~10, got {}", hit.depth);
 }
 
+/// Capsule vs rect: a capsule grazing the rect edge collides.
 #[test]
-fn capsule_rect_returns_none() {
-    let result = collision::test_collision(
+fn capsule_rect_collides() {
+    // Capsule core at x=8 (radius 5); rect right face at x=5 → gap 3 < radius.
+    let hit = collision::test_collision(
         &capsule(5.0, 20.0),
-        &tf(0.0, 0.0),
+        &tf(8.0, 0.0),
         &rect(10.0, 10.0),
         &tf(0.0, 0.0),
-    );
-    assert!(result.is_none(), "capsule-rect should be unsupported");
+    )
+    .unwrap();
+    assert!(hit.colliding, "capsule near the rect face should collide");
+    assert!((hit.depth - 2.0).abs() < 0.1, "depth ~2, got {}", hit.depth);
 }
 
+/// Capsule vs capsule: two nearby vertical capsules collide.
 #[test]
-fn capsule_capsule_returns_none() {
-    let result = collision::test_collision(
+fn capsule_capsule_collides() {
+    // Cores at x=0 and x=8; combined radius 10 > 8 gap → collide, depth 2.
+    let hit = collision::test_collision(
         &capsule(5.0, 20.0),
         &tf(0.0, 0.0),
         &capsule(5.0, 30.0),
-        &tf(10.0, 0.0),
-    );
-    assert!(result.is_none(), "capsule-capsule should be unsupported");
+        &tf(8.0, 0.0),
+    )
+    .unwrap();
+    assert!(hit.colliding, "overlapping capsules should collide");
+    assert!((hit.depth - 2.0).abs() < 0.1, "depth ~2, got {}", hit.depth);
+
+    // Far apart → no collision.
+    let miss = collision::test_collision(
+        &capsule(5.0, 20.0),
+        &tf(0.0, 0.0),
+        &capsule(5.0, 30.0),
+        &tf(50.0, 0.0),
+    )
+    .unwrap();
+    assert!(!miss.colliding, "distant capsules should not collide");
 }
 
+/// Capsule vs segment: a segment touching the capsule core collides.
 #[test]
-fn capsule_segment_returns_none() {
-    let result = collision::test_collision(
+fn capsule_segment_collides() {
+    let hit = collision::test_collision(
         &capsule(5.0, 20.0),
         &tf(0.0, 0.0),
         &segment(0.0, 0.0, 10.0, 10.0),
         &tf(0.0, 0.0),
-    );
-    assert!(result.is_none(), "capsule-segment should be unsupported");
+    )
+    .unwrap();
+    assert!(hit.colliding, "segment through the capsule should collide");
 }
 
+/// Segment vs capsule: symmetric of the previous case.
 #[test]
-fn segment_capsule_returns_none() {
-    let result = collision::test_collision(
+fn segment_capsule_collides() {
+    let hit = collision::test_collision(
         &segment(0.0, 0.0, 10.0, 10.0),
         &tf(0.0, 0.0),
         &capsule(5.0, 20.0),
         &tf(0.0, 0.0),
-    );
-    assert!(result.is_none(), "segment-capsule should be unsupported");
+    )
+    .unwrap();
+    assert!(hit.colliding, "capsule around the segment should collide");
 }
 
 // ===========================================================================

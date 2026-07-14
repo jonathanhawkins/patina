@@ -6,6 +6,105 @@
 
 use gdcore::math::Color;
 use gdvariant::Variant;
+use std::sync::Arc;
+
+/// An in-memory texture image sampled by the software and GPU render paths.
+///
+/// Pixels are stored row-major, length `width * height`, indexed `y * width + x`.
+/// Color textures (albedo, emission) hold **sRGB-authored** texels; data
+/// textures (normal, roughness, metallic / ORM) hold **raw linear** values.
+/// Callers decode as appropriate (see the fragment-shader material sampling).
+///
+/// Wrapped in [`Arc`] on materials so per-draw material clones stay cheap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextureImage {
+    /// Width in texels (must be >= 1).
+    pub width: u32,
+    /// Height in texels (must be >= 1).
+    pub height: u32,
+    /// Row-major pixels, length `width * height`.
+    pub pixels: Vec<Color>,
+}
+
+impl TextureImage {
+    /// Creates a texture from raw pixels. `pixels.len()` must equal
+    /// `width * height`; otherwise sampling clamps out-of-range reads to black.
+    pub fn new(width: u32, height: u32, pixels: Vec<Color>) -> Self {
+        Self {
+            width: width.max(1),
+            height: height.max(1),
+            pixels,
+        }
+    }
+
+    /// Creates a solid 1x1 texture of the given color (handy for tests).
+    pub fn solid(color: Color) -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            pixels: vec![color],
+        }
+    }
+
+    #[inline]
+    fn texel(&self, x: u32, y: u32) -> Color {
+        let idx = (y * self.width + x) as usize;
+        self.pixels.get(idx).copied().unwrap_or(Color::BLACK)
+    }
+
+    /// Nearest-neighbour sample with **repeat** (tiling) wrap. `u`/`v` follow
+    /// Godot/GL UV convention (origin top-left). Texel centres sit at
+    /// `(i + 0.5) / size`.
+    pub fn sample_nearest(&self, u: f32, v: f32) -> Color {
+        let (w, h) = (self.width, self.height);
+        let uf = u * w as f32 - 0.5;
+        let vf = v * h as f32 - 0.5;
+        let xi = wrap_index(uf.round() as i64, w);
+        let yi = wrap_index(vf.round() as i64, h);
+        self.texel(xi, yi)
+    }
+
+    /// Bilinear sample with **repeat** (tiling) wrap — matches Godot's default
+    /// linear texture filter. Sampling exactly at a texel centre
+    /// (`(i + 0.5) / size`) returns that texel unmodified.
+    pub fn sample_bilinear(&self, u: f32, v: f32) -> Color {
+        let (w, h) = (self.width, self.height);
+        let uf = u * w as f32 - 0.5;
+        let vf = v * h as f32 - 0.5;
+        let x0f = uf.floor();
+        let y0f = vf.floor();
+        let tx = uf - x0f;
+        let ty = vf - y0f;
+        let x0 = wrap_index(x0f as i64, w);
+        let x1 = wrap_index(x0f as i64 + 1, w);
+        let y0 = wrap_index(y0f as i64, h);
+        let y1 = wrap_index(y0f as i64 + 1, h);
+        let c00 = self.texel(x0, y0);
+        let c10 = self.texel(x1, y0);
+        let c01 = self.texel(x0, y1);
+        let c11 = self.texel(x1, y1);
+        let top = lerp_color(c00, c10, tx);
+        let bot = lerp_color(c01, c11, tx);
+        lerp_color(top, bot, ty)
+    }
+}
+
+/// Wraps a signed texel coordinate into `[0, size)` with repeat semantics.
+#[inline]
+fn wrap_index(i: i64, size: u32) -> u32 {
+    let s = size as i64;
+    (((i % s) + s) % s) as u32
+}
+
+#[inline]
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    Color::new(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a + (b.a - a.a) * t,
+    )
+}
 
 /// Shading mode for a 3D material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +138,31 @@ pub struct Material3D {
     pub shading_mode: ShadingMode,
     /// Whether the material is double-sided.
     pub double_sided: bool,
+    /// Optional albedo texture (sRGB); its decoded texel multiplies [`albedo`]
+    /// per-fragment at the sampled UV. `None` = flat albedo color.
+    ///
+    /// [`albedo`]: Material3D::albedo
+    pub albedo_texture: Option<Arc<TextureImage>>,
+    /// Optional tangent-space normal map. Perturbs the interpolated normal
+    /// before lighting when present.
+    pub normal_texture: Option<Arc<TextureImage>>,
+    /// Normal-map strength multiplier (1.0 = full strength).
+    pub normal_scale: f32,
+    /// Optional roughness texture; its **green** channel multiplies
+    /// [`roughness`] per-fragment (Godot's default roughness channel).
+    ///
+    /// [`roughness`]: Material3D::roughness
+    pub roughness_texture: Option<Arc<TextureImage>>,
+    /// Optional metallic texture; its **blue** channel multiplies [`metallic`]
+    /// per-fragment (Godot's default metallic channel).
+    ///
+    /// [`metallic`]: Material3D::metallic
+    pub metallic_texture: Option<Arc<TextureImage>>,
+    /// Optional emission texture (sRGB); its decoded texel multiplies
+    /// [`emission`] per-fragment.
+    ///
+    /// [`emission`]: Material3D::emission
+    pub emission_texture: Option<Arc<TextureImage>>,
 }
 
 impl Default for Material3D {
@@ -50,6 +174,12 @@ impl Default for Material3D {
             emission: Color::new(0.0, 0.0, 0.0, 0.0),
             shading_mode: ShadingMode::Lambert,
             double_sided: false,
+            albedo_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            roughness_texture: None,
+            metallic_texture: None,
+            emission_texture: None,
         }
     }
 }
@@ -135,6 +265,7 @@ impl StandardMaterial3D {
             emission: self.emission,
             shading_mode: self.shading_mode,
             double_sided: self.double_sided,
+            ..Material3D::default()
         }
     }
 
@@ -215,6 +346,89 @@ impl StandardMaterial3D {
 mod tests {
     use super::*;
 
+    // ── TextureImage sampling ──
+
+    fn checker_2x2() -> TextureImage {
+        // (0,0)=red (1,0)=green / (0,1)=blue (1,1)=white, row-major.
+        TextureImage::new(
+            2,
+            2,
+            vec![
+                Color::new(1.0, 0.0, 0.0, 1.0),
+                Color::new(0.0, 1.0, 0.0, 1.0),
+                Color::new(0.0, 0.0, 1.0, 1.0),
+                Color::new(1.0, 1.0, 1.0, 1.0),
+            ],
+        )
+    }
+
+    #[test]
+    fn bilinear_at_texel_centers_returns_exact_texel() {
+        let t = checker_2x2();
+        // Texel centres sit at (i + 0.5) / size = 0.25 and 0.75.
+        assert_eq!(t.sample_bilinear(0.25, 0.25), Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(t.sample_bilinear(0.75, 0.25), Color::new(0.0, 1.0, 0.0, 1.0));
+        assert_eq!(t.sample_bilinear(0.25, 0.75), Color::new(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(t.sample_bilinear(0.75, 0.75), Color::new(1.0, 1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn nearest_at_texel_centers_returns_exact_texel() {
+        let t = checker_2x2();
+        assert_eq!(t.sample_nearest(0.1, 0.1), Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(t.sample_nearest(0.9, 0.1), Color::new(0.0, 1.0, 0.0, 1.0));
+        assert_eq!(t.sample_nearest(0.1, 0.9), Color::new(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(t.sample_nearest(0.9, 0.9), Color::new(1.0, 1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn bilinear_midpoint_blends_neighbours() {
+        // Two horizontal texels: black then white. Midpoint u=0.5 (between the
+        // two texel centres 0.25 and 0.75) blends to 50% grey.
+        let t = TextureImage::new(2, 1, vec![Color::BLACK, Color::WHITE]);
+        let mid = t.sample_bilinear(0.5, 0.5);
+        assert!((mid.r - 0.5).abs() < 1e-5, "got {mid:?}");
+        assert!((mid.g - 0.5).abs() < 1e-5);
+        assert!((mid.b - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn nearest_repeat_wraps_out_of_range_uv() {
+        let t = TextureImage::new(2, 1, vec![Color::BLACK, Color::WHITE]);
+        // u=1.1 wraps to 0.1 → texel 0 (black); u=1.9 wraps to 0.9 → texel 1.
+        assert_eq!(t.sample_nearest(1.1, 0.0), Color::BLACK);
+        assert_eq!(t.sample_nearest(1.9, 0.0), Color::WHITE);
+        // Negative UVs wrap too.
+        assert_eq!(t.sample_nearest(-0.9, 0.0), Color::WHITE);
+    }
+
+    #[test]
+    fn solid_texture_samples_uniformly() {
+        let c = Color::new(0.2, 0.4, 0.6, 1.0);
+        let t = TextureImage::solid(c);
+        assert_eq!(t.sample_bilinear(0.0, 0.0), c);
+        assert_eq!(t.sample_bilinear(0.37, 0.91), c);
+        assert_eq!(t.sample_nearest(2.5, -3.3), c);
+    }
+
+    #[test]
+    fn out_of_bounds_pixel_index_is_black_not_panic() {
+        // width*height claims 4 texels but only 1 provided; missing reads → black.
+        let t = TextureImage::new(2, 2, vec![Color::WHITE]);
+        assert_eq!(t.sample_nearest(0.9, 0.9), Color::BLACK);
+    }
+
+    #[test]
+    fn material_texture_slots_default_to_none() {
+        let mat = Material3D::default();
+        assert!(mat.albedo_texture.is_none());
+        assert!(mat.normal_texture.is_none());
+        assert!(mat.roughness_texture.is_none());
+        assert!(mat.metallic_texture.is_none());
+        assert!(mat.emission_texture.is_none());
+        assert!((mat.normal_scale - 1.0).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn default_material() {
         let mat = Material3D::default();
@@ -234,6 +448,7 @@ mod tests {
             emission: Color::new(0.5, 0.5, 0.0, 1.0),
             shading_mode: ShadingMode::Phong,
             double_sided: true,
+            ..Material3D::default()
         };
         assert_eq!(mat.shading_mode, ShadingMode::Phong);
         assert!(mat.double_sided);

@@ -60,6 +60,12 @@ pub enum Token {
     Export,
     /// `await`
     Await,
+    /// `is` — type-test operator.
+    Is,
+    /// `as` — type-cast operator.
+    As,
+    /// `when` — match pattern guard.
+    When,
 
     // Literals
     /// Integer literal.
@@ -112,6 +118,38 @@ pub enum Token {
     PlusAssign,
     /// `-=`
     MinusAssign,
+    /// `*=`
+    StarAssign,
+    /// `/=`
+    SlashAssign,
+    /// `%=`
+    PercentAssign,
+    /// `**`
+    StarStar,
+    /// `**=`
+    StarStarAssign,
+    /// `&`
+    Amp,
+    /// `|`
+    Pipe,
+    /// `^`
+    Caret,
+    /// `~`
+    Tilde,
+    /// `<<`
+    Shl,
+    /// `>>`
+    Shr,
+    /// `&=`
+    AmpAssign,
+    /// `|=`
+    PipeAssign,
+    /// `^=`
+    CaretAssign,
+    /// `<<=`
+    ShlAssign,
+    /// `>>=`
+    ShrAssign,
     /// `->`
     Arrow,
     /// `@`
@@ -138,6 +176,8 @@ pub enum Token {
     Comma,
     /// `.`
     Dot,
+    /// `..` — rest pattern in `match`.
+    DotDot,
     /// `;`
     Semicolon,
 
@@ -180,6 +220,9 @@ impl fmt::Display for Token {
             Token::Onready => write!(f, "onready"),
             Token::Export => write!(f, "export"),
             Token::Await => write!(f, "await"),
+            Token::Is => write!(f, "is"),
+            Token::As => write!(f, "as"),
+            Token::When => write!(f, "when"),
             Token::IntLit(v) => write!(f, "{v}"),
             Token::FloatLit(v) => write!(f, "{v}"),
             Token::StringLit(v) => write!(f, "\"{v}\""),
@@ -203,6 +246,22 @@ impl fmt::Display for Token {
             Token::Assign => write!(f, "="),
             Token::PlusAssign => write!(f, "+="),
             Token::MinusAssign => write!(f, "-="),
+            Token::StarAssign => write!(f, "*="),
+            Token::SlashAssign => write!(f, "/="),
+            Token::PercentAssign => write!(f, "%="),
+            Token::StarStar => write!(f, "**"),
+            Token::StarStarAssign => write!(f, "**="),
+            Token::Amp => write!(f, "&"),
+            Token::Pipe => write!(f, "|"),
+            Token::Caret => write!(f, "^"),
+            Token::Tilde => write!(f, "~"),
+            Token::Shl => write!(f, "<<"),
+            Token::Shr => write!(f, ">>"),
+            Token::AmpAssign => write!(f, "&="),
+            Token::PipeAssign => write!(f, "|="),
+            Token::CaretAssign => write!(f, "^="),
+            Token::ShlAssign => write!(f, "<<="),
+            Token::ShrAssign => write!(f, ">>="),
             Token::Arrow => write!(f, "->"),
             Token::AtSign => write!(f, "@"),
             Token::Dollar => write!(f, "$"),
@@ -215,6 +274,7 @@ impl fmt::Display for Token {
             Token::Colon => write!(f, ":"),
             Token::Comma => write!(f, ","),
             Token::Dot => write!(f, "."),
+            Token::DotDot => write!(f, ".."),
             Token::Semicolon => write!(f, ";"),
             Token::Indent => write!(f, "INDENT"),
             Token::Dedent => write!(f, "DEDENT"),
@@ -529,6 +589,9 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 "or" => Token::Or,
                 "not" => Token::Not,
                 "await" => Token::Await,
+                "is" => Token::Is,
+                "as" => Token::As,
+                "when" => Token::When,
                 _ => Token::Ident(ident),
             };
             tokens.push(TokenSpan {
@@ -541,8 +604,52 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
 
         // Multi-character operators
         let start_col = col;
+        // Three-character operators first (maximal munch): `**=`, `<<=`, `>>=`.
+        if pos + 2 < len {
+            let three: String = chars[pos..pos + 3].iter().collect();
+            let three_tok = match three.as_str() {
+                "**=" => Some(Token::StarStarAssign),
+                "<<=" => Some(Token::ShlAssign),
+                ">>=" => Some(Token::ShrAssign),
+                _ => None,
+            };
+            if let Some(tok) = three_tok {
+                tokens.push(TokenSpan {
+                    token: tok,
+                    line,
+                    col: start_col,
+                });
+                pos += 3;
+                col += 3;
+                continue;
+            }
+        }
         if pos + 1 < len {
             let two: String = chars[pos..pos + 2].iter().collect();
+            // Two-character operators with a single token mapping.
+            let two_tok = match two.as_str() {
+                "**" => Some(Token::StarStar),
+                "*=" => Some(Token::StarAssign),
+                "/=" => Some(Token::SlashAssign),
+                "%=" => Some(Token::PercentAssign),
+                "&=" => Some(Token::AmpAssign),
+                "|=" => Some(Token::PipeAssign),
+                "^=" => Some(Token::CaretAssign),
+                "<<" => Some(Token::Shl),
+                ">>" => Some(Token::Shr),
+                ".." => Some(Token::DotDot),
+                _ => None,
+            };
+            if let Some(tok) = two_tok {
+                tokens.push(TokenSpan {
+                    token: tok,
+                    line,
+                    col: start_col,
+                });
+                pos += 2;
+                col += 2;
+                continue;
+            }
             match two.as_str() {
                 "==" => {
                     tokens.push(TokenSpan {
@@ -625,6 +732,10 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             '*' => Token::Star,
             '/' => Token::Slash,
             '%' => Token::Percent,
+            '&' => Token::Amp,
+            '|' => Token::Pipe,
+            '^' => Token::Caret,
+            '~' => Token::Tilde,
             '<' => Token::Lt,
             '>' => Token::Gt,
             '=' => Token::Assign,
@@ -875,8 +986,8 @@ mod tests {
 
     #[test]
     fn unexpected_char_error() {
-        let err = tokenize("~").unwrap_err();
-        assert!(matches!(err, LexError::UnexpectedChar { ch: '~', .. }));
+        let err = tokenize("`").unwrap_err();
+        assert!(matches!(err, LexError::UnexpectedChar { ch: '`', .. }));
     }
 
     #[test]
@@ -897,6 +1008,73 @@ mod tests {
         assert_eq!(
             tokens,
             vec![Token::ClassName, Token::Ident("MyClass".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn tokenize_bitwise_and_compound_operators() {
+        let tokens = tok_types("& | ^ ~ << >> ** *= /= %= **= &= |= ^= <<= >>=");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Amp,
+                Token::Pipe,
+                Token::Caret,
+                Token::Tilde,
+                Token::Shl,
+                Token::Shr,
+                Token::StarStar,
+                Token::StarAssign,
+                Token::SlashAssign,
+                Token::PercentAssign,
+                Token::StarStarAssign,
+                Token::AmpAssign,
+                Token::PipeAssign,
+                Token::CaretAssign,
+                Token::ShlAssign,
+                Token::ShrAssign,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_is_as_when_keywords() {
+        let tokens = tok_types("x is int as float when");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("x".into()),
+                Token::Is,
+                Token::Ident("int".into()),
+                Token::As,
+                Token::Ident("float".into()),
+                Token::When,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_maximal_munch_star_star() {
+        // `**` must not be split into two `*`, and `**=` must win over `**`.
+        assert_eq!(
+            tok_types("2**3"),
+            vec![
+                Token::IntLit(2),
+                Token::StarStar,
+                Token::IntLit(3),
+                Token::Eof
+            ]
+        );
+        assert_eq!(
+            tok_types("x**=2"),
+            vec![
+                Token::Ident("x".into()),
+                Token::StarStarAssign,
+                Token::IntLit(2),
+                Token::Eof
+            ]
         );
     }
 

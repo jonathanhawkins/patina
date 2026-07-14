@@ -63,10 +63,13 @@ pub struct VoxelGI {
     /// Whether the VoxelGI probe data has been baked.
     pub baked: bool,
     /// Cached aggregate indirect-light contribution produced by the most
-    /// recent [`VoxelGI::bake`] call. The bake/sample path stores a single
-    /// volume-wide colour rather than a full voxel grid — this is the parity
-    /// oracle used by the renderer to fold GI into fragments inside the AABB.
+    /// recent [`VoxelGI::bake`] call (volume average).
     pub baked_indirect: Color,
+    /// Coarse spatial grid (N³ = 64 cells) for position-varying samples
+    /// (pat-p0s82.9). Empty until bake.
+    pub grid: Vec<Color>,
+    /// Grid resolution per axis (fixed 4 for the portable slice).
+    pub grid_res: u32,
 }
 
 impl VoxelGI {
@@ -85,66 +88,92 @@ impl VoxelGI {
             interior: false,
             baked: false,
             baked_indirect: Color::BLACK,
+            grid: Vec::new(),
+            grid_res: 4,
         }
     }
 
     /// Bakes indirect-light contribution from `lights` into the volume.
     ///
-    /// Mirrors Godot's voxel-cone-tracing pre-pass at the simplified level
-    /// the parity tests require: each light's reaching contribution is
-    /// summed at the volume centre, modulated by the probe's `propagation`
-    /// factor, and stashed in `baked_indirect`. `interior=true` skips the
-    /// sky term — directional lights are treated as the sky proxy and are
-    /// excluded when interior mode is on, matching Godot's behaviour.
-    ///
-    /// Subsequent calls overwrite the previous bake. Lights with
-    /// `light_type == LightType::Directional` contribute their full energy;
-    /// point and spot lights attenuate by inverse-square distance from the
-    /// volume centre.
+    /// Fills a coarse spatial grid so `sample` varies with position (P1 GI).
     pub fn bake(&mut self, lights: &[Light3D]) {
-        let mut r = 0.0_f32;
-        let mut g = 0.0_f32;
-        let mut b = 0.0_f32;
-        let centre = self.transform.origin;
-        for light in lights {
-            let attenuation = match light.light_type {
-                LightType::Directional => {
-                    if self.interior {
-                        continue;
-                    }
-                    1.0
-                }
-                LightType::Point | LightType::Spot => {
-                    let d = (light.position - centre).length().max(1.0);
-                    1.0 / (d * d)
-                }
-            };
-            r += light.color.r * light.energy * attenuation;
-            g += light.color.g * light.energy * attenuation;
-            b += light.color.b * light.energy * attenuation;
-        }
+        let n = self.grid_res as usize;
+        self.grid = vec![Color::BLACK; n * n * n];
+        let (min, max) = self.world_aabb_min_max();
         let prop = self.propagation;
-        self.baked_indirect = Color::new(r * prop, g * prop, b * prop, 1.0);
+        let mut avg = Color::BLACK;
+        let mut count = 0.0f32;
+        for iz in 0..n {
+            for iy in 0..n {
+                for ix in 0..n {
+                    let fx = (ix as f32 + 0.5) / n as f32;
+                    let fy = (iy as f32 + 0.5) / n as f32;
+                    let fz = (iz as f32 + 0.5) / n as f32;
+                    let cell = Vector3::new(
+                        min.x + (max.x - min.x) * fx,
+                        min.y + (max.y - min.y) * fy,
+                        min.z + (max.z - min.z) * fz,
+                    );
+                    let mut r = 0.0f32;
+                    let mut g = 0.0f32;
+                    let mut b = 0.0f32;
+                    for light in lights {
+                        let attenuation = match light.light_type {
+                            LightType::Directional => {
+                                if self.interior {
+                                    continue;
+                                }
+                                1.0
+                            }
+                            LightType::Point | LightType::Spot => {
+                                let d = (light.position - cell).length().max(1.0);
+                                1.0 / (d * d)
+                            }
+                        };
+                        r += light.color.r * light.energy * attenuation;
+                        g += light.color.g * light.energy * attenuation;
+                        b += light.color.b * light.energy * attenuation;
+                    }
+                    let c = Color::new(r * prop, g * prop, b * prop, 1.0);
+                    self.grid[iz * n * n + iy * n + ix] = c;
+                    avg.r += c.r;
+                    avg.g += c.g;
+                    avg.b += c.b;
+                    count += 1.0;
+                }
+            }
+        }
+        if count > 0.0 {
+            self.baked_indirect = Color::new(avg.r / count, avg.g / count, avg.b / count, 1.0);
+        }
         self.baked = true;
     }
 
     /// Samples the baked indirect-light contribution at `world_pos`.
     ///
-    /// Returns `Color::BLACK` when the probe has not been baked or when the
-    /// point lies outside the probe's AABB. Inside the AABB the contribution
-    /// is `baked_indirect * energy` componentwise. Box-projected cone tracing
-    /// across individual voxel cells is left to the renderer; this volume-wide
-    /// constant is the parity surface tests assert against.
+    /// Returns spatially varying irradiance from the coarse grid when baked.
     pub fn sample(&self, world_pos: Vector3) -> Color {
         if !self.baked || !self.contains_point(world_pos) {
             return Color::BLACK;
         }
-        Color::new(
-            self.baked_indirect.r * self.energy,
-            self.baked_indirect.g * self.energy,
-            self.baked_indirect.b * self.energy,
-            1.0,
-        )
+        let n = self.grid_res as usize;
+        if self.grid.len() != n * n * n {
+            return Color::new(
+                self.baked_indirect.r * self.energy,
+                self.baked_indirect.g * self.energy,
+                self.baked_indirect.b * self.energy,
+                1.0,
+            );
+        }
+        let (min, max) = self.world_aabb_min_max();
+        let fx = ((world_pos.x - min.x) / (max.x - min.x).max(1e-6)).clamp(0.0, 0.999);
+        let fy = ((world_pos.y - min.y) / (max.y - min.y).max(1e-6)).clamp(0.0, 0.999);
+        let fz = ((world_pos.z - min.z) / (max.z - min.z).max(1e-6)).clamp(0.0, 0.999);
+        let ix = (fx * n as f32) as usize;
+        let iy = (fy * n as f32) as usize;
+        let iz = (fz * n as f32) as usize;
+        let c = self.grid[iz * n * n + iy * n + ix];
+        Color::new(c.r * self.energy, c.g * self.energy, c.b * self.energy, 1.0)
     }
 
     /// Returns the axis-aligned bounding box of the VoxelGI volume in world space.
@@ -254,6 +283,8 @@ pub struct LightmapGI {
     pub baked: bool,
     /// Path to baked lightmap data resource (if baked).
     pub light_data_path: Option<String>,
+    /// Baked sample grid (pat-p0s82.10).
+    pub lightmap_samples: Vec<Color>,
 }
 
 impl LightmapGI {
@@ -276,13 +307,70 @@ impl LightmapGI {
             camera_attributes_path: None,
             baked: false,
             light_data_path: None,
+            lightmap_samples: Vec::new(),
         }
+    }
+
+    /// Bake a simple lightmap sample grid from lights (pat-p0s82.10).
+    ///
+    /// Produces `resolution × resolution` samples in the XZ plane at y=0.
+    pub fn bake_samples(&mut self, lights: &[Light3D], resolution: u32) {
+        let res = resolution.max(2);
+        self.lightmap_samples = Vec::with_capacity((res * res) as usize);
+        for z in 0..res {
+            for x in 0..res {
+                let fx = (x as f32 / (res - 1) as f32) * 2.0 - 1.0;
+                let fz = (z as f32 / (res - 1) as f32) * 2.0 - 1.0;
+                let pos = Vector3::new(fx * 10.0, 0.0, fz * 10.0);
+                let mut r = 0.0f32;
+                let mut g = 0.0f32;
+                let mut b = 0.0f32;
+                for light in lights {
+                    let att = match light.light_type {
+                        LightType::Directional => {
+                            if self.interior {
+                                continue;
+                            }
+                            1.0
+                        }
+                        LightType::Point | LightType::Spot => {
+                            let d = (light.position - pos).length().max(1.0);
+                            1.0 / (d * d)
+                        }
+                    };
+                    r += light.color.r * light.energy * att;
+                    g += light.color.g * light.energy * att;
+                    b += light.color.b * light.energy * att;
+                }
+                self.lightmap_samples
+                    .push(Color::new(r * self.energy, g * self.energy, b * self.energy, 1.0));
+            }
+        }
+        self.baked = true;
+        self.light_data_path = Some(format!("res://lightmaps/{}.lmbake", self.id.0));
+    }
+
+    /// Sample lightmap by world XZ in \[-10,10\].
+    pub fn sample_lightmap(&self, world: Vector3) -> Color {
+        if !self.baked || self.lightmap_samples.is_empty() {
+            return Color::BLACK;
+        }
+        let res = (self.lightmap_samples.len() as f32).sqrt() as u32;
+        if res < 2 {
+            return Color::BLACK;
+        }
+        let fx = ((world.x + 10.0) / 20.0).clamp(0.0, 0.999);
+        let fz = ((world.z + 10.0) / 20.0).clamp(0.0, 0.999);
+        let ix = (fx * res as f32) as usize;
+        let iz = (fz * res as f32) as usize;
+        self.lightmap_samples[iz * res as usize + ix]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::light::Light3DId;
 
     // -- VoxelGI tests --------------------------------------------------------
 
@@ -351,6 +439,26 @@ mod tests {
         assert_eq!(VoxelGISubdiv::Subdiv128 as u32, 1);
         assert_eq!(VoxelGISubdiv::Subdiv256 as u32, 2);
         assert_eq!(VoxelGISubdiv::Subdiv512 as u32, 3);
+    }
+
+    #[test]
+    fn voxelgi_sample_varies_spatially_near_point_light() {
+        let mut gi = VoxelGI::new(VoxelGIId(1));
+        gi.size = Vector3::new(20.0, 20.0, 20.0);
+        let mut light = Light3D::directional(Light3DId(1));
+        light.light_type = LightType::Point;
+        light.position = Vector3::new(8.0, 0.0, 0.0);
+        light.color = Color::WHITE;
+        light.energy = 10.0;
+        gi.bake(&[light]);
+        let near = gi.sample(Vector3::new(7.0, 0.0, 0.0));
+        let far = gi.sample(Vector3::new(-7.0, 0.0, 0.0));
+        assert!(
+            near.r > far.r,
+            "near GI {} should exceed far {}",
+            near.r,
+            far.r
+        );
     }
 
     // -- LightmapGI tests ----------------------------------------------------

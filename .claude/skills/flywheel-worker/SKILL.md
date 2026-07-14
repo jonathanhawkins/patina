@@ -40,18 +40,18 @@ If that returns ANY bead, **Do NOT claim a new bead** — finish (or report/resu
 Run this EXACT command. Do NOT pipe it into python. Do NOT add a filter. Do NOT wrap it in any script:
 
 ```bash
-br ready --json --unassigned --limit 5 --no-auto-import --allow-stale
+br ready --json --unassigned --sort priority --limit 5 --no-auto-import --allow-stale
 ```
 
 Then extract the first bead's ID and priority — shell only, no filtering logic:
 
 ```bash
-br ready --json --unassigned --limit 5 --no-auto-import --allow-stale | jq -r '.issues[0] | "\(.id) \(.priority)"'
+br ready --json --unassigned --sort priority --limit 5 --no-auto-import --allow-stale | jq -r '.issues[0] | "\(.id) \(.priority)"'
 ```
 
 (If `jq` is unavailable, use: `python3 -c 'import json,sys; d=json.load(sys.stdin); i=d["issues"][0] if d["issues"] else None; print(i["id"], i["priority"]) if i else print("")'` — this only prints the first issue, it does NOT filter.)
 
-**Selection rule**: Every bead returned by `br ready --unassigned` IS actionable. Take the FIRST issue from the `issues` array (the list is already priority-ordered: P0 before P1 before P2 before P3). Do NOT inspect labels. Do NOT skip beads based on title content. Do NOT define your own "actionable" predicate.
+**Selection rule**: Every bead returned by `br ready --unassigned` IS actionable. Take the FIRST issue from the `issues` array. The `--sort priority` flag is REQUIRED — it makes the list strictly priority-ordered (P0 before P1 before P2 before P3); br's default "hybrid" sort lumps P0/P1 into one oldest-first band, which makes workers grab stale P1s while fresh P0s starve. Do NOT inspect labels. Do NOT skip beads based on title content. Do NOT define your own "actionable" predicate.
 
 **Idle ONLY when** the JSON `issues` array is literally empty (`[]`).
 

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use gdcore::math::Vector3;
+use gdcore::math3d::Aabb;
 
 #[cfg(test)]
 use crate::body::BodyType3D;
@@ -29,6 +30,8 @@ pub struct PhysicsWorld3D {
     next_id: u64,
     /// Gravity acceleration applied to all rigid bodies each step.
     pub gravity: Vector3,
+    /// Soft bodies stepped with gravity each frame (pat-p0s82.18).
+    soft_bodies: Vec<gdphysics2d::softbody3d::SoftBody3D>,
 }
 
 impl PhysicsWorld3D {
@@ -38,7 +41,23 @@ impl PhysicsWorld3D {
             bodies: BTreeMap::new(),
             next_id: 1,
             gravity: Vector3::new(0.0, -9.8, 0.0),
+            soft_bodies: Vec::new(),
         }
+    }
+
+    /// Register a soft body for simulation.
+    pub fn add_soft_body(&mut self, body: gdphysics2d::softbody3d::SoftBody3D) {
+        self.soft_bodies.push(body);
+    }
+
+    /// Soft body count.
+    pub fn soft_body_count(&self) -> usize {
+        self.soft_bodies.len()
+    }
+
+    /// Mutable access to soft bodies.
+    pub fn soft_bodies_mut(&mut self) -> &mut [gdphysics2d::softbody3d::SoftBody3D] {
+        &mut self.soft_bodies
     }
 
     /// Adds a body to the world and returns its unique ID.
@@ -79,6 +98,11 @@ impl PhysicsWorld3D {
     pub fn step(&mut self, dt: f32) {
         let gravity = self.gravity;
 
+        // Soft bodies integrate with the same gravity (pat-p0s82.18).
+        for sb in &mut self.soft_bodies {
+            sb.step(dt, gravity);
+        }
+
         // 0. Clear contacts from previous step.
         for body in self.bodies.values_mut() {
             body.clear_contacts();
@@ -89,106 +113,163 @@ impl PhysicsWorld3D {
             body.integrate(dt, gravity);
         }
 
-        // 2. Detect and resolve collisions (sphere-sphere only for now).
-        let ids: Vec<BodyId3D> = self.bodies.keys().copied().collect();
-        for i in 0..ids.len() {
-            for j in (i + 1)..ids.len() {
-                let id_a = ids[i];
-                let id_b = ids[j];
+        // 2. Broad-phase: prune candidate pairs whose world-space AABBs overlap
+        //    via sweep-and-prune (O(n log n + k) instead of O(n^2) all-pairs).
+        //    Each candidate is then filtered by collision layer/mask before the
+        //    narrow-phase test and impulse resolution.
+        let pairs = self.broadphase_pairs();
+        for (id_a, id_b) in pairs {
+            let (should_collide, pos_a, rot_a, shape_a, pos_b, rot_b, shape_b) = {
+                let a = &self.bodies[&id_a];
+                let b = &self.bodies[&id_b];
+                (
+                    a.should_collide_with(b),
+                    a.position,
+                    a.rotation,
+                    a.shape.clone(),
+                    b.position,
+                    b.rotation,
+                    b.shape.clone(),
+                )
+            };
 
-                let (pos_a, shape_a, pos_b, shape_b) = {
-                    let a = &self.bodies[&id_a];
-                    let b = &self.bodies[&id_b];
-                    (a.position, a.shape.clone(), b.position, b.shape.clone())
-                };
+            // Collision layer/mask filter (Godot semantics): skip the pair
+            // unless either body's mask includes a layer the other belongs to.
+            if !should_collide {
+                continue;
+            }
 
-                let result = collision::test_collision(pos_a, &shape_a, pos_b, &shape_b);
-                if result.colliding {
-                    // Record contacts.
-                    let contact_pos = pos_a + result.normal * (pos_b - pos_a).length() * 0.5;
+            let result =
+                collision::test_collision_rot(pos_a, rot_a, &shape_a, pos_b, rot_b, &shape_b);
+            if result.colliding {
+                // Record contacts.
+                let contact_pos = pos_a + result.normal * (pos_b - pos_a).length() * 0.5;
+                if let Some(a) = self.bodies.get_mut(&id_a) {
+                    a.add_contact(ContactPoint3D {
+                        position: contact_pos,
+                        normal: result.normal,
+                        depth: result.depth,
+                        other_body: id_b,
+                    });
+                }
+                if let Some(b) = self.bodies.get_mut(&id_b) {
+                    b.add_contact(ContactPoint3D {
+                        position: contact_pos,
+                        normal: result.normal * -1.0,
+                        depth: result.depth,
+                        other_body: id_a,
+                    });
+                }
+
+                let a_inv = self.bodies[&id_a].inverse_mass();
+                let b_inv = self.bodies[&id_b].inverse_mass();
+                let total_inv = a_inv + b_inv;
+
+                if total_inv > 0.0 {
+                    // Position correction.
+                    let correction = result.normal * result.depth;
                     if let Some(a) = self.bodies.get_mut(&id_a) {
-                        a.add_contact(ContactPoint3D {
-                            position: contact_pos,
-                            normal: result.normal,
-                            depth: result.depth,
-                            other_body: id_b,
-                        });
+                        a.position = a.position - correction * (a_inv / total_inv);
                     }
                     if let Some(b) = self.bodies.get_mut(&id_b) {
-                        b.add_contact(ContactPoint3D {
-                            position: contact_pos,
-                            normal: result.normal * -1.0,
-                            depth: result.depth,
-                            other_body: id_a,
-                        });
+                        b.position = b.position + correction * (b_inv / total_inv);
                     }
 
-                    let a_inv = self.bodies[&id_a].inverse_mass();
-                    let b_inv = self.bodies[&id_b].inverse_mass();
-                    let total_inv = a_inv + b_inv;
+                    // Impulse-based velocity response with restitution and friction.
+                    let vel_a = self.bodies[&id_a].linear_velocity;
+                    let vel_b = self.bodies[&id_b].linear_velocity;
+                    let relative_vel = vel_a - vel_b;
+                    let vel_along_normal = relative_vel.dot(result.normal);
 
-                    if total_inv > 0.0 {
-                        // Position correction.
-                        let correction = result.normal * result.depth;
+                    // Only resolve if bodies are moving toward each other.
+                    if vel_along_normal > 0.0 {
+                        let restitution =
+                            self.bodies[&id_a].bounce.min(self.bodies[&id_b].bounce);
+                        let j = -(1.0 + restitution) * vel_along_normal / total_inv;
+                        let impulse = result.normal * j;
+
+                        // impulse = normal * j where j < 0 (opposing approach).
+                        // vel_a += impulse / m_a, vel_b -= impulse / m_b.
                         if let Some(a) = self.bodies.get_mut(&id_a) {
-                            a.position = a.position - correction * (a_inv / total_inv);
+                            a.linear_velocity = a.linear_velocity + impulse * a_inv;
                         }
                         if let Some(b) = self.bodies.get_mut(&id_b) {
-                            b.position = b.position + correction * (b_inv / total_inv);
+                            b.linear_velocity = b.linear_velocity - impulse * b_inv;
                         }
 
-                        // Impulse-based velocity response with restitution and friction.
-                        let vel_a = self.bodies[&id_a].linear_velocity;
-                        let vel_b = self.bodies[&id_b].linear_velocity;
-                        let relative_vel = vel_a - vel_b;
-                        let vel_along_normal = relative_vel.dot(result.normal);
+                        // Friction impulse (tangential).
+                        let tangent = relative_vel - result.normal * vel_along_normal;
+                        let tangent_len = tangent.length();
+                        if tangent_len > 1e-8 {
+                            let tangent_dir = tangent * (1.0 / tangent_len);
+                            let friction_coeff = (self.bodies[&id_a].friction
+                                * self.bodies[&id_b].friction)
+                                .sqrt();
+                            let jt = -tangent_len / total_inv;
+                            // Coulomb friction clamp.
+                            let friction_impulse = if jt.abs() < j.abs() * friction_coeff {
+                                tangent_dir * jt
+                            } else {
+                                tangent_dir * (-j.abs() * friction_coeff)
+                            };
 
-                        // Only resolve if bodies are moving toward each other.
-                        if vel_along_normal > 0.0 {
-                            let restitution =
-                                self.bodies[&id_a].bounce.min(self.bodies[&id_b].bounce);
-                            let j = -(1.0 + restitution) * vel_along_normal / total_inv;
-                            let impulse = result.normal * j;
-
-                            // impulse = normal * j where j < 0 (opposing approach).
-                            // vel_a += impulse / m_a, vel_b -= impulse / m_b.
                             if let Some(a) = self.bodies.get_mut(&id_a) {
-                                a.linear_velocity = a.linear_velocity + impulse * a_inv;
+                                a.linear_velocity = a.linear_velocity + friction_impulse * a_inv;
                             }
                             if let Some(b) = self.bodies.get_mut(&id_b) {
-                                b.linear_velocity = b.linear_velocity - impulse * b_inv;
-                            }
-
-                            // Friction impulse (tangential).
-                            let tangent = relative_vel - result.normal * vel_along_normal;
-                            let tangent_len = tangent.length();
-                            if tangent_len > 1e-8 {
-                                let tangent_dir = tangent * (1.0 / tangent_len);
-                                let friction_coeff = (self.bodies[&id_a].friction
-                                    * self.bodies[&id_b].friction)
-                                    .sqrt();
-                                let jt = -tangent_len / total_inv;
-                                // Coulomb friction clamp.
-                                let friction_impulse = if jt.abs() < j.abs() * friction_coeff {
-                                    tangent_dir * jt
-                                } else {
-                                    tangent_dir * (-j.abs() * friction_coeff)
-                                };
-
-                                if let Some(a) = self.bodies.get_mut(&id_a) {
-                                    a.linear_velocity =
-                                        a.linear_velocity + friction_impulse * a_inv;
-                                }
-                                if let Some(b) = self.bodies.get_mut(&id_b) {
-                                    b.linear_velocity =
-                                        b.linear_velocity - friction_impulse * b_inv;
-                                }
+                                b.linear_velocity = b.linear_velocity - friction_impulse * b_inv;
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Broad-phase sweep-and-prune: returns candidate body pairs whose
+    /// world-space AABBs overlap, sorted by ascending id so downstream
+    /// resolution is deterministic.
+    ///
+    /// Bodies are sorted along the X axis; each body is only compared against
+    /// neighbours that still overlap it on X, so a scene of well-separated
+    /// bodies costs O(n log n + k) (k = overlapping pairs) rather than the
+    /// O(n^2) all-pairs scan. A real collision always implies AABB overlap, so
+    /// pruning never drops a colliding pair.
+    fn broadphase_pairs(&self) -> Vec<(BodyId3D, BodyId3D)> {
+        let mut entries: Vec<(BodyId3D, Aabb)> = self
+            .bodies
+            .values()
+            .map(|b| (b.id, b.world_aabb()))
+            .collect();
+        entries.sort_by(|a, b| {
+            a.1.position
+                .x
+                .partial_cmp(&b.1.position.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut pairs: Vec<(BodyId3D, BodyId3D)> = Vec::new();
+        for (i, &(id_i, aabb_i)) in entries.iter().enumerate() {
+            let i_max_x = aabb_i.position.x + aabb_i.size.x;
+            for &(id_j, aabb_j) in entries.iter().skip(i + 1) {
+                // Sorted on X: once a neighbour begins beyond i's max X, no
+                // later neighbour can overlap on X either — stop scanning.
+                if aabb_j.position.x > i_max_x {
+                    break;
+                }
+                if aabb_i.intersects(aabb_j) {
+                    if id_i.0 <= id_j.0 {
+                        pairs.push((id_i, id_j));
+                    } else {
+                        pairs.push((id_j, id_i));
+                    }
+                }
+            }
+        }
+
+        // Deterministic ascending-id order, matching the prior all-pairs scan.
+        pairs.sort_by(|x, y| (x.0 .0, x.1 .0).cmp(&(y.0 .0, y.1 .0)));
+        pairs
     }
 
     /// Casts a ray and returns the closest hit (sphere bodies only).
@@ -484,5 +565,185 @@ mod tests {
     fn default_gravity() {
         let world = PhysicsWorld3D::new();
         assert!((world.gravity.y - (-9.8)).abs() < 1e-5);
+    }
+
+    // -- Collision layer/mask filtering -----------------------------------
+
+    #[test]
+    fn collision_mask_skips_non_matching_pair() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+
+        // Two overlapping spheres that should ignore each other: a is only on
+        // and scanning layer 1, b is only on and scanning layer 2.
+        let mut a = sphere_body(Vector3::ZERO);
+        a.collision_layer = 0b0001;
+        a.collision_mask = 0b0001;
+        let mut b = sphere_body(Vector3::new(1.0, 0.0, 0.0));
+        b.collision_layer = 0b0010;
+        b.collision_mask = 0b0010;
+        let id_a = world.add_body(a);
+        let id_b = world.add_body(b);
+
+        world.step(1.0 / 60.0);
+
+        // No separation and no recorded contacts because masks are disjoint.
+        let pa = world.get_body(id_a).unwrap().position;
+        let pb = world.get_body(id_b).unwrap().position;
+        let dist = (pb - pa).length();
+        assert!(
+            (dist - 1.0).abs() < 1e-5,
+            "masked-out spheres must not be pushed apart, dist={dist}"
+        );
+    }
+
+    #[test]
+    fn collision_mask_resolves_matching_pair() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+
+        // a belongs to layer 1; b scans layer 1 → they collide (one-directional
+        // match is enough under Godot semantics).
+        let mut a = sphere_body(Vector3::ZERO);
+        a.collision_layer = 0b0001;
+        a.collision_mask = 0b0000;
+        let mut b = sphere_body(Vector3::new(1.0, 0.0, 0.0));
+        b.collision_layer = 0b0010;
+        b.collision_mask = 0b0001;
+        let id_a = world.add_body(a);
+        let id_b = world.add_body(b);
+
+        world.step(1.0 / 60.0);
+
+        let pa = world.get_body(id_a).unwrap().position;
+        let pb = world.get_body(id_b).unwrap().position;
+        let dist = (pb - pa).length();
+        assert!(
+            dist >= 1.9,
+            "matching-mask spheres should separate, dist={dist}"
+        );
+    }
+
+    // -- Broad-phase sweep-and-prune --------------------------------------
+
+    /// Reference O(n^2) broad-phase: every pair whose world AABBs overlap,
+    /// normalised to ascending-id order.
+    fn bruteforce_pairs(world: &PhysicsWorld3D) -> Vec<(BodyId3D, BodyId3D)> {
+        let bodies: Vec<&PhysicsBody3D> = world.bodies().collect();
+        let mut pairs = Vec::new();
+        for i in 0..bodies.len() {
+            for j in (i + 1)..bodies.len() {
+                if bodies[i].world_aabb().intersects(bodies[j].world_aabb()) {
+                    let (a, b) = (bodies[i].id, bodies[j].id);
+                    if a.0 <= b.0 {
+                        pairs.push((a, b));
+                    } else {
+                        pairs.push((b, a));
+                    }
+                }
+            }
+        }
+        pairs.sort_by(|x, y| (x.0 .0, x.1 .0).cmp(&(y.0 .0, y.1 .0)));
+        pairs
+    }
+
+    #[test]
+    fn broadphase_matches_bruteforce() {
+        let mut world = PhysicsWorld3D::new();
+        // Deterministic pseudo-random spread with several overlaps and gaps.
+        let coords = [
+            (0.0, 0.0, 0.0),
+            (0.5, 0.0, 0.0),   // overlaps 0
+            (1.4, 0.0, 0.0),   // overlaps 1
+            (10.0, 0.0, 0.0),  // isolated
+            (10.3, 0.4, 0.0),  // overlaps 3
+            (-5.0, 2.0, 1.0),  // isolated
+            (-4.2, 2.0, 1.0),  // overlaps 5
+            (100.0, 0.0, 0.0), // isolated
+        ];
+        for (x, y, z) in coords {
+            world.add_body(sphere_body(Vector3::new(x, y, z)));
+        }
+        assert_eq!(
+            world.broadphase_pairs(),
+            bruteforce_pairs(&world),
+            "sweep-and-prune must produce the same overlapping pairs as O(n^2)"
+        );
+    }
+
+    #[test]
+    fn broadphase_prunes_separated_bodies() {
+        let mut world = PhysicsWorld3D::new();
+        // 1000 spheres (radius 1) on a grid with 4-unit spacing → none overlap.
+        for i in 0..1000u64 {
+            let x = (i % 50) as f32 * 4.0;
+            let z = (i / 50) as f32 * 4.0;
+            world.add_body(sphere_body(Vector3::new(x, 0.0, z)));
+        }
+        let pairs = world.broadphase_pairs();
+        assert!(
+            pairs.is_empty(),
+            "well-separated bodies must yield zero candidate pairs, got {}",
+            pairs.len()
+        );
+    }
+
+    #[test]
+    fn thousand_body_scene_steps_within_budget() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+        // Sparse grid: 1000 bodies, spacing 4 → broad-phase prunes to near-zero
+        // candidate pairs, so the O(n^2) all-pairs cost is avoided.
+        for i in 0..1000u64 {
+            let x = (i % 50) as f32 * 4.0;
+            let z = (i / 50) as f32 * 4.0;
+            world.add_body(sphere_body(Vector3::new(x, 0.0, z)));
+        }
+
+        // Assert the "budget" deterministically via the pruned candidate-pair
+        // count rather than wall-clock time (which is flaky under CPU-contended
+        // CI): a naive O(n^2) scan would consider ~500k pairs, sweep-and-prune
+        // keeps it at zero for this well-separated grid.
+        let pairs = world.broadphase_pairs();
+        assert!(
+            pairs.is_empty(),
+            "sparse grid must prune to zero candidate pairs, got {}",
+            pairs.len()
+        );
+
+        // The simulation still steps to completion over many frames.
+        for _ in 0..60 {
+            world.step(1.0 / 60.0);
+        }
+        assert_eq!(world.body_count(), 1000);
+    }
+}
+
+
+
+
+#[cfg(test)]
+mod softbody_world_tests {
+    use super::*;
+    use gdcore::math::Vector3;
+    use gdphysics2d::softbody3d::{SoftBody3D, SoftBodyId3D};
+
+    #[test]
+    fn soft_body_steps_with_world() {
+        let mut world = PhysicsWorld3D::new();
+        let positions = [
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(-1.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 1.0),
+            Vector3::new(0.0, 0.0, -1.0),
+        ];
+        let edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+        let sb = SoftBody3D::new(SoftBodyId3D(1), &positions, &edges);
+        let y0 = sb.vertices[0].position.y;
+        world.add_soft_body(sb);
+        world.step(1.0 / 60.0);
+        assert_eq!(world.soft_body_count(), 1);
+        let y1 = world.soft_bodies_mut()[0].vertices[0].position.y;
+        assert!(y1 < y0, "unpinned soft body falls under gravity");
     }
 }

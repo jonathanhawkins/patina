@@ -9,13 +9,19 @@ Reads every `engine-rs/fixtures/editor_oracle/inspector_*.json` golden and emits
 golden entry, else the unanimous shown value, else the Godot type-zero) and
 `true_default` is Godot's real ClassDB default used to decide `is_default` — the
 two differ for project-settings-/context-derived and always-overridden props
-(see `KNOWN_TRUE_DEFAULTS` / `true_default_expr`; pat-ghfv0.41).
+(see `true_defaults.json` from the ClassDB probe / `true_default_expr`;
+pat-ghfv0.41 + pat-ghfv0.42).
 
 This is the single source of truth for the seeded schema: it transcribes the
 real editor property list, order, hints, and defaults straight from Godot rather
 than hand-authoring ~30 classes.
 
 Run from repo root:  python3 tools/oracle/gen_inspector_schema.py
+
+True ClassDB defaults for props without an `is_default=true` golden sample come
+from `fixtures/editor_oracle/true_defaults.json` (produced by
+`tools/oracle/editor_true_defaults_probe.gd` via ClassDB.class_get_property_default_value).
+There is no hand-curated KNOWN_TRUE_DEFAULTS table after pat-ghfv0.42.
 """
 import glob
 import json
@@ -24,6 +30,7 @@ import re
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ORACLE_DIR = os.path.join(REPO, "engine-rs/fixtures/editor_oracle")
+TRUE_DEFAULTS_PATH = os.path.join(ORACLE_DIR, "true_defaults.json")
 OUT = os.path.join(REPO, "engine-rs/crates/gdeditor/src/inspector_schema_generated.rs")
 
 
@@ -144,43 +151,70 @@ def rust_default(type_name, value):
     return "Variant::Nil"
 
 
-# Godot 4.6.1 ClassDB defaults (`ClassDB.class_get_property_default_value`) for
-# editor props whose goldens contain NO `is_default=true` sample to recover the
-# real default from — so the shown (override / display) value would otherwise be
-# mistaken for the default and `is_default` would wrongly read true. Each entry is
-# the documented real class default; `is_default` is computed against it, while
-# the shown display value (`default`) is left untouched to preserve value-parity.
-KNOWN_TRUE_DEFAULTS = {
-    # Camera3D.current defaults to false; every captured camera sets current=true,
-    # so a current camera is an override.
-    ("Camera3D", "current"): "Variant::Bool(false)",
-    # CollisionShape debug_color's ClassDB default is transparent black; the shown
-    # color is derived from ProjectSettings `debug/shapes/collision/shape_color`.
-    ("CollisionShape3D", "debug_color"): "Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })",
-    ("CollisionShape2D", "debug_color"): "Variant::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })",
-    # Control.layout_mode defaults to POSITION (0); a Label parented to a Container
-    # is forced to CONTAINER (2), an override.
-    ("Label", "layout_mode"): "Variant::Int(0)",
-    # anchors_preset for a plain Control defaults to Custom (-1); the shown 0
-    # (Top-Left) is a set preset -> override. A Container records 0 as ITS own
-    # default (recovered from that class's own is_default=true golden sample).
-    ("Control", "anchors_preset"): "Variant::Int(-1)",
-    # Control.size defaults to (0,0); Label/VBoxContainer show a laid-out size.
-    ("Label", "size"): "Variant::Vector2(Vector2 { x: 0.0, y: 0.0 })",
-    ("VBoxContainer", "size"): "Variant::Vector2(Vector2 { x: 0.0, y: 0.0 })",
-    # A bare VBoxContainer's computed layout_mode has no scalar ClassDB default we
-    # can recover from the goldens (Godot yields an empty/typed value); model it as
-    # Nil so the shown Int is a type-mismatch override, matching the capture's
-    # `typeof(value) == typeof(default)` guard.
-    ("VBoxContainer", "layout_mode"): "Variant::Nil",
-}
+def load_true_defaults_table():
+    """Load ClassDB true defaults from the probe artifact (pat-ghfv0.42).
+
+    Returns a dict keyed by (class, prop) -> Rust Variant expression string.
+    The probe JSON is the durable source — not a hand-curated Python table.
+    """
+    table = {}
+    if not os.path.isfile(TRUE_DEFAULTS_PATH):
+        return table
+    with open(TRUE_DEFAULTS_PATH) as f:
+        doc = json.load(f)
+    classes = doc.get("classes") or {}
+    for cls, props in classes.items():
+        if not isinstance(props, dict):
+            continue
+        for name, entry in props.items():
+            if not isinstance(entry, dict):
+                continue
+            tname = entry.get("type") or "Nil"
+            value = entry.get("value")
+            # Map probe type names to rust_default's type strings.
+            # NOTE: rust_default() matches primitive types in lowercase
+            # ("bool"/"int"/"float") but compound types capitalized
+            # ("String"/"Vector2"/"Vector3"/"Color"). The probe emits capitalized
+            # primitive names ("Bool"/"Int"/"Float"), so these MUST map down to
+            # lowercase — otherwise every bool/int/float true-default falls through
+            # rust_default and silently becomes Variant::Nil (pat-ghfv0.42 regression).
+            type_map = {
+                "bool": "bool",
+                "int": "int",
+                "float": "float",
+                "String": "String",
+                "Vector2": "Vector2",
+                "Vector3": "Vector3",
+                "Color": "Color",
+                "Nil": "Nil",
+                "Bool": "bool",
+                "Int": "int",
+                "Float": "float",
+            }
+            t = type_map.get(tname, tname)
+            if t == "Nil" or value is None and tname in ("Nil", "nil", ""):
+                table[(cls, name)] = "Variant::Nil"
+            else:
+                table[(cls, name)] = rust_default(t, value if value is not None else {})
+    return table
+
+
+# Populated once at import / main — sourced from true_defaults.json (probe).
+TRUE_DEFAULTS_FROM_PROBE = None
+
+
+def true_defaults_table():
+    global TRUE_DEFAULTS_FROM_PROBE
+    if TRUE_DEFAULTS_FROM_PROBE is None:
+        TRUE_DEFAULTS_FROM_PROBE = load_true_defaults_table()
+    return TRUE_DEFAULTS_FROM_PROBE
 
 
 def true_default_expr(cls, name, tname, entry, display_default):
     """Rust `Variant` expression for a prop's TRUE ClassDB default, used for
     `is_default` (distinct from the shown `display_default`). Precedence:
       1. an `is_default=true` golden sample directly reveals the real default;
-      2. a known Godot ClassDB default for props with no such sample;
+      2. probe-sourced ClassDB default from true_defaults.json (pat-ghfv0.42);
       3. transform defaults (position -> origin, scale -> unit vector);
       4. otherwise the display default (the two coincide for the vast majority).
     `surface_material_override/N` slots are handled by the server (always an
@@ -188,8 +222,9 @@ def true_default_expr(cls, name, tname, entry, display_default):
     if name in entry["default"]:
         # An is_default=true sample IS Godot's class default for this class.
         return rust_default(tname, entry["default"][name])
-    if (cls, name) in KNOWN_TRUE_DEFAULTS:
-        return KNOWN_TRUE_DEFAULTS[(cls, name)]
+    probe = true_defaults_table()
+    if (cls, name) in probe:
+        return probe[(cls, name)]
     if name == "position":
         return rust_default(tname, {})  # origin: (0,0) / (0,0,0)
     if name == "scale":

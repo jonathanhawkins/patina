@@ -189,3 +189,26 @@ The following are major third-party dependencies in upstream Godot's `thirdparty
 | Pending | All |
 
 This table will be updated as classification decisions are made.
+
+
+## C# / mono (pat-z35r2.15)
+
+**Classification: Deferred (bucket 4 — reimplement later or wrap)**
+
+Patina does not ship a C# / mono runtime in `engine-rs`. Godot's `modules/mono`
+is out of v1 1:1 scope. GDScript remains the primary scripting path.
+
+## Jolt physics (pat-p0s82.27)
+
+**Classification: Replace with Rust crate / FFI (bucket 1 or 2) — optional feature**
+
+Godot 4.6 defaults toward Jolt. Patina keeps custom `gdphysics3d` as default;
+optional `jolt` feature may wrap `joltc` / `jolt-rust` later. Not required for
+current fixture corpus.
+
+## FBX (pat-p0s82.24)
+
+**Classification: Wrap via FFI / ufbx (bucket 2)**
+
+Prefer `ufbx` (C, permissive) via FFI or pure-Rust port when FBX import is
+scheduled. Not started; glTF is the preferred interchange format.

@@ -35,7 +35,8 @@ impl TresSaver {
         write!(out, "[gd_resource type=\"{}\"", resource.class_name)
             .map_err(|e| EngineError::Parse(e.to_string()))?;
         if resource.uid.is_valid() {
-            write!(out, " uid=\"uid://{}\"", resource.uid.raw())
+            // Godot base-34 encoding; id_to_text already includes the `uid://` prefix.
+            write!(out, " uid=\"{}\"", crate::uid::id_to_text(resource.uid.raw()))
                 .map_err(|e| EngineError::Parse(e.to_string()))?;
         }
         writeln!(out, " format=3]").map_err(|e| EngineError::Parse(e.to_string()))?;
@@ -182,7 +183,13 @@ mod tests {
         let output = saver.save_to_string(&r).unwrap();
 
         assert!(output.contains("[gd_resource type=\"Resource\""));
-        assert!(output.contains("uid=\"uid://12345\""));
+        // 12345 encodes to base-34 "kxd" (hand-derived: 12345 = 10*34² + 23*34 + 3
+        // → chars 'k','x','d'), and must round-trip back to 12345.
+        assert!(
+            output.contains("uid=\"uid://kxd\""),
+            "expected base-34 uid, got: {output}"
+        );
+        assert_eq!(crate::uid::text_to_id("uid://kxd").raw(), 12345);
         assert!(output.contains("[resource]"));
         assert!(output.contains("name = \"Test\""));
         assert!(output.contains("value = 42"));

@@ -13,6 +13,8 @@ use gdcore::math::Vector2;
 use gdvariant::Variant;
 
 use crate::animation::{blend_animations, interpolate_variant, Animation};
+use crate::node::NodeId;
+use crate::scene_tree::SceneTree;
 
 /// A node in the animation graph.
 #[derive(Debug, Clone)]
@@ -51,6 +53,9 @@ pub enum AnimationNode {
 pub struct BlendSpace1D {
     points: Vec<(f32, String)>,
     pub blend_position: f32,
+    /// Shared playback clock (seconds), advanced by the tree each frame so the
+    /// blended clips play over time rather than being frozen at t=0.
+    pub elapsed: f64,
 }
 
 impl BlendSpace1D {
@@ -75,6 +80,9 @@ impl BlendSpace1D {
 pub struct BlendSpace2D {
     points: Vec<(Vector2, String)>,
     pub blend_position: Vector2,
+    /// Shared playback clock (seconds), advanced by the tree each frame so the
+    /// blended clips play over time rather than being frozen at t=0.
+    pub elapsed: f64,
 }
 
 impl BlendSpace2D {
@@ -179,6 +187,15 @@ pub struct StateMachine {
     transition: Option<ActiveTransition>,
 }
 
+impl StateMachine {
+    /// Create an empty state machine. Provided for consistency with the other
+    /// animation-node constructors (`BlendSpace1D::new`, `OneShot::new`, …);
+    /// equivalent to `StateMachine::default()`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// A declarative transition between two states.
 #[derive(Debug, Clone)]
 pub struct StateTransition {
@@ -259,6 +276,31 @@ impl Default for AnimationTree {
     }
 }
 
+/// Drives an [`AnimationTree`] for one frame and applies the resulting pose to a
+/// node in the scene: advances all clocks (state machines, blend-space clocks,
+/// one-shots, animation leaves) by `delta`, samples the blended property values,
+/// and writes each `(property_path, value)` onto `node_id`.
+///
+/// This is the runtime bridge from a graph-based AnimationTree to actual node
+/// properties — the "advance clocks + apply blended pose to nodes" half of
+/// runtime AnimationTree support. (Storing the tree in the [`SceneTree`] arena
+/// for automatic per-frame driving, alongside `animation_players`, is the
+/// remaining follow-up and lives in `scene_tree.rs`.)
+pub fn advance_and_apply(
+    tree: &mut AnimationTree,
+    scene: &mut SceneTree,
+    node_id: NodeId,
+    delta: f64,
+) {
+    tree.advance(delta);
+    let values = tree.get_current_values();
+    if let Some(node) = scene.get_node_mut(node_id) {
+        for (path, value) in values {
+            node.set_property(&path, value);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Evaluation
 // ---------------------------------------------------------------------------
@@ -286,11 +328,13 @@ fn advance_node(
             advance_node(c, delta, library, params);
         }
         AnimationNode::OneShot(one_shot) => advance_one_shot(one_shot, delta, library, params),
-        AnimationNode::BlendSpace1D(_) | AnimationNode::BlendSpace2D(_) => {
-            // Blend spaces are stateless — their animations loop based on a
-            // shared clock driven by the tree. We intentionally do not track
-            // per-point time here; sampling uses the tree-level elapsed value
-            // stored on the nodes' underlying Animation library (loops).
+        AnimationNode::BlendSpace1D(bs) => {
+            // Advance the shared playback clock so the blended clips play over
+            // time (each clip loops independently at sample time).
+            bs.elapsed += delta;
+        }
+        AnimationNode::BlendSpace2D(bs) => {
+            bs.elapsed += delta;
         }
         AnimationNode::StateMachine(sm) => advance_state_machine(sm, delta, library, params),
     }
@@ -476,12 +520,12 @@ fn sample_blend_space_1d(
     }
     let x = space.blend_position;
 
-    // Clamp to ends.
+    // Clamp to ends — the single active clip still plays over time.
     if x <= space.points[0].0 {
-        return sample_library(library, &space.points[0].1);
+        return sample_clip_at(library, &space.points[0].1, space.elapsed);
     }
     if x >= space.points[space.points.len() - 1].0 {
-        return sample_library(library, &space.points[space.points.len() - 1].1);
+        return sample_clip_at(library, &space.points[space.points.len() - 1].1, space.elapsed);
     }
 
     // Find the bracketing pair.
@@ -499,10 +543,12 @@ fn sample_blend_space_1d(
                 Some(a) => a,
                 None => return Vec::new(),
             };
-            // Use position 0.0 for both — blend spaces sample the clips' t=0
-            // pose unless the tree has an external clock. This matches the
-            // minimal parity surface; higher-fidelity phasing is future work.
-            return blend_animations(anim_a, anim_b, 0.0, 0.0, t);
+            // Sample each clip at the blend space's shared playback clock,
+            // looped to that clip's own length, so the blended clips play over
+            // time rather than being frozen at t=0.
+            let ta = space.elapsed.rem_euclid(anim_a.length.max(f64::EPSILON));
+            let tb = space.elapsed.rem_euclid(anim_b.length.max(f64::EPSILON));
+            return blend_animations(anim_a, anim_b, ta, tb, t);
         }
     }
     Vec::new()
@@ -590,6 +636,20 @@ fn sample_library(library: &HashMap<String, Animation>, name: &str) -> Vec<(Stri
     }
 }
 
+/// Samples a single clip from `library` at `elapsed` seconds, looped to the
+/// clip's own length. Used by blend spaces so a clamped (single-clip) position
+/// still plays over time rather than being frozen at t=0.
+fn sample_clip_at(
+    library: &HashMap<String, Animation>,
+    name: &str,
+    elapsed: f64,
+) -> Vec<(String, Variant)> {
+    match library.get(name) {
+        Some(a) => a.sample_all(elapsed.rem_euclid(a.length.max(f64::EPSILON))),
+        None => Vec::new(),
+    }
+}
+
 fn blend_value_lists(
     a: &[(String, Variant)],
     b: &[(String, Variant)],
@@ -667,5 +727,74 @@ mod tests {
             position: 0.0,
         });
         assert_eq!(float_of(&tree.get_current_values(), "x"), 3.0);
+    }
+
+    fn ramp_anim(name: &str, v0: f64, v1: f64) -> Animation {
+        let mut anim = Animation::new(name, 1.0);
+        let mut track = AnimationTrack::new("x");
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(v0)));
+        track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(v1)));
+        anim.tracks.push(track);
+        anim
+    }
+
+    #[test]
+    fn blend_space_1d_blends_by_position_and_plays_over_time() {
+        let mut tree = AnimationTree::new();
+        // Two ramp clips: A goes 0->10, B goes 100->110 over 1s.
+        tree.add_animation(ramp_anim("a", 0.0, 10.0));
+        tree.add_animation(ramp_anim("b", 100.0, 110.0));
+
+        let mut bs = BlendSpace1D::new();
+        bs.add_point(0.0, "a");
+        bs.add_point(1.0, "b");
+        bs.blend_position = 0.5; // midway between the two clips
+        tree.set_root(AnimationNode::BlendSpace1D(bs));
+
+        // Blend by position: midway between clip A (start 0) and clip B (start 100).
+        let v0 = float_of(&tree.get_current_values(), "x");
+        assert!((40.0..=60.0).contains(&v0), "blend-by-position at start: v0={v0}");
+
+        // Over time: advancing the tree plays both clips forward (they ramp up),
+        // so the blended value increases — previously it was frozen at t=0.
+        tree.advance(0.5);
+        let v_mid = float_of(&tree.get_current_values(), "x");
+        assert!(
+            v_mid > v0 + 1.0,
+            "blend-space clips must play over time: v0={v0} v_mid={v_mid}"
+        );
+    }
+
+    #[test]
+    fn state_machine_drives_node_property_over_time() {
+        use crate::node::Node;
+
+        let mut scene = SceneTree::new();
+        let root = scene.root_id();
+        let node = scene.add_child(root, Node::new("N", "Node")).unwrap();
+
+        // A state machine whose current state plays a clip that ramps "x" 0->42.
+        let mut tree = AnimationTree::new();
+        tree.add_animation(ramp_anim("run", 0.0, 42.0));
+        let mut sm = StateMachine::new();
+        sm.states.insert(
+            "run".into(),
+            AnimationNode::Animation {
+                name: "run".into(),
+                position: 0.0,
+            },
+        );
+        sm.current = "run".into();
+        tree.set_root(AnimationNode::StateMachine(sm));
+
+        // Drive the tree at runtime and apply its pose to the node.
+        advance_and_apply(&mut tree, &mut scene, node, 0.5);
+
+        // The state machine drove the node's "x" property over time
+        // (0 -> 42 over 1s, so ~21 at 0.5s).
+        match scene.get_node(node).unwrap().get_property("x") {
+            Variant::Float(x) => assert!((x - 21.0).abs() < 1.0, "x={x}"),
+            other => panic!("x not driven by AnimationTree: {other:?}"),
+        }
     }
 }

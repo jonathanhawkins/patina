@@ -948,6 +948,7 @@ impl EditorState {
         InputSnapshot {
             pressed_keys: self.pressed_keys.clone(),
             just_pressed_keys: self.just_pressed_keys.clone(),
+            just_released_keys: self.just_released_keys.clone(),
             input_map: self.input_map.clone(),
             mouse_position: Default::default(),
             mouse_buttons_pressed: Default::default(),

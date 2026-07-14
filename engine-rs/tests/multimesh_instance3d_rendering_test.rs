@@ -32,6 +32,7 @@ fn triangle_mesh() -> Mesh3D {
         indices: vec![0, 1, 2],
         primitive_type: PrimitiveType::Triangles,
         surfaces: vec![],
+        ..Default::default()
     }
 }
 
@@ -54,6 +55,7 @@ fn small_quad() -> Mesh3D {
         indices: vec![0, 1, 2, 0, 2, 3],
         primitive_type: PrimitiveType::Triangles,
         surfaces: vec![],
+        ..Default::default()
     }
 }
 

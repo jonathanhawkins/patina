@@ -12,24 +12,30 @@
 //!
 //! Also includes depth buffering, framebuffer comparison, and test utilities.
 
+pub mod camera_attributes;
 pub mod compare;
 pub mod depth_buffer;
+pub mod morph;
 pub mod postprocess;
 pub mod rasterizer;
+pub mod render_modes;
 pub mod renderer;
 pub mod shader;
 pub mod shadow_map;
+#[cfg(test)]
+mod sky_parity_tests;
 pub mod test_adapter;
 #[cfg(feature = "gpu")]
 pub mod wgpu_pipeline;
 
 pub use compare::{compare_framebuffers_3d, diff_image_3d, DiffResult3D};
 pub use depth_buffer::DepthBuffer;
+pub use postprocess::{apply_camera_post, screen_space_dither};
 pub use rasterizer::{clip_to_screen, rasterize_triangle, ScreenVertex};
-pub use renderer::{FrameBuffer3D, RenderMode, SoftwareRenderer3D};
+pub use renderer::{equirect_uv, sample_equirect, FrameBuffer3D, RenderMode, SoftwareRenderer3D};
 pub use shader::{
-    CustomFragmentShader, FragmentInput, FragmentShader, LambertFragmentShader, LightKind,
-    LightUniform, PhongFragmentShader, ShaderUniforms, StandardVertexShader, UnlitFragmentShader,
-    VertexInput, VertexOutput, VertexShader,
+    d_ggx, pbr_shade, v_ggx, CustomFragmentShader, FragmentInput, FragmentShader,
+    LambertFragmentShader, LightKind, LightUniform, PhongFragmentShader, ShaderUniforms,
+    StandardVertexShader, UnlitFragmentShader, VertexInput, VertexOutput, VertexShader,
 };
 pub use shadow_map::{generate_omni_shadow_cubemaps, generate_shadow_maps, ShadowMap};

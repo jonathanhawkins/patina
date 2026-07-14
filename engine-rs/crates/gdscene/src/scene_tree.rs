@@ -13,6 +13,7 @@ use gdobject::notification::{
 };
 use gdobject::signal::SignalStore;
 use gdobject::weak_ref;
+use gdplatform::network::MultiplayerAPI;
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
@@ -21,6 +22,46 @@ use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
 use crate::trace::{EventTrace, TraceEvent, TraceEventType};
 use crate::tween::{Tween, TweenId};
+
+/// Stable FNV-1a hash of a node path, used as the RPC `node_path` key on the
+/// wire (pat-u3l8c.75). Deterministic across builds so two peers agree on the
+/// target of an `rpc()` call.
+pub fn rpc_path_hash(path: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// A single entry in the deferred call queue ([`SceneTree::call_deferred`]).
+///
+/// Queued during the frame and executed by [`SceneTree::process_deferred_calls`]
+/// after process notifications (Godot MessageQueue order).
+#[derive(Debug, Clone)]
+pub struct DeferredCall {
+    /// Target node.
+    pub node_id: NodeId,
+    /// Method name (script method, or special `"set"` for property set).
+    pub method: String,
+    /// Arguments passed to the method.
+    pub args: Vec<Variant>,
+}
+
+
+/// One-shot timer created by [`SceneTree::create_timer`] (Godot SceneTreeTimer).
+#[derive(Debug, Clone)]
+pub struct SceneTreeTimer {
+    /// Unique id for this timer.
+    pub id: u64,
+    /// Seconds remaining until timeout.
+    pub time_left: f64,
+    /// When true, the timer has fired and should be removed.
+    pub done: bool,
+    /// Signal name for awaiters (`timeout` or `timeout_<id>`).
+    pub signal_name: String,
+}
 
 /// The scene tree — an arena that owns every node and maintains the
 /// hierarchy.
@@ -54,12 +95,23 @@ pub struct SceneTree {
     /// Nodes marked for deferred deletion via `queue_free()`.
     /// They are removed at the end of the frame by `process_deletions()`.
     pending_deletions: Vec<NodeId>,
+    /// Methods queued via [`call_deferred`](Self::call_deferred). Flushed after
+    /// the process phase (before deletions), matching Godot's MessageQueue.
+    pending_deferred_calls: Vec<DeferredCall>,
+    /// Active SceneTreeTimers from [`create_timer`] (pat-z35r2.3).
+    scene_timers: Vec<SceneTreeTimer>,
+    /// Next timer id.
+    next_timer_id: u64,
     /// Global event trace for lifecycle/signal ordering verification.
     event_trace: EventTrace,
     /// Current frame number for trace recording.
     trace_frame: u64,
     /// Whether the scene tree is currently paused.
     paused: bool,
+    /// Multiplayer coordinator wired into the tree (pat-u3l8c.75). Polled once
+    /// per frame via [`poll_multiplayer`](Self::poll_multiplayer); inbound RPCs
+    /// are dispatched to their target node's script.
+    multiplayer: MultiplayerAPI,
 }
 
 impl std::fmt::Debug for SceneTree {
@@ -95,9 +147,247 @@ impl SceneTree {
             current_packed_scene: None,
             current_scene_id: None,
             pending_deletions: Vec::new(),
+            pending_deferred_calls: Vec::new(),
+            scene_timers: Vec::new(),
+            next_timer_id: 1,
             event_trace: EventTrace::new(),
             trace_frame: 0,
             paused: false,
+            multiplayer: MultiplayerAPI::new(),
+        }
+    }
+
+    // -- multiplayer (pat-u3l8c.75) ----------------------------------------
+
+    /// Shared read access to the tree's [`MultiplayerAPI`], mirroring Godot's
+    /// `SceneTree.get_multiplayer()`.
+    pub fn get_multiplayer(&self) -> &MultiplayerAPI {
+        &self.multiplayer
+    }
+
+    /// Mutable access to the tree's [`MultiplayerAPI`] (assign a peer, register
+    /// RPCs, set authority, initiate `rpc()` calls).
+    pub fn get_multiplayer_mut(&mut self) -> &mut MultiplayerAPI {
+        &mut self.multiplayer
+    }
+
+    /// Polls the multiplayer transport once (call once per frame) and dispatches
+    /// every decoded inbound RPC to its target node's script method.
+    ///
+    /// The wire `node_path` is matched against the [`rpc_path_hash`] of each
+    /// live node's path, so a peer that invokes `rpc(rpc_path_hash(path), …)`
+    /// reaches the node at that path on the receiver.
+    pub fn poll_multiplayer(&mut self) {
+        // Non-RPC packets (spawn/sync/etc.) are left for higher layers.
+        let _other = self.multiplayer.poll();
+        let inbound = self.multiplayer.take_inbound_rpcs();
+        for rpc in inbound {
+            if let Some(node_id) = self.node_for_rpc_hash(rpc.node_path) {
+                self.call_script_with_access(node_id, &rpc.method_name, &rpc.args);
+            }
+        }
+    }
+
+    /// Resolves an inbound RPC `node_path` hash to a live node by matching the
+    /// [`rpc_path_hash`] of each node's absolute path.
+    fn node_for_rpc_hash(&self, hash: u64) -> Option<NodeId> {
+        self.nodes
+            .keys()
+            .copied()
+            .find(|&id| self.node_path(id).as_deref().map(rpc_path_hash) == Some(hash))
+    }
+
+    /// Create a one-shot [`SceneTreeTimer`] (Godot `SceneTree.create_timer`).
+    ///
+    /// Returns the timer id. Advance with [`process_timers`]; when finished the
+    /// timer is marked `done` and its `signal_name` is available via
+    /// [`take_timeout_signals`].
+    pub fn create_timer(&mut self, seconds: f64) -> u64 {
+        let id = self.next_timer_id;
+        self.next_timer_id = self.next_timer_id.saturating_add(1);
+        let signal_name = format!("timeout_{id}");
+        self.scene_timers.push(SceneTreeTimer {
+            id,
+            time_left: seconds.max(0.0),
+            done: false,
+            signal_name,
+        });
+        id
+    }
+
+    /// Look up a live timer by id.
+    pub fn get_timer(&self, id: u64) -> Option<&SceneTreeTimer> {
+        self.scene_timers.iter().find(|t| t.id == id)
+    }
+
+    /// Advance all SceneTreeTimers by `delta` seconds. Completed timers stay
+    /// until drained by [`take_timeout_signals`].
+    pub fn process_timers(&mut self, delta: f64) {
+        for t in &mut self.scene_timers {
+            if t.done {
+                continue;
+            }
+            t.time_left -= delta;
+            if t.time_left <= 0.0 {
+                t.time_left = 0.0;
+                t.done = true;
+            }
+        }
+    }
+
+    /// Drain signal names for timers that timed out (for await resume).
+    /// Also removes finished timers after reporting.
+    pub fn take_timeout_signals(&mut self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut keep = Vec::new();
+        for t in self.scene_timers.drain(..) {
+            if t.done {
+                names.push(t.signal_name);
+                // Also emit generic "timeout" for the latest style awaiters.
+                names.push("timeout".to_string());
+            } else {
+                keep.push(t);
+            }
+        }
+        self.scene_timers = keep;
+        names
+    }
+
+    /// Drives GDScript coroutines suspended on `await` for every attached script
+    /// once per frame (pat-nzgdu.6). Called from `MainLoop::step` after the
+    /// process phase so `await get_tree().create_timer(t).timeout` and
+    /// frame-based awaits actually resume at runtime.
+    ///
+    /// SceneTreeTimers are advanced and drained here exactly once — not once per
+    /// script — and their timeout signals wake the parked awaits; each script
+    /// then advances its own frame-based awaits.
+    pub fn process_script_coroutines(&mut self, delta: f32) {
+        // Advance one-shot SceneTreeTimers once and collect fired timeout signals.
+        self.process_timers(delta as f64);
+        let fired = self.take_timeout_signals();
+
+        // Temporarily remove each script while it runs so a resumed coroutine
+        // body can call back into the tree via SceneTreeAccessor without
+        // violating borrow rules (mirrors `call_script_with_access`).
+        let node_ids: Vec<NodeId> = self.scripts.keys().copied().collect();
+        for node_id in node_ids {
+            let Some(mut script) = self.scripts.remove(&node_id) else {
+                continue;
+            };
+            let snapshot_clone = self.input_snapshot.clone();
+            // SAFETY: same invariant as `call_script_with_access` — the accessor
+            // lives only within this frame and is cleared before re-insertion,
+            // so no dangling pointer escapes.
+            let accessor = if let Some(snapshot) = snapshot_clone {
+                unsafe {
+                    crate::scripting::SceneTreeAccessor::with_input(
+                        self as *mut SceneTree,
+                        snapshot,
+                    )
+                }
+            } else {
+                unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
+            };
+            script.set_scene_access(Box::new(accessor), node_id.raw());
+            for sig in &fired {
+                script.notify_await_signal(sig, &[]);
+            }
+            script.poll_coroutines(delta);
+            script.clear_scene_access();
+
+            // Sync any variables a resumed coroutine wrote (e.g. `done = true`)
+            // back to node properties, matching `call_script_with_access`.
+            let prop_values: Vec<(String, Variant)> = script
+                .list_properties()
+                .into_iter()
+                .filter_map(|info| script.get_property(&info.name).map(|v| (info.name, v)))
+                .collect();
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                for (name, val) in prop_values {
+                    node.set_property(&name, val);
+                }
+            }
+
+            self.scripts.insert(node_id, script);
+        }
+    }
+
+    /// Advances all `Timer` nodes in the tree (Godot `Timer`, idle process
+    /// callback) (pat-u3l8c.3).
+    ///
+    /// Handles `autostart`, `paused`, `one_shot`, and `wait_time`, emitting
+    /// the `timeout` signal on expiry. Runtime state lives in node
+    /// properties so scripts can read `time_left`; `__timer_started` /
+    /// `__timer_running` are internal markers. Scripted `start()`/`stop()`
+    /// requires node-method dispatch (tracked separately); `autostart`
+    /// covers the `.tscn` path.
+    pub fn process_timer_nodes(&mut self, delta: f64) {
+        let timer_ids: Vec<NodeId> = self
+            .all_nodes_in_tree_order()
+            .into_iter()
+            .filter(|&id| {
+                self.get_node(id)
+                    .is_some_and(|n| n.class_name() == "Timer")
+            })
+            .collect();
+
+        for id in timer_ids {
+            let Some(node) = self.get_node(id) else {
+                continue;
+            };
+            let as_bool =
+                |key: &str| matches!(node.get_property(key), gdvariant::Variant::Bool(true));
+            let as_float = |key: &str, default: f64| match node.get_property(key) {
+                gdvariant::Variant::Float(f) => f,
+                gdvariant::Variant::Int(i) => i as f64,
+                _ => default,
+            };
+            let started = as_bool("__timer_started");
+            let mut running = as_bool("__timer_running");
+            let mut time_left = as_float("time_left", 0.0);
+            let wait_time = as_float("wait_time", 1.0).max(1e-4);
+            let one_shot = as_bool("one_shot");
+            let paused = as_bool("paused");
+            let autostart = as_bool("autostart");
+
+            if !started {
+                if autostart {
+                    running = true;
+                    time_left = wait_time;
+                }
+                if let Some(node) = self.get_node_mut(id) {
+                    node.set_property("__timer_started", gdvariant::Variant::Bool(true));
+                    node.set_property("__timer_running", gdvariant::Variant::Bool(running));
+                    node.set_property("time_left", gdvariant::Variant::Float(time_left));
+                }
+            }
+
+            if !running || paused {
+                continue;
+            }
+
+            time_left -= delta;
+            let fired = time_left <= 0.0;
+            if fired {
+                if one_shot {
+                    running = false;
+                    time_left = 0.0;
+                } else {
+                    // Repeating timer: carry the overshoot into the next cycle.
+                    time_left += wait_time;
+                    if time_left <= 0.0 {
+                        time_left = wait_time;
+                    }
+                }
+            }
+
+            if let Some(node) = self.get_node_mut(id) {
+                node.set_property("time_left", gdvariant::Variant::Float(time_left));
+                node.set_property("__timer_running", gdvariant::Variant::Bool(running));
+            }
+            if fired {
+                self.emit_signal(id, "timeout", &[]);
+            }
         }
     }
 
@@ -965,6 +1255,13 @@ impl SceneTree {
             }
         }
 
+        // Resume any coroutine on the emitting node parked at `await <signal>`,
+        // binding the emitted argument(s) as the awaited value so
+        // `var v = await my_signal` sees the emit's payload (pat-nzgdu.6).
+        if self.scripts.contains_key(&source) {
+            self.notify_script_await(source, signal_name, args);
+        }
+
         results
     }
 
@@ -1081,20 +1378,89 @@ impl SceneTree {
         self.animation_players.get_mut(&node_id)
     }
 
-    /// Advances all animation players by `delta` seconds and applies sampled
-    /// values to the corresponding node properties.
+    /// Advances all animation players by `delta` seconds and applies the
+    /// sampled results to their nodes: property tracks set node properties,
+    /// method tracks invoke the owner node's script method as the playhead
+    /// crosses each keyframe, and a configured root-motion track is applied as
+    /// a transform delta rather than an absolute property.
     pub fn process_animations(&mut self, delta: f64) {
         // Collect node_ids to avoid borrowing self twice.
         let node_ids: Vec<NodeId> = self.animation_players.keys().copied().collect();
         for node_id in node_ids {
-            if let Some(player) = self.animation_players.get_mut(&node_id) {
-                player.advance(delta);
-                let values = player.get_current_values();
-                for (path, value) in values {
-                    if let Some(node) = self.nodes.get_mut(&node_id) {
-                        node.set_property(&path, value);
+            // Advance the player and gather everything we need while only the
+            // player is borrowed, so we can then mutate nodes and scripts.
+            let (values, skip, method_calls, root_motion, root_node) =
+                match self.animation_players.get_mut(&node_id) {
+                    Some(player) => {
+                        let prev = player.position();
+                        player.advance(delta);
+                        let curr = player.position();
+                        // (node_path, property_path, value) triples so each track
+                        // can target a different node relative to root_node
+                        // instead of always writing to the player (pat-u3l8c.94).
+                        let values = player.get_current_values_targeted();
+                        let skip: std::collections::HashSet<String> =
+                            player.non_property_track_paths().into_iter().collect();
+                        let method_calls = player.method_calls_in_range(prev, curr);
+                        let root_motion = player.consume_root_motion(prev, curr);
+                        let root_node = player.root_node.clone();
+                        (values, skip, method_calls, root_motion, root_node)
                     }
+                    None => continue,
+                };
+
+            // Base node that track `node_path`s resolve against: the player's
+            // `root_node` from the owner node (default "." = the owner itself,
+            // matching Godot's root_node resolution).
+            let base_node = if root_node.is_empty() || root_node == "." {
+                node_id
+            } else {
+                self.get_node_or_null(node_id, &root_node).unwrap_or(node_id)
+            };
+
+            // Apply ordinary property tracks to their resolved target nodes,
+            // skipping method and root-motion tracks (handled below).
+            for (track_node_path, path, value) in values {
+                if skip.contains(&path) {
+                    continue;
                 }
+                let target = if track_node_path.is_empty() || track_node_path == "." {
+                    base_node
+                } else {
+                    match self.get_node_or_null(base_node, &track_node_path) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
+                if let Some(node) = self.nodes.get_mut(&target) {
+                    node.set_property(&path, value);
+                }
+            }
+
+            // Root motion accumulates onto the resolved root node — the node the
+            // mixer drives (`root_node` relative to the player owner). Godot
+            // applies root motion in the space of the AnimationMixer root, so a
+            // non-default `root_node` moves that target rather than the player.
+            // With the default root_node "." this is the player's owner node.
+            if let Some(node) = self.nodes.get_mut(&base_node) {
+                apply_root_motion_delta(node, &root_motion);
+            }
+
+            // Dispatch each method-track call to the node named by the track's
+            // `node_path`, resolved relative to `base_node` exactly like property
+            // tracks. In Godot a method track can invoke a method on any node in
+            // the tree, not just the player; an empty/"." path targets the root
+            // node (the pre-existing behavior).
+            for call in method_calls {
+                let target = if call.node_path.is_empty() || call.node_path == "." {
+                    base_node
+                } else {
+                    match self.get_node_or_null(base_node, &call.node_path) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
+                self.call_script_with_access(target, &call.method, &call.args);
             }
         }
     }
@@ -1285,6 +1651,90 @@ impl SceneTree {
         }
     }
 
+    /// Delivers an emitted signal to a coroutine on `node_id` parked at
+    /// `await <signal_name>`, binding the emitted argument(s) as the resumed
+    /// value (pat-nzgdu.6). Mirrors [`call_script_with_access`]'s borrow-safe
+    /// dance: the script is removed while it runs so a resumed body can call
+    /// back into the tree via `SceneTreeAccessor` without aliasing `self`.
+    fn notify_script_await(&mut self, node_id: NodeId, signal_name: &str, args: &[Variant]) {
+        if let Some(mut script) = self.scripts.remove(&node_id) {
+            let snapshot_clone = self.input_snapshot.clone();
+            // SAFETY: identical invariant to `call_script_with_access` — the
+            // accessor lives only within this call frame and is cleared before
+            // the script is re-inserted, so no dangling pointer escapes.
+            let accessor = if let Some(snapshot) = snapshot_clone {
+                unsafe {
+                    crate::scripting::SceneTreeAccessor::with_input(
+                        self as *mut SceneTree,
+                        snapshot,
+                    )
+                }
+            } else {
+                unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
+            };
+            script.set_scene_access(Box::new(accessor), node_id.raw());
+            script.notify_await_signal(signal_name, args);
+            script.clear_scene_access();
+
+            // Sync any variables a resumed coroutine wrote back to node
+            // properties, matching `call_script_with_access`.
+            let prop_values: Vec<(String, Variant)> = script
+                .list_properties()
+                .into_iter()
+                .filter_map(|info| script.get_property(&info.name).map(|v| (info.name, v)))
+                .collect();
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                for (name, val) in prop_values {
+                    node.set_property(&name, val);
+                }
+            }
+
+            self.scripts.insert(node_id, script);
+        }
+    }
+
+    /// Delivers engine notification `what` (a Godot `NOTIFICATION_*` code) to
+    /// the script on `node_id` via its `_notification(what)` virtual, so user
+    /// code sees ENTER_TREE/READY/PAUSED/PROCESS/PREDELETE etc. (pat-nzgdu.13).
+    /// Mirrors [`call_script_with_access`]'s borrow-safe accessor dance: the
+    /// script is removed while it runs so `_notification` can call back into the
+    /// tree, then its property writes are synced to node properties.
+    pub fn notify_script(&mut self, node_id: NodeId, what: i64) {
+        if let Some(mut script) = self.scripts.remove(&node_id) {
+            let snapshot_clone = self.input_snapshot.clone();
+            // SAFETY: identical invariant to `call_script_with_access` — the
+            // accessor lives only within this call frame and is cleared before
+            // the script is re-inserted, so no dangling pointer escapes.
+            let accessor = if let Some(snapshot) = snapshot_clone {
+                unsafe {
+                    crate::scripting::SceneTreeAccessor::with_input(
+                        self as *mut SceneTree,
+                        snapshot,
+                    )
+                }
+            } else {
+                unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
+            };
+            script.set_scene_access(Box::new(accessor), node_id.raw());
+            script.notification(what);
+            script.clear_scene_access();
+
+            // Sync any variables `_notification` wrote back to node properties.
+            let prop_values: Vec<(String, Variant)> = script
+                .list_properties()
+                .into_iter()
+                .filter_map(|info| script.get_property(&info.name).map(|v| (info.name, v)))
+                .collect();
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                for (name, val) in prop_values {
+                    node.set_property(&name, val);
+                }
+            }
+
+            self.scripts.insert(node_id, script);
+        }
+    }
+
     /// Calls `_ready()` on the node's script, if present.
     ///
     /// Before `_ready` executes, any `@onready` variables are resolved
@@ -1427,6 +1877,7 @@ impl SceneTree {
     /// notification and has its `_process()` called before the next node is
     /// processed.
     pub fn process_frame_with_scripts(&mut self, delta: f64) {
+        self.process_timers(delta);
         let ids: Vec<NodeId> = self
             .all_nodes_in_process_order()
             .into_iter()
@@ -1482,21 +1933,68 @@ impl SceneTree {
         crate::collision::process_collisions_with_bounds(self, screen_w, screen_h);
     }
 
-    // -- deferred calls (stub) ----------------------------------------------
+    // -- deferred calls -----------------------------------------------------
 
-    /// Stub for Godot's `call_deferred()` mechanism.
+    /// Queues a method call for the end of the frame (Godot `call_deferred`).
     ///
-    /// In Godot, deferred calls are queued during the current frame and
-    /// executed at the end of the frame (after all process callbacks).
-    /// This is a placeholder -- deferred call queuing and execution is not
-    /// yet implemented.
+    /// Calls are FIFO and run in [`process_deferred_calls`](Self::process_deferred_calls)
+    /// after process/collision and before `queue_free` deletions. Nested
+    /// `call_deferred` during a flush is appended and processed in the same
+    /// flush (Godot MessageQueue re-entrancy), up to a safety cap.
     ///
-    /// TODO: Implement a deferred call queue that collects callables during
-    /// the frame and flushes them after the process phase in `MainLoop::step()`.
-    pub fn call_deferred(&mut self, _node_id: NodeId, _method: &str, _args: &[Variant]) {
-        // Stub: deferred calls are not yet queued or executed.
-        // When implemented, this should push onto a Vec<DeferredCall> that
-        // MainLoop::step() flushes after the process phase.
+    /// Special method `"set"` with args `[property_name, value]` sets a node
+    /// property (Godot `Object.set` deferred).
+    pub fn call_deferred(&mut self, node_id: NodeId, method: &str, args: &[Variant]) {
+        self.pending_deferred_calls.push(DeferredCall {
+            node_id,
+            method: method.to_string(),
+            args: args.to_vec(),
+        });
+    }
+
+    /// Number of deferred calls waiting to be flushed.
+    pub fn pending_deferred_count(&self) -> usize {
+        self.pending_deferred_calls.len()
+    }
+
+    /// Flushes the deferred call queue.
+    ///
+    /// Each entry either:
+    /// - handles `"set"` as a property write on the node, or
+    /// - dispatches to the node's attached script via
+    ///   [`call_script_with_access`](Self::call_script_with_access).
+    ///
+    /// Missing nodes or methods are skipped (matching Godot's null-target
+    /// tolerance for freed objects). Nested deferred calls enqueued during
+    /// this flush run before returning.
+    pub fn process_deferred_calls(&mut self) {
+        // Cap nested re-queues so a method that always call_deferred's itself
+        // cannot hang the frame forever.
+        const MAX_FLUSH_ROUNDS: usize = 1024;
+        let mut rounds = 0;
+        while !self.pending_deferred_calls.is_empty() && rounds < MAX_FLUSH_ROUNDS {
+            rounds += 1;
+            let batch: Vec<DeferredCall> = self.pending_deferred_calls.drain(..).collect();
+            for call in batch {
+                if !self.nodes.contains_key(&call.node_id) {
+                    continue;
+                }
+                if call.method == "set" {
+                    // Godot Object.set(property, value) deferred form.
+                    if call.args.len() >= 2 {
+                        if let Variant::String(prop) = &call.args[0] {
+                            if let Some(node) = self.nodes.get_mut(&call.node_id) {
+                                node.set_property(prop, call.args[1].clone());
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if self.scripts.contains_key(&call.node_id) {
+                    self.call_script_with_access(call.node_id, &call.method, &call.args);
+                }
+            }
+        }
     }
 
     // -- runtime node creation/deletion -------------------------------------
@@ -1664,6 +2162,36 @@ impl SceneTree {
 impl Default for SceneTree {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Applies an animation root-motion delta to a node's transform by translating
+/// its `position` property and adding to the Y component of its `rotation`.
+///
+/// Root motion moves the owner node itself (matching Godot, where the mixer's
+/// parent/character consumes the delta) rather than driving an absolute value,
+/// so successive frames accumulate movement.
+fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotionDelta) {
+    if delta.position != gdcore::math::Vector3::ZERO {
+        let cur = match node.get_property("position") {
+            Variant::Vector3(v) => v,
+            _ => gdcore::math::Vector3::ZERO,
+        };
+        node.set_property("position", Variant::Vector3(cur + delta.position));
+    }
+    if delta.rotation_y != 0.0 {
+        let cur = match node.get_property("rotation") {
+            Variant::Vector3(v) => v,
+            _ => gdcore::math::Vector3::ZERO,
+        };
+        node.set_property(
+            "rotation",
+            Variant::Vector3(gdcore::math::Vector3::new(
+                cur.x,
+                cur.y + delta.rotation_y,
+                cur.z,
+            )),
+        );
     }
 }
 
@@ -2276,8 +2804,10 @@ mod tests {
 
     mod animation_store_tests {
         use super::*;
-        use crate::animation::{Animation, AnimationPlayer, AnimationTrack, KeyFrame, LoopMode};
-        use gdcore::math::Vector2;
+        use crate::animation::{
+            Animation, AnimationPlayer, AnimationTrack, KeyFrame, LoopMode, TrackType,
+        };
+        use gdcore::math::{Vector2, Vector3};
         use gdvariant::Variant;
 
         /// Helper: build a tree with root + one Node2D child.
@@ -2287,6 +2817,43 @@ mod tests {
             let node = Node::new("Sprite", "Node2D");
             let id = tree.add_child(root, node).unwrap();
             (tree, id)
+        }
+
+        /// Script mock that records every `call_method` invocation, used to
+        /// assert method-track dispatch.
+        struct RecordingScript {
+            calls: std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<Variant>)>>>,
+        }
+
+        impl gdscript_interop::bindings::ScriptInstance for RecordingScript {
+            fn call_method(
+                &mut self,
+                name: &str,
+                args: &[Variant],
+            ) -> Result<Variant, gdscript_interop::bindings::ScriptError> {
+                self.calls
+                    .borrow_mut()
+                    .push((name.to_string(), args.to_vec()));
+                Ok(Variant::Nil)
+            }
+            fn get_property(&self, _name: &str) -> Option<Variant> {
+                None
+            }
+            fn set_property(&mut self, _name: &str, _value: Variant) -> bool {
+                false
+            }
+            fn list_methods(&self) -> Vec<gdscript_interop::bindings::MethodInfo> {
+                Vec::new()
+            }
+            fn list_properties(&self) -> Vec<gdscript_interop::bindings::ScriptPropertyInfo> {
+                Vec::new()
+            }
+            fn get_script_name(&self) -> &str {
+                "RecordingScript"
+            }
+            fn has_method(&self, _name: &str) -> bool {
+                true
+            }
         }
 
         #[test]
@@ -2366,6 +2933,147 @@ mod tests {
                 assert!((v.y - 100.0).abs() < 1e-3);
             } else {
                 panic!("expected Vector2, got {val:?}");
+            }
+        }
+
+        #[test]
+        fn process_animations_dispatches_method_track() {
+            let (mut tree, id) = tree_with_node();
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            tree.attach_script(id, Box::new(RecordingScript { calls: calls.clone() }));
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("fx", 2.0);
+            let mut track = AnimationTrack::with_type("", "hit", TrackType::Method);
+            track.add_keyframe(KeyFrame::linear(
+                1.0,
+                Variant::Array(vec![Variant::String("on_footstep".into()), Variant::Int(3)]),
+            ));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("fx");
+            tree.attach_animation_player(id, player).unwrap();
+
+            // Advancing past t=1.0 fires the method track exactly once.
+            tree.process_animations(1.5);
+            {
+                let c = calls.borrow();
+                assert_eq!(c.len(), 1, "method track should fire once");
+                assert_eq!(c[0].0, "on_footstep");
+                assert_eq!(c[0].1, vec![Variant::Int(3)]);
+            }
+
+            // Advancing further (without re-crossing the keyframe) does not
+            // fire it again.
+            tree.process_animations(0.4);
+            assert_eq!(calls.borrow().len(), 1, "keyframe must not re-fire");
+
+            // A method track is never written to the node as a property.
+            assert_eq!(tree.get_node(id).unwrap().get_property("hit"), Variant::Nil);
+        }
+
+        #[test]
+        fn process_animations_applies_root_motion_delta() {
+            let (mut tree, id) = tree_with_node();
+            // Seed a starting position on the node.
+            tree.get_node_mut(id)
+                .unwrap()
+                .set_property("position", Variant::Vector3(Vector3::new(10.0, 0.0, 0.0)));
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("walk", 2.0);
+            let mut track = AnimationTrack::with_type("", "position", TrackType::Property);
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Vector3(Vector3::ZERO)));
+            track.add_keyframe(KeyFrame::linear(
+                2.0,
+                Variant::Vector3(Vector3::new(4.0, 0.0, 0.0)),
+            ));
+            anim.tracks.push(track);
+            player.add_animation(anim);
+            player.play("walk");
+            player.root_motion_track = Some("position".to_string());
+            tree.attach_animation_player(id, player).unwrap();
+
+            // At t=1.0 the linear track delta is half of (4,0,0) = (2,0,0),
+            // added onto the seeded position → (12,0,0). The track is applied
+            // as a delta, never as its absolute (2,0,0) value.
+            tree.process_animations(1.0);
+            let pos = tree.get_node(id).unwrap().get_property("position");
+            if let Variant::Vector3(v) = pos {
+                assert!(
+                    (v.x - 12.0).abs() < 1e-3,
+                    "expected root-motion translation, got {v:?}"
+                );
+                assert!((v.y).abs() < 1e-3 && (v.z).abs() < 1e-3, "got {v:?}");
+            } else {
+                panic!("expected Vector3, got {pos:?}");
+            }
+        }
+
+        #[test]
+        fn transform_tracks_drive_node3d_trs() {
+            use gdcore::math3d::Quaternion;
+            let (mut tree, id) = tree_with_node();
+
+            let mut player = AnimationPlayer::new();
+            let mut anim = Animation::new("clip", 1.0);
+
+            // Position3D → node "position" (Vector3 lerp).
+            let mut pos = AnimationTrack::with_type("", "position", TrackType::Position3D);
+            pos.add_keyframe(KeyFrame::linear(0.0, Variant::Vector3(Vector3::ZERO)));
+            pos.add_keyframe(KeyFrame::linear(
+                1.0,
+                Variant::Vector3(Vector3::new(10.0, 0.0, 0.0)),
+            ));
+            anim.tracks.push(pos);
+
+            // Rotation3D → node "quaternion" (shortest-path slerp).
+            let mut rot = AnimationTrack::with_type("", "quaternion", TrackType::Rotation3D);
+            rot.add_keyframe(KeyFrame::linear(
+                0.0,
+                Variant::Quaternion(Quaternion::IDENTITY),
+            ));
+            rot.add_keyframe(KeyFrame::linear(
+                1.0,
+                Variant::Quaternion(Quaternion::from_axis_angle(
+                    Vector3::new(0.0, 1.0, 0.0),
+                    std::f32::consts::FRAC_PI_2,
+                )),
+            ));
+            anim.tracks.push(rot);
+
+            // BlendShape → weight property (float lerp).
+            let mut bs = AnimationTrack::with_type("", "blend_shapes/Smile", TrackType::BlendShape);
+            bs.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            bs.add_keyframe(KeyFrame::linear(1.0, Variant::Float(1.0)));
+            anim.tracks.push(bs);
+
+            player.add_animation(anim);
+            player.play("clip");
+            tree.attach_animation_player(id, player).unwrap();
+
+            tree.process_animations(0.5);
+            let node = tree.get_node(id).unwrap();
+
+            match node.get_property("position") {
+                Variant::Vector3(v) => {
+                    assert!((v.x - 5.0).abs() < 1e-3, "position drives TRS, got {v:?}")
+                }
+                other => panic!("expected Vector3 position, got {other:?}"),
+            }
+            match node.get_property("quaternion") {
+                Variant::Quaternion(q) => assert!(
+                    (q.length() - 1.0).abs() < 1e-3,
+                    "rotation drives TRS (normalized), len={}",
+                    q.length()
+                ),
+                other => panic!("expected Quaternion, got {other:?}"),
+            }
+            match node.get_property("blend_shapes/Smile") {
+                Variant::Float(w) => {
+                    assert!((w - 0.5).abs() < 1e-3, "blend-shape weight set, got {w}")
+                }
+                other => panic!("expected Float weight, got {other:?}"),
             }
         }
 
@@ -2945,6 +3653,139 @@ mod tests {
             tree.process_deletions();
             assert_eq!(tree.pending_deletion_count(), 0);
         }
+
+        #[test]
+        fn call_deferred_queues_until_flush() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let n = tree.add_child(root, Node::new("N", "Node")).unwrap();
+            tree.get_node_mut(n)
+                .unwrap()
+                .set_property("visible", Variant::Bool(true));
+
+            tree.call_deferred(
+                n,
+                "set",
+                &[Variant::String("visible".into()), Variant::Bool(false)],
+            );
+            assert_eq!(tree.pending_deferred_count(), 1);
+            assert_eq!(
+                tree.get_node(n).unwrap().get_property("visible"),
+                Variant::Bool(true)
+            );
+
+            tree.process_deferred_calls();
+            assert_eq!(tree.pending_deferred_count(), 0);
+            assert_eq!(
+                tree.get_node(n).unwrap().get_property("visible"),
+                Variant::Bool(false)
+            );
+        }
+
+        #[test]
+        fn call_deferred_fifo_order_for_set() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let n = tree.add_child(root, Node::new("N", "Node")).unwrap();
+            tree.call_deferred(
+                n,
+                "set",
+                &[Variant::String("name".into()), Variant::String("A".into())],
+            );
+            tree.call_deferred(
+                n,
+                "set",
+                &[Variant::String("name".into()), Variant::String("B".into())],
+            );
+            tree.process_deferred_calls();
+            assert_eq!(
+                tree.get_node(n).unwrap().get_property("name"),
+                Variant::String("B".into()),
+                "last deferred set should win (FIFO)"
+            );
+        }
+
+        #[test]
+        fn call_deferred_skips_freed_nodes() {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let n = tree.add_child(root, Node::new("N", "Node")).unwrap();
+            tree.call_deferred(
+                n,
+                "set",
+                &[Variant::String("visible".into()), Variant::Bool(false)],
+            );
+            tree.queue_free(n);
+            tree.process_deletions();
+            // Flush after free — must not panic.
+            tree.process_deferred_calls();
+            assert_eq!(tree.pending_deferred_count(), 0);
+        }
+
+        #[test]
+        fn call_deferred_nested_runs_same_flush() {
+            // A script method that call_deferred's another set during flush.
+            struct NestScript;
+            impl ScriptInstance for NestScript {
+                fn call_method(
+                    &mut self,
+                    name: &str,
+                    _args: &[Variant],
+                ) -> Result<Variant, gdscript_interop::bindings::ScriptError> {
+                    if name == "kick" {
+                        Ok(Variant::Nil)
+                    } else {
+                        Err(gdscript_interop::bindings::ScriptError::MethodNotFound(
+                            name.to_string(),
+                        ))
+                    }
+                }
+                fn get_property(&self, _: &str) -> Option<Variant> {
+                    None
+                }
+                fn set_property(&mut self, _: &str, _: Variant) -> bool {
+                    false
+                }
+                fn list_methods(&self) -> Vec<gdscript_interop::bindings::MethodInfo> {
+                    vec![gdscript_interop::bindings::MethodInfo {
+                        name: "kick".into(),
+                        argument_names: Vec::new(),
+                        return_type: gdvariant::variant::VariantType::Nil,
+                        flags: gdscript_interop::bindings::MethodFlags::NORMAL,
+                    }]
+                }
+                fn list_properties(
+                    &self,
+                ) -> Vec<gdscript_interop::bindings::ScriptPropertyInfo> {
+                    Vec::new()
+                }
+                fn get_script_name(&self) -> &str {
+                    "NestScript"
+                }
+                fn has_method(&self, name: &str) -> bool {
+                    name == "kick"
+                }
+            }
+
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let n = tree.add_child(root, Node::new("N", "Node")).unwrap();
+            tree.attach_script(n, Box::new(NestScript));
+            tree.call_deferred(n, "kick", &[]);
+            // Nested deferred during process: queue a set after kick runs by
+            // pre-queuing second call (simulates re-entrant queue growth).
+            tree.call_deferred(
+                n,
+                "set",
+                &[Variant::String("visible".into()), Variant::Bool(false)],
+            );
+            tree.process_deferred_calls();
+            assert_eq!(tree.pending_deferred_count(), 0);
+            assert_eq!(
+                tree.get_node(n).unwrap().get_property("visible"),
+                Variant::Bool(false)
+            );
+        }
     }
 
     // ── B006: EventTrace integration tests ──────────────────────────────
@@ -3227,5 +4068,137 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn create_timer_fires_after_delta() {
+        let mut tree = SceneTree::new();
+        let id = tree.create_timer(0.25);
+        assert!(tree.get_timer(id).is_some());
+        tree.process_timers(0.1);
+        assert!(!tree.get_timer(id).unwrap().done);
+        tree.process_timers(0.2);
+        let signals = tree.take_timeout_signals();
+        assert!(
+            signals.iter().any(|s| s == "timeout" || s.starts_with("timeout_")),
+            "expected timeout signal, got {signals:?}"
+        );
+        assert!(tree.get_timer(id).is_none(), "timer drained after fire");
+    }
+}
+
+#[cfg(test)]
+mod multiplayer_tests {
+    use super::*;
+    use crate::node::Node;
+    use gdplatform::network::{
+        MockNetwork, MultiplayerAPI, PeerId, RPCConfig, RPCMode, TransferMode,
+    };
+
+    /// Script that records every method call, used to assert RPC dispatch.
+    struct RecordingScript {
+        calls: std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<Variant>)>>>,
+    }
+
+    impl gdscript_interop::bindings::ScriptInstance for RecordingScript {
+        fn call_method(
+            &mut self,
+            name: &str,
+            args: &[Variant],
+        ) -> Result<Variant, gdscript_interop::bindings::ScriptError> {
+            self.calls.borrow_mut().push((name.to_string(), args.to_vec()));
+            Ok(Variant::Nil)
+        }
+        fn get_property(&self, _name: &str) -> Option<Variant> {
+            None
+        }
+        fn set_property(&mut self, _name: &str, _value: Variant) -> bool {
+            false
+        }
+        fn list_methods(&self) -> Vec<gdscript_interop::bindings::MethodInfo> {
+            Vec::new()
+        }
+        fn list_properties(&self) -> Vec<gdscript_interop::bindings::ScriptPropertyInfo> {
+            Vec::new()
+        }
+        fn get_script_name(&self) -> &str {
+            "RecordingScript"
+        }
+        fn has_method(&self, _name: &str) -> bool {
+            true
+        }
+    }
+
+    fn any_reliable() -> RPCConfig {
+        RPCConfig {
+            mode: RPCMode::Any,
+            transfer_mode: TransferMode::Reliable,
+            channel: 0,
+        }
+    }
+
+    #[test]
+    fn scene_tree_exposes_multiplayer() {
+        // get_multiplayer() is available and starts peer-less (not a server).
+        let mut tree = SceneTree::new();
+        assert!(!tree.get_multiplayer().is_server());
+        // Polling with no peer is a harmless no-op.
+        tree.poll_multiplayer();
+    }
+
+    #[test]
+    fn two_peers_exchange_rpc_through_scene_tree() {
+        // Paired loopback transport: server + client.
+        let (server_peer, client_peer) = MockNetwork::create_pair(PeerId(2));
+
+        // Server side: a MultiplayerAPI that initiates the rpc.
+        let mut server = MultiplayerAPI::new();
+        server.set_multiplayer_peer(Box::new(server_peer));
+        server.register_rpc("take_damage", any_reliable());
+
+        // Client side: a SceneTree with a "Player" node whose script records calls.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let player = tree.add_child(root, Node::new("Player", "Node")).unwrap();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        tree.attach_script(player, Box::new(RecordingScript { calls: calls.clone() }));
+        tree.get_multiplayer_mut()
+            .set_multiplayer_peer(Box::new(client_peer));
+
+        // Server invokes the rpc targeting the client's Player node path.
+        let player_path = tree.node_path(player).unwrap();
+        server
+            .rpc(
+                rpc_path_hash(&player_path),
+                "take_damage",
+                vec![Variant::Int(7)],
+            )
+            .unwrap();
+
+        // Client polls: the inbound rpc is decoded and dispatched to the script.
+        tree.poll_multiplayer();
+
+        let recorded = calls.borrow();
+        assert_eq!(recorded.len(), 1, "player should receive exactly one rpc");
+        assert_eq!(recorded[0].0, "take_damage");
+        assert_eq!(recorded[0].1, vec![Variant::Int(7)]);
+    }
+
+    #[test]
+    fn rpc_to_unknown_path_is_dropped() {
+        let (server_peer, client_peer) = MockNetwork::create_pair(PeerId(2));
+        let mut server = MultiplayerAPI::new();
+        server.set_multiplayer_peer(Box::new(server_peer));
+        server.register_rpc("noop", any_reliable());
+
+        let mut tree = SceneTree::new();
+        tree.get_multiplayer_mut()
+            .set_multiplayer_peer(Box::new(client_peer));
+
+        // No node hashes to this path, so the rpc is silently dropped.
+        server
+            .rpc(rpc_path_hash("root/DoesNotExist"), "noop", vec![])
+            .unwrap();
+        tree.poll_multiplayer(); // must not panic
     }
 }

@@ -1086,10 +1086,21 @@ pub fn render_editor_3d_frame_gpu(
     let height = viewport.height.max(1);
 
     // Fog is applied per-fragment in the software renderer's linear pass (it
-    // needs a depth buffer, which the GPU editor path doesn't read back). When
-    // the environment enables fog, render on the software path so fog is
-    // correct; fog is off by default so the GPU fast path stays the norm.
-    if editor_render_environment(viewport).fog_enabled {
+    // needs a depth buffer, which the GPU editor path doesn't read back). Same
+    // for a procedural sky's `sky_cover` texture (the WGSL sky pass is
+    // procedural-only, no texture bind). Both are off by default, so the GPU
+    // fast path stays the norm; when either is set, render on the software
+    // reference path so the result is correct.
+    let render_env = editor_render_environment(viewport);
+    // Any sky feature that needs a texture the WGSL sky pass can't bind: a
+    // procedural `sky_cover` or a physical `night_sky`. Render those on the
+    // software reference path.
+    let sky_needs_software = match render_env.sky.as_ref().map(|s| &s.material) {
+        Some(gdserver3d::sky::SkyMaterial::Procedural(m)) => m.sky_cover.is_some(),
+        Some(gdserver3d::sky::SkyMaterial::Physical(m)) => m.night_sky.is_some(),
+        _ => false,
+    };
+    if render_env.fog_enabled || sky_needs_software {
         return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs));
     }
 

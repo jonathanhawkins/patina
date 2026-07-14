@@ -6,9 +6,10 @@
 use gdcore::math::Vector3;
 
 /// How vertices are interpreted during rasterization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrimitiveType {
     /// Every three vertices form a triangle.
+    #[default]
     Triangles,
     /// Every two vertices form a line segment.
     Lines,
@@ -37,7 +38,7 @@ pub struct Surface3D {
 }
 
 /// A 3D mesh containing vertex data, optionally split into multiple surfaces.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Mesh3D {
     /// Vertex positions.
     pub vertices: Vec<Vector3>,
@@ -56,6 +57,20 @@ pub struct Mesh3D {
     /// represents a distinct surface that can receive its own material
     /// override in MeshInstance3D.
     pub surfaces: Vec<Surface3D>,
+    /// Per-vertex bone weights for skeletal skinning (up to 4 influences).
+    ///
+    /// Parallel to `vertices`. Each `[f32; 4]` holds the blend weights for the
+    /// four bones referenced by the matching `bone_indices` entry; weights are
+    /// normally normalized to sum to `1.0`. Empty when the mesh is not rigged.
+    /// See [`crate::skin`] for the skinning pipeline.
+    pub bone_weights: Vec<[f32; 4]>,
+    /// Per-vertex bone indices for skeletal skinning (up to 4 influences).
+    ///
+    /// Parallel to `vertices`. Each `[u32; 4]` selects up to four binds in a
+    /// [`crate::skin::Skin`] (indices into `Skin::binds`, matching Godot's
+    /// `Skin` indirection — not raw skeleton bone indices). Empty when the
+    /// mesh is not rigged.
+    pub bone_indices: Vec<[u32; 4]>,
 }
 
 impl Mesh3D {
@@ -68,6 +83,8 @@ impl Mesh3D {
             indices: Vec::new(),
             primitive_type,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         }
     }
 
@@ -79,6 +96,16 @@ impl Mesh3D {
     /// Returns the number of triangles (only valid for `Triangles` primitive type).
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// Returns true if this mesh carries per-vertex bone weights/indices for
+    /// skeletal skinning (both arrays present and parallel to `vertices`).
+    ///
+    /// A skinned mesh can be deformed with [`crate::skin::skin_mesh`].
+    pub fn is_skinned(&self) -> bool {
+        !self.vertices.is_empty()
+            && self.bone_weights.len() == self.vertices.len()
+            && self.bone_indices.len() == self.vertices.len()
     }
 
     /// Generates a unit cube centered at the origin, scaled by `size`.
@@ -158,6 +185,8 @@ impl Mesh3D {
             indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         }
     }
 
@@ -211,6 +240,8 @@ impl Mesh3D {
             indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         }
     }
 
@@ -261,6 +292,8 @@ impl Mesh3D {
             indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         }
     }
 
@@ -281,6 +314,8 @@ impl Mesh3D {
             indices: vec![0, 1, 2, 0, 2, 3],
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         }
     }
 
@@ -390,6 +425,8 @@ impl Mesh3D {
             indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         }
     }
 
@@ -526,6 +563,8 @@ impl Mesh3D {
             indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         }
     }
 
@@ -677,6 +716,8 @@ impl Mesh3D {
             indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         })
     }
 
@@ -972,6 +1013,36 @@ mod tests {
         let mesh = Mesh3D::new(PrimitiveType::Lines);
         assert!(mesh.vertices.is_empty());
         assert_eq!(mesh.primitive_type, PrimitiveType::Lines);
+    }
+
+    // ── Skinning attribute fields ──
+
+    #[test]
+    fn primitive_mesh_has_no_bone_data() {
+        let mesh = Mesh3D::cube(1.0);
+        assert!(mesh.bone_weights.is_empty());
+        assert!(mesh.bone_indices.is_empty());
+        assert!(!mesh.is_skinned());
+    }
+
+    #[test]
+    fn mesh_with_parallel_bone_data_is_skinned() {
+        let mut mesh = Mesh3D::plane(1.0); // 4 vertices
+        mesh.bone_weights = vec![[1.0, 0.0, 0.0, 0.0]; 4];
+        mesh.bone_indices = vec![[0, 0, 0, 0]; 4];
+        assert!(mesh.is_skinned());
+        // A mismatched-length attribute array must not count as skinned.
+        mesh.bone_weights.pop();
+        assert!(!mesh.is_skinned());
+    }
+
+    #[test]
+    fn default_mesh_is_empty_triangles() {
+        let mesh = Mesh3D::default();
+        assert!(mesh.vertices.is_empty());
+        assert_eq!(mesh.primitive_type, PrimitiveType::Triangles);
+        assert!(mesh.bone_weights.is_empty());
+        assert!(mesh.bone_indices.is_empty());
     }
 
     #[test]

@@ -123,10 +123,39 @@ impl PackedScene {
         let mut current: Option<NodeTemplate> = None;
         // The id of the sub-resource whose property lines we're currently reading.
         let mut current_sub: Option<String> = None;
+        // A property whose value opens a bracket/brace that has not yet closed,
+        // so it continues onto following lines. Godot writes container values
+        // (e.g. a GridMap `data = { "cells": PackedInt32Array(...) }`) across
+        // multiple lines; we accumulate until the brackets balance, then parse.
+        let mut pending_prop: Option<(String, String)> = None;
 
         for (line_num, line) in source.lines().enumerate() {
             let _line_num = line_num + 1; // 1-based, for error reporting
             let line = line.trim();
+
+            // Continue accumulating a multi-line property value from a prior line.
+            if let Some((key, mut acc)) = pending_prop.take() {
+                if !acc.is_empty() {
+                    acc.push(' ');
+                }
+                acc.push_str(line);
+                if bracket_depth(&acc) > 0 {
+                    // Still unbalanced — keep reading subsequent lines.
+                    pending_prop = Some((key, acc));
+                } else if let Some(ref mut tmpl) = current {
+                    match parse_variant_value(acc.trim()) {
+                        Ok(value) => {
+                            tmpl.properties.insert(key, value);
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "skipping unparseable multi-line value for key '{key}'"
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
 
             // Skip empty / comments.
             if line.is_empty() || line.starts_with(';') {
@@ -252,6 +281,14 @@ impl PackedScene {
                         continue;
                     }
 
+                    // A value that opens more brackets/braces than it closes on
+                    // this line continues onto following lines (e.g. a GridMap
+                    // `data = {` dictionary). Buffer it until the brackets balance.
+                    if bracket_depth(value_str) > 0 {
+                        pending_prop = Some((key.to_string(), value_str.to_string()));
+                        continue;
+                    }
+
                     match parse_variant_value(value_str) {
                         Ok(value) => {
                             tmpl.properties.insert(key.to_string(), value);
@@ -332,6 +369,64 @@ impl PackedScene {
                 {
                     tmpl.properties.insert("albedo_color".into(), Variant::Color(*c));
                 }
+            }
+        }
+
+        // Resolve a ShaderMaterial referenced by `material_override` or
+        // `surface_material_override/0` into flat node properties the 3D render
+        // server understands (`shader_code` / `shader_path`, `shader_type`, and
+        // `shader_parameter/*`). The ShaderMaterial's `shader` field points to
+        // either an inline `[sub_resource type="Shader"]` (with a `code`
+        // property — fully resolved here) or an external `.gdshader`
+        // `[ext_resource]` (path recorded under `shader_path` for the render
+        // server to load). Mirrors Godot's ShaderMaterial → Shader chain.
+        for tmpl in &mut templates {
+            let ext_ref_id = |v: Option<&Variant>| -> Option<String> {
+                match v {
+                    Some(Variant::String(s)) => s.strip_prefix("ExtResource:").map(String::from),
+                    _ => None,
+                }
+            };
+            // Find the ShaderMaterial sub-resource id (override or per-surface).
+            let smat_id = sub_ref_id(tmpl.properties.get("material_override"))
+                .or_else(|| sub_ref_id(tmpl.properties.get("surface_material_override/0")))
+                .filter(|id| sub_resources.get(id).map(String::as_str) == Some("ShaderMaterial"));
+            let Some(smat_id) = smat_id else { continue };
+            let Some(smat_props) = sub_resource_props.get(&smat_id) else {
+                continue;
+            };
+
+            // Resolve the shader source: inline Shader sub-resource `code`, or an
+            // external `.gdshader` path via ext_resource.
+            if let Some(shader_id) = sub_ref_id(smat_props.get("shader")) {
+                if let Some(Variant::String(code)) =
+                    sub_resource_props.get(&shader_id).and_then(|p| p.get("code"))
+                {
+                    let shader = gdresource::importers::shader_from_source(code, "");
+                    tmpl.properties
+                        .insert("shader_code".into(), Variant::String(code.clone()));
+                    if let Some(gdvariant::Variant::String(ty)) = shader.get_property("shader_type")
+                    {
+                        tmpl.properties
+                            .insert("shader_type".into(), Variant::String(ty.clone()));
+                    }
+                }
+            } else if let Some(ext_id) = ext_ref_id(smat_props.get("shader")) {
+                if let Some(entry) = ext_resources.get(&ext_id) {
+                    tmpl.properties
+                        .insert("shader_path".into(), Variant::String(entry.path.clone()));
+                }
+            }
+
+            // Copy every `shader_parameter/*` entry from the ShaderMaterial onto
+            // the node so the render server can bind uniform values.
+            let params: Vec<(String, Variant)> = smat_props
+                .iter()
+                .filter(|(k, _)| k.starts_with("shader_parameter/"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (k, v) in params {
+                tmpl.properties.insert(k, v);
             }
         }
 
@@ -797,6 +892,38 @@ fn encode_shape_marker(ty: &str, props: Option<&HashMap<String, Variant>>) -> St
         }
         _ => format!("shape:{ty}"),
     }
+}
+
+/// Net bracket depth of `s`: `([{` count as `+1`, `)]}` as `-1`, ignoring any
+/// characters inside double-quoted strings. A positive result means the value
+/// opens more containers than it closes, i.e. it continues on a later line
+/// (used to stitch multi-line `.tscn` property values such as a GridMap `data`
+/// dictionary back into a single parseable string).
+fn bracket_depth(s: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for c in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match c {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
 }
 
 fn parse_groups_attr(raw: &str) -> Vec<String> {
@@ -2784,5 +2911,82 @@ fov = 90.0
         let root = tree.root_id();
         let _scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
         // Just verify it didn't panic.
+    }
+
+    // -- ShaderMaterial flattening (pat-u3l8c.43) ---------------------------
+
+    /// A ShaderMaterial sub-resource whose `shader` is an inline
+    /// `[sub_resource type="Shader"]` (with `code`) flattens its source,
+    /// shader_type, and shader_parameter/* onto the referencing node.
+    #[test]
+    fn shader_material_inline_shader_flattens_onto_node() {
+        let tscn = r#"
+[gd_scene load_steps=3 format=3]
+
+[sub_resource type="Shader" id="Shader_1"]
+code = "shader_type spatial; uniform float wave_height = 0.5; void fragment() { ALBEDO = vec3(1.0); }"
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = SubResource("Shader_1")
+shader_parameter/wave_height = 0.75
+shader_parameter/tint = Color(0.2, 0.4, 0.8, 1)
+
+[node name="Water" type="MeshInstance3D"]
+material_override = SubResource("ShaderMaterial_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let water = &nodes[0];
+        assert_eq!(water.name(), "Water");
+
+        // Shader source flattened onto the node.
+        match water.get_property("shader_code") {
+            Variant::String(s) => assert!(s.contains("shader_type spatial"), "code: {s}"),
+            other => panic!("expected shader_code string, got {other:?}"),
+        }
+        assert_eq!(
+            water.get_property("shader_type"),
+            Variant::String("spatial".into())
+        );
+        // Parameters copied verbatim.
+        assert_eq!(
+            water.get_property("shader_parameter/wave_height"),
+            Variant::Float(0.75)
+        );
+        assert_eq!(
+            water.get_property("shader_parameter/tint"),
+            Variant::Color(gdcore::math::Color::new(0.2, 0.4, 0.8, 1.0))
+        );
+    }
+
+    /// A ShaderMaterial whose `shader` is an external `.gdshader` ext_resource
+    /// records the `.gdshader` path under `shader_path` plus the parameters.
+    #[test]
+    fn shader_material_ext_shader_records_path() {
+        let tscn = r#"
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Shader" path="res://shaders/water.gdshader" id="1_shd"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = ExtResource("1_shd")
+shader_parameter/speed = 2.0
+
+[node name="Ocean" type="MeshInstance3D"]
+material_override = SubResource("ShaderMaterial_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let ocean = &nodes[0];
+        assert_eq!(
+            ocean.get_property("shader_path"),
+            Variant::String("res://shaders/water.gdshader".into())
+        );
+        assert_eq!(
+            ocean.get_property("shader_parameter/speed"),
+            Variant::Float(2.0)
+        );
+        // No inline code in the ext case.
+        assert_eq!(ocean.get_property("shader_code"), Variant::Nil);
     }
 }

@@ -52,6 +52,22 @@ pub struct Config {
     /// workers present) before the deadlock watchdog alerts (D5).
     pub deadlock_watchdog_polls: usize,
 
+    // Close-stall backpressure
+    /// No bead close for this long while the swarm is saturated ⇒ suppress
+    /// re-prompts/reclaims and alert the operator. 0 disables.
+    pub close_stall_backpressure_seconds: u64,
+    /// Minimum gap between repeated close-stall operator notifications.
+    pub close_stall_renotify_seconds: u64,
+
+    // Gardener (queue-hygiene pass while the planner is idle)
+    /// Interval between gardener digests when the planner skips (queue
+    /// saturated). 0 disables the gardener.
+    pub gardener_interval_seconds: u64,
+    /// Open P0 count above which the gardener flags priority dilution.
+    pub gardener_p0_dilution_threshold: usize,
+    /// An open bead untouched for this many days counts as stale.
+    pub gardener_stale_days: i64,
+
     // Verification
     pub verify_reported_tests: bool,
     pub verify_timeout_seconds: u64,
@@ -172,6 +188,16 @@ impl Config {
             identity_cache_ttl_seconds: env_or("ORCH_IDENTITY_CACHE_TTL_SECONDS", 5),
             reclaim_hysteresis_seconds: env_or("ORCH_RECLAIM_HYSTERESIS_SECONDS", 60),
             deadlock_watchdog_polls: env_or("ORCH_DEADLOCK_WATCHDOG_POLLS", 6),
+            // Deliberately spaced above verify_timeout_seconds (900) so one
+            // full-timeout verify can't latch suppression at the boundary.
+            close_stall_backpressure_seconds: env_or(
+                "ORCH_CLOSE_STALL_BACKPRESSURE_SECONDS",
+                1200,
+            ),
+            close_stall_renotify_seconds: env_or("ORCH_CLOSE_STALL_RENOTIFY_SECONDS", 1800),
+            gardener_interval_seconds: env_or("ORCH_GARDENER_INTERVAL_SECONDS", 3600),
+            gardener_p0_dilution_threshold: env_or("ORCH_GARDENER_P0_DILUTION_THRESHOLD", 15),
+            gardener_stale_days: env_or("ORCH_GARDENER_STALE_DAYS", 14),
             verify_reported_tests: env_or("VERIFY_REPORTED_TESTS", true),
             verify_timeout_seconds: env_or("VERIFY_TIMEOUT_SECONDS", 900),
             pending_verification_reap_seconds: env_or("ORCH_PENDING_VERIFY_REAP_SECONDS", 1800),
@@ -439,6 +465,11 @@ pub fn test_config() -> Config {
         identity_cache_ttl_seconds: 5,
         reclaim_hysteresis_seconds: 60,
         deadlock_watchdog_polls: 6,
+        close_stall_backpressure_seconds: 1200,
+        close_stall_renotify_seconds: 1800,
+        gardener_interval_seconds: 3600,
+        gardener_p0_dilution_threshold: 15,
+        gardener_stale_days: 14,
         verify_reported_tests: true,
         verify_timeout_seconds: 900,
         pending_verification_reap_seconds: 1800,

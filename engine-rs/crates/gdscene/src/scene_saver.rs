@@ -93,6 +93,70 @@ pub fn format_variant_value(v: &Variant) -> String {
                 .collect();
             format!("{{{}}}", pairs.join(", "))
         }
+        // Packed arrays serialize as `PackedXArray(elem, elem, …)`, with
+        // vector/color elements flattened into their components (Godot syntax).
+        Variant::PackedByteArray(v) => {
+            let items: Vec<String> = v.iter().map(|b| b.to_string()).collect();
+            format!("PackedByteArray({})", items.join(", "))
+        }
+        Variant::PackedInt32Array(v) => {
+            let items: Vec<String> = v.iter().map(|i| i.to_string()).collect();
+            format!("PackedInt32Array({})", items.join(", "))
+        }
+        Variant::PackedInt64Array(v) => {
+            let items: Vec<String> = v.iter().map(|i| i.to_string()).collect();
+            format!("PackedInt64Array({})", items.join(", "))
+        }
+        Variant::PackedFloat32Array(v) => {
+            let items: Vec<String> = v.iter().map(|f| format_f32(*f)).collect();
+            format!("PackedFloat32Array({})", items.join(", "))
+        }
+        Variant::PackedFloat64Array(v) => {
+            let items: Vec<String> = v.iter().map(|f| format_float(*f)).collect();
+            format!("PackedFloat64Array({})", items.join(", "))
+        }
+        Variant::PackedStringArray(v) => {
+            let items: Vec<String> = v
+                .iter()
+                .map(|s| {
+                    let escaped = s
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                        .replace('\t', "\\t");
+                    format!("\"{escaped}\"")
+                })
+                .collect();
+            format!("PackedStringArray({})", items.join(", "))
+        }
+        Variant::PackedVector2Array(v) => {
+            let items: Vec<String> = v
+                .iter()
+                .flat_map(|p| [format_f32(p.x), format_f32(p.y)])
+                .collect();
+            format!("PackedVector2Array({})", items.join(", "))
+        }
+        Variant::PackedVector3Array(v) => {
+            let items: Vec<String> = v
+                .iter()
+                .flat_map(|p| [format_f32(p.x), format_f32(p.y), format_f32(p.z)])
+                .collect();
+            format!("PackedVector3Array({})", items.join(", "))
+        }
+        Variant::PackedColorArray(v) => {
+            let items: Vec<String> = v
+                .iter()
+                .flat_map(|c| {
+                    [
+                        format_f32(c.r),
+                        format_f32(c.g),
+                        format_f32(c.b),
+                        format_f32(c.a),
+                    ]
+                })
+                .collect();
+            format!("PackedColorArray({})", items.join(", "))
+        }
         // Types that don't have a standard .tscn text representation.
         other => format!("{other}"),
     }
@@ -664,5 +728,54 @@ health = 100
         let nodes2 = scene2.instance().unwrap();
         assert_eq!(nodes2[3].name(), "Boss");
         assert_eq!(nodes2[3].get_property("health"), Variant::Int(100));
+    }
+
+    // -- Packed array .tscn round-trips (pat-u3l8c.11) ----------------------
+
+    /// Format a packed value to `.tscn` text and parse it back; the packed
+    /// type and contents must survive unchanged.
+    fn packed_roundtrip(v: Variant) {
+        let text = format_variant_value(&v);
+        let parsed = gdresource::loader::parse_variant_value(&text)
+            .unwrap_or_else(|e| panic!("re-parse of {text:?} failed: {e:?}"));
+        assert_eq!(parsed, v, "round-trip changed value; text was {text:?}");
+    }
+
+    #[test]
+    fn packed_arrays_keep_type_through_tscn_roundtrip() {
+        packed_roundtrip(Variant::PackedByteArray(vec![0, 1, 2, 255]));
+        packed_roundtrip(Variant::PackedByteArray(vec![]));
+        packed_roundtrip(Variant::PackedInt32Array(vec![1, -2, 3]));
+        packed_roundtrip(Variant::PackedInt64Array(vec![1, -2, 9_000_000_000]));
+        packed_roundtrip(Variant::PackedFloat32Array(vec![0.0, 1.5, -3.25]));
+        packed_roundtrip(Variant::PackedFloat64Array(vec![0.0, 1.5, -3.25]));
+        packed_roundtrip(Variant::PackedStringArray(vec![
+            "alpha".into(),
+            "with space".into(),
+        ]));
+        packed_roundtrip(Variant::PackedVector2Array(vec![
+            Vector2::new(1.0, 2.0),
+            Vector2::new(-3.0, 4.0),
+        ]));
+        packed_roundtrip(Variant::PackedVector3Array(vec![Vector3::new(1.0, 2.0, 3.0)]));
+        packed_roundtrip(Variant::PackedColorArray(vec![Color::new(
+            1.0, 0.0, 0.5, 1.0,
+        )]));
+    }
+
+    #[test]
+    fn packed_array_saved_as_constructor_syntax() {
+        assert_eq!(
+            format_variant_value(&Variant::PackedInt32Array(vec![1, 2, 3])),
+            "PackedInt32Array(1, 2, 3)"
+        );
+        assert_eq!(
+            format_variant_value(&Variant::PackedVector2Array(vec![Vector2::new(1.0, 2.0)])),
+            "PackedVector2Array(1, 2)"
+        );
+        assert_eq!(
+            format_variant_value(&Variant::PackedByteArray(vec![])),
+            "PackedByteArray()"
+        );
     }
 }

@@ -204,6 +204,22 @@ pub struct SoftwareRenderer {
     next_id: u64,
     /// Textures registered for DrawTextureRect commands, keyed by path.
     textures: Vec<(String, Texture2D)>,
+    /// Active 2D lights applied after rasterization (pat-z35r2.1).
+    lights: Vec<crate::light2d::Light2D>,
+    /// Occluders used for light shadows.
+    occluders: Vec<crate::light2d::LightOccluder2D>,
+    /// Ambient contribution before lights.
+    ambient: crate::light2d::CanvasAmbient,
+    /// Item mask for which lights apply in the post-shade pass.
+    light_item_mask: u32,
+    /// When true, `apply_lights_to_framebuffer` runs each frame.
+    lighting_enabled: bool,
+    /// Optional outline font. When set, `DrawString` renders real TTF glyphs
+    /// (kerned, anti-aliased) instead of the built-in 5×7 bitmap (pat-u3l8c.69).
+    ttf_font: Option<crate::ttf_font::TtfFont>,
+    /// Glyph atlas cache for TTF rendering (interior-mutable so rasterization
+    /// can cache glyphs from the `&self` rasterize pass).
+    glyph_atlas: std::cell::RefCell<crate::ttf_font::GlyphAtlas>,
 }
 
 impl SoftwareRenderer {
@@ -213,7 +229,64 @@ impl SoftwareRenderer {
             items: Vec::new(),
             next_id: 1,
             textures: Vec::new(),
+            lights: Vec::new(),
+            occluders: Vec::new(),
+            ambient: crate::light2d::CanvasAmbient::default(),
+            light_item_mask: 1,
+            lighting_enabled: false,
+            ttf_font: None,
+            glyph_atlas: std::cell::RefCell::new(crate::ttf_font::GlyphAtlas::new(512, 512)),
         }
+    }
+
+    /// Sets the outline font used to render `DrawString` text. Once set, Label /
+    /// Button text renders as real TTF glyphs at `font_size × 7` px (matching
+    /// the bitmap fallback's visual size).
+    pub fn set_font(&mut self, font: crate::ttf_font::TtfFont) {
+        self.ttf_font = Some(font);
+    }
+
+    /// Whether an outline (TTF) font is active for text rendering.
+    pub fn has_ttf_font(&self) -> bool {
+        self.ttf_font.is_some()
+    }
+
+    /// Loads the engine's built-in default UI font so `DrawString` (Label /
+    /// Button text) renders TTF glyphs. Call once at app startup after `new()`.
+    pub fn use_default_font(&mut self) {
+        self.set_font(crate::ttf_font::TtfFont::builtin());
+    }
+
+    /// Replace the light list used by the frame post-shade pass.
+    pub fn set_lights(&mut self, lights: Vec<crate::light2d::Light2D>) {
+        self.lighting_enabled = !lights.is_empty() || !self.occluders.is_empty();
+        self.lights = lights;
+        if !self.lights.is_empty() {
+            self.lighting_enabled = true;
+        }
+    }
+
+    /// Replace occluders used for shadow rays.
+    pub fn set_occluders(&mut self, occluders: Vec<crate::light2d::LightOccluder2D>) {
+        self.occluders = occluders;
+        if !self.lights.is_empty() || !self.occluders.is_empty() {
+            self.lighting_enabled = true;
+        }
+    }
+
+    /// Enable/disable the lighting post-pass explicitly.
+    pub fn set_lighting_enabled(&mut self, enabled: bool) {
+        self.lighting_enabled = enabled;
+    }
+
+    /// Returns true when lighting post-pass is active.
+    pub fn lighting_enabled(&self) -> bool {
+        self.lighting_enabled
+    }
+
+    /// Set ambient light for the shade pass.
+    pub fn set_ambient(&mut self, ambient: crate::light2d::CanvasAmbient) {
+        self.ambient = ambient;
     }
 
     /// Registers a texture that can be referenced by `DrawTextureRect` commands.
@@ -244,6 +317,7 @@ impl SoftwareRenderer {
         }
 
         let global_transform = parent_transform * item.transform;
+        let axis_aligned = Self::transform_is_axis_aligned(global_transform);
 
         for cmd in &item.commands {
             match cmd {
@@ -253,8 +327,15 @@ impl SoftwareRenderer {
                     filled,
                 } => {
                     if *filled {
+                        if axis_aligned {
+                            let transformed = Self::transform_rect(global_transform, *rect);
+                            draw::fill_rect_blended(fb, transformed, *color);
+                        } else {
+                            draw::fill_rect_transformed(fb, global_transform, *rect, *color);
+                        }
+                    } else {
                         let transformed = Self::transform_rect(global_transform, *rect);
-                        draw::fill_rect(fb, transformed, *color);
+                        draw::draw_rect_outline_blended(fb, transformed, *color, 1.0);
                     }
                 }
                 DrawCommand::DrawCircle {
@@ -271,7 +352,7 @@ impl SoftwareRenderer {
                         .basis_xform(Vector2::new(0.0, 1.0))
                         .length();
                     let scaled_radius = *radius * (sx + sy) * 0.5;
-                    draw::fill_circle(fb, pos, scaled_radius, *color);
+                    draw::fill_circle_blended(fb, pos, scaled_radius, *color);
                 }
                 DrawCommand::DrawLine {
                     from,
@@ -281,7 +362,7 @@ impl SoftwareRenderer {
                 } => {
                     let f = global_transform.xform(*from);
                     let t = global_transform.xform(*to);
-                    draw::draw_line(fb, f, t, *color, *width);
+                    draw::draw_line_blended(fb, f, t, *color, *width);
                 }
                 DrawCommand::DrawTextureRect {
                     texture_path,
@@ -289,8 +370,19 @@ impl SoftwareRenderer {
                     modulate,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
-                        let transformed = Self::transform_rect(global_transform, *rect);
-                        draw::draw_texture_rect(fb, tex, transformed, *modulate);
+                        if axis_aligned {
+                            let transformed = Self::transform_rect(global_transform, *rect);
+                            draw::draw_texture_rect_blended(fb, tex, transformed, *modulate);
+                        } else {
+                            draw::draw_texture_rect_transformed(
+                                fb,
+                                tex,
+                                global_transform,
+                                *rect,
+                                None,
+                                *modulate,
+                            );
+                        }
                     }
                 }
                 DrawCommand::DrawTextureRegion {
@@ -300,8 +392,14 @@ impl SoftwareRenderer {
                     modulate,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
-                        let transformed = Self::transform_rect(global_transform, *rect);
-                        draw::draw_texture_region(fb, tex, transformed, *source_rect, *modulate);
+                        draw::draw_texture_rect_transformed(
+                            fb,
+                            tex,
+                            global_transform,
+                            *rect,
+                            Some(*source_rect),
+                            *modulate,
+                        );
                     }
                 }
                 DrawCommand::DrawString {
@@ -311,8 +409,16 @@ impl SoftwareRenderer {
                     font_size,
                 } => {
                     let pos = global_transform.xform(*position);
-                    let bitmap_font = font::BitmapFont::builtin();
-                    font::draw_string(fb, &bitmap_font, pos, text, *color, *font_size);
+                    if let Some(ttf) = &self.ttf_font {
+                        // `font_size` is the bitmap scale; the bitmap cell is 7px
+                        // tall, so `scale × 7` gives the matching TTF pixel size.
+                        let px = (*font_size as f32) * 7.0;
+                        let mut atlas = self.glyph_atlas.borrow_mut();
+                        crate::ttf_font::draw_ttf_text(fb, &mut atlas, ttf, text, pos, px, *color);
+                    } else {
+                        let bitmap_font = font::BitmapFont::builtin();
+                        font::draw_string(fb, &bitmap_font, pos, text, *color, *font_size);
+                    }
                 }
                 DrawCommand::DrawNinePatch {
                     texture_path,
@@ -343,11 +449,19 @@ impl SoftwareRenderer {
         }
     }
 
+    /// Returns `true` when the transform has no rotation or skew (basis is
+    /// axis-aligned, possibly scaled/flipped), so rects can use the fast
+    /// AABB draw path without distortion (pat-u3l8c.24).
+    fn transform_is_axis_aligned(xform: Transform2D) -> bool {
+        xform.x.y.abs() < 1e-6 && xform.y.x.abs() < 1e-6
+    }
+
     /// Transforms an axis-aligned rect through a 2D transform, returning the AABB.
     ///
     /// All four corners are transformed, then the axis-aligned bounding box is
-    /// computed. This correctly handles rotation (the AABB grows) and zoom
-    /// (the rect size scales).
+    /// computed. Only valid as a draw rect for axis-aligned transforms —
+    /// rotated/skewed items must use the `*_transformed` draw paths (see
+    /// [`Self::transform_is_axis_aligned`]).
     fn transform_rect(xform: Transform2D, rect: Rect2) -> Rect2 {
         let p0 = xform.xform(rect.position);
         let p1 = xform.xform(Vector2::new(rect.position.x + rect.size.x, rect.position.y));
@@ -495,6 +609,17 @@ impl RenderingServer2D for SoftwareRenderer {
             self.rasterize_item(&mut fb, item, camera_xform);
         }
 
+        // Canvas light post-pass (pat-z35r2.1): Point/Directional lights + occluders.
+        if self.lighting_enabled && !self.lights.is_empty() {
+            crate::light2d::apply_lights_to_framebuffer(
+                &mut fb,
+                &self.lights,
+                &self.occluders,
+                self.ambient,
+                self.light_item_mask,
+            );
+        }
+
         FrameData {
             width: fb.width,
             height: fb.height,
@@ -532,6 +657,145 @@ mod tests {
         fb.set_pixel(0, 0, Color::WHITE);
         fb.clear(Color::rgb(0.5, 0.5, 0.5));
         assert_eq!(fb.get_pixel(0, 0), Color::rgb(0.5, 0.5, 0.5));
+    }
+
+    /// A rotated DrawRect must rasterize as the rotated shape, not its AABB
+    /// (pat-u3l8c.24 regression).
+    #[test]
+    fn rotated_rect_renders_rotated_not_aabb() {
+        let mut renderer = SoftwareRenderer::new();
+        let mut vp = Viewport::new(64, 64, Color::BLACK);
+        let mut item = CanvasItem::new(CanvasItemId(1));
+        // Thin horizontal bar in local space, centered on the item origin.
+        item.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::new(-16.0, -2.0), Vector2::new(32.0, 4.0)),
+            color: Color::WHITE,
+            filled: true,
+        });
+        let angle = std::f32::consts::FRAC_PI_4;
+        let (s, c) = angle.sin_cos();
+        item.transform = Transform2D {
+            x: Vector2::new(c, s),
+            y: Vector2::new(-s, c),
+            origin: Vector2::new(32.0, 32.0),
+        };
+        vp.add_canvas_item(item);
+        let frame = renderer.render_frame(&vp);
+
+        // On the rotated bar's diagonal axis.
+        assert_eq!(
+            frame.pixels[42 * 64 + 42],
+            Color::WHITE,
+            "diagonal point should lie on the rotated bar",
+        );
+        // Inside the bar's AABB but off the rotated bar: stays background.
+        assert_eq!(
+            frame.pixels[24 * 64 + 40],
+            Color::BLACK,
+            "point inside the AABB but off the rotated bar must not be filled",
+        );
+    }
+
+    /// A semi-transparent rect must composite over the background rather
+    /// than overwrite it (pat-u3l8c.24 regression).
+    #[test]
+    fn semi_transparent_rect_blends_over_background() {
+        let mut renderer = SoftwareRenderer::new();
+        let mut vp = Viewport::new(8, 8, Color::rgb(1.0, 0.0, 0.0));
+        let mut item = CanvasItem::new(CanvasItemId(1));
+        item.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(8.0, 8.0)),
+            color: Color::new(0.0, 0.0, 1.0, 0.5),
+            filled: true,
+        });
+        vp.add_canvas_item(item);
+        let frame = renderer.render_frame(&vp);
+
+        let px = frame.pixels[4 * 8 + 4];
+        assert!(
+            px.r > 0.3 && px.b > 0.3,
+            "50% blue over red should mix red and blue, got {px:?}",
+        );
+    }
+
+    #[test]
+    fn render_frame_applies_point_light_shade() {
+        use crate::light2d::Light2D;
+        let mut renderer = SoftwareRenderer::new();
+        let mut vp = Viewport::new(32, 32, Color::WHITE);
+        let mut item = CanvasItem::new(CanvasItemId(1));
+        item.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(32.0, 32.0)),
+            color: Color::WHITE,
+            filled: true,
+        });
+        vp.add_canvas_item(item);
+        renderer.set_lights(vec![Light2D::point(
+            Vector2::new(4.0, 4.0),
+            Color::WHITE,
+            2.0,
+            14.0,
+        )]);
+        renderer.set_ambient(crate::light2d::CanvasAmbient {
+            color: Color::new(0.05, 0.05, 0.05, 1.0),
+        });
+        let frame = renderer.render_frame(&vp);
+        let near = frame.pixels[(4 * 32 + 4) as usize];
+        let far = frame.pixels[(30 * 32 + 30) as usize];
+        assert!(
+            near.r > far.r,
+            "SoftwareRenderer light pass: near {} must exceed far {}",
+            near.r,
+            far.r
+        );
+        assert!(renderer.lighting_enabled());
+    }
+
+    #[test]
+    fn use_default_font_enables_ttf() {
+        let mut r = SoftwareRenderer::new();
+        assert!(!r.has_ttf_font());
+        r.use_default_font();
+        assert!(r.has_ttf_font());
+    }
+
+    #[test]
+    fn draw_string_renders_ttf_when_font_set() {
+        const FONT: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_assets/Cantarell-Regular.ttf"
+        ));
+
+        fn render_label(renderer: &mut SoftwareRenderer) -> FrameData {
+            let mut vp = Viewport::new(120, 40, Color::BLACK);
+            let mut item = CanvasItem::new(CanvasItemId(1));
+            item.commands.push(DrawCommand::DrawString {
+                text: "Ag".to_string(),
+                position: Vector2::new(4.0, 4.0),
+                color: Color::WHITE,
+                font_size: 3,
+            });
+            vp.add_canvas_item(item);
+            renderer.render_frame(&vp)
+        }
+
+        // Bitmap fallback renders binary (fully on/off) coverage.
+        let mut bitmap = SoftwareRenderer::new();
+        assert!(!bitmap.has_ttf_font());
+        let bmp = render_label(&mut bitmap);
+        assert!(bmp.pixels.iter().any(|c| c.r > 0.5), "bitmap text drawn");
+
+        // TTF path renders real, anti-aliased glyph outlines.
+        let ttf = crate::ttf_font::TtfFont::from_bytes(FONT.to_vec()).unwrap();
+        let mut outline = SoftwareRenderer::new();
+        outline.set_font(ttf);
+        assert!(outline.has_ttf_font());
+        let out = render_label(&mut outline);
+        assert!(out.pixels.iter().any(|c| c.r > 0.5), "TTF text drawn");
+        // Anti-aliased edges produce partially-covered (gray) pixels that the
+        // 1-bit bitmap font never produces.
+        let ttf_partial = out.pixels.iter().filter(|c| c.r > 0.15 && c.r < 0.85).count();
+        assert!(ttf_partial > 0, "TTF glyphs should be anti-aliased");
     }
 
     #[test]

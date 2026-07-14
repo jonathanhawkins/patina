@@ -23,7 +23,7 @@ use crate::depth_buffer::DepthBuffer;
 use crate::rasterizer::{clip_to_screen, rasterize_triangle};
 use crate::shader::{
     fragment_shader_for_mode, CustomFragmentShader, FragmentShader, LightKind, LightUniform,
-    ShaderUniforms, StandardVertexShader, VertexInput, VertexShader,
+    MaterialTextures, ShaderUniforms, StandardVertexShader, VertexInput, VertexShader,
 };
 
 /// A pixel framebuffer with depth for the 3D software renderer.
@@ -419,8 +419,10 @@ impl SoftwareRenderer3D {
                 .iter()
                 .enumerate()
                 .map(|(i, lu)| {
-                    if lu.shadow_enabled && lu.kind == LightKind::Directional {
-                        // Find the shadow map for this light.
+                    // Directional + spot share 2D depth shadow maps (pat-bt77r).
+                    if lu.shadow_enabled
+                        && matches!(lu.kind, LightKind::Directional | LightKind::Spot)
+                    {
                         let light_id = self.lights.get(i).map(|l| l.id);
                         light_id.and_then(|lid| {
                             shadow_maps
@@ -519,6 +521,17 @@ impl SoftwareRenderer3D {
                     lights: light_uniforms.clone(),
                     directional_shadow_maps: directional_shadow_maps.clone(),
                     omni_shadow_cubemaps: omni_shadow_cubemaps.clone(),
+                    // Per-fragment material texture maps (albedo/normal/ORM/
+                    // emission), sampled at the interpolated UV. Arc clones are
+                    // cheap; `None` fields fall back to the flat scalars.
+                    textures: MaterialTextures {
+                        albedo: entry.material.albedo_texture.clone(),
+                        normal: entry.material.normal_texture.clone(),
+                        normal_scale: entry.material.normal_scale,
+                        roughness: entry.material.roughness_texture.clone(),
+                        metallic: entry.material.metallic_texture.clone(),
+                        emission: entry.material.emission_texture.clone(),
+                    },
                 };
 
                 let mesh = entry.mesh;
@@ -661,7 +674,9 @@ impl SoftwareRenderer3D {
     /// from its depth via the inverse projection, so distances and heights are
     /// world-accurate rather than a raw depth fraction. Runs before the camera
     /// post-process, in linear space.
-    fn apply_fog_pass(
+    /// `pub(crate)` so the GPU trait path applies the identical fog to its
+    /// read-back HDR buffer (pat-kr04d) — same reconstruction, same math.
+    pub(crate) fn apply_fog_pass(
         pixels: &mut [Color],
         depth: &[f32],
         w: u32,
@@ -894,21 +909,98 @@ pub fn sky_suns_from_lights(lights: &[Light3D]) -> Vec<SkySun> {
 }
 
 /// Samples a sky material color for the given world-space view direction.
-fn sample_sky_color(material: &SkyMaterial, dir: &Vector3, energy: f32, suns: &[SkySun]) -> Color {
+/// `pub(crate)` so the sky parity tests can probe materials directly.
+pub(crate) fn sample_sky_color(
+    material: &SkyMaterial,
+    dir: &Vector3,
+    energy: f32,
+    suns: &[SkySun],
+) -> Color {
     match material {
         SkyMaterial::Procedural(mat) => sample_procedural_sky(mat, dir, energy, suns),
-        SkyMaterial::Physical(mat) => sample_physical_sky(mat, dir, energy),
-        SkyMaterial::Panoramic(_) => {
-            // Panoramic sky requires texture lookup — show a neutral color
-            // (linear, since the sampler outputs linear HDR).
-            Color::new(
-                srgb_to_linear_channel(0.3),
-                srgb_to_linear_channel(0.3),
-                srgb_to_linear_channel(0.35),
-                1.0,
-            )
+        SkyMaterial::Physical(mat) => sample_physical_sky(mat, dir, energy, suns),
+        SkyMaterial::Panoramic(mat) => sample_panoramic_sky(mat, dir, energy),
+    }
+}
+
+/// Equirectangular panorama sampling (Godot `SKY_COORDS`).
+///
+/// Godot's sky.glsl computes `atan(x, -z)` wrapped into [0, 2π) (negative →
+/// +2π) then divides by 2π — **no half-turn shift** — so −Z maps to u = 0,
+/// +X to 0.25, +Z to 0.5, −X to 0.75. `rem_euclid(1.0)` performs the same
+/// wrap. `v = acos(y) / π` (zenith at the top row).
+pub fn equirect_uv(dir: &Vector3) -> (f32, f32) {
+    let d = dir.normalized();
+    let u = d.x.atan2(-d.z) / (2.0 * std::f32::consts::PI);
+    let v = d.y.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+    (u.rem_euclid(1.0), v.clamp(0.0, 1.0))
+}
+
+/// Samples a panorama texture at a world direction.
+pub fn sample_equirect(
+    tex: &gdserver3d::sky::PanoramaTexture,
+    dir: &Vector3,
+    filter: bool,
+) -> Color {
+    let (u, v) = equirect_uv(dir);
+    let w = tex.width.max(1) as f32;
+    let h = tex.height.max(1) as f32;
+    if !filter || tex.width < 2 || tex.height < 2 {
+        let x = ((u * w).floor() as u32).min(tex.width.saturating_sub(1));
+        let y = ((v * h).floor() as u32).min(tex.height.saturating_sub(1));
+        let idx = (y * tex.width + x) as usize;
+        return tex.pixels.get(idx).copied().unwrap_or(Color::BLACK);
+    }
+    // GL/Godot repeat-sampler semantics: texel centers sit at (i + 0.5)/w, so
+    // sample at `u·w − 0.5` and wrap the x neighbors across the u = 0/1 seam
+    // (the panorama is horizontally periodic; a clamped `u·(w−1)` mapping
+    // leaves a visible seam column at the −Z direction). Vertically clamp —
+    // the poles don't wrap.
+    let x = u * w - 0.5;
+    let y = (v * h - 0.5).clamp(0.0, h - 1.0);
+    let x0f = x.floor();
+    let y0 = y.floor() as u32;
+    let x0 = x0f.rem_euclid(w) as u32 % tex.width;
+    let x1 = (x0f + 1.0).rem_euclid(w) as u32 % tex.width;
+    let y1 = (y0 + 1).min(tex.height - 1);
+    let fx = x - x0f;
+    let fy = y - y0 as f32;
+    let sample = |xx: u32, yy: u32| {
+        let idx = (yy * tex.width + xx) as usize;
+        tex.pixels.get(idx).copied().unwrap_or(Color::BLACK)
+    };
+    let c00 = sample(x0, y0);
+    let c10 = sample(x1, y0);
+    let c01 = sample(x0, y1);
+    let c11 = sample(x1, y1);
+    let lerp_c = |a: Color, b: Color, t: f32| {
+        Color::new(
+            a.r + (b.r - a.r) * t,
+            a.g + (b.g - a.g) * t,
+            a.b + (b.b - a.b) * t,
+            a.a + (b.a - a.a) * t,
+        )
+    };
+    let top = lerp_c(c00, c10, fx);
+    let bot = lerp_c(c01, c11, fx);
+    lerp_c(top, bot, fy)
+}
+
+fn sample_panoramic_sky(mat: &gdserver3d::sky::PanoramicSkyMaterial, dir: &Vector3, energy: f32) -> Color {
+    if let Some(tex) = mat.texture.as_ref() {
+        if !tex.pixels.is_empty() && tex.width > 0 && tex.height > 0 {
+            let c = sample_equirect(tex, dir, mat.filter);
+            let e = mat.energy_multiplier * energy;
+            return Color::new(c.r * e, c.g * e, c.b * e, 1.0);
         }
     }
+    // No texture loaded — neutral linear placeholder (matches prior behavior).
+    Color::new(
+        srgb_to_linear_channel(0.3) * mat.energy_multiplier * energy,
+        srgb_to_linear_channel(0.3) * mat.energy_multiplier * energy,
+        srgb_to_linear_channel(0.35) * mat.energy_multiplier * energy,
+        1.0,
+    )
 }
 
 /// Evaluates the procedural sky for a view direction — a port of Godot 4.6's
@@ -984,6 +1076,21 @@ fn sample_procedural_sky(
                 );
             }
         }
+
+        // Godot's `sky_cover`: sample the cover texture equirectangularly
+        // (`SKY_COORDS`) and add it over the sky hemisphere, modulated by
+        // `sky_cover_modulate`. Per the material's setters the modulate rgb is
+        // an sRGB source_color (→ linear) and its alpha carries the
+        // `sky_energy_multiplier`:
+        // `sky += cover.rgb·modulate.rgb · cover.a·(modulate.a·sky_energy)`.
+        if let Some(cover) = &mat.sky_cover {
+            let c = sample_equirect(cover, dir, true);
+            let m = mat.sky_cover_modulate;
+            let ma = m.a * mat.sky_energy_multiplier;
+            rgb.0 += c.r * srgb_to_linear_channel(m.r) * c.a * ma;
+            rgb.1 += c.g * srgb_to_linear_channel(m.g) * c.a * ma;
+            rgb.2 += c.b * srgb_to_linear_channel(m.b) * c.a * ma;
+        }
         rgb
     } else {
         // Ground hemisphere: bottom→horizon gradient (no sun below horizon).
@@ -1001,36 +1108,141 @@ fn sample_procedural_sky(
     Color::new(r * energy, g * energy, b * energy, 1.0)
 }
 
-/// Simplified physical sky approximation using Rayleigh-like scattering.
-///
-/// Like [`sample_procedural_sky`], this outputs linear HDR: the `source_color`
-/// material colors are converted sRGB→linear and the result is left unclamped
-/// for the camera post-process to tonemap.
-fn sample_physical_sky(mat: &PhysicalSkyMaterial, dir: &Vector3, energy: f32) -> Color {
-    let y = dir.y.clamp(-1.0, 1.0);
+/// Physical sky — a **verbatim port** of Godot 4.6's generated
+/// `PhysicalSkyMaterial` sky shader (`PhysicalSkyMaterial::_update_shader` in
+/// `scene/resources/3d/sky_material.cpp`): Preetham-style Rayleigh/Mie betas,
+/// the zenith optical-mass formula, per-channel extinction, the three.js
+/// low-sun mix, the ground-color horizon blend, the smoothstep solar disk
+/// (sized by `LIGHT0_SIZE * sun_disk_scale`), and the final
+/// `pow(color, 1/(1.2 + 1.2·sun_fade))`. `LIGHT0` is the first sky-visible
+/// directional light; with no sun Godot shows only the night-sky texture
+/// (default black).
+fn sample_physical_sky(
+    mat: &PhysicalSkyMaterial,
+    dir: &Vector3,
+    energy: f32,
+    suns: &[SkySun],
+) -> Color {
+    let d = dir.normalized();
+    let exposure = mat.energy_multiplier * energy;
+    // Godot's night_sky texture (source_color → linear, sampled at SKY_COORDS).
+    let night = mat.night_sky.as_ref().map(|tex| {
+        let c = sample_equirect(tex, &d, true);
+        [c.r, c.g, c.b]
+    });
+    let Some(sun) = suns.first() else {
+        // No sun: Godot displays only the night_sky (default black) × exposure.
+        return match night {
+            Some(n) => Color::new(n[0] * exposure, n[1] * exposure, n[2] * exposure, 1.0),
+            None => Color::new(0.0, 0.0, 0.0, 1.0),
+        };
+    };
+    // LIGHTn/material colors arrive linear (`source_color` / `srgb_to_linear`).
+    let sun_dir = sun.direction.normalized();
+    let sun_col = [
+        srgb_to_linear_channel(sun.color.r),
+        srgb_to_linear_channel(sun.color.g),
+        srgb_to_linear_channel(sun.color.b),
+    ];
+    let rayleigh_col = [
+        srgb_to_linear_channel(mat.rayleigh_color.r),
+        srgb_to_linear_channel(mat.rayleigh_color.g),
+        srgb_to_linear_channel(mat.rayleigh_color.b),
+    ];
+    let mie_col = [
+        srgb_to_linear_channel(mat.mie_color.r),
+        srgb_to_linear_channel(mat.mie_color.g),
+        srgb_to_linear_channel(mat.mie_color.b),
+    ];
+    let ground_col = [
+        srgb_to_linear_channel(mat.ground_color.r),
+        srgb_to_linear_channel(mat.ground_color.g),
+        srgb_to_linear_channel(mat.ground_color.b),
+    ];
 
-    if y < 0.0 {
-        // Below horizon — return ground color (linear).
-        return Color::new(
-            srgb_to_linear_channel(mat.ground_color.r) * energy,
-            srgb_to_linear_channel(mat.ground_color.g) * energy,
-            srgb_to_linear_channel(mat.ground_color.b) * energy,
-            1.0,
-        );
+    // Optical length at zenith for molecules.
+    const RAYLEIGH_ZENITH_SIZE: f32 = 8.4e3;
+    const MIE_ZENITH_SIZE: f32 = 1.25e3;
+
+    let zenith_angle = sun_dir.y.clamp(-1.0, 1.0); // dot(UP, LIGHT0_DIRECTION)
+    let sun_energy = (0.757 * zenith_angle).max(0.0) * sun.energy;
+    let sun_fade = 1.0 - (1.0 - sun_dir.y.exp()).clamp(0.0, 1.0);
+
+    // Rayleigh coefficients (fade shrinks them as the sun sets).
+    let rayleigh_coefficient = mat.rayleigh_coefficient - 1.0 * (1.0 - sun_fade);
+    let rayleigh_beta = [
+        rayleigh_coefficient * rayleigh_col[0] * 0.0001,
+        rayleigh_coefficient * rayleigh_col[1] * 0.0001,
+        rayleigh_coefficient * rayleigh_col[2] * 0.0001,
+    ];
+    // Mie coefficients from Preetham.
+    let mie_beta = [
+        mat.turbidity * mat.mie_coefficient * mie_col[0] * 0.000434,
+        mat.turbidity * mat.mie_coefficient * mie_col[1] * 0.000434,
+        mat.turbidity * mat.mie_coefficient * mie_col[2] * 0.000434,
+    ];
+
+    // Optical length.
+    let zenith = d.y.max(0.0); // dot(UP, EYEDIR)
+    let optical_mass = 1.0 / (zenith + 0.15 * (3.885 + 54.5 * zenith).powf(-1.253));
+    let rayleigh_scatter = RAYLEIGH_ZENITH_SIZE * optical_mass;
+    let mie_scatter = MIE_ZENITH_SIZE * optical_mass;
+
+    // Light extinction based on thickness of atmosphere.
+    let extinction = [
+        (-(rayleigh_beta[0] * rayleigh_scatter + mie_beta[0] * mie_scatter)).exp(),
+        (-(rayleigh_beta[1] * rayleigh_scatter + mie_beta[1] * mie_scatter)).exp(),
+        (-(rayleigh_beta[2] * rayleigh_scatter + mie_beta[2] * mie_scatter)).exp(),
+    ];
+
+    // In scattering.
+    let cos_theta = d.dot(sun_dir);
+    let rayleigh_phase =
+        (3.0 / (16.0 * std::f32::consts::PI)) * (1.0 + (cos_theta * 0.5 + 0.5).powi(2));
+    let mie_phase = henyey_greenstein(cos_theta, mat.mie_eccentricity);
+
+    // Lin = pow(sun_energy·(βθ/β)·(1−ext), 1.5), the three.js low-sun hack
+    // mix toward pow(sun_energy·(βθ/β)·ext, 0.5), then the ground blend.
+    let low_sun_mix = (1.0 - zenith_angle).powi(5).clamp(0.0, 1.0);
+    let ground_blend = smoothstep(-0.1, 0.1, d.y);
+    let mut lin = [0.0f32; 3];
+    for i in 0..3 {
+        let beta_theta = rayleigh_beta[i] * rayleigh_phase + mie_beta[i] * mie_phase;
+        let beta_sum = (rayleigh_beta[i] + mie_beta[i]).max(1e-12);
+        let base = sun_energy * (beta_theta / beta_sum);
+        let mut l = (base * (1.0 - extinction[i])).max(0.0).powf(1.5);
+        let l_low = (base * extinction[i]).max(0.0).powf(0.5);
+        l *= 1.0 + (l_low - 1.0) * low_sun_mix;
+        l *= ground_col[i] + (1.0 - ground_col[i]) * ground_blend;
+        lin[i] = l;
     }
 
-    // Simplified atmospheric scattering: blend from horizon to zenith, in linear.
-    let t = y.powf(0.5);
-    let zr = srgb_to_linear_channel(mat.rayleigh_color.r);
-    let zg = srgb_to_linear_channel(mat.rayleigh_color.g);
-    let zb = srgb_to_linear_channel(mat.rayleigh_color.b);
-    let horizon_factor = 1.0 / (1.0 + mat.turbidity * 0.1);
-    let hr = lerp(1.0, zr, t) * horizon_factor;
-    let hg = lerp(1.0, zg, t) * horizon_factor;
-    let hb = lerp(1.0, zb, t) * horizon_factor;
+    // Solar disk and out-scattering.
+    let sun_ang_cos = (sun.size * mat.sun_disk_scale).cos();
+    let sun_ang_cos2 = (sun.size * mat.sun_disk_scale * 0.5).cos();
+    let sundisk = smoothstep(sun_ang_cos, sun_ang_cos2, cos_theta);
 
-    let e = mat.energy_multiplier * energy;
-    Color::new(hr * e, hg * e, hb * e, 1.0)
+    // COLOR = pow(Lin + L0, 1/(1.2 + 1.2·sun_fade)) * exposure.
+    let final_pow = 1.0 / (1.2 + 1.2 * sun_fade);
+    let mut out = [0.0f32; 3];
+    for i in 0..3 {
+        let mut l0 = sun_energy * extinction[i] * sundisk * sun_col[i];
+        // Godot: `L0 += texture(night_sky, SKY_COORDS).xyz * extinction` — the
+        // night sky shows through where the atmosphere is thin (high extinction,
+        // i.e. toward the horizon / as the sun sets).
+        if let Some(n) = night {
+            l0 += n[i] * extinction[i];
+        }
+        out[i] = (lin[i] + l0).max(0.0).powf(final_pow) * exposure;
+    }
+    Color::new(out[0], out[1], out[2], 1.0)
+}
+
+/// Henyey-Greenstein phase function with Godot's baked `k = 1/(4π)` constant
+/// (`0.0795774715459` in the generated PhysicalSkyMaterial shader).
+fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
+    const K: f32 = 0.079_577_47;
+    K * (1.0 - g * g) / (1.0 + g * g - 2.0 * g * cos_theta).max(1e-9).powf(1.5)
 }
 
 /// Reconstructs a view-space position from a pixel's NDC coordinates and depth,
@@ -1830,11 +2042,11 @@ mod tests {
         let mat = ProceduralSkyMaterial::default();
 
         // Slightly above the horizon: pow(0.9, 4) ≈ 0.656 → still mostly the
-        // whitish horizon color (0.646), not the darker top color (0.385).
+        // whitish horizon color (0.6463), not the darker top color (0.385).
         // Endpoints are linearized (Godot's source_color), then mixed in linear.
         let just_above = sample_procedural_sky(&mat, &Vector3::new(0.0, 0.1, -1.0).normalized(), 1.0, &[]);
         let t = (1.0f32 - 0.099_503_72).powf(0.6 / 0.15);
-        let expected_r = s2l(0.385) + (s2l(0.646) - s2l(0.385)) * t;
+        let expected_r = s2l(0.385) + (s2l(0.6463) - s2l(0.385)) * t;
         assert!(
             (just_above.r - expected_r).abs() < 1e-3,
             "sky gradient must follow Godot's pow(1-y, 0.6/curve) in linear: got r={:.4}, want {:.4}",
@@ -1864,6 +2076,81 @@ mod tests {
             (far_below.r - s2l(0.2)).abs() < 1e-3 && (far_below.b - s2l(0.133)).abs() < 1e-3,
             "nadir must be ground_bottom_color (linear), got {:?}",
             far_below
+        );
+    }
+
+    /// Godot's `sky_cover`: the cover texture is added over the sky hemisphere
+    /// (modulated), and never touches the ground hemisphere.
+    #[test]
+    fn procedural_sky_cover_adds_over_sky_hemisphere_only() {
+        use gdserver3d::sky::PanoramaTexture;
+        // 1×1 opaque cover, linear red 0.7.
+        let cover = PanoramaTexture { width: 1, height: 1, pixels: vec![Color::new(0.7, 0.0, 0.0, 1.0)] };
+        let mut mat = ProceduralSkyMaterial::default();
+        mat.sky_cover = Some(cover);
+        let bare = ProceduralSkyMaterial::default();
+
+        // Sky hemisphere: cover adds 0.7·modulate(white,1)·alpha(1)·sky_energy(1) = 0.7 to red.
+        let up = Vector3::new(0.0, 1.0, 0.0);
+        let with = sample_procedural_sky(&mat, &up, 1.0, &[]);
+        let without = sample_procedural_sky(&bare, &up, 1.0, &[]);
+        assert!(
+            (with.r - without.r - 0.7).abs() < 1e-4,
+            "sky_cover must add its texture over the sky: with={:.3} without={:.3}",
+            with.r, without.r
+        );
+
+        // Ground hemisphere: untouched.
+        let down = Vector3::new(0.0, -1.0, 0.0);
+        let with_g = sample_procedural_sky(&mat, &down, 1.0, &[]);
+        let without_g = sample_procedural_sky(&bare, &down, 1.0, &[]);
+        assert!(
+            (with_g.r - without_g.r).abs() < 1e-6,
+            "sky_cover must not affect the ground hemisphere"
+        );
+
+        // Modulate alpha 0 disables the cover entirely.
+        mat.sky_cover_modulate = Color::new(1.0, 1.0, 1.0, 0.0);
+        let muted = sample_procedural_sky(&mat, &up, 1.0, &[]);
+        assert!((muted.r - without.r).abs() < 1e-6, "modulate.a=0 must hide sky_cover");
+    }
+
+    /// Godot's physical-sky `night_sky`: with no sun the whole sky is the
+    /// night_sky texture (×exposure); with a sun it adds into `L0` scaled by
+    /// extinction (so it shows where the atmosphere is thin — overhead).
+    #[test]
+    fn physical_sky_night_sky_no_sun_and_extinction_scaled() {
+        use gdserver3d::sky::PanoramaTexture;
+        let stars = PanoramaTexture { width: 1, height: 1, pixels: vec![Color::new(0.1, 0.1, 0.4, 1.0)] };
+        let mut mat = PhysicalSkyMaterial::default();
+        mat.night_sky = Some(stars);
+        let bare = PhysicalSkyMaterial::default();
+        let up = Vector3::new(0.0, 1.0, 0.0);
+
+        // No sun: sky == night_sky × exposure (energy 1). Bare == black.
+        let no_sun = sample_physical_sky(&mat, &up, 1.0, &[]);
+        assert!(
+            (no_sun.r - 0.1).abs() < 1e-4 && (no_sun.b - 0.4).abs() < 1e-4,
+            "no-sun physical sky must display night_sky, got {:?}",
+            no_sun
+        );
+        let no_sun_bare = sample_physical_sky(&bare, &up, 1.0, &[]);
+        assert!(no_sun_bare.r < 1e-6 && no_sun_bare.b < 1e-6, "no night_sky → black");
+
+        // With a sun overhead-ish, night_sky adds into L0 (× extinction ≈ 1 when
+        // looking up through thin atmosphere), brightening the sky.
+        let sun = SkySun {
+            direction: Vector3::new(0.0, 0.3, -1.0).normalized(),
+            color: Color::WHITE,
+            energy: 1.0,
+            size: 0.0,
+        };
+        let with_night = sample_physical_sky(&mat, &up, 1.0, &[sun]);
+        let without_night = sample_physical_sky(&bare, &up, 1.0, &[sun]);
+        assert!(
+            with_night.b > without_night.b + 0.01,
+            "night_sky must add through thin atmosphere: {:.3} vs {:.3}",
+            with_night.b, without_night.b
         );
     }
 
@@ -2161,6 +2448,10 @@ mod tests {
 
     #[test]
     fn fog_disabled_no_effect() {
+        // Both frames carry an environment (attaching one changes the ambient
+        // source from the bare-renderer 0.1 grey to the environment, so a
+        // no-env frame is not a valid baseline); they must differ ONLY in the
+        // fog settings, which — being disabled — must not change a pixel.
         let mut renderer = SoftwareRenderer3D::new();
         let id = renderer.create_instance();
         renderer.set_mesh(id, Mesh3D::cube(1.0));
@@ -2172,9 +2463,14 @@ mod tests {
                 origin: Vector3::new(0.0, 0.0, -5.0),
             },
         );
+        // Light the cube so the frames aren't trivially black.
+        let mut light = Light3D::directional(Light3DId(1));
+        light.direction = Vector3::new(0.0, 0.0, -1.0);
+        renderer.add_light(light.id);
+        renderer.update_light(&light);
 
-        let vp_no = Viewport3D::new(32, 32);
-        let frame_no = renderer.render_frame(&vp_no);
+        let vp_base = viewport_with_env(Environment3D::default());
+        let frame_base = renderer.render_frame(&vp_base);
 
         let env = Environment3D {
             fog_enabled: false,
@@ -2185,11 +2481,20 @@ mod tests {
         let vp_env = viewport_with_env(env);
         let frame_env = renderer.render_frame(&vp_env);
 
-        let avg_no = avg_color(&frame_no.pixels);
+        let avg_base = avg_color(&frame_base.pixels);
         let avg_env = avg_color(&frame_env.pixels);
         assert!(
-            (avg_no.r - avg_env.r).abs() < 0.02 && (avg_no.g - avg_env.g).abs() < 0.02,
-            "Fog disabled should not change rendering"
+            avg_base.r > 0.01,
+            "baseline must render a lit cube, got avg r={:.4}",
+            avg_base.r
+        );
+        assert!(
+            (avg_base.r - avg_env.r).abs() < 1e-5 && (avg_base.g - avg_env.g).abs() < 1e-5,
+            "Fog disabled should not change rendering: base=({:.4},{:.4}) env=({:.4},{:.4})",
+            avg_base.r,
+            avg_base.g,
+            avg_env.r,
+            avg_env.g
         );
     }
 

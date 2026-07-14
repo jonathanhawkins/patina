@@ -1,0 +1,25 @@
+[package]
+name = "patina-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# cdylib: the wasm module the browser instantiates. rlib: lets the crate be
+# unit-tested on the host and linked by native tooling.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Wasm-safe engine core linked into the web runtime. Heavier subsystems
+# (gdscene -> gdaudio -> cpal, gdrender3d -> native wgpu backends) require
+# native-dep cfg-gating and are staged in the follow-up web beads
+# (pat-u3l8c.110-.113).
+gdcore = { path = "../gdcore" }
+gdvariant = { path = "../gdvariant" }
+
+# Browser bindings are only needed when actually targeting wasm32; keeping them
+# target-gated keeps native `cargo test -p patina-web` dependency-light.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

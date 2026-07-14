@@ -745,12 +745,12 @@ data = PackedInt32Array(1, 2, 3, 4, 5)
 "#,
     );
     match res.get_property("data") {
-        Some(Variant::Array(arr)) => {
+        Some(Variant::PackedInt32Array(arr)) => {
             assert_eq!(arr.len(), 5);
-            assert_eq!(arr[0], Variant::Int(1));
-            assert_eq!(arr[4], Variant::Int(5));
+            assert_eq!(arr[0], 1);
+            assert_eq!(arr[4], 5);
         }
-        other => panic!("expected Array from PackedInt32Array, got {other:?}"),
+        other => panic!("expected PackedInt32Array, got {other:?}"),
     }
 }
 
@@ -764,18 +764,12 @@ weights = PackedFloat32Array(0.1, 0.5, 1.0, 2.5)
 "#,
     );
     match res.get_property("weights") {
-        Some(Variant::Array(arr)) => {
+        Some(Variant::PackedFloat32Array(arr)) => {
             assert_eq!(arr.len(), 4);
-            match &arr[0] {
-                Variant::Float(f) => assert!((*f - 0.1).abs() < 1e-5),
-                other => panic!("expected Float, got {other:?}"),
-            }
-            match &arr[2] {
-                Variant::Float(f) => assert!((*f - 1.0).abs() < 1e-5),
-                other => panic!("expected Float, got {other:?}"),
-            }
+            assert!((arr[0] - 0.1).abs() < 1e-5);
+            assert!((arr[2] - 1.0).abs() < 1e-5);
         }
-        other => panic!("expected Array from PackedFloat32Array, got {other:?}"),
+        other => panic!("expected PackedFloat32Array, got {other:?}"),
     }
 }
 
@@ -789,12 +783,12 @@ tags = PackedStringArray("alpha", "beta", "gamma")
 "#,
     );
     match res.get_property("tags") {
-        Some(Variant::Array(arr)) => {
+        Some(Variant::PackedStringArray(arr)) => {
             assert_eq!(arr.len(), 3);
-            assert_eq!(arr[0], Variant::String("alpha".into()));
-            assert_eq!(arr[2], Variant::String("gamma".into()));
+            assert_eq!(arr[0], "alpha");
+            assert_eq!(arr[2], "gamma");
         }
-        other => panic!("expected Array from PackedStringArray, got {other:?}"),
+        other => panic!("expected PackedStringArray, got {other:?}"),
     }
 }
 
@@ -808,13 +802,13 @@ raw = PackedByteArray()
 "#,
     );
     match res.get_property("raw") {
-        Some(Variant::Array(arr)) => {
+        Some(Variant::PackedByteArray(arr)) => {
             assert!(
                 arr.is_empty(),
-                "empty PackedByteArray should produce empty array"
+                "empty PackedByteArray should produce empty packed array"
             );
         }
-        other => panic!("expected empty Array, got {other:?}"),
+        other => panic!("expected empty PackedByteArray, got {other:?}"),
     }
 }
 
@@ -828,24 +822,14 @@ path_points = PackedVector2Array(0, 0, 10, 20, 30, 40)
 "#,
     );
     match res.get_property("path_points") {
-        Some(Variant::Array(arr)) => {
+        Some(Variant::PackedVector2Array(arr)) => {
             assert_eq!(arr.len(), 3, "3 pairs of floats = 3 Vector2 values");
-            match &arr[0] {
-                Variant::Vector2(v) => {
-                    assert_eq!(v.x, 0.0);
-                    assert_eq!(v.y, 0.0);
-                }
-                other => panic!("expected Vector2, got {other:?}"),
-            }
-            match &arr[2] {
-                Variant::Vector2(v) => {
-                    assert_eq!(v.x, 30.0);
-                    assert_eq!(v.y, 40.0);
-                }
-                other => panic!("expected Vector2, got {other:?}"),
-            }
+            assert_eq!(arr[0].x, 0.0);
+            assert_eq!(arr[0].y, 0.0);
+            assert_eq!(arr[2].x, 30.0);
+            assert_eq!(arr[2].y, 40.0);
         }
-        other => panic!("expected Array from PackedVector2Array, got {other:?}"),
+        other => panic!("expected PackedVector2Array, got {other:?}"),
     }
 }
 
@@ -859,18 +843,13 @@ vertices = PackedVector3Array(1, 2, 3, 4, 5, 6)
 "#,
     );
     match res.get_property("vertices") {
-        Some(Variant::Array(arr)) => {
+        Some(Variant::PackedVector3Array(arr)) => {
             assert_eq!(arr.len(), 2, "6 floats / 3 = 2 Vector3 values");
-            match &arr[1] {
-                Variant::Vector3(v) => {
-                    assert_eq!(v.x, 4.0);
-                    assert_eq!(v.y, 5.0);
-                    assert_eq!(v.z, 6.0);
-                }
-                other => panic!("expected Vector3, got {other:?}"),
-            }
+            assert_eq!(arr[1].x, 4.0);
+            assert_eq!(arr[1].y, 5.0);
+            assert_eq!(arr[1].z, 6.0);
         }
-        other => panic!("expected Array from PackedVector3Array, got {other:?}"),
+        other => panic!("expected PackedVector3Array, got {other:?}"),
     }
 }
 
@@ -884,19 +863,14 @@ colors = PackedColorArray(1, 0, 0, 1, 0, 1, 0, 0.5)
 "#,
     );
     match res.get_property("colors") {
-        Some(Variant::Array(arr)) => {
+        Some(Variant::PackedColorArray(arr)) => {
             assert_eq!(arr.len(), 2, "8 floats / 4 = 2 Color values");
-            match &arr[0] {
-                Variant::Color(c) => {
-                    assert_eq!(c.r, 1.0);
-                    assert_eq!(c.g, 0.0);
-                    assert_eq!(c.b, 0.0);
-                    assert_eq!(c.a, 1.0);
-                }
-                other => panic!("expected Color, got {other:?}"),
-            }
+            assert_eq!(arr[0].r, 1.0);
+            assert_eq!(arr[0].g, 0.0);
+            assert_eq!(arr[0].b, 0.0);
+            assert_eq!(arr[0].a, 1.0);
         }
-        other => panic!("expected Array from PackedColorArray, got {other:?}"),
+        other => panic!("expected PackedColorArray, got {other:?}"),
     }
 }
 

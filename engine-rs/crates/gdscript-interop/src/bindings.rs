@@ -90,6 +90,12 @@ pub struct ScriptPropertyInfo {
     pub property_type: VariantType,
     /// The default value for this property.
     pub default_value: Variant,
+    /// Godot `PROPERTY_HINT_*` code (0 = `PROPERTY_HINT_NONE`) derived from an
+    /// `@export*` annotation; drives the inspector editor (pat-nzgdu.5).
+    pub hint: i64,
+    /// Hint string paired with [`hint`](Self::hint), e.g. `"0,100,5"` for
+    /// `@export_range(0,100,5)` or `"Idle,Run"` for `@export_enum("Idle","Run")`.
+    pub hint_string: String,
 }
 
 /// Errors that can occur when interacting with a script instance.
@@ -162,6 +168,25 @@ pub trait ScriptInstance {
 
     /// Remove scene-tree access after a script callback finishes.
     fn clear_scene_access(&mut self) {}
+
+    /// Advances any coroutines suspended on `await` by `delta` seconds, resuming
+    /// those whose frame waits have elapsed. Driven once per frame by the
+    /// SceneTree tick so `await` actually progresses at runtime. Default no-op
+    /// for scripts without coroutine support (pat-nzgdu.6).
+    fn poll_coroutines(&mut self, _delta: f32) {}
+
+    /// Notifies suspended coroutines that a signal named `name` fired with
+    /// `args`, resuming any `await` parked on it and binding the argument(s) as
+    /// the awaited value. Driven by the SceneTree after each `emit_signal` and
+    /// on SceneTreeTimer timeouts. Default no-op (pat-nzgdu.6).
+    fn notify_await_signal(&mut self, _name: &str, _args: &[Variant]) {}
+
+    /// Delivers an engine notification (`what`, a Godot `NOTIFICATION_*` code)
+    /// to the script's `_notification(int what)` virtual, if it overrides it.
+    /// This is how PREDELETE, ENTER_TREE/READY/EXIT_TREE, PAUSED/UNPAUSED,
+    /// PROCESS/PHYSICS_PROCESS, etc. reach user code in Godot. Default no-op
+    /// for scripts without `_notification` support (pat-nzgdu.13).
+    fn notification(&mut self, _what: i64) {}
 }
 
 /// Trait providing scene-tree operations to a running script.
@@ -203,8 +228,34 @@ pub trait SceneAccess {
     /// Mark a node for deferred deletion (removed at end of frame).
     fn queue_free(&mut self, _node_id: u64) {}
 
+    /// Queue a method call on `node_id` for end-of-frame (Godot `call_deferred`).
+    fn call_deferred(&mut self, _node_id: u64, _method: &str, _args: &[Variant]) {}
+
+    /// Create a SceneTreeTimer (Godot `SceneTree.create_timer`).
+    ///
+    /// Returns `(timer_id, signal_name)` used with `await` / `notify_await_signal`.
+    fn create_timer(&mut self, _seconds: f64) -> Option<(u64, String)> {
+        None
+    }
+
+    /// Advance scene timers by `delta` and return fired signal names.
+    fn process_timers(&mut self, _delta: f64) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Return the class name of a node.
     fn get_class(&self, _node: u64) -> Option<String> {
+        None
+    }
+
+    /// Instantiate a packed scene (`.tscn`/`.scn`) referenced by `path`,
+    /// building its node subtree and returning the root node's raw ObjectId.
+    ///
+    /// The returned subtree lives in the tree but is not yet parented to the
+    /// caller — the script is expected to follow up with `add_child`, mirroring
+    /// Godot's `preload("x.tscn").instantiate()` spawn pattern. Returns `None`
+    /// if the scene cannot be loaded (Godot: `load` yields `null`).
+    fn instantiate_packed_scene(&mut self, _path: &str) -> Option<u64> {
         None
     }
 
@@ -258,5 +309,33 @@ pub trait SceneAccess {
         } else {
             (0.0, 0.0)
         }
+    }
+
+    /// Analog strength of `action` in `[0, 1]` (pat-nzgdu.9).
+    ///
+    /// The default treats an action as digital: `1.0` while any mapped input is
+    /// pressed, else `0.0`. The runtime accessor overrides this with real
+    /// analog/deadzone-scaled magnitudes for gamepad axes.
+    fn get_action_strength(&self, action: &str) -> f32 {
+        if self.is_input_action_pressed(action) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Godot `Input.get_axis(neg, pos)` == `strength(pos) - strength(neg)`
+    /// (pat-nzgdu.9). Derives from [`Self::get_action_strength`], so digital
+    /// actions yield `-1.0` / `0.0` / `1.0`.
+    fn get_input_axis(&self, neg: &str, pos: &str) -> f32 {
+        self.get_action_strength(pos) - self.get_action_strength(neg)
+    }
+
+    /// Returns `true` if any input mapped to `action` was released this frame
+    /// (mirror of [`Self::is_input_action_just_pressed`]). The default is
+    /// `false`; the runtime accessor overrides it from the frame's
+    /// just-released set. (pat-nzgdu.9)
+    fn is_input_action_just_released(&self, _action: &str) -> bool {
+        false
     }
 }

@@ -1104,6 +1104,16 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                         workers,
                         "planner skipped: queue healthy or swarm saturated"
                     );
+                    // Gardener: while the planner is idle, spend a rate-limited
+                    // cycle on queue hygiene (dilution/blockage/staleness
+                    // digest) instead of doing nothing.
+                    if gardener_due(
+                        bg_planner.last_gardener_run.map(|t| t.elapsed()),
+                        coord.config.gardener_interval_seconds,
+                    ) {
+                        bg_planner.last_gardener_run = Some(Instant::now());
+                        let _ = run_gardener(&coord);
+                    }
                 }
 
                 // Step 4: Harvest completed background planner thread
@@ -1390,6 +1400,8 @@ struct BackgroundPlannerState {
     pending_recommendations: Vec<planner::Recommendation>,
     last_deep_run: Option<Instant>,
     work_exhausted: bool,
+    /// Last gardener (queue-hygiene) pass while the planner was idle.
+    last_gardener_run: Option<Instant>,
 }
 
 impl BackgroundPlannerState {
@@ -1399,6 +1411,7 @@ impl BackgroundPlannerState {
             pending_recommendations: Vec::new(),
             last_deep_run: None,
             work_exhausted: false,
+            last_gardener_run: None,
         }
     }
 }
@@ -1507,6 +1520,33 @@ fn maintain_planner_pane(
             tracing::warn!(error = %e, "planner pane restart failed");
         }
     }
+}
+
+/// Gardener cadence: run when enabled (interval > 0) and the interval has
+/// elapsed since the last pass (or it never ran). Takes an elapsed Duration
+/// rather than an Instant so tests can't hit Instant-underflow on low-uptime
+/// machines (macOS Instants are time-since-boot).
+fn gardener_due(elapsed_since_last: Option<Duration>, interval_seconds: u64) -> bool {
+    interval_seconds > 0
+        && elapsed_since_last.map_or(true, |e| e >= Duration::from_secs(interval_seconds))
+}
+
+/// Queue-hygiene pass run while the planner is idle: digest of P0 dilution,
+/// blocked share, staleness, and the highest-impact blockers. Logged every
+/// pass; boss-notified only when red flags are present.
+fn run_gardener(coord: &coordinator::Coordinator) -> Option<String> {
+    let hygiene = {
+        let conn = db::open(&coord.config.project_root).ok()?;
+        db::queue_hygiene(&conn, coord.config.gardener_stale_days).ok()?
+        // conn dropped here — frees the DB for br subprocess writes
+    };
+    let flags = planner::hygiene_flags(&hygiene, coord.config.gardener_p0_dilution_threshold);
+    let digest = planner::hygiene_digest(&hygiene, &flags);
+    println!("{digest}");
+    if !flags.is_empty() {
+        coord.notify_boss(&digest);
+    }
+    Some(digest)
 }
 
 /// Decide whether queue replenishment should run at all.
@@ -1803,12 +1843,32 @@ fn ensure_mail_server(orch_root: &std::path::Path, mail_session: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalized_worker_command, planner_boot_command, planner_capture_shows_rate_limit,
-        planner_loop_command, planner_replenishment_needed, resolve_dependency_edges,
-        set_acceptance_with_retry,
+        gardener_due, normalized_worker_command, planner_boot_command,
+        planner_capture_shows_rate_limit, planner_loop_command, planner_replenishment_needed,
+        resolve_dependency_edges, set_acceptance_with_retry,
     };
     use crate::prd_parser::BeadSpec;
     use std::cell::Cell;
+
+    /// Gardener cadence: interval 0 disables; never-ran fires; a recent run
+    /// suppresses until the interval elapses. Uses plain Durations — Instant
+    /// arithmetic here would panic on machines with uptime below the offset
+    /// (macOS Instants are time-since-boot, and reboots are this repo's
+    /// standard AMFI-wedge recovery).
+    #[test]
+    fn test_gardener_due_cadence() {
+        use std::time::Duration;
+        assert!(!gardener_due(None, 0), "interval 0 disables the gardener");
+        assert!(gardener_due(None, 3600), "never ran → due");
+        assert!(
+            !gardener_due(Some(Duration::from_secs(60)), 3600),
+            "just ran → not due"
+        );
+        assert!(
+            gardener_due(Some(Duration::from_secs(7200)), 3600),
+            "interval elapsed → due"
+        );
+    }
 
     // ─── A2: acceptance-criteria update retry ────────────────────────────
 

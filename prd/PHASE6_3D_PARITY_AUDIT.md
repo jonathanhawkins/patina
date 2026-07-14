@@ -496,14 +496,16 @@ This lane needs the clearest separation between:
 - Upstream source family: `scene/3d/physics/ray_cast_3d.*`,
   `scene/3d/physics/shape_cast_3d.*`
 - Patina evidence:
-  - low-level query support only via `gdphysics3d::query`
-- Current classification: `Missing or deferred at node/runtime layer`
+  - low-level query objects via `gdphysics3d::query` (measured)
+  - scene helpers `gdscene::raycast3d` / `gdscene::shapecast3d` with unit tests
+  - ClassDB registration of `RayCast3D` / `ShapeCast3D` under `Node3D`
+  - integration: `engine-rs/tests/raycast3d_shapecast3d_parity_test.rs`
+- Current classification: `Measured` (bounded node runtime slice)
 - Reason:
-  - This audit found low-level query objects, but did not find corresponding
-    `RayCast3D` / `ShapeCast3D` node registration, defaults, scene integration,
-    or parity tests.
-  - The correct next bead here is a classification/measurement bead, not a
-    duplicate of the existing low-level query work.
+  - Nodes expose enabled/target_position/mask/exclude_parent, force_*_update,
+    is_colliding, collider/point/normal accessors, and exception lists.
+  - Evidence is bounded to deterministic software-physics queries, not editor
+    debug drawing or every upstream property.
 
 #### physics joints
 
@@ -558,6 +560,20 @@ These are supported by direct tests or Phase 6 report evidence:
 - representative 3D fixture loading
 - aggregate 3D report artifacts
 - low-level 3D ray and shape query objects
+- `RayCast3D` / `ShapeCast3D` scene nodes over those queries (ClassDB + parity test)
+
+### scene/3d/physics — Physics Families
+
+| Upstream Family | Patina Area | Current Status | Evidence |
+|-----------------|-------------|----------------|----------|
+| `Area3D` | `gdphysics3d::area3d` | Implemented, not yet measured | overlap storage; no body_entered runtime signal parity test |
+| `PhysicsRayQueryParameters3D` | `gdphysics3d::query::PhysicsRayQuery3D` | Measured | `physics_ray_shape_query3d_test.rs` |
+| `PhysicsShapeQueryParameters3D` | `gdphysics3d::query::PhysicsShapeQuery3D` | Measured | `physics_ray_shape_query3d_test.rs` |
+| `RayCast3D` | `gdscene::raycast3d` + ClassDB | Measured | unit tests + `raycast3d_shapecast3d_parity_test.rs` |
+| `ShapeCast3D` | `gdscene::shapecast3d` + ClassDB | Measured | unit tests + `raycast3d_shapecast3d_parity_test.rs` |
+
+Note: low-level query objects remain a distinct measured layer from the
+query-object layer; node parity is measured separately above.
 
 ### Implemented, not yet cleanly measured at parity level
 
@@ -575,15 +591,45 @@ These appear in local code or docs, but need explicit parity evidence mapped:
 
 ### Deferred or explicitly limited
 
-These are already called out as limited or absent and should not be represented
-as parity gaps for the bounded Phase 6 slice unless project scope changes:
+These are already called out as limited or absent and should not be represented as parity gaps for the bounded Phase 6 slice unless project scope changes.
+No Phase 6 doc should imply parity for deferred systems without measured evidence.
 
 - runtime `NavigationAgent3D`
 - `SoftBody3D`
 - `VehicleBody3D`
 - `SpringArm3D`
+- `ConeTwistJoint3D`
+- `Generic6DOFJoint3D`
+- `LightmapGI` (config stubs only; full baking out of slice)
+- data-model only (no integrated runtime solver parity): `PinJoint3D`, `HingeJoint3D`, `SliderJoint3D`
 - broad GPU / post-processing parity
 - full gameplay-behavior parity for 3D projects
+
+### scene/3d — Node and Rendering Families
+
+| Upstream Family | Patina Area | Current Status | Evidence |
+|-----------------|-------------|----------------|----------|
+| `Node3D` | `gdscene::node3d` | Measured | transform propagation tests |
+| `Camera3D` | `gdscene`, `gdrender3d` | Measured | fixture + render parity |
+| `MeshInstance3D` | `gdserver3d`, `gdrender3d` | Measured | software render path |
+| `SoftBody3D` | — | Deferred | outside Phase 6 slice |
+| `VehicleBody3D` | — | Deferred | outside Phase 6 slice |
+| `SpringArm3D` | `gdscene::springarm3d` | Deferred | helper exists; broader parity limited |
+| `NavigationAgent3D` | — | Deferred | runtime pathfinding out of slice |
+| `LightmapGI` | `gdserver3d::gi` | Deferred | config stubs only |
+
+### Render Server / Material Families
+
+| Upstream Family | Patina Area | Current Status | Evidence |
+|-----------------|-------------|----------------|----------|
+| `RenderingServer3D` | `gdserver3d`, `gdrender3d` | Measured | software path tests |
+| `StandardMaterial3D` | `gdserver3d::material` | Implemented, not yet measured | albedo/shading slice |
+| `ShaderMaterial3D` | `gdrender3d::shader` | Measured | narrow override tests |
+| `ConeTwistJoint3D` | `gdphysics3d::joint` | Deferred | no full runtime parity claim |
+| `Generic6DOFJoint3D` | `gdphysics3d::joint` | Deferred | no full runtime parity claim |
+| `PinJoint3D` | `gdphysics3d::joint` | Deferred | data-model only |
+| `HingeJoint3D` | `gdphysics3d::joint` | Deferred | data-model only |
+| `SliderJoint3D` | `gdphysics3d::joint` | Deferred | data-model only |
 
 ## 3D Fixture Corpus Definition
 

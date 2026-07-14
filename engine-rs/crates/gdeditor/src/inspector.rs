@@ -1229,6 +1229,16 @@ impl PropertyEditor {
             VariantType::Dictionary => Self::Dictionary,
             VariantType::Callable => Self::Callable,
             VariantType::Resource => Self::ResourcePicker,
+            // Packed arrays edit through the generic array widget.
+            VariantType::PackedByteArray
+            | VariantType::PackedInt32Array
+            | VariantType::PackedInt64Array
+            | VariantType::PackedFloat32Array
+            | VariantType::PackedFloat64Array
+            | VariantType::PackedStringArray
+            | VariantType::PackedVector2Array
+            | VariantType::PackedVector3Array
+            | VariantType::PackedColorArray => Self::Array,
         }
     }
 

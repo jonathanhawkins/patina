@@ -42,8 +42,11 @@ pub mod world;
 pub mod body3d;
 pub mod collision3d;
 pub mod shape3d;
+pub mod softbody3d;
 pub mod vehicle3d;
 pub mod world3d;
+
+pub use softbody3d::{SoftBody3D, SoftBodyId3D};
 
 // Re-export key types for convenience.
 pub use area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};
@@ -57,7 +60,7 @@ pub use shape::Shape2D;
 pub use tilemap_collision::{
     collect_collision_tiles, tilemap_to_physics, TileCollisionInfo, TileMapCollisionResult,
 };
-pub use world::{CollisionEvent, ContactState, PhysicsWorld2D, RaycastHit};
+pub use world::{CollisionEvent, ContactState, PhysicsWorld2D, RaycastHit, DEFAULT_GRAVITY_2D};
 
 // 3D re-exports.
 pub use body3d::{BodyId3D, BodyType3D, PhysicsBody3D};

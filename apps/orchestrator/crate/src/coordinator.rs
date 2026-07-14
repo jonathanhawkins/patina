@@ -77,6 +77,12 @@ pub struct Coordinator {
     identity_cache: Mutex<HashMap<String, (String, Instant)>>,
     /// Last time a bead was reclaimed from each worker (D4 reclaim hysteresis).
     last_reclaim: Mutex<HashMap<String, Instant>>,
+    /// Last time a bead close succeeded via any path (close-stall detection).
+    last_close: Mutex<Option<Instant>>,
+    /// Coordinator start time — close-stall baseline before the first close.
+    started_at: Instant,
+    /// Last close-stall operator notification (rate limiting).
+    last_stall_notify: Mutex<Option<Instant>>,
 }
 
 impl Coordinator {
@@ -114,6 +120,9 @@ impl Coordinator {
             orphan_strikes: Mutex::new(HashMap::new()),
             identity_cache: Mutex::new(HashMap::new()),
             last_reclaim: Mutex::new(HashMap::new()),
+            last_close: Mutex::new(None),
+            started_at: Instant::now(),
+            last_stall_notify: Mutex::new(None),
         })
     }
 
@@ -246,6 +255,7 @@ impl Coordinator {
                     tracing::info!(bead = %vr.bead_id, "Stale bead verified PASSED — closing as done");
                     match br::close_bead(&vr.bead_id, "stale-recovery: acceptance tests passed") {
                         Ok(_) => {
+                            self.record_close();
                             processed += 1;
                         }
                         Err(e) => {
@@ -523,6 +533,7 @@ impl Coordinator {
         for id in &ids {
             match br::close_bead(id, "Self-completed by worker (pull mode)") {
                 Ok(_) => {
+                    self.record_close();
                     tracing::info!(bead = %id, "Swept self-completed bead → closed");
                     closed += 1;
                 }
@@ -926,6 +937,34 @@ impl Coordinator {
             map
         };
 
+        // Close-stall backpressure: when nothing has closed for the configured
+        // window while THIS swarm's workers are saturated with claimed work
+        // AND finished work is queued for verification, the verifier lane is
+        // wedged — re-prompting churns tokens and reclaiming reverts completed
+        // work stuck in the pipe. A drought with an EMPTY verify queue is the
+        // opposite failure (workers never started — swallowed prompts), where
+        // the re-prompt is the remedy, so suppression requires queued > 0.
+        // Fresh assignments to genuinely idle workers always stay enabled so
+        // backpressure can never deadlock the swarm.
+        let worker_names: Vec<String> = workers
+            .iter()
+            .filter(|w| {
+                !w.worker_name.is_empty() && !self.config.is_reserved_verifier_pane(w.pane_index)
+            })
+            .map(|w| w.worker_name.clone())
+            .collect();
+        let in_progress_count = {
+            let db = self.open_db()?;
+            db::count_in_progress_for_workers(&db, &worker_names)?
+        };
+        let close_stalled = self.close_stalled(in_progress_count, worker_names.len());
+        let queued_verifications = self.pending_verifications.lock().unwrap().len();
+        let stall_suppression =
+            stall_suppression_active(close_stalled, queued_verifications, skip_completion_grace);
+        if close_stalled {
+            self.maybe_notify_close_stall(in_progress_count, worker_names.len());
+        }
+
         for w in &workers {
             if self.config.is_reserved_verifier_pane(w.pane_index) {
                 continue;
@@ -993,18 +1032,25 @@ impl Coordinator {
                             );
                         }
 
-                        // Check if should reclaim
-                        if should_reclaim_idle(
-                            bead,
-                            age,
-                            stale_threshold,
-                            self.config.idle_reclaim_grace_seconds,
-                            session,
-                            window,
-                            w.pane_index,
-                            &w.worker_name,
-                            &self,
-                        ) {
+                        // Check if should reclaim. Under stall suppression the
+                        // "stale" assignment is usually a completion stuck in
+                        // the wedged verifier lane — reclaiming reverts done
+                        // work. Recovery mode and an empty verify queue both
+                        // disable suppression (see stall_suppression_active).
+                        let allow_reclaim = !stall_suppression;
+                        if allow_reclaim
+                            && should_reclaim_idle(
+                                bead,
+                                age,
+                                stale_threshold,
+                                self.config.idle_reclaim_grace_seconds,
+                                session,
+                                window,
+                                w.pane_index,
+                                &w.worker_name,
+                                &self,
+                            )
+                        {
                             // D4: detect a repeat reclaim from this worker within
                             // the hysteresis window — that's the reclaim↔reassign
                             // ping-pong signature of a genuinely stuck worker.
@@ -1043,6 +1089,15 @@ impl Coordinator {
                             // Fall through to fresh assignment
                         } else {
                             // Not reclaimable — check reprompt
+                            if stall_suppression {
+                                tracing::info!(
+                                    pane = w.pane_index,
+                                    worker = %w.worker_name,
+                                    bead = %bead.id,
+                                    "close-stall backpressure: suppressing re-prompt"
+                                );
+                                continue;
+                            }
                             if self.should_skip_reprompt(&w.worker_name, &bead.id) {
                                 continue;
                             }
@@ -1103,8 +1158,8 @@ impl Coordinator {
             }
 
             // Worker needs a fresh assignment
-            let ready = self.ensure_ready_work()?;
-            let next = ready.iter().find(|b| !selected_beads.contains(&b.id));
+            let (ready, busy_crates) = self.ready_work_context()?;
+            let next = pick_from_ready(&ready, &busy_crates, &selected_beads);
 
             let bead = match next {
                 Some(b) => b.clone(),
@@ -1234,13 +1289,19 @@ impl Coordinator {
         // on the worker being otherwise idle (Step 2).
         tracing::info!(bead = %completed_bead, "Closing completed bead");
         match br::close_bead(completed_bead, "completed") {
-            Ok(_) => {}
+            Ok(_) => self.record_close(),
             Err(e) => {
                 let msg = format!("{e}").to_lowercase();
                 if msg.contains("already closed") || msg.contains("not found") {
                     // Already closed, or still not found even after br::close_bead's
                     // automatic sync-and-retry (bead may only exist in agent mail,
                     // not in any JSONL). Treat as closed and continue.
+                    // "Already closed" (e.g. an operator's manual br close) is
+                    // still close-flow evidence — record it so a latched
+                    // close-stall doesn't survive real progress.
+                    if msg.contains("already closed") {
+                        self.record_close();
+                    }
                     if msg.contains("not found") {
                         tracing::warn!(
                             bead = %completed_bead,
@@ -1282,12 +1343,12 @@ impl Coordinator {
         // JSONL export happens once at end-of-cycle in main.rs (br::sync).
 
         let t = std::time::Instant::now();
-        let ready_beads = self.ensure_ready_work()?;
+        let (ready_beads, busy_crates) = self.ready_work_context()?;
         tracing::info!(
             elapsed_ms = t.elapsed().as_millis() as u64,
             "reassign: ensure_ready_work"
         );
-        let next = ready_beads.into_iter().next();
+        let next = pick_from_ready(&ready_beads, &busy_crates, &[]).cloned();
 
         let next_bead = match next {
             Some(b) => b,
@@ -1675,6 +1736,73 @@ impl Coordinator {
         }
 
         Ok(recovered)
+    }
+
+    /// Record a successful bead close (any path). Feeds close-stall detection.
+    fn record_close(&self) {
+        *self.last_close.lock().unwrap() = Some(Instant::now());
+    }
+
+    /// Time since the last successful close, falling back to coordinator
+    /// startup so a fresh launch doesn't instantly alarm.
+    fn since_last_close(&self) -> Duration {
+        self.last_close
+            .lock()
+            .unwrap()
+            .map(|t| t.elapsed())
+            .unwrap_or_else(|| self.started_at.elapsed())
+    }
+
+    /// Close-stall: the swarm holds claimed work but nothing has closed for
+    /// the configured backpressure window — the verifier lane is wedged.
+    pub fn close_stalled(&self, in_progress: usize, workers: usize) -> bool {
+        close_stall_active(
+            self.since_last_close(),
+            self.config.close_stall_backpressure_seconds,
+            in_progress,
+            workers,
+        )
+    }
+
+    /// Alert the operator about a close-stall, rate-limited so a long wedge
+    /// doesn't flood the boss pane.
+    fn maybe_notify_close_stall(&self, in_progress: usize, workers: usize) {
+        {
+            let last = self.last_stall_notify.lock().unwrap();
+            if let Some(t) = *last {
+                if t.elapsed() < Duration::from_secs(self.config.close_stall_renotify_seconds) {
+                    return;
+                }
+            }
+        }
+        *self.last_stall_notify.lock().unwrap() = Some(Instant::now());
+        let mins = self.since_last_close().as_secs() / 60;
+        let queued = self.pending_verifications.lock().unwrap().len();
+        let diagnosis = if queued > 0 {
+            "Verifier lane is likely wedged — suppressing re-prompts and reclaims until a \
+             close lands. Check .orchestrator/rust-build.lock.info and the verifier pane."
+        } else {
+            "Verify queue is EMPTY — workers may never have started (swallowed prompts?). \
+             Re-prompts stay enabled; check the worker panes."
+        };
+        let msg = format!(
+            "CLOSE-STALL: no bead has closed in {mins}m with {in_progress} in_progress \
+             across {workers} workers ({queued} verifications queued). {diagnosis}"
+        );
+        tracing::warn!("{msg}");
+        self.notify_boss(&msg);
+    }
+
+    /// Ready list plus busy-crate context for collision-aware selection.
+    fn ready_work_context(
+        &self,
+    ) -> Result<(Vec<db::BeadInfo>, std::collections::HashSet<String>)> {
+        let ready = self.ensure_ready_work()?;
+        let busy = {
+            let db = self.open_db()?;
+            db::busy_crate_labels(&db)?
+        };
+        Ok((ready, busy))
     }
 
     fn ensure_ready_work(&self) -> Result<Vec<db::BeadInfo>> {
@@ -2077,6 +2205,61 @@ fn within_hysteresis(since_last_reclaim: Duration, window_seconds: u64) -> bool 
     window_seconds > 0 && since_last_reclaim < Duration::from_secs(window_seconds)
 }
 
+/// Whether close-stall suppression (skip re-prompts and reclaims) applies.
+/// Requires evidence the pipeline actually holds finished work — queued
+/// verifications — because a close drought with an EMPTY verify queue is the
+/// swallowed-prompt failure mode, where the re-prompt is the remedy, not the
+/// disease. Recovery mode always bypasses suppression.
+fn stall_suppression_active(
+    close_stalled: bool,
+    queued_verifications: usize,
+    recovery_mode: bool,
+) -> bool {
+    close_stalled && queued_verifications > 0 && !recovery_mode
+}
+
+/// Close-stall predicate: nothing closed for `threshold_seconds` while the
+/// swarm holds at least as many in_progress beads as workers (i.e. closes
+/// should be flowing). `threshold_seconds` 0 disables detection entirely.
+fn close_stall_active(
+    since_last_close: Duration,
+    threshold_seconds: u64,
+    in_progress: usize,
+    workers: usize,
+) -> bool {
+    threshold_seconds > 0
+        && workers > 0
+        && in_progress >= workers
+        && since_last_close >= Duration::from_secs(threshold_seconds)
+}
+
+/// Pick the next bead from the priority-ordered ready list.
+///
+/// Within the head priority band, prefer a bead whose `crate:*` labels don't
+/// intersect the crates in_progress work is already editing — two workers in
+/// one crate is how cross-worker compile breakage cascades and reopens closed
+/// beads. Never crosses a priority band for that preference (a colliding P0
+/// still beats a collision-free P1), and falls back to the band head when
+/// every candidate collides: a collision is cheaper than a starved worker.
+fn pick_from_ready<'a>(
+    ready: &'a [db::BeadInfo],
+    busy_crates: &std::collections::HashSet<String>,
+    exclude: &[String],
+) -> Option<&'a db::BeadInfo> {
+    let mut head: Option<&db::BeadInfo> = None;
+    for b in ready.iter().filter(|b| !exclude.contains(&b.id)) {
+        match head {
+            None => head = Some(b),
+            Some(h) if b.priority != h.priority => break,
+            Some(_) => {}
+        }
+        if b.crate_labels.iter().all(|l| !busy_crates.contains(l)) {
+            return Some(b);
+        }
+    }
+    head
+}
+
 /// Check if an idle worker's stale assignment should be reclaimed.
 fn should_reclaim_idle(
     bead: &db::BeadInfo,
@@ -2097,8 +2280,33 @@ fn should_reclaim_idle(
     }
 
     let capture = tmux::capture_pane(session, window, pane_index, 60).unwrap_or_default();
+    reclaim_decision(bead, age, grace_seconds, &capture, worker_name, coordinator)
+}
 
-    if worker::has_active_work(&capture) {
+/// Decision core of [`should_reclaim_idle`], with the pane capture injected
+/// so tests can drive every branch without a live tmux session.
+fn reclaim_decision(
+    bead: &db::BeadInfo,
+    age: u64,
+    grace_seconds: u64,
+    capture: &str,
+    worker_name: &str,
+    coordinator: &Coordinator,
+) -> bool {
+    // Never reclaim a bead whose completion is actively being verified — the
+    // work is done and in the pipe; reclaiming reverts it and churns the
+    // queue (the verifier-thrash failure mode).
+    if coordinator
+        .pending_verifications
+        .lock()
+        .unwrap()
+        .contains_key(&bead.id)
+    {
+        tracing::debug!(bead = %bead.id, "skip reclaim: verification pending");
+        return false;
+    }
+
+    if worker::has_active_work(capture) {
         return false;
     }
 
@@ -2187,7 +2395,141 @@ mod tests {
             orphan_strikes: Mutex::new(HashMap::new()),
             identity_cache: Mutex::new(HashMap::new()),
             last_reclaim: Mutex::new(HashMap::new()),
+            last_close: Mutex::new(None),
+            started_at: Instant::now(),
+            last_stall_notify: Mutex::new(None),
         }
+    }
+
+    fn ready_bead(id: &str, priority: i32, crates: &[&str]) -> db::BeadInfo {
+        db::BeadInfo {
+            id: id.to_string(),
+            title: id.to_string(),
+            description: String::new(),
+            status: db::BeadStatus::Open,
+            assignee: None,
+            updated_at: None,
+            priority,
+            crate_labels: crates.iter().map(|s| s.to_string()).collect(),
+            unblock_impact: 0,
+        }
+    }
+
+    /// Close-stall fires only when the swarm is saturated AND the close
+    /// drought exceeds the threshold; 0-threshold disables.
+    #[test]
+    fn close_stall_activates_only_when_saturated_and_stale() {
+        let drought = Duration::from_secs(1000);
+        assert!(close_stall_active(drought, 900, 5, 5));
+        assert!(
+            close_stall_active(drought, 900, 7, 5),
+            "over-saturated swarm still stalls"
+        );
+        assert!(!close_stall_active(drought, 0, 5, 5), "threshold 0 disables");
+        assert!(
+            !close_stall_active(Duration::from_secs(100), 900, 5, 5),
+            "recent close means no stall"
+        );
+        assert!(
+            !close_stall_active(drought, 900, 3, 5),
+            "under-saturated swarm: closes aren't expected to flow"
+        );
+        assert!(!close_stall_active(drought, 900, 0, 0), "no workers, no stall");
+    }
+
+    /// Collision-aware pick: prefer a collision-free bead within the head
+    /// priority band.
+    #[test]
+    fn pick_prefers_collision_free_within_priority_band() {
+        let ready = vec![
+            ready_bead("pat-a", 0, &["crate:gdeditor"]),
+            ready_bead("pat-b", 0, &["crate:gdscene"]),
+            ready_bead("pat-c", 1, &[]),
+        ];
+        let busy: HashSet<String> = ["crate:gdeditor".to_string()].into_iter().collect();
+        assert_eq!(pick_from_ready(&ready, &busy, &[]).unwrap().id, "pat-b");
+    }
+
+    /// Priority always beats collision avoidance: a colliding P0 is taken
+    /// over a collision-free P1.
+    #[test]
+    fn pick_never_crosses_priority_band_for_collision_avoidance() {
+        let ready = vec![
+            ready_bead("pat-p0", 0, &["crate:gdeditor"]),
+            ready_bead("pat-p1", 1, &[]),
+        ];
+        let busy: HashSet<String> = ["crate:gdeditor".to_string()].into_iter().collect();
+        assert_eq!(pick_from_ready(&ready, &busy, &[]).unwrap().id, "pat-p0");
+    }
+
+    /// Beads without crate labels are trivially collision-free; head order
+    /// is preserved when nothing collides.
+    #[test]
+    fn pick_unlabeled_head_wins_immediately() {
+        let ready = vec![
+            ready_bead("pat-a", 0, &[]),
+            ready_bead("pat-b", 0, &["crate:free"]),
+        ];
+        let busy: HashSet<String> = HashSet::new();
+        assert_eq!(pick_from_ready(&ready, &busy, &[]).unwrap().id, "pat-a");
+    }
+
+    /// Exclusions are skipped entirely; empty/fully-excluded lists yield None.
+    #[test]
+    fn pick_respects_exclusions_and_empty_list() {
+        let ready = vec![ready_bead("pat-a", 0, &[]), ready_bead("pat-b", 0, &[])];
+        let busy: HashSet<String> = HashSet::new();
+        let excl = vec!["pat-a".to_string()];
+        assert_eq!(pick_from_ready(&ready, &busy, &excl).unwrap().id, "pat-b");
+        assert!(pick_from_ready(&[], &busy, &[]).is_none());
+        let all = vec!["pat-a".to_string(), "pat-b".to_string()];
+        assert!(pick_from_ready(&ready, &busy, &all).is_none());
+    }
+
+    /// A bead whose completion is mid-verification must never be reclaimed —
+    /// reclaiming reverts finished work while the verifier lane is busy or
+    /// wedged (the verifier-thrash failure mode). The capture used here DOES
+    /// warrant a reclaim on its own (idle/done pattern), so the first assert
+    /// proves the test is not vacuous and the second isolates the guard.
+    #[test]
+    fn reclaim_skips_bead_with_pending_verification() {
+        let coord = test_coordinator();
+        let mut bead = ready_bead("pat-pending", 0, &[]);
+        bead.status = db::BeadStatus::InProgress;
+        bead.assignee = Some("WorkerA".to_string());
+        let capture = "bead implemented and reported.\nwaiting for next assignment";
+
+        assert!(
+            reclaim_decision(&bead, 9999, 30, capture, "WorkerA", &coord),
+            "sanity: without a pending verification this capture must reclaim"
+        );
+
+        coord
+            .pending_verifications
+            .lock()
+            .unwrap()
+            .insert("pat-pending".to_string(), Instant::now());
+        assert!(
+            !reclaim_decision(&bead, 9999, 30, capture, "WorkerA", &coord),
+            "pending verification must veto the reclaim"
+        );
+    }
+
+    /// Suppression needs all three: an active close-stall, queued
+    /// verifications (evidence work is stuck in the pipe, not
+    /// never-started), and no recovery override.
+    #[test]
+    fn stall_suppression_requires_queued_verifications_and_no_recovery() {
+        assert!(stall_suppression_active(true, 3, false));
+        assert!(
+            !stall_suppression_active(true, 0, false),
+            "empty verify queue = swallowed-prompt mode; re-prompts must flow"
+        );
+        assert!(
+            !stall_suppression_active(true, 3, true),
+            "recovery mode bypasses suppression"
+        );
+        assert!(!stall_suppression_active(false, 3, false));
     }
 
     /// pat-f6ndj: the live verify lane must STOP launching verifies once the

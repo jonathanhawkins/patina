@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use gdcore::math3d::{Basis, Transform3D};
 use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,14 @@ pub enum TrackType {
     /// Keyframe values should be `Variant::Dictionary` with keys:
     /// `"stream"` (resource path), `"start_offset"` (float), `"end_offset"` (float).
     Audio,
+    /// Animates a `Node3D`'s position (`Variant::Vector3`, linear) — pat-u3l8c.95.
+    Position3D,
+    /// Animates a `Node3D`'s rotation (`Variant::Quaternion`, shortest-path slerp).
+    Rotation3D,
+    /// Animates a `Node3D`'s scale (`Variant::Vector3`, linear).
+    Scale3D,
+    /// Animates a mesh blend-shape weight (`Variant::Float`).
+    BlendShape,
 }
 
 impl TrackType {
@@ -100,6 +109,10 @@ impl TrackType {
             "property" => Some(Self::Property),
             "method" => Some(Self::Method),
             "audio" => Some(Self::Audio),
+            "position_3d" => Some(Self::Position3D),
+            "rotation_3d" => Some(Self::Rotation3D),
+            "scale_3d" => Some(Self::Scale3D),
+            "blend_shape" => Some(Self::BlendShape),
             _ => None,
         }
     }
@@ -110,6 +123,10 @@ impl TrackType {
             Self::Property => "property",
             Self::Method => "method",
             Self::Audio => "audio",
+            Self::Position3D => "position_3d",
+            Self::Rotation3D => "rotation_3d",
+            Self::Scale3D => "scale_3d",
+            Self::BlendShape => "blend_shape",
         }
     }
 }
@@ -334,6 +351,23 @@ impl Animation {
         }
         results
     }
+
+    /// Like [`sample_all`](Self::sample_all) but also returns each track's
+    /// `node_path`, so callers can resolve the target node (pat-u3l8c.94).
+    /// Yields `(node_path, property_path, value)` triples.
+    pub fn sample_all_targeted(&self, time: f64) -> Vec<(String, String, Variant)> {
+        let mut results = Vec::new();
+        for track in &self.tracks {
+            if let Some(value) = track.sample(time) {
+                results.push((
+                    track.node_path.clone(),
+                    track.property_path.clone(),
+                    value,
+                ));
+            }
+        }
+        results
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +393,17 @@ pub struct AnimationPlayer {
     ping_pong_forward: bool,
     /// Active crossfade blend state (if any).
     blend_state: Option<BlendState>,
+    /// Property path of the track consumed as root motion (Godot's
+    /// `AnimationMixer.root_motion_track`). When set, this track is not applied
+    /// as an absolute node property; its per-frame position delta is exposed
+    /// via [`consume_root_motion`](AnimationPlayer::consume_root_motion) and
+    /// applied to the owner node's transform instead.
+    pub root_motion_track: Option<String>,
+    /// Node path that track `node_path`s resolve against, relative to the
+    /// player's owner node (Godot's `AnimationMixer.root_node`, pat-u3l8c.94).
+    /// Defaults to `"."` (the owner node itself); set to `".."` for Godot's
+    /// parent-relative default. An empty track `node_path` targets this node.
+    pub root_node: String,
 }
 
 /// Tracks an in-progress crossfade between two animations.
@@ -401,6 +446,8 @@ impl AnimationPlayer {
             autoplay: None,
             ping_pong_forward: true,
             blend_state: None,
+            root_motion_track: None,
+            root_node: ".".to_string(),
         }
     }
 
@@ -608,11 +655,175 @@ impl AnimationPlayer {
 
         result
     }
+
+    /// Like [`get_current_values`](Self::get_current_values) but preserves each
+    /// track's `node_path` so callers can resolve the target node (pat-u3l8c.94).
+    /// Returns `(node_path, property_path, value)` triples; crossfade blending
+    /// matches tracks by `(node_path, property_path)`.
+    pub fn get_current_values_targeted(&self) -> Vec<(String, String, Variant)> {
+        let to_anim = match self.current.as_ref().and_then(|n| self.animations.get(n)) {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        let to_values = to_anim.sample_all_targeted(self.position);
+
+        let bs = match &self.blend_state {
+            Some(bs) => bs,
+            None => return to_values,
+        };
+        let from_anim = match self.animations.get(&bs.from_animation) {
+            Some(a) => a,
+            None => return to_values,
+        };
+        let factor = bs.blend_factor();
+        if factor >= 1.0 {
+            return to_values;
+        }
+        let from_values = from_anim.sample_all_targeted(bs.from_position);
+        let from_map: HashMap<(&str, &str), &Variant> = from_values
+            .iter()
+            .map(|(n, p, v)| ((n.as_str(), p.as_str()), v))
+            .collect();
+
+        let mut result = Vec::with_capacity(to_values.len());
+        for (node, prop, to_val) in &to_values {
+            if let Some(from_val) = from_map.get(&(node.as_str(), prop.as_str())) {
+                if let Some(blended) = interpolate_variant(from_val, to_val, factor) {
+                    result.push((node.clone(), prop.clone(), blended));
+                } else {
+                    result.push((node.clone(), prop.clone(), to_val.clone()));
+                }
+            } else {
+                result.push((node.clone(), prop.clone(), to_val.clone()));
+            }
+        }
+        result
+    }
+
+    /// Returns the method-track invocations whose keyframes were crossed while
+    /// advancing playback from `prev_time` to `curr_time`.
+    ///
+    /// The entry side of the interval is exclusive and the exit side inclusive
+    /// (`(prev, curr]` for forward play, `[curr, prev)` for reversed), so a
+    /// keyframe fires exactly once as the playhead passes it. Only
+    /// [`TrackType::Method`] tracks are considered; each keyframe value is
+    /// expected to be `Variant::Array([method_name, arg0, arg1, ...])`.
+    pub fn method_calls_in_range(&self, prev_time: f64, curr_time: f64) -> Vec<MethodCall> {
+        let anim = match self.current.as_ref().and_then(|n| self.animations.get(n)) {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        let mut calls = Vec::new();
+        for track in &anim.tracks {
+            if track.track_type != TrackType::Method {
+                continue;
+            }
+            for kf in track.keyframes() {
+                let crossed = if curr_time >= prev_time {
+                    kf.time > prev_time && kf.time <= curr_time
+                } else {
+                    kf.time < prev_time && kf.time >= curr_time
+                };
+                if crossed {
+                    if let Some(call) = method_call_from_value(&track.node_path, &kf.value) {
+                        calls.push(call);
+                    }
+                }
+            }
+        }
+        calls
+    }
+
+    /// Returns the root-motion position delta of the configured
+    /// [`root_motion_track`](Self::root_motion_track) across the interval from
+    /// `prev_time` to `curr_time`.
+    ///
+    /// Returns a zero delta when no root-motion track is set, the track is not
+    /// found in the current animation, or it is not a `Vector3` position track.
+    pub fn consume_root_motion(&self, prev_time: f64, curr_time: f64) -> RootMotionDelta {
+        let track_path = match &self.root_motion_track {
+            Some(p) => p,
+            None => return RootMotionDelta::default(),
+        };
+        let anim = match self.current.as_ref().and_then(|n| self.animations.get(n)) {
+            Some(a) => a,
+            None => return RootMotionDelta::default(),
+        };
+        let track = match anim.tracks.iter().find(|t| &t.property_path == track_path) {
+            Some(t) => t,
+            None => return RootMotionDelta::default(),
+        };
+        match (
+            track.sample(prev_time).and_then(variant_to_vec3),
+            track.sample(curr_time).and_then(variant_to_vec3),
+        ) {
+            (Some(prev), Some(curr)) => compute_root_motion_delta(prev, curr),
+            _ => RootMotionDelta::default(),
+        }
+    }
+
+    /// Returns the property paths of the current animation that must NOT be
+    /// applied to nodes as ordinary properties: method-track paths (dispatched
+    /// as calls) and the root-motion track (applied as a transform delta).
+    pub fn non_property_track_paths(&self) -> Vec<String> {
+        let mut paths = Vec::new();
+        if let Some(anim) = self.current.as_ref().and_then(|n| self.animations.get(n)) {
+            for track in &anim.tracks {
+                if track.track_type == TrackType::Method {
+                    paths.push(track.property_path.clone());
+                }
+            }
+        }
+        if let Some(rm) = &self.root_motion_track {
+            paths.push(rm.clone());
+        }
+        paths
+    }
 }
 
 impl Default for AnimationPlayer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A method-track invocation resolved while advancing an [`AnimationPlayer`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodCall {
+    /// Node path the method targets, resolved relative to the player's
+    /// `root_node` (like property tracks). Empty or "." targets the root node.
+    pub node_path: String,
+    /// Method name to invoke.
+    pub method: String,
+    /// Arguments to pass to the method.
+    pub args: Vec<Variant>,
+}
+
+/// Parses a method-track keyframe value `[method_name, arg0, ...]` into a
+/// [`MethodCall`]. Returns `None` when the value is not an array whose first
+/// element is a string method name.
+fn method_call_from_value(node_path: &str, value: &Variant) -> Option<MethodCall> {
+    if let Variant::Array(items) = value {
+        let method = match items.first() {
+            Some(Variant::String(s)) => s.clone(),
+            _ => return None,
+        };
+        let args = items.iter().skip(1).cloned().collect();
+        Some(MethodCall {
+            node_path: node_path.to_owned(),
+            method,
+            args,
+        })
+    } else {
+        None
+    }
+}
+
+/// Extracts a `Vector3` from a `Variant::Vector3`, else `None`.
+fn variant_to_vec3(value: Variant) -> Option<gdcore::math::Vector3> {
+    match value {
+        Variant::Vector3(v) => Some(v),
+        _ => None,
     }
 }
 
@@ -697,6 +908,24 @@ pub fn interpolate_variant(from: &Variant, to: &Variant, t: f32) -> Option<Varia
         (Variant::Vector2(a), Variant::Vector2(b)) => Some(Variant::Vector2(a.lerp(*b, t))),
         (Variant::Vector3(a), Variant::Vector3(b)) => Some(Variant::Vector3(a.lerp(*b, t))),
         (Variant::Color(a), Variant::Color(b)) => Some(Variant::Color(a.lerp(*b, t))),
+        // Rotation tracks slerp along the shortest arc (pat-u3l8c.95):
+        // `Quaternion::slerp` negates one endpoint when their dot is negative.
+        (Variant::Quaternion(a), Variant::Quaternion(b)) => {
+            Some(Variant::Quaternion(a.slerp(*b, t)))
+        }
+        // Transform tracks: translation lerps and the basis columns lerp.
+        // Rotation-dominant animation should use a Rotation3D/Quaternion track
+        // (which slerps correctly) rather than a raw Transform3D track.
+        (Variant::Transform3D(a), Variant::Transform3D(b)) => {
+            Some(Variant::Transform3D(Transform3D {
+                basis: Basis {
+                    x: a.basis.x.lerp(b.basis.x, t),
+                    y: a.basis.y.lerp(b.basis.y, t),
+                    z: a.basis.z.lerp(b.basis.z, t),
+                },
+                origin: a.origin.lerp(b.origin, t),
+            }))
+        }
         _ => None,
     }
 }
@@ -1360,5 +1589,210 @@ mod tests {
         assert!(player.blend_state().is_some());
         player.clear_blend();
         assert!(player.blend_state().is_none());
+    }
+}
+
+
+/// Root motion sample (pat-z35r2.10).
+#[derive(Debug, Clone, Copy)]
+pub struct RootMotionDelta {
+    pub position: gdcore::math::Vector3,
+    pub rotation_y: f32,
+}
+
+impl Default for RootMotionDelta {
+    fn default() -> Self {
+        Self {
+            position: gdcore::math::Vector3::ZERO,
+            rotation_y: 0.0,
+        }
+    }
+}
+
+/// Accumulate root motion from a position track delta.
+pub fn compute_root_motion_delta(
+    prev: gdcore::math::Vector3,
+    next: gdcore::math::Vector3,
+) -> RootMotionDelta {
+    RootMotionDelta {
+        position: gdcore::math::Vector3::new(next.x - prev.x, next.y - prev.y, next.z - prev.z),
+        rotation_y: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod root_motion_tests {
+    use super::*;
+    use gdcore::math::Vector3;
+
+    #[test]
+    fn root_motion_delta() {
+        let d = compute_root_motion_delta(Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 2.0));
+        assert!((d.position.x - 1.0).abs() < 1e-5);
+        assert!((d.position.z - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn method_calls_fire_once_on_crossing() {
+        let mut anim = Animation::new("a", 2.0);
+        let mut track = AnimationTrack::with_type("Enemy", "attack", TrackType::Method);
+        track.add_keyframe(KeyFrame::linear(
+            1.0,
+            Variant::Array(vec![Variant::String("on_hit".into()), Variant::Int(7)]),
+        ));
+        anim.tracks.push(track);
+        let mut player = AnimationPlayer::new();
+        player.add_animation(anim);
+        player.play("a");
+
+        // Interval before the keyframe → no calls.
+        assert!(player.method_calls_in_range(0.0, 0.5).is_empty());
+
+        // Interval crossing t=1.0 → one parsed call (name, node path, args).
+        let calls = player.method_calls_in_range(0.5, 1.5);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "on_hit");
+        assert_eq!(calls[0].node_path, "Enemy");
+        assert_eq!(calls[0].args, vec![Variant::Int(7)]);
+
+        // A keyframe already passed does not fire again.
+        assert!(player.method_calls_in_range(1.5, 2.0).is_empty());
+    }
+
+    #[test]
+    fn method_calls_ignore_non_method_tracks() {
+        let mut anim = Animation::new("a", 2.0);
+        // A property track is never treated as a method call.
+        let mut track = AnimationTrack::with_type("N", "opacity", TrackType::Property);
+        track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(1.0)));
+        anim.tracks.push(track);
+        let mut player = AnimationPlayer::new();
+        player.add_animation(anim);
+        player.play("a");
+        assert!(player.method_calls_in_range(0.0, 2.0).is_empty());
+    }
+
+    #[test]
+    fn root_motion_consumes_track_delta() {
+        let mut anim = Animation::new("walk", 2.0);
+        let mut track = AnimationTrack::with_type("Root", "position", TrackType::Property);
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Vector3(Vector3::ZERO)));
+        track.add_keyframe(KeyFrame::linear(
+            2.0,
+            Variant::Vector3(Vector3::new(4.0, 0.0, 8.0)),
+        ));
+        anim.tracks.push(track);
+        let mut player = AnimationPlayer::new();
+        player.add_animation(anim);
+        player.play("walk");
+        player.root_motion_track = Some("position".to_string());
+
+        // Linear track: delta from t=0.0 to t=1.0 is half the total → (2, 0, 4).
+        let d = player.consume_root_motion(0.0, 1.0);
+        assert!((d.position.x - 2.0).abs() < 1e-4, "x={}", d.position.x);
+        assert!((d.position.z - 4.0).abs() < 1e-4, "z={}", d.position.z);
+
+        // No root-motion track configured → zero delta.
+        player.root_motion_track = None;
+        assert_eq!(player.consume_root_motion(0.0, 1.0).position, Vector3::ZERO);
+    }
+
+    #[test]
+    fn non_property_paths_lists_method_and_root_tracks() {
+        let mut anim = Animation::new("a", 1.0);
+        anim.tracks
+            .push(AnimationTrack::with_type("N", "position", TrackType::Property));
+        anim.tracks
+            .push(AnimationTrack::with_type("N", "fire", TrackType::Method));
+        let mut player = AnimationPlayer::new();
+        player.add_animation(anim);
+        player.play("a");
+        player.root_motion_track = Some("position".to_string());
+
+        let skip = player.non_property_track_paths();
+        assert!(skip.contains(&"fire".to_string()), "method track excluded");
+        assert!(skip.contains(&"position".to_string()), "root track excluded");
+        // A plain property track that is not root motion stays applicable.
+        assert_eq!(skip.iter().filter(|p| *p == "position").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod track_3d_tests {
+    use super::*;
+    use gdcore::math::Vector3;
+    use gdcore::math3d::Quaternion;
+
+    #[test]
+    fn track_type_3d_variants_round_trip() {
+        for (s, t) in [
+            ("position_3d", TrackType::Position3D),
+            ("rotation_3d", TrackType::Rotation3D),
+            ("scale_3d", TrackType::Scale3D),
+            ("blend_shape", TrackType::BlendShape),
+        ] {
+            assert_eq!(TrackType::from_str_name(s), Some(t));
+            assert_eq!(t.as_str(), s);
+        }
+    }
+
+    #[test]
+    fn rotation_slerps_shortest_path() {
+        let axis = Vector3::new(0.0, 1.0, 0.0);
+        let a = Quaternion::IDENTITY;
+        // Nearly a full turn: its dot with identity is ≈ -0.99 (far hemisphere).
+        let b = Quaternion::from_axis_angle(axis, 1.9 * std::f32::consts::PI);
+        let mid = match interpolate_variant(&Variant::Quaternion(a), &Variant::Quaternion(b), 0.5) {
+            Some(Variant::Quaternion(q)) => q,
+            other => panic!("expected Quaternion, got {other:?}"),
+        };
+        assert!(
+            (mid.length() - 1.0).abs() < 1e-4,
+            "slerp result is normalized, len={}",
+            mid.length()
+        );
+        // Shortest arc barely moves from identity, so w stays near 1; a naive
+        // lerp toward b's negative w would collapse w to ~0.
+        assert!(
+            mid.w > 0.9,
+            "shortest-path slerp stays near identity, w={}",
+            mid.w
+        );
+    }
+
+    #[test]
+    fn transform3d_interpolates_translation() {
+        let mut a = Transform3D::IDENTITY;
+        a.origin = Vector3::new(0.0, 0.0, 0.0);
+        let mut b = Transform3D::IDENTITY;
+        b.origin = Vector3::new(4.0, 8.0, 0.0);
+        let mid = match interpolate_variant(&Variant::Transform3D(a), &Variant::Transform3D(b), 0.5)
+        {
+            Some(Variant::Transform3D(tf)) => tf,
+            other => panic!("expected Transform3D, got {other:?}"),
+        };
+        assert!((mid.origin.x - 2.0).abs() < 1e-5, "origin.x lerps to 2, got {}", mid.origin.x);
+        assert!((mid.origin.y - 4.0).abs() < 1e-5, "origin.y lerps to 4, got {}", mid.origin.y);
+    }
+
+    #[test]
+    fn rotation_track_sample_slerps() {
+        // A Rotation3D track with two quaternion keyframes slerps when sampled.
+        let mut track = AnimationTrack::with_type("Player", "quaternion", TrackType::Rotation3D);
+        let axis = Vector3::new(0.0, 1.0, 0.0);
+        track.add_keyframe(KeyFrame::linear(
+            0.0,
+            Variant::Quaternion(Quaternion::IDENTITY),
+        ));
+        track.add_keyframe(KeyFrame::linear(
+            1.0,
+            Variant::Quaternion(Quaternion::from_axis_angle(axis, std::f32::consts::FRAC_PI_2)),
+        ));
+        match track.sample(0.5) {
+            Some(Variant::Quaternion(q)) => {
+                assert!((q.length() - 1.0).abs() < 1e-4, "sampled rotation normalized");
+            }
+            other => panic!("expected sampled Quaternion, got {other:?}"),
+        }
     }
 }

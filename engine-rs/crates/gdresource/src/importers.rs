@@ -11,7 +11,7 @@ use std::sync::Arc;
 use gdcore::error::{EngineError, EngineResult};
 use gdvariant::Variant;
 
-use crate::loader::{ResourceLoader, TresLoader};
+use crate::loader::TresLoader;
 use crate::resource::Resource;
 
 // ---------------------------------------------------------------------------
@@ -36,12 +36,92 @@ pub fn resolve_res_path(project_root: &Path, res_path: &str) -> EngineResult<Pat
 /// PNG magic bytes.
 const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
-/// Reads a PNG file's IHDR chunk and creates a `Texture2D` resource.
+/// Reads a PNG file and creates a `Texture2D` resource **with pixel data**.
 ///
-/// Only the header is parsed — no pixel data is decoded.
+/// Decodes 8-bit grayscale / RGB / RGBA IDAT payloads (same path as the
+/// renderer). Pixel colors are stored as a `Variant::Array` of `Color`
+/// under the `"pixels"` property so the runtime can upload textures.
 pub fn import_image(path: &Path) -> EngineResult<Arc<Resource>> {
+    // If a `.import` sidecar redirects this source image to a compiled artifact
+    // (e.g. a `.ctex` under `.godot/imported/`), load that artifact instead.
+    if let Some(artifact) = resolve_import_artifact(path)? {
+        return load_ctex_file(&artifact);
+    }
     let data = std::fs::read(path).map_err(EngineError::Io)?;
+    import_image_bytes(&data, path)
+}
 
+/// Resolves a source image's `.import` sidecar to its compiled artifact path.
+///
+/// Looks for `<source>.import` next to `source_path`. When present, reads the
+/// `[remap] path` (or the first per-platform `path.*` key), resolves the
+/// `res://` artifact via the project root (found by walking up for
+/// `project.godot` / `.godot/`), and returns its absolute path. Returns
+/// `Ok(None)` when no sidecar exists (direct source loading is the fallback);
+/// returns an error when the sidecar names an artifact that cannot be found.
+fn resolve_import_artifact(source_path: &Path) -> EngineResult<Option<PathBuf>> {
+    // The sidecar is "<full source filename>.import" (e.g. "icon.png.import").
+    let mut sidecar_os = source_path.as_os_str().to_os_string();
+    sidecar_os.push(".import");
+    let sidecar = PathBuf::from(sidecar_os);
+    if !sidecar.exists() {
+        return Ok(None);
+    }
+
+    let import = load_import_file(&sidecar)?;
+    let remap_path = import
+        .import_path()
+        .or_else(|| {
+            // Per-platform remaps (`path.s3tc`, `path.etc2`, …) — take the first.
+            import
+                .remap
+                .iter()
+                .filter(|(k, _)| k.starts_with("path."))
+                .map(|(_, v)| v.as_str())
+                .next()
+        })
+        .ok_or_else(|| {
+            EngineError::Parse(format!("{} has no [remap] path", sidecar.display()))
+        })?;
+
+    let project_root = find_project_root(source_path).ok_or_else(|| {
+        EngineError::NotFound(format!(
+            "could not locate project root to resolve import artifact for {}",
+            source_path.display()
+        ))
+    })?;
+    let artifact = resolve_res_path(&project_root, remap_path)?;
+    if !artifact.exists() {
+        return Err(EngineError::NotFound(format!(
+            "imported artifact not found: {} (referenced by {})",
+            artifact.display(),
+            sidecar.display()
+        )));
+    }
+    Ok(Some(artifact))
+}
+
+/// Walks up from `start` to find the project root: the nearest ancestor
+/// directory containing `project.godot` or a `.godot/` directory.
+fn find_project_root(start: &Path) -> Option<PathBuf> {
+    let mut cur = start.parent();
+    while let Some(dir) = cur {
+        if dir.join("project.godot").exists() || dir.join(".godot").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+/// Loads a `.ctex` CompressedTexture2D file into a `Texture2D` [`Resource`].
+fn load_ctex_file(path: &Path) -> EngineResult<Arc<Resource>> {
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    crate::ctex::load_ctex_bytes(&data, path)
+}
+
+/// Decode PNG bytes into a Texture2D resource (pixels included).
+pub fn import_image_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> {
     if data.len() < 29 {
         return Err(EngineError::Parse("PNG file too short".into()));
     }
@@ -51,20 +131,15 @@ pub fn import_image(path: &Path) -> EngineResult<Arc<Resource>> {
         ));
     }
 
-    // IHDR starts at byte 8: 4 bytes length, 4 bytes "IHDR", then 13 bytes of data.
-    // Width:  bytes 16..20 (big-endian u32)
-    // Height: bytes 20..24 (big-endian u32)
-    // Bit depth: byte 24
-    // Color type: byte 25
     let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
     let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
     let bit_depth = data[24];
     let color_type = data[25];
 
     let format = match color_type {
-        0 => "L", // Grayscale
+        0 => "L",
         2 => "RGB",
-        4 => "LA", // Grayscale + Alpha
+        4 => "LA",
         6 => "RGBA",
         3 => "Indexed",
         _ => "Unknown",
@@ -80,7 +155,229 @@ pub fn import_image(path: &Path) -> EngineResult<Arc<Resource>> {
     res.set_property("format", Variant::String(format.into()));
     res.set_property("bit_depth", Variant::Int(bit_depth as i64));
 
+    // Full pixel decode (pat-z35r2.2 / pat-p0s82.19).
+    if let Some(pixels) = decode_png_pixels(data) {
+        let colors: Vec<Variant> = pixels
+            .into_iter()
+            .map(|(r, g, b, a)| {
+                Variant::Color(gdcore::math::Color::new(r, g, b, a))
+            })
+            .collect();
+        res.set_property("pixels", Variant::Array(colors));
+        res.set_property("has_pixel_data", Variant::Bool(true));
+    } else {
+        res.set_property("has_pixel_data", Variant::Bool(false));
+    }
+
     Ok(Arc::new(res))
+}
+
+/// Loads a source `.webp` image (pat-nzgdu.8).
+///
+/// Mirrors [`import_image`]: a `.import` sidecar redirecting to a compiled
+/// `.ctex` artifact wins; otherwise the loose WebP file is decoded directly.
+pub fn import_webp(path: &Path) -> EngineResult<Arc<Resource>> {
+    if let Some(artifact) = resolve_import_artifact(path)? {
+        return load_ctex_file(&artifact);
+    }
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    import_webp_bytes(&data, path)
+}
+
+/// Decodes WebP bytes into a `Texture2D` [`Resource`] with a populated
+/// `pixels` array — the same contract [`import_image_bytes`] produces for PNG.
+///
+/// Used both for loose `.webp` sources and for the WebP payload embedded in a
+/// `DATA_FORMAT_WEBP` `.ctex` (see [`crate::ctex`]). Godot's default texture
+/// importer stores 2D textures this way, so this is the common path for any
+/// real imported/exported project.
+pub fn import_webp_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> {
+    let rgba = ::image::load_from_memory_with_format(data, ::image::ImageFormat::WebP)
+        .map_err(|e| EngineError::Parse(format!("WebP decode failed: {e}")))?
+        .to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let raw = rgba.into_raw(); // tightly-packed RGBA8
+
+    let mut res = Resource::new("Texture2D");
+    res.path = format!(
+        "res://{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    res.set_property("width", Variant::Int(width as i64));
+    res.set_property("height", Variant::Int(height as i64));
+    res.set_property("format", Variant::String("RGBA".into()));
+    res.set_property("bit_depth", Variant::Int(8));
+
+    let colors: Vec<Variant> = raw
+        .chunks_exact(4)
+        .map(|px| {
+            Variant::Color(gdcore::math::Color::new(
+                px[0] as f32 / 255.0,
+                px[1] as f32 / 255.0,
+                px[2] as f32 / 255.0,
+                px[3] as f32 / 255.0,
+            ))
+        })
+        .collect();
+    let has_pixels = !colors.is_empty();
+    res.set_property("pixels", Variant::Array(colors));
+    res.set_property("has_pixel_data", Variant::Bool(has_pixels));
+
+    Ok(Arc::new(res))
+}
+
+/// Decode PNG IDAT to linear RGBA floats in \[0,1\]. Returns None on failure.
+fn decode_png_pixels(data: &[u8]) -> Option<Vec<(f32, f32, f32, f32)>> {
+    use miniz_oxide::inflate::decompress_to_vec_zlib;
+
+    if data.len() < 33 || data[0..8] != PNG_MAGIC {
+        return None;
+    }
+    let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as usize;
+    let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]) as usize;
+    let bit_depth = data[24];
+    let color_type = data[25];
+    if bit_depth != 8 || width == 0 || height == 0 {
+        return None;
+    }
+    let bpp: usize = match color_type {
+        0 => 1,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => return None,
+    };
+
+    let mut pos = 8usize;
+    let mut idat = Vec::new();
+    while pos + 12 <= data.len() {
+        let chunk_len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let chunk_type = &data[pos + 4..pos + 8];
+        if chunk_type == b"IDAT" {
+            if pos + 8 + chunk_len > data.len() {
+                return None;
+            }
+            idat.extend_from_slice(&data[pos + 8..pos + 8 + chunk_len]);
+        } else if chunk_type == b"IEND" {
+            break;
+        }
+        pos += 12 + chunk_len;
+    }
+    let raw = decompress_to_vec_zlib(&idat).ok()?;
+    let stride = width * bpp;
+    let row_bytes = 1 + stride;
+    if raw.len() < row_bytes * height {
+        return None;
+    }
+    let mut unfiltered = vec![0u8; stride * height];
+    for y in 0..height {
+        let filter_byte = raw[y * row_bytes];
+        let src = &raw[y * row_bytes + 1..y * row_bytes + 1 + stride];
+        let dst_off = y * stride;
+        match filter_byte {
+            0 => unfiltered[dst_off..dst_off + stride].copy_from_slice(src),
+            1 => {
+                for i in 0..stride {
+                    let a = if i >= bpp {
+                        unfiltered[dst_off + i - bpp]
+                    } else {
+                        0
+                    };
+                    unfiltered[dst_off + i] = src[i].wrapping_add(a);
+                }
+            }
+            2 => {
+                for i in 0..stride {
+                    let b = if y > 0 {
+                        unfiltered[(y - 1) * stride + i]
+                    } else {
+                        0
+                    };
+                    unfiltered[dst_off + i] = src[i].wrapping_add(b);
+                }
+            }
+            3 => {
+                for i in 0..stride {
+                    let a = if i >= bpp {
+                        unfiltered[dst_off + i - bpp]
+                    } else {
+                        0
+                    };
+                    let b = if y > 0 {
+                        unfiltered[(y - 1) * stride + i]
+                    } else {
+                        0
+                    };
+                    unfiltered[dst_off + i] = src[i].wrapping_add(((a as u16 + b as u16) / 2) as u8);
+                }
+            }
+            4 => {
+                for i in 0..stride {
+                    let a = if i >= bpp {
+                        unfiltered[dst_off + i - bpp] as i32
+                    } else {
+                        0
+                    };
+                    let b = if y > 0 {
+                        unfiltered[(y - 1) * stride + i] as i32
+                    } else {
+                        0
+                    };
+                    let c = if y > 0 && i >= bpp {
+                        unfiltered[(y - 1) * stride + i - bpp] as i32
+                    } else {
+                        0
+                    };
+                    let p = a + b - c;
+                    let pa = (p - a).abs();
+                    let pb = (p - b).abs();
+                    let pc = (p - c).abs();
+                    let pr = if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    };
+                    unfiltered[dst_off + i] = src[i].wrapping_add(pr as u8);
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let mut out = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let i = (y * stride) + x * bpp;
+            let (r, g, b, a) = match color_type {
+                0 => {
+                    let v = unfiltered[i] as f32 / 255.0;
+                    (v, v, v, 1.0)
+                }
+                2 => (
+                    unfiltered[i] as f32 / 255.0,
+                    unfiltered[i + 1] as f32 / 255.0,
+                    unfiltered[i + 2] as f32 / 255.0,
+                    1.0,
+                ),
+                4 => {
+                    let v = unfiltered[i] as f32 / 255.0;
+                    (v, v, v, unfiltered[i + 1] as f32 / 255.0)
+                }
+                6 => (
+                    unfiltered[i] as f32 / 255.0,
+                    unfiltered[i + 1] as f32 / 255.0,
+                    unfiltered[i + 2] as f32 / 255.0,
+                    unfiltered[i + 3] as f32 / 255.0,
+                ),
+                _ => return None,
+            };
+            out.push((r, g, b, a));
+        }
+    }
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +485,10 @@ pub fn import_font(path: &Path) -> EngineResult<Arc<Resource>> {
         )));
     }
 
+    // Load raw font bytes so the runtime can build an atlas / FreeType later
+    // (pat-p0s82.19). We store length + a SHA-free presence flag; full TTF
+    // parsing is optional beyond having the payload available.
+    let bytes = std::fs::read(path).map_err(EngineError::Io)?;
     let mut res = Resource::new("FontFile");
     res.path = format!(
         "res://{}",
@@ -195,6 +496,42 @@ pub fn import_font(path: &Path) -> EngineResult<Arc<Resource>> {
     );
     res.set_property("path", Variant::String(path.to_string_lossy().into()));
     res.set_property("size", Variant::Int(16));
+    res.set_property("byte_length", Variant::Int(bytes.len() as i64));
+    res.set_property("has_font_data", Variant::Bool(!bytes.is_empty()));
+
+    // Parse the outline font to validate it and expose real metrics (pat-u3l8c.69).
+    // Kept lenient: unparseable data still yields a resource with `parsed=false`
+    // rather than an error, so bitmap/placeholder fonts continue to load.
+    match ttf_parser::Face::parse(&bytes, 0) {
+        Ok(face) => {
+            res.set_property("parsed", Variant::Bool(true));
+            res.set_property("units_per_em", Variant::Int(face.units_per_em() as i64));
+            res.set_property("glyph_count", Variant::Int(face.number_of_glyphs() as i64));
+            res.set_property("ascent", Variant::Int(face.ascender() as i64));
+            res.set_property("descent", Variant::Int(face.descender() as i64));
+            res.set_property("is_monospaced", Variant::Bool(face.is_monospaced()));
+            if let Some(family) = face
+                .names()
+                .into_iter()
+                .filter(|n| n.name_id == ttf_parser::name_id::FAMILY)
+                .find_map(|n| n.to_string())
+            {
+                res.set_property("family_name", Variant::String(family));
+            }
+        }
+        Err(_) => {
+            res.set_property("parsed", Variant::Bool(false));
+        }
+    }
+    // Store raw bytes as Array of Int for round-trip without binary Variant type.
+    // Cap stored preview to first 64 bytes in properties for huge files; full
+    // path remains for loaders that re-read the file.
+    let preview: Vec<Variant> = bytes
+        .iter()
+        .take(64)
+        .map(|b| Variant::Int(*b as i64))
+        .collect();
+    res.set_property("data_preview", Variant::Array(preview));
 
     Ok(Arc::new(res))
 }
@@ -321,12 +658,18 @@ impl ResourceFormatLoader {
     pub fn with_defaults() -> Self {
         let mut rfl = Self::new();
         rfl.register(".png", import_image);
+        rfl.register(".webp", import_webp);
+        rfl.register(".ctex", load_ctex_file);
         rfl.register(".wav", import_wav);
         rfl.register(".ttf", import_font);
         rfl.register(".otf", import_font);
-        rfl.register(".tres", tres_loader);
-        rfl.register(".tscn", tscn_loader);
+        rfl.register(".tres", load_text_or_binary);
+        rfl.register(".tscn", load_text_or_binary);
+        rfl.register(".res", load_text_or_binary);
+        rfl.register(".scn", load_text_or_binary);
         rfl.register(".vs", vs_loader);
+        rfl.register(".gdshader", load_gdshader);
+        rfl.register(".gdshaderinc", load_gdshader);
         rfl
     }
 
@@ -380,16 +723,68 @@ impl std::fmt::Debug for ResourceFormatLoader {
     }
 }
 
-/// Loader function for `.tres` files.
-fn tres_loader(path: &Path) -> EngineResult<Arc<Resource>> {
-    TresLoader::new().load(path.to_str().unwrap_or(""))
+/// Loader for `.tres`/`.tscn`/`.res`/`.scn` files.
+///
+/// Sniffs the file's leading magic: binary resources (`RSRC`/`RSCC`) route to
+/// [`load_res_binary`](crate::res_loader::load_res_binary); everything else is
+/// parsed as Godot text (`.tres`/`.tscn`). This lets a binary-saved `.tres` and
+/// a text-saved `.res` both load by content rather than extension.
+fn load_text_or_binary(path: &Path) -> EngineResult<Arc<Resource>> {
+    let path_str = path.to_str().unwrap_or("");
+    let bytes = std::fs::read(path).map_err(EngineError::Io)?;
+    if crate::res_loader::is_res_binary(&bytes) {
+        crate::res_loader::load_res_binary(&bytes, path_str)
+    } else {
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|e| EngineError::Parse(format!("invalid UTF-8 in {path_str}: {e}")))?;
+        TresLoader::new().parse_str(text, path_str)
+    }
 }
 
-/// Loader function for `.tscn` files.
+/// Loader for `.gdshader` / `.gdshaderinc` files.
 ///
-/// Re-uses the `.tres` parser since `.tscn` uses the same text format.
-fn tscn_loader(path: &Path) -> EngineResult<Arc<Resource>> {
-    TresLoader::new().load(path.to_str().unwrap_or(""))
+/// Godot stores shader source in plain-text `.gdshader` files (and reusable
+/// include fragments in `.gdshaderinc`). This produces a `Shader` [`Resource`]
+/// whose `code` property holds the verbatim source, `shader_type` holds the
+/// declared `shader_type` mode (e.g. `"spatial"`, `"canvas_item"`, `"sky"`),
+/// and `uniforms` holds a comma-joined list of the declared uniform names so
+/// callers (the inspector, ShaderMaterial parameter resolution) can enumerate
+/// parameters without re-tokenizing. Include files carry no `shader_type`
+/// declaration, so that property is simply omitted for them.
+pub fn load_gdshader(path: &Path) -> EngineResult<Arc<Resource>> {
+    let source = std::fs::read_to_string(path).map_err(EngineError::Io)?;
+    Ok(Arc::new(shader_from_source(&source, path.to_str().unwrap_or(""))))
+}
+
+/// Builds a `Shader` [`Resource`] from raw shader source (no filesystem access).
+///
+/// Shared by [`load_gdshader`] and the tscn/tres loaders, which encounter inline
+/// `[sub_resource type="Shader"]` sections with a `code = "..."` property.
+pub fn shader_from_source(source: &str, res_path: &str) -> Resource {
+    use crate::shader_tokenizer::{extract_shader_type, extract_uniforms, tokenize_shader_no_comments};
+
+    let mut res = Resource::new("Shader");
+    if !res_path.is_empty() {
+        res.path = res_path.to_string();
+    }
+    res.set_property("code", Variant::String(source.to_string()));
+
+    // Tokenize once to derive shader_type + uniform names. A lex error (bad
+    // source) is non-fatal: the raw code still loads so the editor can show and
+    // repair it, matching Godot's tolerance of shaders that fail to compile.
+    if let Ok(tokens) = tokenize_shader_no_comments(source) {
+        if let Some(ty) = extract_shader_type(&tokens) {
+            res.set_property("shader_type", Variant::String(ty));
+        }
+        let names: Vec<String> = extract_uniforms(&tokens)
+            .into_iter()
+            .map(|u| u.name)
+            .collect();
+        if !names.is_empty() {
+            res.set_property("uniforms", Variant::String(names.join(",")));
+        }
+    }
+    res
 }
 
 /// Loader function for `.vs` (VisualScript) files.
@@ -508,6 +903,37 @@ mod tests {
     }
 
     // -- ImageImporter --------------------------------------------------------
+
+    /// Minimal 1×1 red RGB PNG (8-bit) with valid IHDR+IDAT+IEND.
+    fn tiny_red_png() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/red1x1.png"
+        ))
+        .expect("fixture red1x1.png")
+    }
+
+    #[test]
+    fn import_png_decodes_pixel_data() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("red.png");
+        std::fs::write(&path, tiny_red_png()).unwrap();
+        let res = import_image(&path).unwrap();
+        assert_eq!(res.get_property("has_pixel_data"), Some(&Variant::Bool(true)));
+        match res.get_property("pixels") {
+            Some(Variant::Array(a)) => {
+                assert_eq!(a.len(), 1, "1x1 image");
+                match &a[0] {
+                    Variant::Color(c) => {
+                        assert!(c.r > 0.9, "red channel, got {}", c.r);
+                        assert!(c.g < 0.1, "green should be low");
+                    }
+                    other => panic!("expected Color, got {other:?}"),
+                }
+            }
+            other => panic!("pixels missing: {other:?}"),
+        }
+    }
 
     #[test]
     fn import_png_reads_dimensions() {
@@ -646,6 +1072,38 @@ mod tests {
         assert!(import_font(Path::new("/nonexistent/font.ttf")).is_err());
     }
 
+    #[test]
+    fn import_font_parses_real_ttf() {
+        const FONT: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_assets/Cantarell-Regular.ttf"
+        ));
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("Cantarell-Regular.ttf");
+        std::fs::write(&path, FONT).unwrap();
+
+        let res = import_font(&path).unwrap();
+        assert_eq!(res.get_property("parsed"), Some(&Variant::Bool(true)));
+        match res.get_property("units_per_em") {
+            Some(Variant::Int(upm)) => assert!(*upm > 0),
+            other => panic!("units_per_em: {other:?}"),
+        }
+        match res.get_property("glyph_count") {
+            Some(Variant::Int(gc)) => assert!(*gc > 10),
+            other => panic!("glyph_count: {other:?}"),
+        }
+        assert!(res.get_property("family_name").is_some());
+    }
+
+    #[test]
+    fn import_font_marks_invalid_data_unparsed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bad.ttf");
+        std::fs::write(&path, b"not a real font").unwrap();
+        let res = import_font(&path).unwrap();
+        assert_eq!(res.get_property("parsed"), Some(&Variant::Bool(false)));
+    }
+
     // -- ImportFileParser -----------------------------------------------------
 
     #[test]
@@ -737,7 +1195,12 @@ antialiased=true
         assert!(rfl.can_load(".otf"));
         assert!(rfl.can_load(".tres"));
         assert!(rfl.can_load(".tscn"));
-        assert_eq!(rfl.extension_count(), 7);
+        assert!(rfl.can_load(".res"));
+        assert!(rfl.can_load(".scn"));
+        assert!(rfl.can_load(".ctex"));
+        assert!(rfl.can_load(".gdshader"));
+        assert!(rfl.can_load(".gdshaderinc"));
+        assert_eq!(rfl.extension_count(), 12);
     }
 
     #[test]
@@ -783,5 +1246,170 @@ antialiased=true
         rfl.register(".png", import_image);
         assert!(rfl.can_load(".PNG"));
         assert!(rfl.can_load(".Png"));
+    }
+
+    // ── .import remap → .ctex redirection ──
+
+    /// Builds a minimal 1x1 RGBA8 `.ctex` (DATA_FORMAT_IMAGE=0, FORMAT_RGBA8=5).
+    fn build_ctex_rgba8_1x1(rgba: [u8; 4]) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"GST2"); // magic
+        d.extend_from_slice(&1u32.to_le_bytes()); // version
+        d.extend_from_slice(&1u32.to_le_bytes()); // width
+        d.extend_from_slice(&1u32.to_le_bytes()); // height
+        d.extend_from_slice(&0u32.to_le_bytes()); // df flags
+        d.extend_from_slice(&0u32.to_le_bytes()); // mipmap_limit
+        d.extend_from_slice(&[0u8; 12]); // 3 reserved u32
+        d.extend_from_slice(&0u32.to_le_bytes()); // DATA_FORMAT_IMAGE
+        d.extend_from_slice(&1u16.to_le_bytes()); // w
+        d.extend_from_slice(&1u16.to_le_bytes()); // h
+        d.extend_from_slice(&0u32.to_le_bytes()); // mipmaps
+        d.extend_from_slice(&5u32.to_le_bytes()); // Image::FORMAT_RGBA8
+        d.extend_from_slice(&rgba); // 1x1 pixel
+        d
+    }
+
+    #[test]
+    fn import_remap_redirects_png_to_ctex() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".godot/imported")).unwrap();
+
+        // A deliberately-invalid source PNG: if the loader decoded it directly
+        // (no redirect) the test would fail — proving the redirect happened.
+        let png = root.join("icon.png");
+        std::fs::write(&png, b"NOT A PNG").unwrap();
+
+        std::fs::write(
+            root.join("icon.png.import"),
+            "[remap]\nimporter=\"texture\"\ntype=\"CompressedTexture2D\"\npath=\"res://.godot/imported/icon.ctex\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".godot/imported/icon.ctex"),
+            build_ctex_rgba8_1x1([255, 0, 0, 255]),
+        )
+        .unwrap();
+
+        let res = import_image(&png).unwrap();
+        assert_eq!(res.class_name, "Texture2D");
+        assert_eq!(res.get_property("width"), Some(&Variant::Int(1)));
+        assert_eq!(res.get_property("height"), Some(&Variant::Int(1)));
+        match res.get_property("pixels") {
+            Some(Variant::Array(a)) => {
+                assert_eq!(a.len(), 1);
+                match &a[0] {
+                    Variant::Color(c) => assert!(c.r > 0.9 && c.g < 0.1),
+                    other => panic!("expected Color, got {other:?}"),
+                }
+            }
+            other => panic!("expected pixels array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_remap_missing_artifact_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".godot")).unwrap();
+        let png = root.join("icon.png");
+        std::fs::write(&png, b"src").unwrap();
+        std::fs::write(
+            root.join("icon.png.import"),
+            "[remap]\npath=\"res://.godot/imported/missing.ctex\"\n",
+        )
+        .unwrap();
+
+        let err = import_image(&png).unwrap_err().to_string();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn no_import_sidecar_loads_source_directly() {
+        // Without a `.import`, the source PNG is loaded as before.
+        let dir = tempfile::TempDir::new().unwrap();
+        let png = dir.path().join("plain.png");
+        std::fs::write(&png, tiny_red_png()).unwrap();
+        let res = import_image(&png).unwrap();
+        assert_eq!(res.class_name, "Texture2D");
+        assert_eq!(res.get_property("has_pixel_data"), Some(&Variant::Bool(true)));
+    }
+
+    #[test]
+    fn ctex_loader_via_registry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("art.ctex");
+        std::fs::write(&path, build_ctex_rgba8_1x1([0, 255, 0, 255])).unwrap();
+        let rfl = ResourceFormatLoader::with_defaults();
+        let res = rfl.load_resource(&path).unwrap();
+        assert_eq!(res.class_name, "Texture2D");
+        assert_eq!(res.get_property("format"), Some(&Variant::String("RGBA".into())));
+    }
+
+    // -- .gdshader loader (pat-u3l8c.43) -------------------------------------
+
+    #[test]
+    fn gdshader_loads_as_shader_resource() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("water.gdshader");
+        let src = "shader_type spatial;\n\
+                   uniform float wave_height = 0.5;\n\
+                   uniform vec3 tint;\n\
+                   void fragment() { ALBEDO = tint; }\n";
+        std::fs::write(&path, src).unwrap();
+
+        let res = load_gdshader(&path).unwrap();
+        assert_eq!(res.class_name, "Shader");
+        // Full source preserved verbatim under `code`.
+        assert_eq!(res.get_property("code"), Some(&Variant::String(src.into())));
+        // shader_type declaration extracted.
+        assert_eq!(
+            res.get_property("shader_type"),
+            Some(&Variant::String("spatial".into()))
+        );
+        // Declared uniforms enumerated.
+        match res.get_property("uniforms") {
+            Some(Variant::String(u)) => {
+                assert!(u.contains("wave_height"), "uniforms: {u}");
+                assert!(u.contains("tint"), "uniforms: {u}");
+            }
+            other => panic!("expected uniforms string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gdshader_loads_via_registry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("outline.gdshader");
+        std::fs::write(&path, "shader_type canvas_item;\nvoid fragment() {}\n").unwrap();
+        let rfl = ResourceFormatLoader::with_defaults();
+        let res = rfl.load_resource(&path).unwrap();
+        assert_eq!(res.class_name, "Shader");
+        assert_eq!(
+            res.get_property("shader_type"),
+            Some(&Variant::String("canvas_item".into()))
+        );
+    }
+
+    #[test]
+    fn gdshaderinc_has_no_shader_type() {
+        // Include fragments have no `shader_type` declaration.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("common.gdshaderinc");
+        std::fs::write(&path, "float noise(vec2 p) { return 0.0; }\n").unwrap();
+        let res = load_gdshader(&path).unwrap();
+        assert_eq!(res.class_name, "Shader");
+        assert!(res.get_property("shader_type").is_none());
+    }
+
+    #[test]
+    fn shader_from_source_preserves_code_and_type() {
+        let s = shader_from_source("shader_type sky;\nvoid sky() {}\n", "res://s.gdshader");
+        assert_eq!(s.class_name, "Shader");
+        assert_eq!(s.path, "res://s.gdshader");
+        assert_eq!(
+            s.get_property("shader_type"),
+            Some(&Variant::String("sky".into()))
+        );
     }
 }

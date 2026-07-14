@@ -77,6 +77,9 @@ fn classify_token(token: &Token) -> HighlightKind {
         | Token::Self_
         | Token::Super
         | Token::ClassName
+        | Token::Is
+        | Token::As
+        | Token::When
         | Token::Await => HighlightKind::Keyword,
 
         // Annotations
@@ -108,7 +111,23 @@ fn classify_token(token: &Token) -> HighlightKind {
         | Token::Assign
         | Token::Arrow
         | Token::PlusAssign
-        | Token::MinusAssign => HighlightKind::Operator,
+        | Token::MinusAssign
+        | Token::StarAssign
+        | Token::SlashAssign
+        | Token::PercentAssign
+        | Token::StarStar
+        | Token::StarStarAssign
+        | Token::Amp
+        | Token::Pipe
+        | Token::Caret
+        | Token::Tilde
+        | Token::Shl
+        | Token::Shr
+        | Token::AmpAssign
+        | Token::PipeAssign
+        | Token::CaretAssign
+        | Token::ShlAssign
+        | Token::ShrAssign => HighlightKind::Operator,
 
         // Punctuation
         Token::LParen
@@ -122,6 +141,7 @@ fn classify_token(token: &Token) -> HighlightKind {
         | Token::Dot
         | Token::Semicolon
         | Token::AtSign
+        | Token::DotDot
         | Token::Dollar => HighlightKind::Punctuation,
 
         // Indentation / whitespace
@@ -184,6 +204,26 @@ fn token_text(token: &Token) -> String {
         Token::Arrow => "->".into(),
         Token::PlusAssign => "+=".into(),
         Token::MinusAssign => "-=".into(),
+        Token::StarAssign => "*=".into(),
+        Token::SlashAssign => "/=".into(),
+        Token::PercentAssign => "%=".into(),
+        Token::StarStar => "**".into(),
+        Token::StarStarAssign => "**=".into(),
+        Token::Amp => "&".into(),
+        Token::Pipe => "|".into(),
+        Token::Caret => "^".into(),
+        Token::Tilde => "~".into(),
+        Token::Shl => "<<".into(),
+        Token::Shr => ">>".into(),
+        Token::AmpAssign => "&=".into(),
+        Token::PipeAssign => "|=".into(),
+        Token::CaretAssign => "^=".into(),
+        Token::ShlAssign => "<<=".into(),
+        Token::ShrAssign => ">>=".into(),
+        Token::Is => "is".into(),
+        Token::As => "as".into(),
+        Token::When => "when".into(),
+        Token::DotDot => "..".into(),
         Token::LParen => "(".into(),
         Token::RParen => ")".into(),
         Token::LBracket => "[".into(),

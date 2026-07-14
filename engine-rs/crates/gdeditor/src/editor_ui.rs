@@ -1984,6 +1984,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <div class="ctx-item" data-action="move-down">Move Down</div>
   <div class="ctx-separator"></div>
   <div class="ctx-item" data-action="attach-script">Attach Script</div>
+  <div class="ctx-separator"></div>
+  <div class="ctx-item" data-action="change-type">Change Type…</div>
+  <div class="ctx-item" data-action="make-local">Make Local</div>
+  <div class="ctx-item" data-action="editable-children">Editable Children</div>
+  <div class="ctx-item" data-action="unique-name">Access as Unique Name (%)</div>
+  <div class="ctx-item" data-action="lock">Lock/Unlock</div>
 </div>
 
 <!-- Add Node Dialog — 1:1 with Godot's Create New Node (CreateDialog) -->
@@ -2916,8 +2922,26 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       </div>
     </div>
     <div id="node-dock-content" class="right-panel-content" data-rptab="node">
+      <!-- Permanent Signals/Groups chrome (Godot SignalsDock + GroupsEditor). -->
       <div id="node-dock">
-        <div class="insp-empty">Select a node to view signals</div>
+        <div id="node-dock-chrome">
+          <div id="node-signals-chrome" class="node-dock-section">
+            <div class="node-dock-section-header">Signals</div>
+            <div class="signal-search-wrap">
+              <input type="text" id="signal-search" class="signal-search" placeholder="Filter Signals" autocomplete="off">
+              <span class="signal-search-icon">&#128269;</span>
+            </div>
+            <div id="node-signals-list"></div>
+          </div>
+          <div id="node-groups-chrome" class="node-dock-section">
+            <div class="node-dock-section-header">Groups</div>
+            <div class="groups-toolbar">
+              <input type="text" id="group-search" class="group-search" placeholder="Filter Groups" autocomplete="off">
+            </div>
+            <div id="node-groups-list"></div>
+          </div>
+        </div>
+        <div class="insp-empty" id="node-dock-empty">Select a node to view signals</div>
       </div>
     </div>
   </div>
@@ -3877,6 +3901,18 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     menu.style.left = x + 'px';
     menu.style.top = y + 'px';
     menu.classList.add('open');
+    // Godot's per-node warning badge: surface configuration warnings at the top.
+    var oldBadge = document.getElementById('ctx-warning-badge');
+    if (oldBadge) oldBadge.remove();
+    fetchNodeWarnings(nodeId).then(function(ws) {
+      if (ws && ws.length) {
+        var badge = document.createElement('div');
+        badge.id = 'ctx-warning-badge';
+        badge.className = 'ctx-item ctx-warning';
+        badge.textContent = '⚠ ' + ws.join('; ');
+        menu.insertBefore(badge, menu.firstChild);
+      }
+    });
     setTimeout(function() {
       var rect = menu.getBoundingClientRect();
       if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
@@ -3924,6 +3960,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         await fetchScene(); break;
       case 'attach-script': doAttachScript(nodeId); break;
       case 'instance-scene': doInstanceScene(nodeId); break;
+      case 'change-type': doChangeType(nodeId); break;
+      case 'make-local': doMakeLocal(nodeId); break;
+      case 'editable-children': doEditableChildren(nodeId); break;
+      case 'unique-name': doToggleUniqueName(nodeId); break;
+      case 'lock': doToggleLock(nodeId); break;
     }
   }
 
@@ -3967,6 +4008,54 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       renderInspectorEmpty();
     }
     await fetchScene();
+  }
+
+  // ---- Scene-tree context ops (Godot SceneTreeDock parity) ----
+  // These wire the right-click menu to the existing server handlers that were
+  // previously dead from the UI (change_type/make_local/editable_children/
+  // unique_name/lock + the warnings badge).
+
+  async function doChangeType(nodeId) {
+    var cls = prompt('Change node type to (class name):');
+    if (!cls) return;
+    await api('POST', '/api/node/change_type', { node_id: nodeId, class_name: cls });
+    await fetchScene();
+    if (selectedNodeId) await fetchSelected();
+  }
+
+  async function doMakeLocal(nodeId) {
+    await api('POST', '/api/node/make_local', { node_id: nodeId });
+    await fetchScene();
+    if (selectedNodeId === nodeId) await fetchSelected();
+  }
+
+  async function doEditableChildren(nodeId) {
+    var node = findNodeInTree(sceneData ? sceneData.nodes : null, nodeId);
+    var enable = !(node && node.editable_children);
+    await api('POST', '/api/node/editable_children', { node_id: nodeId, enabled: enable });
+    await fetchScene();
+  }
+
+  async function doToggleUniqueName(nodeId) {
+    var node = findNodeInTree(sceneData ? sceneData.nodes : null, nodeId);
+    var enable = !(node && node.unique_name_in_owner);
+    await api('POST', '/api/node/unique_name', { node_id: nodeId, enabled: enable });
+    await fetchScene();
+    if (selectedNodeId === nodeId) await fetchSelected();
+  }
+
+  async function doToggleLock(nodeId) {
+    var node = findNodeInTree(sceneData ? sceneData.nodes : null, nodeId);
+    var lock = !(node && node.locked);
+    await api('POST', '/api/node/lock', { node_id: nodeId, locked: lock });
+    await fetchScene();
+  }
+
+  // Fetch a node's configuration warnings (Godot update_configuration_warnings).
+  // Returns an array of warning strings; used to render a ⚠ badge in the menu.
+  async function fetchNodeWarnings(nodeId) {
+    var res = await api('GET', '/api/node/warnings?node_id=' + encodeURIComponent(nodeId));
+    return (res && res.warnings) || [];
   }
 
   function doAddChild(parentId) {
@@ -9878,7 +9967,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   function renderNodeDockEmpty() {
-    document.getElementById('node-dock').innerHTML = '<div class="insp-empty">Select a node to view signals</div>';
+    // Keep permanent Signals/Groups chrome; only clear dynamic lists.
+    var empty = document.getElementById('node-dock-empty');
+    if (empty) empty.style.display = '';
+    var sigList = document.getElementById('node-signals-list');
+    if (sigList) sigList.innerHTML = '';
+    var grpList = document.getElementById('node-groups-list');
+    if (grpList) grpList.innerHTML = '';
   }
 
   // pat-9zrvd: current Signals-tab filter text + a shared lightweight context

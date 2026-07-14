@@ -28,14 +28,18 @@ This document defines the smallest acceptable audio contract for the current Pat
 - Mono and stereo layouts; normalizes all formats to `f32`
 - **Note**: Decode-to-buffer only — no real audio output or streaming playback
 
+## Platform output (pat-p0s82.1)
+
+- **`PlatformAudioOutput`** (`output.rs`): real device output via `cpal`
+  (CoreAudio on macOS, WASAPI on Windows, ALSA/Pulse on Linux).
+- **`mix_and_write`**: pumps `AudioServer::mix` into any `AudioOutputStream`.
+- **`CaptureAudioOutput`**: records PCM for tests / offline capture.
+- **`NullAudioOutput`**: still available for headless CI.
+
 ## Deferred (Not in Current Scope)
 
-The following are explicitly out of scope until runtime parity exits are met:
-
-- **Actual audio output**: No platform audio backend (WASAPI, CoreAudio, ALSA/PulseAudio)
-- **OGG/MP3 decoding**: Only WAV is decoded; OGG and MP3 remain stubs
-- **Effects processing**: No reverb, EQ, compression, or bus effects chain
-- **Spatial audio**: No 2D/3D positional audio or distance attenuation
+- **OGG/MP3 decoding**: OGG is decoded; MP3 remains later
+- **Effects processing**: No reverb, EQ, compression, or bus effects chain (P0 bead pat-p0s82.2)
 - **Audio streaming**: No background file streaming or buffer management
 - **Bus send routing**: No bus-to-bus send topology (only flat bus list)
 - **PingPong loop mode**: Only `None` and `Forward` loops implemented

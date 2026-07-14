@@ -1026,6 +1026,7 @@ fn standard_material_render_matches_direct_material3d() {
         emission: std_mat.emission,
         shading_mode: std_mat.shading_mode,
         double_sided: std_mat.double_sided,
+        ..Material3D::default()
     };
 
     let mut std_renderer = SoftwareRenderer3D::new();

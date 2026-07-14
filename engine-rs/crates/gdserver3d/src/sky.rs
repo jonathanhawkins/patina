@@ -72,23 +72,50 @@ pub struct ProceduralSkyMaterial {
     pub sun_angle_max: f32,
     /// Curve controlling sun disc falloff.
     pub sun_curve: f32,
+    /// Resource path to the sky-cover texture (Godot's `sky_cover`, e.g. clouds
+    /// or stars), or empty. Sampled equirectangularly at `SKY_COORDS`.
+    pub sky_cover_path: String,
+    /// Optional decoded sky-cover texture (linear RGBA) for runtime sampling.
+    /// When set, it is added over the sky hemisphere modulated by
+    /// [`sky_cover_modulate`](Self::sky_cover_modulate).
+    pub sky_cover: Option<PanoramaTexture>,
+    /// Tint/opacity applied to the sky-cover texture (Godot's
+    /// `sky_cover_modulate`, default opaque white).
+    pub sky_cover_modulate: Color,
 }
 
 impl Default for ProceduralSkyMaterial {
     fn default() -> Self {
         Self {
             sky_top_color: Color::new(0.385, 0.454, 0.55, 1.0),
-            sky_horizon_color: Color::new(0.646, 0.654, 0.67, 1.0),
+            // Godot's constructor uses the full-precision horizon color
+            // (0.6463, 0.6558, 0.6708) — the truncated (0.646, 0.654, 0.67)
+            // in its shader-default text is overridden by the setters.
+            sky_horizon_color: Color::new(0.6463, 0.6558, 0.6708, 1.0),
             sky_curve: 0.15,
             sky_energy_multiplier: 1.0,
             ground_bottom_color: Color::new(0.2, 0.169, 0.133, 1.0),
-            ground_horizon_color: Color::new(0.646, 0.654, 0.67, 1.0),
+            ground_horizon_color: Color::new(0.6463, 0.6558, 0.6708, 1.0),
             ground_curve: 0.02,
             ground_energy_multiplier: 1.0,
             sun_angle_max: 30.0,
             sun_curve: 0.15,
+            sky_cover_path: String::new(),
+            sky_cover: None,
+            sky_cover_modulate: Color::new(1.0, 1.0, 1.0, 1.0),
         }
     }
+}
+
+/// Optional in-memory panorama pixels for equirect sampling (tests + loaders).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanoramaTexture {
+    /// Width in texels.
+    pub width: u32,
+    /// Height in texels.
+    pub height: u32,
+    /// Linear RGB pixels, row-major, length `width * height`.
+    pub pixels: Vec<Color>,
 }
 
 /// A panoramic sky material that maps an HDR panorama texture onto the
@@ -103,6 +130,8 @@ pub struct PanoramicSkyMaterial {
     pub filter: bool,
     /// Energy multiplier.
     pub energy_multiplier: f32,
+    /// Optional decoded panorama for runtime equirect sampling.
+    pub texture: Option<PanoramaTexture>,
 }
 
 impl Default for PanoramicSkyMaterial {
@@ -111,6 +140,7 @@ impl Default for PanoramicSkyMaterial {
             panorama_path: String::new(),
             filter: true,
             energy_multiplier: 1.0,
+            texture: None,
         }
     }
 }
@@ -138,6 +168,13 @@ pub struct PhysicalSkyMaterial {
     pub ground_color: Color,
     /// Energy multiplier.
     pub energy_multiplier: f32,
+    /// Resource path to the night-sky texture (Godot's `night_sky`), or empty.
+    /// Sampled equirectangularly at `SKY_COORDS`.
+    pub night_sky_path: String,
+    /// Optional decoded night-sky texture (linear RGB). Shown where the
+    /// atmosphere is thin (added to `L0` × extinction) and as the whole sky
+    /// when there is no sun.
+    pub night_sky: Option<PanoramaTexture>,
 }
 
 impl Default for PhysicalSkyMaterial {
@@ -152,6 +189,8 @@ impl Default for PhysicalSkyMaterial {
             sun_disk_scale: 1.0,
             ground_color: Color::new(0.1, 0.07, 0.034, 1.0),
             energy_multiplier: 1.0,
+            night_sky_path: String::new(),
+            night_sky: None,
         }
     }
 }
@@ -249,6 +288,19 @@ impl ProceduralSkyMaterial {
                         mat.sun_curve = *f as f32;
                     }
                 }
+                // The texture itself is resolved by a loader; here we keep the
+                // resource-ref string (Godot serialises `sky_cover` as a
+                // SubResource/ExtResource) and the modulate tint.
+                "sky_cover" => {
+                    if let Variant::String(s) = value {
+                        mat.sky_cover_path = s.clone();
+                    }
+                }
+                "sky_cover_modulate" => {
+                    if let Variant::Color(c) = value {
+                        mat.sky_cover_modulate = *c;
+                    }
+                }
                 _ => {}
             }
         }
@@ -309,6 +361,18 @@ impl ProceduralSkyMaterial {
         }
         if (self.sun_curve - def.sun_curve).abs() > f32::EPSILON {
             props.push(("sun_curve".into(), Variant::Float(self.sun_curve as f64)));
+        }
+        if self.sky_cover_path != def.sky_cover_path {
+            props.push((
+                "sky_cover".into(),
+                Variant::String(self.sky_cover_path.clone()),
+            ));
+        }
+        if self.sky_cover_modulate != def.sky_cover_modulate {
+            props.push((
+                "sky_cover_modulate".into(),
+                Variant::Color(self.sky_cover_modulate),
+            ));
         }
         props
     }
@@ -415,6 +479,13 @@ impl PhysicalSkyMaterial {
                         mat.energy_multiplier = *f as f32;
                     }
                 }
+                // The texture is resolved by a loader; keep the resource-ref
+                // string (Godot serialises `night_sky` as a Sub/ExtResource).
+                "night_sky" => {
+                    if let Variant::String(s) = value {
+                        mat.night_sky_path = s.clone();
+                    }
+                }
                 _ => {}
             }
         }
@@ -465,6 +536,12 @@ impl PhysicalSkyMaterial {
             props.push((
                 "energy_multiplier".into(),
                 Variant::Float(self.energy_multiplier as f64),
+            ));
+        }
+        if self.night_sky_path != def.night_sky_path {
+            props.push((
+                "night_sky".into(),
+                Variant::String(self.night_sky_path.clone()),
             ));
         }
         props
@@ -615,7 +692,8 @@ mod tests {
                 panorama_path: "res://sky_hdr.exr".to_string(),
                 filter: true,
                 energy_multiplier: 1.5,
-            }),
+                        texture: None,
+        }),
             process_mode: SkyProcessMode::Quality,
             radiance_size: 512,
         };

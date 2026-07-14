@@ -18,6 +18,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use gdaudio::AudioOutputStream;
 use gdscene::scene_tree::SceneTree;
 use gdscene::{GDScriptNodeInstance, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::Variant;
@@ -239,6 +240,12 @@ pub struct EngineBootstrap {
     main_loop: Option<MainLoop>,
     log: Vec<BootstrapLogEntry>,
     scripts_attached: usize,
+    /// Audio output sink to attach to the [`MainLoop`]'s audio bridge when the
+    /// [`BootPhase::Running`] phase creates it. If `None`, a platform-default
+    /// sink is selected at boot (see [`default_audio_output`]). Injecting a sink
+    /// via [`EngineBootstrap::set_audio_output`] overrides the default and lets
+    /// tests capture the mixed PCM that flows out of the boot flow.
+    pending_output: Option<Box<dyn AudioOutputStream>>,
 }
 
 impl EngineBootstrap {
@@ -252,7 +259,21 @@ impl EngineBootstrap {
             main_loop: None,
             log: Vec::new(),
             scripts_attached: 0,
+            pending_output: None,
         }
+    }
+
+    /// Attaches a custom audio output sink to the run.
+    ///
+    /// The sink is handed to the [`MainLoop`]'s audio bridge when the
+    /// [`BootPhase::Running`] phase constructs the loop, so mixed PCM produced
+    /// by `AudioStreamPlayer` nodes flows into it every frame instead of being
+    /// discarded. Overrides the platform-default sink chosen at boot. Primarily
+    /// used by tests (with a capture sink) and by hosts that own the device
+    /// (e.g. the web AudioWorklet backend attaching after a user-gesture
+    /// unlock). Must be called before the loop is created.
+    pub fn set_audio_output(&mut self, output: Box<dyn AudioOutputStream>) {
+        self.pending_output = Some(output);
     }
 
     /// Returns the current bootstrap phase.
@@ -482,9 +503,54 @@ impl EngineBootstrap {
             message: "SceneTree not initialized".to_string(),
         })?;
 
-        self.main_loop = Some(MainLoop::new(tree));
+        let mut main_loop = MainLoop::new(tree);
+
+        // Wire the mixer output to a real sink. Godot's runner opens an audio
+        // driver at startup and pulls mixed frames into it every callback;
+        // without this the bridge mixes each frame and discards it, so the
+        // runner is silent. Prefer an injected sink (tests / web host); else
+        // pick the platform default.
+        let output = self
+            .pending_output
+            .take()
+            .or_else(|| default_audio_output(&self.config));
+        if let Some(sink) = output {
+            main_loop.audio_bridge_mut().attach_output(sink);
+        }
+
+        self.main_loop = Some(main_loop);
         Ok(())
     }
+}
+
+/// Selects the platform-default audio output sink for the boot flow.
+///
+/// - **Native, non-headless**: opens the host device via cpal
+///   ([`gdaudio::PlatformAudioOutput`]). If no device is available (e.g. CI),
+///   returns `None` so boot stays silent rather than failing — matching Godot's
+///   fallback to a dummy driver.
+/// - **Native, headless**: `None` (no hardware sink, like Godot's headless
+///   dummy driver).
+/// - **Web (wasm)**: `None` here; the AudioWorklet backend is attached by the
+///   JS/wasm host through [`EngineBootstrap::set_audio_output`] after the
+///   AudioContext is resumed on a user gesture.
+#[cfg(not(target_arch = "wasm32"))]
+fn default_audio_output(config: &BootConfig) -> Option<Box<dyn AudioOutputStream>> {
+    if config.headless {
+        return None;
+    }
+    match gdaudio::PlatformAudioOutput::try_open() {
+        Ok(out) => Some(Box::new(out) as Box<dyn AudioOutputStream>),
+        Err(_) => None,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_audio_output(_config: &BootConfig) -> Option<Box<dyn AudioOutputStream>> {
+    // The browser AudioWorklet sink is attached by the wasm host via
+    // `set_audio_output` once the AudioContext is unlocked (a user gesture is
+    // required before audio can play). No device is opened here.
+    None
 }
 
 impl fmt::Debug for EngineBootstrap {

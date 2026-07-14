@@ -9,6 +9,7 @@ use std::sync::Arc;
 use gdcore::math::{Color, Vector3};
 
 use gdserver3d::light::ShadowCubemap;
+use gdserver3d::material::TextureImage;
 
 use crate::shadow_map::ShadowMap;
 
@@ -137,6 +138,149 @@ pub struct ShaderUniforms {
     /// Only populated for point lights with `shadow_enabled = true` and
     /// `omni_shadow_mode == Cube`; other entries are `None`.
     pub omni_shadow_cubemaps: Vec<Option<Arc<ShadowCubemap>>>,
+    /// Optional per-fragment material texture maps sampled at the interpolated
+    /// UV. When present they modulate the flat `albedo`/`emission`/`roughness`/
+    /// `metallic` scalars and perturb the shading normal. `None` fields fall
+    /// back to the flat values, so an untextured material is unchanged.
+    pub textures: MaterialTextures,
+}
+
+/// The set of texture maps bound for a draw, sampled per-fragment at the
+/// interpolated UV. Mirrors Godot's `StandardMaterial3D` texture channels.
+///
+/// Color maps (albedo, emission) hold sRGB texels and are decoded to linear
+/// before modulating the (already-linear) flat colors. Data maps (normal,
+/// roughness, metallic) hold raw linear values.
+#[derive(Debug, Clone, Default)]
+pub struct MaterialTextures {
+    /// Albedo map; decoded texel multiplies the flat albedo.
+    pub albedo: Option<Arc<TextureImage>>,
+    /// Tangent-space normal map; perturbs the interpolated normal.
+    pub normal: Option<Arc<TextureImage>>,
+    /// Normal-map strength (1.0 = full).
+    pub normal_scale: f32,
+    /// Roughness map; green channel multiplies the flat roughness.
+    pub roughness: Option<Arc<TextureImage>>,
+    /// Metallic map; blue channel multiplies the flat metallic.
+    pub metallic: Option<Arc<TextureImage>>,
+    /// Emission map; decoded texel multiplies the flat emission.
+    pub emission: Option<Arc<TextureImage>>,
+}
+
+/// Per-fragment material values after sampling any bound textures at a UV.
+///
+/// All colors are **linear** and ready to feed lighting; `normal` is the
+/// world-space shading normal (normal-mapped if a normal map is bound).
+#[derive(Debug, Clone, Copy)]
+pub struct SampledMaterial {
+    /// Linear albedo (flat albedo × decoded albedo texel).
+    pub albedo: Color,
+    /// Linear emission (flat emission × decoded emission texel).
+    pub emission: Color,
+    /// Effective roughness in `[0, 1]`.
+    pub roughness: f32,
+    /// Effective metallic in `[0, 1]`.
+    pub metallic: f32,
+    /// World-space shading normal (not necessarily unit-length).
+    pub normal: Vector3,
+}
+
+impl ShaderUniforms {
+    /// Resolves the effective per-fragment material by sampling any bound
+    /// texture maps at `uv`, starting from the flat scalar material and the
+    /// interpolated geometric `world_normal`.
+    ///
+    /// Bilinear filtering with repeat wrap (Godot's default). Color maps are
+    /// sRGB-decoded; the normal map is decoded from tangent space and rotated
+    /// into world space via a tangent frame derived from `world_normal`
+    /// (meshes carry no tangents here — see [`tangent_frame`]).
+    pub fn sample_material(&self, uv: [f32; 2], world_normal: Vector3) -> SampledMaterial {
+        let (u, v) = (uv[0], uv[1]);
+        let t = &self.textures;
+
+        let mut albedo = self.albedo;
+        if let Some(map) = &t.albedo {
+            let texel = map.sample_bilinear(u, v).srgb_to_linear();
+            albedo = Color::new(
+                albedo.r * texel.r,
+                albedo.g * texel.g,
+                albedo.b * texel.b,
+                albedo.a * texel.a,
+            );
+        }
+
+        let mut emission = self.emission;
+        if let Some(map) = &t.emission {
+            let texel = map.sample_bilinear(u, v).srgb_to_linear();
+            emission = Color::new(
+                emission.r * texel.r,
+                emission.g * texel.g,
+                emission.b * texel.b,
+                emission.a * texel.a,
+            );
+        }
+
+        let mut roughness = self.roughness;
+        if let Some(map) = &t.roughness {
+            // Godot samples roughness from the green channel by default.
+            roughness *= map.sample_bilinear(u, v).g;
+        }
+
+        let mut metallic = self.metallic;
+        if let Some(map) = &t.metallic {
+            // Godot samples metallic from the blue channel by default.
+            metallic *= map.sample_bilinear(u, v).b;
+        }
+
+        let normal = match &t.normal {
+            Some(map) => {
+                let texel = map.sample_bilinear(u, v);
+                apply_normal_map(world_normal, texel, t.normal_scale)
+            }
+            None => world_normal,
+        };
+
+        SampledMaterial {
+            albedo,
+            emission,
+            roughness: roughness.clamp(0.0, 1.0),
+            metallic: metallic.clamp(0.0, 1.0),
+            normal,
+        }
+    }
+}
+
+/// Builds an orthonormal tangent frame `(tangent, bitangent)` for a unit
+/// `normal` using Duff et al.'s branchless method. Meshes here carry no
+/// tangents, so the frame is derived purely from the normal — deterministic,
+/// but not aligned to UV gradients. Sufficient to perturb lighting from a
+/// normal map (the perturbation direction is stable per normal).
+pub fn tangent_frame(normal: Vector3) -> (Vector3, Vector3) {
+    let n = normal.normalized();
+    let s = if n.z >= 0.0 { 1.0 } else { -1.0 };
+    let a = -1.0 / (s + n.z);
+    let b = n.x * n.y * a;
+    let tangent = Vector3::new(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    let bitangent = Vector3::new(b, s + n.y * n.y * a, -n.y);
+    (tangent, bitangent)
+}
+
+/// Decodes a tangent-space normal-map texel (`rgb` in `[0,1]` encoding a
+/// direction in `[-1,1]`) and rotates it into world space via the tangent
+/// frame of `world_normal`, scaling the XY perturbation by `scale`.
+pub fn apply_normal_map(world_normal: Vector3, texel: Color, scale: f32) -> Vector3 {
+    let n = world_normal.normalized();
+    // Decode from [0,1] to [-1,1]; a flat map (0.5,0.5,1.0) → (0,0,1) = no tilt.
+    let tx = (texel.r * 2.0 - 1.0) * scale;
+    let ty = (texel.g * 2.0 - 1.0) * scale;
+    let tz = (texel.b * 2.0 - 1.0).max(1e-4);
+    let (tangent, bitangent) = tangent_frame(n);
+    let perturbed = Vector3::new(
+        tangent.x * tx + bitangent.x * ty + n.x * tz,
+        tangent.y * tx + bitangent.y * ty + n.y * tz,
+        tangent.z * tx + bitangent.z * ty + n.z * tz,
+    );
+    perturbed.normalized()
 }
 
 /// Type tag for light uniforms passed to fragment shaders.
@@ -320,12 +464,16 @@ impl VertexShader for StandardVertexShader {
 pub struct UnlitFragmentShader;
 
 impl FragmentShader for UnlitFragmentShader {
-    fn process(&self, _input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
+    fn process(&self, input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
+        // Sample albedo/emission maps at the fragment UV (flat color when none).
+        let m = uniforms.sample_material(input.uv, input.world_normal);
+        // Scene-referred linear HDR: no clamp, so emissive values > 1 survive
+        // to feed glow; the camera post pass tonemaps and clamps at the end.
         Color::new(
-            (uniforms.albedo.r + uniforms.emission.r).min(1.0),
-            (uniforms.albedo.g + uniforms.emission.g).min(1.0),
-            (uniforms.albedo.b + uniforms.emission.b).min(1.0),
-            uniforms.albedo.a,
+            m.albedo.r + m.emission.r,
+            m.albedo.g + m.emission.g,
+            m.albedo.b + m.emission.b,
+            m.albedo.a,
         )
     }
 }
@@ -367,10 +515,12 @@ fn compute_shadow_factor(
                 }
             })
             .unwrap_or(1.0),
-        LightKind::Spot => {
-            // Spot light shadows not yet implemented — treat as lit.
-            1.0
-        }
+        LightKind::Spot => uniforms
+            .directional_shadow_maps
+            .get(light_index)
+            .and_then(|s| s.as_ref())
+            .map(|sm| 1.0 - sm.sample(frag_pos))
+            .unwrap_or(1.0),
     }
 }
 
@@ -380,74 +530,152 @@ pub struct LambertFragmentShader;
 
 impl FragmentShader for LambertFragmentShader {
     fn process(&self, input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
-        let normal = input.world_normal.normalized();
+        // Sample material textures (albedo/normal/emission) at the fragment UV.
+        let m = uniforms.sample_material(input.uv, input.world_normal);
+        let normal = m.normal;
+        let albedo = m.albedo;
 
-        let mut diffuse_r = uniforms.ambient.r * uniforms.albedo.r;
-        let mut diffuse_g = uniforms.ambient.g * uniforms.albedo.g;
-        let mut diffuse_b = uniforms.ambient.b * uniforms.albedo.b;
+        let mut diffuse_r = uniforms.ambient.r * albedo.r;
+        let mut diffuse_g = uniforms.ambient.g * albedo.g;
+        let mut diffuse_b = uniforms.ambient.b * albedo.b;
 
         for (i, light) in uniforms.lights.iter().enumerate() {
             let (light_dir, intensity) = light.evaluate(input.world_position);
             let shadow = compute_shadow_factor(light, i, input.world_position, uniforms);
             let n_dot_l = normal.dot(light_dir).max(0.0);
             let contrib = n_dot_l * intensity * shadow;
-            diffuse_r += uniforms.albedo.r * light.color.r * contrib;
-            diffuse_g += uniforms.albedo.g * light.color.g * contrib;
-            diffuse_b += uniforms.albedo.b * light.color.b * contrib;
+            diffuse_r += albedo.r * light.color.r * contrib;
+            diffuse_g += albedo.g * light.color.g * contrib;
+            diffuse_b += albedo.b * light.color.b * contrib;
         }
 
+        // Scene-referred linear HDR: no clamp (tonemapping clamps at the end).
         Color::new(
-            (diffuse_r + uniforms.emission.r).min(1.0),
-            (diffuse_g + uniforms.emission.g).min(1.0),
-            (diffuse_b + uniforms.emission.b).min(1.0),
-            uniforms.albedo.a,
+            diffuse_r + m.emission.r,
+            diffuse_g + m.emission.g,
+            diffuse_b + m.emission.b,
+            albedo.a,
         )
     }
 }
 
-/// Phong specular fragment shader (diffuse + specular).
+/// Phong mode now uses Godot's default Burley diffuse + Schlick-GGX specular
+/// (pat-sf07y). Kept under the `Phong` name so existing `ShadingMode::Phong`
+/// materials pick up the PBR path without a new enum variant.
 #[derive(Debug, Clone, Copy)]
 pub struct PhongFragmentShader;
 
 impl FragmentShader for PhongFragmentShader {
     fn process(&self, input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
-        let normal = input.world_normal.normalized();
-        let view_dir = (uniforms.camera_position - input.world_position).normalized();
-        let shininess = ((1.0 - uniforms.roughness) * 128.0).max(1.0);
-
-        let mut r = uniforms.ambient.r * uniforms.albedo.r;
-        let mut g = uniforms.ambient.g * uniforms.albedo.g;
-        let mut b = uniforms.ambient.b * uniforms.albedo.b;
-
-        for (i, light) in uniforms.lights.iter().enumerate() {
-            let (light_dir, intensity) = light.evaluate(input.world_position);
-            let shadow = compute_shadow_factor(light, i, input.world_position, uniforms);
-            let n_dot_l = normal.dot(light_dir).max(0.0);
-            let contrib = n_dot_l * intensity * shadow;
-
-            // Diffuse.
-            r += uniforms.albedo.r * light.color.r * contrib;
-            g += uniforms.albedo.g * light.color.g * contrib;
-            b += uniforms.albedo.b * light.color.b * contrib;
-
-            // Specular (Blinn-Phong half-vector).
-            if n_dot_l > 0.0 && intensity > 0.0 && shadow > 0.0 {
-                let half_dir = (light_dir + view_dir).normalized();
-                let spec = normal.dot(half_dir).max(0.0).powf(shininess);
-                let spec_strength = uniforms.metallic * 0.5 + 0.5;
-                r += light.color.r * spec * spec_strength * intensity * shadow;
-                g += light.color.g * spec * spec_strength * intensity * shadow;
-                b += light.color.b * spec * spec_strength * intensity * shadow;
-            }
-        }
-
-        Color::new(
-            (r + uniforms.emission.r).min(1.0),
-            (g + uniforms.emission.g).min(1.0),
-            (b + uniforms.emission.b).min(1.0),
-            uniforms.albedo.a,
-        )
+        pbr_shade(input, uniforms)
     }
+}
+
+/// Burley diffuse + Schlick-GGX specular (Godot `light_compute` default).
+///
+/// Ported from `scene_forward_lights_inc.glsl` (Godot 4.6.1): `D_GGX`,
+/// `V_GGX`, `SchlickFresnel`, Burley FD90, and metallic F0 mix.
+pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
+    // Sample material textures (albedo/normal/roughness/metallic/emission) at UV.
+    let m = uniforms.sample_material(input.uv, input.world_normal);
+    let albedo = m.albedo;
+    let n = m.normal;
+    let v = (uniforms.camera_position - input.world_position).normalized();
+    let n_dot_v = n.dot(v).max(1e-4);
+    let roughness = m.roughness;
+    let metallic = m.metallic;
+    let alpha = (roughness * roughness).max(1e-4);
+    // F0: dielectric 0.04, metals use albedo (specular amount = 0.5 → 0.16*0.25=0.04).
+    let f0_d = 0.04;
+    let f0 = [
+        lerp_f(f0_d, albedo.r, metallic),
+        lerp_f(f0_d, albedo.g, metallic),
+        lerp_f(f0_d, albedo.b, metallic),
+    ];
+    let albedo_lin = [
+        albedo.r * (1.0 - metallic),
+        albedo.g * (1.0 - metallic),
+        albedo.b * (1.0 - metallic),
+    ];
+
+    let mut r = uniforms.ambient.r * albedo.r;
+    let mut g = uniforms.ambient.g * albedo.g;
+    let mut b = uniforms.ambient.b * albedo.b;
+
+    for (i, light) in uniforms.lights.iter().enumerate() {
+        let (l, intensity) = light.evaluate(input.world_position);
+        let shadow = compute_shadow_factor(light, i, input.world_position, uniforms);
+        if intensity <= 0.0 || shadow <= 0.0 {
+            continue;
+        }
+        let n_dot_l = n.dot(l).max(0.0);
+        if n_dot_l <= 0.0 {
+            continue;
+        }
+        let h = (l + v).normalized();
+        let n_dot_h = n.dot(h).max(1e-4);
+        let l_dot_h = l.dot(h).max(1e-4);
+
+        // Burley diffuse (Filament / Godot).
+        let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * roughness;
+        let light_scatter = 1.0 + (fd90 - 1.0) * pow5(1.0 - n_dot_l);
+        let view_scatter = 1.0 + (fd90 - 1.0) * pow5(1.0 - n_dot_v);
+        let burley = (1.0 / std::f32::consts::PI) * light_scatter * view_scatter;
+        let diffuse = n_dot_l * intensity * shadow * burley;
+
+        r += albedo_lin[0] * light.color.r * diffuse;
+        g += albedo_lin[1] * light.color.g * diffuse;
+        b += albedo_lin[2] * light.color.b * diffuse;
+
+        // GGX D * V * F (Schlick).
+        let d = d_ggx(n_dot_h, alpha);
+        let vis = v_ggx(n_dot_l, n_dot_v, alpha);
+        let f = [
+            f0[0] + (1.0 - f0[0]) * pow5(1.0 - l_dot_h),
+            f0[1] + (1.0 - f0[1]) * pow5(1.0 - l_dot_h),
+            f0[2] + (1.0 - f0[2]) * pow5(1.0 - l_dot_h),
+        ];
+        let spec = d * vis * n_dot_l * intensity * shadow;
+        r += light.color.r * f[0] * spec;
+        g += light.color.g * f[1] * spec;
+        b += light.color.b * f[2] * spec;
+    }
+
+    Color::new(
+        r + m.emission.r,
+        g + m.emission.g,
+        b + m.emission.b,
+        albedo.a,
+    )
+}
+
+#[inline]
+fn pow5(x: f32) -> f32 {
+    let x2 = x * x;
+    x2 * x2 * x
+}
+
+#[inline]
+fn lerp_f(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// GGX normal distribution (Godot `D_GGX`).
+pub fn d_ggx(n_dot_h: f32, alpha: f32) -> f32 {
+    let a = n_dot_h * alpha;
+    let k = alpha / ((1.0 - n_dot_h * n_dot_h) + a * a).max(1e-6);
+    let d = k * k * (1.0 / std::f32::consts::PI);
+    d.max(0.0)
+}
+
+/// Height-correlated Smith GGX visibility (Godot `V_GGX`).
+///
+/// `0.5 / mix(2 * NdotL * NdotV, NdotL + NdotV, alpha)`.
+pub fn v_ggx(n_dot_l: f32, n_dot_v: f32, alpha: f32) -> f32 {
+    let a = 2.0 * n_dot_l * n_dot_v;
+    let b = n_dot_l + n_dot_v;
+    let denom = a * (1.0 - alpha) + b * alpha;
+    (0.5 / denom.max(1e-6)).min(1.0e4)
 }
 
 /// Selects the appropriate fragment shader for a given shading mode.
@@ -474,6 +702,19 @@ pub struct CustomFragmentShader {
     compiled: gdserver3d::CompiledShader3D,
     /// Runtime parameter values from the ShaderMaterial3D.
     parameters: std::collections::HashMap<String, gdvariant::Variant>,
+    /// Parsed `fragment()` body instructions (from the compiled shader) for
+    /// CPU evaluation. When empty, `process` falls back to the uniform-only
+    /// [`gdserver3d::ShaderProcessor3D::apply_shader`] path.
+    fragment_body: Vec<gdserver3d::shader::FragmentInstruction3D>,
+    /// Textures bound by `sampler2D` uniform name, sampled by the
+    /// `texture(sampler, uv)` fragment expression. Populated via
+    /// [`CustomFragmentShader::set_texture`] (Variants cannot carry pixels, so
+    /// textures are injected separately from `parameters`).
+    textures: std::collections::HashMap<String, Arc<TextureImage>>,
+    /// Shader `TIME` built-in, injectable via [`CustomFragmentShader::set_time`].
+    /// Frame-loop plumbing to the RenderingServer is a documented follow-up;
+    /// the setter makes time-animated shaders testable now.
+    time: f32,
 }
 
 impl CustomFragmentShader {
@@ -488,9 +729,13 @@ impl CustomFragmentShader {
         } else {
             compiler.compile(gdserver3d::ShaderType3D::Spatial, "")
         };
+        let fragment_body = compiled.fragment_body.clone();
         Self {
             compiled,
             parameters: material.parameters.clone(),
+            fragment_body,
+            textures: std::collections::HashMap::new(),
+            time: 0.0,
         }
     }
 
@@ -500,9 +745,13 @@ impl CustomFragmentShader {
         compiled: gdserver3d::CompiledShader3D,
         parameters: std::collections::HashMap<String, gdvariant::Variant>,
     ) -> Self {
+        let fragment_body = compiled.fragment_body.clone();
         Self {
             compiled,
             parameters,
+            fragment_body,
+            textures: std::collections::HashMap::new(),
+            time: 0.0,
         }
     }
 
@@ -515,11 +764,24 @@ impl CustomFragmentShader {
     pub fn is_valid(&self) -> bool {
         !self.compiled.has_errors()
     }
+
+    /// Sets the shader `TIME` built-in used when evaluating the fragment body.
+    ///
+    /// The render frame loop should call this each frame with the elapsed
+    /// time so time-animated shaders advance; without it, `TIME` reads as 0.
+    pub fn set_time(&mut self, t: f32) {
+        self.time = t;
+    }
+
+    /// Binds a texture to a `sampler2D` uniform by name for the CPU
+    /// `texture(sampler, uv)` fragment expression.
+    pub fn set_texture(&mut self, name: &str, texture: Arc<TextureImage>) {
+        self.textures.insert(name.to_string(), texture);
+    }
 }
 
 impl FragmentShader for CustomFragmentShader {
     fn process(&self, input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
-        let processor = gdserver3d::ShaderProcessor3D::new();
         let ctx = gdserver3d::FragmentContext3D {
             albedo: uniforms.albedo,
             normal: input.world_normal,
@@ -528,10 +790,29 @@ impl FragmentShader for CustomFragmentShader {
             view_dir: (uniforms.camera_position - input.world_position).normalized(),
             roughness: uniforms.roughness,
             metallic: uniforms.metallic,
-            time: 0.0,
+            time: self.time,
         };
 
-        let color = processor.apply_shader(&self.compiled, &self.parameters, &ctx);
+        // If the shader has a parsed fragment body, evaluate it (real AST +
+        // UV math + TIME + texture sampling). Otherwise fall back to the
+        // uniform-only path so uniform-driven shaders don't regress.
+        let color = if self.fragment_body.is_empty() {
+            let processor = gdserver3d::ShaderProcessor3D::new();
+            processor.apply_shader(&self.compiled, &self.parameters, &ctx)
+        } else {
+            // Sample bound textures by sampler2D uniform name; a missing
+            // binding yields opaque white (a neutral placeholder). The closure
+            // is passed inline so it coerces to the higher-ranked `&dyn Fn`.
+            gdserver3d::shader::execute_fragment_3d(
+                &self.fragment_body,
+                &ctx,
+                &self.parameters,
+                &|name: &str, u: f32, v: f32| match self.textures.get(name) {
+                    Some(tex) => tex.sample_bilinear(u, v),
+                    None => Color::new(1.0, 1.0, 1.0, 1.0),
+                },
+            )
+        };
 
         // If unshaded, return the color directly (no lighting).
         if self.compiled.render_modes.unshaded {
@@ -582,6 +863,93 @@ impl FragmentShader for CustomFragmentShader {
 mod tests {
     use super::*;
 
+    // ── Material texture sampling ──
+
+    fn tex(w: u32, h: u32, pixels: Vec<Color>) -> Arc<TextureImage> {
+        Arc::new(TextureImage::new(w, h, pixels))
+    }
+
+    #[test]
+    fn tangent_frame_is_orthonormal() {
+        for n in [
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.0, 0.0, -1.0),
+            Vector3::new(1.0, 2.0, 3.0).normalized(),
+            Vector3::new(-2.0, 0.5, -1.0).normalized(),
+        ] {
+            let (t, b) = tangent_frame(n);
+            assert!(t.dot(n).abs() < 1e-5, "tangent ⟂ normal");
+            assert!(b.dot(n).abs() < 1e-5, "bitangent ⟂ normal");
+            assert!(t.dot(b).abs() < 1e-5, "tangent ⟂ bitangent");
+            assert!((t.length() - 1.0).abs() < 1e-5, "tangent unit-length");
+            assert!((b.length() - 1.0).abs() < 1e-5, "bitangent unit-length");
+        }
+    }
+
+    #[test]
+    fn flat_normal_map_is_identity() {
+        let n = Vector3::new(0.0, 0.0, 1.0);
+        // Encoded (0.5,0.5,1.0) decodes to tangent-space (0,0,1) = no tilt.
+        let out = apply_normal_map(n, Color::new(0.5, 0.5, 1.0, 1.0), 1.0);
+        assert!((out.x - n.x).abs() < 1e-5);
+        assert!((out.y - n.y).abs() < 1e-5);
+        assert!((out.z - n.z).abs() < 1e-5);
+    }
+
+    #[test]
+    fn tilted_normal_map_perturbs_normal() {
+        let n = Vector3::new(0.0, 0.0, 1.0);
+        // Full +X tangent tilt: (1.0,0.5,1.0) → tangent-space (1,0,1) → 45° toward +X.
+        let out = apply_normal_map(n, Color::new(1.0, 0.5, 1.0, 1.0), 1.0);
+        assert!(out.x > 0.5, "normal should tilt toward +X, got {out:?}");
+        assert!((out.length() - 1.0).abs() < 1e-5, "result stays unit-length");
+    }
+
+    #[test]
+    fn sample_material_albedo_texture_multiplies_flat_color() {
+        let mut u = default_uniforms();
+        u.albedo = Color::new(1.0, 1.0, 1.0, 1.0);
+        // Solid green sRGB texel; sRGB(1.0)=1.0, sRGB(0.0)=0.0 → linear (0,1,0).
+        u.textures.albedo = Some(tex(1, 1, vec![Color::new(0.0, 1.0, 0.0, 1.0)]));
+        let m = u.sample_material([0.5, 0.5], Vector3::new(0.0, 0.0, 1.0));
+        assert!(m.albedo.r < 1e-4 && (m.albedo.g - 1.0).abs() < 1e-4 && m.albedo.b < 1e-4);
+    }
+
+    #[test]
+    fn sample_material_roughness_uses_green_metallic_uses_blue() {
+        let mut u = default_uniforms();
+        u.roughness = 1.0;
+        u.metallic = 1.0;
+        // roughness reads .g = 0.25, metallic reads .b = 0.5.
+        u.textures.roughness = Some(tex(1, 1, vec![Color::new(0.9, 0.25, 0.9, 1.0)]));
+        u.textures.metallic = Some(tex(1, 1, vec![Color::new(0.9, 0.9, 0.5, 1.0)]));
+        let m = u.sample_material([0.5, 0.5], Vector3::new(0.0, 0.0, 1.0));
+        assert!((m.roughness - 0.25).abs() < 1e-4, "roughness={}", m.roughness);
+        assert!((m.metallic - 0.5).abs() < 1e-4, "metallic={}", m.metallic);
+    }
+
+    #[test]
+    fn sample_material_emission_texture_modulates() {
+        let mut u = default_uniforms();
+        u.emission = Color::new(1.0, 1.0, 1.0, 1.0);
+        u.textures.emission = Some(tex(1, 1, vec![Color::new(0.0, 0.0, 0.0, 1.0)]));
+        let m = u.sample_material([0.5, 0.5], Vector3::new(0.0, 0.0, 1.0));
+        assert!(m.emission.r < 1e-4 && m.emission.g < 1e-4 && m.emission.b < 1e-4);
+    }
+
+    #[test]
+    fn sample_material_no_textures_returns_flat_values() {
+        let u = default_uniforms();
+        let n = Vector3::new(0.0, 1.0, 0.0);
+        let m = u.sample_material([0.3, 0.7], n);
+        assert_eq!(m.albedo, u.albedo);
+        assert_eq!(m.emission, u.emission);
+        assert!((m.roughness - u.roughness).abs() < 1e-6);
+        assert!((m.metallic - u.metallic).abs() < 1e-6);
+        // Normal passes through unchanged (normalized).
+        assert!((m.normal.x - n.x).abs() < 1e-5 && (m.normal.y - n.y).abs() < 1e-5);
+    }
+
     fn default_uniforms() -> ShaderUniforms {
         ShaderUniforms {
             model_matrix: identity_matrix(),
@@ -596,6 +964,7 @@ mod tests {
             lights: vec![],
             directional_shadow_maps: vec![],
             omni_shadow_cubemaps: vec![],
+            textures: MaterialTextures::default(),
         }
     }
 
@@ -643,6 +1012,29 @@ mod tests {
         assert!((color.b - 0.4).abs() < 1e-5);
     }
 
+    /// Fragment shaders output scene-referred linear HDR: bright emission
+    /// must NOT be clamped to 1.0, or it can never cross the glow HDR
+    /// threshold and bloom like Godot. (Tonemapping clamps at frame end.)
+    #[test]
+    fn unlit_emission_is_hdr_unclamped() {
+        let fs = UnlitFragmentShader;
+        let input = FragmentInput {
+            world_position: Vector3::ZERO,
+            world_normal: Vector3::UP,
+            uv: [0.0, 0.0],
+            depth: 0.5,
+        };
+        let mut uniforms = default_uniforms();
+        uniforms.albedo = Color::new(1.0, 1.0, 1.0, 1.0);
+        uniforms.emission = Color::new(2.0, 2.0, 2.0, 1.0);
+        let color = fs.process(&input, &uniforms);
+        assert!(
+            (color.r - 3.0).abs() < 1e-5,
+            "unlit emission must stay HDR (3.0), got {}",
+            color.r
+        );
+    }
+
     #[test]
     fn lambert_with_no_lights_is_ambient_only() {
         let fs = LambertFragmentShader;
@@ -675,8 +1067,9 @@ mod tests {
             Color::new(1.0, 1.0, 1.0, 1.0),
         ));
         let color = fs.process(&input, &uniforms);
-        // ambient(0.1) + diffuse(1.0 * 1.0 * 1.0) = 1.1, clamped to 1.0
-        assert!((color.r - 1.0).abs() < 1e-5);
+        // ambient(0.1) + diffuse(1.0 * 1.0 * 1.0) = 1.1 — scene-referred HDR,
+        // NOT clamped to 1.0 (tonemapping clamps at the end of the frame).
+        assert!((color.r - 1.1).abs() < 1e-5);
     }
 
     #[test]
@@ -711,15 +1104,50 @@ mod tests {
         let mut uniforms = default_uniforms();
         uniforms.albedo = Color::new(1.0, 1.0, 1.0, 1.0);
         uniforms.metallic = 1.0;
-        uniforms.roughness = 0.0; // Very shiny
+        uniforms.roughness = 0.05; // near-mirror GGX metal
         uniforms.camera_position = Vector3::new(0.0, 1.0, 0.0); // Above
         uniforms.lights.push(LightUniform::directional(
             Vector3::UP,
             Color::new(1.0, 1.0, 1.0, 1.0),
         ));
         let color = fs.process(&input, &uniforms);
-        // Should have significant brightness from specular
-        assert!(color.r > 0.5);
+        // Burley+GGX metal facing the light produces a strong specular lobe.
+        assert!(color.r > 0.3, "PBR specular expected, got {}", color.r);
+    }
+
+    #[test]
+    fn burley_ggx_rough_metal_darker_than_smooth() {
+        let mut rough = default_uniforms();
+        rough.albedo = Color::new(1.0, 1.0, 1.0, 1.0);
+        rough.metallic = 1.0;
+        rough.roughness = 0.9;
+        rough.camera_position = Vector3::new(0.0, 1.0, 0.0);
+        rough.lights.push(LightUniform::directional(
+            Vector3::UP,
+            Color::new(1.0, 1.0, 1.0, 1.0),
+        ));
+        let mut smooth = rough.clone();
+        smooth.roughness = 0.05;
+        let input = FragmentInput {
+            world_position: Vector3::ZERO,
+            world_normal: Vector3::UP,
+            uv: [0.0, 0.0],
+            depth: 0.5,
+        };
+        let cr = PhongFragmentShader.process(&input, &rough);
+        let cs = PhongFragmentShader.process(&input, &smooth);
+        assert!(
+            cs.r > cr.r,
+            "smooth metal should peak higher than rough: smooth={} rough={}",
+            cs.r,
+            cr.r
+        );
+    }
+
+    #[test]
+    fn d_ggx_peaks_at_normal_incidence() {
+        let alpha = 0.25f32;
+        assert!(d_ggx(1.0, alpha) > d_ggx(0.5, alpha));
     }
 
     #[test]
@@ -904,5 +1332,119 @@ mod tests {
         let (dir, intensity) = light.evaluate(Vector3::new(100.0, 200.0, 300.0));
         assert!((dir.y - 1.0).abs() < 1e-5);
         assert!((intensity - 1.0).abs() < 1e-5);
+    }
+
+    // ── CustomFragmentShader: real fragment-body evaluation ──
+
+    /// Builds a `CustomFragmentShader` from an unshaded spatial shader whose
+    /// `fragment()` body is `src`.
+    fn custom_shader(src: &str) -> CustomFragmentShader {
+        let shader = gdserver3d::Shader3D::new(gdserver3d::ShaderType3D::Spatial, src);
+        let mut mat = gdserver3d::ShaderMaterial3D::new();
+        mat.shader = Some(shader);
+        CustomFragmentShader::from_material(&mat)
+    }
+
+    fn frag_at(uv: [f32; 2]) -> FragmentInput {
+        FragmentInput {
+            world_position: Vector3::ZERO,
+            world_normal: Vector3::UP,
+            uv,
+            depth: 0.5,
+        }
+    }
+
+    #[test]
+    fn custom_fragment_uv_gradient() {
+        // ALBEDO = vec3(UV.x, UV.y, 0.0) — output varies across the surface.
+        let fs = custom_shader(
+            "shader_type spatial;\nrender_mode unshaded;\nvoid fragment() {\n    ALBEDO = vec3(UV.x, UV.y, 0.0);\n}",
+        );
+        let uniforms = default_uniforms();
+
+        let a = fs.process(&frag_at([0.25, 0.75]), &uniforms);
+        assert!((a.r - 0.25).abs() < 1e-5, "r={}", a.r);
+        assert!((a.g - 0.75).abs() < 1e-5, "g={}", a.g);
+        assert!(a.b.abs() < 1e-5, "b={}", a.b);
+
+        // A different UV yields a different color (gradient varies with UV).
+        let b = fs.process(&frag_at([0.9, 0.1]), &uniforms);
+        assert!((b.r - 0.9).abs() < 1e-5, "r={}", b.r);
+        assert!((b.g - 0.1).abs() < 1e-5, "g={}", b.g);
+        assert!(b.r > a.r, "output must vary with UV");
+    }
+
+    #[test]
+    fn custom_fragment_time_animates() {
+        // ALPHA = sin(TIME) — output alpha animates as time advances.
+        let mut fs = custom_shader(
+            "shader_type spatial;\nrender_mode unshaded;\nvoid fragment() {\n    ALBEDO = vec3(0.5, 0.5, 0.5);\n    ALPHA = sin(TIME);\n}",
+        );
+        let uniforms = default_uniforms();
+
+        fs.set_time(0.0);
+        let at0 = fs.process(&frag_at([0.0, 0.0]), &uniforms);
+        assert!(at0.a.abs() < 1e-5, "sin(0) alpha={}", at0.a);
+
+        fs.set_time(std::f32::consts::FRAC_PI_2);
+        let at_half_pi = fs.process(&frag_at([0.0, 0.0]), &uniforms);
+        assert!(
+            (at_half_pi.a - 1.0).abs() < 1e-5,
+            "sin(pi/2) alpha={}",
+            at_half_pi.a
+        );
+        assert!(at_half_pi.a > at0.a, "alpha must animate with TIME");
+        // RGB is unaffected by the time change.
+        assert!((at_half_pi.r - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn custom_fragment_texture_sample() {
+        // ALBEDO = texture(tex, UV) — samples the bound solid-color texture.
+        let mut fs = custom_shader(
+            "shader_type spatial;\nrender_mode unshaded;\nuniform sampler2D tex;\nvoid fragment() {\n    ALBEDO = texture(tex, UV);\n}",
+        );
+        fs.set_texture("tex", tex(1, 1, vec![Color::new(0.2, 0.4, 0.6, 1.0)]));
+        let uniforms = default_uniforms();
+
+        let out = fs.process(&frag_at([0.3, 0.7]), &uniforms);
+        assert!((out.r - 0.2).abs() < 1e-5, "r={}", out.r);
+        assert!((out.g - 0.4).abs() < 1e-5, "g={}", out.g);
+        assert!((out.b - 0.6).abs() < 1e-5, "b={}", out.b);
+    }
+
+    #[test]
+    fn custom_fragment_missing_texture_is_white_placeholder() {
+        // No texture bound for `tex` → neutral opaque-white placeholder.
+        let fs = custom_shader(
+            "shader_type spatial;\nrender_mode unshaded;\nuniform sampler2D tex;\nvoid fragment() {\n    ALBEDO = texture(tex, UV);\n}",
+        );
+        let uniforms = default_uniforms();
+        let out = fs.process(&frag_at([0.3, 0.7]), &uniforms);
+        assert!((out.r - 1.0).abs() < 1e-5);
+        assert!((out.g - 1.0).abs() < 1e-5);
+        assert!((out.b - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn custom_fragment_empty_body_falls_back_to_apply_shader() {
+        // No fragment() body → fragment_body is empty → uniform-only path
+        // (apply_shader) still applies albedo_color, so nothing regresses.
+        let shader = gdserver3d::Shader3D::new(
+            gdserver3d::ShaderType3D::Spatial,
+            "shader_type spatial;\nrender_mode unshaded;\nuniform vec4 albedo_color : source_color;",
+        );
+        let mut mat = gdserver3d::ShaderMaterial3D::new();
+        mat.shader = Some(shader);
+        mat.set_shader_parameter(
+            "albedo_color",
+            gdvariant::Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
+        let fs = CustomFragmentShader::from_material(&mat);
+        let uniforms = default_uniforms();
+        let out = fs.process(&frag_at([0.5, 0.5]), &uniforms);
+        assert!((out.r - 1.0).abs() < 1e-5, "r={}", out.r);
+        assert!(out.g.abs() < 1e-5, "g={}", out.g);
+        assert!(out.b.abs() < 1e-5, "b={}", out.b);
     }
 }

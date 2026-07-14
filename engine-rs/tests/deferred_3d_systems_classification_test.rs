@@ -99,8 +99,7 @@ fn parity_report_lists_key_deferred_systems() {
         "SoftBody3D",
         "VehicleBody3D",
         "NavigationAgent3D",
-        "RayCast3D",
-        "ShapeCast3D",
+        "SpringArm3D",
     ];
 
     for system in &key_systems {
@@ -109,6 +108,16 @@ fn parity_report_lists_key_deferred_systems() {
             "parity report deferred section must mention {system}"
         );
     }
+
+    // pat-nwt9y promoted RayCast3D / ShapeCast3D out of deferred into Measured.
+    assert!(
+        !deferred_section.contains("RayCast3D"),
+        "RayCast3D must not remain in the deferred section"
+    );
+    assert!(
+        !deferred_section.contains("ShapeCast3D"),
+        "ShapeCast3D must not remain in the deferred section"
+    );
 }
 
 // ===========================================================================

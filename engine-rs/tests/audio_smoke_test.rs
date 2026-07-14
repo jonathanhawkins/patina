@@ -1,10 +1,16 @@
-//! Smoke tests for AudioStreamPlayer stub behavior (pat-kaa).
+//! Smoke tests for AudioStreamPlayer (pat-kaa, pat-0uov2).
 //!
-//! These tests prove that the AudioStreamPlayer node can be created, configured,
-//! and dropped without panicking. They validate the audio milestone stub contract
-//! defined in EXIT_CRITERIA.md — no actual audio playback occurs.
+//! Covers node creation, ClassDB registration, and play/stop against AudioServer.
 
-use gdaudio::{AudioMixer, AudioStreamPlayback, LoopMode, PlaybackState};
+use gdaudio::{
+    AudioBuffer, AudioMixer, AudioServer, AudioStreamPlayback, AudioStreamPlayer, LoopMode,
+    PlaybackState,
+};
+use gdobject::class_db::{
+    class_exists, clear_for_testing, instantiate, is_parent_class, register_audio_classes,
+    register_class, ClassRegistration,
+};
+use gdobject::object::GodotObject;
 use gdscene::node::Node;
 use gdscene::SceneTree;
 use gdvariant::Variant;
@@ -112,4 +118,117 @@ fn audio_mixer_bus_management_no_panic() {
     assert_eq!(mixer.get_bus(1).unwrap().name(), "Music");
     mixer.remove_bus(1);
     assert_eq!(mixer.bus_count(), 2);
+}
+
+// ===========================================================================
+// pat-0uov2: ClassDB registration + AudioServer-driven play/stop
+// ===========================================================================
+
+fn dc_buffer(frames: usize) -> AudioBuffer {
+    AudioBuffer {
+        samples: vec![0.5; frames],
+        sample_rate: 44100,
+        channels: 1,
+    }
+}
+
+#[test]
+fn audio_stream_player_classdb_registration() {
+    clear_for_testing();
+    register_class(ClassRegistration::new("Object"));
+    register_class(ClassRegistration::new("Node").parent("Object"));
+    register_audio_classes();
+
+    assert!(class_exists("AudioStreamPlayer"));
+    assert!(class_exists("AudioStreamPlayer2D"));
+    assert!(class_exists("AudioStreamPlayer3D"));
+    assert!(is_parent_class("AudioStreamPlayer", "Node"));
+    assert!(is_parent_class("AudioStreamPlayer2D", "Node2D"));
+    assert!(is_parent_class("AudioStreamPlayer3D", "Node3D"));
+
+    let player = instantiate("AudioStreamPlayer").expect("instantiate AudioStreamPlayer");
+    assert_eq!(player.get_property("volume_db"), Variant::Float(0.0));
+    assert_eq!(player.get_property("pitch_scale"), Variant::Float(1.0));
+    assert_eq!(player.get_property("autoplay"), Variant::Bool(false));
+    assert_eq!(
+        player.get_property("bus"),
+        Variant::String("Master".into())
+    );
+    assert_eq!(player.get_property("playing"), Variant::Bool(false));
+}
+
+#[test]
+fn audio_stream_player_play_stop_is_playing() {
+    let mut server = AudioServer::new();
+    let mut player = AudioStreamPlayer::new();
+    player.set_stream(dc_buffer(44100));
+    player.set_volume_db(-3.0);
+    player.set_bus("Master");
+
+    assert!(!player.is_playing(&server));
+    assert!(player.play(&mut server).is_some());
+    assert!(player.is_playing(&server));
+    assert_eq!(server.active_stream_count(), 1);
+
+    // Mix a few frames to prove the voice is live in the server.
+    let out = server.mix(64);
+    assert_eq!(out.len(), 64 * 2);
+
+    player.stop(&mut server);
+    assert!(!player.is_playing(&server));
+    assert_eq!(server.active_stream_count(), 0);
+}
+
+#[test]
+fn audio_stream_player_autoplay_on_enter_tree() {
+    let mut server = AudioServer::new();
+    let mut player = AudioStreamPlayer::new();
+    player.set_stream(dc_buffer(22050));
+    player.set_autoplay(true);
+
+    assert!(player.on_enter_tree(&mut server).is_some());
+    assert!(player.is_playing(&server));
+}
+
+#[test]
+fn audio_stream_player_scene_node_with_server_playback() {
+    // Scene node holds property bag; runtime player drives the server.
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let mut node = Node::new("BGM", "AudioStreamPlayer");
+    node.set_property("volume_db", Variant::Float(-6.0));
+    node.set_property("bus", Variant::String("Master".into()));
+    node.set_property("autoplay", Variant::Bool(true));
+    node.set_property("playing", Variant::Bool(false));
+    let id = tree.add_child(root, node).unwrap();
+
+    let scene_node = tree.get_node(id).unwrap();
+    assert_eq!(scene_node.class_name(), "AudioStreamPlayer");
+
+    let mut server = AudioServer::new();
+    let mut player = AudioStreamPlayer::new();
+    player.set_stream(dc_buffer(44100));
+    if let Variant::Float(db) = scene_node.get_property("volume_db") {
+        player.set_volume_db(db as f32);
+    }
+    if let Variant::Bool(true) = scene_node.get_property("autoplay") {
+        player.set_autoplay(true);
+    }
+    player.on_enter_tree(&mut server);
+    assert!(player.is_playing(&server));
+
+    // Reflect playing state back onto the node property bag.
+    tree.get_node_mut(id)
+        .unwrap()
+        .set_property("playing", Variant::Bool(true));
+    assert_eq!(
+        tree.get_node(id).unwrap().get_property("playing"),
+        Variant::Bool(true)
+    );
+
+    player.stop(&mut server);
+    tree.get_node_mut(id)
+        .unwrap()
+        .set_property("playing", Variant::Bool(false));
+    assert!(!player.is_playing(&server));
 }

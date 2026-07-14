@@ -107,6 +107,32 @@ pub fn to_json(v: &Variant) -> Value {
                 }
             })
         }
+        // Packed arrays serialize their elements as a flat JSON array. Vector
+        // and color arrays flatten to consecutive components.
+        Variant::PackedByteArray(v) => json!({ "type": "PackedByteArray", "value": v }),
+        Variant::PackedInt32Array(v) => json!({ "type": "PackedInt32Array", "value": v }),
+        Variant::PackedInt64Array(v) => json!({ "type": "PackedInt64Array", "value": v }),
+        Variant::PackedFloat32Array(v) => json!({ "type": "PackedFloat32Array", "value": v }),
+        Variant::PackedFloat64Array(v) => json!({ "type": "PackedFloat64Array", "value": v }),
+        Variant::PackedStringArray(v) => json!({ "type": "PackedStringArray", "value": v }),
+        Variant::PackedVector2Array(v) => {
+            let flat: Vec<f64> = v.iter().flat_map(|p| [p.x as f64, p.y as f64]).collect();
+            json!({ "type": "PackedVector2Array", "value": flat })
+        }
+        Variant::PackedVector3Array(v) => {
+            let flat: Vec<f64> = v
+                .iter()
+                .flat_map(|p| [p.x as f64, p.y as f64, p.z as f64])
+                .collect();
+            json!({ "type": "PackedVector3Array", "value": flat })
+        }
+        Variant::PackedColorArray(v) => {
+            let flat: Vec<f64> = v
+                .iter()
+                .flat_map(|c| [c.r as f64, c.g as f64, c.b as f64, c.a as f64])
+                .collect();
+            json!({ "type": "PackedColorArray", "value": flat })
+        }
     }
 }
 
@@ -331,6 +357,96 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 class_name,
                 properties,
             })))
+        }
+        "PackedByteArray" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(u8::try_from(x.as_u64()?).ok()?);
+            }
+            Some(Variant::PackedByteArray(v))
+        }
+        "PackedInt32Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_i64()? as i32);
+            }
+            Some(Variant::PackedInt32Array(v))
+        }
+        "PackedInt64Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_i64()?);
+            }
+            Some(Variant::PackedInt64Array(v))
+        }
+        "PackedFloat32Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_f64()? as f32);
+            }
+            Some(Variant::PackedFloat32Array(v))
+        }
+        "PackedFloat64Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_f64()?);
+            }
+            Some(Variant::PackedFloat64Array(v))
+        }
+        "PackedStringArray" => {
+            let arr = obj.get("value")?.as_array()?;
+            let mut v = Vec::with_capacity(arr.len());
+            for x in arr {
+                v.push(x.as_str()?.to_owned());
+            }
+            Some(Variant::PackedStringArray(v))
+        }
+        "PackedVector2Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 2 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 2);
+            for chunk in arr.chunks(2) {
+                v.push(Vector2::new(chunk[0].as_f64()? as f32, chunk[1].as_f64()? as f32));
+            }
+            Some(Variant::PackedVector2Array(v))
+        }
+        "PackedVector3Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 3 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 3);
+            for chunk in arr.chunks(3) {
+                v.push(Vector3::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                    chunk[2].as_f64()? as f32,
+                ));
+            }
+            Some(Variant::PackedVector3Array(v))
+        }
+        "PackedColorArray" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 4 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 4);
+            for chunk in arr.chunks(4) {
+                v.push(Color::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                    chunk[2].as_f64()? as f32,
+                    chunk[3].as_f64()? as f32,
+                ));
+            }
+            Some(Variant::PackedColorArray(v))
         }
         _ => None,
     }
@@ -742,5 +858,52 @@ mod tests {
     fn parse_vec3_rejects_non_numeric() {
         assert!(parse_vec3(&serde_json::json!("not a vec")).is_none());
         assert!(parse_vec3(&serde_json::json!(42)).is_none());
+    }
+
+    // -- Packed array JSON round-trips --------------------------------------
+
+    #[test]
+    fn roundtrip_packed_byte_array() {
+        let v = Variant::PackedByteArray(vec![0, 1, 255, 128]);
+        assert_eq!(roundtrip(v.clone()), v);
+        assert_eq!(roundtrip(Variant::PackedByteArray(vec![])), Variant::PackedByteArray(vec![]));
+    }
+
+    #[test]
+    fn roundtrip_packed_int_arrays() {
+        let v32 = Variant::PackedInt32Array(vec![0, -1, i32::MAX, i32::MIN]);
+        assert_eq!(roundtrip(v32.clone()), v32);
+        let v64 = Variant::PackedInt64Array(vec![0, i64::MAX, i64::MIN]);
+        assert_eq!(roundtrip(v64.clone()), v64);
+    }
+
+    #[test]
+    fn roundtrip_packed_float_arrays() {
+        let v32 = Variant::PackedFloat32Array(vec![0.0, 0.5, -3.25]);
+        assert_eq!(roundtrip(v32.clone()), v32);
+        let v64 = Variant::PackedFloat64Array(vec![0.1, -2.5, 1e300]);
+        assert_eq!(roundtrip(v64.clone()), v64);
+    }
+
+    #[test]
+    fn roundtrip_packed_string_array() {
+        let v = Variant::PackedStringArray(vec!["".into(), "abc".into(), "héllo".into()]);
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_packed_vector_and_color_arrays() {
+        let v2 = Variant::PackedVector2Array(vec![Vector2::new(1.0, 2.0), Vector2::new(-3.0, 4.5)]);
+        assert_eq!(roundtrip(v2.clone()), v2);
+        let v3 = Variant::PackedVector3Array(vec![Vector3::new(1.0, 2.0, 3.0)]);
+        assert_eq!(roundtrip(v3.clone()), v3);
+        let vc = Variant::PackedColorArray(vec![Color::new(0.1, 0.2, 0.3, 1.0)]);
+        assert_eq!(roundtrip(vc.clone()), vc);
+    }
+
+    #[test]
+    fn packed_vector2_odd_length_rejected() {
+        let j = serde_json::json!({ "type": "PackedVector2Array", "value": [1.0, 2.0, 3.0] });
+        assert!(from_json(&j).is_none());
     }
 }

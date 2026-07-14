@@ -108,8 +108,9 @@ fn panoramic_sky_placeholder_renders() {
         sky: Some(Sky {
             material: SkyMaterial::Panoramic(PanoramicSkyMaterial {
                 panorama_path: "res://my_hdr.exr".to_string(),
+                texture: None,
                 ..Default::default()
-            }),
+        }),
             ..Default::default()
         }),
         ..Default::default()
@@ -315,8 +316,9 @@ fn preview_info_panoramic_with_path() {
         sky: Some(Sky {
             material: SkyMaterial::Panoramic(PanoramicSkyMaterial {
                 panorama_path: "res://sky.hdr".to_string(),
+                texture: None,
                 ..Default::default()
-            }),
+        }),
             ..Default::default()
         }),
         ..Default::default()

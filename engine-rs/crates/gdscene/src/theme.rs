@@ -12,6 +12,8 @@ use gdcore::math::Color;
 use gdvariant::Variant;
 use std::collections::HashMap;
 
+use crate::stylebox::StyleBox;
+
 // ===========================================================================
 // Theme property categories
 // ===========================================================================
@@ -53,8 +55,10 @@ pub struct Theme {
     font_sizes: HashMap<ThemeKey, i64>,
     /// Integer constant properties.
     constants: HashMap<ThemeKey, i64>,
-    /// Generic properties stored as Variant (fonts, styleboxes, etc.).
+    /// Generic properties stored as Variant (fonts, legacy styleboxes, etc.).
     items: HashMap<(ThemePropertyType, ThemeKey), Variant>,
+    /// Typed StyleBox properties (pat-u3l8c.70).
+    styleboxes: HashMap<ThemeKey, StyleBox>,
 }
 
 impl Theme {
@@ -66,6 +70,38 @@ impl Theme {
             font_sizes: HashMap::new(),
             constants: HashMap::new(),
             items: HashMap::new(),
+            styleboxes: HashMap::new(),
+        }
+    }
+
+    // -- StyleBoxes (typed) --------------------------------------------------
+
+    /// Sets a typed [`StyleBox`] for a control type/property (pat-u3l8c.70).
+    pub fn set_stylebox(&mut self, control_type: &str, property: &str, stylebox: StyleBox) {
+        self.styleboxes
+            .insert((control_type.to_string(), property.to_string()), stylebox);
+    }
+
+    /// Gets a typed [`StyleBox`], returning `None` if not set.
+    pub fn get_stylebox(&self, control_type: &str, property: &str) -> Option<&StyleBox> {
+        self.styleboxes
+            .get(&(control_type.to_string(), property.to_string()))
+    }
+
+    /// Returns `true` if a typed StyleBox exists for the given key.
+    pub fn has_stylebox(&self, control_type: &str, property: &str) -> bool {
+        self.styleboxes
+            .contains_key(&(control_type.to_string(), property.to_string()))
+    }
+
+    /// Loads all StyleBox sub-resources from a `.tscn`/`.tres` string and
+    /// assigns them under `control_type` keyed by their sub-resource id.
+    ///
+    /// Convenience for parsing a theme resource into typed styleboxes.
+    pub fn load_styleboxes_from_tscn(&mut self, control_type: &str, text: &str) {
+        for (id, sb) in crate::stylebox::parse_styleboxes_from_tscn(text) {
+            self.styleboxes
+                .insert((control_type.to_string(), id), sb);
         }
     }
 

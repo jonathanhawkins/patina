@@ -4,8 +4,12 @@
 //! `[section]` blocks with `key=value` pairs, where values are
 //! Godot Variant types serialized as text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
+use gdcore::error::{EngineError, EngineResult};
+use gdcore::id::ObjectId;
 use gdvariant::Variant;
 
 /// An INI-style configuration file with section/key/value storage.
@@ -438,5 +442,74 @@ height=720
         assert!(text.contains("[b]"));
         assert!(text.contains("x=1"));
         assert!(text.contains("y=2"));
+    }
+
+    #[test]
+    fn handle_registry_roundtrip() {
+        let id = ConfigFile::new_handle();
+        assert!(is_config_file_handle(id));
+        ConfigFile::with_handle_mut(id, |cfg| {
+            cfg.set_value("player", "hp", Variant::Int(100));
+            Ok(())
+        })
+        .unwrap();
+        let hp = ConfigFile::with_handle_mut(id, |cfg| {
+            Ok(cfg.get_value("player", "hp").cloned())
+        })
+        .unwrap();
+        assert_eq!(hp, Some(Variant::Int(100)));
+        ConfigFile::close_handle(id);
+        assert!(ConfigFile::with_handle_mut(id, |_| Ok(())).is_err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Script-facing handle registry (GDScript ConfigFile.new())
+// ---------------------------------------------------------------------------
+
+const CONFIG_HANDLE_TAG: u64 = 0xCF00_0000_0000_0000;
+static NEXT_CONFIG_HANDLE: AtomicU64 = AtomicU64::new(1);
+static CONFIG_HANDLES: Mutex<Option<HashMap<u64, ConfigFile>>> = Mutex::new(None);
+
+fn config_handles() -> std::sync::MutexGuard<'static, Option<HashMap<u64, ConfigFile>>> {
+    CONFIG_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`ConfigFile::new_handle`].
+pub fn is_config_file_handle(id: ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == CONFIG_HANDLE_TAG
+}
+
+impl ConfigFile {
+    /// Allocates an empty ConfigFile in the process-wide handle table.
+    pub fn new_handle() -> ObjectId {
+        let seq = NEXT_CONFIG_HANDLE.fetch_add(1, Ordering::Relaxed);
+        let raw = CONFIG_HANDLE_TAG | seq;
+        config_handles()
+            .get_or_insert_with(HashMap::new)
+            .insert(raw, ConfigFile::new());
+        ObjectId::from_raw(raw)
+    }
+
+    /// Runs `f` against the live ConfigFile for `id`.
+    pub fn with_handle_mut<R>(
+        id: ObjectId,
+        f: impl FnOnce(&mut ConfigFile) -> EngineResult<R>,
+    ) -> EngineResult<R> {
+        let mut guard = config_handles();
+        let map = guard.get_or_insert_with(HashMap::new);
+        let cfg = map.get_mut(&id.raw()).ok_or_else(|| {
+            EngineError::InvalidOperation("ConfigFile handle is closed or invalid".into())
+        })?;
+        f(cfg)
+    }
+
+    /// Drops a handle created by [`new_handle`](Self::new_handle).
+    pub fn close_handle(id: ObjectId) {
+        if let Some(map) = config_handles().as_mut() {
+            map.remove(&id.raw());
+        }
     }
 }

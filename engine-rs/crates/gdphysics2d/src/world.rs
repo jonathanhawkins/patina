@@ -62,7 +62,13 @@ pub struct PhysicsWorld2D {
     constraint_iterations: usize,
     /// Contacts from the previous frame, keyed by (min_id, max_id).
     previous_contacts: HashSet<(BodyId, BodyId)>,
+    /// Global gravity vector (px/s²) applied to dynamic bodies each step.
+    gravity: Vector2,
 }
+
+/// Godot's default 2D gravity vector: `physics/2d/default_gravity` (980.0)
+/// multiplied by `physics/2d/default_gravity_vector` ((0, 1), i.e. down).
+pub const DEFAULT_GRAVITY_2D: Vector2 = Vector2::new(0.0, 980.0);
 
 impl PhysicsWorld2D {
     /// Creates an empty physics world.
@@ -74,7 +80,21 @@ impl PhysicsWorld2D {
             next_joint_id: 1,
             constraint_iterations: 10,
             previous_contacts: HashSet::new(),
+            gravity: DEFAULT_GRAVITY_2D,
         }
+    }
+
+    /// Sets the global gravity vector (px/s²) applied to dynamic bodies.
+    ///
+    /// Defaults to [`DEFAULT_GRAVITY_2D`] (`(0, 980)`), matching Godot's
+    /// `physics/2d/default_gravity` × `default_gravity_vector` project settings.
+    pub fn set_gravity(&mut self, gravity: Vector2) {
+        self.gravity = gravity;
+    }
+
+    /// Returns the global gravity vector (px/s²).
+    pub fn gravity(&self) -> Vector2 {
+        self.gravity
     }
 
     /// Sets the number of constraint solver iterations per step.
@@ -150,9 +170,10 @@ impl PhysicsWorld2D {
     ///
     /// Returns collision events for this frame (entered, persisting, exited).
     pub fn step(&mut self, dt: f32) -> Vec<CollisionEvent> {
-        // Phase 1: Integrate
+        // Phase 1: Integrate (apply world gravity + per-body damping)
+        let gravity = self.gravity;
         for body in self.bodies.values_mut() {
-            body.integrate(dt);
+            body.integrate(dt, gravity);
         }
 
         // Phase 1.5: Apply joint constraints (iterated for convergence)
@@ -211,8 +232,10 @@ impl PhysicsWorld2D {
                 let (
                     shape_a,
                     pos_a,
+                    rot_a,
                     shape_b,
                     pos_b,
+                    rot_b,
                     layer_a,
                     mask_a,
                     layer_b,
@@ -229,8 +252,10 @@ impl PhysicsWorld2D {
                     (
                         a.shape,
                         a.position,
+                        a.rotation,
                         b.shape,
                         b.position,
+                        b.rotation,
                         a.collision_layer,
                         a.collision_mask,
                         b.collision_layer,
@@ -249,8 +274,10 @@ impl PhysicsWorld2D {
                     continue;
                 }
 
-                let tf_a = Transform2D::translated(pos_a);
-                let tf_b = Transform2D::translated(pos_b);
+                // Build rotation-aware world transforms so the narrow-phase
+                // accounts for each body's orientation (SAT in world space).
+                let tf_a = body_transform(pos_a, rot_a);
+                let tf_b = body_transform(pos_b, rot_b);
 
                 if let Some(result) = collision::test_collision(&shape_a, &tf_a, &shape_b, &tf_b) {
                     if result.colliding && result.depth > 0.0 {
@@ -346,6 +373,16 @@ impl Default for PhysicsWorld2D {
     }
 }
 
+/// Builds a body's world transform from its position and rotation (radians).
+///
+/// The basis carries the rotation so the narrow-phase can transform local
+/// shape geometry into world space, making collisions orientation-aware.
+fn body_transform(position: Vector2, rotation: f32) -> Transform2D {
+    let mut tf = Transform2D::rotated(rotation);
+    tf.origin = position;
+    tf
+}
+
 /// Ray-shape intersection test for a single body.
 fn raycast_shape(
     origin: Vector2,
@@ -365,8 +402,89 @@ fn raycast_shape(
             half_extents,
             body.id,
         ),
-        _ => None, // Segment and capsule raycasts not yet implemented
+        Shape2D::Capsule {
+            radius,
+            height,
+        } => ray_capsule(
+            origin,
+            dir,
+            max_distance,
+            body.position,
+            radius,
+            height,
+            body.id,
+        ),
+        Shape2D::Segment { a, b } => {
+            // Segment as thin capsule between endpoints (relative to body origin).
+            ray_segment(origin, dir, max_distance, body.position + a, body.position + b, body.id)
+        }
+        _ => None,
     }
+}
+
+/// Ray vs vertical capsule (Godot CapsuleShape2D: height along Y, hemispheres).
+fn ray_capsule(
+    origin: Vector2,
+    dir: Vector2,
+    max_dist: f32,
+    center: Vector2,
+    radius: f32,
+    height: f32,
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    // Approximate capsule as two circles + AABB slab; take nearest hit.
+    let half = (height * 0.5 - radius).max(0.0);
+    let c1 = Vector2::new(center.x, center.y - half);
+    let c2 = Vector2::new(center.x, center.y + half);
+    let mut best: Option<RaycastHit> = None;
+    for c in [c1, c2] {
+        if let Some(h) = ray_circle(origin, dir, max_dist, c, radius, body_id) {
+            if best.as_ref().map(|b| h.distance < b.distance).unwrap_or(true) {
+                best = Some(h);
+            }
+        }
+    }
+    // Cylinder body as AABB
+    let half_ext = Vector2::new(radius, half.max(0.0));
+    if let Some(h) = ray_aabb(origin, dir, max_dist, center, half_ext, body_id) {
+        if best.as_ref().map(|b| h.distance < b.distance).unwrap_or(true) {
+            best = Some(h);
+        }
+    }
+    best
+}
+
+/// Ray vs line segment (closest intersection within max_dist).
+fn ray_segment(
+    origin: Vector2,
+    dir: Vector2,
+    max_dist: f32,
+    a: Vector2,
+    b: Vector2,
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    // 2D segment-ray intersection
+    let r = dir;
+    let s = b - a;
+    let det = r.x * s.y - r.y * s.x;
+    if det.abs() < 1e-8 {
+        return None;
+    }
+    let qp = a - origin;
+    let t = (qp.x * s.y - qp.y * s.x) / det;
+    let u = (qp.x * r.y - qp.y * r.x) / det;
+    if t < 0.0 || t > max_dist || u < 0.0 || u > 1.0 {
+        return None;
+    }
+    let point = origin + r * t;
+    let normal = Vector2::new(-(b.y - a.y), b.x - a.x);
+    let nlen = normal.length().max(1e-8);
+    Some(RaycastHit {
+        body_id,
+        point,
+        normal: Vector2::new(normal.x / nlen, normal.y / nlen),
+        distance: t,
+    })
 }
 
 /// Ray vs circle intersection.
@@ -531,6 +649,8 @@ mod tests {
     #[test]
     fn world_step_rigid_body_moves() {
         let mut world = PhysicsWorld2D::new();
+        // Isolate constant-velocity motion from gravity for this assertion.
+        world.set_gravity(Vector2::ZERO);
         let mut body = make_rigid_circle(Vector2::ZERO, 1.0);
         body.linear_velocity = Vector2::new(0.0, 10.0); // falling
         let id = world.add_body(body);
@@ -539,6 +659,113 @@ mod tests {
 
         let b = world.get_body(id).unwrap();
         assert!(approx_eq(b.position.y, 10.0));
+    }
+
+    #[test]
+    fn world_default_gravity_matches_godot() {
+        let world = PhysicsWorld2D::new();
+        assert_eq!(world.gravity(), Vector2::new(0.0, 980.0));
+    }
+
+    #[test]
+    fn world_rigid_body_falls_under_default_gravity() {
+        // Under default gravity, a rigid body should fall ~0.5*g*t² in +Y.
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_rigid_circle(Vector2::ZERO, 1.0));
+
+        let dt = 1.0 / 60.0;
+        let steps = 60;
+        for _ in 0..steps {
+            world.step(dt);
+        }
+
+        let t = dt * steps as f32;
+        let expected = 0.5 * 980.0 * t * t; // ≈ 490 px
+        let y = world.get_body(id).unwrap().position.y;
+        assert!(
+            (y - expected).abs() < expected * 0.05,
+            "fell {y}, expected ≈ {expected} (0.5*g*t²)"
+        );
+        assert!(y > 0.0, "body must fall in +Y");
+    }
+
+    #[test]
+    fn world_gravity_scale_zero_and_double() {
+        // gravity_scale=0 does not fall; gravity_scale=2 falls twice as far.
+        let dt = 1.0 / 60.0;
+        let steps = 30;
+
+        let mut world = PhysicsWorld2D::new();
+        let mut b0 = make_rigid_circle(Vector2::ZERO, 1.0);
+        b0.collision_layer = 0; // avoid any inter-body collision
+        b0.collision_mask = 0;
+        b0.gravity_scale = 0.0;
+        let mut b1 = make_rigid_circle(Vector2::new(100.0, 0.0), 1.0);
+        b1.collision_layer = 0;
+        b1.collision_mask = 0;
+        b1.gravity_scale = 1.0;
+        let mut b2 = make_rigid_circle(Vector2::new(200.0, 0.0), 1.0);
+        b2.collision_layer = 0;
+        b2.collision_mask = 0;
+        b2.gravity_scale = 2.0;
+        let id0 = world.add_body(b0);
+        let id1 = world.add_body(b1);
+        let id2 = world.add_body(b2);
+
+        for _ in 0..steps {
+            world.step(dt);
+        }
+
+        let y0 = world.get_body(id0).unwrap().position.y;
+        let y1 = world.get_body(id1).unwrap().position.y;
+        let y2 = world.get_body(id2).unwrap().position.y;
+        assert!(y0.abs() < 1e-5, "gravity_scale=0 should not fall, got {y0}");
+        assert!(y1 > 0.0, "gravity_scale=1 should fall, got {y1}");
+        // Integration is linear in gravity, so 2x scale falls exactly 2x.
+        assert!(
+            (y2 - 2.0 * y1).abs() < 1e-2,
+            "gravity_scale=2 ({y2}) should fall 2x gravity_scale=1 ({y1})"
+        );
+    }
+
+    #[test]
+    fn world_linear_damp_decays_velocity() {
+        // No gravity + linear damping: velocity decays by (1 - dt*d) per step.
+        let mut world = PhysicsWorld2D::new();
+        world.set_gravity(Vector2::ZERO);
+        let dt = 1.0 / 60.0;
+        let d = 3.0_f32;
+        let mut body = make_rigid_circle(Vector2::ZERO, 1.0);
+        body.collision_layer = 0;
+        body.collision_mask = 0;
+        body.linear_velocity = Vector2::new(50.0, 0.0);
+        body.linear_damp = d;
+        let id = world.add_body(body);
+
+        let steps = 45;
+        for _ in 0..steps {
+            world.step(dt);
+        }
+
+        let expected = 50.0 * (1.0 - dt * d).powi(steps);
+        let vx = world.get_body(id).unwrap().linear_velocity.x;
+        assert!(
+            (vx - expected).abs() < 1e-2,
+            "damped velocity {vx} != expected {expected}"
+        );
+        assert!(vx < 50.0 && vx > 0.0, "velocity should decay, got {vx}");
+    }
+
+    #[test]
+    fn world_static_body_unaffected_by_gravity() {
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_static_rect(Vector2::new(7.0, 3.0), 5.0));
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+        let b = world.get_body(id).unwrap();
+        assert_eq!(b.position, Vector2::new(7.0, 3.0), "static must not fall");
+        assert_eq!(b.linear_velocity, Vector2::ZERO);
     }
 
     #[test]
@@ -673,6 +900,44 @@ mod tests {
         let events = world.step(0.0);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].state, ContactState::Entered);
+    }
+
+    #[test]
+    fn step_narrowphase_is_rotation_aware() {
+        use std::f32::consts::FRAC_PI_2;
+
+        // Thin horizontal bar shape (4 wide, 1 tall).
+        let make_bar = |pos: Vector2, rot: f32| {
+            let mut b = PhysicsBody2D::new(
+                BodyId(0),
+                BodyType::Static,
+                pos,
+                Shape2D::Rectangle {
+                    half_extents: Vector2::new(2.0, 0.5),
+                },
+                1.0,
+            );
+            b.rotation = rot;
+            b
+        };
+
+        // Axis-aligned bars 0.2 apart on Y produce no contact.
+        let mut world = PhysicsWorld2D::new();
+        world.add_body(make_bar(Vector2::new(0.0, 0.0), 0.0));
+        world.add_body(make_bar(Vector2::new(0.0, 1.2), 0.0));
+        assert!(
+            world.step(0.0).is_empty(),
+            "axis-aligned bars 0.2 apart must not collide"
+        );
+
+        // Rotating bar A by 90° makes it span Y ∈ [-2, 2] and reach bar B.
+        let mut rotated_world = PhysicsWorld2D::new();
+        rotated_world.add_body(make_bar(Vector2::new(0.0, 0.0), FRAC_PI_2));
+        rotated_world.add_body(make_bar(Vector2::new(0.0, 1.2), 0.0));
+        assert!(
+            !rotated_world.step(0.0).is_empty(),
+            "rotating bar A by 90° must create a contact (narrow-phase reads rotation)"
+        );
     }
 
     #[test]
@@ -929,5 +1194,49 @@ mod tests {
         // Should not panic
         world.step(1.0 / 60.0);
         assert!(world.get_body(id_a).is_some());
+    }
+}
+
+#[cfg(test)]
+mod capsule_segment_ray_tests {
+    use super::*;
+    use crate::body::{BodyType, PhysicsBody2D};
+    use crate::shape::Shape2D;
+    use gdcore::math::Vector2;
+
+    #[test]
+    fn raycast_hits_capsule() {
+        let mut world = PhysicsWorld2D::new();
+        let body = PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Capsule {
+                radius: 1.0,
+                height: 4.0,
+            },
+            0.0,
+        );
+        world.add_body(body);
+        let hit = world.raycast(Vector2::new(-10.0, 0.0), Vector2::new(1.0, 0.0), 20.0);
+        assert!(hit.is_some(), "should hit capsule");
+    }
+
+    #[test]
+    fn raycast_hits_segment() {
+        let mut world = PhysicsWorld2D::new();
+        let body = PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Segment {
+                a: Vector2::new(0.0, -2.0),
+                b: Vector2::new(0.0, 2.0),
+            },
+            0.0,
+        );
+        world.add_body(body);
+        let hit = world.raycast(Vector2::new(-5.0, 0.0), Vector2::new(1.0, 0.0), 20.0);
+        assert!(hit.is_some());
     }
 }

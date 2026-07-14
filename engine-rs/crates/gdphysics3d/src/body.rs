@@ -1,7 +1,7 @@
 //! 3D rigid body and kinematic body types.
 
 use gdcore::math::Vector3;
-use gdcore::math3d::Quaternion;
+use gdcore::math3d::{Aabb, Quaternion};
 
 use crate::shape::Shape3D;
 
@@ -86,8 +86,10 @@ pub struct PhysicsBody3D {
     pub contact_monitor: bool,
     /// Maximum number of contacts to report.
     pub max_contacts_reported: usize,
-    /// Collision layer bitmask.
+    /// Collision layer bitmask: which layers this body belongs to.
     pub collision_layer: u32,
+    /// Collision mask bitmask: which layers this body scans for collisions.
+    pub collision_mask: u32,
     /// Accumulated force for the current frame.
     accumulated_force: Vector3,
     /// Accumulated torque for the current frame.
@@ -126,6 +128,7 @@ impl PhysicsBody3D {
             contact_monitor: false,
             max_contacts_reported: 0,
             collision_layer: 1,
+            collision_mask: 1,
             accumulated_force: Vector3::ZERO,
             accumulated_torque: Vector3::ZERO,
             contacts: Vec::new(),
@@ -345,6 +348,29 @@ impl PhysicsBody3D {
     }
 
     // -- Query API ---------------------------------------------------------
+
+    /// Returns the body's collision shape AABB translated into world space.
+    ///
+    /// Used by the broad-phase to prune candidate collision pairs. The shape's
+    /// local bounding box is offset by the body's position; like the rest of
+    /// the pipeline this treats shapes as axis-aligned, so for spheres it is
+    /// exact and for other shapes it is a conservative bound.
+    pub fn world_aabb(&self) -> Aabb {
+        let local = self.shape.bounding_aabb();
+        Aabb::new(local.position + self.position, local.size)
+    }
+
+    /// Returns `true` if this body is allowed to collide with `other` under
+    /// Godot's layer/mask rules.
+    ///
+    /// Two bodies collide when either body's collision mask includes a layer
+    /// the other body belongs to, i.e.
+    /// `(a.mask & b.layer) != 0 || (b.mask & a.layer) != 0`, matching Godot's
+    /// `CollisionObject3D::test_collision_mask`.
+    pub fn should_collide_with(&self, other: &PhysicsBody3D) -> bool {
+        (self.collision_mask & other.collision_layer) != 0
+            || (other.collision_mask & self.collision_layer) != 0
+    }
 
     /// Returns the inverse mass (0 for static/kinematic bodies).
     pub fn inverse_mass(&self) -> f32 {
@@ -584,6 +610,63 @@ mod tests {
         // Cross (1,0,0) x (0,0,10) = (0,-10,0)? No: offset.cross(impulse)
         // (1,0,0).cross(0,0,10) = (0*10-0*0, 0*0-1*10, 1*0-0*0) = (0,-10,0)
         assert!(body.angular_velocity.y.abs() > 1.0);
+    }
+
+    #[test]
+    fn collision_layer_mask_defaults() {
+        let body = make_rigid(Vector3::ZERO);
+        assert_eq!(body.collision_layer, 1);
+        assert_eq!(body.collision_mask, 1);
+    }
+
+    #[test]
+    fn should_collide_with_matching_default_layers() {
+        let a = make_rigid(Vector3::ZERO);
+        let b = make_rigid(Vector3::ZERO);
+        assert!(a.should_collide_with(&b));
+    }
+
+    #[test]
+    fn should_not_collide_when_masks_disjoint() {
+        let mut a = make_rigid(Vector3::ZERO);
+        let mut b = make_rigid(Vector3::ZERO);
+        // a is on layer 1, scans layer 1; b is on layer 2, scans layer 2.
+        a.collision_layer = 0b0001;
+        a.collision_mask = 0b0001;
+        b.collision_layer = 0b0010;
+        b.collision_mask = 0b0010;
+        assert!(!a.should_collide_with(&b));
+        assert!(!b.should_collide_with(&a));
+    }
+
+    #[test]
+    fn should_collide_is_symmetric_and_one_directional() {
+        // Godot semantics: collide if EITHER body's mask includes the other's
+        // layer. Here only `a` scans `b`'s layer, `b` scans nothing of `a`.
+        let mut a = make_rigid(Vector3::ZERO);
+        let mut b = make_rigid(Vector3::ZERO);
+        a.collision_layer = 0b0001;
+        a.collision_mask = 0b0010; // a scans layer 2 (b's layer)
+        b.collision_layer = 0b0010;
+        b.collision_mask = 0b0100; // b scans layer 3 (nobody)
+        assert!(a.should_collide_with(&b));
+        assert!(b.should_collide_with(&a), "must be symmetric");
+    }
+
+    #[test]
+    fn world_aabb_is_translated_by_position() {
+        let body = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            Vector3::new(5.0, 0.0, 0.0),
+            Shape3D::Sphere { radius: 1.0 },
+            1.0,
+        );
+        let aabb = body.world_aabb();
+        // Sphere local AABB is centred at origin with half-extent 1 → world box
+        // spans x in [4, 6].
+        assert_eq!(aabb.position, Vector3::new(4.0, -1.0, -1.0));
+        assert_eq!(aabb.size, Vector3::new(2.0, 2.0, 2.0));
     }
 
     #[test]

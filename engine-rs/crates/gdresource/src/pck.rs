@@ -6,29 +6,48 @@
 //!
 //! # Format Overview
 //!
+//! Matches Godot 4.6's `core/io/file_access_pack.cpp`. Two on-disk versions are
+//! accepted for reading — V2 and V3 — and the writer emits V2 (which Godot's
+//! reader still accepts, and which keeps the directory inline for a simple
+//! single-pass writer).
+//!
 //! ```text
-//! Header:
-//!   magic:       4 bytes  "GDPC"
-//!   version:     4 bytes  LE u32  (2 for Godot 4.x)
+//! Header (both V2 and V3):
+//!   magic:       4 bytes  "GDPC" (0x43504447 LE)
+//!   version:     4 bytes  LE u32  (2 or 3)
 //!   ver_major:   4 bytes  LE u32
 //!   ver_minor:   4 bytes  LE u32
 //!   ver_patch:   4 bytes  LE u32
-//!   flags:       4 bytes  LE u32
-//!   reserved:    64 bytes (16 × u32, all zero)
+//!   pack_flags:  4 bytes  LE u32  (PACK_DIR_ENCRYPTED | PACK_REL_FILEBASE | PACK_SPARSE_BUNDLE)
+//!   file_base:   8 bytes  LE u64  (base offset added to every entry's offset;
+//!                                  relative to the header start for V3 and for
+//!                                  V2 when PACK_REL_FILEBASE is set)
+//!   V3 only:
+//!     dir_offset: 8 bytes LE u64  (offset of the directory; reader seeks here)
+//!   V2 only:
+//!     reserved:  64 bytes (16 × u32, all zero) — directory follows inline
+//!
+//! Directory:
 //!   file_count:  4 bytes  LE u32
+//!   For each file:
+//!     path_len:  4 bytes  LE u32  (byte length of path INCLUDING NUL padding to 4)
+//!     path:      path_len bytes   (UTF-8, NUL-padded to a 4-byte boundary)
+//!     offset:    8 bytes  LE u64  (relative to file_base)
+//!     size:      8 bytes  LE u64
+//!     md5:       16 bytes         (MD5 digest, or zeroes)
+//!     flags:     4 bytes  LE u32  (PACK_FILE_ENCRYPTED | PACK_FILE_REMOVAL | PACK_FILE_DELTA)
 //!
-//! For each file:
-//!   path_len:    4 bytes  LE u32  (byte length of path, padded to 4-byte boundary)
-//!   path:        path_len bytes   (NUL-padded to alignment)
-//!   offset:      8 bytes  LE u64
-//!   size:        8 bytes  LE u64
-//!   md5:         16 bytes         (MD5 digest, or zeroes)
+//! File data is aligned (Godot default 64) within the archive.
 //!
-//! File data follows the directory block, each aligned to 64 bytes.
+//! Encryption (PACK_DIR_ENCRYPTED / PACK_FILE_ENCRYPTED) is detected and
+//! reported as an unsupported-format error; no decryption is performed.
+//!
+//! Embedded packs (self-contained executables) are located by scanning for the
+//! magic at the start, or via the end-of-file trailer `[data_size: u64][magic]`.
 //! ```
 
 use std::collections::BTreeMap;
-use std::io::{self, Cursor, Read, Seek, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
@@ -40,17 +59,45 @@ use crate::resource::Resource;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// The magic header bytes for a PCK file.
+/// The magic header bytes for a PCK file (`0x43504447` little-endian).
 pub const PCK_MAGIC: &[u8; 4] = b"GDPC";
 
-/// PCK format version for Godot 4.x.
-pub const PCK_FORMAT_VERSION: u32 = 2;
+/// Legacy pack format version (directory inline after a reserved area).
+pub const PCK_FORMAT_VERSION_V2: u32 = 2;
+
+/// Current pack format version (directory located via a `dir_offset` field).
+pub const PCK_FORMAT_VERSION_V3: u32 = 3;
+
+/// PCK format version emitted by [`PckPacker`].
+///
+/// V2 is written because Godot's reader still accepts it and it keeps the
+/// directory inline, allowing a single seekable pass. Godot's own writer emits
+/// V3; both are readable here.
+pub const PCK_FORMAT_VERSION: u32 = PCK_FORMAT_VERSION_V2;
 
 /// Default alignment for file data within the archive.
 pub const PCK_DATA_ALIGNMENT: u64 = 64;
 
 /// Size of the reserved header area (16 × u32).
 const RESERVED_FIELD_COUNT: usize = 16;
+
+// Pack-level flags (header `pack_flags`), from `file_access_pack.h`.
+/// The directory block is encrypted (unsupported here).
+const PACK_DIR_ENCRYPTED: u32 = 1 << 0;
+/// `file_base` is relative to the header start rather than absolute.
+const PACK_REL_FILEBASE: u32 = 1 << 1;
+/// The pack is a sparse bundle (file data lives in sibling files).
+#[allow(dead_code)]
+const PACK_SPARSE_BUNDLE: u32 = 1 << 2;
+
+// Per-file flags (directory entry `flags`), from `file_access_pack.h`.
+/// The file data is encrypted (unsupported here).
+const PACK_FILE_ENCRYPTED: u32 = 1 << 0;
+/// The entry is a removal record (the path was deleted by a patch pack).
+const PACK_FILE_REMOVAL: u32 = 1 << 1;
+/// The entry is a delta patch over a base pack.
+#[allow(dead_code)]
+const PACK_FILE_DELTA: u32 = 1 << 2;
 
 // ---------------------------------------------------------------------------
 // PckEntry
@@ -119,62 +166,129 @@ pub struct PckArchive {
 impl PckArchive {
     /// Parses a PCK archive from a byte slice, reading the header and
     /// directory but not the file data.
+    ///
+    /// The archive may be a standalone `.pck` (magic at offset 0) or embedded at
+    /// the end of a self-contained executable (located via the end-of-file
+    /// trailer). Entry offsets returned in [`PckEntry::offset`] are absolute
+    /// within `data`, so [`extract_file`](Self::extract_file) works directly.
     pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
-        let mut cursor = Cursor::new(data);
-        Self::read_from(&mut cursor)
+        let pck_start = find_pck_start(data)?;
+        Self::parse_at(data, pck_start)
     }
 
     /// Reads and parses a PCK archive from any seekable reader.
+    ///
+    /// The reader is drained from its current position to the end, then parsed
+    /// with [`from_bytes`](Self::from_bytes) (so embedded-pack scanning applies).
     pub fn read_from<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
-        // Magic
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        Self::from_bytes(&buf)
+    }
+
+    /// Parses the header and directory of a PCK whose `GDPC` magic begins at
+    /// `pck_start` within `data`, matching `PackedSourcePCK::try_open_pack`.
+    fn parse_at(data: &[u8], pck_start: u64) -> io::Result<Self> {
+        let mut cursor = Cursor::new(data);
+        cursor.seek(SeekFrom::Start(pck_start))?;
+
+        // Magic.
         let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic)?;
+        cursor.read_exact(&mut magic)?;
         if &magic != PCK_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("invalid PCK magic: expected GDPC, got {:?}", magic),
+                format!("invalid PCK magic: expected GDPC, got {magic:?}"),
             ));
         }
 
-        // Header fields
-        let format_version = read_u32(reader)?;
-        let ver_major = read_u32(reader)?;
-        let ver_minor = read_u32(reader)?;
-        let ver_patch = read_u32(reader)?;
-        let flags = read_u32(reader)?;
+        // Version fields (shared by V2 and V3).
+        let format_version = read_u32(&mut cursor)?;
+        let ver_major = read_u32(&mut cursor)?;
+        let ver_minor = read_u32(&mut cursor)?;
+        let ver_patch = read_u32(&mut cursor)?;
 
-        // Reserved (16 × u32)
-        for _ in 0..RESERVED_FIELD_COUNT {
-            let _ = read_u32(reader)?;
+        if format_version != PCK_FORMAT_VERSION_V2 && format_version != PCK_FORMAT_VERSION_V3 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported PCK version: {format_version} (expected 2 or 3)"),
+            ));
         }
 
-        let file_count = read_u32(reader)?;
+        let pack_flags = read_u32(&mut cursor)?;
+        let enc_directory = pack_flags & PACK_DIR_ENCRYPTED != 0;
+        let rel_filebase = pack_flags & PACK_REL_FILEBASE != 0;
+
+        if enc_directory {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "encrypted PCK directory is not supported",
+            ));
+        }
+
+        // file_base is present in both V2 and V3. It is relative to the pack
+        // start for V3, and for V2 only when PACK_REL_FILEBASE is set.
+        let mut file_base = read_u64(&mut cursor)?;
+        if format_version == PCK_FORMAT_VERSION_V3
+            || (format_version == PCK_FORMAT_VERSION_V2 && rel_filebase)
+        {
+            file_base += pck_start;
+        }
+
+        if format_version == PCK_FORMAT_VERSION_V3 {
+            // V3: directory offset follows, then reserved space is skipped.
+            let dir_offset = read_u64(&mut cursor)? + pck_start;
+            cursor.seek(SeekFrom::Start(dir_offset))?;
+        } else {
+            // V2: 16 × u32 reserved, directory follows inline.
+            for _ in 0..RESERVED_FIELD_COUNT {
+                let _ = read_u32(&mut cursor)?;
+            }
+        }
+
+        let file_count = read_u32(&mut cursor)?;
 
         let header = PckHeader {
             format_version,
             ver_major,
             ver_minor,
             ver_patch,
-            flags,
+            flags: pack_flags,
             file_count,
         };
 
-        // Directory entries
+        // Directory entries.
         let mut entries = BTreeMap::new();
         for _ in 0..file_count {
-            let path_len = read_u32(reader)? as usize;
+            let path_len = read_u32(&mut cursor)? as usize;
             let mut path_buf = vec![0u8; path_len];
-            reader.read_exact(&mut path_buf)?;
-            // Trim NUL padding
+            cursor.read_exact(&mut path_buf)?;
+            // Trim NUL padding.
             let path = String::from_utf8_lossy(&path_buf)
                 .trim_end_matches('\0')
                 .to_string();
 
-            let offset = read_u64(reader)?;
-            let size = read_u64(reader)?;
+            let rel_offset = read_u64(&mut cursor)?;
+            let size = read_u64(&mut cursor)?;
 
             let mut md5 = [0u8; 16];
-            reader.read_exact(&mut md5)?;
+            cursor.read_exact(&mut md5)?;
+
+            let flags = read_u32(&mut cursor)?;
+
+            // A removal record marks a path deleted by a patch pack — skip it.
+            if flags & PACK_FILE_REMOVAL != 0 {
+                continue;
+            }
+            if flags & PACK_FILE_ENCRYPTED != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("encrypted PCK file entry is not supported: {path}"),
+                ));
+            }
+
+            // Store the absolute offset within `data` so extraction is direct.
+            let offset = file_base + rel_offset;
 
             entries.insert(
                 path.clone(),
@@ -291,34 +405,47 @@ impl PckPacker {
         Ok(out.into_inner())
     }
 
-    /// Writes the packed archive to any writer.
+    /// Writes the packed archive to any writer, using the V2 layout.
+    ///
+    /// The output matches Godot's reader: a `file_base` header field and a
+    /// per-entry trailing `flags` u32 (always 0 here). `pack_flags` sets
+    /// `PACK_REL_FILEBASE` (as Godot's own writer does) and the directory is
+    /// inline after the reserved area.
     pub fn write_to<W: Write + Seek>(&self, writer: &mut W) -> io::Result<()> {
+        // -- Compute the directory size to locate the data section --
+        let mut dir_size: u64 = 0;
+        for (path, _) in &self.files {
+            let padded_len = pad_to_4(path.len());
+            // path_len(4) + path(padded) + offset(8) + size(8) + md5(16) + flags(4)
+            dir_size += 4 + padded_len as u64 + 8 + 8 + 16 + 4;
+        }
+
+        // Header size (V2): magic(4) + version(4) + ver×3(12) + pack_flags(4)
+        //                   + file_base(8) + reserved(64) + file_count(4) = 100.
+        let header_size: u64 =
+            4 + 4 + 12 + 4 + 8 + (RESERVED_FIELD_COUNT as u64 * 4) + 4;
+        let data_start = align_up(header_size + dir_size, self.alignment);
+        // file_base is written relative to the pack start (here the buffer start).
+        // Matching Godot's writer, PACK_REL_FILEBASE is set so the reader adds the
+        // pack's start offset — which makes the output correct both standalone and
+        // when appended to an executable at a non-zero offset.
+        let file_base = data_start;
+
         // -- Header --
         writer.write_all(PCK_MAGIC)?;
-        write_u32(writer, PCK_FORMAT_VERSION)?;
+        write_u32(writer, PCK_FORMAT_VERSION_V2)?;
         write_u32(writer, self.ver_major)?;
         write_u32(writer, self.ver_minor)?;
         write_u32(writer, self.ver_patch)?;
-        write_u32(writer, 0)?; // flags
+        write_u32(writer, PACK_REL_FILEBASE)?; // pack_flags: relative file_base.
+        write_u64(writer, file_base)?; // Files base (relative to pack start).
 
-        // Reserved (16 × u32)
+        // Reserved (16 × u32).
         for _ in 0..RESERVED_FIELD_COUNT {
             write_u32(writer, 0)?;
         }
 
         write_u32(writer, self.files.len() as u32)?;
-
-        // -- Compute directory size to know where data starts --
-        let mut dir_size: u64 = 0;
-        for (path, _) in &self.files {
-            let padded_len = pad_to_4(path.len());
-            // path_len(4) + path(padded) + offset(8) + size(8) + md5(16)
-            dir_size += 4 + padded_len as u64 + 8 + 8 + 16;
-        }
-
-        // Header size: magic(4) + 5×u32(20) + reserved(64) + file_count(4) = 92
-        let header_size: u64 = 4 + 20 + (RESERVED_FIELD_COUNT as u64 * 4) + 4;
-        let data_start = align_up(header_size + dir_size, self.alignment);
 
         // -- Write directory entries --
         let mut current_offset = data_start;
@@ -330,17 +457,21 @@ impl PckPacker {
 
             write_u32(writer, padded_len as u32)?;
             writer.write_all(path_bytes)?;
-            // NUL-pad to alignment
+            // NUL-pad to alignment.
             let padding = padded_len - path_bytes.len();
             if padding > 0 {
                 writer.write_all(&vec![0u8; padding])?;
             }
 
-            write_u64(writer, current_offset)?;
+            // Offset is stored relative to file_base (Godot: `ofs - file_base`).
+            write_u64(writer, current_offset - file_base)?;
             write_u64(writer, data.len() as u64)?;
 
-            // MD5 — write zeros (optional, not computed here)
+            // MD5 — write zeros (optional, not computed here).
             writer.write_all(&[0u8; 16])?;
+
+            // Per-file flags: not encrypted, not a removal, not a delta.
+            write_u32(writer, 0)?;
 
             offsets.push(current_offset);
             current_offset = align_up(current_offset + data.len() as u64, self.alignment);
@@ -464,6 +595,42 @@ fn read_u64<R: Read>(reader: &mut R) -> io::Result<u64> {
     let mut buf = [0u8; 8];
     reader.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
+}
+
+/// Locates the offset of the `GDPC` magic within `data`, matching Godot's
+/// `PackedSourcePCK::try_open_pack` scan.
+///
+/// 1. Magic at offset 0 — a standalone `.pck` file.
+/// 2. End-of-file trailer `[data_size: u64][magic: u32]` — a self-contained
+///    executable with the pack appended; the header starts `12 + data_size`
+///    bytes before the end.
+///
+/// The executable "embedded pck section" scan (`OS::get_embedded_pck_offset`)
+/// is platform/executable-specific and not applicable to an in-memory slice, so
+/// it is intentionally omitted.
+fn find_pck_start(data: &[u8]) -> io::Result<u64> {
+    // 1. Standalone: magic at the very start.
+    if data.len() >= 4 && &data[0..4] == PCK_MAGIC {
+        return Ok(0);
+    }
+
+    // 2. Appended to an executable: check the end-of-file trailer.
+    let n = data.len();
+    if n >= 12 && &data[n - 4..n] == PCK_MAGIC {
+        let ds = u64::from_le_bytes(data[n - 12..n - 4].try_into().unwrap());
+        // The pack header begins `data_size` bytes before the 12-byte trailer.
+        if let Some(start) = (n as u64).checked_sub(12 + ds) {
+            let s = start as usize;
+            if s + 4 <= n && &data[s..s + 4] == PCK_MAGIC {
+                return Ok(start);
+            }
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid PCK magic: no GDPC header at offset 0 or in the end-of-file trailer",
+    ))
 }
 
 fn write_u32<W: Write>(writer: &mut W, v: u32) -> io::Result<()> {
@@ -833,6 +1000,241 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Godot 4.6 format-compatibility tests (V2/V3, embedding, encryption)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn writer_emits_file_base_and_entry_flags() {
+        // Verify the V2 header carries a file_base and each entry a trailing
+        // flags u32, by decoding the raw bytes the writer produced.
+        let mut packer = PckPacker::new();
+        packer.add_file("res://a.txt", b"hello".to_vec());
+        let data = packer.pack().unwrap();
+
+        // magic(4) + version(4) + 3×ver(12) + pack_flags(4) = offset 24 → file_base.
+        assert_eq!(&data[0..4], PCK_MAGIC);
+        assert_eq!(u32::from_le_bytes(data[4..8].try_into().unwrap()), 2); // V2
+        let pack_flags = u32::from_le_bytes(data[20..24].try_into().unwrap());
+        assert_eq!(pack_flags, PACK_REL_FILEBASE);
+        let file_base = u64::from_le_bytes(data[24..32].try_into().unwrap());
+        // Header is 100 bytes; with one 12-byte-padded entry (52 bytes) the
+        // directory ends at 152, aligned up to 192 by the default 64 alignment.
+        assert_eq!(file_base % PCK_DATA_ALIGNMENT, 0);
+        assert!(file_base >= 152);
+
+        // Re-reading yields the correct absolute offset and contents.
+        let archive = PckArchive::from_bytes(&data).unwrap();
+        let entry = archive.get_entry("res://a.txt").unwrap();
+        assert_eq!(entry.offset, file_base); // first file sits at file_base + 0
+        assert_eq!(archive.extract_file(&data, "res://a.txt").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn v2_byte_exact_fixture_parses() {
+        // Hand-built Godot V2 pack: single file "res://a.txt" -> "hello".
+        // pack_flags = 0 → absolute file_base (reader uses it as-is at pck_start 0).
+        let mut d: Vec<u8> = Vec::new();
+        d.extend_from_slice(b"GDPC"); //            [0..4]   magic
+        d.extend_from_slice(&2u32.to_le_bytes()); //  [4..8]   version = 2
+        d.extend_from_slice(&4u32.to_le_bytes()); //  [8..12]  ver_major = 4
+        d.extend_from_slice(&6u32.to_le_bytes()); //  [12..16] ver_minor = 6
+        d.extend_from_slice(&1u32.to_le_bytes()); //  [16..20] ver_patch = 1
+        d.extend_from_slice(&0u32.to_le_bytes()); //  [20..24] pack_flags = 0
+        d.extend_from_slice(&152u64.to_le_bytes()); // [24..32] file_base = 152 (abs)
+        for _ in 0..16 {
+            d.extend_from_slice(&0u32.to_le_bytes()); // [32..96] reserved 16×u32
+        }
+        d.extend_from_slice(&1u32.to_le_bytes()); //  [96..100] file_count = 1
+        // ---- entry ----
+        d.extend_from_slice(&12u32.to_le_bytes()); // [100..104] path_len = 12 (11+NUL)
+        d.extend_from_slice(b"res://a.txt\0"); //     [104..116] path (NUL-padded)
+        d.extend_from_slice(&0u64.to_le_bytes()); //  [116..124] offset = 0 (rel file_base)
+        d.extend_from_slice(&5u64.to_le_bytes()); //  [124..132] size = 5
+        d.extend_from_slice(&[0u8; 16]); //           [132..148] md5 = zeros
+        d.extend_from_slice(&0u32.to_le_bytes()); //  [148..152] flags = 0
+        d.extend_from_slice(b"hello"); //             [152..157] file data
+        assert_eq!(d.len(), 157);
+
+        let archive = PckArchive::from_bytes(&d).unwrap();
+        assert_eq!(archive.header.format_version, 2);
+        assert_eq!(archive.file_count(), 1);
+        let entry = archive.get_entry("res://a.txt").unwrap();
+        assert_eq!(entry.offset, 152); // file_base(152) + 0
+        assert_eq!(entry.size, 5);
+        assert_eq!(archive.extract_file(&d, "res://a.txt").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn v3_byte_exact_fixture_parses() {
+        // Hand-built Godot V3 pack: file data precedes the directory, which is
+        // located via the dir_offset field. file_base and dir_offset are both
+        // relative to the pack start (pck_start = 0 here).
+        let mut d: Vec<u8> = Vec::new();
+        d.extend_from_slice(b"GDPC"); //             [0..4]   magic
+        d.extend_from_slice(&3u32.to_le_bytes()); //   [4..8]   version = 3
+        d.extend_from_slice(&4u32.to_le_bytes()); //   [8..12]  ver_major = 4
+        d.extend_from_slice(&6u32.to_le_bytes()); //   [12..16] ver_minor = 6
+        d.extend_from_slice(&1u32.to_le_bytes()); //   [16..20] ver_patch = 1
+        d.extend_from_slice(&2u32.to_le_bytes()); //   [20..24] pack_flags = PACK_REL_FILEBASE
+        d.extend_from_slice(&104u64.to_le_bytes()); // [24..32] file_base = 104
+        d.extend_from_slice(&109u64.to_le_bytes()); // [32..40] dir_offset = 109
+        for _ in 0..16 {
+            d.extend_from_slice(&0u32.to_le_bytes()); // [40..104] reserved (skipped by seek)
+        }
+        d.extend_from_slice(b"hello"); //             [104..109] file data at file_base
+        // ---- directory at dir_offset = 109 ----
+        d.extend_from_slice(&1u32.to_le_bytes()); //  [109..113] file_count = 1
+        d.extend_from_slice(&12u32.to_le_bytes()); // [113..117] path_len = 12
+        d.extend_from_slice(b"res://a.txt\0"); //     [117..129] path
+        d.extend_from_slice(&0u64.to_le_bytes()); //  [129..137] offset = 0 (rel file_base)
+        d.extend_from_slice(&5u64.to_le_bytes()); //  [137..145] size = 5
+        d.extend_from_slice(&[0u8; 16]); //           [145..161] md5 = zeros
+        d.extend_from_slice(&0u32.to_le_bytes()); //  [161..165] flags = 0
+        assert_eq!(d.len(), 165);
+
+        let archive = PckArchive::from_bytes(&d).unwrap();
+        assert_eq!(archive.header.format_version, 3);
+        assert_eq!(archive.file_count(), 1);
+        let entry = archive.get_entry("res://a.txt").unwrap();
+        assert_eq!(entry.offset, 104); // file_base(104) + 0
+        assert_eq!(archive.extract_file(&d, "res://a.txt").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn embedded_pck_end_trailer_scan() {
+        // A pack appended to an executable is found via the trailer
+        // `[data_size: u64][magic]`. Because the writer uses PACK_REL_FILEBASE,
+        // the entry offsets remain correct at the non-zero embed offset.
+        let mut packer = PckPacker::new();
+        packer.add_file("res://embedded.txt", b"payload".to_vec());
+        let pck = packer.pack().unwrap();
+
+        let mut buf = vec![0xEEu8; 40]; // pretend executable bytes
+        buf.extend_from_slice(&pck);
+        buf.extend_from_slice(&(pck.len() as u64).to_le_bytes()); // data_size
+        buf.extend_from_slice(PCK_MAGIC); // trailer magic
+
+        let archive = PckArchive::from_bytes(&buf).unwrap();
+        assert!(archive.has_file("res://embedded.txt"));
+        assert_eq!(
+            archive.extract_file(&buf, "res://embedded.txt").unwrap(),
+            b"payload"
+        );
+    }
+
+    #[test]
+    fn unsupported_version_rejected() {
+        let mut d: Vec<u8> = Vec::new();
+        d.extend_from_slice(b"GDPC");
+        d.extend_from_slice(&99u32.to_le_bytes()); // bogus version
+        d.extend_from_slice(&4u32.to_le_bytes());
+        d.extend_from_slice(&6u32.to_le_bytes());
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes());
+        d.extend_from_slice(&0u64.to_le_bytes());
+        let err = PckArchive::from_bytes(&d).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported PCK version"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn truncated_header_after_magic_errors() {
+        // Magic present, but the header is cut off before the version fields.
+        let d = b"GDPC\x02\x00\x00\x00".to_vec(); // magic + version only
+        assert!(PckArchive::from_bytes(&d).is_err());
+    }
+
+    #[test]
+    fn encrypted_directory_flag_is_unsupported() {
+        let mut d: Vec<u8> = Vec::new();
+        d.extend_from_slice(b"GDPC");
+        d.extend_from_slice(&2u32.to_le_bytes()); // V2
+        d.extend_from_slice(&4u32.to_le_bytes());
+        d.extend_from_slice(&6u32.to_le_bytes());
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&PACK_DIR_ENCRYPTED.to_le_bytes()); // pack_flags
+        d.extend_from_slice(&0u64.to_le_bytes()); // file_base
+        let err = PckArchive::from_bytes(&d).unwrap_err();
+        assert!(
+            err.to_string().contains("encrypted PCK directory"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn encrypted_file_flag_is_unsupported() {
+        let mut d: Vec<u8> = Vec::new();
+        d.extend_from_slice(b"GDPC");
+        d.extend_from_slice(&2u32.to_le_bytes()); // V2
+        d.extend_from_slice(&4u32.to_le_bytes());
+        d.extend_from_slice(&6u32.to_le_bytes());
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes()); // pack_flags = 0
+        d.extend_from_slice(&152u64.to_le_bytes()); // file_base
+        for _ in 0..16 {
+            d.extend_from_slice(&0u32.to_le_bytes());
+        }
+        d.extend_from_slice(&1u32.to_le_bytes()); // file_count = 1
+        d.extend_from_slice(&12u32.to_le_bytes()); // path_len
+        d.extend_from_slice(b"res://a.txt\0");
+        d.extend_from_slice(&0u64.to_le_bytes()); // offset
+        d.extend_from_slice(&5u64.to_le_bytes()); // size
+        d.extend_from_slice(&[0u8; 16]); // md5
+        d.extend_from_slice(&PACK_FILE_ENCRYPTED.to_le_bytes()); // flags = encrypted
+        d.extend_from_slice(b"hello");
+        let err = PckArchive::from_bytes(&d).unwrap_err();
+        assert!(
+            err.to_string().contains("encrypted PCK file entry"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn file_removal_entry_is_skipped() {
+        // A patch-pack removal record must not appear as a readable file.
+        let mut d: Vec<u8> = Vec::new();
+        d.extend_from_slice(b"GDPC");
+        d.extend_from_slice(&2u32.to_le_bytes());
+        d.extend_from_slice(&4u32.to_le_bytes());
+        d.extend_from_slice(&6u32.to_le_bytes());
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes());
+        d.extend_from_slice(&0u64.to_le_bytes()); // file_base (unused, size 0)
+        for _ in 0..16 {
+            d.extend_from_slice(&0u32.to_le_bytes());
+        }
+        d.extend_from_slice(&1u32.to_le_bytes()); // file_count = 1
+        d.extend_from_slice(&12u32.to_le_bytes());
+        d.extend_from_slice(b"res://a.txt\0");
+        d.extend_from_slice(&0u64.to_le_bytes());
+        d.extend_from_slice(&0u64.to_le_bytes());
+        d.extend_from_slice(&[0u8; 16]);
+        d.extend_from_slice(&PACK_FILE_REMOVAL.to_le_bytes()); // removal flag
+        let archive = PckArchive::from_bytes(&d).unwrap();
+        assert_eq!(archive.file_count(), 0);
+        assert!(!archive.has_file("res://a.txt"));
+    }
+
+    #[test]
+    fn packer_multi_file_offsets_relative_to_file_base() {
+        // Sanity: the packer's V2 output roundtrips with multiple files and the
+        // stored offsets are relative to file_base (i.e. the first is 0).
+        let mut packer = PckPacker::new();
+        packer.add_file("res://a.txt", b"alpha".to_vec());
+        packer.add_file("res://b.txt", b"beta!".to_vec());
+        let data = packer.pack().unwrap();
+
+        let file_base = u64::from_le_bytes(data[24..32].try_into().unwrap());
+        let archive = PckArchive::from_bytes(&data).unwrap();
+        let a = archive.get_entry("res://a.txt").unwrap();
+        assert_eq!(a.offset, file_base); // first file: relative offset 0
+        assert_eq!(archive.extract_file(&data, "res://a.txt").unwrap(), b"alpha");
+        assert_eq!(archive.extract_file(&data, "res://b.txt").unwrap(), b"beta!");
+    }
+
+    // -----------------------------------------------------------------------
     // PckResourceLoader tests
     // -----------------------------------------------------------------------
 
@@ -998,10 +1400,10 @@ name = "Unified"
 
         let loader = PckResourceLoader::from_bytes(data).unwrap();
         let mut unified = UnifiedLoader::new(loader);
-        unified.register_uid_str("uid://unified_ref", "res://unified.tres");
+        unified.register_uid_str("uid://unifiedref", "res://unified.tres");
 
         let by_path = unified.load("res://unified.tres").unwrap();
-        let by_uid = unified.load("uid://unified_ref").unwrap();
+        let by_uid = unified.load("uid://unifiedref").unwrap();
         assert!(Arc::ptr_eq(&by_path, &by_uid));
     }
 
@@ -1202,10 +1604,10 @@ name = "FromMount"
 
         // Use mount manager as the backing loader for UnifiedLoader.
         let mut unified = UnifiedLoader::new(mgr);
-        unified.register_uid_str("uid://mounted_ref", "res://mounted.tres");
+        unified.register_uid_str("uid://mountedref", "res://mounted.tres");
 
         let by_path = unified.load("res://mounted.tres").unwrap();
-        let by_uid = unified.load("uid://mounted_ref").unwrap();
+        let by_uid = unified.load("uid://mountedref").unwrap();
         assert!(Arc::ptr_eq(&by_path, &by_uid));
         assert_eq!(
             by_path.get_property("name"),

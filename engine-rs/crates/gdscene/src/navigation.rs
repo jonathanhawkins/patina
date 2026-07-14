@@ -8,6 +8,9 @@ use std::collections::{BinaryHeap, HashMap};
 
 use gdcore::math::{Vector2, Vector3};
 
+use crate::node::NodeId;
+use crate::scene_tree::SceneTree;
+
 // ---------------------------------------------------------------------------
 // NavPolygon
 // ---------------------------------------------------------------------------
@@ -328,6 +331,8 @@ pub struct NavigationServer2D {
     pub regions: Vec<NavMesh2D>,
     /// Registered obstacles.
     pub obstacles: Vec<NavigationObstacle2D>,
+    /// Registered navigation links that bridge otherwise-disjoint regions.
+    pub links: Vec<NavigationLink2D>,
 }
 
 impl NavigationServer2D {
@@ -336,6 +341,7 @@ impl NavigationServer2D {
         Self {
             regions: Vec::new(),
             obstacles: Vec::new(),
+            links: Vec::new(),
         }
     }
 
@@ -349,6 +355,12 @@ impl NavigationServer2D {
     pub fn add_obstacle(&mut self, obstacle: NavigationObstacle2D) -> usize {
         self.obstacles.push(obstacle);
         self.obstacles.len() - 1
+    }
+
+    /// Adds a [`NavigationLink2D`] and returns its index.
+    pub fn add_link(&mut self, link: NavigationLink2D) -> usize {
+        self.links.push(link);
+        self.links.len() - 1
     }
 
     /// Finds a path from `from` to `to` using A\* on the navigation mesh,
@@ -412,6 +424,106 @@ impl NavigationServer2D {
         }
         false
     }
+
+    /// Finds a path from `from` to `to`, bridging otherwise-disjoint regions
+    /// through any enabled [`NavigationLink2D`].
+    ///
+    /// Unlike [`Self::find_path`], which searches each region in isolation, this
+    /// flattens every region's polygons into a single A\* graph and adds a
+    /// bridging edge for each link, so an agent can cross between regions that
+    /// share no navmesh geometry. Returns an empty `Vec` if no path exists.
+    pub fn find_path_linked(&self, from: Vector2, to: Vector2) -> Vec<Vector2> {
+        // Flatten every region's polygons into one global graph. Each region's
+        // local connectivity is offset by the number of polygons already added.
+        let mut positions: Vec<Vector2> = Vec::new();
+        let mut neighbors: Vec<Vec<usize>> = Vec::new();
+        for region in &self.regions {
+            let base = positions.len();
+            for p in &region.polygons {
+                positions.push(p.centroid());
+            }
+            for conns in &region.connections {
+                neighbors.push(conns.iter().map(|&c| c + base).collect());
+            }
+        }
+
+        // Bridge disjoint regions with each enabled link.
+        for link in &self.links {
+            if !link.enabled {
+                continue;
+            }
+            let a = self.global_polygon_near(&positions, link.start);
+            let b = self.global_polygon_near(&positions, link.end);
+            if let (Some(a), Some(b)) = (a, b) {
+                if a != b {
+                    neighbors[a].push(b);
+                    if link.bidirectional {
+                        neighbors[b].push(a);
+                    }
+                }
+            }
+        }
+
+        // Locate start/goal polygons by containment (agent must be on a navmesh).
+        let start = match self.global_polygon_containing(from) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let goal = match self.global_polygon_containing(to) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        if start == goal {
+            if !self.segment_blocked(from, to) {
+                return vec![from, to];
+            }
+            return Vec::new();
+        }
+
+        if let Some(poly_path) = astar_find_path(start, goal, &positions, &neighbors) {
+            let mut path = vec![from];
+            for &pi in &poly_path[1..poly_path.len().saturating_sub(1)] {
+                path.push(positions[pi]);
+            }
+            path.push(to);
+            if self.path_blocked(&path) {
+                return Vec::new();
+            }
+            return path;
+        }
+        Vec::new()
+    }
+
+    /// Returns the global polygon index (across all regions, in registration
+    /// order) that contains `point`, if any.
+    fn global_polygon_containing(&self, point: Vector2) -> Option<usize> {
+        let mut base = 0usize;
+        for region in &self.regions {
+            if let Some(i) = region.find_polygon(point) {
+                return Some(base + i);
+            }
+            base += region.polygons.len();
+        }
+        None
+    }
+
+    /// Resolves a link endpoint to a global polygon: prefers the containing
+    /// polygon, falling back to the nearest centroid so endpoints placed on a
+    /// region boundary still attach.
+    fn global_polygon_near(&self, positions: &[Vector2], point: Vector2) -> Option<usize> {
+        if let Some(i) = self.global_polygon_containing(point) {
+            return Some(i);
+        }
+        positions
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let da = (**a - point).length_squared();
+                let db = (**b - point).length_squared();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+    }
 }
 
 impl Default for NavigationServer2D {
@@ -437,6 +549,14 @@ pub struct NavigationAgent2D {
     pub path_desired_distance: f32,
     /// Whether avoidance is enabled for this agent.
     pub avoidance_enabled: bool,
+    /// Avoidance radius of this agent (Godot `NavigationAgent2D.radius`, default 10.0).
+    pub radius: f32,
+    /// Maximum speed used when integrating avoidance (Godot default 100.0).
+    pub max_speed: f32,
+    /// Whether `navigation_finished` has already been emitted for the current
+    /// target — so the runtime fires it exactly once per navigation. Reset by
+    /// [`set_target_position`](Self::set_target_position). (pat-nzgdu.10)
+    pub finished_emitted: bool,
 }
 
 impl NavigationAgent2D {
@@ -448,6 +568,9 @@ impl NavigationAgent2D {
             path_index: 0,
             path_desired_distance: 4.0,
             avoidance_enabled: false,
+            radius: 10.0,
+            max_speed: 100.0,
+            finished_emitted: false,
         }
     }
 
@@ -461,6 +584,8 @@ impl NavigationAgent2D {
         self.target_position = target;
         self.path = server.find_path(current, target);
         self.path_index = if self.path.len() > 1 { 1 } else { 0 };
+        // A fresh target restarts the navigation lifecycle.
+        self.finished_emitted = false;
     }
 
     /// Returns the next position along the path, advancing the waypoint index
@@ -494,9 +619,192 @@ impl NavigationAgent2D {
     pub fn set_avoidance_enabled(&mut self, enabled: bool) {
         self.avoidance_enabled = enabled;
     }
+
+    /// Returns the preferred velocity toward the next path waypoint, scaled to
+    /// [`max_speed`](Self::max_speed).
+    ///
+    /// Returns `Vector2::ZERO` when the agent has arrived or has no path, so a
+    /// stepping loop naturally comes to rest.
+    pub fn desired_velocity(&mut self, current: Vector2) -> Vector2 {
+        let next = self.get_next_path_position(current);
+        let dir = next - current;
+        let len = dir.length();
+        if len < 1e-6 {
+            return Vector2::ZERO;
+        }
+        Vector2::new(dir.x / len * self.max_speed, dir.y / len * self.max_speed)
+    }
+
+    /// Filters `preferred` through avoidance given nearby agents `others`
+    /// (each entry is `(position, radius)`).
+    ///
+    /// When [`avoidance_enabled`](Self::avoidance_enabled) is `false` the
+    /// preferred velocity is returned unchanged; otherwise it is deflected away
+    /// from neighbors via [`rvo_avoidance_velocity`], mirroring Godot's
+    /// `set_velocity` → `velocity_computed` flow.
+    pub fn compute_safe_velocity(
+        &self,
+        current: Vector2,
+        preferred: Vector2,
+        others: &[(Vector2, f32)],
+    ) -> Vector2 {
+        if !self.avoidance_enabled {
+            return preferred;
+        }
+        rvo_avoidance_velocity(current, preferred, others, self.radius, self.max_speed)
+    }
+
+    /// Advances the agent by `dt` seconds along its path, avoiding the nearby
+    /// agents `others` (each `(position, radius)`) when avoidance is enabled.
+    ///
+    /// This is what actually *wires* RVO into the agent's stepping loop: the
+    /// preferred velocity toward the next waypoint is run through
+    /// [`compute_safe_velocity`](Self::compute_safe_velocity) before being
+    /// integrated. Returns the agent's new position.
+    pub fn step(&mut self, current: Vector2, dt: f32, others: &[(Vector2, f32)]) -> Vector2 {
+        let preferred = self.desired_velocity(current);
+        let safe = self.compute_safe_velocity(current, preferred, others);
+        Vector2::new(current.x + safe.x * dt, current.y + safe.y * dt)
+    }
 }
 
 impl Default for NavigationAgent2D {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NavigationAgent3D
+// ---------------------------------------------------------------------------
+
+/// Per-node 3D navigation agent, mirroring Godot's `NavigationAgent3D`.
+#[derive(Debug, Clone)]
+pub struct NavigationAgent3D {
+    /// The target position the agent is navigating toward.
+    pub target_position: Vector3,
+    /// The computed path (world-space waypoints).
+    pub path: Vec<Vector3>,
+    /// Index of the next waypoint in the path.
+    pub path_index: usize,
+    /// Distance at which a waypoint is considered reached.
+    pub path_desired_distance: f32,
+    /// Whether avoidance is enabled for this agent.
+    pub avoidance_enabled: bool,
+    /// Avoidance radius of this agent (Godot `NavigationAgent3D.radius`, default 0.5).
+    pub radius: f32,
+    /// Maximum speed used when integrating avoidance (Godot default 10.0).
+    pub max_speed: f32,
+    /// Whether `navigation_finished` has already been emitted for the current
+    /// target (see [`NavigationAgent2D::finished_emitted`]). (pat-nzgdu.10)
+    pub finished_emitted: bool,
+}
+
+impl NavigationAgent3D {
+    /// Creates a new 3D navigation agent.
+    pub fn new() -> Self {
+        Self {
+            target_position: Vector3::ZERO,
+            path: Vec::new(),
+            path_index: 0,
+            path_desired_distance: 1.0,
+            avoidance_enabled: false,
+            radius: 0.5,
+            max_speed: 10.0,
+            finished_emitted: false,
+        }
+    }
+
+    /// Sets the target and computes a path via the 3D navigation server.
+    pub fn set_target_position(
+        &mut self,
+        target: Vector3,
+        current: Vector3,
+        server: &NavigationServer3D,
+    ) {
+        self.target_position = target;
+        self.path = server.find_path(current, target);
+        self.path_index = if self.path.len() > 1 { 1 } else { 0 };
+        self.finished_emitted = false;
+    }
+
+    /// Returns the next path position, advancing when close enough.
+    pub fn get_next_path_position(&mut self, current: Vector3) -> Vector3 {
+        if self.path.is_empty() {
+            return current;
+        }
+        while self.path_index < self.path.len() {
+            let wp = self.path[self.path_index];
+            if (wp - current).length() <= self.path_desired_distance {
+                self.path_index += 1;
+            } else {
+                break;
+            }
+        }
+        if self.path_index < self.path.len() {
+            self.path[self.path_index]
+        } else {
+            self.target_position
+        }
+    }
+
+    /// Returns `true` when there are no remaining waypoints.
+    pub fn is_navigation_finished(&self) -> bool {
+        self.path.is_empty() || self.path_index >= self.path.len()
+    }
+
+    /// Enables or disables avoidance.
+    pub fn set_avoidance_enabled(&mut self, enabled: bool) {
+        self.avoidance_enabled = enabled;
+    }
+
+    /// Returns the preferred velocity toward the next path waypoint, scaled to
+    /// [`max_speed`](Self::max_speed). Returns `Vector3::ZERO` when arrived.
+    pub fn desired_velocity(&mut self, current: Vector3) -> Vector3 {
+        let next = self.get_next_path_position(current);
+        let dir = next - current;
+        let len = dir.length();
+        if len < 1e-6 {
+            return Vector3::ZERO;
+        }
+        Vector3::new(
+            dir.x / len * self.max_speed,
+            dir.y / len * self.max_speed,
+            dir.z / len * self.max_speed,
+        )
+    }
+
+    /// Filters `preferred` through avoidance given nearby agents `others`
+    /// (each `(position, radius)`). Returns `preferred` unchanged when
+    /// avoidance is disabled; otherwise deflects away from neighbors via
+    /// [`rvo_avoidance_velocity_3d`].
+    pub fn compute_safe_velocity(
+        &self,
+        current: Vector3,
+        preferred: Vector3,
+        others: &[(Vector3, f32)],
+    ) -> Vector3 {
+        if !self.avoidance_enabled {
+            return preferred;
+        }
+        rvo_avoidance_velocity_3d(current, preferred, others, self.radius, self.max_speed)
+    }
+
+    /// Advances the agent by `dt` seconds along its path, avoiding nearby
+    /// agents `others` (each `(position, radius)`) when avoidance is enabled.
+    /// Returns the agent's new position.
+    pub fn step(&mut self, current: Vector3, dt: f32, others: &[(Vector3, f32)]) -> Vector3 {
+        let preferred = self.desired_velocity(current);
+        let safe = self.compute_safe_velocity(current, preferred, others);
+        Vector3::new(
+            current.x + safe.x * dt,
+            current.y + safe.y * dt,
+            current.z + safe.z * dt,
+        )
+    }
+}
+
+impl Default for NavigationAgent3D {
     fn default() -> Self {
         Self::new()
     }
@@ -561,6 +869,8 @@ impl NavMesh3D {
 pub struct NavigationServer3D {
     /// Registered 3D navigation meshes.
     pub regions: Vec<NavMesh3D>,
+    /// Registered navigation links that bridge otherwise-disjoint regions.
+    pub links: Vec<NavigationLink3D>,
 }
 
 impl NavigationServer3D {
@@ -568,6 +878,7 @@ impl NavigationServer3D {
     pub fn new() -> Self {
         Self {
             regions: Vec::new(),
+            links: Vec::new(),
         }
     }
 
@@ -575,6 +886,70 @@ impl NavigationServer3D {
     pub fn add_region(&mut self, mesh: NavMesh3D) -> usize {
         self.regions.push(mesh);
         self.regions.len() - 1
+    }
+
+    /// Adds a [`NavigationLink3D`] and returns its index.
+    pub fn add_link(&mut self, link: NavigationLink3D) -> usize {
+        self.links.push(link);
+        self.links.len() - 1
+    }
+
+    /// Finds a path from `from` to `to`, bridging otherwise-disjoint regions
+    /// through any enabled [`NavigationLink3D`].
+    ///
+    /// Unlike [`Self::find_path`], which searches each region in isolation, this
+    /// flattens every region's polygons into a single A\* graph and adds a
+    /// bridging edge for each link. Returns an empty `Vec` if no path exists.
+    pub fn find_path_linked(&self, from: Vector3, to: Vector3) -> Vec<Vector3> {
+        let mut positions: Vec<Vector3> = Vec::new();
+        let mut neighbors: Vec<Vec<usize>> = Vec::new();
+        for region in &self.regions {
+            let base = positions.len();
+            for p in &region.polygons {
+                positions.push(p.centroid());
+            }
+            for conns in &region.connections {
+                neighbors.push(conns.iter().map(|&c| c + base).collect());
+            }
+        }
+
+        for link in &self.links {
+            if !link.enabled {
+                continue;
+            }
+            let a = Self::closest_polygon(&positions, link.start);
+            let b = Self::closest_polygon(&positions, link.end);
+            if let (Some(a), Some(b)) = (a, b) {
+                if a != b {
+                    neighbors[a].push(b);
+                    if link.bidirectional {
+                        neighbors[b].push(a);
+                    }
+                }
+            }
+        }
+
+        let start = match Self::closest_polygon(&positions, from) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let goal = match Self::closest_polygon(&positions, to) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        if start == goal {
+            return vec![from, to];
+        }
+
+        if let Some(poly_path) = astar_find_path_3d(start, goal, &positions, &neighbors) {
+            let mut path = vec![from];
+            for &pi in &poly_path[1..poly_path.len().saturating_sub(1)] {
+                path.push(positions[pi]);
+            }
+            path.push(to);
+            return path;
+        }
+        Vec::new()
     }
 
     /// Finds a path through the 3D navigation mesh using A\*.
@@ -629,6 +1004,180 @@ impl Default for NavigationServer3D {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// NavigationLink + RVO avoidance (pat-p0s82.14)
+// ---------------------------------------------------------------------------
+
+/// Bidirectional or one-way link between two positions on a 2D nav mesh.
+///
+/// A link connects two points that may lie on separate, geometrically disjoint
+/// [`NavMesh2D`] regions, letting pathfinding cross between them.
+#[derive(Debug, Clone)]
+pub struct NavigationLink2D {
+    pub start: Vector2,
+    pub end: Vector2,
+    pub bidirectional: bool,
+    pub enabled: bool,
+}
+
+impl NavigationLink2D {
+    /// Creates a bidirectional, enabled link between `start` and `end`.
+    pub fn new(start: Vector2, end: Vector2) -> Self {
+        Self {
+            start,
+            end,
+            bidirectional: true,
+            enabled: true,
+        }
+    }
+}
+
+/// Bidirectional or one-way link between two positions on a 3D nav mesh.
+///
+/// A link connects two points that may lie on separate, geometrically disjoint
+/// [`NavMesh3D`] regions, letting pathfinding cross between them.
+#[derive(Debug, Clone)]
+pub struct NavigationLink3D {
+    pub start: Vector3,
+    pub end: Vector3,
+    pub bidirectional: bool,
+    pub enabled: bool,
+}
+
+impl NavigationLink3D {
+    /// Creates a bidirectional, enabled link between `start` and `end`.
+    pub fn new(start: Vector3, end: Vector3) -> Self {
+        Self {
+            start,
+            end,
+            bidirectional: true,
+            enabled: true,
+        }
+    }
+}
+
+/// Simple ORCA-lite: push agent velocity away from nearby agents.
+///
+/// `preferred` is the un-avoided velocity; returns a modified velocity.
+pub fn rvo_avoidance_velocity(
+    position: Vector2,
+    preferred: Vector2,
+    others: &[(Vector2, f32)],
+    radius: f32,
+    max_speed: f32,
+) -> Vector2 {
+    let mut v = preferred;
+    for (op, orad) in others {
+        let mut delta = position - *op;
+        let dist = delta.length();
+        let min_dist = radius + *orad;
+        if dist < 1e-4 {
+            delta = Vector2::new(1.0, 0.0);
+        }
+        if dist < min_dist * 2.0 {
+            let push = (min_dist * 2.0 - dist).max(0.0) / (min_dist * 2.0);
+            let n = if dist > 1e-4 {
+                Vector2::new(delta.x / dist, delta.y / dist)
+            } else {
+                Vector2::new(1.0, 0.0)
+            };
+            v = v + n * push * max_speed;
+        }
+    }
+    let sp = v.length();
+    if sp > max_speed && sp > 1e-6 {
+        v = Vector2::new(v.x / sp * max_speed, v.y / sp * max_speed);
+    }
+    v
+}
+
+/// 3D counterpart of [`rvo_avoidance_velocity`]: push agent velocity away from
+/// nearby agents in full 3D space.
+///
+/// `preferred` is the un-avoided velocity; `others` are `(position, radius)`
+/// pairs. The result is clamped to `max_speed`.
+pub fn rvo_avoidance_velocity_3d(
+    position: Vector3,
+    preferred: Vector3,
+    others: &[(Vector3, f32)],
+    radius: f32,
+    max_speed: f32,
+) -> Vector3 {
+    let mut v = preferred;
+    for (op, orad) in others {
+        let delta = position - *op;
+        let dist = delta.length();
+        let min_dist = radius + *orad;
+        if dist < min_dist * 2.0 {
+            let push = (min_dist * 2.0 - dist).max(0.0) / (min_dist * 2.0);
+            let n = if dist > 1e-4 {
+                Vector3::new(delta.x / dist, delta.y / dist, delta.z / dist)
+            } else {
+                // Degenerate overlap: pick an arbitrary but stable separation axis.
+                Vector3::new(1.0, 0.0, 0.0)
+            };
+            v = Vector3::new(
+                v.x + n.x * push * max_speed,
+                v.y + n.y * push * max_speed,
+                v.z + n.z * push * max_speed,
+            );
+        }
+    }
+    let sp = v.length();
+    if sp > max_speed && sp > 1e-6 {
+        v = Vector3::new(v.x / sp * max_speed, v.y / sp * max_speed, v.z / sp * max_speed);
+    }
+    v
+}
+
+// ---------------------------------------------------------------------------
+// Runtime stepping — wire agents into a running game
+// ---------------------------------------------------------------------------
+
+/// Advances a [`NavigationAgent2D`] one frame against a live [`SceneTree`] node.
+///
+/// This is the per-frame wiring a running game's process loop calls so an agent
+/// actually moves along its path: it reads the node's `position`, integrates the
+/// agent toward the next path waypoint (deflecting around `others` when
+/// avoidance is enabled), writes the new `position` back onto the node, and
+/// returns it. Previously nothing referenced the agent stepping logic from the
+/// node/runtime layer, so a `NavigationAgent2D` stayed frozen at its defaults
+/// even with a target set.
+///
+/// `others` is the list of nearby `(position, radius)` neighbors used for
+/// avoidance. Call [`NavigationAgent2D::set_target_position`] first so the agent
+/// has a path to follow.
+pub fn step_navigation_agent_2d(
+    scene: &mut SceneTree,
+    node_id: NodeId,
+    agent: &mut NavigationAgent2D,
+    dt: f32,
+    others: &[(Vector2, f32)],
+) -> Vector2 {
+    let current = crate::node2d::get_position(scene, node_id);
+    let next = agent.step(current, dt, others);
+    crate::node2d::set_position(scene, node_id, next);
+    next
+}
+
+/// Advances a [`NavigationAgent3D`] one frame against a live [`SceneTree`] node.
+///
+/// The 3D counterpart of [`step_navigation_agent_2d`]: reads the node's 3D
+/// `position`, integrates the agent toward its next waypoint (with avoidance
+/// over `others`), writes it back, and returns the new position.
+pub fn step_navigation_agent_3d(
+    scene: &mut SceneTree,
+    node_id: NodeId,
+    agent: &mut NavigationAgent3D,
+    dt: f32,
+    others: &[(Vector3, f32)],
+) -> Vector3 {
+    let current = crate::node3d::get_position(scene, node_id);
+    let next = agent.step(current, dt, others);
+    crate::node3d::set_position(scene, node_id, next);
+    next
+}
 
 #[cfg(test)]
 mod tests {
@@ -894,6 +1443,35 @@ mod tests {
         assert!(agent.avoidance_enabled);
     }
 
+    // -- NavigationAgent3D --------------------------------------------------
+
+    #[test]
+    fn agent3d_basic_navigation() {
+        let p0 = NavPolygon3D::new(vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(5.0, 0.0, 0.0),
+            Vector3::new(5.0, 0.0, 5.0),
+        ]);
+        let p1 = NavPolygon3D::new(vec![
+            Vector3::new(5.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 5.0),
+        ]);
+        let mesh = NavMesh3D::new(vec![p0, p1], vec![vec![1], vec![0]]);
+        let mut server = NavigationServer3D::new();
+        server.add_region(mesh);
+
+        let mut agent = NavigationAgent3D::new();
+        agent.set_target_position(
+            Vector3::new(9.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 1.0),
+            &server,
+        );
+        assert!(!agent.is_navigation_finished());
+        let next = agent.get_next_path_position(Vector3::new(1.0, 0.0, 1.0));
+        assert!(next.x > 1.0);
+    }
+
     // -- 3D stubs -----------------------------------------------------------
 
     #[test]
@@ -981,5 +1559,267 @@ mod tests {
         let obs = NavigationObstacle2D::new(Vector2::new(5.0, 5.0), 2.0);
         assert!(obs.blocks_segment(Vector2::new(5.0, 5.0), Vector2::new(5.0, 5.0)));
         assert!(!obs.blocks_segment(Vector2::new(50.0, 50.0), Vector2::new(50.0, 50.0)));
+    }
+
+    #[test]
+    fn rvo_separates_agents() {
+        let pref = Vector2::new(1.0, 0.0);
+        let v = rvo_avoidance_velocity(
+            Vector2::new(0.0, 0.0),
+            pref,
+            &[(Vector2::new(0.5, 0.0), 0.5)],
+            0.5,
+            2.0,
+        );
+        // Should push away from neighbor (negative or reduced x / nonzero y-ish)
+        assert!(v.x < pref.x + 0.5);
+        assert!(v.length() <= 2.0 + 1e-3);
+    }
+
+    // -- NavigationLink2D/3D disjoint-region bridging -----------------------
+
+    /// Two square regions separated by a gap on the x axis (x in [0,10] and
+    /// [20,30]). They share no geometry, so pathfinding between them requires a
+    /// link.
+    fn disjoint_two_region_server_2d() -> NavigationServer2D {
+        let mut server = NavigationServer2D::new();
+        server.add_region(NavMesh2D::new(
+            vec![NavPolygon::new(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(10.0, 0.0),
+                Vector2::new(10.0, 10.0),
+                Vector2::new(0.0, 10.0),
+            ])],
+            0.01,
+        ));
+        server.add_region(NavMesh2D::new(
+            vec![NavPolygon::new(vec![
+                Vector2::new(20.0, 0.0),
+                Vector2::new(30.0, 0.0),
+                Vector2::new(30.0, 10.0),
+                Vector2::new(20.0, 10.0),
+            ])],
+            0.01,
+        ));
+        server
+    }
+
+    fn disjoint_two_region_server_3d() -> NavigationServer3D {
+        let mut server = NavigationServer3D::new();
+        server.add_region(NavMesh3D::new(
+            vec![NavPolygon3D::new(vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(10.0, 0.0, 0.0),
+                Vector3::new(10.0, 0.0, 10.0),
+                Vector3::new(0.0, 0.0, 10.0),
+            ])],
+            vec![vec![]],
+        ));
+        server.add_region(NavMesh3D::new(
+            vec![NavPolygon3D::new(vec![
+                Vector3::new(20.0, 0.0, 0.0),
+                Vector3::new(30.0, 0.0, 0.0),
+                Vector3::new(30.0, 0.0, 10.0),
+                Vector3::new(20.0, 0.0, 10.0),
+            ])],
+            vec![vec![]],
+        ));
+        server
+    }
+
+    #[test]
+    fn navigation_link_bridges_disjoint_regions_2d() {
+        let mut server = disjoint_two_region_server_2d();
+        let from = Vector2::new(5.0, 5.0);
+        let to = Vector2::new(25.0, 5.0);
+
+        // Without a link the two regions are mutually unreachable.
+        assert!(
+            server.find_path_linked(from, to).is_empty(),
+            "disjoint regions must not be reachable without a link"
+        );
+
+        // A link bridging the regions makes `to` reachable from `from`.
+        server.add_link(NavigationLink2D::new(
+            Vector2::new(8.0, 5.0),
+            Vector2::new(22.0, 5.0),
+        ));
+        let path = server.find_path_linked(from, to);
+        assert!(!path.is_empty(), "link should connect disjoint regions");
+        assert!((path[0] - from).length() < EPSILON);
+        assert!((path[path.len() - 1] - to).length() < EPSILON);
+    }
+
+    #[test]
+    fn navigation_link_disabled_does_not_bridge_2d() {
+        let mut server = disjoint_two_region_server_2d();
+        let mut link = NavigationLink2D::new(Vector2::new(8.0, 5.0), Vector2::new(22.0, 5.0));
+        link.enabled = false;
+        server.add_link(link);
+        assert!(
+            server
+                .find_path_linked(Vector2::new(5.0, 5.0), Vector2::new(25.0, 5.0))
+                .is_empty(),
+            "a disabled link must not bridge regions"
+        );
+    }
+
+    #[test]
+    fn navigation_link_one_way_2d() {
+        let mut server = disjoint_two_region_server_2d();
+        let a = Vector2::new(5.0, 5.0); // region A
+        let b = Vector2::new(25.0, 5.0); // region B
+        let mut link = NavigationLink2D::new(Vector2::new(8.0, 5.0), Vector2::new(22.0, 5.0));
+        link.bidirectional = false; // A -> B only
+        server.add_link(link);
+        assert!(
+            !server.find_path_linked(a, b).is_empty(),
+            "forward direction A->B should work"
+        );
+        assert!(
+            server.find_path_linked(b, a).is_empty(),
+            "reverse direction B->A should be blocked on a one-way link"
+        );
+    }
+
+    #[test]
+    fn navigation_link_bridges_disjoint_regions_3d() {
+        let mut server = disjoint_two_region_server_3d();
+        let from = Vector3::new(5.0, 0.0, 5.0);
+        let to = Vector3::new(25.0, 0.0, 5.0);
+
+        assert!(
+            server.find_path_linked(from, to).is_empty(),
+            "disjoint 3D regions must not be reachable without a link"
+        );
+
+        server.add_link(NavigationLink3D::new(
+            Vector3::new(8.0, 0.0, 5.0),
+            Vector3::new(22.0, 0.0, 5.0),
+        ));
+        let path = server.find_path_linked(from, to);
+        assert!(!path.is_empty(), "3D link should connect disjoint regions");
+        assert!((path[0] - from).length() < EPSILON);
+        assert!((path[path.len() - 1] - to).length() < EPSILON);
+    }
+
+    // -- RVO avoidance wired into agent stepping (pat-p0s82.14) --------------
+
+    /// Builds a 2D agent moving straight along +x with the given avoidance flag.
+    fn straight_x_agent_2d(avoidance: bool) -> NavigationAgent2D {
+        let mut a = NavigationAgent2D::new();
+        a.avoidance_enabled = avoidance;
+        a.max_speed = 10.0;
+        a.radius = 5.0;
+        a.path = vec![Vector2::new(0.0, 0.0), Vector2::new(200.0, 0.0)];
+        a.path_index = 1;
+        a.target_position = Vector2::new(200.0, 0.0);
+        a
+    }
+
+    #[test]
+    fn agent2d_step_moves_toward_waypoint() {
+        let mut a = straight_x_agent_2d(false);
+        let next = a.step(Vector2::ZERO, 1.0, &[]);
+        // max_speed 10, dt 1, straight +x, no neighbors.
+        assert!(approx_eq(next.x, 10.0), "x = {}", next.x);
+        assert!(approx_eq(next.y, 0.0), "y = {}", next.y);
+    }
+
+    #[test]
+    fn agent2d_avoidance_deflects_around_neighbor() {
+        let mut a = straight_x_agent_2d(true);
+        // Neighbor slightly off the +y side of the straight path.
+        let others = [(Vector2::new(8.0, 1.0), 5.0)];
+        let next = a.step(Vector2::ZERO, 1.0, &others);
+        // Deflected to the -y side (away from the neighbor) and slowed in x.
+        assert!(next.y < -0.1, "expected -y deflection, got y = {}", next.y);
+        assert!(next.x > 0.0 && next.x < 10.0, "expected slowed forward x, got {}", next.x);
+    }
+
+    #[test]
+    fn agent2d_avoidance_disabled_ignores_neighbor() {
+        // Same neighbor as the deflection test, but avoidance is OFF: the agent
+        // must walk straight through — proving avoidance is gated by the flag
+        // and actually wired into stepping.
+        let mut a = straight_x_agent_2d(false);
+        let others = [(Vector2::new(8.0, 1.0), 5.0)];
+        let next = a.step(Vector2::ZERO, 1.0, &others);
+        assert!(approx_eq(next.x, 10.0), "x = {}", next.x);
+        assert!(approx_eq(next.y, 0.0), "y = {}", next.y);
+    }
+
+    #[test]
+    fn agent2d_avoidance_displaces_laterally_over_time() {
+        // A neighbor sits on the straight-line path at (30, 5).
+        let neighbor = [(Vector2::new(30.0, 5.0), 5.0)];
+
+        // With avoidance the agent must at some point be pushed off the axis.
+        let mut on = straight_x_agent_2d(true);
+        let mut p_on = Vector2::ZERO;
+        let mut min_y_on = 0.0_f32;
+        for _ in 0..30 {
+            p_on = on.step(p_on, 0.1, &neighbor);
+            min_y_on = min_y_on.min(p_on.y);
+        }
+
+        // Without avoidance the agent stays exactly on the axis the whole time.
+        let mut off = straight_x_agent_2d(false);
+        let mut p_off = Vector2::ZERO;
+        let mut min_y_off = 0.0_f32;
+        for _ in 0..30 {
+            p_off = off.step(p_off, 0.1, &neighbor);
+            min_y_off = min_y_off.min(p_off.y);
+        }
+
+        assert!(min_y_on < -0.1, "avoidance should deflect off-axis, min_y = {min_y_on}");
+        assert!(approx_eq(min_y_off, 0.0), "no-avoidance path must stay on axis, min_y = {min_y_off}");
+        assert!(p_on.x > 1.0 && p_off.x > 1.0, "agents must still progress along x");
+    }
+
+    #[test]
+    fn rvo_3d_separates_agents() {
+        let pref = Vector3::new(1.0, 0.0, 0.0);
+        let v = rvo_avoidance_velocity_3d(
+            Vector3::ZERO,
+            pref,
+            &[(Vector3::new(0.5, 0.0, 0.0), 0.5)],
+            0.5,
+            2.0,
+        );
+        assert!(v.x < pref.x, "should be pushed back in x, got {}", v.x);
+        assert!(v.length() <= 2.0 + 1e-3, "speed must be clamped, got {}", v.length());
+    }
+
+    /// Builds a 3D agent moving straight along +x with the given avoidance flag.
+    fn straight_x_agent_3d(avoidance: bool) -> NavigationAgent3D {
+        let mut a = NavigationAgent3D::new();
+        a.avoidance_enabled = avoidance;
+        a.max_speed = 10.0;
+        a.radius = 5.0;
+        a.path = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(200.0, 0.0, 0.0)];
+        a.path_index = 1;
+        a.target_position = Vector3::new(200.0, 0.0, 0.0);
+        a
+    }
+
+    #[test]
+    fn agent3d_avoidance_deflects_around_neighbor() {
+        let mut a = straight_x_agent_3d(true);
+        let others = [(Vector3::new(8.0, 0.0, 1.0), 5.0)];
+        let next = a.step(Vector3::ZERO, 1.0, &others);
+        // Deflected on -z (away from neighbor), y untouched, slowed in x.
+        assert!(next.z < -0.1, "expected -z deflection, got z = {}", next.z);
+        assert!(approx_eq(next.y, 0.0), "y = {}", next.y);
+        assert!(next.x > 0.0 && next.x < 10.0, "expected slowed forward x, got {}", next.x);
+    }
+
+    #[test]
+    fn agent3d_avoidance_disabled_ignores_neighbor() {
+        let mut a = straight_x_agent_3d(false);
+        let others = [(Vector3::new(8.0, 0.0, 1.0), 5.0)];
+        let next = a.step(Vector3::ZERO, 1.0, &others);
+        assert!(approx_eq(next.x, 10.0), "x = {}", next.x);
+        assert!(approx_eq(next.z, 0.0), "z = {}", next.z);
     }
 }

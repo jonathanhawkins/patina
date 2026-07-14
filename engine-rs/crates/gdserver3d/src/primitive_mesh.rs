@@ -127,6 +127,7 @@ impl BoxMesh {
             indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         }
     }
 }
@@ -287,6 +288,7 @@ impl PlaneMesh {
             indices: vec![0, 1, 2, 0, 2, 3],
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
+            ..Default::default()
         }
     }
 }

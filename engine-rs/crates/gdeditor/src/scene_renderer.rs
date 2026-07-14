@@ -153,13 +153,27 @@ pub fn render_runtime_frame(
     zoom: f64,
     pan: (f64, f64),
 ) -> FrameBuffer {
+    // A running 2D scene maps world coordinates straight to the viewport
+    // (Camera2D handling is a later sub-task), so the editor's zoom/pan — which
+    // only frame the *editor* preview — are intentionally ignored here.
+    let _ = (zoom, pan);
     if scene_is_3d(tree) {
         let mut vp = viewport_3d.clone();
         vp.width = width.max(1);
         vp.height = height.max(1);
         crate::viewport_3d_render::render_editor_3d_frame(&vp, tree)
     } else {
-        render_scene_with_zoom_pan(tree, None, width, height, zoom, pan)
+        // 2D running scene: draw the real CanvasItem pixels the game would show
+        // (pat-u3l8c.23) — no editor grid/rulers/gizmos. This branch is
+        // texture-less; the texture-cached Play path lives in `examples/editor.rs`,
+        // so sprites here fall back to placeholder squares.
+        crate::viewport_2d_render::render_runtime_canvas(
+            tree,
+            width,
+            height,
+            crate::viewport_2d_render::RUNTIME_CLEAR_COLOR,
+            None,
+        )
     }
 }
 

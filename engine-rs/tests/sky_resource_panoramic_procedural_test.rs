@@ -112,7 +112,8 @@ fn panoramic_sky_properties_roundtrip() {
         panorama_path: "res://env/sunset.exr".into(),
         filter: false,
         energy_multiplier: 2.0,
-    };
+                texture: None,
+        };
     let props = mat.to_properties();
     let restored =
         PanoramicSkyMaterial::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
@@ -240,6 +241,7 @@ fn sky_to_properties_roundtrip_panoramic() {
             panorama_path: "res://env/night.exr".into(),
             filter: false,
             energy_multiplier: 0.5,
+                    texture: None,
         }),
         process_mode: SkyProcessMode::Quality,
         radiance_size: 512,
@@ -308,8 +310,9 @@ fn environment_with_panoramic_sky() {
         sky: Some(Sky {
             material: SkyMaterial::Panoramic(PanoramicSkyMaterial {
                 panorama_path: "res://sky.hdr".into(),
+                texture: None,
                 ..Default::default()
-            }),
+        }),
             ..Default::default()
         }),
         ..Default::default()
@@ -367,6 +370,7 @@ fn sky_clone_preserves_material() {
     let sky = Sky {
         material: SkyMaterial::Panoramic(PanoramicSkyMaterial {
             panorama_path: "res://test.hdr".into(),
+            texture: None,
             ..Default::default()
         }),
         process_mode: SkyProcessMode::Quality,

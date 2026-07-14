@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 
 use gdcore::math::Vector3;
+use gdcore::math3d::Quaternion;
 
 use crate::body::{BodyId3D, PhysicsBody3D};
 use crate::collision;
@@ -122,9 +123,7 @@ fn ray_test_body(origin: Vector3, dir: Vector3, body: &PhysicsBody3D) -> Option<
             ray_aabb(origin, dir, body.position, half_extents, body.id)
         }
         Shape3D::CapsuleShape { radius, height } => {
-            // Approximate capsule as sphere for now
-            let eff_radius = radius.max(height * 0.5);
-            ray_sphere(origin, dir, body.position, eff_radius, body.id)
+            ray_capsule(origin, dir, body.position, body.rotation, radius, height, body.id)
         }
         // For other shapes, approximate with their bounding sphere
         _ => {
@@ -164,6 +163,93 @@ fn ray_sphere(
 
     let point = origin + dir * t;
     let normal = (point - center).normalized();
+
+    Some(RaycastHit3D {
+        body_id,
+        point,
+        normal,
+        distance: t,
+    })
+}
+
+/// Ray vs (rotated) capsule intersection.
+///
+/// The capsule's axis is local `+Y` and `height` is the *total* height
+/// including the two hemispherical caps (matching [`Shape3D::CapsuleShape`] and
+/// the collision helpers). `cap_rot` orients the axis in world space.
+///
+/// Analytic port of Inigo Quilez's "capsule - intersection": solve the ray
+/// against the infinite cylinder around the core segment, and if the hit falls
+/// off the ends, fall back to the two end-cap spheres. `dir` must be
+/// normalized, so the returned `distance` is in world units.
+#[allow(clippy::too_many_arguments)]
+fn ray_capsule(
+    origin: Vector3,
+    dir: Vector3,
+    cap_pos: Vector3,
+    cap_rot: Quaternion,
+    radius: f32,
+    height: f32,
+    body_id: BodyId3D,
+) -> Option<RaycastHit3D> {
+    // Core-segment endpoints in world space.
+    let hs = (height * 0.5 - radius).max(0.0);
+    let pa = cap_pos + cap_rot.xform(Vector3::new(0.0, -hs, 0.0));
+    let pb = cap_pos + cap_rot.xform(Vector3::new(0.0, hs, 0.0));
+
+    let ba = pb - pa;
+    let baba = ba.dot(ba);
+
+    // Degenerate segment (height <= 2*radius) — the capsule is a sphere.
+    if baba < 1e-12 {
+        return ray_sphere(origin, dir, cap_pos, radius, body_id);
+    }
+
+    let oa = origin - pa;
+    let bard = ba.dot(dir);
+    let baoa = ba.dot(oa);
+    let rdoa = dir.dot(oa);
+    let oaoa = oa.dot(oa);
+
+    let a = baba - bard * bard;
+    let b = baba * rdoa - baoa * bard;
+    let c = baba * oaoa - baoa * baoa - radius * radius * baba;
+    let h = b * b - a * c;
+
+    let mut t_hit: Option<f32> = None;
+
+    // Cylindrical body: `a` is ~0 only when the ray is parallel to the axis, in
+    // which case the caps handle it below.
+    if a > 1e-9 && h >= 0.0 {
+        let t = (-b - h.sqrt()) / a;
+        let y = baoa + t * bard;
+        if t >= 0.0 && y > 0.0 && y < baba {
+            t_hit = Some(t);
+        }
+    }
+
+    // End caps: keep the nearest non-negative hit.
+    if t_hit.is_none() {
+        for center in [pa, pb] {
+            let oc = origin - center;
+            let cb = dir.dot(oc);
+            let cc = oc.dot(oc) - radius * radius;
+            let ch = cb * cb - cc;
+            if ch >= 0.0 {
+                let t = -cb - ch.sqrt();
+                if t >= 0.0 && t_hit.map_or(true, |prev| t < prev) {
+                    t_hit = Some(t);
+                }
+            }
+        }
+    }
+
+    let t = t_hit?;
+    let point = origin + dir * t;
+    // Normal = direction from the closest point on the core segment to the hit.
+    let seg_t = ((point - pa).dot(ba) / baba).clamp(0.0, 1.0);
+    let axis_point = pa + ba * seg_t;
+    let normal = (point - axis_point).normalized();
 
     Some(RaycastHit3D {
         body_id,
@@ -390,6 +476,86 @@ impl PhysicsShapeQuery3D {
 
         closest
     }
+
+    /// Sweeps the query shape along [`Self::motion`] and reports how far it can
+    /// travel before contacting a body.
+    ///
+    /// Mirrors Godot's `PhysicsDirectSpaceState3D::cast_motion`, returning
+    /// `(safe, unsafe)` fractions in `[0.0, 1.0]`:
+    /// - `safe` — the largest fraction of the motion with no collision.
+    /// - `unsafe` — the fraction at which contact is certain.
+    ///
+    /// Returns `(1.0, 1.0)` when the whole motion is clear and `(0.0, 0.0)` when
+    /// the shape already overlaps a body at the start. Deterministic: a fixed
+    /// coarse march brackets the first contact and a fixed number of bisection
+    /// steps refines the time of impact (no timing or randomness).
+    pub fn cast_motion<'a>(
+        &self,
+        bodies: impl IntoIterator<Item = &'a PhysicsBody3D>,
+    ) -> (f32, f32) {
+        let bodies: Vec<&PhysicsBody3D> = bodies
+            .into_iter()
+            .filter(|b| {
+                !self.exclude.contains(&b.id) && (self.collision_mask & b.collision_layer) != 0
+            })
+            .collect();
+
+        // Already overlapping at the start of the motion.
+        if self.collides_at(0.0, &bodies) {
+            return (0.0, 0.0);
+        }
+        // No motion to sweep.
+        if self.motion.length_squared() < 1e-12 {
+            return (1.0, 1.0);
+        }
+
+        // Coarse march to bracket the first contact between a clear and a
+        // colliding sample.
+        const STEPS: usize = 32;
+        let mut lo = 0.0_f32;
+        let mut hi = 1.0_f32;
+        let mut bracketed = false;
+        for i in 1..=STEPS {
+            let t = i as f32 / STEPS as f32;
+            if self.collides_at(t, &bodies) {
+                lo = (i - 1) as f32 / STEPS as f32;
+                hi = t;
+                bracketed = true;
+                break;
+            }
+        }
+        if !bracketed {
+            return (1.0, 1.0);
+        }
+
+        // Bisect the [clear, contact] bracket for the time of impact.
+        for _ in 0..24 {
+            let mid = 0.5 * (lo + hi);
+            if self.collides_at(mid, &bodies) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Tests the query shape (swept to `motion * t`) against the pre-filtered
+    /// body set. Honors each body's rotation via [`collision::test_collision_rot`].
+    fn collides_at(&self, t: f32, bodies: &[&PhysicsBody3D]) -> bool {
+        let pos = self.position + self.motion * t;
+        bodies.iter().any(|b| {
+            collision::test_collision_rot(
+                pos,
+                Quaternion::IDENTITY,
+                &self.shape,
+                b.position,
+                b.rotation,
+                &b.shape,
+            )
+            .colliding
+        })
+    }
 }
 
 // ===========================================================================
@@ -417,6 +583,16 @@ mod tests {
             BodyType3D::Static,
             pos,
             Shape3D::BoxShape { half_extents: half },
+            0.0,
+        )
+    }
+
+    fn capsule_body(id: u64, pos: Vector3, radius: f32, height: f32) -> PhysicsBody3D {
+        PhysicsBody3D::new(
+            BodyId3D(id),
+            BodyType3D::Static,
+            pos,
+            Shape3D::CapsuleShape { radius, height },
             0.0,
         )
     }
@@ -517,6 +693,72 @@ mod tests {
         assert!(query.intersect(bodies.iter()).is_none());
     }
 
+    // -- Capsule raycast (true, not sphere-approximated) ----------------------
+
+    #[test]
+    fn ray_query_hits_capsule_body() {
+        // Vertical capsule (axis +Y), radius 1.0. A +Z ray at y=0 strikes the
+        // cylindrical side at z = 10 - 1.0 = 9.0 (the old sphere approximation
+        // used eff radius 2.0 and would have reported 8.0).
+        let bodies = vec![capsule_body(1, Vector3::new(0.0, 0.0, 10.0), 1.0, 4.0)];
+        let query = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 20.0));
+        let hit = query.intersect(bodies.iter()).expect("ray should hit capsule body");
+        assert_eq!(hit.body_id, BodyId3D(1));
+        assert!((hit.distance - 9.0).abs() < 0.01, "distance {}", hit.distance);
+        assert!((hit.normal.z + 1.0).abs() < 0.01, "normal {:?}", hit.normal);
+    }
+
+    #[test]
+    fn ray_query_hits_capsule_cap() {
+        // Segment y in [-1, 1]; top cap centered at (0,1,10), radius 1 → apex at
+        // (0,2,10). A downward ray through x=0,z=10 hits that apex.
+        let bodies = vec![capsule_body(1, Vector3::new(0.0, 0.0, 10.0), 1.0, 4.0)];
+        let query =
+            PhysicsRayQuery3D::new(Vector3::new(0.0, 5.0, 10.0), Vector3::new(0.0, -5.0, 10.0));
+        let hit = query.intersect(bodies.iter()).expect("ray should hit top cap");
+        assert!((hit.point.y - 2.0).abs() < 0.02, "point {:?}", hit.point);
+        assert!((hit.normal.y - 1.0).abs() < 0.02, "normal {:?}", hit.normal);
+    }
+
+    #[test]
+    fn ray_query_misses_capsule_where_sphere_approx_would_hit() {
+        // Offset 1.5 in X: outside the true capsule (radius 1.0) yet inside the
+        // old bounding-sphere approximation (eff radius 2.0). A true capsule
+        // raycast must miss.
+        let bodies = vec![capsule_body(1, Vector3::new(0.0, 0.0, 10.0), 1.0, 4.0)];
+        let query =
+            PhysicsRayQuery3D::new(Vector3::new(1.5, 0.0, 0.0), Vector3::new(1.5, 0.0, 20.0));
+        assert!(query.intersect(bodies.iter()).is_none());
+    }
+
+    #[test]
+    fn ray_query_capsule_honors_rotation() {
+        use std::f32::consts::FRAC_PI_2;
+        // Rotate the capsule 90° about Z so its axis lies along X. A downward
+        // ray through x=0,z=0 now hits the cylindrical side at y=0.5 (radius),
+        // distance 9.5 — whereas an unrotated (axis +Y) capsule would present a
+        // cap apex at y=2.0, distance 8.0.
+        let mut body = capsule_body(1, Vector3::ZERO, 0.5, 4.0);
+        body.rotation = Quaternion::from_axis_angle(Vector3::new(0.0, 0.0, 1.0), -FRAC_PI_2);
+        let bodies = vec![body];
+        let query =
+            PhysicsRayQuery3D::new(Vector3::new(0.0, 10.0, 0.0), Vector3::new(0.0, -10.0, 0.0));
+        let hit = query
+            .intersect(bodies.iter())
+            .expect("ray should hit rotated capsule side");
+        assert!((hit.distance - 9.5).abs() < 0.02, "distance {}", hit.distance);
+    }
+
+    #[test]
+    fn ray_query_capsule_degenerate_is_sphere() {
+        // height <= 2*radius collapses the core segment; the capsule behaves as
+        // a sphere of the given radius.
+        let bodies = vec![capsule_body(1, Vector3::new(0.0, 0.0, 10.0), 2.0, 2.0)];
+        let query = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 20.0));
+        let hit = query.intersect(bodies.iter()).expect("degenerate capsule hits");
+        assert!((hit.distance - 8.0).abs() < 0.01, "distance {}", hit.distance);
+    }
+
     // -- PhysicsShapeQuery3D --------------------------------------------------
 
     #[test]
@@ -598,5 +840,77 @@ mod tests {
         assert!(!query.collide_with_areas);
         assert_eq!(query.motion, Vector3::ZERO);
         assert!((query.margin - 0.0).abs() < f32::EPSILON);
+    }
+
+    // -- PhysicsShapeQuery3D::cast_motion -------------------------------------
+
+    fn sweeping_capsule() -> PhysicsShapeQuery3D {
+        let mut q = PhysicsShapeQuery3D::new(
+            Shape3D::CapsuleShape {
+                radius: 0.5,
+                height: 2.0,
+            },
+            Vector3::ZERO,
+        );
+        q.motion = Vector3::new(0.0, 0.0, 10.0);
+        q
+    }
+
+    #[test]
+    fn cast_motion_clear_path_returns_one() {
+        let bodies = vec![sphere_body(1, Vector3::new(0.0, 0.0, 100.0))];
+        let (safe, unsafe_) = sweeping_capsule().cast_motion(bodies.iter());
+        assert!((safe - 1.0).abs() < 1e-6, "safe {}", safe);
+        assert!((unsafe_ - 1.0).abs() < 1e-6, "unsafe {}", unsafe_);
+    }
+
+    #[test]
+    fn cast_motion_stops_before_body() {
+        // Capsule (r=0.5) sweeps +Z toward a sphere (r=1.0) at z=10. Contact when
+        // the axis-to-center gap closes to 1.5: z = 8.5 → safe fraction 0.85.
+        let bodies = vec![sphere_body(1, Vector3::new(0.0, 0.0, 10.0))];
+        let (safe, unsafe_) = sweeping_capsule().cast_motion(bodies.iter());
+        assert!((safe - 0.85).abs() < 0.01, "safe {}", safe);
+        assert!(unsafe_ >= safe, "unsafe {} < safe {}", unsafe_, safe);
+        assert!(unsafe_ - safe < 0.01, "bracket too wide: {}..{}", safe, unsafe_);
+    }
+
+    #[test]
+    fn cast_motion_already_colliding_returns_zero() {
+        let bodies = vec![sphere_body(1, Vector3::new(0.0, 0.0, 1.0))];
+        let (safe, unsafe_) = sweeping_capsule().cast_motion(bodies.iter());
+        assert_eq!(safe, 0.0);
+        assert_eq!(unsafe_, 0.0);
+    }
+
+    #[test]
+    fn cast_motion_respects_exclude() {
+        let bodies = vec![sphere_body(1, Vector3::new(0.0, 0.0, 10.0))];
+        let mut query = sweeping_capsule();
+        query.exclude.insert(BodyId3D(1));
+        let (safe, _unsafe) = query.cast_motion(bodies.iter());
+        assert!((safe - 1.0).abs() < 1e-6, "safe {}", safe);
+    }
+
+    #[test]
+    fn cast_motion_respects_collision_mask() {
+        let mut body = sphere_body(1, Vector3::new(0.0, 0.0, 10.0));
+        body.collision_layer = 0b0010;
+        let bodies = vec![body];
+        let mut query = sweeping_capsule();
+        query.collision_mask = 0b0001; // does not match layer 2 → motion is clear
+        let (safe, _unsafe) = query.cast_motion(bodies.iter());
+        assert!((safe - 1.0).abs() < 1e-6, "safe {}", safe);
+    }
+
+    #[test]
+    fn cast_motion_zero_motion_returns_one() {
+        // No overlap at rest and no motion → the whole (empty) sweep is clear.
+        let bodies = vec![sphere_body(1, Vector3::new(0.0, 0.0, 10.0))];
+        let mut query = sweeping_capsule();
+        query.motion = Vector3::ZERO;
+        let (safe, unsafe_) = query.cast_motion(bodies.iter());
+        assert!((safe - 1.0).abs() < 1e-6, "safe {}", safe);
+        assert!((unsafe_ - 1.0).abs() < 1e-6, "unsafe {}", unsafe_);
     }
 }

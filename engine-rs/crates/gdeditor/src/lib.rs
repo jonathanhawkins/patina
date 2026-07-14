@@ -143,6 +143,7 @@ pub mod signals_tree;
 pub mod texture_cache;
 pub mod theme_editor;
 pub mod tilemap_editor;
+pub mod tilemap_render;
 pub mod undo_redo;
 pub mod variant_value;
 pub mod vcs;

@@ -119,6 +119,10 @@ fn main() {
 
     // Render an initial frame.
     let mut renderer = SoftwareRenderer::new();
+    // Load the engine's built-in default UI font so Label/Button text in the
+    // rendered scene draws as real TTF glyphs instead of the 5×7 bitmap
+    // (pat-u3l8c.69).
+    renderer.use_default_font();
     let viewport = Viewport::new(WIDTH, HEIGHT, Color::rgb(0.05, 0.05, 0.1));
     let initial_frame = capture_frame(&mut renderer, &viewport);
 
@@ -214,9 +218,7 @@ fn main() {
                 state.clear_frame_input();
             }
             let job = {
-                let state = handle.state().lock().unwrap();
-                let zoom = state.viewport_zoom;
-                let pan = state.viewport_pan;
+                let mut state = handle.state().lock().unwrap();
                 // Render at the panel's real size (reported by the browser via
                 // /api/viewport/resize) so the frame fills the viewport instead
                 // of letterboxing a fixed 640x480 box into a centered square.
@@ -242,14 +244,22 @@ fn main() {
                         gdeditor::viewport_3d_render::editor_3d_render_inputs(&vp, running_tree);
                     RenderJob::Gpu { vp, inputs }
                 } else {
-                    RenderJob::Cpu(gdeditor::scene_renderer::render_runtime_frame(
-                        running_tree,
-                        &state.editor_viewport_3d,
+                    // 2D running scene: rasterize the real CanvasItem pixels the
+                    // game draws (pat-u3l8c.23) — textured sprites, color rects,
+                    // label text — with CanvasLayer + z ordering, blitting real
+                    // sprite textures via the editor's texture cache. Build the
+                    // render list off the tree first so its borrow ends before we
+                    // mutably borrow the texture cache below.
+                    let items =
+                        gdeditor::viewport_2d_render::build_runtime_render_list(running_tree);
+                    let fb = gdeditor::viewport_2d_render::rasterize_render_list(
+                        &items,
                         rw,
                         rh,
-                        zoom,
-                        pan,
-                    ))
+                        gdeditor::viewport_2d_render::RUNTIME_CLEAR_COLOR,
+                        Some(&mut state.texture_cache),
+                    );
+                    RenderJob::Cpu(fb)
                 }
             };
             match job {

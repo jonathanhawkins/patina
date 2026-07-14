@@ -251,7 +251,7 @@ fn check_stmt(stmt: &Stmt, funcs: &HashMap<String, FuncSig>, errors: &mut Vec<Ty
                 check_stmt(s, &inner_funcs, errors);
             }
         }
-        Stmt::Await(expr) => check_expr(expr, funcs, errors),
+        Stmt::Await { expr, .. } => check_expr(expr, funcs, errors),
         _ => {}
     }
 }

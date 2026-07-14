@@ -152,7 +152,9 @@ fn edge_function(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader::{FragmentInput, ShaderUniforms, UnlitFragmentShader, VertexOutput};
+    use crate::shader::{
+        FragmentInput, MaterialTextures, ShaderUniforms, UnlitFragmentShader, VertexOutput,
+    };
     use gdcore::math::{Color, Vector3};
 
     fn identity_matrix() -> [[f32; 4]; 4] {
@@ -178,6 +180,7 @@ mod tests {
             lights: vec![],
             directional_shadow_maps: vec![],
             omni_shadow_cubemaps: vec![],
+            textures: MaterialTextures::default(),
         }
     }
 

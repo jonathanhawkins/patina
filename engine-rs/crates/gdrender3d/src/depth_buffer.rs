@@ -53,6 +53,14 @@ impl DepthBuffer {
         (self.width, self.height)
     }
 
+    /// Raw depth samples in row-major order (`y * width + x`).
+    ///
+    /// Unwritten texels remain at `f32::MAX`. Used when uploading CPU shadow
+    /// maps to the GPU (`R32Float` depth texture for pat-32edz).
+    pub fn as_slice(&self) -> &[f32] {
+        &self.data
+    }
+
     /// Consumes the buffer and returns normalized depth values.
     ///
     /// Pixels that were never written (`f32::MAX`) are mapped to `1.0`.

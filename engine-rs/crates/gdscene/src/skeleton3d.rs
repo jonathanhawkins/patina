@@ -251,6 +251,21 @@ pub fn get_bone_global_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Tr
     global
 }
 
+/// Gathers the global pose of every bone into a flat array indexed by bone
+/// index (`0..get_bone_count`).
+///
+/// This is the bridge from `Skeleton3D` to the mesh-skinning pipeline: the
+/// returned array is exactly what `gdserver3d::skin::skin_mesh` expects as its
+/// `bone_global_poses` argument (a `Skin`'s binds reference these bone
+/// indices). It is what actually *consumes* the per-bone global poses computed
+/// by [`get_bone_global_pose`].
+pub fn bone_pose_array(tree: &SceneTree, node_id: NodeId) -> Vec<Transform3D> {
+    let count = get_bone_count(tree, node_id);
+    (0..count)
+        .map(|i| get_bone_global_pose(tree, node_id, i))
+        .collect()
+}
+
 /// Resets all bone poses to identity (clears animation overrides).
 pub fn clear_bones_pose(tree: &mut SceneTree, node_id: NodeId) {
     let count = get_bone_count(tree, node_id);
@@ -631,6 +646,90 @@ mod tests {
         clear_bones_pose(&mut tree, skel_id);
         assert_eq!(get_bone_pose(&tree, skel_id, 0), Transform3D::IDENTITY);
         assert_eq!(get_bone_pose(&tree, skel_id, 1), Transform3D::IDENTITY);
+    }
+
+    // -- Pose array + skinning bridge ----------------------------------------
+
+    #[test]
+    fn bone_pose_array_matches_individual_poses() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let skel = Node::new("Skeleton", "Skeleton3D");
+        let skel_id = tree.add_child(root, skel).unwrap();
+
+        let hip = add_bone(&mut tree, skel_id, "Hip");
+        set_bone_rest(&mut tree, skel_id, hip, Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 1.0, 0.0),
+        });
+        let spine = add_bone(&mut tree, skel_id, "Spine");
+        set_bone_parent(&mut tree, skel_id, spine, hip as i64);
+        set_bone_rest(&mut tree, skel_id, spine, Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 0.5, 0.0),
+        });
+
+        let poses = bone_pose_array(&tree, skel_id);
+        assert_eq!(poses.len(), 2);
+        assert_eq!(poses[0], get_bone_global_pose(&tree, skel_id, 0));
+        assert_eq!(poses[1], get_bone_global_pose(&tree, skel_id, 1));
+        // Spine global Y = hip(1.0) + spine(0.5).
+        assert!((poses[1].origin.y - 1.5).abs() < 1e-5);
+    }
+
+    /// End-to-end: `Skeleton3D` global poses, gathered via [`bone_pose_array`],
+    /// drive `gdserver3d::skin::skin_mesh` to deform a rigged mesh. This closes
+    /// the "skeleton3d computes poses nothing consumes" gap.
+    #[test]
+    fn skeleton_poses_drive_mesh_skinning() {
+        use gdserver3d::mesh::{Mesh3D, PrimitiveType};
+        use gdserver3d::skin::{skin_mesh, Skin};
+
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let skel = Node::new("Skeleton", "Skeleton3D");
+        let skel_id = tree.add_child(root, skel).unwrap();
+
+        // bone0 at origin, bone1 (child) resting at Y=1 (a "joint").
+        let b0 = add_bone(&mut tree, skel_id, "Root");
+        let b1 = add_bone(&mut tree, skel_id, "Tip");
+        set_bone_parent(&mut tree, skel_id, b1, b0 as i64);
+        set_bone_rest(&mut tree, skel_id, b1, Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 1.0, 0.0),
+        });
+
+        // Register a Skin whose binds invert each bone's rest global pose.
+        let mut skin = Skin::new();
+        skin.add_bind_from_rest(b0, get_bone_global_pose(&tree, skel_id, b0));
+        skin.add_bind_from_rest(b1, get_bone_global_pose(&tree, skel_id, b1));
+
+        // Vertex 0 at the root joint -> bind 0; vertex 1 above the tip joint
+        // (Y=2) -> bind 1, so a rotation of bone1 about its joint swings it.
+        let mut mesh = Mesh3D::new(PrimitiveType::Points);
+        mesh.vertices = vec![Vector3::ZERO, Vector3::new(0.0, 2.0, 0.0)];
+        mesh.indices = vec![0, 1];
+        mesh.bone_weights = vec![[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        mesh.bone_indices = vec![[0, 0, 0, 0], [1, 0, 0, 0]];
+        assert!(mesh.is_skinned());
+
+        // At rest the skin is a no-op.
+        let rest_poses = bone_pose_array(&tree, skel_id);
+        let rest_skinned = skin_mesh(&mesh, &skin, &rest_poses);
+        assert!((rest_skinned.vertices[1] - Vector3::new(0.0, 2.0, 0.0)).length() < 1e-4);
+
+        // Rotate bone1 90° about Z at its joint; the tip vertex swings sideways.
+        set_bone_pose(&mut tree, skel_id, b1, Transform3D {
+            basis: Basis::from_euler(Vector3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2)),
+            origin: Vector3::ZERO,
+        });
+        let posed = bone_pose_array(&tree, skel_id);
+        let posed_skinned = skin_mesh(&mesh, &skin, &posed);
+
+        let moved = (posed_skinned.vertices[1] - rest_skinned.vertices[1]).length();
+        assert!(moved > 0.5, "posed skin should move the tip vertex ({moved})");
+        // Root vertex (bind 0, unposed) stays put.
+        assert!((posed_skinned.vertices[0] - Vector3::ZERO).length() < 1e-4);
     }
 
     // -- BoneAttachment3D helpers --------------------------------------------

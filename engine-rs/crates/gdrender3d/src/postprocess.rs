@@ -36,7 +36,20 @@ use gdserver3d::environment::{Environment3D, GlowBlendMode, ToneMapper};
 /// and converted to linear on input round-trips unchanged.
 pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &Environment3D) {
     let exposure = env.tonemap_exposure;
-    let white = env.tonemap_white.max(1e-4);
+    // AgX reads its own white point (Godot passes `tonemap_agx_white` as the
+    // tonemap settings' white when the mapper is AgX — environment.cpp:253).
+    let white = match env.tone_mapper {
+        ToneMapper::Agx => env.tonemap_agx_white.max(1e-4),
+        _ => env.tonemap_white.max(1e-4),
+    };
+    // Precompute the AgX curve once per frame (environment_storage.cpp does
+    // this on the CPU too); the other operators need no per-frame state.
+    let agx = (env.tone_mapper == ToneMapper::Agx)
+        .then(|| AgxCurve::new(white, env.tonemap_agx_contrast));
+    let map = |c: [f32; 3]| match &agx {
+        Some(curve) => curve.apply(c),
+        None => tonemap(c, env.tone_mapper, white),
+    };
     let intensity = env.glow_intensity;
 
     // Generate the glow buffer once (linear HDR, full resolution) if enabled.
@@ -62,21 +75,55 @@ pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &En
         }
 
         // Tone map linear HDR → linear LDR.
-        c = tonemap(c, env.tone_mapper, white);
+        c = map(c);
 
         // Post-tonemap glow (soft light only: it must run after tonemapping to
         // avoid a discontinuity at 1.0).
         if let (Some(g), false) = (glow.as_ref(), pre_tonemap_glow) {
             let mut gi = [g[i][0] * intensity, g[i][1] * intensity, g[i][2] * intensity];
-            gi = tonemap(gi, env.tone_mapper, white);
+            gi = map(gi);
             c = blend_glow(c, gi, GlowBlendMode::Softlight, white, intensity);
         }
 
         // Linear → sRGB for display.
-        px.r = linear_to_srgb_channel(c[0]).clamp(0.0, 1.0);
-        px.g = linear_to_srgb_channel(c[1]).clamp(0.0, 1.0);
-        px.b = linear_to_srgb_channel(c[2]).clamp(0.0, 1.0);
+        let mut r = linear_to_srgb_channel(c[0]);
+        let mut g = linear_to_srgb_channel(c[1]);
+        let mut b = linear_to_srgb_channel(c[2]);
+
+        // Godot use_debanding (tonemap.glsl): per-channel screen-space dither
+        // applied AFTER the sRGB encode ("must be applied after encoding
+        // changes"), breaking up 8-bit banding on shallow gradients
+        // (pat-cf3x8).
+        if env.use_debanding {
+            let x = (i as u32 % width.max(1)) as f32;
+            let y = (i as u32 / width.max(1)) as f32;
+            let d = screen_space_dither(x, y);
+            r = (r + d[0]).clamp(0.0, 1.0);
+            g = (g + d[1]).clamp(0.0, 1.0);
+            b = (b + d[2]).clamp(0.0, 1.0);
+        } else {
+            r = r.clamp(0.0, 1.0);
+            g = g.clamp(0.0, 1.0);
+            b = b.clamp(0.0, 1.0);
+        }
+
+        px.r = r;
+        px.g = g;
+        px.b = b;
     }
+}
+
+/// Godot's debanding dither (tonemap.glsl `screen_space_dither`): Iestyn's
+/// per-channel RGB dither from Portal 2 X360, at 8-bit strength
+/// (`bit_alignment_diviser = 255`). Each channel gets an independent value in
+/// `[-0.5, 0.5] / 255`.
+pub fn screen_space_dither(x: f32, y: f32) -> [f32; 3] {
+    let d = 171.0 * x + 231.0 * y;
+    [
+        ((d / 103.0).fract() - 0.5) / 255.0,
+        ((d / 71.0).fract() - 0.5) / 255.0,
+        ((d / 97.0).fract() - 0.5) / 255.0,
+    ]
 }
 
 // ── Tone mapping (ported from tonemap.glsl) ─────────────────────────────────
@@ -103,6 +150,92 @@ pub fn tonemap(c: [f32; 3], mode: ToneMapper, white: f32) -> [f32; 3] {
             tonemap_filmic(c[2], white),
         ],
         ToneMapper::Aces => tonemap_aces(c, white),
+        // Standalone dispatch uses Godot's default AgX contrast (1.25);
+        // `apply_camera_post` builds the curve from the environment's
+        // configured contrast instead of going through here.
+        ToneMapper::Agx => AgxCurve::new(white, 1.25).apply(c),
+    }
+}
+
+// ── AgX (ported from tonemap.glsl `tonemap_agx` + environment_storage.cpp) ──
+
+/// The `awp_crossover_point` shared by the CPU parameter setup and the curve:
+/// 18% middle gray, perceptually 50% of reference white.
+const AWP_CROSSOVER_POINT: f32 = 0.18;
+/// SDR output ceiling (`output_max_value` in the shader).
+const AWP_OUTPUT_MAX: f32 = 1.0;
+
+/// Godot 4.6's AgX tone mapper: the Blender-derived approximation built on the
+/// allenwp curve. Construction ports the CPU-side parameter derivation in
+/// `environment_storage.cpp` (`awp_toe_a` / `awp_slope` / `awp_w` from the
+/// environment's AgX white and contrast); [`AgxCurve::apply`] ports
+/// `tonemap_agx` from `tonemap.glsl` (Rec.709→Rec.2020+inset matrix, allenwp
+/// curve, clip, outset+Rec.2020→Rec.709 matrix).
+pub struct AgxCurve {
+    contrast: f32,
+    toe_a: f32,
+    slope: f32,
+    w: f32,
+}
+
+impl AgxCurve {
+    /// Builds the curve for `white` (the AgX high clip — scene values at this
+    /// luminance map to display 1.0) and `contrast`.
+    pub fn new(white: f32, contrast: f32) -> Self {
+        let shoulder_max = AWP_OUTPUT_MAX - AWP_CROSSOVER_POINT;
+        let high_clip = white;
+        // awp_toe_a is a solution that ensures intersection at the crossover;
+        // the slope is the derivative of the toe there (verbatim from
+        // environment_storage.cpp).
+        let toe_a = ((1.0 / AWP_CROSSOVER_POINT) - 1.0) * AWP_CROSSOVER_POINT.powf(contrast);
+        let slope_denom = AWP_CROSSOVER_POINT.powf(contrast) + toe_a;
+        let slope = (contrast * AWP_CROSSOVER_POINT.powf(contrast - 1.0) * toe_a)
+            / (slope_denom * slope_denom);
+        let mut w = high_clip - AWP_CROSSOVER_POINT;
+        w = w * w;
+        w /= shoulder_max;
+        w *= slope;
+        Self { contrast, toe_a, slope, w }
+    }
+
+    /// The allenwp tonemapping curve for one channel: a sigmoid power-function
+    /// toe below middle gray, an extended-Reinhard shoulder above (reaches
+    /// exactly `AWP_OUTPUT_MAX` at the configured white).
+    fn allenwp(&self, x: f32) -> f32 {
+        if x < AWP_CROSSOVER_POINT {
+            let t = x.powf(self.contrast);
+            t / (t + self.toe_a)
+        } else {
+            let shoulder_max = AWP_OUTPUT_MAX - AWP_CROSSOVER_POINT;
+            let s = x - AWP_CROSSOVER_POINT;
+            let slope_s = self.slope * s;
+            slope_s * (1.0 + s / self.w) / (1.0 + (slope_s / shoulder_max)) + AWP_CROSSOVER_POINT
+        }
+    }
+
+    /// Tone maps a linear scene-referred color. Input is clamped non-negative
+    /// (large negatives through the inset matrix read darker/oversaturated);
+    /// the output may carry small negative components, exactly like Godot.
+    pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
+        let (r, g, b) = (c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
+
+        // Combined Rec.709 → Rec.2020 and Blender AgX inset matrix.
+        let ir = 0.544_814_75 * r + 0.373_787_4 * g + 0.081_397_855 * b;
+        let ig = 0.140_416_95 * r + 0.754_137_55 * g + 0.105_445_5 * b;
+        let ib = 0.088_810_42 * r + 0.178_871_76 * g + 0.732_317_82 * b;
+
+        // allenwp curve, then clip to the output ceiling (uncapped values show
+        // a cyan shift on very bright inputs).
+        let tr = self.allenwp(ir).min(AWP_OUTPUT_MAX);
+        let tg = self.allenwp(ig).min(AWP_OUTPUT_MAX);
+        let tb = self.allenwp(ib).min(AWP_OUTPUT_MAX);
+
+        // Combined inverse AgX outset and Rec.2020 → Rec.709 matrix.
+        [
+            1.964_887_4 * tr - 0.855_988_5 * tg - 0.108_898_916 * tb,
+            -0.299_313_36 * tr + 1.326_398 * tg - 0.027_084_6 * tb,
+            -0.164_352_74 * tr - 0.238_183_97 * tg + 1.402_536_7 * tb,
+        ]
     }
 }
 
@@ -489,6 +622,45 @@ mod tests {
         assert_eq!(tonemap(c, ToneMapper::Linear, 1.0), c);
     }
 
+    /// AgX anchors, per Godot 4.6's construction (environment_storage.cpp +
+    /// tonemap.glsl): black stays black, middle gray (0.18) is the toe/shoulder
+    /// junction and passes through unchanged, and the configured AgX white
+    /// (Blender default 16.29) maps exactly to display 1.0. Grays stay gray
+    /// because the inset/outset matrix rows each sum to 1.
+    #[test]
+    fn agx_curve_anchors_match_godot() {
+        let agx = AgxCurve::new(16.29, 1.25);
+
+        let black = agx.apply([0.0; 3]);
+        for ch in black {
+            assert!(ch.abs() < 1e-4, "agx(0) must be 0, got {ch}");
+        }
+
+        let mid = agx.apply([0.18; 3]);
+        for ch in mid {
+            assert!((ch - 0.18).abs() < 2e-3, "agx(0.18) must stay ~0.18, got {ch}");
+        }
+
+        let white = agx.apply([16.29; 3]);
+        for ch in white {
+            assert!((ch - 1.0).abs() < 2e-3, "agx(white) must hit 1.0, got {ch}");
+        }
+
+        // Monotonic on grays; values past white clip at 1.0 (the shader's
+        // min(output_max) before the outset).
+        let lo = agx.apply([0.5; 3]);
+        let hi = agx.apply([4.0; 3]);
+        assert!(hi[0] > lo[0], "agx must be monotonic: {} !> {}", hi[0], lo[0]);
+        let over = agx.apply([100.0; 3]);
+        assert!((over[0] - 1.0).abs() < 2e-3, "agx clips past white, got {}", over[0]);
+    }
+
+    #[test]
+    fn tonemap_dispatches_agx() {
+        let out = tonemap([0.18; 3], ToneMapper::Agx, 16.29);
+        assert!((out[0] - 0.18).abs() < 2e-3, "got {}", out[0]);
+    }
+
     #[test]
     fn screen_glow_never_exceeds_white() {
         // Screen blend with full glow can't push a mid value past white.
@@ -573,5 +745,90 @@ mod tests {
         assert_eq!(smoothstep(1.0, 3.0, 0.5), 0.0);
         assert_eq!(smoothstep(1.0, 3.0, 4.0), 1.0);
         assert!((smoothstep(1.0, 3.0, 2.0) - 0.5).abs() < 1e-6);
+    }
+}
+
+
+/// Screen-space ambient occlusion (pat-p0s82.11) — depth-buffer based darkening.
+///
+/// `depth` is linear depth per pixel (same length as `pixels` RGB layout assumed
+/// as packed [r,g,b] triples). Darkens creases where nearby depth is closer.
+pub fn apply_ssao(
+    pixels: &mut [[f32; 3]],
+    depth: &[f32],
+    width: usize,
+    height: usize,
+    intensity: f32,
+) {
+    if depth.len() != width * height || pixels.len() != width * height {
+        return;
+    }
+    let radius = 2i32;
+    let mut ao = vec![1.0f32; width * height];
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let i = (y as usize) * width + x as usize;
+            let d0 = depth[i];
+            let mut occ = 0.0f32;
+            let mut samples = 0.0f32;
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                        continue;
+                    }
+                    let d1 = depth[ny as usize * width + nx as usize];
+                    if d1 + 0.02 < d0 {
+                        occ += 1.0;
+                    }
+                    samples += 1.0;
+                }
+            }
+            let factor = if samples > 0.0 {
+                1.0 - intensity * (occ / samples)
+            } else {
+                1.0
+            };
+            ao[i] = factor.clamp(0.0, 1.0);
+        }
+    }
+    for i in 0..pixels.len() {
+        let a = ao[i];
+        pixels[i][0] *= a;
+        pixels[i][1] *= a;
+        pixels[i][2] *= a;
+    }
+}
+
+#[cfg(test)]
+mod ssao_tests {
+    use super::*;
+
+    #[test]
+    fn ssao_darkens_depth_crease() {
+        let w = 8usize;
+        let h = 8usize;
+        let mut pixels = vec![[1.0f32, 1.0, 1.0]; w * h];
+        let mut depth = vec![1.0f32; w * h];
+        // Center pixel deeper with neighbors closer => AO
+        depth[4 * w + 4] = 2.0;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                depth[(4 + dy) as usize * w + (4 + dx) as usize] = 0.5;
+            }
+        }
+        apply_ssao(&mut pixels, &depth, w, h, 1.0);
+        assert!(
+            pixels[4 * w + 4][0] < 0.95,
+            "SSAO should darken crease, got {}",
+            pixels[4 * w + 4][0]
+        );
     }
 }

@@ -166,13 +166,15 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// AES encryption context (stub).
+/// AES-256-CBC encryption context (pat-z35r2.6).
 ///
-/// Godot's `AESContext` provides AES-256-CBC encryption/decryption.
-/// This is a placeholder that returns errors — real AES requires either
-/// a crypto library dependency or a from-scratch implementation.
+/// Godot's `AESContext` provides AES-256-CBC encrypt/decrypt. Uses the `aes`
+/// + `cbc` crates for a real, tested implementation.
 pub struct AesContext {
-    _mode: AesMode,
+    mode: AesMode,
+    key: Option<[u8; 32]>,
+    iv: Option<[u8; 16]>,
+    started: bool,
 }
 
 /// AES operation mode.
@@ -185,16 +187,17 @@ pub enum AesMode {
 }
 
 impl AesContext {
-    /// Creates a new AES context (stub).
+    /// Creates a new AES context.
     pub fn new() -> Self {
         Self {
-            _mode: AesMode::Encrypt,
+            mode: AesMode::Encrypt,
+            key: None,
+            iv: None,
+            started: false,
         }
     }
 
-    /// Starts the AES context with a key and IV.
-    ///
-    /// Returns `Err` because AES is not yet implemented.
+    /// Starts the AES context with a 32-byte key and 16-byte IV.
     pub fn start(&mut self, mode: AesMode, key: &[u8], iv: &[u8]) -> Result<(), &'static str> {
         if key.len() != 32 {
             return Err("AES-256 requires a 32-byte key");
@@ -202,18 +205,59 @@ impl AesContext {
         if iv.len() != 16 {
             return Err("AES-CBC requires a 16-byte IV");
         }
-        self._mode = mode;
-        Err("AES not yet implemented (stub)")
+        let mut k = [0u8; 32];
+        k.copy_from_slice(key);
+        let mut v = [0u8; 16];
+        v.copy_from_slice(iv);
+        self.mode = mode;
+        self.key = Some(k);
+        self.iv = Some(v);
+        self.started = true;
+        Ok(())
     }
 
-    /// Updates the AES context with data (stub — returns error).
-    pub fn update(&self, _data: &[u8]) -> Result<Vec<u8>, &'static str> {
-        Err("AES not yet implemented (stub)")
+    /// Encrypt or decrypt a full buffer (PKCS7 padded on encrypt).
+    pub fn update(&self, data: &[u8]) -> Result<Vec<u8>, &'static str> {
+        use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+        type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+        if !self.started {
+            return Err("AES context not started");
+        }
+        let key = self.key.as_ref().ok_or("AES key missing")?;
+        let iv = self.iv.as_ref().ok_or("AES IV missing")?;
+        match self.mode {
+            AesMode::Encrypt => {
+                let encryptor = Aes256CbcEnc::new(key.into(), iv.into());
+                // Buffer must have room for PKCS7 padding (up to +16).
+                let mut buf = vec![0u8; data.len() + 16];
+                buf[..data.len()].copy_from_slice(data);
+                let out = encryptor
+                    .encrypt_padded_mut::<Pkcs7>(&mut buf, data.len())
+                    .map_err(|_| "AES encrypt failed")?;
+                Ok(out.to_vec())
+            }
+            AesMode::Decrypt => {
+                if data.is_empty() || data.len() % 16 != 0 {
+                    return Err("AES ciphertext length must be multiple of 16");
+                }
+                let decryptor = Aes256CbcDec::new(key.into(), iv.into());
+                let mut buf = data.to_vec();
+                let out = decryptor
+                    .decrypt_padded_mut::<Pkcs7>(&mut buf)
+                    .map_err(|_| "AES decrypt failed")?;
+                Ok(out.to_vec())
+            }
+        }
     }
 
-    /// Finishes the AES operation (stub — returns error).
+    /// Finishes the AES operation (state remains usable for another update).
     pub fn finish(&self) -> Result<(), &'static str> {
-        Err("AES not yet implemented (stub)")
+        if !self.started {
+            return Err("AES context not started");
+        }
+        Ok(())
     }
 }
 
@@ -300,11 +344,24 @@ mod tests {
     }
 
     #[test]
-    fn aes_stub_returns_error() {
-        let mut ctx = AesContext::new();
-        let key = [0u8; 32];
-        let iv = [0u8; 16];
-        assert!(ctx.start(AesMode::Encrypt, &key, &iv).is_err());
+    fn aes_encrypt_decrypt_roundtrip() {
+        let key = [0x11u8; 32];
+        let iv = [0x22u8; 16];
+        let plain = b"Hello Patina AES-256-CBC!!";
+        let mut enc = AesContext::new();
+        enc.start(AesMode::Encrypt, &key, &iv).unwrap();
+        let cipher = enc.update(plain).unwrap();
+        assert!(!cipher.is_empty());
+        let mut dec = AesContext::new();
+        dec.start(AesMode::Decrypt, &key, &iv).unwrap();
+        let out = dec.update(&cipher).unwrap();
+        assert_eq!(&out, plain.as_slice());
+        enc.finish().unwrap();
+    }
+
+    #[test]
+    fn aes_update_before_start_errors() {
+        let ctx = AesContext::new();
         assert!(ctx.update(b"data").is_err());
         assert!(ctx.finish().is_err());
     }

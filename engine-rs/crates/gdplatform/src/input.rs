@@ -732,19 +732,42 @@ impl InputState {
         (pos - neg).clamp(-1.0, 1.0)
     }
 
+    /// Deadzone for `action` from the bound [`InputMap`], or `0.0` if unmapped.
+    fn action_deadzone(&self, action: &str) -> f32 {
+        self.input_map
+            .as_ref()
+            .map(|m| m.get_deadzone(action))
+            .unwrap_or(0.0)
+    }
+
     /// Returns a 2D input vector based on four directional actions.
     ///
-    /// Mirrors Godot's `Input.get_vector(neg_x, pos_x, neg_y, pos_y)`.
+    /// Mirrors Godot's `Input.get_vector(neg_x, pos_x, neg_y, pos_y)`
+    /// (core/input/input.cpp): the raw axis vector is formed first, then a
+    /// **circular** deadzone (the average of the four actions' deadzones) is
+    /// applied to the vector's *length* and the result renormalized — so a
+    /// diagonal is length-1 and small analog drift inside the deadzone reads as
+    /// zero. (pat-nzgdu.9)
     pub fn get_vector(&self, neg_x: &str, pos_x: &str, neg_y: &str, pos_y: &str) -> Vector2 {
-        let x = self.get_axis(neg_x, pos_x);
-        let y = self.get_axis(neg_y, pos_y);
-        let v = Vector2::new(x, y);
-        let len_sq = v.x * v.x + v.y * v.y;
-        if len_sq > 1.0 {
-            let len = len_sq.sqrt();
-            Vector2::new(v.x / len, v.y / len)
+        let raw = Vector2::new(
+            self.get_action_strength(pos_x) - self.get_action_strength(neg_x),
+            self.get_action_strength(pos_y) - self.get_action_strength(neg_y),
+        );
+        let deadzone = 0.25
+            * (self.action_deadzone(pos_x)
+                + self.action_deadzone(neg_x)
+                + self.action_deadzone(pos_y)
+                + self.action_deadzone(neg_y));
+        let length = (raw.x * raw.x + raw.y * raw.y).sqrt();
+        if length <= deadzone {
+            Vector2::new(0.0, 0.0)
+        } else if length > 1.0 {
+            // Clamp to the unit circle.
+            Vector2::new(raw.x / length, raw.y / length)
         } else {
-            v
+            // Rescale the (deadzone, 1] band back to (0, 1] along the direction.
+            let scale = ((length - deadzone) / (1.0 - deadzone)) / length;
+            Vector2::new(raw.x * scale, raw.y * scale)
         }
     }
 
@@ -927,6 +950,15 @@ impl InputSnapshot {
     /// Returns the string names of keys that became pressed this frame.
     pub fn just_pressed_key_names(&self) -> Vec<String> {
         self.keys_just_pressed
+            .iter()
+            .map(|k| k.name().to_string())
+            .collect()
+    }
+
+    /// Returns the string names of keys that were released this frame
+    /// (pat-nzgdu.9).
+    pub fn just_released_key_names(&self) -> Vec<String> {
+        self.keys_just_released
             .iter()
             .map(|k| k.name().to_string())
             .collect()
@@ -1910,6 +1942,69 @@ mod tests {
 
         let v = state.get_vector("left", "right", "up", "down");
         assert_eq!(v.x, 1.0);
+        assert_eq!(v.y, 0.0);
+    }
+
+    /// pat-nzgdu.9 — circular deadzone: a non-zero deadzone still yields a
+    /// normalized diagonal for digital (full-strength) inputs.
+    #[test]
+    fn get_vector_circular_deadzone_normalizes_digital_diagonal() {
+        let mut map = InputMap::new();
+        for a in ["left", "right", "up", "down"] {
+            map.add_action(a, 0.5); // non-zero deadzone
+        }
+        map.action_add_event("right", ActionBinding::KeyBinding(Key::D));
+        map.action_add_event("down", ActionBinding::KeyBinding(Key::S));
+        let mut state = InputState::new();
+        state.set_input_map(map);
+        for key in [Key::D, Key::S] {
+            state.process_event(InputEvent::Key {
+                key,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+                alt: false,
+            });
+        }
+        let v = state.get_vector("left", "right", "up", "down");
+        let len = (v.x * v.x + v.y * v.y).sqrt();
+        assert!((len - 1.0).abs() < 0.001, "diagonal normalized, got len={len}");
+        assert!(v.x > 0.0 && v.y > 0.0);
+    }
+
+    /// pat-nzgdu.9 — circular deadzone rescales analog magnitude in the
+    /// (deadzone, 1] band and zeros anything at or below the deadzone.
+    #[test]
+    fn get_vector_circular_deadzone_analog_rescale_and_zero() {
+        let mut map = InputMap::new();
+        for a in ["left", "right", "up", "down"] {
+            map.add_action(a, 0.5);
+        }
+        let mut state = InputState::new();
+        state.set_input_map(map);
+
+        // Above deadzone: raw x=0.6, dz=0.5 → 0.6*((0.6-0.5)/(1-0.5))/0.6 = 0.2.
+        state.process_event(InputEvent::Action {
+            action: "right".to_string(),
+            pressed: true,
+            strength: 0.6,
+        });
+        let v = state.get_vector("left", "right", "up", "down");
+        assert!(
+            (v.x - 0.2).abs() < 0.02,
+            "0.6 magnitude rescales to ~0.2 past a 0.5 deadzone, got {}",
+            v.x
+        );
+        assert_eq!(v.y, 0.0);
+
+        // At/below deadzone: raw x=0.3 <= dz 0.5 → zero vector.
+        state.process_event(InputEvent::Action {
+            action: "right".to_string(),
+            pressed: true,
+            strength: 0.3,
+        });
+        let v = state.get_vector("left", "right", "up", "down");
+        assert_eq!(v.x, 0.0, "below-deadzone magnitude reads as zero");
         assert_eq!(v.y, 0.0);
     }
 

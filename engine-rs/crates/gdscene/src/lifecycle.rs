@@ -41,6 +41,9 @@ impl LifecycleManager {
                 node.receive_notification(NOTIFICATION_ENTER_TREE);
             }
             tree.process_script_enter_tree(id);
+            // Deliver ENTER_TREE to the script's `_notification` virtual too,
+            // alongside the named `_enter_tree` callback (pat-nzgdu.13).
+            tree.notify_script(id, NOTIFICATION_ENTER_TREE.code() as i64);
         }
 
         // Phase 2: READY — bottom-up.
@@ -54,6 +57,7 @@ impl LifecycleManager {
                 node.receive_notification(NOTIFICATION_READY);
             }
             tree.process_script_ready(id);
+            tree.notify_script(id, NOTIFICATION_READY.code() as i64);
         }
     }
 
@@ -73,6 +77,7 @@ impl LifecycleManager {
                 node.receive_notification(NOTIFICATION_EXIT_TREE);
             }
             tree.process_script_exit_tree(id);
+            tree.notify_script(id, NOTIFICATION_EXIT_TREE.code() as i64);
         }
     }
 }

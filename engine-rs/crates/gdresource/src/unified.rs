@@ -176,19 +176,19 @@ mod tests {
     #[test]
     fn load_by_uid_resolves_to_path() {
         let mut ul = UnifiedLoader::new(FakeLoader);
-        ul.register_uid_str("uid://sword_42", "res://sword.tres");
+        ul.register_uid_str("uid://sword42", "res://sword.tres");
 
-        let res = ul.load("uid://sword_42").unwrap();
+        let res = ul.load("uid://sword42").unwrap();
         assert_eq!(res.path, "res://sword.tres");
     }
 
     #[test]
     fn load_path_and_uid_same_arc() {
         let mut ul = UnifiedLoader::new(FakeLoader);
-        ul.register_uid_str("uid://enemy_ref", "res://enemy.tres");
+        ul.register_uid_str("uid://enemyref", "res://enemy.tres");
 
         let by_path = ul.load("res://enemy.tres").unwrap();
-        let by_uid = ul.load("uid://enemy_ref").unwrap();
+        let by_uid = ul.load("uid://enemyref").unwrap();
         assert!(
             Arc::ptr_eq(&by_path, &by_uid),
             "loading by path and by UID for same resource must return same Arc"
@@ -205,9 +205,9 @@ mod tests {
     #[test]
     fn path_cached_after_uid_load() {
         let mut ul = UnifiedLoader::new(FakeLoader);
-        ul.register_uid_str("uid://cached_item", "res://item.tres");
+        ul.register_uid_str("uid://cacheditem", "res://item.tres");
 
-        ul.load("uid://cached_item").unwrap();
+        ul.load("uid://cacheditem").unwrap();
         assert!(ul.is_cached("res://item.tres"));
         assert_eq!(ul.cache_len(), 1);
     }
@@ -233,5 +233,27 @@ mod tests {
         ul.invalidate("res://weapon.tres");
         let second = ul.load("uid://weapon").unwrap();
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn loader_resolves_uid_from_cache_bin_to_path() {
+        // Populate a registry from a uid_cache.bin fixture, then confirm the
+        // unified loader resolves the encoded `uid://` reference to the cached
+        // path. id 12345 encodes to "uid://kxd". "res://item.tres" is 15 bytes.
+        let mut cache: Vec<u8> = Vec::new();
+        cache.extend_from_slice(&1u32.to_le_bytes()); // entry_count
+        cache.extend_from_slice(&12345u64.to_le_bytes());
+        cache.extend_from_slice(&15u32.to_le_bytes());
+        cache.extend_from_slice(b"res://item.tres");
+
+        let mut registry = crate::uid::UidRegistry::new();
+        registry.load_from_cache_bytes(&cache).unwrap();
+
+        let mut ul = UnifiedLoader::with_registry(FakeLoader, registry);
+        let res = ul.load("uid://kxd").unwrap();
+        assert_eq!(res.path, "res://item.tres");
+        // The same resource resolves by its concrete path (shared Arc).
+        let by_path = ul.load("res://item.tres").unwrap();
+        assert!(Arc::ptr_eq(&res, &by_path));
     }
 }

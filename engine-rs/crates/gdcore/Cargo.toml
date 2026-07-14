@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 regex = "1"
 serde_json = "1"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
 thiserror.workspace = true
 tracing.workspace = true
 

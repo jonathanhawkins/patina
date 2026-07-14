@@ -99,6 +99,8 @@ machine-readable version of this classification.
 - `PhysicsShapeQuery3D` — shape overlap depth, world integration
 - `RenderingServer3D` — software renderer, instance/material/light ops
 - `ShaderMaterial3D` — custom shader override, unshaded behavior
+- `RayCast3D` — scene node over PhysicsRayQuery3D (`gdscene::raycast3d`, ClassDB, `raycast3d_shapecast3d_parity_test`)
+- `ShapeCast3D` — scene node over PhysicsShapeQuery3D (`gdscene::shapecast3d`, ClassDB, `raycast3d_shapecast3d_parity_test`)
 
 ### Implemented, not yet measured at parity level
 
@@ -120,8 +122,7 @@ machine-readable version of this classification.
 
 - `VehicleBody3D` — outside bounded Phase 6 slice
 - `SoftBody3D` — outside bounded Phase 6 slice
-- `SpringArm3D` — not in current slice
-- `RayCast3D` / `ShapeCast3D` — low-level query support only, no node parity
+- `SpringArm3D` — ClassDB + helper module exist; broader camera-rig parity still limited
 - `NavigationAgent3D` — runtime pathfinding outside Phase 6 scope
 - `GPUPostProcessing` — broad GPU/post-processing parity deferred
 

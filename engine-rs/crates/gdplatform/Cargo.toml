@@ -6,14 +6,16 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-windowed = ["winit", "softbuffer", "gdrender2d"]
+windowed = ["winit", "softbuffer"]
 
 [dependencies]
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
-gdrender2d = { path = "../gdrender2d", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror.workspace = true
+# Monotonic clock that works on both native and wasm32 (performance.now on the
+# web); std::time::Instant panics on wasm32-unknown-unknown. See os.rs (pat-u3l8c.109).
+web-time = "1.1"
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }

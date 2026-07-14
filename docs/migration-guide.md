@@ -70,7 +70,7 @@ aligned with the project's milestone phases:
    ```
 
 4. **Key differences from Godot**:
-   - No GDScript -- logic is written in Rust
+   - GDScript runs via `gdscript-interop` (partial; prefer Rust for production-critical logic)
    - `Variant` is an enum, not a pointer-based type
    - `NodePath` and `StringName` are value types with interning
    - Resource paths use `res://` prefix, same as Godot
@@ -142,7 +142,7 @@ aligned with the project's milestone phases:
 ### Crates Available
 
 - **`gdaudio`** -- Audio bus system, playback control
-- **`gdscript-interop`** -- GDScript variable and export interop layer
+- **`gdscript-interop`** -- GDScript interpreter (parser, type checker, runtime) plus variable/export interop
 
 ### What You Can Do
 
@@ -444,7 +444,7 @@ compatibility table below.
 | `RigidBody3D` | Full | `gdphysics3d` | Dynamic bodies, forces, contacts |
 | `StaticBody3D` | Full | `gdphysics3d` | Immovable collision bodies |
 | `CharacterBody3D` | Full | `gdphysics3d` | `move_and_slide()` 3D controller |
-| `Area3D` | Full | `gdphysics3d` | Overlap detection, signals |
+| `Area3D` | Partial | `gdphysics3d` | Overlap storage; body_entered signal parity not fully measured |
 | `CollisionShape3D` | Full | `gdphysics3d` | All primitive shapes below |
 | `BoxShape3D` | Full | `gdphysics3d` | AABB collision |
 | `SphereShape3D` | Full | `gdphysics3d` | Sphere collision |
@@ -461,7 +461,7 @@ compatibility table below.
 | `DirectionalLight3D` | Full | `gdscene` | Sun/directional with shadow hints |
 | `OmniLight3D` | Full | `gdscene` | Point light with shadow cubemap |
 | `SpotLight3D` | Full | `gdscene` | Spotlight with cone/attenuation |
-| `WorldEnvironment` | Partial | `gdscene` | Sky, ambient; no post-processing |
+| `WorldEnvironment` | Partial | `gdscene` / `gdrender3d` | Sky, ambient, filmic tonemap, glow, fog (editor viewport path measured) |
 | `Sky` | Partial | `gdscene` | Panoramic and procedural sky |
 
 ##### 3D CSG (Constructive Solid Geometry)
@@ -526,8 +526,8 @@ compatibility table below.
 
 | Godot Type | Status | Patina Crate | Notes |
 |------------|--------|--------------|-------|
-| `AnimationPlayer` | Partial | `gdscene` | Keyframe playback; no blend trees |
-| `Tween` | Stub | `gdscene` | Basic tween; no chaining |
+| `AnimationPlayer` | Partial | `gdscene` | Keyframe playback; blend trees via AnimationTree (bounded) |
+| `Tween` | Partial | `gdscene` | Property tweens with easing; chaining supported for common sequences |
 
 ##### Not Yet Supported
 
@@ -535,7 +535,7 @@ The following Godot node types are **not** currently implemented:
 
 | Category | Types |
 |----------|-------|
-| Networking | `MultiplayerSpawner`, `MultiplayerSynchronizer`, `HTTPRequest` |
+| Networking | `MultiplayerSpawner`, `MultiplayerSynchronizer` (scene multiplayer helpers; `HTTPRequest` / `HTTPClient` / `WebSocketPeer` / `TcpMultiplayerPeer` are implemented) |
 | Navigation | `NavigationAgent2D/3D` (runtime pathfinding) |
 | Advanced rendering | `SubViewport`, `CanvasGroup`, `BackBufferCopy` |
 | Mobile-specific | Touch input nodes, `XRCamera3D`, `XRController3D` |
@@ -560,17 +560,17 @@ Supported (port directly):
   ✓ Skeletal animation with bone attachments
 
 Partially supported (may need adaptation):
-  ~ GDScript (must be rewritten in Rust)
+  ~ GDScript (interpreter in `gdscript-interop`; partial language coverage — see Known Limitations)
   ~ Shaders (software rendering only, no custom shaders)
-  ~ Animation (keyframe playback, no blend trees or state machines)
+  ~ Animation (AnimationPlayer + AnimationTree blend/state machine slice)
   ~ Some UI widgets (Tree, TextEdit, RichTextLabel) have limited features
 
-Not yet supported (requires workarounds or deferral):
-  ✗ Networking/multiplayer
-  ✗ Runtime navigation/pathfinding
-  ✗ Mobile platforms (iOS, Android)
+Partially supported / deferred:
+  ~ Networking: HTTPClient, HTTPRequest, WebSocketPeer, TcpMultiplayerPeer (loopback multiplayer); full ENet RPC surface still growing
+  ~ Runtime navigation/pathfinding (mesh baking partial)
+  ✗ Mobile platforms (iOS, Android) as first-class targets
   ✗ GDExtension/C# interop
-  ✗ GPU rendering pipeline
+  ~ GPU rendering pipeline (editor wgpu path exists; software path is the oracle)
   ✗ XR/VR support
 ```
 
@@ -608,12 +608,14 @@ cp -r godot-project/assets/ my-game/assets/
 
 Patina reads the same `.tscn`/`.tres` format as Godot 4.x (`format=3`).
 
-### Step 4: Rewrite GDScript in Rust
+### Step 4: GDScript and/or Rust game logic
 
-This is the main porting effort. Each GDScript file becomes Rust code that
-operates on the scene tree.
+Patina can **execute GDScript** through the `gdscript-interop` crate (parse →
+type-check → run on a node with scene access). Many projects can keep simple
+`_ready` / `_process` scripts. For performance-critical or incomplete-language
+features, rewrite hot paths in Rust.
 
-**GDScript (before)**:
+**Option A — keep GDScript** (attach via script interop / scene script path):
 ```gdscript
 extends CharacterBody2D
 
@@ -625,7 +627,7 @@ func _physics_process(delta):
     move_and_slide()
 ```
 
-**Rust (after)**:
+**Option B — Rust** (when you need full control or missing language surface):
 ```rust
 use gdcore::math::Vector2;
 use gdplatform::input::InputState;
@@ -674,7 +676,7 @@ Godot 4.6 that may affect ported projects, along with recommended workarounds.
 | Limitation | Impact | Workaround |
 |------------|--------|------------|
 | Software rendering only — no GPU shader pipeline | Visual fidelity is lower than Godot; custom shaders don't work | Use built-in material properties (albedo, emission, metallic). For shader-dependent effects, pre-bake textures in Godot and load as static assets. |
-| No post-processing stack (glow, DOF, SSAO, SSR) | Scenes relying on post-processing will look flat | Bake ambient occlusion into lightmap textures. Use vertex colors or pre-lit textures for depth cues. |
+| Limited post-processing (DOF/SSAO/SSR) | Advanced screen-space effects beyond filmic tonemap/glow/fog may look flat | Filmic tonemap + glow + fog are in the editor viewport path; bake AO into lightmaps for SSAO-like look. |
 | No GPU particles | `GPUParticles2D`/`GPUParticles3D` fall back to CPU | Use `CPUParticles2D`/`CPUParticles3D` directly. Reduce particle counts for performance. |
 | No `SubViewport` or render-to-texture | Minimap, picture-in-picture, or portal effects won't work | Render secondary views as separate scenes and composite in UI. |
 
@@ -682,17 +684,17 @@ Godot 4.6 that may affect ported projects, along with recommended workarounds.
 
 | Limitation | Impact | Workaround |
 |------------|--------|------------|
-| No GDScript interpreter | All game logic must be written in Rust | Port scripts method-by-method. See the GDScript-to-Rust example in "Step 4" above. |
-| No `@onready` or `@export` annotations | Node references and editor-visible properties need manual setup | Use `NodePath` resolution at `_ready()` time. Define configuration as Rust structs loaded from `.tres` resources. |
-| No `await` / coroutines | Asynchronous GDScript patterns don't translate directly | Use Rust `async`/channels, or split long operations across frames using the process callback. |
-| No `match` pattern-matching on Variant types | GDScript `match` on dictionaries/arrays won't work | Use Rust `match` on `Variant` enum variants. Type patterns map to `Variant::Int`, `Variant::String`, etc. |
+| Partial GDScript interpreter (`gdscript-interop`) | Common `_ready`/`_process` scripts, exports, many builtins work; full Godot language surface is not 1:1 | Run scripts as-is when possible; port incomplete features to Rust. See Step 4. |
+| Limited `@onready` / `@export` coverage | Some annotation edge cases need manual setup | Prefer tested export types; resolve `NodePath` at `_ready()` when needed. |
+| No `await` / coroutines | Asynchronous GDScript patterns don't translate directly | Use frame-split logic, signals, or Rust `async`/channels. |
+| Partial `match` / advanced typing | Complex dictionary/array pattern matches may fail | Simplify match arms or use Rust `match` on `Variant` enum variants. |
 
 ### Physics
 
 | Limitation | Impact | Workaround |
 |------------|--------|------------|
 | No `NavigationAgent2D`/`3D` runtime pathfinding | A* and navigation mesh queries aren't available at runtime | Implement custom A* using `gdcore::math` types, or pre-compute paths offline. `NavigationRegion3D` mesh baking works for defining walkable areas. |
-| No physics joints (HingeJoint3D, SliderJoint3D, etc.) | Constrained bodies like doors, ragdolls, or vehicles need alternatives | Simulate constraints manually with force application, or simplify the design to use kinematic animation. |
+| Physics joints are data-model only (PinJoint3D / HingeJoint3D / SliderJoint3D exist as structs; full runtime solver parity is limited) | Constrained bodies like doors, ragdolls, or vehicles may need alternatives | Prefer kinematic animation for V1; joint data models can be stored but do not claim full Godot solver parity yet. |
 | No SoftBody3D | Cloth, jelly, or deformable mesh simulation isn't available | Use skeletal animation driven by `AnimationPlayer` to approximate soft-body motion. |
 | No `VehicleBody3D` | Built-in vehicle physics controller not available | Implement wheel physics manually using `RigidBody3D` with custom force application per-frame. |
 
@@ -700,8 +702,8 @@ Godot 4.6 that may affect ported projects, along with recommended workarounds.
 
 | Limitation | Impact | Workaround |
 |------------|--------|------------|
-| No blend trees or `AnimationTree` | Complex animation blending (walk/run/idle transitions) won't work | Cross-fade between animations manually using `AnimationPlayer` with interpolated weights in your process loop. |
-| No Tween chaining | `Tween.chain()` / `Tween.parallel()` don't work | Sequence tweens manually using timers or frame counters in your process callback. |
+| `AnimationTree` blend depth | Some advanced blend-space setups may differ from Godot | Prefer the measured AnimationTree blend/state-machine slice; fall back to AnimationPlayer cross-fades for exotic graphs. |
+| Tween edge cases | Rare chain/parallel combinations may need review | Use `gdscene::tween` sequences; add timers only for unsupported edge cases. |
 | No bezier curve tracks | Animation curves default to linear interpolation | Pre-bake bezier curves as keyframe sequences with enough samples for smooth playback. |
 
 ### Audio
@@ -741,8 +743,8 @@ Godot 4.6 that may affect ported projects, along with recommended workarounds.
 
 | Limitation | Impact | Workaround |
 |------------|--------|------------|
-| No `MultiplayerPeer` / ENet / WebSocket transport | Multiplayer games won't have built-in networking | Use Rust networking crates (`tokio`, `quinn`, `tungstenite`) directly. The `gdplatform::network` module provides type stubs for API compatibility. |
-| No `HTTPRequest` node | HTTP calls from the scene tree aren't available | Use `reqwest` or `ureq` Rust crates for HTTP calls in your game logic. |
+| Full ENet multiplayer RPC surface still growing | High-level multiplayer games that depend on Godot's ENet peer + automatic RPC replication may need adaptation | Prefer `TcpMultiplayerPeer` for loopback/LAN multiplayer today; `HTTPClient`/`HTTPRequest` and `WebSocketPeer` cover request/stream I/O. Full ENet peer parity remains a follow-up. |
+| No remote `load("http://...")` for resources | `ResourceLoader` does not fetch assets over HTTP | Download resources to local storage first, then load via `res://` paths. |
 
 ### Debugging & Profiling
 
@@ -779,11 +781,12 @@ Godot 4.6 that may affect ported projects, along with recommended workarounds.
 
 ### What Is Not Yet Supported
 
-- GDScript execution (logic must be written in Rust)
-- GPU shader pipeline (software rendering only, no custom shaders)
-- Animation blend trees and state machines (keyframe playback works)
+- Full GDScript language parity (`await`, some annotations/typing; interpreter is partial)
+- GPU custom shader pipeline (software oracle + editor wgpu path; no arbitrary ShaderMaterial GPU compile)
+
+- Some advanced AnimationTree blend-space edge cases (core blend/state machine exists)
 - Runtime navigation/pathfinding (mesh baking works)
-- Networking/multiplayer
+- Full ENet multiplayer RPC surface (HTTP/WS/TcpMultiplayerPeer exist)
 - Mobile platforms (iOS, Android)
 - XR/VR support
 - GDExtension/C# interop

@@ -183,6 +183,15 @@ pub enum VariantType {
     Dictionary,
     Callable,
     Resource,
+    PackedByteArray,
+    PackedInt32Array,
+    PackedInt64Array,
+    PackedFloat32Array,
+    PackedFloat64Array,
+    PackedStringArray,
+    PackedVector2Array,
+    PackedVector3Array,
+    PackedColorArray,
 }
 
 /// A dynamically-typed engine value, analogous to Godot's `Variant`.
@@ -233,6 +242,24 @@ pub enum Variant {
     Callable(Box<CallableRef>),
     /// A loaded resource.
     Resource(Box<ResourceRef>),
+    /// A tightly-packed array of bytes (`PackedByteArray`).
+    PackedByteArray(Vec<u8>),
+    /// A tightly-packed array of 32-bit ints (`PackedInt32Array`).
+    PackedInt32Array(Vec<i32>),
+    /// A tightly-packed array of 64-bit ints (`PackedInt64Array`).
+    PackedInt64Array(Vec<i64>),
+    /// A tightly-packed array of 32-bit floats (`PackedFloat32Array`).
+    PackedFloat32Array(Vec<f32>),
+    /// A tightly-packed array of 64-bit floats (`PackedFloat64Array`).
+    PackedFloat64Array(Vec<f64>),
+    /// A tightly-packed array of strings (`PackedStringArray`).
+    PackedStringArray(Vec<String>),
+    /// A tightly-packed array of 2D vectors (`PackedVector2Array`).
+    PackedVector2Array(Vec<Vector2>),
+    /// A tightly-packed array of 3D vectors (`PackedVector3Array`).
+    PackedVector3Array(Vec<Vector3>),
+    /// A tightly-packed array of colors (`PackedColorArray`).
+    PackedColorArray(Vec<Color>),
 }
 
 impl Variant {
@@ -261,6 +288,15 @@ impl Variant {
             Self::Dictionary(_) => VariantType::Dictionary,
             Self::Callable(_) => VariantType::Callable,
             Self::Resource(_) => VariantType::Resource,
+            Self::PackedByteArray(_) => VariantType::PackedByteArray,
+            Self::PackedInt32Array(_) => VariantType::PackedInt32Array,
+            Self::PackedInt64Array(_) => VariantType::PackedInt64Array,
+            Self::PackedFloat32Array(_) => VariantType::PackedFloat32Array,
+            Self::PackedFloat64Array(_) => VariantType::PackedFloat64Array,
+            Self::PackedStringArray(_) => VariantType::PackedStringArray,
+            Self::PackedVector2Array(_) => VariantType::PackedVector2Array,
+            Self::PackedVector3Array(_) => VariantType::PackedVector3Array,
+            Self::PackedColorArray(_) => VariantType::PackedColorArray,
         }
     }
 
@@ -285,6 +321,16 @@ impl Variant {
             Self::Dictionary(d) => !d.is_empty(),
             Self::Callable(_) => true,
             Self::Resource(_) => true,
+            // Packed arrays follow Array truthiness: empty is falsy.
+            Self::PackedByteArray(v) => !v.is_empty(),
+            Self::PackedInt32Array(v) => !v.is_empty(),
+            Self::PackedInt64Array(v) => !v.is_empty(),
+            Self::PackedFloat32Array(v) => !v.is_empty(),
+            Self::PackedFloat64Array(v) => !v.is_empty(),
+            Self::PackedStringArray(v) => !v.is_empty(),
+            Self::PackedVector2Array(v) => !v.is_empty(),
+            Self::PackedVector3Array(v) => !v.is_empty(),
+            Self::PackedColorArray(v) => !v.is_empty(),
             _ => true,
         }
     }
@@ -350,6 +396,238 @@ impl Variant {
     pub fn to_string_lossy(&self) -> String {
         self.to_string()
     }
+
+    // -----------------------------------------------------------------------
+    // Packed array helpers
+    //
+    // A unified element-oriented API over the nine `Packed*Array` variants.
+    // The GDScript method surface (`size`, `is_empty`, `append`, `resize`,
+    // `slice`, `to_byte_array`, indexing) is built on top of these so the
+    // interpreter bindings stay thin and every rule is unit-tested here.
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` if this is any `Packed*Array` variant.
+    pub fn is_packed_array(&self) -> bool {
+        matches!(
+            self,
+            Self::PackedByteArray(_)
+                | Self::PackedInt32Array(_)
+                | Self::PackedInt64Array(_)
+                | Self::PackedFloat32Array(_)
+                | Self::PackedFloat64Array(_)
+                | Self::PackedStringArray(_)
+                | Self::PackedVector2Array(_)
+                | Self::PackedVector3Array(_)
+                | Self::PackedColorArray(_)
+        )
+    }
+
+    /// Element count, if this is a packed array (`None` otherwise).
+    pub fn packed_len(&self) -> Option<usize> {
+        Some(match self {
+            Self::PackedByteArray(v) => v.len(),
+            Self::PackedInt32Array(v) => v.len(),
+            Self::PackedInt64Array(v) => v.len(),
+            Self::PackedFloat32Array(v) => v.len(),
+            Self::PackedFloat64Array(v) => v.len(),
+            Self::PackedStringArray(v) => v.len(),
+            Self::PackedVector2Array(v) => v.len(),
+            Self::PackedVector3Array(v) => v.len(),
+            Self::PackedColorArray(v) => v.len(),
+            _ => return None,
+        })
+    }
+
+    /// `true` if this is an empty packed array. `None` if not packed.
+    pub fn packed_is_empty(&self) -> Option<bool> {
+        self.packed_len().map(|n| n == 0)
+    }
+
+    /// Element at `index`, boxed as a `Variant`. `None` if not a packed array
+    /// or `index` is out of range. Byte/int elements surface as `Int`, float
+    /// elements as `Float`.
+    pub fn packed_get(&self, index: usize) -> Option<Variant> {
+        Some(match self {
+            Self::PackedByteArray(v) => Variant::Int(i64::from(*v.get(index)?)),
+            Self::PackedInt32Array(v) => Variant::Int(i64::from(*v.get(index)?)),
+            Self::PackedInt64Array(v) => Variant::Int(*v.get(index)?),
+            Self::PackedFloat32Array(v) => Variant::Float(f64::from(*v.get(index)?)),
+            Self::PackedFloat64Array(v) => Variant::Float(*v.get(index)?),
+            Self::PackedStringArray(v) => Variant::String(v.get(index)?.clone()),
+            Self::PackedVector2Array(v) => Variant::Vector2(*v.get(index)?),
+            Self::PackedVector3Array(v) => Variant::Vector3(*v.get(index)?),
+            Self::PackedColorArray(v) => Variant::Color(*v.get(index)?),
+            _ => return None,
+        })
+    }
+
+    /// Overwrites the element at `index`, coercing `value` to the element type.
+    /// Returns `false` if this is not a packed array, `index` is out of range,
+    /// or `value` is the wrong type for a vector/color array.
+    pub fn packed_set(&mut self, index: usize, value: &Variant) -> bool {
+        match self {
+            Self::PackedByteArray(v) => set_slot(v, index, value.to_int() as u8),
+            Self::PackedInt32Array(v) => set_slot(v, index, value.to_int() as i32),
+            Self::PackedInt64Array(v) => set_slot(v, index, value.to_int()),
+            Self::PackedFloat32Array(v) => set_slot(v, index, value.to_float() as f32),
+            Self::PackedFloat64Array(v) => set_slot(v, index, value.to_float()),
+            Self::PackedStringArray(v) => set_slot(v, index, value.to_string_lossy()),
+            Self::PackedVector2Array(v) => match value {
+                Variant::Vector2(x) => set_slot(v, index, *x),
+                _ => false,
+            },
+            Self::PackedVector3Array(v) => match value {
+                Variant::Vector3(x) => set_slot(v, index, *x),
+                _ => false,
+            },
+            Self::PackedColorArray(v) => match value {
+                Variant::Color(x) => set_slot(v, index, *x),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Appends `value` (coerced to the element type). Returns `false` if this
+    /// is not a packed array or `value` is the wrong type for a
+    /// vector/color array. Mirrors `Packed*Array.append` / `push_back`.
+    pub fn packed_push(&mut self, value: &Variant) -> bool {
+        match self {
+            Self::PackedByteArray(v) => v.push(value.to_int() as u8),
+            Self::PackedInt32Array(v) => v.push(value.to_int() as i32),
+            Self::PackedInt64Array(v) => v.push(value.to_int()),
+            Self::PackedFloat32Array(v) => v.push(value.to_float() as f32),
+            Self::PackedFloat64Array(v) => v.push(value.to_float()),
+            Self::PackedStringArray(v) => v.push(value.to_string_lossy()),
+            Self::PackedVector2Array(v) => match value {
+                Variant::Vector2(x) => v.push(*x),
+                _ => return false,
+            },
+            Self::PackedVector3Array(v) => match value {
+                Variant::Vector3(x) => v.push(*x),
+                _ => return false,
+            },
+            Self::PackedColorArray(v) => match value {
+                Variant::Color(x) => v.push(*x),
+                _ => return false,
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    /// Resizes the packed array to `new_len`, truncating or filling with the
+    /// element type's zero value (opaque black for colors, matching Godot).
+    /// Returns `false` if this is not a packed array.
+    pub fn packed_resize(&mut self, new_len: usize) -> bool {
+        match self {
+            Self::PackedByteArray(v) => v.resize(new_len, 0),
+            Self::PackedInt32Array(v) => v.resize(new_len, 0),
+            Self::PackedInt64Array(v) => v.resize(new_len, 0),
+            Self::PackedFloat32Array(v) => v.resize(new_len, 0.0),
+            Self::PackedFloat64Array(v) => v.resize(new_len, 0.0),
+            Self::PackedStringArray(v) => v.resize(new_len, String::new()),
+            Self::PackedVector2Array(v) => v.resize(new_len, Vector2::ZERO),
+            Self::PackedVector3Array(v) => v.resize(new_len, Vector3::ZERO),
+            Self::PackedColorArray(v) => v.resize(new_len, Color::new(0.0, 0.0, 0.0, 1.0)),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Godot `Packed*Array.slice(begin, end)` — negative indices count from the
+    /// end, bounds are clamped, and the result is the *same* packed type.
+    /// `None` if this is not a packed array.
+    pub fn packed_slice(&self, begin: i64, end: i64) -> Option<Variant> {
+        let len = self.packed_len()?;
+        let (b, e) = slice_bounds(begin, end, len);
+        Some(match self {
+            Self::PackedByteArray(v) => Self::PackedByteArray(v[b..e].to_vec()),
+            Self::PackedInt32Array(v) => Self::PackedInt32Array(v[b..e].to_vec()),
+            Self::PackedInt64Array(v) => Self::PackedInt64Array(v[b..e].to_vec()),
+            Self::PackedFloat32Array(v) => Self::PackedFloat32Array(v[b..e].to_vec()),
+            Self::PackedFloat64Array(v) => Self::PackedFloat64Array(v[b..e].to_vec()),
+            Self::PackedStringArray(v) => Self::PackedStringArray(v[b..e].to_vec()),
+            Self::PackedVector2Array(v) => Self::PackedVector2Array(v[b..e].to_vec()),
+            Self::PackedVector3Array(v) => Self::PackedVector3Array(v[b..e].to_vec()),
+            Self::PackedColorArray(v) => Self::PackedColorArray(v[b..e].to_vec()),
+            _ => return None,
+        })
+    }
+
+    /// Converts a packed array to a heterogeneous [`Variant::Array`] of boxed
+    /// elements. `None` if this is not a packed array. Inverse-friendly with
+    /// the parser and the GDScript constructors.
+    pub fn packed_to_array(&self) -> Option<Vec<Variant>> {
+        let len = self.packed_len()?;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            out.push(self.packed_get(i)?);
+        }
+        Some(out)
+    }
+
+    /// Godot `Packed*Array.to_byte_array()` — the raw little-endian byte image
+    /// of the elements, as a [`Variant::PackedByteArray`]. `None` if this is
+    /// not a byte/numeric/vector/color packed array (`PackedStringArray` has no
+    /// byte image and returns `None`).
+    pub fn packed_to_byte_array(&self) -> Option<Variant> {
+        let bytes = match self {
+            Self::PackedByteArray(v) => v.clone(),
+            Self::PackedInt32Array(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::PackedInt64Array(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::PackedFloat32Array(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::PackedFloat64Array(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Self::PackedVector2Array(v) => v
+                .iter()
+                .flat_map(|p| [p.x.to_le_bytes(), p.y.to_le_bytes()])
+                .flatten()
+                .collect(),
+            Self::PackedVector3Array(v) => v
+                .iter()
+                .flat_map(|p| [p.x.to_le_bytes(), p.y.to_le_bytes(), p.z.to_le_bytes()])
+                .flatten()
+                .collect(),
+            Self::PackedColorArray(v) => v
+                .iter()
+                .flat_map(|c| {
+                    [
+                        c.r.to_le_bytes(),
+                        c.g.to_le_bytes(),
+                        c.b.to_le_bytes(),
+                        c.a.to_le_bytes(),
+                    ]
+                })
+                .flatten()
+                .collect(),
+            _ => return None,
+        };
+        Some(Variant::PackedByteArray(bytes))
+    }
+}
+
+/// Overwrites `v[index]`, returning `false` if `index` is out of range.
+fn set_slot<T>(v: &mut [T], index: usize, value: T) -> bool {
+    match v.get_mut(index) {
+        Some(slot) => {
+            *slot = value;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Normalizes Godot `slice(begin, end)` indices into a `[start, end)` byte
+/// range clamped to `len`. Negative indices count from the end.
+fn slice_bounds(begin: i64, end: i64, len: usize) -> (usize, usize) {
+    let len_i = len as i64;
+    let norm = |i: i64| -> i64 {
+        let i = if i < 0 { i + len_i } else { i };
+        i.clamp(0, len_i)
+    };
+    let b = norm(begin);
+    let e = norm(end).max(b);
+    (b as usize, e as usize)
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +776,15 @@ impl fmt::Display for Variant {
             Self::Dictionary(d) => write!(f, "{{Dict; len={}}}", d.len()),
             Self::Callable(c) => write!(f, "{c:?}"),
             Self::Resource(r) => write!(f, "<Resource:{} @ {}>", r.class_name, r.path),
+            Self::PackedByteArray(v) => write!(f, "[PackedByteArray; len={}]", v.len()),
+            Self::PackedInt32Array(v) => write!(f, "[PackedInt32Array; len={}]", v.len()),
+            Self::PackedInt64Array(v) => write!(f, "[PackedInt64Array; len={}]", v.len()),
+            Self::PackedFloat32Array(v) => write!(f, "[PackedFloat32Array; len={}]", v.len()),
+            Self::PackedFloat64Array(v) => write!(f, "[PackedFloat64Array; len={}]", v.len()),
+            Self::PackedStringArray(v) => write!(f, "[PackedStringArray; len={}]", v.len()),
+            Self::PackedVector2Array(v) => write!(f, "[PackedVector2Array; len={}]", v.len()),
+            Self::PackedVector3Array(v) => write!(f, "[PackedVector3Array; len={}]", v.len()),
+            Self::PackedColorArray(v) => write!(f, "[PackedColorArray; len={}]", v.len()),
         }
     }
 }
@@ -527,6 +814,15 @@ impl fmt::Display for VariantType {
             Self::Dictionary => "Dictionary",
             Self::Callable => "Callable",
             Self::Resource => "Resource",
+            Self::PackedByteArray => "PackedByteArray",
+            Self::PackedInt32Array => "PackedInt32Array",
+            Self::PackedInt64Array => "PackedInt64Array",
+            Self::PackedFloat32Array => "PackedFloat32Array",
+            Self::PackedFloat64Array => "PackedFloat64Array",
+            Self::PackedStringArray => "PackedStringArray",
+            Self::PackedVector2Array => "PackedVector2Array",
+            Self::PackedVector3Array => "PackedVector3Array",
+            Self::PackedColorArray => "PackedColorArray",
         };
         write!(f, "{name}")
     }
@@ -747,5 +1043,194 @@ mod tests {
         assert_eq!(format!("{}", VariantType::ObjectId), "ObjectId");
         assert_eq!(format!("{}", VariantType::Array), "Array");
         assert_eq!(format!("{}", VariantType::Dictionary), "Dictionary");
+    }
+
+    // -- Packed array variants ----------------------------------------------
+
+    #[test]
+    fn packed_type_tags() {
+        assert_eq!(
+            Variant::PackedByteArray(vec![1, 2, 3]).variant_type(),
+            VariantType::PackedByteArray
+        );
+        assert_eq!(
+            Variant::PackedInt32Array(vec![1]).variant_type(),
+            VariantType::PackedInt32Array
+        );
+        assert_eq!(
+            Variant::PackedInt64Array(vec![1]).variant_type(),
+            VariantType::PackedInt64Array
+        );
+        assert_eq!(
+            Variant::PackedFloat32Array(vec![1.0]).variant_type(),
+            VariantType::PackedFloat32Array
+        );
+        assert_eq!(
+            Variant::PackedFloat64Array(vec![1.0]).variant_type(),
+            VariantType::PackedFloat64Array
+        );
+        assert_eq!(
+            Variant::PackedStringArray(vec!["x".into()]).variant_type(),
+            VariantType::PackedStringArray
+        );
+        assert_eq!(
+            Variant::PackedVector2Array(vec![Vector2::ZERO]).variant_type(),
+            VariantType::PackedVector2Array
+        );
+        assert_eq!(
+            Variant::PackedVector3Array(vec![Vector3::ZERO]).variant_type(),
+            VariantType::PackedVector3Array
+        );
+        assert_eq!(
+            Variant::PackedColorArray(vec![Color::TRANSPARENT]).variant_type(),
+            VariantType::PackedColorArray
+        );
+    }
+
+    #[test]
+    fn packed_type_display_names() {
+        assert_eq!(format!("{}", VariantType::PackedByteArray), "PackedByteArray");
+        assert_eq!(
+            format!("{}", VariantType::PackedInt32Array),
+            "PackedInt32Array"
+        );
+        assert_eq!(
+            format!("{}", VariantType::PackedVector2Array),
+            "PackedVector2Array"
+        );
+        assert_eq!(
+            format!("{}", VariantType::PackedColorArray),
+            "PackedColorArray"
+        );
+    }
+
+    #[test]
+    fn packed_truthiness_follows_array() {
+        assert!(!Variant::PackedByteArray(vec![]).is_truthy());
+        assert!(Variant::PackedByteArray(vec![0]).is_truthy());
+        assert!(!Variant::PackedStringArray(vec![]).is_truthy());
+        assert!(Variant::PackedVector2Array(vec![Vector2::ZERO]).is_truthy());
+    }
+
+    #[test]
+    fn packed_len_and_is_empty() {
+        let v = Variant::PackedInt32Array(vec![1, 2, 3]);
+        assert_eq!(v.packed_len(), Some(3));
+        assert_eq!(v.packed_is_empty(), Some(false));
+        assert_eq!(Variant::PackedInt32Array(vec![]).packed_is_empty(), Some(true));
+        // Non-packed values return None.
+        assert_eq!(Variant::Int(5).packed_len(), None);
+        assert!(!Variant::Int(5).is_packed_array());
+        assert!(Variant::PackedByteArray(vec![]).is_packed_array());
+    }
+
+    #[test]
+    fn packed_get_indexing() {
+        assert_eq!(
+            Variant::PackedByteArray(vec![10, 20]).packed_get(1),
+            Some(Variant::Int(20))
+        );
+        assert_eq!(
+            Variant::PackedFloat32Array(vec![1.5]).packed_get(0),
+            Some(Variant::Float(1.5))
+        );
+        assert_eq!(
+            Variant::PackedStringArray(vec!["a".into(), "b".into()]).packed_get(0),
+            Some(Variant::String("a".into()))
+        );
+        assert_eq!(
+            Variant::PackedVector2Array(vec![Vector2::new(3.0, 4.0)]).packed_get(0),
+            Some(Variant::Vector2(Vector2::new(3.0, 4.0)))
+        );
+        // Out of range → None.
+        assert_eq!(Variant::PackedByteArray(vec![1]).packed_get(5), None);
+    }
+
+    #[test]
+    fn packed_push_and_set() {
+        let mut v = Variant::PackedByteArray(vec![]);
+        assert!(v.packed_push(&Variant::Int(65)));
+        assert!(v.packed_push(&Variant::Int(300))); // wraps to low byte (44)
+        assert_eq!(v, Variant::PackedByteArray(vec![65, 44]));
+        assert!(v.packed_set(0, &Variant::Int(66)));
+        assert_eq!(v, Variant::PackedByteArray(vec![66, 44]));
+        assert!(!v.packed_set(9, &Variant::Int(1))); // out of range
+
+        // Vector arrays reject non-vector pushes.
+        let mut vv = Variant::PackedVector2Array(vec![]);
+        assert!(vv.packed_push(&Variant::Vector2(Vector2::new(1.0, 2.0))));
+        assert!(!vv.packed_push(&Variant::Int(3)));
+        assert_eq!(vv.packed_len(), Some(1));
+    }
+
+    #[test]
+    fn packed_resize_grows_and_truncates() {
+        let mut v = Variant::PackedInt32Array(vec![1, 2, 3]);
+        assert!(v.packed_resize(5));
+        assert_eq!(v, Variant::PackedInt32Array(vec![1, 2, 3, 0, 0]));
+        assert!(v.packed_resize(2));
+        assert_eq!(v, Variant::PackedInt32Array(vec![1, 2]));
+        // Color fill value is opaque black.
+        let mut c = Variant::PackedColorArray(vec![]);
+        assert!(c.packed_resize(1));
+        assert_eq!(
+            c,
+            Variant::PackedColorArray(vec![Color::new(0.0, 0.0, 0.0, 1.0)])
+        );
+    }
+
+    #[test]
+    fn packed_slice_semantics() {
+        let v = Variant::PackedInt64Array(vec![0, 1, 2, 3, 4]);
+        assert_eq!(v.packed_slice(1, 3), Some(Variant::PackedInt64Array(vec![1, 2])));
+        // Negative indices count from the end.
+        assert_eq!(
+            v.packed_slice(-2, 5),
+            Some(Variant::PackedInt64Array(vec![3, 4]))
+        );
+        // Clamped / inverted ranges yield empty, keeping the packed type.
+        assert_eq!(v.packed_slice(3, 1), Some(Variant::PackedInt64Array(vec![])));
+    }
+
+    #[test]
+    fn packed_to_array_roundtrips_elements() {
+        let v = Variant::PackedInt32Array(vec![7, 8, 9]);
+        assert_eq!(
+            v.packed_to_array(),
+            Some(vec![Variant::Int(7), Variant::Int(8), Variant::Int(9)])
+        );
+        assert_eq!(Variant::Int(1).packed_to_array(), None);
+    }
+
+    #[test]
+    fn packed_to_byte_array_le_layout() {
+        // PackedInt32Array([1]) → 4 LE bytes.
+        assert_eq!(
+            Variant::PackedInt32Array(vec![1]).packed_to_byte_array(),
+            Some(Variant::PackedByteArray(vec![1, 0, 0, 0]))
+        );
+        // Byte array is its own byte image.
+        assert_eq!(
+            Variant::PackedByteArray(vec![9, 8]).packed_to_byte_array(),
+            Some(Variant::PackedByteArray(vec![9, 8]))
+        );
+        // Float32 0.5 = 0x3F000000 LE.
+        assert_eq!(
+            Variant::PackedFloat32Array(vec![0.5]).packed_to_byte_array(),
+            Some(Variant::PackedByteArray(vec![0x00, 0x00, 0x00, 0x3F]))
+        );
+        // Vector2(1,2) → two f32 = 8 bytes.
+        assert_eq!(
+            Variant::PackedVector2Array(vec![Vector2::new(1.0, 2.0)])
+                .packed_to_byte_array(),
+            Some(Variant::PackedByteArray(vec![
+                0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x00, 0x40
+            ]))
+        );
+        // String arrays have no byte image.
+        assert_eq!(
+            Variant::PackedStringArray(vec!["x".into()]).packed_to_byte_array(),
+            None
+        );
     }
 }

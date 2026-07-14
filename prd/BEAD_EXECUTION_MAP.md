@@ -200,3 +200,23 @@ Rules:
 - Run the narrowest verification that proves the acceptance criteria
 - Report back using the required worker report format
 ```
+
+## Port completion queue (2026-07-11 scorecard)
+
+Epics: `pat-p0s82` (parity audit), `pat-z35r2` (1:1 completion).
+
+### Now (P0 — drain first)
+- ~~Light2D in SoftwareRenderer (`pat-z35r2.1`)~~
+- ~~PNG pixels (`pat-z35r2.2` / `pat-p0s82.19`)~~
+- ~~SceneTree timer await (`pat-z35r2.3`)~~
+
+### Next (P1 claim order)
+1. Import depth / GUI core (`pat-p0s82.20`)
+2. Cascades / SSAO / GI (`pat-p0s82.8`–`.11`)
+3. Path3D, GridMap, SubViewport, SoftBody (`pat-p0s82.15`–`.18`)
+4. Nav RVO, bus sends, MP3 (`pat-p0s82.12`–`.14`)
+5. Shaders (`pat-p0s82.21`)
+6. Remaining `pat-z35r2.*` P1 (AES, text, animation, oracle, …)
+
+### Later (P2)
+WebRTC, XR, FBX, Jolt, video, docs matrix, ClassDB inventory.

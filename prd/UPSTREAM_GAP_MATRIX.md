@@ -5,10 +5,21 @@ the pinned `upstream/godot` 4.6.1 oracle checkout and the audited Patina
 implementation. This is intentionally narrow and machine-readable so the planner
 can create concrete beads without inferring from prose.
 
-> **Reconciled 2026-06-12:** 19 of 22 entries verified implemented (closed beads +
-> code present in `engine-rs/crates`). Remaining: `httpclient-node` (pat-7xflw),
-> `websocket-peer` (pat-p2nes), and `gpu-render-backbone` (partial — editor-viewport
-> slice deferred as pat-ism62).
+> **Scan 2026-07-11 (post zero-open):** New open bead set from code+docs scan (see planner_log).
+> Highlights: `call_deferred` stub, GDScript docs contradiction, NavigationAgent ClassDB,
+> MultiplayerSpawner/Synchronizer, PacketPeerUDP/StreamPeerTCP, Spot shadows, SubViewport
+> (prior close incomplete), Vehicle/SoftBody ClassDB, GPU shadow atlas + equirect sky,
+> editor visual-fidelity remaining chrome, ENet peer slice, FS exit-criteria tick.
+> Deferred only: `pat-ism62` (wgpu default editor renderer).
+>
+> **Reconciled 2026-07-11:** HTTP/WebSocket closed; FileAccess/DirAccess, RayCast3D/ShapeCast3D,
+> AudioStreamPlayer ClassDB, GDScript singletons, TcpMultiplayerPeer closed. Remaining partial:
+> `gpu-render-backbone` (editor wgpu default still deferred as pat-ism62).
+>
+> **2026-07-10 source review:** HTTP/WebSocket beads closed 2026-06-29. New gap beads
+> created from code+upstream compare: `pat-nwt9y` (RayCast3D/ShapeCast3D — closed),
+> `pat-e7t1n` (FileAccess/DirAccess — closed), open `pat-0uov2` (AudioStreamPlayer ClassDB),
+> `pat-0m7oj` (GDScript singletons), `pat-fg8dk` (real multiplayer peer), `pat-273bn` (docs).
 
 ## Source-Backed Planner Gaps
 
@@ -234,27 +245,25 @@ Evidence:
 
 ### `httpclient-node`
 - Title: Implement HTTPClient and HTTPRequest nodes for HTTP(S) access
-- Status: missing
-- Bead: pat-7xflw (created 2026-06-12)
+- Status: implemented (closed pat-7xflw) (created 2026-06-12)
 - Priority: P3
 - Labels: phase6, networking
 - Acceptance: ./scripts/rust_task.sh nextest run --test networking_parity_test -- http_request
 
 Evidence:
 - Upstream Godot exposes `HTTPClient` and `HTTPRequest` in `core/io/` and `scene/main/http_request.*`.
-- No networking crate or HTTP path exists in Patina (distinct from the deferred ENet multiplayer stack).
+- **Landed:** Patina implements `HTTPClient`/`HTTPRequest` and related networking paths (closed with pat-7xflw). Remaining gap is full ENet multiplayer RPC surface, not base HTTP.
 
 ### `websocket-peer`
 - Title: Implement WebSocketPeer for bidirectional WS connections
-- Status: missing
-- Bead: pat-p2nes (created 2026-06-12)
+- Status: implemented (closed pat-p2nes) (created 2026-06-12)
 - Priority: P3
 - Labels: phase6, networking
 - Acceptance: ./scripts/rust_task.sh nextest run --test networking_parity_test -- websocket_peer
 
 Evidence:
 - Upstream Godot provides `WebSocketPeer` in `modules/websocket/`.
-- No WebSocket implementation in Patina.
+- **Landed:** Patina implements `WebSocketPeer` (closed pat-p2nes).
 
 ### `gpu-render-backbone`
 - Title: Promote gdserver2d/gdserver3d software rasterisation to a wgpu (Vulkan/Metal/GL) pipeline

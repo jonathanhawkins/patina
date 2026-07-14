@@ -6,7 +6,7 @@ trigger: "deploy orchestrator", "restart orchestrator", "rebuild orchestrator", 
 
 # Deploy Orchestrator
 
-Build, test, and hot-deploy the Rust orchestrator binary. The orchestrator is invoked per-cycle (not a long-running daemon), so rebuilding the release binary is sufficient — the next cycle picks up the new code automatically. An immediate assignment cycle is triggered to avoid waiting.
+Build, test, and hot-deploy the Rust orchestrator binary. One-shot subcommands (`assign`, `poll`) pick up a rebuilt binary automatically, BUT a long-running `run` daemon does NOT — it keeps executing the old code until restarted. A deploy is not complete until any live `run` daemon has been restarted (step 3).
 
 ## Steps
 
@@ -21,30 +21,45 @@ Build, test, and hot-deploy the Rust orchestrator binary. The orchestrator is in
    ./scripts/rust_task.sh build --release -p patina-orchestrator 2>&1 | tail -5
    ```
 
-3. **Find the coordinator identity** — read the canonical pointer file (the orchestrator writes this on every coordinator startup):
+3. **Restart the `run` daemon if one is live** — a running daemon keeps the OLD code loaded (verified the hard way on 2026-07-13: a 16h-old daemon silently ignored a deploy):
+   ```bash
+   pgrep -fl "patina-orchestrator run" || echo "no daemon (one-shot mode; skip restart)"
+   ```
+   If a daemon is found: capture its env (`ps eww -p <pid> | tr ' ' '\n' | grep -E '^(ORCH_|AGENT_)'`), `kill -TERM <pid>`, then relaunch from the repo root with the same env:
+   ```bash
+   env <captured ORCH_*/AGENT_* vars> nohup \
+     ./apps/orchestrator/crate/target/release/patina-orchestrator run \
+     --session patina-fly --interval 8 \
+     > .codex/orchestrator/run.log 2>&1 & disown
+   ```
+   Confirm the new pid with `pgrep -fl "patina-orchestrator run"` and watch `.codex/orchestrator/run.log` for the first cycle.
+
+4. **Find the coordinator identity** — read the canonical pointer file (the orchestrator writes this on every coordinator startup):
    ```bash
    cat /Users/bone/dev/games/patina/.beads/coordinator_agent 2>/dev/null
    ```
    This is the single source of truth. Do NOT grep logs, do NOT guess names like `IvoryTower`/`liveTower`, do NOT inspect tmux pane scrollback. If the file is missing or empty, the coordinator isn't running — surface that and stop, don't fabricate a name.
 
-4. **Trigger an immediate assignment cycle** to prompt idle workers. Read the coordinator name from the file (do not hard-code):
+5. **Trigger an immediate assignment cycle** to prompt idle workers. Read the coordinator name from the file (do not hard-code):
    ```bash
    COORDINATOR="$(cat /Users/bone/dev/games/patina/.beads/coordinator_agent)"
    AGENT_NAME="$COORDINATOR" ORCH_SESSION=patina-fly \
      ./apps/orchestrator/crate/target/release/patina-orchestrator assign --session patina-fly 2>&1
    ```
 
-5. **Verify** workers are picking up work:
+6. **Verify** workers are picking up work:
    ```bash
-   tail -5 /tmp/patina-orchestrator.log
+   tail -5 .codex/orchestrator/run.log
    ```
-   Look for "Assigning", "Queuing prompt", and "pane done ok=true" lines.
+   Look for "Assigning", "Queuing prompt", and "pane done ok=true" lines. (The old
+   /tmp/patina-orchestrator.log path is stale — the daemon logs to
+   .codex/orchestrator/run.log since 2026-07-13.)
 
 ## Notes
 
 - The orchestrator binary lives at `apps/orchestrator/crate/target/release/patina-orchestrator`
-- It's invoked per poll/assign cycle from the coordinator Claude in `patina-fly:0.1`
-- No process restart needed — rebuilding the binary is the deployment
+- One-shot `assign`/`poll` invocations pick up a rebuilt binary automatically; the
+  long-running `run --interval N` daemon does NOT — restarting it IS the deployment
 - The `assign` subcommand runs a single idle-fill + prompt submission cycle
 - The `poll` subcommand processes pending completions and reassigns workers
 

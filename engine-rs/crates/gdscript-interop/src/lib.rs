@@ -9,18 +9,25 @@
 
 pub mod bindings;
 pub mod bridge;
+pub mod coroutine;
 pub mod fuzz_gdscript;
+pub mod global_constants;
 pub mod interpreter;
 pub mod parser;
 pub mod tokenizer;
 pub mod type_checker;
 pub mod visual_script;
 
+pub use coroutine::{AwaitTarget, CoroutineHost, CoroutineId, SuspendedCoroutine};
+
 pub use bindings::{
     MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
 };
 pub use bridge::{NativeScript, NativeScriptBuilder, ScriptBridge};
-pub use interpreter::{RuntimeError, RuntimeErrorKind, ScriptWarning, SourceLocation, StackFrame};
+pub use interpreter::{
+    set_engine_editor_hint, set_engine_frames_per_second, RuntimeError, RuntimeErrorKind,
+    ScriptWarning, SourceLocation, StackFrame,
+};
 pub use parser::{
     Annotation, AssignOp, BinOp, Expr, FuncParam, MatchArm, MatchPattern, ParseError, Parser, Stmt,
     UnaryOp,

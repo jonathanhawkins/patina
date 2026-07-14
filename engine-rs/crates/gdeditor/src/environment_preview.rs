@@ -295,6 +295,8 @@ impl EnvironmentPreviewInfo {
             ToneMapper::Reinhard => "Reinhard",
             ToneMapper::Filmic => "Filmic",
             ToneMapper::Aces => "ACES",
+            // Godot's inspector label for TONE_MAPPER_AGX.
+            ToneMapper::Agx => "AgX",
         }
         .to_string();
 

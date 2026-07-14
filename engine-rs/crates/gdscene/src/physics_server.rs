@@ -78,6 +78,25 @@ fn vec2_prop(tree: &SceneTree, id: NodeId, key: &str, default: Vector2) -> Vecto
         .unwrap_or(default)
 }
 
+/// Reads a `PackedVector2Array` property from a node (used for polygon points
+/// and concave-polygon segments). Also accepts a generic `Array` of `Vector2`.
+/// Returns an empty vec when the property is missing or the wrong type.
+fn vec2array_prop(tree: &SceneTree, id: NodeId, key: &str) -> Vec<Vector2> {
+    tree.get_node(id)
+        .map(|n| match n.get_property(key) {
+            Variant::PackedVector2Array(v) => v,
+            Variant::Array(items) => items
+                .into_iter()
+                .filter_map(|it| match it {
+                    Variant::Vector2(v) => Some(v),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
 /// Extracts a collision shape from a `CollisionShape2D` node's properties.
 fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
     let node = tree.get_node(node_id)?;
@@ -97,6 +116,43 @@ fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
                 Some(Shape2D::Rectangle {
                     half_extents: Vector2::new(size.x / 2.0, size.y / 2.0),
                 })
+            }
+            "CapsuleShape2D" => {
+                let radius = float_prop(tree, node_id, "radius", 10.0) as f32;
+                let height = float_prop(tree, node_id, "height", 20.0) as f32;
+                Some(Shape2D::Capsule { radius, height })
+            }
+            "SegmentShape2D" => {
+                let a = vec2_prop(tree, node_id, "a", Vector2::ZERO);
+                let b = vec2_prop(tree, node_id, "b", Vector2::new(0.0, 10.0));
+                Some(Shape2D::Segment { a, b })
+            }
+            "ConvexPolygonShape2D" => {
+                let points = vec2array_prop(tree, node_id, "points");
+                if points.is_empty() {
+                    None
+                } else {
+                    Some(Shape2D::convex_polygon(&points))
+                }
+            }
+            "ConcavePolygonShape2D" => {
+                // Godot stores concave collision as a flat "segments" array of
+                // point pairs.
+                let segments = vec2array_prop(tree, node_id, "segments");
+                if segments.is_empty() {
+                    None
+                } else {
+                    Some(Shape2D::concave_polygon(&segments))
+                }
+            }
+            "WorldBoundaryShape2D" => {
+                let normal = vec2_prop(tree, node_id, "normal", Vector2::new(0.0, -1.0));
+                let distance = float_prop(tree, node_id, "distance", 0.0) as f32;
+                Some(Shape2D::world_boundary(normal, distance))
+            }
+            "SeparationRayShape2D" => {
+                let length = float_prop(tree, node_id, "length", 20.0) as f32;
+                Some(Shape2D::SeparationRay { length })
             }
             _ => None,
         },
@@ -153,6 +209,34 @@ fn scale_shape(shape: Shape2D, scale: Vector2) -> Shape2D {
                 height: height * scale.y.abs(),
             }
         }
+        Shape2D::ConvexPolygon { points, count } => {
+            let n = (count as usize).min(points.len());
+            let scaled: Vec<Vector2> = points[..n]
+                .iter()
+                .map(|p| Vector2::new(p.x * scale.x, p.y * scale.y))
+                .collect();
+            Shape2D::convex_polygon(&scaled)
+        }
+        Shape2D::ConcavePolygon { points, count } => {
+            let n = (count as usize).min(points.len());
+            let scaled: Vec<Vector2> = points[..n]
+                .iter()
+                .map(|p| Vector2::new(p.x * scale.x, p.y * scale.y))
+                .collect();
+            Shape2D::concave_polygon(&scaled)
+        }
+        Shape2D::WorldBoundary { normal, distance } => {
+            // A half-plane's offset scales with the average axis scale; the
+            // normal direction is preserved (exact only for uniform scale).
+            let s = (scale.x.abs() + scale.y.abs()) * 0.5;
+            Shape2D::WorldBoundary {
+                normal,
+                distance: distance * s,
+            }
+        }
+        Shape2D::SeparationRay { length } => Shape2D::SeparationRay {
+            length: length * scale.y.abs(),
+        },
     }
 }
 
@@ -268,9 +352,30 @@ impl PhysicsServer {
         &self.world
     }
 
+    /// Sets the global 2D gravity vector (px/s²) on the underlying world.
+    ///
+    /// Mirrors Godot's `physics/2d/default_gravity` × `default_gravity_vector`
+    /// project settings. The world defaults to `(0, 980)`, so an integrator only
+    /// needs to call this when a project overrides the default gravity.
+    pub fn set_gravity(&mut self, gravity: Vector2) {
+        self.world.set_gravity(gravity);
+    }
+
+    /// Returns the global 2D gravity vector (px/s²) from the underlying world.
+    pub fn gravity(&self) -> Vector2 {
+        self.world.gravity()
+    }
+
     /// Returns the body ID for a scene node, if registered.
     pub fn body_for_node(&self, node_id: NodeId) -> Option<BodyId> {
         self.node_to_body.get(&node_id).copied()
+    }
+
+    /// Returns the scene node owning a body, if any (reverse of
+    /// [`body_for_node`](Self::body_for_node)). Used to resolve a raycast hit's
+    /// `body_id` back to the collider node for `RayCast2D.get_collider`.
+    pub fn node_for_body(&self, body_id: BodyId) -> Option<NodeId> {
+        self.body_to_node.get(&body_id).copied()
     }
 
     /// Returns the area ID for a scene node, if registered.
@@ -309,6 +414,10 @@ impl PhysicsServer {
                 body.linear_velocity = vec2_prop(tree, node_id, "linear_velocity", Vector2::ZERO);
                 body.rotation = float_prop(tree, node_id, "rotation", 0.0) as f32;
                 body.angular_velocity = float_prop(tree, node_id, "angular_velocity", 0.0) as f32;
+                // Godot RigidBody2D gravity/damping properties.
+                body.gravity_scale = float_prop(tree, node_id, "gravity_scale", 1.0) as f32;
+                body.linear_damp = float_prop(tree, node_id, "linear_damp", 0.0) as f32;
+                body.angular_damp = float_prop(tree, node_id, "angular_damp", 0.0) as f32;
 
                 let body_id = self.world.add_body(body);
                 self.node_to_body.insert(node_id, body_id);
@@ -493,8 +602,14 @@ impl PhysicsServer {
             .collect();
 
         for (node_id, body_id) in char_entries {
+            // `velocity` is in pixels-per-second (Godot contract). Cross-frame
+            // state (is_on_floor, platform_velocity) is persisted on the node.
             let velocity = vec2_prop(tree, node_id, "velocity", Vector2::ZERO);
-            if velocity.length_squared() < 1e-8 {
+            let was_on_floor = bool_prop(tree, node_id, "is_on_floor", false);
+            let stored_platform_vel = vec2_prop(tree, node_id, "platform_velocity", Vector2::ZERO);
+
+            // Skip idle bodies unless a moving platform would still carry them.
+            if velocity.length_squared() < 1e-8 && stored_platform_vel.length_squared() < 1e-8 {
                 continue;
             }
 
@@ -503,10 +618,30 @@ impl PhysicsServer {
                 None => continue,
             };
 
-            // Build a CharacterBody2D for move_and_slide
+            // Build a CharacterBody2D seeded from the node's persisted state and
+            // configuration properties.
             let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
             character.collision_layer = body.collision_layer;
             character.collision_mask = body.collision_mask;
+            character.up_direction =
+                vec2_prop(tree, node_id, "up_direction", Vector2::new(0.0, -1.0));
+            character.floor_max_angle = float_prop(
+                tree,
+                node_id,
+                "floor_max_angle",
+                std::f64::consts::FRAC_PI_4,
+            ) as f32;
+            character.floor_snap_length =
+                float_prop(tree, node_id, "floor_snap_length", 0.0) as f32;
+            character.floor_stop_on_slope =
+                bool_prop(tree, node_id, "floor_stop_on_slope", false);
+            character.floor_constant_speed =
+                bool_prop(tree, node_id, "floor_constant_speed", false);
+            character.floor_block_on_wall = bool_prop(tree, node_id, "floor_block_on_wall", true);
+            character.slide_on_ceiling = bool_prop(tree, node_id, "slide_on_ceiling", true);
+            character.max_slides = u32_prop(tree, node_id, "max_slides", 4).max(1) as usize;
+            character.set_on_floor(was_on_floor);
+            character.platform_velocity = stored_platform_vel;
 
             // Collect static/other bodies to collide against (exclude self)
             let obstacle_refs: Vec<&PhysicsBody2D> = self
@@ -520,21 +655,30 @@ impl PhysicsServer {
                 })
                 .collect();
 
-            let displacement = Vector2::new(velocity.x * dt, velocity.y * dt);
-            let result_velocity = character.move_and_slide(displacement, &obstacle_refs);
+            // move_and_slide_delta applies dt internally and returns px/s velocity.
+            let result_velocity = character.move_and_slide_delta(velocity, dt, &obstacle_refs);
+            let result_platform_vel = character.get_platform_velocity();
+            let new_position = character.position;
+            let on_floor = character.is_on_floor();
+            let on_wall = character.is_on_wall();
+            let on_ceiling = character.is_on_ceiling();
+
+            // Release the immutable borrow of `self.world` before the mutable one.
+            drop(obstacle_refs);
 
             // Write position back to the physics body
             if let Some(phys_body) = self.world.get_body_mut(body_id) {
-                phys_body.position = character.position;
+                phys_body.position = new_position;
             }
 
             // Sync to scene tree
             if let Some(node) = tree.get_node_mut(node_id) {
-                node.set_property("position", Variant::Vector2(character.position));
+                node.set_property("position", Variant::Vector2(new_position));
                 node.set_property("velocity", Variant::Vector2(result_velocity));
-                node.set_property("is_on_floor", Variant::Bool(character.is_on_floor()));
-                node.set_property("is_on_wall", Variant::Bool(character.is_on_wall()));
-                node.set_property("is_on_ceiling", Variant::Bool(character.is_on_ceiling()));
+                node.set_property("platform_velocity", Variant::Vector2(result_platform_vel));
+                node.set_property("is_on_floor", Variant::Bool(on_floor));
+                node.set_property("is_on_wall", Variant::Bool(on_wall));
+                node.set_property("is_on_ceiling", Variant::Bool(on_ceiling));
             }
         }
     }
@@ -615,6 +759,124 @@ mod tests {
                 half_extents: Vector2::new(200.0, 10.0)
             }
         );
+    }
+
+    /// Builds a tree with a single `CollisionShape2D` under root carrying the
+    /// given shape class and properties, returning the tree and shape node id.
+    fn shape_node(class: &str, props: &[(&str, Variant)]) -> (SceneTree, NodeId) {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("shape", Variant::String(class.to_string()));
+        for (k, v) in props {
+            s.set_property(k, v.clone());
+        }
+        let id = tree.add_child(root, s).unwrap();
+        (tree, id)
+    }
+
+    #[test]
+    fn shape_from_node_builds_capsule() {
+        let (tree, id) = shape_node(
+            "CapsuleShape2D",
+            &[
+                ("radius", Variant::Float(6.0)),
+                ("height", Variant::Float(30.0)),
+            ],
+        );
+        assert_eq!(
+            shape_from_node(&tree, id),
+            Some(Shape2D::Capsule {
+                radius: 6.0,
+                height: 30.0
+            })
+        );
+    }
+
+    #[test]
+    fn shape_from_node_builds_segment() {
+        let (tree, id) = shape_node(
+            "SegmentShape2D",
+            &[
+                ("a", Variant::Vector2(Vector2::new(-3.0, 0.0))),
+                ("b", Variant::Vector2(Vector2::new(3.0, 0.0))),
+            ],
+        );
+        assert_eq!(
+            shape_from_node(&tree, id),
+            Some(Shape2D::Segment {
+                a: Vector2::new(-3.0, 0.0),
+                b: Vector2::new(3.0, 0.0),
+            })
+        );
+    }
+
+    #[test]
+    fn shape_from_node_builds_convex_polygon() {
+        let pts = vec![
+            Vector2::new(-1.0, -1.0),
+            Vector2::new(1.0, -1.0),
+            Vector2::new(1.0, 1.0),
+            Vector2::new(-1.0, 1.0),
+        ];
+        let (tree, id) = shape_node(
+            "ConvexPolygonShape2D",
+            &[("points", Variant::PackedVector2Array(pts.clone()))],
+        );
+        let shape = shape_from_node(&tree, id).unwrap();
+        assert_eq!(shape, Shape2D::convex_polygon(&pts));
+        assert_eq!(shape.polygon_points().len(), 4);
+    }
+
+    #[test]
+    fn shape_from_node_builds_concave_polygon() {
+        let segs = vec![Vector2::new(-5.0, 0.0), Vector2::new(5.0, 0.0)];
+        let (tree, id) = shape_node(
+            "ConcavePolygonShape2D",
+            &[("segments", Variant::PackedVector2Array(segs.clone()))],
+        );
+        assert_eq!(
+            shape_from_node(&tree, id),
+            Some(Shape2D::concave_polygon(&segs))
+        );
+    }
+
+    #[test]
+    fn shape_from_node_builds_world_boundary() {
+        let (tree, id) = shape_node(
+            "WorldBoundaryShape2D",
+            &[
+                ("normal", Variant::Vector2(Vector2::new(0.0, -1.0))),
+                ("distance", Variant::Float(4.0)),
+            ],
+        );
+        assert_eq!(
+            shape_from_node(&tree, id),
+            Some(Shape2D::world_boundary(Vector2::new(0.0, -1.0), 4.0))
+        );
+    }
+
+    #[test]
+    fn shape_from_node_builds_separation_ray() {
+        let (tree, id) = shape_node("SeparationRayShape2D", &[("length", Variant::Float(25.0))]);
+        assert_eq!(
+            shape_from_node(&tree, id),
+            Some(Shape2D::SeparationRay { length: 25.0 })
+        );
+    }
+
+    #[test]
+    fn scale_shape_scales_convex_polygon() {
+        let poly = Shape2D::convex_polygon(&[
+            Vector2::new(-1.0, -2.0),
+            Vector2::new(1.0, -2.0),
+            Vector2::new(0.0, 2.0),
+        ]);
+        let scaled = scale_shape(poly, Vector2::new(2.0, 3.0));
+        let pts = scaled.polygon_points();
+        assert_eq!(pts.len(), 3);
+        assert!((pts[0].x + 2.0).abs() < 1e-5); // -1 * 2
+        assert!((pts[0].y + 6.0).abs() < 1e-5); // -2 * 3
     }
 
     #[test]
@@ -806,6 +1068,93 @@ mod tests {
         let body = server.world().get_body(body_id).unwrap();
         assert_eq!(body.collision_layer, 3);
         assert_eq!(body.collision_mask, 5);
+    }
+
+    #[test]
+    fn gravity_scale_and_damp_read_from_node_properties() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut body_node = Node::new("Body", "RigidBody2D");
+        body_node.set_property("position", Variant::Vector2(Vector2::ZERO));
+        body_node.set_property("gravity_scale", Variant::Float(2.5));
+        body_node.set_property("linear_damp", Variant::Float(0.75));
+        body_node.set_property("angular_damp", Variant::Float(0.25));
+        let id = tree.add_child(root, body_node).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(4.0));
+        tree.add_child(id, s).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let body_id = server.body_for_node(id).unwrap();
+        let body = server.world().get_body(body_id).unwrap();
+        assert!((body.gravity_scale - 2.5).abs() < 1e-6);
+        assert!((body.linear_damp - 0.75).abs() < 1e-6);
+        assert!((body.angular_damp - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gravity_scale_and_damp_default_when_absent() {
+        // A RigidBody2D with no explicit gravity/damping properties uses the
+        // Godot defaults (gravity_scale 1.0, damping 0.0).
+        let (tree, rigid_id, _) = make_physics_scene();
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let body_id = server.body_for_node(rigid_id).unwrap();
+        let body = server.world().get_body(body_id).unwrap();
+        assert_eq!(body.gravity_scale, 1.0);
+        assert_eq!(body.linear_damp, 0.0);
+        assert_eq!(body.angular_damp, 0.0);
+    }
+
+    #[test]
+    fn server_default_gravity_is_godot_default() {
+        let server = PhysicsServer::new();
+        assert_eq!(server.gravity(), Vector2::new(0.0, 980.0));
+    }
+
+    #[test]
+    fn server_set_gravity_overrides_world_gravity() {
+        // A single isolated rigid body (no floor) registered via the bridge
+        // falls under the world gravity; set_gravity can zero it out (e.g. for a
+        // zero-gravity project).
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut body = Node::new("Ball", "RigidBody2D");
+        body.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        let rigid_id = tree.add_child(root, body).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(4.0));
+        tree.add_child(rigid_id, s).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+        let body_id = server.body_for_node(rigid_id).unwrap();
+        let start_y = server.world().get_body(body_id).unwrap().position.y;
+
+        // Default gravity → body falls in +Y.
+        for _ in 0..30 {
+            server.step_physics(1.0 / 60.0);
+        }
+        let fell_y = server.world().get_body(body_id).unwrap().position.y;
+        assert!(fell_y > start_y, "body should fall under default gravity");
+
+        // Zero gravity → body no longer accelerates downward.
+        server.set_gravity(Vector2::ZERO);
+        assert_eq!(server.gravity(), Vector2::ZERO);
+        server.world.get_body_mut(body_id).unwrap().linear_velocity = Vector2::ZERO;
+        let held_y = server.world().get_body(body_id).unwrap().position.y;
+        for _ in 0..30 {
+            server.step_physics(1.0 / 60.0);
+        }
+        let after_y = server.world().get_body(body_id).unwrap().position.y;
+        assert!(
+            (after_y - held_y).abs() < 1e-4,
+            "body must not fall with zero gravity: {held_y} -> {after_y}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1102,5 +1451,82 @@ mod tests {
         let pos = vec2_prop(&tree, char_id, "position", Vector2::ZERO);
         assert_eq!(pos.x, 10.0);
         assert_eq!(pos.y, 20.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // pat-u3l8c.48 — platformer app test: a CharacterBody2D runs across a
+    // floor under gravity for many frames. The horizontal velocity must stay
+    // in px/s (the pre-fix bug collapsed it to ~v*dt each frame), and the body
+    // must settle onto the floor.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn platformer_character_keeps_px_per_second_velocity_and_lands() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Player starts in the air, running right at a constant 100 px/s.
+        let mut char_node = Node::new("Player", "CharacterBody2D");
+        char_node.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        char_node.set_property("velocity", Variant::Vector2(Vector2::new(100.0, 0.0)));
+        let char_id = tree.add_child(root, char_node).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(8.0));
+        tree.add_child(char_id, s).unwrap();
+
+        // Wide floor: top edge at y=90 so the player (radius 8) rests at y=82.
+        let mut floor = Node::new("Floor", "StaticBody2D");
+        floor.set_property("position", Variant::Vector2(Vector2::new(0.0, 100.0)));
+        let floor_id = tree.add_child(root, floor).unwrap();
+        let mut fs = Node::new("Shape", "CollisionShape2D");
+        fs.set_property("size", Variant::Vector2(Vector2::new(4000.0, 20.0)));
+        tree.add_child(floor_id, fs).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let dt = 1.0 / 60.0;
+        let gravity = 980.0_f32;
+        // Simulate 3 seconds of a platformer loop: gravity is applied by the
+        // "script" each frame, exactly like Godot's `_physics_process`.
+        for _ in 0..180 {
+            let mut v = vec2_prop(&tree, char_id, "velocity", Vector2::ZERO);
+            v.y += gravity * dt;
+            if let Some(node) = tree.get_node_mut(char_id) {
+                node.set_property("velocity", Variant::Vector2(v));
+            }
+            server.process_character_movement(dt, &mut tree);
+        }
+
+        let vel = vec2_prop(&tree, char_id, "velocity", Vector2::ZERO);
+        let pos = vec2_prop(&tree, char_id, "position", Vector2::ZERO);
+        let on_floor = tree
+            .get_node(char_id)
+            .map(|n| n.get_property("is_on_floor"))
+            .unwrap_or(Variant::Nil);
+
+        // The KEY regression: horizontal velocity must remain ~100 px/s.
+        assert!(
+            (vel.x - 100.0).abs() < 5.0,
+            "horizontal velocity must stay in px/s (~100), got {:.3}",
+            vel.x
+        );
+        // The body should have travelled a long way horizontally.
+        assert!(
+            pos.x > 150.0,
+            "player should have run right across the floor, got x={:.1}",
+            pos.x
+        );
+        // ...and be resting on the floor (top at y=90, radius 8 => center ~82).
+        assert!(
+            (pos.y - 82.0).abs() < 3.0,
+            "player should rest on the floor (~y=82), got y={:.1}",
+            pos.y
+        );
+        assert_eq!(
+            on_floor,
+            Variant::Bool(true),
+            "player should be on the floor at rest"
+        );
     }
 }

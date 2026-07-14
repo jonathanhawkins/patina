@@ -50,6 +50,10 @@ pub struct BeadInfo {
     pub assignee: Option<String>,
     pub updated_at: Option<String>,
     pub priority: i32,
+    /// `crate:*` labels on the bead, for collision-aware assignment.
+    pub crate_labels: Vec<String>,
+    /// Number of open beads a close of this bead would directly unblock.
+    pub unblock_impact: i64,
 }
 
 fn db_max_retries() -> u32 {
@@ -212,6 +216,8 @@ pub fn assigned_bead_for_worker(conn: &Connection, worker: &str) -> Result<Optio
                 },
                 updated_at: row.get(5)?,
                 priority: row.get(6)?,
+                crate_labels: Vec::new(),
+                unblock_impact: 0,
             })
         });
 
@@ -232,32 +238,100 @@ pub fn count_by_status(conn: &Connection, status: BeadStatus) -> Result<usize> {
     })
 }
 
-/// Count ready beads that have no assignee.
+/// Label that marks a bead as blocked on the machine environment (missing
+/// toolchain, operator action needed). Assignment skips these even when the
+/// dependency graph says ready.
+pub const ENV_BLOCKED_LABEL: &str = "env-blocked";
+
+/// Separator used for the aggregated crate-label column (ASCII unit separator,
+/// cannot appear in label names).
+const LABEL_SEP: char = '\u{1F}';
+
+/// Ready-for-assignment filter. Mirrors `br ready` semantics — open, unblocked
+/// by live dependencies (`blocks`/`conditional-blocks`/`waits-for` on the
+/// issue, `parent-child` from open children), not deferred, deleted, or a
+/// template — validated 1:1 against `br ready --unassigned` output. On top of
+/// that, two assignment-specific exclusions: epics are containers (never
+/// hand one to a worker), and `env-blocked`-labeled beads need operator action
+/// no worker can perform.
+///
+/// `defer_until` normalization: br writes ISO-8601 `T` timestamps while
+/// SQLite's datetime('now') uses a space; substr+replace compares the first
+/// 19 chars in a uniform format.
+fn ready_unassigned_where() -> String {
+    format!(
+        "i.status = 'open' \
+         AND (i.assignee IS NULL OR i.assignee = '') \
+         AND coalesce(i.issue_type,'task') != 'epic' \
+         AND i.deleted_at IS NULL \
+         AND coalesce(i.is_template,0) = 0 \
+         AND (i.defer_until IS NULL \
+              OR replace(substr(i.defer_until,1,19),'T',' ') <= datetime('now')) \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM dependencies d JOIN issues b ON b.id = d.depends_on_id \
+             WHERE d.issue_id = i.id \
+               AND d.type IN ('blocks','conditional-blocks','waits-for') \
+               AND b.status != 'closed' AND b.deleted_at IS NULL) \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM dependencies pc JOIN issues c ON c.id = pc.issue_id \
+             WHERE pc.depends_on_id = i.id \
+               AND pc.type = 'parent-child' \
+               AND c.status != 'closed' AND c.deleted_at IS NULL) \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM labels sl \
+             WHERE sl.issue_id = i.id AND sl.label = '{ENV_BLOCKED_LABEL}')"
+    )
+}
+
+fn ready_unassigned_sql() -> &'static str {
+    static SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SQL.get_or_init(|| {
+        format!(
+            "SELECT i.id, coalesce(i.title,''), coalesce(i.description,''), i.status, \
+             coalesce(i.assignee,''), i.updated_at, coalesce(i.priority,999), \
+             (SELECT coalesce(group_concat(l.label, char(31)),'') FROM labels l \
+              WHERE l.issue_id = i.id AND l.label LIKE 'crate:%') AS crate_labels, \
+             (SELECT count(*) FROM dependencies du JOIN issues di ON di.id = du.issue_id \
+              WHERE du.depends_on_id = i.id \
+                AND du.type IN ('blocks','conditional-blocks','waits-for') \
+                AND di.status = 'open' AND di.deleted_at IS NULL) AS unblock_impact \
+             FROM issues i \
+             WHERE {} \
+             ORDER BY coalesce(i.priority,999), unblock_impact DESC, i.created_at \
+             LIMIT ?1",
+            ready_unassigned_where()
+        )
+    })
+}
+
+fn count_ready_unassigned_sql() -> &'static str {
+    static SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SQL.get_or_init(|| {
+        format!(
+            "SELECT count(*) FROM issues i WHERE {}",
+            ready_unassigned_where()
+        )
+    })
+}
+
+/// Count ready (assignable) beads that have no assignee.
 pub fn count_ready_unassigned(conn: &Connection) -> Result<usize> {
     with_retry(|| {
-        let mut stmt = conn.prepare_cached(
-            "SELECT count(*) FROM issues \
-             WHERE status = 'open' AND (assignee IS NULL OR assignee = '')",
-        )?;
+        let mut stmt = conn.prepare_cached(count_ready_unassigned_sql())?;
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
         Ok(count as usize)
     })
 }
 
-/// Get ready unassigned beads, ordered by priority.
+/// Get ready unassigned beads: P0 first, then by how many open beads a close
+/// would unblock (critical path first), then oldest.
 pub fn ready_unassigned(conn: &Connection, limit: usize) -> Result<Vec<BeadInfo>> {
     with_retry(|| {
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, coalesce(title,''), coalesce(description,''), status, \
-             coalesce(assignee,''), updated_at, coalesce(priority,999) \
-             FROM issues \
-             WHERE status = 'open' AND (assignee IS NULL OR assignee = '') \
-             ORDER BY priority, created_at \
-             LIMIT ?1",
-        )?;
+        let mut stmt = conn.prepare_cached(ready_unassigned_sql())?;
         let rows = stmt.query_map([limit as i64], |row| {
             let status_str: String = row.get(3)?;
             let assignee_str: String = row.get(4)?;
+            let crate_labels_str: String = row.get(7)?;
             Ok(BeadInfo {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -270,9 +344,135 @@ pub fn ready_unassigned(conn: &Connection, limit: usize) -> Result<Vec<BeadInfo>
                 },
                 updated_at: row.get(5)?,
                 priority: row.get(6)?,
+                crate_labels: if crate_labels_str.is_empty() {
+                    Vec::new()
+                } else {
+                    crate_labels_str.split(LABEL_SEP).map(str::to_string).collect()
+                },
+                unblock_impact: row.get(8)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
+    })
+}
+
+/// Count live in_progress beads held by the given workers (close-stall
+/// saturation input). Excludes soft-deleted rows and beads assigned outside
+/// this swarm, so phantom rows can't fake saturation and latch backpressure.
+pub fn count_in_progress_for_workers(conn: &Connection, workers: &[String]) -> Result<usize> {
+    if workers.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; workers.len()].join(",");
+    let sql = format!(
+        "SELECT count(*) FROM issues \
+         WHERE status = 'in_progress' AND deleted_at IS NULL \
+           AND assignee IN ({placeholders})"
+    );
+    with_retry(|| {
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let n: i64 =
+            stmt.query_row(rusqlite::params_from_iter(workers.iter()), |row| row.get(0))?;
+        Ok(n as usize)
+    })
+}
+
+/// Aggregate queue-hygiene counters for the gardener digest.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HygieneCounts {
+    pub open_total: usize,
+    pub open_p0: usize,
+    pub open_unassigned: usize,
+    /// Actually assignable (full ready semantics).
+    pub truly_ready: usize,
+    /// Open unassigned beads hidden behind a live blocking dependency.
+    pub blocked_open: usize,
+    /// Open beads untouched for longer than the stale window.
+    pub stale_open: usize,
+    /// Highest-impact live blockers: (bead id, open beads it blocks).
+    pub top_blockers: Vec<(String, i64)>,
+}
+
+/// Collect queue-hygiene counters in one pass (gardener input).
+pub fn queue_hygiene(conn: &Connection, stale_days: i64) -> Result<HygieneCounts> {
+    let truly_ready = count_ready_unassigned(conn)?;
+    with_retry(|| {
+        let count1 = |sql: &str| -> std::result::Result<usize, rusqlite::Error> {
+            let mut stmt = conn.prepare_cached(sql)?;
+            let n: i64 = stmt.query_row([], |row| row.get(0))?;
+            Ok(n as usize)
+        };
+        let open_total =
+            count1("SELECT count(*) FROM issues WHERE status='open' AND deleted_at IS NULL")?;
+        let open_p0 = count1(
+            "SELECT count(*) FROM issues \
+             WHERE status='open' AND deleted_at IS NULL AND coalesce(priority,999) = 0",
+        )?;
+        let open_unassigned = count1(
+            "SELECT count(*) FROM issues \
+             WHERE status='open' AND deleted_at IS NULL \
+               AND (assignee IS NULL OR assignee = '')",
+        )?;
+        let blocked_open = count1(
+            "SELECT count(*) FROM issues i \
+             WHERE i.status='open' AND i.deleted_at IS NULL \
+               AND (i.assignee IS NULL OR i.assignee = '') \
+               AND EXISTS ( \
+                   SELECT 1 FROM dependencies d JOIN issues b ON b.id = d.depends_on_id \
+                   WHERE d.issue_id = i.id \
+                     AND d.type IN ('blocks','conditional-blocks','waits-for') \
+                     AND b.status != 'closed' AND b.deleted_at IS NULL)",
+        )?;
+        let stale_open = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT count(*) FROM issues \
+                 WHERE status='open' AND deleted_at IS NULL \
+                   AND replace(substr(updated_at,1,19),'T',' ') < datetime('now', ?1)",
+            )?;
+            let n: i64 =
+                stmt.query_row([format!("-{stale_days} days")], |row| row.get(0))?;
+            n as usize
+        };
+        let top_blockers = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT b.id, count(*) AS n \
+                 FROM issues b \
+                 JOIN dependencies d ON d.depends_on_id = b.id \
+                 JOIN issues dep ON dep.id = d.issue_id \
+                 WHERE b.status IN ('open','in_progress') AND b.deleted_at IS NULL \
+                   AND d.type IN ('blocks','conditional-blocks','waits-for') \
+                   AND dep.status = 'open' AND dep.deleted_at IS NULL \
+                 GROUP BY b.id ORDER BY n DESC, b.id LIMIT 5",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        Ok(HygieneCounts {
+            open_total,
+            open_p0,
+            open_unassigned,
+            truly_ready,
+            blocked_open,
+            stale_open,
+            top_blockers,
+        })
+    })
+}
+
+/// Distinct `crate:*` labels attached to in_progress beads — the crates the
+/// swarm is currently editing. Input for collision-aware assignment.
+pub fn busy_crate_labels(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    with_retry(|| {
+        let mut stmt = conn.prepare_cached(
+            "SELECT DISTINCT l.label FROM labels l \
+             JOIN issues i ON i.id = l.issue_id \
+             WHERE i.status = 'in_progress' AND i.deleted_at IS NULL \
+               AND l.label LIKE 'crate:%'",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()
     })
 }
 
@@ -593,8 +793,23 @@ mod tests {
                 status TEXT,
                 assignee TEXT,
                 priority INTEGER DEFAULT 999,
+                issue_type TEXT DEFAULT 'task',
+                defer_until DATETIME,
+                deleted_at DATETIME,
+                is_template INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE dependencies (
+                issue_id TEXT NOT NULL,
+                depends_on_id TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'blocks',
+                PRIMARY KEY (issue_id, depends_on_id)
+            );
+            CREATE TABLE labels (
+                issue_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                PRIMARY KEY (issue_id, label)
             );",
         )
         .unwrap();
@@ -671,6 +886,225 @@ mod tests {
         assert_eq!(beads.len(), 2);
         assert_eq!(beads[0].id, "pat-3"); // higher priority
         assert_eq!(beads[1].id, "pat-2");
+    }
+
+    /// Beads with a live blocker (any blocking dep type) are not ready;
+    /// closing the blocker makes them ready. Non-blocking dep types don't hide.
+    #[test]
+    fn test_ready_excludes_dep_blocked_until_blocker_closes() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, priority) VALUES
+             ('pat-blocker', 'Blocker', 'in_progress', 0),
+             ('pat-blocks', 'Blocked via blocks', 'open', 0),
+             ('pat-waits', 'Blocked via waits-for', 'open', 0),
+             ('pat-cond', 'Blocked via conditional-blocks', 'open', 0),
+             ('pat-related', 'Related only', 'open', 0);
+             INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
+             ('pat-blocks', 'pat-blocker', 'blocks'),
+             ('pat-waits', 'pat-blocker', 'waits-for'),
+             ('pat-cond', 'pat-blocker', 'conditional-blocks'),
+             ('pat-related', 'pat-blocker', 'related');",
+        )
+        .unwrap();
+
+        let ids: Vec<String> = ready_unassigned(&conn, 10)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(ids, vec!["pat-related"], "only non-blocking dep is ready");
+        assert_eq!(count_ready_unassigned(&conn).unwrap(), 1);
+
+        conn.execute("UPDATE issues SET status='closed' WHERE id='pat-blocker'", [])
+            .unwrap();
+        assert_eq!(
+            count_ready_unassigned(&conn).unwrap(),
+            4,
+            "closing the blocker frees all dependents"
+        );
+    }
+
+    /// Epics are never assignable, and a non-epic parent with an open child
+    /// (parent-child dep rows point child -> parent) is blocked until the
+    /// child closes.
+    #[test]
+    fn test_ready_excludes_epics_and_open_parents() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, priority, issue_type) VALUES
+             ('pat-epic', 'Unblocked epic', 'open', 0, 'epic'),
+             ('pat-parent', 'Task with subtask', 'open', 0, 'task'),
+             ('pat-child', 'Subtask', 'open', 1, 'task');
+             INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
+             ('pat-child', 'pat-parent', 'parent-child');",
+        )
+        .unwrap();
+
+        let ids: Vec<String> = ready_unassigned(&conn, 10)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        // Epic hidden even with no deps; parent hidden while child open.
+        assert_eq!(ids, vec!["pat-child"]);
+
+        conn.execute("UPDATE issues SET status='closed' WHERE id='pat-child'", [])
+            .unwrap();
+        let ids: Vec<String> = ready_unassigned(&conn, 10)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(ids, vec!["pat-parent"], "epic still hidden after children close");
+    }
+
+    /// Deferred (future defer_until, ISO-T format), deleted, template, and
+    /// env-blocked-labeled beads are not assignable; past defer_until is.
+    #[test]
+    fn test_ready_excludes_deferred_deleted_template_env_blocked() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, priority, defer_until, deleted_at, is_template) VALUES
+             ('pat-deferred', 'Deferred', 'open', 0, '2099-01-01T00:00:00Z', NULL, 0),
+             ('pat-undeferred', 'Defer elapsed', 'open', 0, '2020-01-01T00:00:00Z', NULL, 0),
+             ('pat-deleted', 'Deleted', 'open', 0, NULL, '2026-01-01T00:00:00Z', 0),
+             ('pat-template', 'Template', 'open', 0, NULL, NULL, 1),
+             ('pat-envblocked', 'Env blocked', 'open', 0, NULL, NULL, 0);
+             INSERT INTO labels (issue_id, label) VALUES
+             ('pat-envblocked', 'env-blocked');",
+        )
+        .unwrap();
+        // Same-day ISO-T defer that elapsed an hour ago: without the
+        // T→space normalization ('T' > ' ' in ASCII) this row would stay
+        // hidden until midnight — this pins the normalization.
+        conn.execute(
+            "INSERT INTO issues (id, title, status, priority, defer_until) VALUES
+             ('pat-defer-today', 'Defer elapsed today', 'open', 0,
+              strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now','-1 hour')))",
+            [],
+        )
+        .unwrap();
+
+        let mut ids: Vec<String> = ready_unassigned(&conn, 10)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["pat-defer-today", "pat-undeferred"]);
+        assert_eq!(count_ready_unassigned(&conn).unwrap(), 2);
+    }
+
+    /// Saturation counting must ignore soft-deleted rows and beads assigned
+    /// to agents outside the current worker set (phantom saturation would
+    /// latch close-stall backpressure on an under-saturated swarm).
+    #[test]
+    fn test_count_in_progress_for_workers_scopes_and_skips_deleted() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, assignee, deleted_at) VALUES
+             ('pat-1', 'Mine', 'in_progress', 'WorkerA', NULL),
+             ('pat-2', 'Mine too', 'in_progress', 'WorkerB', NULL),
+             ('pat-3', 'Deleted phantom', 'in_progress', 'WorkerA', '2026-01-01T00:00:00Z'),
+             ('pat-4', 'Foreign session', 'in_progress', 'SomeoneElse', NULL),
+             ('pat-5', 'Open not in progress', 'open', 'WorkerA', NULL);",
+        )
+        .unwrap();
+        let workers = vec!["WorkerA".to_string(), "WorkerB".to_string()];
+        assert_eq!(count_in_progress_for_workers(&conn, &workers).unwrap(), 2);
+        assert_eq!(count_in_progress_for_workers(&conn, &[]).unwrap(), 0);
+    }
+
+    /// Ordering: priority first, then unblock impact (open dependents) desc,
+    /// then created_at. A P1 that unblocks nothing still loses to every P0.
+    #[test]
+    fn test_ready_orders_by_priority_then_unblock_impact_then_age() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, priority, created_at) VALUES
+             ('pat-p0-old', 'P0 no impact, oldest', 'open', 0, '2026-01-01T00:00:00Z'),
+             ('pat-p0-impact', 'P0 unblocks two', 'open', 0, '2026-01-03T00:00:00Z'),
+             ('pat-p0-new', 'P0 no impact, newest', 'open', 0, '2026-01-02T00:00:00Z'),
+             ('pat-p1-impact', 'P1 unblocks one', 'open', 1, '2026-01-01T00:00:00Z'),
+             ('pat-dep1', 'Dependent 1', 'open', 2, '2026-01-04T00:00:00Z'),
+             ('pat-dep2', 'Dependent 2', 'open', 2, '2026-01-04T00:00:00Z'),
+             ('pat-dep3', 'Dependent 3', 'open', 2, '2026-01-04T00:00:00Z');
+             INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
+             ('pat-dep1', 'pat-p0-impact', 'blocks'),
+             ('pat-dep2', 'pat-p0-impact', 'waits-for'),
+             ('pat-dep3', 'pat-p1-impact', 'blocks');",
+        )
+        .unwrap();
+
+        let beads = ready_unassigned(&conn, 10).unwrap();
+        let ids: Vec<&str> = beads.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["pat-p0-impact", "pat-p0-old", "pat-p0-new", "pat-p1-impact"],
+            "impact wins within priority; age breaks impact ties; priority trumps impact"
+        );
+        assert_eq!(beads[0].unblock_impact, 2);
+        assert_eq!(beads[3].unblock_impact, 1);
+    }
+
+    /// queue_hygiene counts the gardener's inputs: dilution, blockage,
+    /// staleness, and highest-impact blockers.
+    #[test]
+    fn test_queue_hygiene_counts() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, priority, updated_at) VALUES
+             ('pat-p0a', 'P0 ready', 'open', 0, '2026-07-13T00:00:00Z'),
+             ('pat-p0b', 'P0 blocked', 'open', 0, '2026-07-13T00:00:00Z'),
+             ('pat-p1', 'P1 stale', 'open', 1, '2020-01-01T00:00:00Z'),
+             ('pat-blocker', 'Blocker in progress', 'in_progress', 0, '2026-07-13T00:00:00Z'),
+             ('pat-closed', 'Closed', 'closed', 0, '2020-01-01T00:00:00Z');
+             INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
+             ('pat-p0b', 'pat-blocker', 'blocks'),
+             ('pat-p1', 'pat-blocker', 'blocks');",
+        )
+        .unwrap();
+
+        let h = queue_hygiene(&conn, 14).unwrap();
+        assert_eq!(h.open_total, 3);
+        assert_eq!(h.open_p0, 2);
+        assert_eq!(h.open_unassigned, 3);
+        assert_eq!(h.truly_ready, 1, "only pat-p0a is assignable");
+        assert_eq!(h.blocked_open, 2);
+        assert_eq!(h.stale_open, 1, "pat-p1 untouched since 2020");
+        assert_eq!(h.top_blockers, vec![("pat-blocker".to_string(), 2)]);
+    }
+
+    /// crate:* labels round-trip into BeadInfo.crate_labels; busy_crate_labels
+    /// reports only in_progress beads' crate labels.
+    #[test]
+    fn test_crate_labels_and_busy_set() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, priority) VALUES
+             ('pat-ready', 'Ready with labels', 'open', 0),
+             ('pat-busy', 'In progress', 'in_progress', 0),
+             ('pat-done', 'Closed', 'closed', 0);
+             INSERT INTO labels (issue_id, label) VALUES
+             ('pat-ready', 'crate:gdrender2d'),
+             ('pat-ready', 'crate:gdscene'),
+             ('pat-ready', 'area:web'),
+             ('pat-busy', 'crate:gdeditor'),
+             ('pat-done', 'crate:gdaudio');",
+        )
+        .unwrap();
+
+        let beads = ready_unassigned(&conn, 10).unwrap();
+        assert_eq!(beads.len(), 1);
+        let mut labels = beads[0].crate_labels.clone();
+        labels.sort();
+        assert_eq!(labels, vec!["crate:gdrender2d", "crate:gdscene"]);
+
+        let busy = busy_crate_labels(&conn).unwrap();
+        assert!(busy.contains("crate:gdeditor"));
+        assert!(!busy.contains("crate:gdaudio"), "closed beads are not busy");
+        assert!(!busy.contains("crate:gdrender2d"), "open beads are not busy");
     }
 
     #[test]

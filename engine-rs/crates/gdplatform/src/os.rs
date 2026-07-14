@@ -4,7 +4,13 @@
 //! of Godot's `OS` singleton.
 
 use std::sync::OnceLock;
-use std::time::Instant;
+// `std::time::Instant::now()` panics on `wasm32-unknown-unknown` (there is no
+// native monotonic clock). `web_time::Instant` is a drop-in replacement: on
+// native targets it re-exports `std::time::Instant` (identical behavior and
+// cost), and on wasm32 it is backed by the browser's `performance.now()`
+// monotonic clock. This keeps `get_ticks_*` working in the web runtime
+// (pat-u3l8c.109).
+use web_time::Instant;
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 

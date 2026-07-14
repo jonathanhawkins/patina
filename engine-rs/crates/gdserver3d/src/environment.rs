@@ -109,6 +109,9 @@ pub enum ToneMapper {
     Filmic,
     /// ACES filmic tone mapping.
     Aces,
+    /// AgX tone mapping (Godot 4.6's Blender-derived approximation; reads
+    /// `tonemap_agx_white` / `tonemap_agx_contrast` instead of `tonemap_white`).
+    Agx,
 }
 
 impl ToneMapper {
@@ -119,6 +122,7 @@ impl ToneMapper {
             1 => Self::Reinhard,
             2 => Self::Filmic,
             3 => Self::Aces,
+            4 => Self::Agx,
             _ => Self::Linear,
         }
     }
@@ -130,6 +134,7 @@ impl ToneMapper {
             Self::Reinhard => 1,
             Self::Filmic => 2,
             Self::Aces => 3,
+            Self::Agx => 4,
         }
     }
 }
@@ -207,6 +212,12 @@ pub struct Environment3D {
     /// The white reference point for tone mapping (Godot's `tonemap_white`).
     /// Scene values at this luminance map to display white.
     pub tonemap_white: f32,
+    /// The white reference point when the tone mapper is [`ToneMapper::Agx`]
+    /// (Godot's `tonemap_agx_white`, default 16.29 — Blender's AgX white).
+    pub tonemap_agx_white: f32,
+    /// AgX curve contrast (Godot's `tonemap_agx_contrast`, default 1.25 —
+    /// approximately Blender's AgX contrast).
+    pub tonemap_agx_contrast: f32,
     /// Whether the glow (bloom) post-process is enabled.
     pub glow_enabled: bool,
     /// Overall glow intensity — scales the gathered glow before blending
@@ -262,6 +273,11 @@ pub struct Environment3D {
     pub fog_depth_begin: f32,
     /// Distance where depth fog reaches full density (`fog_depth_end`).
     pub fog_depth_end: f32,
+    /// Screen-space debanding dither after the sRGB encode. Patina extension:
+    /// in Godot this is the `rendering/anti_aliasing/quality/use_debanding`
+    /// viewport/project setting (default **false**), not an Environment
+    /// property — it never appears in a Godot `.tscn`/`.tres`.
+    pub use_debanding: bool,
 }
 
 /// How fog density accumulates with distance.
@@ -308,6 +324,9 @@ impl Default for Environment3D {
             tone_mapper: ToneMapper::Linear,
             tonemap_exposure: 1.0,
             tonemap_white: 1.0,
+            // Godot 4.6 defaults: Blender's AgX white / approximate contrast.
+            tonemap_agx_white: 16.29,
+            tonemap_agx_contrast: 1.25,
             glow_enabled: false,
             glow_intensity: 0.3,
             glow_strength: 1.0,
@@ -330,6 +349,9 @@ impl Default for Environment3D {
             fog_depth_curve: 1.0,
             fog_depth_begin: 10.0,
             fog_depth_end: 100.0,
+            // Off by default so deterministic framebuffer goldens stay stable;
+            // enable for editor/sky paths that want Godot-like gradient dither.
+            use_debanding: false,
         }
     }
 }
@@ -392,6 +414,19 @@ impl Environment3D {
                 "tonemap_white" => {
                     if let Variant::Float(f) = value {
                         env.tonemap_white = *f as f32;
+                    }
+                }
+                "tonemap_agx_white" => {
+                    if let Variant::Float(f) = value {
+                        env.tonemap_agx_white = *f as f32;
+                    }
+                }
+                "tonemap_agx_contrast" => {
+                    if let Variant::Float(f) = value {
+                        // Godot's property hint is `1.0,2.0,0.01,or_greater` —
+                        // enforce the lower bound (contrast ≤ 0 would NaN the
+                        // allenwp shoulder: slope and w collapse to 0).
+                        env.tonemap_agx_contrast = (*f as f32).max(1.0);
                     }
                 }
                 "glow_enabled" => {
@@ -584,6 +619,18 @@ impl Environment3D {
             props.push((
                 "tonemap_white".into(),
                 Variant::Float(self.tonemap_white as f64),
+            ));
+        }
+        if (self.tonemap_agx_white - def.tonemap_agx_white).abs() > f32::EPSILON {
+            props.push((
+                "tonemap_agx_white".into(),
+                Variant::Float(self.tonemap_agx_white as f64),
+            ));
+        }
+        if (self.tonemap_agx_contrast - def.tonemap_agx_contrast).abs() > f32::EPSILON {
+            props.push((
+                "tonemap_agx_contrast".into(),
+                Variant::Float(self.tonemap_agx_contrast as f64),
             ));
         }
         if self.glow_enabled != def.glow_enabled {
@@ -979,6 +1026,39 @@ mod tests {
         let props: Vec<(&str, Variant)> = vec![("tonemap_mode", Variant::Int(3))];
         let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
         assert_eq!(env.tone_mapper, ToneMapper::Aces);
+    }
+
+    /// AgX (Godot ToneMapper int 4) round-trips with its dedicated white /
+    /// contrast properties; defaults are Blender's (16.29 / 1.25).
+    #[test]
+    fn from_properties_tonemap_agx() {
+        assert!((Environment3D::default().tonemap_agx_white - 16.29).abs() < 1e-5);
+        assert!((Environment3D::default().tonemap_agx_contrast - 1.25).abs() < 1e-5);
+
+        let props: Vec<(&str, Variant)> = vec![
+            ("tonemap_mode", Variant::Int(4)),
+            ("tonemap_agx_white", Variant::Float(8.0)),
+            ("tonemap_agx_contrast", Variant::Float(1.4)),
+        ];
+        let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
+        assert_eq!(env.tone_mapper, ToneMapper::Agx);
+        assert!((env.tonemap_agx_white - 8.0).abs() < 1e-5);
+        assert!((env.tonemap_agx_contrast - 1.4).abs() < 1e-5);
+
+        // Out-of-range contrast clamps to Godot's property floor (1.0) —
+        // contrast ≤ 0 would NaN the allenwp shoulder. (Named `clamped`, not
+        // `env`: the serialization checks below still use the AgX env.)
+        let zero: Vec<(&str, Variant)> = vec![("tonemap_agx_contrast", Variant::Float(0.0))];
+        let clamped = Environment3D::from_properties(zero.iter().map(|(k, v)| (*k, v)));
+        assert!(
+            (clamped.tonemap_agx_contrast - 1.0).abs() < 1e-5,
+            "contrast must clamp to 1.0"
+        );
+
+        // And they serialize back (non-default values only).
+        let out = env.to_properties();
+        assert!(out.iter().any(|(k, _)| k == "tonemap_agx_white"));
+        assert!(out.iter().any(|(k, _)| k == "tonemap_agx_contrast"));
     }
 
     #[test]

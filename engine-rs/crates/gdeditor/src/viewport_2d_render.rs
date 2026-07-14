@@ -11,11 +11,15 @@
 //! It lives in its own module (over the public `viewport_2d` API) to compose
 //! with the viewport without growing the already-large `viewport_2d.rs`.
 
-use gdcore::math::{Color, Transform2D, Vector2};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2};
+use gdrender2d::draw;
+use gdrender2d::font::{draw_string, BitmapFont};
+use gdrender2d::renderer::FrameBuffer;
 use gdscene::control::TextAlign;
 use gdscene::{control, node2d, SceneTree};
 use gdvariant::Variant;
 
+use crate::texture_cache::TextureCache;
 use crate::viewport_2d::Viewport2D;
 
 /// The kind of content drawn for a 2D canvas node.
@@ -86,6 +90,11 @@ pub struct Render2DItem {
     /// The node's `z_index`; items are returned sorted by it ascending so lower
     /// z draws first (behind) and higher z draws last (in front).
     pub z_index: i64,
+    /// The `layer` of the node's nearest `CanvasLayer` ancestor (Godot's
+    /// `CanvasLayer.layer`), or `0` for the default canvas. Items sort by
+    /// `(canvas_layer, z_index)`, so a node on a higher layer always draws over
+    /// one on a lower layer regardless of `z_index`.
+    pub canvas_layer: i64,
     /// What to draw for this node.
     pub kind: Render2DKind,
 }
@@ -99,34 +108,73 @@ impl Viewport2D {
     /// skipped, and items appear in scene-tree order (the back-to-front draw
     /// order).
     pub fn build_render_list(&self, tree: &SceneTree) -> Vec<Render2DItem> {
-        let mut items: Vec<Render2DItem> = tree
-            .all_nodes_in_tree_order()
-            .into_iter()
-            .filter_map(|id| {
-                let node = tree.get_node(id)?;
-                // Only canvas items (Node2D and Control families) participate in
-                // the 2D render list; spatial (Node3D) nodes never do.
-                if !node.is_class("CanvasItem") {
-                    return None;
-                }
-                // Hidden nodes (own flag or inherited) draw nothing.
-                if !node2d::is_visible_in_tree(tree, id) {
-                    return None;
-                }
-                Some(Render2DItem {
-                    node_id: id.raw(),
-                    global_transform: node2d::get_global_transform(tree, id),
-                    modulate: read_color(tree, id, "modulate"),
-                    z_index: node2d::get_z_index(tree, id),
-                    kind: render_kind_for(tree, id, node.class_name()),
-                })
-            })
-            .collect();
-        // Godot draws by ascending z_index; a stable sort keeps scene-tree order
-        // as the tiebreaker within the same z.
-        items.sort_by_key(|i| i.z_index);
-        items
+        collect_canvas_items(tree)
     }
+}
+
+/// Walks `tree` in scene order and returns a [`Render2DItem`] for every
+/// **visible** `CanvasItem` (the Node2D and Control families), ordered
+/// back-to-front by `(canvas_layer, z_index)` with scene-tree order as the
+/// stable tiebreaker. Hidden and non-canvas (spatial) nodes are skipped.
+///
+/// Shared by the editor viewport's render list ([`Viewport2D::build_render_list`])
+/// and the runtime canvas rasterizer ([`build_runtime_render_list`]) so both draw
+/// the same nodes in the same order.
+pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
+    let mut items: Vec<Render2DItem> = tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .filter_map(|id| {
+            let node = tree.get_node(id)?;
+            // Only canvas items (Node2D and Control families) participate in
+            // the 2D render list; spatial (Node3D) nodes never do.
+            if !node.is_class("CanvasItem") {
+                return None;
+            }
+            // Hidden nodes (own flag or inherited) draw nothing.
+            if !node2d::is_visible_in_tree(tree, id) {
+                return None;
+            }
+            Some(Render2DItem {
+                node_id: id.raw(),
+                global_transform: node2d::get_global_transform(tree, id),
+                modulate: read_color(tree, id, "modulate"),
+                z_index: node2d::get_z_index(tree, id),
+                canvas_layer: canvas_layer_for(tree, id),
+                kind: render_kind_for(tree, id, node.class_name()),
+            })
+        })
+        .collect();
+    // Godot draws canvas layers in ascending `layer` order, and within a layer
+    // by ascending `z_index`; a stable sort keeps scene-tree order as the
+    // tiebreaker within the same layer+z.
+    items.sort_by_key(|i| (i.canvas_layer, i.z_index));
+    items
+}
+
+/// Returns the `layer` index of `id`'s nearest `CanvasLayer` ancestor, or `0`
+/// when the node lives in the default canvas (no `CanvasLayer` above it).
+///
+/// Godot draws each `CanvasLayer` above the default canvas (whose implicit layer
+/// is `0`), and a `CanvasLayer` node's `layer` property defaults to `1`, so a UI
+/// layer naturally renders over the world. Read straight off the node's `layer`
+/// property (the `gdscene` canvas-layer helper module is not yet wired in).
+fn canvas_layer_for(tree: &SceneTree, id: gdscene::NodeId) -> i64 {
+    let mut current = tree.get_node(id).and_then(|n| n.parent());
+    while let Some(pid) = current {
+        let Some(node) = tree.get_node(pid) else {
+            break;
+        };
+        if node.is_class("CanvasLayer") {
+            return match node.get_property("layer") {
+                Variant::Int(l) => l,
+                // Godot's CanvasLayer.layer defaults to 1.
+                _ => 1,
+            };
+        }
+        current = node.parent();
+    }
+    0
 }
 
 /// Chooses the draw kind for a visible canvas node: a sprite for a textured
@@ -224,6 +272,207 @@ fn read_f32(tree: &SceneTree, id: gdscene::NodeId, key: &str, default: f32) -> f
         Some(Variant::Float(f)) => f as f32,
         Some(Variant::Int(i)) => i as f32,
         _ => default,
+    }
+}
+
+// ===========================================================================
+// Runtime canvas rasterizer (pat-u3l8c.23)
+//
+// The editor *viewport* draws an abstract preview of the scene — a grid,
+// rulers, gizmos, and class-glyph markers (see `scene_renderer`). A *running*
+// 2D game draws none of that: it rasterizes the actual `CanvasItem` pixels the
+// game would show. These functions turn the render list above into real pixels
+// for the editor's **Play** tab and the runtime framebuffer.
+// ===========================================================================
+
+/// The background color a running 2D scene clears to before its canvas is
+/// drawn — Godot's `rendering/environment/defaults/default_clear_color` default
+/// (a mid gray). The runtime frame has no editor chrome (grid/rulers/gizmos),
+/// only the game's own pixels over this clear.
+pub const RUNTIME_CLEAR_COLOR: Color = Color::new(0.3, 0.3, 0.3, 1.0);
+
+/// Builds the runtime 2D render list for `tree`: the same visible-`CanvasItem`
+/// walk the editor viewport uses ([`collect_canvas_items`]), ordered by
+/// `(canvas_layer, z_index)`.
+///
+/// Returned owned (borrowing only `tree`) so a caller can drop its `tree` borrow
+/// before rasterizing with a mutable [`TextureCache`] — the editor's Play loop
+/// borrows both the running tree and the texture cache from the same state.
+pub fn build_runtime_render_list(tree: &SceneTree) -> Vec<Render2DItem> {
+    collect_canvas_items(tree)
+}
+
+/// Rasterizes an ordered runtime render list into a fresh [`FrameBuffer`],
+/// drawing the real CanvasItem pixels a running 2D game would show: textured
+/// sprites, filled color rects, label text, filled polygons, and polylines,
+/// composited back-to-front in the list's order (`items` must already be sorted,
+/// as [`build_runtime_render_list`] returns them).
+///
+/// This is what the editor's **Play** tab and the running-game framebuffer
+/// display (pat-u3l8c.23), replacing the class-glyph icon/grid preview with the
+/// pixels the game itself draws. When `texture_cache` is `Some`, `Sprite2D`
+/// textures are loaded and blitted at each node's global transform (honoring
+/// `offset`, `flip_h`/`flip_v`, and `modulate`); without a cache — or when a
+/// texture fails to load — a sprite falls back to a modulate-tinted placeholder
+/// square so it stays visible. `Marker` items (cameras, empty `Node2D`s) draw
+/// nothing: they are editor-only chrome, invisible at runtime.
+pub fn rasterize_render_list(
+    items: &[Render2DItem],
+    width: u32,
+    height: u32,
+    clear: Color,
+    mut texture_cache: Option<&mut TextureCache>,
+) -> FrameBuffer {
+    let mut fb = FrameBuffer::new(width.max(1), height.max(1), clear);
+    let font = BitmapFont::builtin();
+    for item in items {
+        let xform = item.global_transform;
+        match &item.kind {
+            Render2DKind::Sprite {
+                texture,
+                offset,
+                flip_h,
+                flip_v,
+            } => {
+                let mut drawn = false;
+                if let Some(cache) = texture_cache.as_deref_mut() {
+                    if let Some(tex) = cache.get(texture) {
+                        let (tw, th) = (tex.width as f32, tex.height as f32);
+                        if tw > 0.0 && th > 0.0 {
+                            // Sprite2D is centered by default: the texture's
+                            // top-left sits at `offset - size/2` in node-local
+                            // space. Flip mirrors the basis about that center.
+                            let rect = Rect2::new(
+                                Vector2::new(offset.x - tw / 2.0, offset.y - th / 2.0),
+                                Vector2::new(tw, th),
+                            );
+                            let flip = Transform2D::scaled(Vector2::new(
+                                if *flip_h { -1.0 } else { 1.0 },
+                                if *flip_v { -1.0 } else { 1.0 },
+                            ));
+                            draw::draw_texture_rect_transformed(
+                                &mut fb,
+                                tex,
+                                xform * flip,
+                                rect,
+                                None,
+                                item.modulate,
+                            );
+                            drawn = true;
+                        }
+                    }
+                }
+                if !drawn {
+                    // No texture available: a visible tinted placeholder square
+                    // so the sprite's presence is still rendered.
+                    let rect = Rect2::new(
+                        Vector2::new(offset.x - 16.0, offset.y - 16.0),
+                        Vector2::new(32.0, 32.0),
+                    );
+                    draw::fill_rect_transformed(&mut fb, xform, rect, item.modulate);
+                }
+            }
+            Render2DKind::ColorRect { size, color } => {
+                let rect = Rect2::new(Vector2::ZERO, *size);
+                draw::fill_rect_transformed(&mut fb, xform, rect, modulate(*color, item.modulate));
+            }
+            Render2DKind::Text {
+                text, font_size, ..
+            } => {
+                // Map Godot's font size onto the built-in bitmap font's integer
+                // pixel scale (native cell height), at least 1.
+                let scale = ((*font_size as f32 / font.char_height as f32).round() as u32).max(1);
+                draw_string(&mut fb, &font, xform.origin, text, item.modulate, scale);
+            }
+            Render2DKind::Polygon { points, color } => {
+                fill_polygon(&mut fb, xform, points, modulate(*color, item.modulate));
+            }
+            Render2DKind::Line {
+                points,
+                width: stroke,
+                color,
+            } => {
+                let col = modulate(*color, item.modulate);
+                for seg in points.windows(2) {
+                    draw::draw_line_blended(
+                        &mut fb,
+                        xform.xform(seg[0]),
+                        xform.xform(seg[1]),
+                        col,
+                        *stroke,
+                    );
+                }
+            }
+            Render2DKind::Marker { .. } => {}
+        }
+    }
+    fb
+}
+
+/// Convenience: [`build_runtime_render_list`] + [`rasterize_render_list`] in one
+/// call, for callers whose `tree` and `texture_cache` don't come from the same
+/// borrow (tests, and the texture-less `render_runtime_frame` 2D branch).
+pub fn render_runtime_canvas(
+    tree: &SceneTree,
+    width: u32,
+    height: u32,
+    clear: Color,
+    texture_cache: Option<&mut TextureCache>,
+) -> FrameBuffer {
+    let items = build_runtime_render_list(tree);
+    rasterize_render_list(&items, width, height, clear, texture_cache)
+}
+
+/// Component-wise multiply of a base color by a `modulate` tint.
+fn modulate(base: Color, tint: Color) -> Color {
+    Color::new(
+        base.r * tint.r,
+        base.g * tint.g,
+        base.b * tint.b,
+        base.a * tint.a,
+    )
+}
+
+/// Scanline-fills a simple polygon (its `points` transformed by `xform` into
+/// screen space) with `color`, using the even-odd rule. Handles convex and
+/// simple concave polygons; degenerate (<3 point) or transparent fills are no-ops.
+fn fill_polygon(fb: &mut FrameBuffer, xform: Transform2D, points: &[Vector2], color: Color) {
+    if points.len() < 3 || color.a <= 0.001 {
+        return;
+    }
+    let pts: Vec<Vector2> = points.iter().map(|p| xform.xform(*p)).collect();
+    let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
+    for p in &pts {
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+    }
+    let y_start = (min_y.floor() as i32).max(0);
+    let y_end = (max_y.ceil() as i32).min(fb.height as i32 - 1);
+    let n = pts.len();
+    for y in y_start..=y_end {
+        let yc = y as f32 + 0.5;
+        // Collect the x crossings of the scanline with each polygon edge.
+        let mut xs: Vec<f32> = Vec::new();
+        for i in 0..n {
+            let a = pts[i];
+            let b = pts[(i + 1) % n];
+            let (lo, hi) = if a.y < b.y { (a, b) } else { (b, a) };
+            if yc >= lo.y && yc < hi.y {
+                let t = (yc - lo.y) / (hi.y - lo.y);
+                xs.push(lo.x + t * (hi.x - lo.x));
+            }
+        }
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Fill between successive crossing pairs (even-odd).
+        let mut k = 0;
+        while k + 1 < xs.len() {
+            let xa = (xs[k].ceil() as i32).max(0);
+            let xb = (xs[k + 1].floor() as i32).min(fb.width as i32 - 1);
+            for x in xa..=xb {
+                fb.blend_pixel(x as u32, y as u32, color);
+            }
+            k += 2;
+        }
     }
 }
 
