@@ -68,6 +68,25 @@ pub struct Config {
     /// An open bead untouched for this many days counts as stale.
     pub gardener_stale_days: i64,
 
+    // Fail-streak parking
+    /// Consecutive failed verifications before a bead is parked with the
+    /// needs-attention label (excluded from assignment). 0 disables.
+    pub verify_fail_park_threshold: u32,
+
+    // Crate-breakage circuit breaker
+    /// Consecutive `could not compile <crate>` verify failures before the
+    /// lane holds that crate's verifies behind a check pre-flight. 0 disables.
+    pub crate_breaker_threshold: u32,
+
+    // Auto-checkpoint
+    /// Closes between auto-checkpoint commits of the shared tree. 0 disables.
+    pub checkpoint_closes: u64,
+    /// Minimum spacing between checkpoint attempts (a red gate retries no
+    /// sooner than this).
+    pub checkpoint_min_interval_seconds: u64,
+    /// Timeout for the `cargo check --workspace` green gate.
+    pub checkpoint_gate_timeout_seconds: u64,
+
     // Verification
     pub verify_reported_tests: bool,
     pub verify_timeout_seconds: u64,
@@ -190,14 +209,16 @@ impl Config {
             deadlock_watchdog_polls: env_or("ORCH_DEADLOCK_WATCHDOG_POLLS", 6),
             // Deliberately spaced above verify_timeout_seconds (900) so one
             // full-timeout verify can't latch suppression at the boundary.
-            close_stall_backpressure_seconds: env_or(
-                "ORCH_CLOSE_STALL_BACKPRESSURE_SECONDS",
-                1200,
-            ),
+            close_stall_backpressure_seconds: env_or("ORCH_CLOSE_STALL_BACKPRESSURE_SECONDS", 1200),
             close_stall_renotify_seconds: env_or("ORCH_CLOSE_STALL_RENOTIFY_SECONDS", 1800),
             gardener_interval_seconds: env_or("ORCH_GARDENER_INTERVAL_SECONDS", 3600),
             gardener_p0_dilution_threshold: env_or("ORCH_GARDENER_P0_DILUTION_THRESHOLD", 15),
             gardener_stale_days: env_or("ORCH_GARDENER_STALE_DAYS", 14),
+            verify_fail_park_threshold: env_or("ORCH_VERIFY_FAIL_PARK_THRESHOLD", 2),
+            crate_breaker_threshold: env_or("ORCH_CRATE_BREAKER_THRESHOLD", 3),
+            checkpoint_closes: env_or("ORCH_CHECKPOINT_CLOSES", 10),
+            checkpoint_min_interval_seconds: env_or("ORCH_CHECKPOINT_MIN_INTERVAL_SECONDS", 1800),
+            checkpoint_gate_timeout_seconds: env_or("ORCH_CHECKPOINT_GATE_TIMEOUT_SECONDS", 1500),
             verify_reported_tests: env_or("VERIFY_REPORTED_TESTS", true),
             verify_timeout_seconds: env_or("VERIFY_TIMEOUT_SECONDS", 900),
             pending_verification_reap_seconds: env_or("ORCH_PENDING_VERIFY_REAP_SECONDS", 1800),
@@ -470,6 +491,11 @@ pub fn test_config() -> Config {
         gardener_interval_seconds: 3600,
         gardener_p0_dilution_threshold: 15,
         gardener_stale_days: 14,
+        verify_fail_park_threshold: 2,
+        crate_breaker_threshold: 3,
+        checkpoint_closes: 10,
+        checkpoint_min_interval_seconds: 1800,
+        checkpoint_gate_timeout_seconds: 1500,
         verify_reported_tests: true,
         verify_timeout_seconds: 900,
         pending_verification_reap_seconds: 1800,

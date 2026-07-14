@@ -56,6 +56,18 @@ struct VerifyRequest {
     enqueued_at: Instant,
 }
 
+/// Outcome bundle from one verification run, feeding both circuit breakers
+/// (dyld-wedge via `outcome`, crate-breakage via the crate fields).
+struct VerifyRunSummary {
+    outcome: crate::verifier::circuit_breaker::VerifyOutcome,
+    /// Crate the verify targeted (`-p`/`--package` in its commands).
+    request_crate: Option<String>,
+    /// Crate rustc blamed in a `could not compile` failure, if any.
+    broken_crate: Option<String>,
+    /// Tail of the failure output for operator alerts.
+    error_excerpt: String,
+}
+
 pub struct Coordinator {
     pub config: Config,
     mail: MailClient,
@@ -83,6 +95,14 @@ pub struct Coordinator {
     started_at: Instant,
     /// Last close-stall operator notification (rate limiting).
     last_stall_notify: Mutex<Option<Instant>>,
+    /// Consecutive failed verifications per bead (fail-streak parking).
+    verify_fail_streaks: Mutex<HashMap<String, u32>>,
+    /// Successful closes since the last auto-checkpoint commit.
+    closes_since_checkpoint: Arc<Mutex<u64>>,
+    /// Guards a single in-flight auto-checkpoint thread.
+    checkpoint_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// Last auto-checkpoint attempt (success or failure) — attempt throttle.
+    last_checkpoint_attempt: Mutex<Option<Instant>>,
 }
 
 impl Coordinator {
@@ -99,6 +119,7 @@ impl Coordinator {
         spawn_verifier_worker(
             config.project_root.clone(),
             Duration::from_secs(config.verify_timeout_seconds),
+            config.crate_breaker_threshold,
             verify_request_rx,
             verify_tx.clone(),
             Arc::clone(&pending_verifications),
@@ -123,6 +144,10 @@ impl Coordinator {
             last_close: Mutex::new(None),
             started_at: Instant::now(),
             last_stall_notify: Mutex::new(None),
+            verify_fail_streaks: Mutex::new(HashMap::new()),
+            closes_since_checkpoint: Arc::new(Mutex::new(0)),
+            checkpoint_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_checkpoint_attempt: Mutex::new(None),
         })
     }
 
@@ -250,6 +275,8 @@ impl Coordinator {
                 self.pending_completion_msgs.lock().unwrap().remove(&id);
             }
             if vr.passed {
+                // A pass ends any fail streak (fail-streak parking).
+                self.verify_fail_streaks.lock().unwrap().remove(&vr.bead_id);
                 if vr.is_stale_recovery {
                     // Stale-PROG recovery — just close, no worker to reassign
                     tracing::info!(bead = %vr.bead_id, "Stale bead verified PASSED — closing as done");
@@ -300,13 +327,17 @@ impl Coordinator {
                     let _ = br::reopen(&vr.bead_id);
                     rejected += 1;
                 } else {
-                    // Normal verification failed — reopen bead and notify worker
-                    tracing::info!(
-                        bead = %vr.bead_id,
-                        reason = ?vr.reject_reason,
-                        "REJECT: verification failed"
-                    );
-                    let _ = br::reopen(&vr.bead_id);
+                    // Normal verification failed — reopen bead and notify worker.
+                    // Repeated failures park the bead instead of round-robining
+                    // it through the swarm forever (fail-streak parking).
+                    let (streak, park) = {
+                        let mut streaks = self.verify_fail_streaks.lock().unwrap();
+                        bump_fail_streak(
+                            &mut streaks,
+                            &vr.bead_id,
+                            self.config.verify_fail_park_threshold,
+                        )
+                    };
                     let details = format!(
                         "Files changed: {}\nTests run: {}",
                         if vr.files_changed.is_empty() {
@@ -324,7 +355,45 @@ impl Coordinator {
                         .reject_reason
                         .as_deref()
                         .unwrap_or("reported test commands failed when rerun by the coordinator");
-                    let _ = self.send_reopen_message(&vr.worker, &vr.bead_id, reason, &details);
+                    if park {
+                        tracing::warn!(
+                            bead = %vr.bead_id,
+                            streak,
+                            "PARKING bead after repeated verification failures"
+                        );
+                        if !self.dry_run {
+                            let _ = br::label_add(&vr.bead_id, "needs-attention");
+                            let _ = br::reopen(&vr.bead_id);
+                        }
+                        self.notify_boss(&format!(
+                            "PARKED {}: {} consecutive failed verifications — labeled \
+                             needs-attention and excluded from assignment until an operator \
+                             clears the label. Last failure: {}",
+                            vr.bead_id,
+                            streak,
+                            verifier::tail_chars(reason, 300)
+                        ));
+                        let park_reason = format!(
+                            "parked after {streak} failed verifications — the bead is labeled \
+                             needs-attention for operator triage; do NOT retry it, claim other work. \
+                             Last failure: {reason}"
+                        );
+                        let _ = self.send_reopen_message(
+                            &vr.worker,
+                            &vr.bead_id,
+                            &park_reason,
+                            &details,
+                        );
+                    } else {
+                        tracing::info!(
+                            bead = %vr.bead_id,
+                            reason = ?vr.reject_reason,
+                            streak,
+                            "REJECT: verification failed"
+                        );
+                        let _ = br::reopen(&vr.bead_id);
+                        let _ = self.send_reopen_message(&vr.worker, &vr.bead_id, reason, &details);
+                    }
                     self.ack_or_mark_read(vr.msg_id);
                     rejected += 1;
                 }
@@ -1738,9 +1807,11 @@ impl Coordinator {
         Ok(recovered)
     }
 
-    /// Record a successful bead close (any path). Feeds close-stall detection.
+    /// Record a successful bead close (any path). Feeds close-stall detection
+    /// and the auto-checkpoint cadence.
     fn record_close(&self) {
         *self.last_close.lock().unwrap() = Some(Instant::now());
+        *self.closes_since_checkpoint.lock().unwrap() += 1;
     }
 
     /// Time since the last successful close, falling back to coordinator
@@ -1793,10 +1864,80 @@ impl Coordinator {
         self.notify_boss(&msg);
     }
 
+    /// Spawn a background auto-checkpoint (workspace-check gate + git commit
+    /// of the shared tree) once enough beads have closed. Bounds the blast
+    /// radius of uncommitted swarm WIP: after a bad hunk lands, at most one
+    /// checkpoint window of work is unattributable. No-op when disabled,
+    /// in flight, under target, throttled, or in dry-run.
+    pub fn maybe_spawn_checkpoint(&self) {
+        let target = self.config.checkpoint_closes;
+        let closes = *self.closes_since_checkpoint.lock().unwrap();
+        let in_flight = self
+            .checkpoint_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let since = self
+            .last_checkpoint_attempt
+            .lock()
+            .unwrap()
+            .map(|t| t.elapsed());
+        if !checkpoint_due(
+            closes,
+            target,
+            in_flight,
+            since,
+            self.config.checkpoint_min_interval_seconds,
+        ) {
+            return;
+        }
+        if self.dry_run {
+            return;
+        }
+        *self.last_checkpoint_attempt.lock().unwrap() = Some(Instant::now());
+        self.checkpoint_in_flight
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let root = self.config.project_root.clone();
+        let gate_timeout = Duration::from_secs(self.config.checkpoint_gate_timeout_seconds);
+        let counter = Arc::clone(&self.closes_since_checkpoint);
+        let flag = Arc::clone(&self.checkpoint_in_flight);
+        let notify_script = self.config.notify_boss_script();
+        let session = self.config.session_name.clone();
+        tracing::info!(
+            closes,
+            "auto-checkpoint: spawning workspace-check gate + commit"
+        );
+        std::thread::spawn(move || {
+            // Green gate goes through verify_commands so it serializes on the
+            // build slot (rust_task.sh wrapping) and gets process-group-kill
+            // timeout handling.
+            let outcome = verifier::verify_commands(
+                &root,
+                &["cargo check --workspace".to_string()],
+                gate_timeout,
+            )
+            .map_err(|e| format!("workspace check not green: {e}"))
+            .and_then(|_| run_checkpoint_commit(&root, closes));
+            let text = match &outcome {
+                Ok(msg) => {
+                    *counter.lock().unwrap() = 0;
+                    format!("AUTO-CHECKPOINT: {msg}")
+                }
+                Err(e) => format!("AUTO-CHECKPOINT skipped: {e}"),
+            };
+            tracing::info!("{text}");
+            if let Some(session) = session {
+                if notify_script.exists() {
+                    let _ = Command::new(&notify_script)
+                        .arg(&session)
+                        .arg(&text)
+                        .output();
+                }
+            }
+            flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
     /// Ready list plus busy-crate context for collision-aware selection.
-    fn ready_work_context(
-        &self,
-    ) -> Result<(Vec<db::BeadInfo>, std::collections::HashSet<String>)> {
+    fn ready_work_context(&self) -> Result<(Vec<db::BeadInfo>, std::collections::HashSet<String>)> {
         let ready = self.ensure_ready_work()?;
         let busy = {
             let db = self.open_db()?;
@@ -1944,6 +2085,7 @@ fn verifier_log_append(path: &PathBuf, line: &str) {
 fn spawn_verifier_worker(
     project_root: PathBuf,
     timeout: Duration,
+    crate_breaker_threshold: u32,
     verify_request_rx: mpsc::Receiver<VerifyRequest>,
     verify_tx: mpsc::Sender<VerifyResult>,
     pending_verifications: Arc<Mutex<HashMap<String, Instant>>>,
@@ -1957,6 +2099,7 @@ fn spawn_verifier_worker(
     project_key: String,
 ) {
     use crate::verifier::circuit_breaker::{probe_recent_test_binary, VerifyCircuitBreaker};
+    use crate::verifier::crate_breaker::CrateBreaker;
 
     std::thread::spawn(move || {
         // pat-f6ndj: a host dyld-wedge makes every freshly launched test binary
@@ -1970,82 +2113,239 @@ fn spawn_verifier_worker(
         let mut breaker = VerifyCircuitBreaker::new(BREAKER_THRESHOLD);
         let mut last_probe: Option<Instant> = None;
 
-        while let Ok(request) = verify_request_rx.recv() {
-            let bead_id = request.bead_id.clone();
-            let msg_id = request.msg_id;
+        // Crate-breakage breaker: consecutive `could not compile <crate>`
+        // failures trip a per-crate gate; the lane then holds behind a
+        // throttled `cargo check -p <crate>` pre-flight until the crate
+        // builds again instead of re-burning the build slot per bead.
+        let mut crate_breaker =
+            CrateBreaker::new(crate_breaker_threshold, Duration::from_secs(120));
+        let precheck_timeout = timeout.min(Duration::from_secs(300));
 
-            // Breaker open → do not launch this verify. Try a throttled probe to
-            // resume; if it's not time yet or the probe fails, skip the launch
-            // and leave the bead pending so the stale-verification reaper (B3)
-            // handles it — don't bounce the worker during a host-level wedge.
-            if !breaker.should_launch() {
-                let due = last_probe.map_or(true, |t| t.elapsed() >= probe_interval);
-                let resumed = due && {
-                    last_probe = Some(Instant::now());
-                    breaker.probe_and_maybe_resume(|| probe_recent_test_binary(&project_root))
-                };
-                if resumed {
-                    verifier_log_append(
-                        &verifier_log_path,
-                        "RESUMED verify lane — probe launch succeeded (dyld-wedge cleared)",
-                    );
-                    tracing::warn!("verify lane resumed after dyld-wedge probe succeeded");
-                } else {
-                    verifier_log_append(
+        while let Ok(first) = verify_request_rx.recv() {
+            // Batch-drain the queue and group same-crate verifies adjacently
+            // so warm build artifacts are reused instead of interleaving
+            // rebuilds across crates.
+            let mut batch = vec![first];
+            while let Ok(more) = verify_request_rx.try_recv() {
+                batch.push(more);
+            }
+            if batch.len() > 1 {
+                order_batch_by_crate(&mut batch);
+                verifier_log_append(
+                    &verifier_log_path,
+                    &format!(
+                        "BATCH drained {} queued verifies (crate-grouped)",
+                        batch.len()
+                    ),
+                );
+            }
+
+            for request in batch {
+                let bead_id = request.bead_id.clone();
+                let msg_id = request.msg_id;
+
+                // Breaker open → do not launch this verify. Try a throttled probe to
+                // resume; if it's not time yet or the probe fails, skip the launch
+                // and leave the bead pending so the stale-verification reaper (B3)
+                // handles it — don't bounce the worker during a host-level wedge.
+                if !breaker.should_launch() {
+                    let due = last_probe.map_or(true, |t| t.elapsed() >= probe_interval);
+                    let resumed = due && {
+                        last_probe = Some(Instant::now());
+                        breaker.probe_and_maybe_resume(|| probe_recent_test_binary(&project_root))
+                    };
+                    if resumed {
+                        verifier_log_append(
+                            &verifier_log_path,
+                            "RESUMED verify lane — probe launch succeeded (dyld-wedge cleared)",
+                        );
+                        tracing::warn!("verify lane resumed after dyld-wedge probe succeeded");
+                    } else {
+                        verifier_log_append(
                         &verifier_log_path,
                         &format!(
                             "SKIPPED bead={bead_id} — verify lane halted (dyld-wedge circuit breaker open)"
                         ),
                     );
-                    continue;
-                }
-            }
-
-            // B1: isolate each verification in catch_unwind so a panic on one
-            // bead can never kill the verifier thread and wedge the whole swarm.
-            // Always remove the bead from the pending sets afterwards — otherwise
-            // a panic would leave it pending forever (the B3 reaper is the
-            // backstop, but we should not rely on it for the common case).
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                process_one_verification(
-                    &project_root,
-                    timeout,
-                    request,
-                    &verify_tx,
-                    &verifier_log_path,
-                )
-            }));
-            match result {
-                Ok(outcome) => {
-                    // Feed the outcome to the breaker; emit the operator alert
-                    // exactly once, on the transition that trips it.
-                    if let Some(alert) = breaker.record(outcome) {
-                        verifier_log_append(&verifier_log_path, &alert.host_issue_log_line());
-                        tracing::error!("{}", alert.host_issue_log_line());
-                        send_host_issue_alert(
-                            &alert_mail_config,
-                            coordinator_name.as_deref(),
-                            &project_key,
-                            &alert,
-                        );
-                        // Don't probe immediately at the trip — wait a window.
-                        last_probe = Some(Instant::now());
+                        continue;
                     }
                 }
-                Err(_) => {
-                    verifier_log_append(
-                        &verifier_log_path,
-                        &format!("PANIC bead={bead_id} — verification thread recovered"),
-                    );
-                    tracing::error!(bead = %bead_id, "verification panicked — thread recovered, bead reopened next cycle");
+
+                // Crate-breakage gate: while a shared crate is known-broken,
+                // don't burn the build slot re-verifying against it. A throttled
+                // `cargo check -p <crate>` pre-flight detects recovery; until
+                // then skipped beads stay pending (B3 reaper backstop) — workers
+                // are never bounced for someone else's breakage.
+                if crate_breaker.any_tripped() {
+                    let recovered = crate_breaker.run_due_prechecks(|krate| {
+                        verifier::verify_commands(
+                            &project_root,
+                            &[format!("cargo check -p {krate}")],
+                            precheck_timeout,
+                        )
+                        .is_ok()
+                    });
+                    for krate in &recovered {
+                        verifier_log_append(
+                            &verifier_log_path,
+                            &format!("RESUMED — `{krate}` builds again (pre-check passed)"),
+                        );
+                        tracing::warn!(krate = %krate, "crate-breakage breaker cleared");
+                    }
+                    if crate_breaker.any_tripped() {
+                        verifier_log_append(
+                            &verifier_log_path,
+                            &format!(
+                                "SKIPPED bead={bead_id} — crate-breakage breaker open ({})",
+                                crate_breaker.tripped_crates().join(", ")
+                            ),
+                        );
+                        continue;
+                    }
                 }
-            }
-            pending_verifications.lock().unwrap().remove(&bead_id);
-            if let Some(id) = msg_id {
-                pending_completion_msgs.lock().unwrap().remove(&id);
+
+                // B1: isolate each verification in catch_unwind so a panic on one
+                // bead can never kill the verifier thread and wedge the whole swarm.
+                // Always remove the bead from the pending sets afterwards — otherwise
+                // a panic would leave it pending forever (the B3 reaper is the
+                // backstop, but we should not rely on it for the common case).
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    process_one_verification(
+                        &project_root,
+                        timeout,
+                        request,
+                        &verify_tx,
+                        &verifier_log_path,
+                    )
+                }));
+                match result {
+                    Ok(summary) => {
+                        // Feed the crate-breakage breaker; alert exactly once on
+                        // the trip transition, with the rustc excerpt and the
+                        // crate's uncommitted files as the suspect list.
+                        if let Some(alert) = crate_breaker.record(
+                            summary.request_crate.as_deref(),
+                            summary.broken_crate.as_deref(),
+                            &summary.error_excerpt,
+                        ) {
+                            let suspects = dirty_files_for_crate(&project_root, &alert.crate_name);
+                            verifier_log_append(&verifier_log_path, &alert.log_line());
+                            tracing::error!("{}", alert.log_line());
+                            send_crate_breakage_alert(
+                                &alert_mail_config,
+                                coordinator_name.as_deref(),
+                                &project_key,
+                                &alert,
+                                &suspects,
+                            );
+                        }
+                        // Feed the outcome to the dyld breaker; emit the operator
+                        // alert exactly once, on the transition that trips it.
+                        if let Some(alert) = breaker.record(summary.outcome) {
+                            verifier_log_append(&verifier_log_path, &alert.host_issue_log_line());
+                            tracing::error!("{}", alert.host_issue_log_line());
+                            send_host_issue_alert(
+                                &alert_mail_config,
+                                coordinator_name.as_deref(),
+                                &project_key,
+                                &alert,
+                            );
+                            // Don't probe immediately at the trip — wait a window.
+                            last_probe = Some(Instant::now());
+                        }
+                    }
+                    Err(_) => {
+                        verifier_log_append(
+                            &verifier_log_path,
+                            &format!("PANIC bead={bead_id} — verification thread recovered"),
+                        );
+                        tracing::error!(bead = %bead_id, "verification panicked — thread recovered, bead reopened next cycle");
+                    }
+                }
+                pending_verifications.lock().unwrap().remove(&bead_id);
+                if let Some(id) = msg_id {
+                    pending_completion_msgs.lock().unwrap().remove(&id);
+                }
             }
         }
     });
+}
+
+/// Order a drained batch of verify requests so same-crate verifies run
+/// adjacently — consecutive same-crate runs reuse warm build artifacts
+/// instead of interleaving rebuilds. Stable: arrival order is preserved
+/// within a crate group (and for unscoped requests, which sort first).
+fn order_batch_by_crate(batch: &mut [VerifyRequest]) {
+    batch.sort_by_key(|r| {
+        verifier::crate_breaker::extract_request_crate(&r.commands).unwrap_or_default()
+    });
+}
+
+/// Uncommitted files under a broken crate — the operator's suspect list for
+/// a crate-breakage alert. Best-effort.
+fn dirty_files_for_crate(project_root: &std::path::Path, crate_name: &str) -> String {
+    let out = Command::new("git")
+        .current_dir(project_root)
+        .args([
+            "diff",
+            "--name-only",
+            "HEAD",
+            "--",
+            &format!("engine-rs/crates/{crate_name}/"),
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let files: Vec<&str> = s.lines().take(12).collect();
+            if files.is_empty() {
+                "(no uncommitted files under the crate)".to_string()
+            } else {
+                files.join("\n")
+            }
+        }
+        _ => "(git diff unavailable)".to_string(),
+    }
+}
+
+/// Mail the CRATE-BROKEN alert to the coordinator/operator. Best-effort and
+/// log-only when no coordinator recipient is configured (tests).
+fn send_crate_breakage_alert(
+    mail_config: &MailConfig,
+    coordinator: Option<&str>,
+    project_key: &str,
+    alert: &crate::verifier::crate_breaker::BreakageAlert,
+    suspects: &str,
+) {
+    let Some(coord) = coordinator else {
+        return;
+    };
+    let msg = OutgoingMessage {
+        project_key: project_key.to_string(),
+        sender_name: "verifier".to_string(),
+        to: vec![coord.to_string()],
+        subject: format!(
+            "CRATE-BROKEN: `{}` is blocking the verify lane",
+            alert.crate_name
+        ),
+        body_md: format!(
+            "`{}` failed to compile in {} consecutive verifies. The lane now holds its \
+             verifies behind a throttled `cargo check -p {}` pre-flight until it builds \
+             again; skipped beads stay pending (no worker bounces).\n\n\
+             rustc excerpt:\n```\n{}\n```\n\n\
+             Uncommitted files under the crate (suspects):\n```\n{}\n```",
+            alert.crate_name,
+            alert.consecutive_failures,
+            alert.crate_name,
+            alert.error_excerpt,
+            suspects
+        ),
+        importance: "high".to_string(),
+        ack_required: false,
+        topic: "crate-broken".to_string(),
+        thread_id: format!("verifier-crate-broken-{}", alert.crate_name),
+    };
+    let _ = MailClient::new(mail_config).send_message_best_effort(&msg);
 }
 
 /// Send the dyld-wedge HOST-ISSUE alert to the coordinator/operator (pat-f6ndj).
@@ -2074,17 +2374,17 @@ fn send_host_issue_alert(
 }
 
 /// Run one verification request and send its result. Separated out so the
-/// verifier loop can wrap it in `catch_unwind` (B1). Returns the outcome
-/// classified for the dyld-wedge circuit breaker (pat-f6ndj): a bare wall-clock
-/// timeout (no compile error) is `TimedOut`, every other terminal result is
-/// `Finished`.
+/// verifier loop can wrap it in `catch_unwind` (B1). Returns a summary that
+/// feeds both circuit breakers: the dyld-wedge outcome (pat-f6ndj; a bare
+/// wall-clock timeout with no build output is `TimedOut`) plus the crate
+/// fields for the crate-breakage breaker.
 fn process_one_verification(
     project_root: &std::path::Path,
     timeout: Duration,
     request: VerifyRequest,
     verify_tx: &mpsc::Sender<VerifyResult>,
     verifier_log_path: &PathBuf,
-) -> crate::verifier::circuit_breaker::VerifyOutcome {
+) -> VerifyRunSummary {
     let bead_id = request.bead_id.clone();
     let queue_wait_ms = request.enqueued_at.elapsed().as_millis() as u64;
     let joined = request.commands.join(" && ");
@@ -2126,10 +2426,10 @@ fn process_one_verification(
         );
     }
 
-    // Classify for the circuit breaker before `reject_reason` is moved into the
-    // result. A bare timeout is reported by `verify_commands` as a "timed out
-    // after …" error with no build output; treat that (and only that) as the
-    // wedge-candidate `TimedOut`.
+    // Classify for the circuit breakers before `reject_reason` is moved into
+    // the result. A bare timeout is reported by `verify_commands` as a "timed
+    // out after …" error with no build output; treat that (and only that) as
+    // the wedge-candidate `TimedOut`.
     let timed_out = !passed
         && reject_reason
             .as_deref()
@@ -2138,6 +2438,14 @@ fn process_one_verification(
         timed_out,
         reject_reason.as_deref().unwrap_or(""),
     );
+    let request_crate = verifier::crate_breaker::extract_request_crate(&request.commands);
+    let broken_crate = reject_reason
+        .as_deref()
+        .and_then(verifier::crate_breaker::parse_broken_crate);
+    let error_excerpt = reject_reason
+        .as_deref()
+        .map(|r| verifier::tail_chars(r, 600))
+        .unwrap_or_default();
 
     let _ = verify_tx.send(VerifyResult {
         bead_id: request.bead_id.clone(),
@@ -2151,7 +2459,12 @@ fn process_one_verification(
         is_stale_recovery: request.is_stale_recovery,
     });
 
-    outcome
+    VerifyRunSummary {
+        outcome,
+        request_crate,
+        broken_crate,
+        error_excerpt,
+    }
 }
 
 /// Update per-bead orphan strike counts and return beads that have reached the
@@ -2203,6 +2516,85 @@ pub fn deadlock_watchdog_tick(
 /// `window_seconds == 0` disables hysteresis.
 fn within_hysteresis(since_last_reclaim: Duration, window_seconds: u64) -> bool {
     window_seconds > 0 && since_last_reclaim < Duration::from_secs(window_seconds)
+}
+
+/// Bump a bead's verify-fail streak. Returns `(streak, should_park)`; a
+/// parked bead's entry is removed so a later operator retry starts fresh.
+/// `park_threshold == 0` disables parking.
+fn bump_fail_streak(
+    streaks: &mut HashMap<String, u32>,
+    bead_id: &str,
+    park_threshold: u32,
+) -> (u32, bool) {
+    let n = streaks.entry(bead_id.to_string()).or_insert(0);
+    *n += 1;
+    let streak = *n;
+    let park = park_threshold > 0 && streak >= park_threshold;
+    if park {
+        streaks.remove(bead_id);
+    }
+    (streak, park)
+}
+
+/// Auto-checkpoint decision: enough closes accumulated, no run in flight,
+/// and the attempt throttle has elapsed. `target == 0` disables.
+fn checkpoint_due(
+    closes: u64,
+    target: u64,
+    in_flight: bool,
+    since_attempt: Option<Duration>,
+    min_interval_secs: u64,
+) -> bool {
+    target > 0
+        && !in_flight
+        && closes >= target
+        && since_attempt.map_or(true, |d| d >= Duration::from_secs(min_interval_secs))
+}
+
+/// Run a git command in `root`, returning stdout or a descriptive error.
+fn git_capture(root: &std::path::Path, args: &[&str]) -> std::result::Result<String, String> {
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {} spawn failed: {e}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Commit the working tree as an auto-checkpoint snapshot. Refuses on the
+/// default branch. Hooks are bypassed (`--no-verify`): the checkpoint is by
+/// design a whole-tree snapshot of every agent's WIP, which per-agent
+/// pre-commit guards would otherwise veto. Returns a short human summary.
+fn run_checkpoint_commit(
+    project_root: &std::path::Path,
+    closes: u64,
+) -> std::result::Result<String, String> {
+    let branch_raw = git_capture(project_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = branch_raw.trim();
+    if branch == "main" || branch == "master" {
+        return Err(format!(
+            "on default branch `{branch}` — auto-checkpoint refuses to commit here"
+        ));
+    }
+    git_capture(project_root, &["add", "-A"])?;
+    let staged = git_capture(project_root, &["status", "--porcelain"])?;
+    if staged.trim().is_empty() {
+        return Ok("nothing to commit (tree clean)".to_string());
+    }
+    let msg = format!("Checkpoint: auto after {closes} closes (orchestrator)");
+    git_capture(project_root, &["commit", "--no-verify", "-m", &msg])?;
+    let short = git_capture(project_root, &["rev-parse", "--short", "HEAD"])?;
+    Ok(format!(
+        "committed {} on `{branch}` after {closes} closes",
+        short.trim()
+    ))
 }
 
 /// Whether close-stall suppression (skip re-prompts and reclaims) applies.
@@ -2398,6 +2790,10 @@ mod tests {
             last_close: Mutex::new(None),
             started_at: Instant::now(),
             last_stall_notify: Mutex::new(None),
+            verify_fail_streaks: Mutex::new(HashMap::new()),
+            closes_since_checkpoint: Arc::new(Mutex::new(0)),
+            checkpoint_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_checkpoint_attempt: Mutex::new(None),
         }
     }
 
@@ -2425,7 +2821,10 @@ mod tests {
             close_stall_active(drought, 900, 7, 5),
             "over-saturated swarm still stalls"
         );
-        assert!(!close_stall_active(drought, 0, 5, 5), "threshold 0 disables");
+        assert!(
+            !close_stall_active(drought, 0, 5, 5),
+            "threshold 0 disables"
+        );
         assert!(
             !close_stall_active(Duration::from_secs(100), 900, 5, 5),
             "recent close means no stall"
@@ -2434,7 +2833,10 @@ mod tests {
             !close_stall_active(drought, 900, 3, 5),
             "under-saturated swarm: closes aren't expected to flow"
         );
-        assert!(!close_stall_active(drought, 900, 0, 0), "no workers, no stall");
+        assert!(
+            !close_stall_active(drought, 900, 0, 0),
+            "no workers, no stall"
+        );
     }
 
     /// Collision-aware pick: prefer a collision-free bead within the head
@@ -2532,6 +2934,111 @@ mod tests {
         assert!(!stall_suppression_active(false, 3, false));
     }
 
+    fn verify_request(bead: &str, cmd: &str) -> VerifyRequest {
+        VerifyRequest {
+            bead_id: bead.to_string(),
+            worker: "WorkerA".to_string(),
+            msg_id: None,
+            ack_required: false,
+            files_changed: String::new(),
+            tests_run: String::new(),
+            commands: vec![cmd.to_string()],
+            is_stale_recovery: false,
+            enqueued_at: Instant::now(),
+        }
+    }
+
+    /// Batch ordering groups same-crate verifies adjacently (warm-build
+    /// reuse) while preserving arrival order within each crate group.
+    #[test]
+    fn batch_orders_same_crate_adjacent_and_stable() {
+        let mut batch = vec![
+            verify_request("b1", "cargo nextest run -p gdscene --lib a"),
+            verify_request("b2", "cargo nextest run -p gdeditor --test t1"),
+            verify_request("b3", "cargo nextest run -p gdscene --lib b"),
+            verify_request("b4", "cargo nextest run -p gdeditor --test t2"),
+        ];
+        order_batch_by_crate(&mut batch);
+        let ids: Vec<&str> = batch.iter().map(|r| r.bead_id.as_str()).collect();
+        assert_eq!(ids, vec!["b2", "b4", "b1", "b3"]);
+    }
+
+    /// Fail streaks park at the threshold, clear on park (operator retry
+    /// starts fresh), and are disabled by threshold 0.
+    #[test]
+    fn fail_streak_parks_at_threshold_and_resets() {
+        let mut m = HashMap::new();
+        assert_eq!(bump_fail_streak(&mut m, "pat-x", 2), (1, false));
+        assert_eq!(bump_fail_streak(&mut m, "pat-x", 2), (2, true));
+        assert_eq!(
+            bump_fail_streak(&mut m, "pat-x", 2),
+            (1, false),
+            "parked entry cleared — retry starts a fresh streak"
+        );
+        let mut m2 = HashMap::new();
+        for _ in 0..5 {
+            assert!(
+                !bump_fail_streak(&mut m2, "pat-y", 0).1,
+                "0 disables parking"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_due_gates_correctly() {
+        let long = Some(Duration::from_secs(9999));
+        assert!(checkpoint_due(10, 10, false, None, 1800), "never attempted");
+        assert!(checkpoint_due(12, 10, false, long, 1800));
+        assert!(!checkpoint_due(9, 10, false, long, 1800), "under target");
+        assert!(!checkpoint_due(12, 0, false, long, 1800), "disabled");
+        assert!(
+            !checkpoint_due(12, 10, true, long, 1800),
+            "already in flight"
+        );
+        assert!(
+            !checkpoint_due(12, 10, false, Some(Duration::from_secs(60)), 1800),
+            "attempt throttle"
+        );
+    }
+
+    /// Auto-checkpoint refuses the default branch, commits on a work branch,
+    /// and reports a clean tree without committing.
+    #[test]
+    fn checkpoint_commit_branch_guard_and_commit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@test"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["checkout", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "one").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "init"]);
+
+        std::fs::write(root.join("b.txt"), "two").unwrap();
+        let err = run_checkpoint_commit(root, 10).unwrap_err();
+        assert!(err.contains("default branch"), "{err}");
+
+        git(&["checkout", "-b", "swarm-work"]);
+        let ok = run_checkpoint_commit(root, 10).unwrap();
+        assert!(ok.contains("committed"), "{ok}");
+        let ok2 = run_checkpoint_commit(root, 12).unwrap();
+        assert!(ok2.contains("nothing to commit"), "{ok2}");
+    }
+
     /// pat-f6ndj: the live verify lane must STOP launching verifies once the
     /// dyld-wedge circuit breaker trips. Drives the real `spawn_verifier_worker`
     /// loop with a 1s timeout and three `sleep 30` requests (each a guaranteed
@@ -2551,6 +3058,7 @@ mod tests {
         spawn_verifier_worker(
             dir.path().to_path_buf(),
             Duration::from_secs(1), // short timeout → `sleep 30` always times out
+            0,                      // crate breaker disabled — this test drives the dyld breaker
             req_rx,
             res_tx,
             Arc::clone(&pending),
@@ -4223,12 +4731,19 @@ mod tests {
     #[test]
     fn test_verify_dispatch_does_not_ack() {
         let source = include_str!("coordinator.rs");
+        // Anchor on the verifier lane's own thread — the file has other,
+        // unrelated thread::spawns earlier (e.g. the auto-checkpoint thread),
+        // so a bare first-match would sweep the wrong window.
+        let lane_fn = source
+            .find("fn spawn_verifier_worker(")
+            .expect("spawn_verifier_worker must exist");
+        let after_fn = &source[lane_fn..];
         // Find the thread::spawn dispatch and the "continue" after it.
         // Only check BETWEEN spawn and continue — not reject paths above.
-        let spawn_pos = source
+        let spawn_pos = after_fn
             .find("std::thread::spawn(move ||")
             .expect("thread spawn must exist");
-        let after_spawn = &source[spawn_pos..];
+        let after_spawn = &after_fn[spawn_pos..];
         let continue_pos = after_spawn.find("continue;").unwrap_or(500);
         let section = &after_spawn[..continue_pos];
 
@@ -4298,7 +4813,9 @@ mod tests {
     #[test]
     fn test_reassign_closes_before_other_active_check() {
         let source = include_str!("coordinator.rs");
-        let reassign_fn = source.find("pub fn reassign(").expect("reassign must exist");
+        let reassign_fn = source
+            .find("pub fn reassign(")
+            .expect("reassign must exist");
         let fn_body = &source[reassign_fn..(reassign_fn + 4000).min(source.len())];
 
         let close_pos = fn_body

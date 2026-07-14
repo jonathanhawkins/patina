@@ -1890,6 +1890,9 @@ impl SceneTree {
             }
             if self.scripts.contains_key(&id) {
                 self.process_script_process(id, delta);
+                // Deliver PROCESS to the script's `_notification` virtual too,
+                // alongside the named `_process(delta)` callback (pat-nzgdu.13).
+                self.notify_script(id, gdobject::NOTIFICATION_PROCESS.code() as i64);
             }
         }
     }
@@ -2057,6 +2060,9 @@ impl SceneTree {
                 if let Some(node) = self.nodes.get_mut(&nid) {
                     node.receive_notification(gdobject::NOTIFICATION_PREDELETE);
                 }
+                // Deliver PREDELETE to the script's `_notification` virtual
+                // before the script is removed (pat-nzgdu.13).
+                self.notify_script(nid, gdobject::NOTIFICATION_PREDELETE.code() as i64);
             }
 
             // Now remove scripts and the node itself.

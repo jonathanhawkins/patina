@@ -987,7 +987,9 @@ pub mod crate_breaker {
         fn trips_once_on_broken_crate_not_request_crate() {
             let mut b = CrateBreaker::new(3, Duration::from_secs(120));
             assert!(b.record(Some("gdeditor"), Some("gdscene"), "e1").is_none());
-            assert!(b.record(Some("gdrender2d"), Some("gdscene"), "e2").is_none());
+            assert!(b
+                .record(Some("gdrender2d"), Some("gdscene"), "e2")
+                .is_none());
             let alert = b.record(Some("gdeditor"), Some("gdscene"), "e3");
             assert_eq!(alert.unwrap().crate_name, "gdscene");
             assert!(b.any_tripped());

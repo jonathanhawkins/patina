@@ -352,7 +352,13 @@ fn analyze_phase_chain(
         // "skip this phase" — Unevaluable means we couldn't determine its
         // state (e.g. exit_criteria file not yet authored). Either way, don't
         // block the walk on a phase we can't make progress on.
-        match phase_status(phase, &criteria_now, Some(&gates), None, Some(&editor_parity)) {
+        match phase_status(
+            phase,
+            &criteria_now,
+            Some(&gates),
+            None,
+            Some(&editor_parity),
+        ) {
             PhaseStatus::Complete => {
                 eprintln!("[plan] phase '{}': complete, advancing", phase.label);
                 continue;
@@ -2506,8 +2512,13 @@ mod tests {
             checked: false,
             line_number: 1,
         }];
-        let report =
-            run_analysis_from_criteria(&criteria, &[], &[], false, Path::new("/nonexistent-engine"));
+        let report = run_analysis_from_criteria(
+            &criteria,
+            &[],
+            &[],
+            false,
+            Path::new("/nonexistent-engine"),
+        );
         assert!(report.passing.is_empty());
         assert!(report.failing.is_empty());
         assert_eq!(report.total, 0);
@@ -2654,7 +2665,11 @@ OVERALL                         100       95    95.0%
 
         let report_dir = dir.path().join("engine-rs/fixtures/editor_oracle");
         fs::create_dir_all(&report_dir).unwrap();
-        fs::write(report_dir.join("parity_report.txt"), "OVERALL  200  190  95.0%\n").unwrap();
+        fs::write(
+            report_dir.join("parity_report.txt"),
+            "OVERALL  200  190  95.0%\n",
+        )
+        .unwrap();
         let r = read_editor_parity(dir.path());
         assert!(r.available);
         assert!((r.overall - 95.0).abs() < 0.01);

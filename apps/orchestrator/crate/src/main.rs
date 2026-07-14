@@ -912,6 +912,11 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
             }
         };
 
+        // Auto-checkpoint: snapshot the shared tree once enough beads have
+        // closed (gated on a green workspace check; no-op when disabled,
+        // under target, throttled, or already running).
+        coord.maybe_spawn_checkpoint();
+
         if poll_ok {
             if let Some(session) = &session_name {
                 // Post-poll idle fill — collect prompts for parallel submission.
@@ -1522,6 +1527,21 @@ fn maintain_planner_pane(
     }
 }
 
+/// Crate names cited as `crates/<name>/` paths in bead text — conservative
+/// (path-anchored) so prose mentions don't produce false crate labels.
+fn crate_labels_from_text(text: &str) -> Vec<String> {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"crates/([A-Za-z0-9_-]+)/").unwrap());
+    let mut out: Vec<String> = Vec::new();
+    for cap in re.captures_iter(text) {
+        let name = cap[1].to_string();
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// Gardener cadence: run when enabled (interval > 0) and the interval has
 /// elapsed since the last pass (or it never ran). Takes an elapsed Duration
 /// rather than an Instant so tests can't hit Instant-underflow on low-uptime
@@ -1676,7 +1696,7 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
             key = rec.gate_key,
         );
         // Sanitize labels: br only allows alphanumeric, hyphen, underscore, colon
-        let labels: String = rec
+        let mut label_set: Vec<String> = rec
             .labels
             .iter()
             .map(|l| {
@@ -1684,8 +1704,17 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
                     .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ':')
                     .collect::<String>()
             })
-            .collect::<Vec<_>>()
-            .join(",");
+            .filter(|l| !l.is_empty())
+            .collect();
+        // Derive crate:<name> labels from crate paths in the rec so the
+        // coordinator's collision-aware picker knows what the bead touches.
+        for krate in crate_labels_from_text(&format!("{} {}", rec.title, description)) {
+            let label = format!("crate:{krate}");
+            if !label_set.contains(&label) {
+                label_set.push(label);
+            }
+        }
+        let labels: String = label_set.join(",");
         let priority = rec.priority.to_string();
 
         let mut args = vec![
@@ -1849,6 +1878,20 @@ mod tests {
     };
     use crate::prd_parser::BeadSpec;
     use std::cell::Cell;
+
+    /// Crate labels derive only from path-anchored `crates/<name>/` mentions,
+    /// never from prose crate names (false labels would mis-steer the
+    /// collision-aware picker).
+    #[test]
+    fn test_crate_labels_from_text() {
+        let text = "EVIDENCE: crates/gdscene/src/scene_tree.rs:10 plus \
+                    crates/gdrender2d/src/lib.rs; gdaudio mentioned in prose only";
+        assert_eq!(
+            super::crate_labels_from_text(text),
+            vec!["gdscene".to_string(), "gdrender2d".to_string()]
+        );
+        assert!(super::crate_labels_from_text("no paths here").is_empty());
+    }
 
     /// Gardener cadence: interval 0 disables; never-ran fires; a recent run
     /// suppresses until the interval elapses. Uses plain Durations — Instant
@@ -2068,7 +2111,13 @@ mod tests {
         let fn_start = source
             .find("fn auto_create_beads_from_planner")
             .expect("auto_create_beads_from_planner must exist");
-        let body = &source[fn_start..std::cmp::min(fn_start + 6000, source.len())];
+        // Window spans to the next top-level fn — a fixed char budget broke
+        // once when the function legitimately grew (crate-label derivation).
+        let fn_end = source[fn_start + 10..]
+            .find("\nfn ")
+            .map(|p| fn_start + 10 + p)
+            .unwrap_or(source.len());
+        let body = &source[fn_start..fn_end];
 
         assert!(
             body.contains("dep_add"),

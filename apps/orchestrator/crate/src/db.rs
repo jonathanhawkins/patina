@@ -243,6 +243,11 @@ pub fn count_by_status(conn: &Connection, status: BeadStatus) -> Result<usize> {
 /// dependency graph says ready.
 pub const ENV_BLOCKED_LABEL: &str = "env-blocked";
 
+/// Label set by fail-streak parking: the bead failed verification repeatedly
+/// and needs operator triage. Assignment skips these until the label is
+/// removed.
+pub const NEEDS_ATTENTION_LABEL: &str = "needs-attention";
+
 /// Separator used for the aggregated crate-label column (ASCII unit separator,
 /// cannot appear in label names).
 const LABEL_SEP: char = '\u{1F}';
@@ -279,7 +284,8 @@ fn ready_unassigned_where() -> String {
                AND c.status != 'closed' AND c.deleted_at IS NULL) \
          AND NOT EXISTS ( \
              SELECT 1 FROM labels sl \
-             WHERE sl.issue_id = i.id AND sl.label = '{ENV_BLOCKED_LABEL}')"
+             WHERE sl.issue_id = i.id \
+               AND sl.label IN ('{ENV_BLOCKED_LABEL}','{NEEDS_ATTENTION_LABEL}'))"
     )
 }
 
@@ -347,7 +353,10 @@ pub fn ready_unassigned(conn: &Connection, limit: usize) -> Result<Vec<BeadInfo>
                 crate_labels: if crate_labels_str.is_empty() {
                     Vec::new()
                 } else {
-                    crate_labels_str.split(LABEL_SEP).map(str::to_string).collect()
+                    crate_labels_str
+                        .split(LABEL_SEP)
+                        .map(str::to_string)
+                        .collect()
                 },
                 unblock_impact: row.get(8)?,
             })
@@ -429,8 +438,7 @@ pub fn queue_hygiene(conn: &Connection, stale_days: i64) -> Result<HygieneCounts
                  WHERE status='open' AND deleted_at IS NULL \
                    AND replace(substr(updated_at,1,19),'T',' ') < datetime('now', ?1)",
             )?;
-            let n: i64 =
-                stmt.query_row([format!("-{stale_days} days")], |row| row.get(0))?;
+            let n: i64 = stmt.query_row([format!("-{stale_days} days")], |row| row.get(0))?;
             n as usize
         };
         let top_blockers = {
@@ -916,8 +924,11 @@ mod tests {
         assert_eq!(ids, vec!["pat-related"], "only non-blocking dep is ready");
         assert_eq!(count_ready_unassigned(&conn).unwrap(), 1);
 
-        conn.execute("UPDATE issues SET status='closed' WHERE id='pat-blocker'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE issues SET status='closed' WHERE id='pat-blocker'",
+            [],
+        )
+        .unwrap();
         assert_eq!(
             count_ready_unassigned(&conn).unwrap(),
             4,
@@ -956,7 +967,11 @@ mod tests {
             .into_iter()
             .map(|b| b.id)
             .collect();
-        assert_eq!(ids, vec!["pat-parent"], "epic still hidden after children close");
+        assert_eq!(
+            ids,
+            vec!["pat-parent"],
+            "epic still hidden after children close"
+        );
     }
 
     /// Deferred (future defer_until, ISO-T format), deleted, template, and
@@ -970,9 +985,11 @@ mod tests {
              ('pat-undeferred', 'Defer elapsed', 'open', 0, '2020-01-01T00:00:00Z', NULL, 0),
              ('pat-deleted', 'Deleted', 'open', 0, NULL, '2026-01-01T00:00:00Z', 0),
              ('pat-template', 'Template', 'open', 0, NULL, NULL, 1),
-             ('pat-envblocked', 'Env blocked', 'open', 0, NULL, NULL, 0);
+             ('pat-envblocked', 'Env blocked', 'open', 0, NULL, NULL, 0),
+             ('pat-parked', 'Parked after fail streak', 'open', 0, NULL, NULL, 0);
              INSERT INTO labels (issue_id, label) VALUES
-             ('pat-envblocked', 'env-blocked');",
+             ('pat-envblocked', 'env-blocked'),
+             ('pat-parked', 'needs-attention');",
         )
         .unwrap();
         // Same-day ISO-T defer that elapsed an hour ago: without the
@@ -1104,7 +1121,10 @@ mod tests {
         let busy = busy_crate_labels(&conn).unwrap();
         assert!(busy.contains("crate:gdeditor"));
         assert!(!busy.contains("crate:gdaudio"), "closed beads are not busy");
-        assert!(!busy.contains("crate:gdrender2d"), "open beads are not busy");
+        assert!(
+            !busy.contains("crate:gdrender2d"),
+            "open beads are not busy"
+        );
     }
 
     #[test]

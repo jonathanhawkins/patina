@@ -37,6 +37,7 @@ If `$ARGUMENTS` contains `--dry-run`, drop the `--apply` flag instead — the an
 2. **Confirm the apply summary**: Read the `[plan --apply] summary:` line from stderr.
 - `failed > 0` → STOP the cycle, log the failure to `prd/planner_log.md`, and surface the failing titles. Do NOT create more beads manually — the binary's two-step `br create` + `br update --acceptance-criteria` pattern is the only supported path.
 - `skipped > 0` → log which recommendations were skipped (the stderr lines name the title and `gate_key`). Skips are usually due to empty `acceptance_command` upstream in `planner.rs` templates and should be reported, not patched around.
+- The binary auto-derives `crate:<name>` labels from `crates/<name>/` paths in each recommendation's title/description (the coordinator's collision-aware picker uses these to avoid two workers editing the same crate concurrently). Always cite concrete file paths (`crates/gdscene/src/...`) in recommendation descriptions so the labels land.
 
 3. **Update exit criteria for newly-passing gates**: When the planner config uses the new phase-chain schema (`[[phase]] analysis = { source = "criteria" }`), the binary auto-ticks `- [ ]` → `- [x]` for every criterion whose `(test: \`name\`)` test passed during this cycle. The stderr log shows `[plan] phase 'NAME': ticked N criteria from passing tests` when this happens — no Edit pass needed.
 

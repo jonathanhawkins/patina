@@ -237,6 +237,7 @@ fn script_snapshot_uses_godot_button_indices() {
     let script_snap = ScriptSnapshot {
         pressed_keys: Default::default(),
         just_pressed_keys: Default::default(),
+        just_released_keys: Default::default(),
         input_map: Default::default(),
         mouse_position: Vector2::new(100.0, 200.0),
         mouse_buttons_pressed: ["1".to_string(), "3".to_string()].into_iter().collect(),

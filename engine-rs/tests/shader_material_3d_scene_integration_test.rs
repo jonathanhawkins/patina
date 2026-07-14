@@ -401,6 +401,7 @@ fn shader_processor_unshaded_bypasses_lighting() {
             ..Default::default()
         },
         diagnostics: vec![],
+        fragment_body: vec![],
     };
 
     let processor = ShaderProcessor3D::new();

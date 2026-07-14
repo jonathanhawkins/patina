@@ -52,7 +52,7 @@ fn await_parses_as_stmt() {
     let mut parser = gdscript_interop::Parser::new(tokens, "await get_tree().process_frame\n");
     let stmts = parser.parse_script().unwrap();
     assert_eq!(stmts.len(), 1);
-    assert!(matches!(stmts[0], gdscript_interop::Stmt::Await(_)));
+    assert!(matches!(stmts[0], gdscript_interop::Stmt::Await { .. }));
 }
 
 #[test]

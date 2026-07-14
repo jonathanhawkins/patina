@@ -111,6 +111,7 @@ fn make_input(actions: &[&str], input_map: &HashMap<String, Vec<String>>) -> Inp
     InputSnapshot {
         pressed_keys,
         just_pressed_keys: just_pressed,
+        just_released_keys: Default::default(),
         input_map: input_map.clone(),
         mouse_position: Default::default(),
         mouse_buttons_pressed: Default::default(),
