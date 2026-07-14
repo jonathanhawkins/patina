@@ -384,7 +384,11 @@ impl Node {
     }
 
     /// Marks whether this node is currently inside the active scene tree.
-    pub(crate) fn set_inside_tree(&mut self, inside_tree: bool) {
+    ///
+    /// Public for lifecycle drivers and app-level tests that stage tree
+    /// membership before firing ENTER_TREE (mirrors the inline LifecycleManager
+    /// tests); the paired reader [`Node::is_inside_tree`] is already public.
+    pub fn set_inside_tree(&mut self, inside_tree: bool) {
         self.inside_tree = inside_tree;
     }
 
