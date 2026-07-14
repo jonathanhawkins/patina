@@ -17,6 +17,15 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/bone/dev/games/patina/.claude/hooks/block_worker_cargo.sh'"
+          }
+        ]
+      },
+      {
         "matcher": "Edit",
         "hooks": [
           {
