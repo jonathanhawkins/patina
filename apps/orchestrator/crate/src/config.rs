@@ -78,6 +78,11 @@ pub struct Config {
     /// lane holds that crate's verifies behind a check pre-flight. 0 disables.
     pub crate_breaker_threshold: u32,
 
+    // Coordinator leader health
+    /// Consecutive poll failures before the lock-holding coordinator steps
+    /// down (fail-stop) so a standby/supervisor can take over. 0 disables.
+    pub coordinator_failstop_polls: usize,
+
     // Auto-checkpoint
     /// Closes between auto-checkpoint commits of the shared tree. 0 disables.
     pub checkpoint_closes: u64,
@@ -216,6 +221,7 @@ impl Config {
             gardener_stale_days: env_or("ORCH_GARDENER_STALE_DAYS", 14),
             verify_fail_park_threshold: env_or("ORCH_VERIFY_FAIL_PARK_THRESHOLD", 2),
             crate_breaker_threshold: env_or("ORCH_CRATE_BREAKER_THRESHOLD", 3),
+            coordinator_failstop_polls: env_or("ORCH_COORDINATOR_FAILSTOP_POLLS", 10),
             checkpoint_closes: env_or("ORCH_CHECKPOINT_CLOSES", 10),
             checkpoint_min_interval_seconds: env_or("ORCH_CHECKPOINT_MIN_INTERVAL_SECONDS", 1800),
             checkpoint_gate_timeout_seconds: env_or("ORCH_CHECKPOINT_GATE_TIMEOUT_SECONDS", 1500),
@@ -493,6 +499,7 @@ pub fn test_config() -> Config {
         gardener_stale_days: 14,
         verify_fail_park_threshold: 2,
         crate_breaker_threshold: 3,
+        coordinator_failstop_polls: 10,
         checkpoint_closes: 10,
         checkpoint_min_interval_seconds: 1800,
         checkpoint_gate_timeout_seconds: 1500,

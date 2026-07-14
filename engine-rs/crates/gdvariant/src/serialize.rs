@@ -8,10 +8,20 @@
 //! { "type": "Int", "value": 42 }
 //! ```
 
+use crate::dictionary::Dictionary;
 use crate::variant::Variant;
 use gdcore::math::{Color, Rect2, Vector2, Vector3};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use serde_json::{json, Value};
+
+/// Renders a dictionary key to the string used for a JSON object key. String
+/// keys pass through verbatim; other Variant kinds use their lossy string form.
+fn dict_key_json_string(k: &Variant) -> String {
+    match k {
+        Variant::String(s) => s.clone(),
+        other => other.to_string_lossy(),
+    }
+}
 
 /// Serializes a `Variant` to a `serde_json::Value`.
 pub fn to_json(v: &Variant) -> Value {
@@ -81,8 +91,12 @@ pub fn to_json(v: &Variant) -> Value {
             json!({ "type": "Array", "value": items })
         }
         Variant::Dictionary(dict) => {
-            let entries: serde_json::Map<String, Value> =
-                dict.iter().map(|(k, v)| (k.clone(), to_json(v))).collect();
+            // JSON object keys must be strings, so non-string Variant keys are
+            // rendered to their string form (matching Godot's JSON output).
+            let entries: serde_json::Map<String, Value> = dict
+                .iter()
+                .map(|(k, v)| (dict_key_json_string(k), to_json(v)))
+                .collect();
             json!({ "type": "Dictionary", "value": entries })
         }
         Variant::Callable(c) => match c.as_ref() {
@@ -334,7 +348,7 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         }
         "Dictionary" => {
             let entries = obj.get("value")?.as_object()?;
-            let mut map = std::collections::HashMap::new();
+            let mut map = Dictionary::new();
             for (k, v) in entries {
                 map.insert(k.clone(), from_json(v)?);
             }
@@ -514,9 +528,9 @@ mod tests {
 
     #[test]
     fn roundtrip_dictionary() {
-        let mut dict = std::collections::HashMap::new();
-        dict.insert("name".into(), Variant::String("Patina".into()));
-        dict.insert("version".into(), Variant::Int(1));
+        let mut dict = Dictionary::new();
+        dict.insert("name", Variant::String("Patina".into()));
+        dict.insert("version", Variant::Int(1));
         let v = Variant::Dictionary(dict);
         assert_eq!(roundtrip(v.clone()), v);
     }
@@ -623,10 +637,10 @@ mod tests {
 
     #[test]
     fn roundtrip_nested_dictionary() {
-        let mut inner = std::collections::HashMap::new();
-        inner.insert("nested".into(), Variant::Bool(true));
-        let mut outer = std::collections::HashMap::new();
-        outer.insert("child".into(), Variant::Dictionary(inner));
+        let mut inner = Dictionary::new();
+        inner.insert("nested", Variant::Bool(true));
+        let mut outer = Dictionary::new();
+        outer.insert("child", Variant::Dictionary(inner));
         let v = Variant::Dictionary(outer);
         assert_eq!(roundtrip(v.clone()), v);
     }

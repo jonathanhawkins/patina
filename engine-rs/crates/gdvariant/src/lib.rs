@@ -7,6 +7,7 @@
 
 pub mod binary;
 pub mod conversion;
+pub mod dictionary;
 #[cfg(test)]
 mod fuzz_variant;
 pub mod serialize;
@@ -15,4 +16,5 @@ pub mod variant;
 // Re-export the most-used types at the crate root.
 pub use binary::{decode_variant, encode_variant, VariantDecodeError, VariantEncodeError};
 pub use conversion::ConversionError;
+pub use dictionary::Dictionary;
 pub use variant::{CallableRef, ResourceRef, Variant, VariantType};

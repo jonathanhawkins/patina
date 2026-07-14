@@ -13,6 +13,7 @@ use gdscene::animation::{AnimationTrack, KeyFrame, TransitionType};
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
 use gdvariant::variant::VariantType;
+use gdvariant::Dictionary;
 use gdvariant::ResourceRef;
 use gdvariant::Variant;
 
@@ -1502,7 +1503,7 @@ pub fn default_variant(vtype: VariantType) -> Variant {
         VariantType::Float => Variant::Float(0.0),
         VariantType::String => Variant::String(String::new()),
         VariantType::Array => Variant::Array(Vec::new()),
-        VariantType::Dictionary => Variant::Dictionary(HashMap::new()),
+        VariantType::Dictionary => Variant::Dictionary(Dictionary::new()),
         _ => Variant::Nil,
     }
 }
@@ -1709,7 +1710,7 @@ impl TypedDictionaryEditor {
 
     /// Serializes the dictionary back to a `Variant::Dictionary`.
     pub fn to_variant(&self) -> Variant {
-        Variant::Dictionary(self.entries.clone())
+        Variant::Dictionary(Dictionary::from(self.entries.clone()))
     }
 }
 

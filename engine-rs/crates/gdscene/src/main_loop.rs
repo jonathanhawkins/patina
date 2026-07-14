@@ -988,6 +988,11 @@ impl MainLoop {
             // Emit body_entered / body_exited signals on Area2D nodes.
             self.physics_server.process_overlap_signals(&mut self.tree);
 
+            // Emit body_entered / body_exited signals on contact-monitoring
+            // RigidBody2D nodes (contact_monitor + max_contacts_reported).
+            self.physics_server
+                .process_body_contact_signals(&mut self.tree);
+
             // Run move_and_slide for CharacterBody2D nodes with velocity.
             self.physics_server
                 .process_character_movement(physics_dt as f32, &mut self.tree);

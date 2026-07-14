@@ -21,10 +21,16 @@ use gdscene::node2d;
 use gdscene::node3d;
 use gdscene::scene_tree::SceneTree;
 
-/// Three 10x10 squares in a row along +x — `[0,10]`, `[10,20]`, `[20,30]` —
-/// each sharing an edge with the next, so A* produces a path with an
-/// intermediate waypoint (start -> centroid -> goal) rather than one hop.
-fn strip_mesh() -> NavMesh2D {
+/// An L-shaped mesh of three 10x10 squares meeting at the reflex corner
+/// `(10,10)`: a bottom square `[0,10]x[0,10]`, one above it `[0,10]x[10,20]`,
+/// and one to the right of that `[10,20]x[10,20]`.
+///
+/// The bend matters: with portal-edge funnel smoothing (pat-u3l8c.62) a
+/// *straight* corridor collapses to a single hop, so to keep "successive
+/// `get_next_path_position` values" meaningful the corridor must genuinely
+/// turn a corner — producing an intermediate waypoint hugging `(10,10)`
+/// rather than routing through polygon centroids.
+fn l_bend_mesh() -> NavMesh2D {
     let p0 = NavPolygon::new(vec![
         Vector2::new(0.0, 0.0),
         Vector2::new(10.0, 0.0),
@@ -32,16 +38,16 @@ fn strip_mesh() -> NavMesh2D {
         Vector2::new(0.0, 10.0),
     ]);
     let p1 = NavPolygon::new(vec![
-        Vector2::new(10.0, 0.0),
-        Vector2::new(20.0, 0.0),
-        Vector2::new(20.0, 10.0),
+        Vector2::new(0.0, 10.0),
         Vector2::new(10.0, 10.0),
+        Vector2::new(10.0, 20.0),
+        Vector2::new(0.0, 20.0),
     ]);
     let p2 = NavPolygon::new(vec![
-        Vector2::new(20.0, 0.0),
-        Vector2::new(30.0, 0.0),
-        Vector2::new(30.0, 10.0),
+        Vector2::new(10.0, 10.0),
         Vector2::new(20.0, 10.0),
+        Vector2::new(20.0, 20.0),
+        Vector2::new(10.0, 20.0),
     ]);
     NavMesh2D::new(vec![p0, p1, p2], 0.01)
 }
@@ -57,12 +63,13 @@ fn agent_2d_paths_across_frames_to_target() {
     let start = Vector2::new(5.0, 5.0);
     node2d::set_position(&mut scene, node, start);
 
-    // Multi-polygon navmesh => the computed path has an intermediate waypoint,
-    // which is what makes "successive get_next_path_position" meaningful.
+    // L-bend navmesh => the smoothed path turns a corner and therefore has an
+    // intermediate waypoint, which is what makes "successive
+    // get_next_path_position" meaningful even after funnel smoothing.
     let mut server = NavigationServer2D::new();
-    server.add_region(strip_mesh());
+    server.add_region(l_bend_mesh());
 
-    let target = Vector2::new(25.0, 5.0);
+    let target = Vector2::new(18.0, 15.0);
     let mut agent = NavigationAgent2D::new();
     agent.set_target_position(target, start, &server);
 

@@ -328,6 +328,8 @@ impl SoftwareRenderer3D {
             &viewport.camera_transform,
             &sky_suns_from_lights(&self.lights),
         );
+        // SSAO runs before tonemapping, gated on the environment.
+        crate::postprocess::apply_ssao_env(&mut pixels, &depth_normalized, w, h, env);
         crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
         FrameData3D {
@@ -621,6 +623,8 @@ impl SoftwareRenderer3D {
             &viewport.camera_transform,
             &sky_suns_from_lights(&self.lights),
         );
+        // SSAO runs before tonemapping, gated on the environment.
+        crate::postprocess::apply_ssao_env(&mut pixels, &depth_normalized, w, h, env);
         crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
         FrameData3D {

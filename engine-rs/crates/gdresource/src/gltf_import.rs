@@ -18,7 +18,7 @@
 //! - Cameras, lights, extensions beyond core 2.0
 //! - Multiple scenes (only default / first scene is imported)
 
-use std::collections::HashMap;
+use gdvariant::Dictionary;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -249,27 +249,27 @@ fn build_document(
         .unwrap_or_default();
     let mut node_dicts: Vec<Variant> = Vec::with_capacity(nodes.len());
     for (ni, node) in nodes.iter().enumerate() {
-        let mut d = HashMap::new();
-        d.insert("index".into(), Variant::Int(ni as i64));
+        let mut d = Dictionary::new();
+        d.insert("index", Variant::Int(ni as i64));
         let name = node
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("Node")
             .to_string();
-        d.insert("name".into(), Variant::String(name));
+        d.insert("name", Variant::String(name));
         if let Some(mesh) = node.get("mesh").and_then(|v| v.as_u64()) {
-            d.insert("mesh".into(), Variant::Int(mesh as i64));
+            d.insert("mesh", Variant::Int(mesh as i64));
         }
         if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
             let kids: Vec<Variant> = children
                 .iter()
                 .filter_map(|c| c.as_u64().map(|u| Variant::Int(u as i64)))
                 .collect();
-            d.insert("children".into(), Variant::Array(kids));
+            d.insert("children", Variant::Array(kids));
         }
         let (t, r, s) = node_trs(node);
         d.insert(
-            "translation".into(),
+            "translation",
             Variant::Array(vec![
                 Variant::Float(t[0] as f64),
                 Variant::Float(t[1] as f64),
@@ -277,7 +277,7 @@ fn build_document(
             ]),
         );
         d.insert(
-            "rotation".into(),
+            "rotation",
             Variant::Array(vec![
                 Variant::Float(r[0] as f64),
                 Variant::Float(r[1] as f64),
@@ -286,7 +286,7 @@ fn build_document(
             ]),
         );
         d.insert(
-            "scale".into(),
+            "scale",
             Variant::Array(vec![
                 Variant::Float(s[0] as f64),
                 Variant::Float(s[1] as f64),

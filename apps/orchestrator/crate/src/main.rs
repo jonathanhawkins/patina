@@ -818,6 +818,7 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
 
     let mut stall_counter: usize = 0;
     let mut deadlock_counter: usize = 0; // D5: consecutive zero-progress polls
+    let mut consecutive_poll_failures: usize = 0; // leader fail-stop input
     let mut bg_planner = BackgroundPlannerState::new();
     let mut planner_recovery = PlannerRecoveryState::new();
     let mut last_mail_check = Instant::now(); // Fix #5: cache mail server check
@@ -848,6 +849,13 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
             thread::sleep(interval);
             continue;
         }
+
+        // The lock winner is the active coordinator: keep the discovery file
+        // pointing at ITS registered identity. Two daemons with different
+        // names (supervisor respawn + manual restart, observed 2026-07-13)
+        // otherwise split assignment (winner's name) from completion routing
+        // (file's name) and no bead ever closes.
+        sync_coordinator_discovery_file(&coord.config);
 
         // Ensure mail server is running (only check every 60s, not every cycle)
         if let Some(mail_session) = &mail_server_session {
@@ -891,7 +899,31 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
         // and reassigns to worker B, then poll sees worker A's completion message
         // and skips it due to assignee mismatch.
         let mut poll_progress = 0usize; // completions processed + rejected (D5)
-        let poll_ok = match coord.poll() {
+        let poll_result = coord.poll();
+        if poll_result.is_err() {
+            consecutive_poll_failures += 1;
+            // FAIL-STOP: a leader whose polls fail persistently (broken mail
+            // identity, dead mail server, wedged DB) must step down rather
+            // than hold the lock while processing nothing — a healthy standby
+            // or supervisor takes over, and the discovery-file sync above
+            // repoints workers at the new leader's identity. Observed live
+            // 2026-07-13: an unregistered identity failed every poll while
+            // the daemon happily kept leading.
+            let failstop = coord.config.coordinator_failstop_polls;
+            if failstop > 0 && consecutive_poll_failures >= failstop {
+                let msg = format!(
+                    "COORDINATOR FAIL-STOP: {consecutive_poll_failures} consecutive poll \
+                     failures (mail identity/server/db broken) — stepping down so a standby \
+                     or supervisor can take over."
+                );
+                eprintln!("{msg}");
+                coord.notify_boss(&msg);
+                return;
+            }
+        } else {
+            consecutive_poll_failures = 0;
+        }
+        let poll_ok = match poll_result {
             Ok(result) => {
                 tracing::info!(
                     processed = result.processed,
@@ -1527,6 +1559,31 @@ fn maintain_planner_pane(
     }
 }
 
+/// The flock winner is the active coordinator: keep `.beads/coordinator_agent`
+/// pointing at ITS registered identity so workers route completions to the
+/// name that is actually fetching the inbox. No-op when the identities already
+/// match or the daemon has no configured name.
+fn sync_coordinator_discovery_file(config: &config::Config) {
+    let Some(name) = &config.coordinator_agent else {
+        return;
+    };
+    let path = config.project_root.join(".beads/coordinator_agent");
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current.trim() != name {
+        // Temp-file + rename: atomic on APFS. Workers re-read this file per
+        // completion and must never observe a torn or empty write.
+        let tmp = path.with_extension("tmp");
+        match std::fs::write(&tmp, name).and_then(|()| std::fs::rename(&tmp, &path)) {
+            Ok(()) => tracing::warn!(
+                coordinator = %name,
+                was = %current.trim(),
+                "discovery file repointed to the active lock-winner"
+            ),
+            Err(e) => tracing::warn!(error = %e, "could not update coordinator discovery file"),
+        }
+    }
+}
+
 /// Crate names cited as `crates/<name>/` paths in bead text — conservative
 /// (path-anchored) so prose mentions don't produce false crate labels.
 fn crate_labels_from_text(text: &str) -> Vec<String> {
@@ -1878,6 +1935,55 @@ mod tests {
     };
     use crate::prd_parser::BeadSpec;
     use std::cell::Cell;
+
+    /// The discovery file follows the lock winner: mismatched names are
+    /// rewritten, matching names are left alone (no write churn), and a
+    /// nameless daemon never touches the file.
+    #[test]
+    fn test_sync_coordinator_discovery_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
+        let path = dir.path().join(".beads/coordinator_agent");
+        std::fs::write(&path, "StaleName").unwrap();
+
+        let mut cfg = crate::config::test_config();
+        cfg.project_root = dir.path().to_path_buf();
+        cfg.coordinator_agent = Some("CrimsonOwl".to_string());
+        super::sync_coordinator_discovery_file(&cfg);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "CrimsonOwl");
+
+        // Matching name: untouched. Nameless daemon: untouched.
+        super::sync_coordinator_discovery_file(&cfg);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "CrimsonOwl");
+        cfg.coordinator_agent = None;
+        std::fs::write(&path, "SomeoneElse").unwrap();
+        super::sync_coordinator_discovery_file(&cfg);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SomeoneElse");
+    }
+
+    /// Regression (2026-07-13): the run loop must fail-stop after persistent
+    /// poll failures — an unregistered/broken leader otherwise holds the lock
+    /// forever while processing nothing.
+    #[test]
+    fn test_run_loop_has_failstop_and_discovery_sync() {
+        let source = include_str!("main.rs");
+        let run_fn = source.find("fn cmd_run(").expect("cmd_run must exist");
+        // Bound the window to cmd_run itself — extending to EOF would match
+        // this test's own string literals (vacuous).
+        let fn_end = source[run_fn + 10..]
+            .find("\nfn ")
+            .map(|p| run_fn + 10 + p)
+            .unwrap_or(source.len());
+        let body = &source[run_fn..fn_end];
+        assert!(
+            body.contains("COORDINATOR FAIL-STOP"),
+            "run loop must step down on persistent poll failures"
+        );
+        assert!(
+            body.contains("sync_coordinator_discovery_file"),
+            "lock winner must repoint the discovery file to its own identity"
+        );
+    }
 
     /// Crate labels derive only from path-anchored `crates/<name>/` mentions,
     /// never from prose crate names (false labels would mis-steer the

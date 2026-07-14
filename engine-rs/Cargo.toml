@@ -103,3 +103,11 @@ serde_yaml = "0.9"
 [[example]]
 name = "editor"
 path = "examples/editor.rs"
+
+# Verifier-lane build speed: ~550 integration test binaries each link the full
+# engine, and full DWARF (debuginfo=2) dominates that link time. Line tables
+# keep file:line in panic backtraces — enough for swarm verify triage — while
+# cutting compile+link cost substantially. Set `debug = 2` locally if you need
+# full variable info under a debugger.
+[profile.dev]
+debug = "line-tables-only"

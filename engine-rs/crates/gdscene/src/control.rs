@@ -2036,4 +2036,84 @@ func _on_pressed():
         assert!((get_anchor_right(&tree, id) - 0.0).abs() < 1e-4);
         assert!((get_anchor_bottom(&tree, id) - 1.0).abs() < 1e-4);
     }
+
+    // -- Containers: Margin / Center / Scroll / Tab -------------------------
+
+    /// Adds a container of `class` under root and `n` plain Control children.
+    fn container_with_children(class: &str, n: usize) -> (SceneTree, NodeId, Vec<NodeId>) {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let cid = tree.add_child(root, Node::new("C", class)).unwrap();
+        let kids: Vec<NodeId> = (0..n)
+            .map(|i| {
+                tree.add_child(cid, Node::new(&format!("k{i}"), "Control"))
+                    .unwrap()
+            })
+            .collect();
+        (tree, cid, kids)
+    }
+
+    #[test]
+    fn margin_container_insets_child() {
+        let (mut tree, cid, kids) = container_with_children("MarginContainer", 1);
+        set_margin(&mut tree, cid, "left", 10);
+        set_margin(&mut tree, cid, "top", 5);
+        set_margin(&mut tree, cid, "right", 20);
+        set_margin(&mut tree, cid, "bottom", 15);
+
+        arrange_container(&mut tree, cid, Vector2::new(200.0, 100.0));
+
+        let pos = get_position(&tree, kids[0]);
+        let size = get_size(&tree, kids[0]);
+        assert_eq!(pos, Vector2::new(10.0, 5.0));
+        // 200 - 10 - 20 = 170, 100 - 5 - 15 = 80.
+        assert_eq!(size, Vector2::new(170.0, 80.0));
+    }
+
+    #[test]
+    fn center_container_centers_child_at_min_size() {
+        let (mut tree, cid, kids) = container_with_children("CenterContainer", 1);
+        set_custom_minimum_size(&mut tree, kids[0], Vector2::new(40.0, 20.0));
+
+        arrange_container(&mut tree, cid, Vector2::new(200.0, 100.0));
+
+        let pos = get_position(&tree, kids[0]);
+        let size = get_size(&tree, kids[0]);
+        assert_eq!(size, Vector2::new(40.0, 20.0));
+        // (200-40)/2 = 80, (100-20)/2 = 40.
+        assert_eq!(pos, Vector2::new(80.0, 40.0));
+    }
+
+    #[test]
+    fn scroll_container_shifts_content_by_offset() {
+        let (mut tree, cid, kids) = container_with_children("ScrollContainer", 1);
+        set_custom_minimum_size(&mut tree, kids[0], Vector2::new(500.0, 400.0));
+        tree.get_node_mut(cid)
+            .unwrap()
+            .set_property("scroll_vertical", Variant::Int(120));
+
+        arrange_container(&mut tree, cid, Vector2::new(200.0, 100.0));
+
+        let pos = get_position(&tree, kids[0]);
+        let size = get_size(&tree, kids[0]);
+        // Content larger than viewport keeps its min size, shifted up by scroll.
+        assert_eq!(size, Vector2::new(500.0, 400.0));
+        assert_eq!(pos, Vector2::new(0.0, -120.0));
+    }
+
+    #[test]
+    fn tab_container_shows_only_current_tab() {
+        let (mut tree, cid, kids) = container_with_children("TabContainer", 3);
+        set_current_tab(&mut tree, cid, 1);
+
+        arrange_container(&mut tree, cid, Vector2::new(300.0, 200.0));
+
+        // Non-current tabs collapse to zero; current tab fills below the header.
+        assert_eq!(get_size(&tree, kids[0]), Vector2::ZERO);
+        assert_eq!(get_size(&tree, kids[2]), Vector2::ZERO);
+        let cur_size = get_size(&tree, kids[1]);
+        let cur_pos = get_position(&tree, kids[1]);
+        assert_eq!(cur_pos, Vector2::new(0.0, TAB_BAR_HEIGHT));
+        assert_eq!(cur_size, Vector2::new(300.0, 200.0 - TAB_BAR_HEIGHT));
+    }
 }

@@ -606,6 +606,19 @@ pub fn bead_description(conn: &Connection, bead_id: &str) -> Result<Option<Strin
     })
 }
 
+/// `crate:*` labels attached to one bead — used to scope the stale-recovery
+/// fallback check to the crates the bead actually touched instead of a
+/// full-workspace build.
+pub fn bead_crate_labels(conn: &Connection, bead_id: &str) -> Result<Vec<String>> {
+    with_retry(|| {
+        let mut stmt = conn.prepare_cached(
+            "SELECT label FROM labels WHERE issue_id = ?1 AND label LIKE 'crate:%'",
+        )?;
+        let rows = stmt.query_map([bead_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+    })
+}
+
 /// Collect bead titles matching any of the given statuses.
 pub fn bead_titles_by_status(conn: &Connection, statuses: &[BeadStatus]) -> Result<Vec<String>> {
     if statuses.is_empty() {
@@ -845,6 +858,27 @@ mod tests {
         let conn = setup_test_db();
         let state = bead_state(&conn, "pat-nonexistent").unwrap();
         assert_eq!(state, None);
+    }
+
+    /// Only the bead's own `crate:*` labels come back — other labels and other
+    /// beads' labels don't. Missing beads yield an empty list, not an error.
+    #[test]
+    fn test_bead_crate_labels() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status) VALUES ('pat-1', 'B1', 'in_progress');
+             INSERT INTO labels (issue_id, label) VALUES
+             ('pat-1', 'crate:gdscene'),
+             ('pat-1', 'crate:gdrender2d'),
+             ('pat-1', 'needs-attention'),
+             ('pat-2', 'crate:gdeditor');",
+        )
+        .unwrap();
+
+        let mut labels = bead_crate_labels(&conn, "pat-1").unwrap();
+        labels.sort();
+        assert_eq!(labels, vec!["crate:gdrender2d", "crate:gdscene"]);
+        assert!(bead_crate_labels(&conn, "pat-missing").unwrap().is_empty());
     }
 
     #[test]

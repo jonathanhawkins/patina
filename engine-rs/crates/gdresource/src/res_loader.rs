@@ -12,7 +12,7 @@
 //! resource type string, and then serialized properties using Godot's
 //! binary variant encoding.
 
-use std::collections::HashMap;
+use gdvariant::Dictionary;
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
@@ -593,15 +593,12 @@ impl BinaryResourceReader<'_> {
             }
             V_DICTIONARY => {
                 let len = self.cur.u32()? & 0x7FFF_FFFF;
-                let mut map = HashMap::new();
+                let mut map = Dictionary::new();
                 for _ in 0..len {
                     let key = self.parse_variant(depth + 1)?;
                     let value = self.parse_variant(depth + 1)?;
-                    let key_str = match key {
-                        Variant::String(s) => s,
-                        other => other.to_string_lossy(),
-                    };
-                    map.insert(key_str, value);
+                    // Keys keep their decoded Variant type (typed dictionary keys).
+                    map.insert(key, value);
                 }
                 Ok(Variant::Dictionary(map))
             }

@@ -133,6 +133,28 @@ impl Area3D {
         }
     }
 
+    /// Returns the space gravity acceleration this area imposes at world
+    /// position `at`.
+    ///
+    /// For a directional area the gravity is `gravity_direction * gravity`.
+    /// For a point area (`gravity_point`) the gravity pulls toward the area's
+    /// origin with magnitude `gravity`. The returned vector is the *space*
+    /// gravity; a body's own `gravity_scale` is applied on top during
+    /// integration, matching Godot's semantics.
+    pub fn gravity_vector(&self, at: Vector3) -> Vector3 {
+        if self.gravity_point {
+            let dir = self.position - at;
+            let len = dir.length();
+            if len > 1e-6 {
+                dir * (self.gravity / len)
+            } else {
+                Vector3::ZERO
+            }
+        } else {
+            self.gravity_direction.normalized() * self.gravity
+        }
+    }
+
     /// Returns the list of bodies currently overlapping this area, given the
     /// current body set. This is a one-shot query (no enter/exit tracking).
     pub fn get_overlapping_bodies<'a>(
@@ -200,6 +222,11 @@ impl AreaStore3D {
     /// Returns a mutable reference to an area by ID.
     pub fn get_area_mut(&mut self, id: AreaId3D) -> Option<&mut Area3D> {
         self.areas.get_mut(&id)
+    }
+
+    /// Returns an iterator over all areas in the store.
+    pub fn areas(&self) -> impl Iterator<Item = &Area3D> {
+        self.areas.values()
     }
 
     /// Returns the number of areas in the store.

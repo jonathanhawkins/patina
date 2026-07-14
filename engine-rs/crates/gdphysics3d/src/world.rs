@@ -3,13 +3,68 @@
 use std::collections::BTreeMap;
 
 use gdcore::math::Vector3;
-use gdcore::math3d::Aabb;
+use gdcore::math3d::{Aabb, Quaternion};
 
-#[cfg(test)]
+use crate::area3d::{Area3D, AreaId3D, AreaStore3D, SpaceOverride};
 use crate::body::BodyType3D;
 use crate::body::{BodyId3D, ContactPoint3D, PhysicsBody3D};
 use crate::collision;
 use crate::shape::Shape3D;
+
+/// Half the largest bounding-box extent of a shape — a conservative sphere
+/// radius used by the continuous-collision sweep.
+fn bounding_radius(shape: &Shape3D) -> f32 {
+    let size = shape.bounding_aabb().size;
+    0.5 * size.x.max(size.y).max(size.z)
+}
+
+/// Sign of `v` with a dead-band around zero (so a face-aligned direction keeps
+/// the support point centred on that axis rather than biased to a corner).
+fn axis_sign(v: f32) -> f32 {
+    if v > 1e-6 {
+        1.0
+    } else if v < -1e-6 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// Returns the farthest point of a shape (at `pos`/`rot`) in world direction
+/// `dir` — its support point. Used to place the contact roughly on the touching
+/// surface so an off-centre or tilted contact produces a torque, rather than
+/// the centre-line midpoint (which is always parallel to the normal and can
+/// never rotate a body).
+fn support_point(shape: &Shape3D, pos: Vector3, rot: Quaternion, dir: Vector3) -> Vector3 {
+    let d = dir.normalized();
+    match shape {
+        Shape3D::Sphere { radius } => pos + d * *radius,
+        Shape3D::BoxShape { half_extents } => {
+            let local_dir = rot.inverse().xform(d);
+            let corner = Vector3::new(
+                half_extents.x * axis_sign(local_dir.x),
+                half_extents.y * axis_sign(local_dir.y),
+                half_extents.z * axis_sign(local_dir.z),
+            );
+            pos + rot.xform(corner)
+        }
+        Shape3D::ConvexPolygonShape { points } if !points.is_empty() => {
+            let local_dir = rot.inverse().xform(d);
+            let mut best = points[0];
+            let mut best_dot = best.dot(local_dir);
+            for &p in &points[1..] {
+                let dp = p.dot(local_dir);
+                if dp > best_dot {
+                    best_dot = dp;
+                    best = p;
+                }
+            }
+            pos + rot.xform(best)
+        }
+        // Capsule/cylinder/concave/plane: approximate with the bounding sphere.
+        _ => pos + d * bounding_radius(shape),
+    }
+}
 
 /// Result of a 3D raycast query.
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +87,8 @@ pub struct PhysicsWorld3D {
     pub gravity: Vector3,
     /// Soft bodies stepped with gravity each frame (pat-p0s82.18).
     soft_bodies: Vec<gdphysics2d::softbody3d::SoftBody3D>,
+    /// Areas whose space overrides (gravity/damp) are applied during the step.
+    area_store: AreaStore3D,
 }
 
 impl PhysicsWorld3D {
@@ -42,7 +99,36 @@ impl PhysicsWorld3D {
             next_id: 1,
             gravity: Vector3::new(0.0, -9.8, 0.0),
             soft_bodies: Vec::new(),
+            area_store: AreaStore3D::new(),
         }
+    }
+
+    // -- Area management ---------------------------------------------------
+
+    /// Adds an [`Area3D`] whose space overrides affect overlapping rigid
+    /// bodies during the step, returning its ID.
+    pub fn add_area(&mut self, area: Area3D) -> AreaId3D {
+        self.area_store.add_area(area)
+    }
+
+    /// Removes an area by ID.
+    pub fn remove_area(&mut self, id: AreaId3D) -> Option<Area3D> {
+        self.area_store.remove_area(id)
+    }
+
+    /// Returns a reference to an area by ID.
+    pub fn get_area(&self, id: AreaId3D) -> Option<&Area3D> {
+        self.area_store.get_area(id)
+    }
+
+    /// Returns a mutable reference to an area by ID.
+    pub fn get_area_mut(&mut self, id: AreaId3D) -> Option<&mut Area3D> {
+        self.area_store.get_area_mut(id)
+    }
+
+    /// Returns the number of areas in the world.
+    pub fn area_count(&self) -> usize {
+        self.area_store.area_count()
     }
 
     /// Register a soft body for simulation.
@@ -108,9 +194,37 @@ impl PhysicsWorld3D {
             body.clear_contacts();
         }
 
-        // 1. Integrate all rigid bodies.
-        for body in self.bodies.values_mut() {
-            body.integrate(dt, gravity);
+        // Record pre-integration positions of continuous-CD bodies so we can
+        // sweep their motion for tunnelling after integration.
+        let ccd_prev: Vec<(BodyId3D, Vector3)> = self
+            .bodies
+            .values()
+            .filter(|b| b.continuous_cd && b.body_type == BodyType3D::Rigid && !b.sleeping)
+            .map(|b| (b.id, b.position))
+            .collect();
+
+        // 1. Integrate all rigid bodies, applying Area3D gravity/damp overrides
+        //    for any body overlapping an area with an active space override.
+        let ids: Vec<BodyId3D> = self.bodies.keys().copied().collect();
+        for id in &ids {
+            let (eff_gravity, lin_damp, ang_damp) = self.effective_space_params(*id);
+            if let Some(body) = self.bodies.get_mut(id) {
+                body.integrate(dt, eff_gravity);
+                if let Some(d) = lin_damp {
+                    let factor = (1.0 - d * dt).max(0.0);
+                    body.linear_velocity = body.linear_velocity * factor;
+                }
+                if let Some(d) = ang_damp {
+                    let factor = (1.0 - d * dt).max(0.0);
+                    body.angular_velocity = body.angular_velocity * factor;
+                }
+            }
+        }
+
+        // 1b. Continuous collision detection: clamp fast movers that stepped
+        //     clean through a static/kinematic body so they cannot tunnel.
+        for (id, prev) in ccd_prev {
+            self.ccd_clamp(id, prev);
         }
 
         // 2. Broad-phase: prune candidate pairs whose world-space AABBs overlap
@@ -142,8 +256,16 @@ impl PhysicsWorld3D {
             let result =
                 collision::test_collision_rot(pos_a, rot_a, &shape_a, pos_b, rot_b, &shape_b);
             if result.colliding {
-                // Record contacts.
-                let contact_pos = pos_a + result.normal * (pos_b - pos_a).length() * 0.5;
+                // Contact point on the touching surfaces: midpoint of each
+                // body's support point toward the other. This is offset from a
+                // body's centre of mass for tilted/edge contacts, so the normal
+                // impulse can induce rotation (a tumbling box), unlike a plain
+                // centre-line midpoint.
+                let support_a =
+                    support_point(&shape_a, pos_a, rot_a, result.normal);
+                let support_b =
+                    support_point(&shape_b, pos_b, rot_b, result.normal * -1.0);
+                let contact_pos = (support_a + support_b) * 0.5;
                 if let Some(a) = self.bodies.get_mut(&id_a) {
                     a.add_contact(ContactPoint3D {
                         position: contact_pos,
@@ -175,37 +297,84 @@ impl PhysicsWorld3D {
                         b.position = b.position + correction * (b_inv / total_inv);
                     }
 
-                    // Impulse-based velocity response with restitution and friction.
+                    // Impulse-based velocity response with restitution and
+                    // friction. Contact impulses are applied at `contact_pos`
+                    // (offset from each body's centre of mass), so an off-centre
+                    // contact induces angular velocity through the inverse
+                    // inertia tensor — a box resting past a ledge tumbles.
+                    let n = result.normal;
+                    let ra = contact_pos - pos_a;
+                    let rb = contact_pos - pos_b;
                     let vel_a = self.bodies[&id_a].linear_velocity;
                     let vel_b = self.bodies[&id_b].linear_velocity;
-                    let relative_vel = vel_a - vel_b;
-                    let vel_along_normal = relative_vel.dot(result.normal);
+                    let ang_a = self.bodies[&id_a].angular_velocity;
+                    let ang_b = self.bodies[&id_b].angular_velocity;
+                    // Relative velocity at the contact point (linear + rotational).
+                    let vp_a = vel_a + ang_a.cross(ra);
+                    let vp_b = vel_b + ang_b.cross(rb);
+                    let relative_vel = vp_a - vp_b;
+                    let vel_along_normal = relative_vel.dot(n);
 
-                    // Only resolve if bodies are moving toward each other.
+                    // Only resolve if bodies are approaching at the contact.
                     if vel_along_normal > 0.0 {
                         let restitution =
                             self.bodies[&id_a].bounce.min(self.bodies[&id_b].bounce);
-                        let j = -(1.0 + restitution) * vel_along_normal / total_inv;
-                        let impulse = result.normal * j;
 
-                        // impulse = normal * j where j < 0 (opposing approach).
-                        // vel_a += impulse / m_a, vel_b -= impulse / m_b.
+                        // Effective mass along the normal including the angular
+                        // contribution of each body: 1/m_a + 1/m_b +
+                        // n·((I_a⁻¹(r_a×n))×r_a) + n·((I_b⁻¹(r_b×n))×r_b).
+                        let raxn = ra.cross(n);
+                        let rbxn = rb.cross(n);
+                        let ang_term_a = self.bodies[&id_a]
+                            .apply_inverse_inertia(raxn)
+                            .cross(ra)
+                            .dot(n);
+                        let ang_term_b = self.bodies[&id_b]
+                            .apply_inverse_inertia(rbxn)
+                            .cross(rb)
+                            .dot(n);
+                        let k = total_inv + ang_term_a + ang_term_b;
+                        if k <= 0.0 {
+                            continue;
+                        }
+
+                        let j = -(1.0 + restitution) * vel_along_normal / k;
+                        let impulse = n * j;
+
+                        // Apply the normal impulse to linear and angular state.
                         if let Some(a) = self.bodies.get_mut(&id_a) {
                             a.linear_velocity = a.linear_velocity + impulse * a_inv;
+                            let dw = a.apply_inverse_inertia(ra.cross(impulse));
+                            a.angular_velocity = a.angular_velocity + dw;
                         }
                         if let Some(b) = self.bodies.get_mut(&id_b) {
                             b.linear_velocity = b.linear_velocity - impulse * b_inv;
+                            let dw = b.apply_inverse_inertia(rb.cross(impulse));
+                            b.angular_velocity = b.angular_velocity - dw;
                         }
 
-                        // Friction impulse (tangential).
-                        let tangent = relative_vel - result.normal * vel_along_normal;
+                        // Friction impulse (tangential), applied to linear and
+                        // angular state as well.
+                        let tangent = relative_vel - n * vel_along_normal;
                         let tangent_len = tangent.length();
                         if tangent_len > 1e-8 {
                             let tangent_dir = tangent * (1.0 / tangent_len);
                             let friction_coeff = (self.bodies[&id_a].friction
                                 * self.bodies[&id_b].friction)
                                 .sqrt();
-                            let jt = -tangent_len / total_inv;
+                            // Effective mass along the tangent direction.
+                            let raxt = ra.cross(tangent_dir);
+                            let rbxt = rb.cross(tangent_dir);
+                            let kt = total_inv
+                                + self.bodies[&id_a]
+                                    .apply_inverse_inertia(raxt)
+                                    .cross(ra)
+                                    .dot(tangent_dir)
+                                + self.bodies[&id_b]
+                                    .apply_inverse_inertia(rbxt)
+                                    .cross(rb)
+                                    .dot(tangent_dir);
+                            let jt = if kt > 0.0 { -tangent_len / kt } else { 0.0 };
                             // Coulomb friction clamp.
                             let friction_impulse = if jt.abs() < j.abs() * friction_coeff {
                                 tangent_dir * jt
@@ -215,13 +384,135 @@ impl PhysicsWorld3D {
 
                             if let Some(a) = self.bodies.get_mut(&id_a) {
                                 a.linear_velocity = a.linear_velocity + friction_impulse * a_inv;
+                                let dw = a.apply_inverse_inertia(ra.cross(friction_impulse));
+                                a.angular_velocity = a.angular_velocity + dw;
                             }
                             if let Some(b) = self.bodies.get_mut(&id_b) {
                                 b.linear_velocity = b.linear_velocity - friction_impulse * b_inv;
+                                let dw = b.apply_inverse_inertia(rb.cross(friction_impulse));
+                                b.angular_velocity = b.angular_velocity - dw;
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Computes the effective space parameters for a body this step by folding
+    /// in every overlapping [`Area3D`] whose gravity space override is active.
+    ///
+    /// Returns the effective *space* gravity (before the body's own
+    /// `gravity_scale`) plus optional linear/angular damping overrides. Areas
+    /// are applied highest-`priority` first; `Replace` modes discard the
+    /// accumulated gravity, `Combine` modes add to it — a simplification of
+    /// Godot's five-way override enum that covers the common single-zone case.
+    fn effective_space_params(&self, id: BodyId3D) -> (Vector3, Option<f32>, Option<f32>) {
+        let body = match self.bodies.get(&id) {
+            Some(b) => b,
+            None => return (self.gravity, None, None),
+        };
+        if body.body_type != BodyType3D::Rigid {
+            return (self.gravity, None, None);
+        }
+        if self.area_store.area_count() == 0 {
+            return (self.gravity, None, None);
+        }
+
+        let mut overlapping: Vec<&Area3D> = self
+            .area_store
+            .areas()
+            .filter(|a| a.gravity_space_override != SpaceOverride::Disabled)
+            .filter(|a| (a.collision_mask & body.collision_layer) != 0)
+            .filter(|a| {
+                collision::test_collision(a.position, &a.shape, body.position, &body.shape)
+                    .colliding
+            })
+            .collect();
+        if overlapping.is_empty() {
+            return (self.gravity, None, None);
+        }
+        // Highest priority applied last so it wins a `Replace`.
+        overlapping.sort_by(|x, y| {
+            x.priority
+                .partial_cmp(&y.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut gravity = self.gravity;
+        let mut lin_damp: Option<f32> = None;
+        let mut ang_damp: Option<f32> = None;
+        for area in overlapping {
+            let g = area.gravity_vector(body.position);
+            match area.gravity_space_override {
+                SpaceOverride::Replace | SpaceOverride::ReplaceCombine => gravity = g,
+                SpaceOverride::Combine | SpaceOverride::CombineReplace => gravity = gravity + g,
+                SpaceOverride::Disabled => {}
+            }
+            lin_damp = Some(lin_damp.map_or(area.linear_damp, |d| d.max(area.linear_damp)));
+            ang_damp = Some(ang_damp.map_or(area.angular_damp, |d| d.max(area.angular_damp)));
+        }
+        (gravity, lin_damp, ang_damp)
+    }
+
+    /// Continuous collision detection for a body that moved from `prev` to its
+    /// current position this step. If the swept motion (approximated as a
+    /// sphere sweep) crosses a static or kinematic body it did not start inside,
+    /// the body is clamped to the entry point so it cannot tunnel through thin
+    /// geometry in a single large step.
+    fn ccd_clamp(&mut self, id: BodyId3D, prev: Vector3) {
+        let (new_pos, r_self, self_layer, self_mask) = match self.bodies.get(&id) {
+            Some(b) => (
+                b.position,
+                bounding_radius(&b.shape),
+                b.collision_layer,
+                b.collision_mask,
+            ),
+            None => return,
+        };
+        let motion = new_pos - prev;
+        let dist = motion.length();
+        if dist < 1e-5 {
+            return;
+        }
+        let dir = motion * (1.0 / dist);
+
+        let mut earliest = dist;
+        let mut hit = false;
+        for other in self.bodies.values() {
+            if other.id == id || other.body_type == BodyType3D::Rigid {
+                continue;
+            }
+            // Godot layer/mask semantics (symmetric).
+            if (self_mask & other.collision_layer) == 0 && (other.collision_mask & self_layer) == 0 {
+                continue;
+            }
+            let r = r_self + bounding_radius(&other.shape);
+            let oc = prev - other.position;
+            let c = oc.dot(oc) - r * r;
+            if c <= 0.0 {
+                // Already overlapping at the start of the step — the regular
+                // narrow-phase/resolution pass handles this, not CCD.
+                continue;
+            }
+            let b = oc.dot(dir);
+            if b > 0.0 {
+                continue; // moving away from this body
+            }
+            let disc = b * b - c;
+            if disc < 0.0 {
+                continue; // sweep misses the expanded sphere
+            }
+            let t = -b - disc.sqrt();
+            if t > 1e-4 && t < earliest {
+                earliest = t;
+                hit = true;
+            }
+        }
+
+        if hit {
+            if let Some(body) = self.bodies.get_mut(&id) {
+                body.position = prev + dir * earliest;
             }
         }
     }
@@ -565,6 +856,207 @@ mod tests {
     fn default_gravity() {
         let world = PhysicsWorld3D::new();
         assert!((world.gravity.y - (-9.8)).abs() < 1e-5);
+    }
+
+    // -- Area space overrides (pat-u3l8c.59) ------------------------------
+
+    #[test]
+    fn area_management_add_get_remove() {
+        let mut world = PhysicsWorld3D::new();
+        let id = world.add_area(Area3D::new(
+            AreaId3D(0),
+            Vector3::ZERO,
+            Shape3D::Sphere { radius: 5.0 },
+        ));
+        assert_eq!(world.area_count(), 1);
+        assert!(world.get_area(id).is_some());
+        world.get_area_mut(id).unwrap().gravity = 3.0;
+        assert!((world.get_area(id).unwrap().gravity - 3.0).abs() < 1e-6);
+        assert!(world.remove_area(id).is_some());
+        assert_eq!(world.area_count(), 0);
+    }
+
+    #[test]
+    fn area_gravity_override_redirects_body() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::new(0.0, -9.8, 0.0);
+        // A body that would normally fall.
+        let id = world.add_body(sphere_body(Vector3::new(0.0, 1.0, 0.0)));
+        // An area that replaces gravity with a strong upward field.
+        let mut area = Area3D::new(AreaId3D(0), Vector3::ZERO, Shape3D::Sphere { radius: 20.0 });
+        area.gravity_space_override = SpaceOverride::Replace;
+        area.gravity = 30.0;
+        area.gravity_direction = Vector3::new(0.0, 1.0, 0.0);
+        world.add_area(area);
+
+        world.step(1.0 / 60.0);
+        let b = world.get_body(id).unwrap();
+        assert!(
+            b.linear_velocity.y > 0.0,
+            "upward area gravity should redirect the body upward, vy={}",
+            b.linear_velocity.y
+        );
+    }
+
+    #[test]
+    fn area_without_override_leaves_gravity_alone() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::new(0.0, -9.8, 0.0);
+        let id = world.add_body(sphere_body(Vector3::new(0.0, 1.0, 0.0)));
+        // Disabled override → default gravity still applies (body falls).
+        let mut area = Area3D::new(AreaId3D(0), Vector3::ZERO, Shape3D::Sphere { radius: 20.0 });
+        area.gravity_space_override = SpaceOverride::Disabled;
+        area.gravity = 30.0;
+        area.gravity_direction = Vector3::new(0.0, 1.0, 0.0);
+        world.add_area(area);
+
+        world.step(1.0 / 60.0);
+        assert!(world.get_body(id).unwrap().linear_velocity.y < 0.0);
+    }
+
+    #[test]
+    fn area_damp_override_slows_body() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+        let mut body = sphere_body(Vector3::new(0.0, 1.0, 0.0));
+        body.linear_velocity = Vector3::new(10.0, 0.0, 0.0);
+        body.can_sleep = false;
+        let id = world.add_body(body);
+        // Active override (combine, no gravity change) applies the area's damp.
+        let mut area = Area3D::new(AreaId3D(0), Vector3::ZERO, Shape3D::Sphere { radius: 20.0 });
+        area.gravity_space_override = SpaceOverride::Combine;
+        area.gravity = 0.0;
+        area.linear_damp = 5.0;
+        world.add_area(area);
+
+        world.step(1.0 / 60.0);
+        let vx = world.get_body(id).unwrap().linear_velocity.x;
+        assert!(vx < 10.0 && vx > 0.0, "area damp should slow but not reverse, vx={vx}");
+    }
+
+    // -- Continuous collision detection (pat-u3l8c.59) --------------------
+
+    #[test]
+    fn ccd_prevents_tunneling_through_static_wall() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+        // A fast bullet that would step from x=-5 to x=+5 in one frame, clean
+        // through a thin static wall at the origin.
+        let mut bullet = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            Vector3::new(-5.0, 0.0, 0.0),
+            Shape3D::Sphere { radius: 0.1 },
+            1.0,
+        );
+        bullet.linear_velocity = Vector3::new(600.0, 0.0, 0.0); // 10 units / (1/60)s
+        bullet.continuous_cd = true;
+        bullet.can_sleep = false;
+        let id = world.add_body(bullet);
+        world.add_body(PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Static,
+            Vector3::ZERO,
+            Shape3D::Sphere { radius: 0.2 },
+            0.0,
+        ));
+
+        world.step(1.0 / 60.0);
+        let x = world.get_body(id).unwrap().position.x;
+        assert!(x < 0.5, "CCD must stop the bullet at the wall (x={x}), not tunnel to +5");
+    }
+
+    #[test]
+    fn without_ccd_fast_body_tunnels() {
+        // Control: the same setup without CCD tunnels straight through.
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+        let mut bullet = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            Vector3::new(-5.0, 0.0, 0.0),
+            Shape3D::Sphere { radius: 0.1 },
+            1.0,
+        );
+        bullet.linear_velocity = Vector3::new(600.0, 0.0, 0.0);
+        bullet.continuous_cd = false;
+        bullet.can_sleep = false;
+        let id = world.add_body(bullet);
+        world.add_body(PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Static,
+            Vector3::ZERO,
+            Shape3D::Sphere { radius: 0.2 },
+            0.0,
+        ));
+
+        world.step(1.0 / 60.0);
+        let x = world.get_body(id).unwrap().position.x;
+        assert!(x > 4.0, "without CCD the fast body tunnels through (x={x})");
+    }
+
+    // -- Contact torque / angular response (pat-u3l8c.59) -----------------
+
+    #[test]
+    fn tilted_box_gains_angular_velocity_from_contact() {
+        // A tilted box driven into a wide static floor gains angular velocity:
+        // the contact/impulse is offset from its centre of mass so the normal
+        // impulse produces a torque (the box tumbles toward flat).
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+        let mut box_body = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            Vector3::new(0.0, 0.9, 0.0),
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(0.5, 0.5, 0.5),
+            },
+            1.0,
+        );
+        box_body.rotation = Quaternion::from_axis_angle(Vector3::new(0.0, 0.0, 1.0), 0.5);
+        box_body.linear_velocity = Vector3::new(0.0, -3.0, 0.0);
+        box_body.can_sleep = false;
+        let id = world.add_body(box_body);
+        world.add_body(PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Static,
+            Vector3::ZERO,
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(5.0, 0.5, 5.0),
+            },
+            0.0,
+        ));
+
+        world.step(1.0 / 60.0);
+        let av = world.get_body(id).unwrap().angular_velocity;
+        assert!(
+            av.length() > 1e-3,
+            "offset contact should induce spin, angular_velocity={av:?}"
+        );
+    }
+
+    #[test]
+    fn head_on_sphere_collision_stays_linear() {
+        // Regression: a centre-line sphere/sphere collision must NOT spuriously
+        // introduce angular velocity (contact is on the line of centres).
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+        let mut ball = sphere_body(Vector3::ZERO);
+        ball.linear_velocity = Vector3::new(10.0, 0.0, 0.0);
+        ball.can_sleep = false;
+        let id = world.add_body(ball);
+        let wall = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Static,
+            Vector3::new(1.5, 0.0, 0.0),
+            Shape3D::Sphere { radius: 1.0 },
+            0.0,
+        );
+        world.add_body(wall);
+
+        world.step(1.0 / 60.0);
+        let av = world.get_body(id).unwrap().angular_velocity;
+        assert!(av.length() < 1e-5, "head-on contact must stay linear, av={av:?}");
     }
 
     // -- Collision layer/mask filtering -----------------------------------

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use gdvariant::{CallableRef, ResourceRef, Variant};
+use gdvariant::{CallableRef, Dictionary, ResourceRef, Variant};
 
 use crate::bindings::{
     MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
@@ -1138,11 +1138,7 @@ impl Interpreter {
                 let mut bindings = vec![];
                 for (key_expr, sub) in entries {
                     let key = self.eval_expr(key_expr)?;
-                    let key_str = match key {
-                        Variant::String(s) => s,
-                        other => format!("{other}"),
-                    };
-                    let Some(entry_val) = dict.get(&key_str) else {
+                    let Some(entry_val) = dict.get(&key) else {
                         return Ok(None);
                     };
                     if let Some(sub_pat) = sub {
@@ -1922,15 +1918,13 @@ impl Interpreter {
             }
 
             Expr::DictLiteral(entries) => {
-                let mut map = HashMap::new();
+                let mut map = Dictionary::new();
                 for (k, v) in entries {
                     let key = self.eval_expr(k)?;
                     let val = self.eval_expr(v)?;
-                    let key_str = match key {
-                        Variant::String(s) => s,
-                        other => format!("{other}"),
-                    };
-                    map.insert(key_str, val);
+                    // Keys keep their evaluated Variant type (Godot dictionaries
+                    // are Variant-keyed, e.g. `{1: "a", Vector2(): "b"}`).
+                    map.insert(key, val);
                 }
                 Ok(Variant::Dictionary(map))
             }
@@ -1945,7 +1939,7 @@ impl Interpreter {
                 }
                 // Fallback: return ClassInstance properties as Dictionary
                 if let Some(ref inst) = self.self_instance {
-                    Ok(Variant::Dictionary(inst.properties.clone()))
+                    Ok(Variant::Dictionary(Dictionary::from(inst.properties.clone())))
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "'self' used outside of a class instance".into(),
@@ -2113,13 +2107,7 @@ impl Interpreter {
             BinOp::Ge => self.binary_cmp(lhs, rhs, |o| o.is_ge()),
             BinOp::In => match rhs {
                 Variant::Array(a) => Ok(Variant::Bool(a.iter().any(|v| variant_eq(v, lhs)))),
-                Variant::Dictionary(d) => {
-                    let key = match lhs {
-                        Variant::String(s) => s.clone(),
-                        other => format!("{other}"),
-                    };
-                    Ok(Variant::Bool(d.contains_key(&key)))
-                }
+                Variant::Dictionary(d) => Ok(Variant::Bool(d.contains_key(lhs))),
                 _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                     "cannot use 'in' with {}",
                     rhs.variant_type()
@@ -2398,19 +2386,16 @@ impl Interpreter {
                 // Prefer SceneTree-backed timer when scene access is available.
                 if let Some(ref mut access) = self.scene_access {
                     if let Some((id, signal_name)) = access.create_timer(secs) {
-                        let mut d = std::collections::HashMap::new();
-                        d.insert(
-                            "__await_kind".into(),
-                            Variant::String("signal".into()),
-                        );
-                        d.insert("name".into(), Variant::String(signal_name.clone()));
-                        d.insert("timer_id".into(), Variant::Int(id as i64));
+                        let mut d = Dictionary::new();
+                        d.insert("__await_kind", Variant::String("signal".into()));
+                        d.insert("name", Variant::String(signal_name.clone()));
+                        d.insert("timer_id", Variant::Int(id as i64));
                         // Property `.timeout` is itself awaitable (Godot idiom).
                         d.insert(
-                            "timeout".into(),
+                            "timeout",
                             crate::coroutine::AwaitTarget::signal_variant(&signal_name),
                         );
-                        d.insert("time_left".into(), Variant::Float(secs));
+                        d.insert("time_left", Variant::Float(secs));
                         return Ok(Some(Variant::Dictionary(d)));
                     }
                 }
@@ -4347,52 +4332,77 @@ impl Interpreter {
             },
             Variant::Dictionary(d) => match method {
                 "size" => Ok(Variant::Int(d.len() as i64)),
+                "is_empty" => Ok(Variant::Bool(d.is_empty())),
                 "has" => {
                     if args.len() != 1 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "has() takes 1 argument".into(),
                         )));
                     }
-                    let key = match &args[0] {
-                        Variant::String(ss) => ss.clone(),
-                        other => format!("{other}"),
-                    };
-                    Ok(Variant::Bool(d.contains_key(&key)))
+                    Ok(Variant::Bool(d.contains_key(&args[0])))
                 }
-                "keys" => Ok(Variant::Array(
-                    d.keys().map(|k| Variant::String(k.clone())).collect(),
-                )),
+                "has_all" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "has_all() takes 1 argument".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Array(keys) => Ok(Variant::Bool(d.has_all(keys))),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "has_all() arg must be an array".into(),
+                        ))),
+                    }
+                }
+                "keys" => Ok(Variant::Array(d.keys().cloned().collect())),
                 "values" => Ok(Variant::Array(d.values().cloned().collect())),
+                "find_key" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "find_key() takes 1 argument".into(),
+                        )));
+                    }
+                    Ok(d.find_key(&args[0]))
+                }
+                "duplicate" => {
+                    let deep = matches!(args.first(), Some(Variant::Bool(true)));
+                    Ok(Variant::Dictionary(d.duplicate(deep)))
+                }
                 "erase" => {
                     if args.len() != 1 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "erase() takes 1 argument".into(),
                         )));
                     }
-                    let key = match &args[0] {
-                        Variant::String(ss) => ss.clone(),
-                        other => format!("{other}"),
+                    let mut c = self.eval_expr(object_expr)?;
+                    let existed = if let Variant::Dictionary(ref mut dm) = c {
+                        dm.remove(&args[0]).is_some()
+                    } else {
+                        false
                     };
+                    self.write_place(object_expr, c)?;
+                    Ok(Variant::Bool(existed))
+                }
+                "clear" => {
                     let mut c = self.eval_expr(object_expr)?;
                     if let Variant::Dictionary(ref mut dm) = c {
-                        dm.remove(&key);
+                        dm.clear();
                     }
                     self.write_place(object_expr, c)?;
                     Ok(Variant::Nil)
                 }
                 "merge" => {
-                    if args.len() != 1 {
+                    if args.is_empty() || args.len() > 2 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "merge() takes 1 argument".into(),
+                            "merge() takes 1-2 arguments".into(),
                         )));
                     }
                     match &args[0] {
                         Variant::Dictionary(other) => {
+                            let overwrite = matches!(args.get(1), Some(Variant::Bool(true)));
                             let mut c = self.eval_expr(object_expr)?;
                             if let Variant::Dictionary(ref mut dm) = c {
-                                for (k, v) in other {
-                                    dm.insert(k.clone(), v.clone());
-                                }
+                                dm.merge(other, overwrite);
                             }
                             self.write_place(object_expr, c)?;
                             Ok(Variant::Nil)
@@ -4402,22 +4412,54 @@ impl Interpreter {
                         ))),
                     }
                 }
+                "merged" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "merged() takes 1-2 arguments".into(),
+                        )));
+                    }
+                    match &args[0] {
+                        Variant::Dictionary(other) => {
+                            let overwrite = matches!(args.get(1), Some(Variant::Bool(true)));
+                            Ok(Variant::Dictionary(d.merged(other, overwrite)))
+                        }
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "merged() arg must be dictionary".into(),
+                        ))),
+                    }
+                }
                 "get" => {
                     if args.is_empty() || args.len() > 2 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "get() takes 1-2 arguments".into(),
                         )));
                     }
-                    let key = match &args[0] {
-                        Variant::String(ss) => ss.clone(),
-                        other => format!("{other}"),
-                    };
                     let default = if args.len() == 2 {
                         args[1].clone()
                     } else {
                         Variant::Nil
                     };
-                    Ok(d.get(&key).cloned().unwrap_or(default))
+                    Ok(d.get(&args[0]).cloned().unwrap_or(default))
+                }
+                "get_or_add" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "get_or_add() takes 1-2 arguments".into(),
+                        )));
+                    }
+                    let default = if args.len() == 2 {
+                        args[1].clone()
+                    } else {
+                        Variant::Nil
+                    };
+                    let mut c = self.eval_expr(object_expr)?;
+                    let result = if let Variant::Dictionary(ref mut dm) = c {
+                        dm.get_or_add(args[0].clone(), default)
+                    } else {
+                        Variant::Nil
+                    };
+                    self.write_place(object_expr, c)?;
+                    Ok(result)
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("Dictionary.{method}"),
@@ -5824,10 +5866,12 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
                     length: a.len(),
                 }))
         }
-        (Variant::Dictionary(d), Variant::String(k)) => d
-            .get(k)
+        (Variant::Dictionary(d), key) => d
+            .get(key)
             .cloned()
-            .ok_or_else(|| RuntimeError::new(RuntimeErrorKind::UndefinedVariable(k.clone()))),
+            .ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::UndefinedVariable(key.to_string_lossy()))
+            }),
         (Variant::String(s), Variant::Int(i)) => {
             let index = if *i < 0 {
                 (s.len() as i64 + i) as usize
@@ -5892,8 +5936,8 @@ fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(
             a[index] = value;
             Ok(())
         }
-        (Variant::Dictionary(d), Variant::String(k)) => {
-            d.insert(k.clone(), value);
+        (Variant::Dictionary(d), key) => {
+            d.insert(key.clone(), value);
             Ok(())
         }
         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -7212,13 +7256,13 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
             let second = day_secs % 60;
             // Civil date from days since 1970-01-01 (Howard Hinnant algorithm).
             let (year, month, day) = civil_from_days(days);
-            let mut dict = std::collections::HashMap::new();
-            dict.insert("year".into(), Variant::Int(year));
-            dict.insert("month".into(), Variant::Int(month));
-            dict.insert("day".into(), Variant::Int(day));
-            dict.insert("hour".into(), Variant::Int(hour));
-            dict.insert("minute".into(), Variant::Int(minute));
-            dict.insert("second".into(), Variant::Int(second));
+            let mut dict = Dictionary::new();
+            dict.insert("year", Variant::Int(year));
+            dict.insert("month", Variant::Int(month));
+            dict.insert("day", Variant::Int(day));
+            dict.insert("hour", Variant::Int(hour));
+            dict.insert("minute", Variant::Int(minute));
+            dict.insert("second", Variant::Int(second));
             Ok(Variant::Dictionary(dict))
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
@@ -7261,7 +7305,7 @@ fn json_value_to_variant(v: &serde_json::Value) -> Variant {
             Variant::Array(arr.iter().map(json_value_to_variant).collect())
         }
         serde_json::Value::Object(map) => {
-            let mut dict = std::collections::HashMap::new();
+            let mut dict = Dictionary::new();
             for (k, val) in map {
                 dict.insert(k.clone(), json_value_to_variant(val));
             }
@@ -7282,8 +7326,13 @@ fn variant_to_json_value(v: &Variant) -> serde_json::Value {
         }
         Variant::Dictionary(map) => {
             let mut obj = serde_json::Map::new();
-            for (k, val) in map {
-                obj.insert(k.clone(), variant_to_json_value(val));
+            for (k, val) in map.iter() {
+                // JSON object keys are strings; stringify non-string Variant keys.
+                let key = match k {
+                    Variant::String(s) => s.clone(),
+                    other => other.to_string_lossy(),
+                };
+                obj.insert(key, variant_to_json_value(val));
             }
             serde_json::Value::Object(obj)
         }

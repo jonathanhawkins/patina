@@ -46,6 +46,31 @@ fn float_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// Reads a `u32` bitmask property (`collision_layer` / `collision_mask`),
+/// defaulting to `default`.
+fn u32_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: u32) -> u32 {
+    tree.get_node(id)
+        .map(|n| match n.get_property(key) {
+            Variant::Int(i) => i as u32,
+            Variant::Float(f) => f as u32,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+/// Reads a truthy property that Godot may expose as a bool or as an enum int
+/// (e.g. `continuous_cd`'s CCD mode, where any nonzero mode enables CCD).
+fn truthy_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: bool) -> bool {
+    tree.get_node(id)
+        .map(|n| match n.get_property(key) {
+            Variant::Bool(b) => b,
+            Variant::Int(i) => i != 0,
+            Variant::Float(f) => f != 0.0,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
 /// Reads a `PackedVector3Array` (or an `Array` of `Vector3`) property from a
 /// node, returning its points. Returns an empty vec when the property is
 /// absent or not a vector array — used to populate convex-hull / trimesh
@@ -222,16 +247,42 @@ impl PhysicsServer3D {
 
                         let mut body =
                             PhysicsBody3D::new(placeholder_id, body_type, position, shape, mass);
-                        body.collision_layer = match node.get_property("collision_layer") {
-                            Variant::Int(i) => i as u32,
-                            Variant::Float(f) => f as u32,
-                            _ => 1,
-                        };
+
+                        // Initial orientation from the node transform.
+                        body.rotation =
+                            gdcore::math3d::Quaternion::from_euler(node3d::get_rotation(tree, nid));
+
+                        // Read the physics material / body properties from the
+                        // node so authored values drive the simulation.
+                        body.collision_layer = u32_prop_3d(tree, nid, "collision_layer", 1);
+                        body.collision_mask = u32_prop_3d(tree, nid, "collision_mask", 1);
+                        body.gravity_scale =
+                            float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
+                        body.linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
+                        body.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
+                        body.friction = float_prop_3d(tree, nid, "friction", 0.5) as f32;
+                        body.bounce = float_prop_3d(tree, nid, "bounce", 0.0) as f32;
+                        body.continuous_cd = truthy_prop_3d(tree, nid, "continuous_cd", false);
+                        body.can_sleep = truthy_prop_3d(tree, nid, "can_sleep", true);
+
                         let actual_id = self.world.add_body(body);
                         self.node_to_body.insert(nid, actual_id);
+                    } else if body_type != BodyType3D::Rigid {
+                        // Static/kinematic bodies are driven by the scene tree:
+                        // push their current node transform into the world so a
+                        // moving platform (animated StaticBody/CharacterBody)
+                        // pushes rigid bodies correctly.
+                        if let Some(&body_id) = self.node_to_body.get(&nid) {
+                            let position = node3d::get_global_transform(tree, nid).origin;
+                            let rotation = gdcore::math3d::Quaternion::from_euler(
+                                node3d::get_rotation(tree, nid),
+                            );
+                            if let Some(b) = self.world.get_body_mut(body_id) {
+                                b.position = position;
+                                b.rotation = rotation;
+                            }
+                        }
                     }
-                    // For already-tracked bodies we could update positions here;
-                    // deferred to future work.
                 }
             }
         }
@@ -244,9 +295,10 @@ impl PhysicsServer3D {
             .copied()
             .collect();
         for nid in stale {
-            if let Some(_body_id) = self.node_to_body.remove(&nid) {
-                // PhysicsWorld3D does not yet expose remove_body — tracked
-                // as future work for the physics3d crate boundary.
+            if let Some(body_id) = self.node_to_body.remove(&nid) {
+                // Free the simulated body so a removed node stops simulating and
+                // does not leak in the physics world.
+                self.world.remove_body(body_id);
             }
         }
     }
@@ -264,8 +316,10 @@ impl PhysicsServer3D {
         for (&nid, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
                 if body.body_type == BodyType3D::Rigid {
-                    let pos = body.position;
-                    node3d::set_position(tree, nid, pos);
+                    node3d::set_position(tree, nid, body.position);
+                    // Pull the simulated orientation back so tumbling/rolling
+                    // rigid bodies rotate their scene nodes too.
+                    node3d::set_rotation(tree, nid, body.rotation.to_euler());
                 }
             }
         }
@@ -515,6 +569,88 @@ mod tests {
     fn custom_gravity() {
         let server = PhysicsServer3D::with_gravity(Vector3::new(0.0, -20.0, 0.0));
         assert!((server.gravity().y - (-20.0)).abs() < 0.01);
+    }
+
+    // -- Server sync fixes (pat-u3l8c.59) ---------------------------------
+
+    #[test]
+    fn removed_node_frees_world_body() {
+        // Previously remove_body was a no-op that leaked the simulated body.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let body = Node::new("Ball", "RigidBody3D");
+        let body_nid = tree.add_child(root, body).unwrap();
+
+        let mut server = PhysicsServer3D::new();
+        server.sync_to_physics(&tree);
+        assert_eq!(server.world().body_count(), 1);
+
+        tree.remove_node(body_nid).unwrap();
+        server.sync_to_physics(&tree);
+        assert_eq!(server.body_count(), 0);
+        assert_eq!(
+            server.world().body_count(),
+            0,
+            "removed node must stop simulating (no leaked world body)"
+        );
+    }
+
+    #[test]
+    fn rotation_syncs_back_to_node() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let body_nid = tree.add_child(root, Node::new("Spinner", "RigidBody3D")).unwrap();
+
+        let mut server = PhysicsServer3D::new();
+        server.sync_to_physics(&tree);
+
+        // Give the simulated body a spin, integrate, and pull it back.
+        let bid = server.body_for_node(body_nid).unwrap();
+        server
+            .world
+            .get_body_mut(bid)
+            .unwrap()
+            .set_angular_velocity(Vector3::new(0.0, 0.0, 5.0));
+        for _ in 0..10 {
+            server.step(1.0 / 60.0);
+        }
+        server.sync_from_physics(&mut tree);
+
+        let rot = node3d::get_rotation(&tree, body_nid);
+        assert!(
+            rot.length() > 1e-3,
+            "spinning body should update the node rotation, rot={rot:?}"
+        );
+    }
+
+    #[test]
+    fn reads_physics_props_from_node() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ball", "RigidBody3D");
+        node.set_property("mass", Variant::Float(4.0));
+        node.set_property("collision_mask", Variant::Int(0b0110));
+        node.set_property("gravity_scale", Variant::Float(2.5));
+        node.set_property("linear_damp", Variant::Float(0.3));
+        node.set_property("friction", Variant::Float(0.8));
+        node.set_property("bounce", Variant::Float(0.6));
+        node.set_property("continuous_cd", Variant::Bool(true));
+        node.set_property("can_sleep", Variant::Bool(false));
+        let nid = tree.add_child(root, node).unwrap();
+
+        let mut server = PhysicsServer3D::new();
+        server.sync_to_physics(&tree);
+        let bid = server.body_for_node(nid).unwrap();
+        let body = server.world().get_body(bid).unwrap();
+
+        assert!((body.mass - 4.0).abs() < 1e-5);
+        assert_eq!(body.collision_mask, 0b0110);
+        assert!((body.gravity_scale - 2.5).abs() < 1e-5);
+        assert!((body.linear_damp - 0.3).abs() < 1e-5);
+        assert!((body.friction - 0.8).abs() < 1e-5);
+        assert!((body.bounce - 0.6).abs() < 1e-5);
+        assert!(body.continuous_cd);
+        assert!(!body.can_sleep);
     }
 
     #[test]

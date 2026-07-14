@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use gdcore::math::Color;
-use gdcore::math::Vector3;
+use gdcore::math::{Rect2, Vector2, Vector2i, Vector3};
 use gdcore::math3d::Transform3D;
 use gdrender3d::{compare_framebuffers_3d, DiffResult3D, FrameBuffer3D, SoftwareRenderer3D};
 use gdserver3d::instance::Instance3DId;
@@ -17,6 +17,7 @@ use gdserver3d::mesh::{Mesh3D, PrimitiveType};
 use gdserver3d::reflection_probe::ReflectionProbeId;
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
 use gdserver3d::shader::{Shader3D, ShaderMaterial3D, ShaderType3D};
+use gdserver3d::sprite3d::{Axis3D, BillboardMode3D, Sprite3D};
 use gdserver3d::viewport::Viewport3D;
 
 use crate::node::NodeId;
@@ -33,6 +34,12 @@ struct InstanceMap {
 #[derive(Debug, Default)]
 struct MultiMeshMap {
     node_to_instances: HashMap<NodeId, Vec<Instance3DId>>,
+}
+
+/// Maps Sprite3D NodeIds to their render instance IDs (one textured quad each).
+#[derive(Debug, Default)]
+struct SpriteMap {
+    node_to_instance: HashMap<NodeId, Instance3DId>,
 }
 
 /// Maps scene tree NodeIds to render server Light3DIds.
@@ -202,6 +209,7 @@ pub struct RenderServer3DAdapter {
     renderer: SoftwareRenderer3D,
     instance_map: InstanceMap,
     multimesh_map: MultiMeshMap,
+    sprite_map: SpriteMap,
     light_map: LightMap,
     reflection_probe_map: ReflectionProbeMap,
     viewport_width: u32,
@@ -218,6 +226,7 @@ impl RenderServer3DAdapter {
             renderer: SoftwareRenderer3D::new(),
             instance_map: InstanceMap::default(),
             multimesh_map: MultiMeshMap::default(),
+            sprite_map: SpriteMap::default(),
             light_map: LightMap::default(),
             reflection_probe_map: ReflectionProbeMap::default(),
             viewport_width: width,
@@ -246,10 +255,12 @@ impl RenderServer3DAdapter {
         // 1. Find the active Camera3D and build a Viewport3D.
         let (viewport, camera_transform) = self.build_viewport(tree);
 
-        // 2. Sync MeshInstance3D and MultiMeshInstance3D nodes.
+        // 2. Sync MeshInstance3D, MultiMeshInstance3D, and Sprite3D nodes.
         let visible_count = self.sync_mesh_instances(tree);
         let multimesh_visible = self.sync_multimesh_instances(tree);
-        let visible_count = visible_count + multimesh_visible;
+        // Sprites billboard toward the active camera, so pass its world origin.
+        let sprite_visible = self.sync_sprite3d(tree, camera_transform.origin);
+        let visible_count = visible_count + multimesh_visible + sprite_visible;
 
         // 3. Sync light nodes to render server.
         let light_count = self.sync_lights(tree);
@@ -545,6 +556,174 @@ impl RenderServer3DAdapter {
         }
 
         visible_count
+    }
+
+    /// Syncs `Sprite3D` nodes into the 3D draw list (pat-u3l8c.39).
+    ///
+    /// Each visible `Sprite3D` becomes one textured-quad render instance: the
+    /// node's properties are read into a [`Sprite3D`], `to_mesh()` builds the
+    /// quad geometry (region/flip UVs baked in), and the material carries the
+    /// sprite's modulate tint (unlit by default, matching Godot). Billboard
+    /// modes replace the instance basis so the quad faces `camera_pos`. Returns
+    /// the number of visible sprites, and frees instances for removed nodes.
+    fn sync_sprite3d(&mut self, tree: &SceneTree, camera_pos: Vector3) -> u32 {
+        let all_nodes = tree.all_nodes_in_tree_order();
+
+        let mut current: HashMap<NodeId, ()> = HashMap::new();
+        let mut visible_count = 0u32;
+
+        for &nid in &all_nodes {
+            let node = match tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            if node.class_name() != "Sprite3D" {
+                continue;
+            }
+            current.insert(nid, ());
+
+            let sprite = Self::sprite3d_from_node(tree, nid);
+            let node_transform = node3d::get_global_transform(tree, nid);
+            let visible = node3d::is_visible(tree, nid);
+
+            // Billboard modes ignore the node's own rotation and orient the quad
+            // toward the camera; disabled billboarding keeps the node basis.
+            let basis = if sprite.billboard == BillboardMode3D::Disabled {
+                node_transform.basis
+            } else {
+                sprite.billboard_basis(node_transform.origin, camera_pos)
+            };
+            let transform = Transform3D {
+                basis,
+                origin: node_transform.origin,
+            };
+
+            let inst_id = if let Some(&existing) = self.sprite_map.node_to_instance.get(&nid) {
+                existing
+            } else {
+                let new_id = self.renderer.create_instance();
+                self.sprite_map.node_to_instance.insert(nid, new_id);
+                new_id
+            };
+
+            // Rebuild the quad every frame so region/flip/pixel_size edits apply.
+            self.renderer.set_mesh(inst_id, sprite.to_mesh());
+            self.renderer.set_material(inst_id, Self::sprite_material(&sprite));
+            self.renderer.set_transform(inst_id, transform);
+            self.renderer.set_visible(inst_id, visible);
+
+            if visible {
+                visible_count += 1;
+            }
+        }
+
+        // Free instances for Sprite3D nodes no longer present.
+        let stale: Vec<NodeId> = self
+            .sprite_map
+            .node_to_instance
+            .keys()
+            .filter(|nid| !current.contains_key(nid))
+            .copied()
+            .collect();
+        for nid in stale {
+            if let Some(inst_id) = self.sprite_map.node_to_instance.remove(&nid) {
+                self.renderer.free_instance(inst_id);
+            }
+        }
+
+        visible_count
+    }
+
+    /// Builds the render material for a `Sprite3D`: the modulate color drives
+    /// the albedo, sprites are unlit unless `shaded` is set, and `double_sided`
+    /// is honored so the quad shows from behind (Godot's `Sprite3D` default).
+    fn sprite_material(sprite: &Sprite3D) -> Material3D {
+        Material3D {
+            albedo: sprite.modulate,
+            shading_mode: if sprite.shaded {
+                ShadingMode::Lambert
+            } else {
+                ShadingMode::Unlit
+            },
+            double_sided: sprite.double_sided,
+            ..Material3D::default()
+        }
+    }
+
+    /// Reads a `Sprite3D`'s properties off a scene node into a [`Sprite3D`],
+    /// falling back to Godot defaults for any property the node does not set.
+    fn sprite3d_from_node(tree: &SceneTree, nid: NodeId) -> Sprite3D {
+        let mut sprite = Sprite3D::default();
+        let node = match tree.get_node(nid) {
+            Some(n) => n,
+            None => return sprite,
+        };
+
+        let get = |k: &str| node.get_property(k);
+        let as_f32 = |v: gdvariant::Variant| -> Option<f32> {
+            match v {
+                gdvariant::Variant::Float(f) => Some(f as f32),
+                gdvariant::Variant::Int(i) => Some(i as f32),
+                _ => None,
+            }
+        };
+        let as_bool = |v: gdvariant::Variant| -> Option<bool> {
+            match v {
+                gdvariant::Variant::Bool(b) => Some(b),
+                _ => None,
+            }
+        };
+
+        if let gdvariant::Variant::String(path) = get("texture") {
+            if !path.is_empty() {
+                sprite.texture = Some(TextureSlot { path });
+            }
+        }
+        if let gdvariant::Variant::Vector2(sz) = get("texture_size") {
+            sprite.texture_size = Vector2i::new(sz.x as i32, sz.y as i32);
+        }
+        if let Some(b) = as_bool(get("centered")) {
+            sprite.centered = b;
+        }
+        if let gdvariant::Variant::Vector2(o) = get("offset") {
+            sprite.offset = o;
+        }
+        if let Some(b) = as_bool(get("flip_h")) {
+            sprite.flip_h = b;
+        }
+        if let Some(b) = as_bool(get("flip_v")) {
+            sprite.flip_v = b;
+        }
+        if let gdvariant::Variant::Color(c) = get("modulate") {
+            sprite.modulate = c;
+        }
+        if let Some(px) = as_f32(get("pixel_size")) {
+            sprite.pixel_size = px;
+        }
+        if let gdvariant::Variant::Int(a) = get("axis") {
+            sprite.axis = match a {
+                0 => Axis3D::X,
+                1 => Axis3D::Y,
+                _ => Axis3D::Z,
+            };
+        }
+        if let gdvariant::Variant::Int(b) = get("billboard") {
+            sprite.billboard = BillboardMode3D::from_godot_int(b);
+        }
+        if let Some(b) = as_bool(get("shaded")) {
+            sprite.shaded = b;
+        }
+        if let Some(b) = as_bool(get("double_sided")) {
+            sprite.double_sided = b;
+        }
+        if let Some(b) = as_bool(get("region_enabled")) {
+            sprite.region_enabled = b;
+        }
+        if let gdvariant::Variant::Rect2(r) = get("region_rect") {
+            sprite.region_rect = r;
+        }
+
+        sprite
     }
 
     /// Resolves the shared mesh for a MultiMeshInstance3D.
@@ -1174,7 +1353,7 @@ mod tests {
     use super::*;
     use crate::node::Node;
     use crate::scene_tree::SceneTree;
-    use gdcore::math::Vector3;
+    use gdcore::math::{Color, Rect2, Vector2, Vector3};
     use gdvariant::Variant;
 
     #[test]

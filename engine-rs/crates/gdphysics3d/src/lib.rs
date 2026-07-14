@@ -44,6 +44,8 @@ pub use area3d::{
 pub use body::{BodyId3D, BodyType3D, ContactPoint3D, FreezeMode, PhysicsBody3D};
 pub use character::CharacterBody3D;
 pub use collision::CollisionResult3D;
-pub use query::{PhysicsRayQuery3D, PhysicsShapeQuery3D, ShapeQueryResult3D};
+pub use query::{
+    PhysicsPointQuery3D, PhysicsRayQuery3D, PhysicsShapeQuery3D, RestInfo3D, ShapeQueryResult3D,
+};
 pub use shape::Shape3D;
 pub use world::PhysicsWorld3D;

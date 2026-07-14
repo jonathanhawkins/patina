@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use gdvariant::Variant;
+use gdvariant::{Dictionary, Variant};
 
 use crate::parser::Stmt;
 
@@ -90,25 +90,25 @@ impl AwaitTarget {
 
     /// Build the dictionary form of a timer awaitable.
     pub fn timer_variant(seconds: f64) -> Variant {
-        let mut d = HashMap::new();
-        d.insert("__await_kind".into(), Variant::String("timer".into()));
-        d.insert("seconds".into(), Variant::Float(seconds));
+        let mut d = Dictionary::new();
+        d.insert("__await_kind", Variant::String("timer".into()));
+        d.insert("seconds", Variant::Float(seconds));
         Variant::Dictionary(d)
     }
 
     /// Build the dictionary form of a signal awaitable.
     pub fn signal_variant(name: &str) -> Variant {
-        let mut d = HashMap::new();
-        d.insert("__await_kind".into(), Variant::String("signal".into()));
-        d.insert("name".into(), Variant::String(name.into()));
+        let mut d = Dictionary::new();
+        d.insert("__await_kind", Variant::String("signal".into()));
+        d.insert("name", Variant::String(name.into()));
         Variant::Dictionary(d)
     }
 
     /// Build the dictionary form of a frames awaitable.
     pub fn frames_variant(count: i64) -> Variant {
-        let mut d = HashMap::new();
-        d.insert("__await_kind".into(), Variant::String("frames".into()));
-        d.insert("count".into(), Variant::Int(count));
+        let mut d = Dictionary::new();
+        d.insert("__await_kind", Variant::String("frames".into()));
+        d.insert("count", Variant::Int(count));
         Variant::Dictionary(d)
     }
 }

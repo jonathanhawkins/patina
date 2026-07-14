@@ -1239,4 +1239,101 @@ mod capsule_segment_ray_tests {
         let hit = world.raycast(Vector2::new(-5.0, 0.0), Vector2::new(1.0, 0.0), 20.0);
         assert!(hit.is_some());
     }
+
+    // -----------------------------------------------------------------------
+    // pat-u3l8c.50 — a 10-box stack resting on a static floor must stay
+    // stable: it must not explode, tunnel through the floor, or collapse.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ten_box_stack_stays_stable() {
+        // Gravity is (0, +980): +y points *down*, so smaller y is higher up.
+        let mut world = PhysicsWorld2D::new();
+
+        // Static floor centred at y = 0 with half-height 5 → top surface at y = -5.
+        const FLOOR_TOP: f32 = -5.0;
+        const BOX_HALF: f32 = 2.0; // 4×4 boxes
+        world.add_body(PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            Vector2::new(0.0, 0.0),
+            Shape2D::Rectangle {
+                half_extents: Vector2::new(100.0, 5.0),
+            },
+            0.0,
+        ));
+
+        // Ten dynamic boxes, axis-aligned and centred on x = 0, each starting a
+        // hair above its resting position so they settle onto one another.
+        const N: usize = 10;
+        // Resting centre of box i: FLOOR_TOP - BOX_HALF - i * (2*BOX_HALF).
+        let rest_y = |i: usize| FLOOR_TOP - BOX_HALF - (i as f32) * (2.0 * BOX_HALF);
+        let mut ids = Vec::new();
+        for i in 0..N {
+            // 0.1 gap between boxes so nothing starts inter-penetrating.
+            let y = rest_y(i) - 0.1 * (i as f32 + 1.0);
+            let body = PhysicsBody2D::new(
+                BodyId(0),
+                BodyType::Rigid,
+                Vector2::new(0.0, y),
+                Shape2D::Rectangle {
+                    half_extents: Vector2::new(BOX_HALF, BOX_HALF),
+                },
+                1.0,
+            );
+            ids.push(world.add_body(body));
+        }
+
+        // Simulate 5 seconds at 60 Hz — plenty of time to settle or blow up.
+        for _ in 0..300 {
+            world.step(1.0 / 60.0);
+        }
+
+        let ys: Vec<f32> = ids
+            .iter()
+            .map(|&id| world.get_body(id).unwrap().position.y)
+            .collect();
+        let xs: Vec<f32> = ids
+            .iter()
+            .map(|&id| world.get_body(id).unwrap().position.x)
+            .collect();
+
+        for i in 0..N {
+            // 1. Nothing diverged to NaN/inf (catches solver explosions).
+            assert!(
+                xs[i].is_finite() && ys[i].is_finite(),
+                "box {i} position must stay finite, got ({}, {})",
+                xs[i],
+                ys[i]
+            );
+            // 2. No box tunnels through the floor. A box centre below
+            //    FLOOR_TOP - BOX_HALF + slop means it sank into the floor.
+            assert!(
+                ys[i] <= FLOOR_TOP - BOX_HALF + 1.0,
+                "box {i} sank into/through the floor (y = {})",
+                ys[i]
+            );
+            // 3. Centred contacts impart no horizontal drift.
+            assert!(
+                xs[i].abs() < 1.0,
+                "box {i} drifted horizontally (x = {})",
+                xs[i]
+            );
+            // 4. The whole stack stayed within a generous bounding region
+            //    (no upward explosion).
+            assert!(
+                ys[i] > rest_y(N - 1) - 10.0,
+                "box {i} flew upward out of the stack (y = {})",
+                ys[i]
+            );
+        }
+
+        // 5. The stack did not collapse into a single point — the top box is
+        //    still well above the bottom one (rest separation is 36 units).
+        assert!(
+            ys[N - 1] < ys[0] - 20.0,
+            "stack collapsed: top box y = {} vs bottom box y = {}",
+            ys[N - 1],
+            ys[0]
+        );
+    }
 }

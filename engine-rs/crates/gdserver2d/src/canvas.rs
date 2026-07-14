@@ -5,6 +5,8 @@
 
 use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 
+use crate::shader::ShaderMaterial;
+
 /// Unique identifier for a canvas draw item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CanvasItemId(pub u64);
@@ -99,6 +101,11 @@ pub struct CanvasItem {
     pub parent: Option<CanvasItemId>,
     /// Canvas layer this item belongs to.
     pub layer_id: Option<u64>,
+    /// Optional 2D shader material. When set with a `fragment()` shader, the
+    /// item's textured draw commands run the shader per-pixel in the software
+    /// render path — `COLOR` starts as the sampled texel × modulate, `UV` spans
+    /// 0..1 across the destination rect, `TIME` is elapsed seconds (pat-u3l8c.45).
+    pub material: Option<ShaderMaterial>,
 }
 
 impl CanvasItem {
@@ -113,7 +120,14 @@ impl CanvasItem {
             children: Vec::new(),
             parent: None,
             layer_id: None,
+            material: None,
         }
+    }
+
+    /// Attaches a shader material so this item's textured draws run the
+    /// material's `fragment()` shader per-pixel (pat-u3l8c.45).
+    pub fn set_material(&mut self, material: ShaderMaterial) {
+        self.material = Some(material);
     }
 }
 

@@ -318,20 +318,26 @@ pub fn command_workdir(project_root: &Path, command: &str) -> PathBuf {
 /// Rewrite broad workspace commands to focused ones.
 ///
 /// Workers sometimes report `--workspace`, `-E` filter, or `--no-run` commands
-/// that enumerate all 300+ test binaries. Replace with `check --workspace` for
-/// compile-only checks, or strip `-E`/`--workspace` from test commands.
+/// that enumerate all 300+ test binaries. Replace with a compile-only check —
+/// scoped to the named package when the command carries `-p`/`--package`
+/// (a full `cargo check --workspace` compiles every crate, wgpu/metal
+/// included), falling back to the workspace check only for unscoped commands.
 fn rewrite_broad_command(cmd: &str) -> String {
     let lower = cmd.to_lowercase();
+    let fallback_check = || match crate_breaker::extract_crate_from_command(cmd) {
+        Some(pkg) => format!("cargo check -p {pkg}"),
+        None => "cargo check --workspace".to_string(),
+    };
 
     // `cargo test --workspace --no-run` → just check it compiles
     if lower.contains("--workspace") && lower.contains("--no-run") {
-        return "cargo check --workspace".to_string();
+        return fallback_check();
     }
 
     // `cargo nextest run --workspace -E <expr>` → extract --test from the -E if possible,
     // otherwise fall back to check
     if lower.contains("--workspace") && lower.contains("-e ") {
-        return "cargo check --workspace".to_string();
+        return fallback_check();
     }
 
     // `nextest run -E <expr>` without --test → fall back to check
@@ -340,7 +346,7 @@ fn rewrite_broad_command(cmd: &str) -> String {
         && lower.contains("-e ")
         && !lower.contains("--test ")
     {
-        return "cargo check --workspace".to_string();
+        return fallback_check();
     }
 
     // `cargo test --workspace` without --test → check only
@@ -348,10 +354,81 @@ fn rewrite_broad_command(cmd: &str) -> String {
         && (lower.contains("cargo test") || lower.contains("cargo nextest"))
         && !lower.contains("--test ")
     {
-        return "cargo check --workspace".to_string();
+        return fallback_check();
     }
 
     cmd.to_string()
+}
+
+/// One shared warm-up build covering every scoped cargo test target across a
+/// drained verify batch, so N beads amortize a single dep-graph build instead
+/// of each paying compile+link of the engine chain separately.
+///
+/// Collects `-p <pkg>` / `--test <target>` pairs from cargo-ish commands
+/// (unscoped `--test` targets belong to `default_package`, the workspace-root
+/// package). Commands with no `--test` target contribute nothing: including a
+/// bare `-p X` would build ALL of X's test binaries — the exact full-build
+/// trap this pre-build exists to avoid. Returns `None` unless the union spans
+/// at least two distinct targets (a single-target batch gains nothing).
+///
+/// The result is best-effort by design: one bogus target name fails the whole
+/// cargo invocation, so callers must treat a failure as "skip the warm-up and
+/// let per-bead verifies build individually", never as a bead failure.
+pub fn batch_prebuild_command<'a>(
+    commands: impl IntoIterator<Item = &'a str>,
+    default_package: &str,
+) -> Option<String> {
+    static TEST_TARGET: OnceLock<Regex> = OnceLock::new();
+    let test_re =
+        TEST_TARGET.get_or_init(|| Regex::new(r"(?:^|\s)--test[=\s]+([A-Za-z0-9_-]+)").unwrap());
+
+    let mut packages: Vec<String> = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
+    for cmd in commands {
+        let lower = cmd.to_lowercase();
+        // Only cargo-ish commands participate. Broad --workspace commands get
+        // rewritten to plain checks at verify time; pre-building them would
+        // reintroduce the full-workspace build.
+        if !(lower.contains("cargo") || lower.contains("rust_task"))
+            || lower.contains("--workspace")
+        {
+            continue;
+        }
+        // Ignore everything after ` -- ` — those args go to the test binary,
+        // and a `--test` there (e.g. libtest's own flag) is not a cargo target.
+        let head = cmd.split(" -- ").next().unwrap_or(cmd);
+        let cmd_targets: Vec<String> = test_re
+            .captures_iter(head)
+            .map(|c| c[1].to_string())
+            .collect();
+        if cmd_targets.is_empty() {
+            continue;
+        }
+        let pkg = crate_breaker::extract_crate_from_command(head)
+            .unwrap_or_else(|| default_package.to_string());
+        if !packages.contains(&pkg) {
+            packages.push(pkg);
+        }
+        for t in cmd_targets {
+            if !targets.contains(&t) {
+                targets.push(t);
+            }
+        }
+    }
+
+    if targets.len() < 2 {
+        return None;
+    }
+    let mut out = String::from("cargo build");
+    for p in &packages {
+        out.push_str(" -p ");
+        out.push_str(p);
+    }
+    for t in &targets {
+        out.push_str(" --test ");
+        out.push_str(t);
+    }
+    Some(out)
 }
 
 /// Return the last `max_chars` characters of `s`, prefixed with an ellipsis
@@ -828,15 +905,18 @@ pub mod crate_breaker {
 
     use regex::Regex;
 
-    /// Crate a verify request targets, from its command list
-    /// (`-p X` / `--package X`). None for non-cargo or unscoped commands.
-    pub fn extract_request_crate(commands: &[String]) -> Option<String> {
+    /// Crate a single command targets (`-p X` / `--package X`), if any.
+    pub fn extract_crate_from_command(command: &str) -> Option<String> {
         static RE: OnceLock<Regex> = OnceLock::new();
         let re = RE
             .get_or_init(|| Regex::new(r"(?:^|\s)(?:-p|--package)[=\s]+([A-Za-z0-9_-]+)").unwrap());
-        commands
-            .iter()
-            .find_map(|c| re.captures(c).map(|cap| cap[1].to_string()))
+        re.captures(command).map(|cap| cap[1].to_string())
+    }
+
+    /// Crate a verify request targets, from its command list
+    /// (`-p X` / `--package X`). None for non-cargo or unscoped commands.
+    pub fn extract_request_crate(commands: &[String]) -> Option<String> {
+        commands.iter().find_map(|c| extract_crate_from_command(c))
     }
 
     /// Crate named in a ``could not compile `X` `` failure output.
@@ -925,6 +1005,10 @@ pub mod crate_breaker {
             !self.tripped.is_empty()
         }
 
+        pub fn is_tripped(&self, crate_name: &str) -> bool {
+            self.tripped.contains_key(crate_name)
+        }
+
         pub fn tripped_crates(&self) -> Vec<String> {
             let mut v: Vec<String> = self.tripped.keys().cloned().collect();
             v.sort();
@@ -993,6 +1077,9 @@ pub mod crate_breaker {
             let alert = b.record(Some("gdeditor"), Some("gdscene"), "e3");
             assert_eq!(alert.unwrap().crate_name, "gdscene");
             assert!(b.any_tripped());
+            // Trip is crate-scoped: only the broken crate's verifies are held.
+            assert!(b.is_tripped("gdscene"));
+            assert!(!b.is_tripped("gdaudio"));
             // Further failures don't re-alert.
             assert!(b.record(Some("gdeditor"), Some("gdscene"), "e4").is_none());
             assert_eq!(b.tripped_crates(), vec!["gdscene".to_string()]);
@@ -1696,6 +1783,99 @@ Also ran `cargo test --test foo` again."#;
             rewrite_broad_command("Cargo Test --Workspace --No-Run"),
             "cargo check --workspace"
         );
+    }
+
+    /// Broad commands that carry `-p <pkg>` must rewrite to a check scoped to
+    /// that package, not a full-workspace check (which compiles every crate,
+    /// wgpu/metal included).
+    #[test]
+    fn test_rewrite_scopes_check_to_named_package() {
+        assert_eq!(
+            rewrite_broad_command("cargo test -p gdscene --workspace --no-run"),
+            "cargo check -p gdscene"
+        );
+        assert_eq!(
+            rewrite_broad_command("cargo nextest run --workspace -p gdeditor -E 'test(foo)'"),
+            "cargo check -p gdeditor"
+        );
+        assert_eq!(
+            rewrite_broad_command("cargo nextest run -p gdrender2d -E 'test(bar)'"),
+            "cargo check -p gdrender2d"
+        );
+        assert_eq!(
+            rewrite_broad_command("cargo nextest run --package gdvariant --workspace"),
+            "cargo check -p gdvariant"
+        );
+    }
+
+    // ─── batch_prebuild_command (shared warm-up build) ───────────────────
+
+    /// The union build covers every scoped `-p`/`--test` pair across the
+    /// batch, assigns unscoped `--test` targets to the root package, and
+    /// dedupes repeats.
+    #[test]
+    fn test_batch_prebuild_unions_packages_and_targets() {
+        let cmds = [
+            "cargo nextest run -p gdscene --test navigation_runtime_test",
+            "cargo test --test editor_api_test",
+            "scripts/rust_task.sh nextest run -p gdscene --test navigation_runtime_test",
+            "cargo test -p gdrender2d --test=draw_test -- --ignored slow_case",
+        ];
+        let cmd = batch_prebuild_command(cmds.iter().copied(), "patina-engine").unwrap();
+        assert_eq!(
+            cmd,
+            "cargo build -p gdscene -p patina-engine -p gdrender2d \
+             --test navigation_runtime_test --test editor_api_test --test draw_test"
+        );
+    }
+
+    /// A single distinct target (or none) gains nothing from a shared
+    /// pre-build — the per-bead verify builds it anyway.
+    #[test]
+    fn test_batch_prebuild_needs_two_distinct_targets() {
+        let one = ["cargo test --test only_test"];
+        assert_eq!(batch_prebuild_command(one.iter().copied(), "root"), None);
+        let dup = [
+            "cargo test --test same_test",
+            "cargo nextest run --test same_test",
+        ];
+        assert_eq!(batch_prebuild_command(dup.iter().copied(), "root"), None);
+        let none: [&str; 0] = [];
+        assert_eq!(batch_prebuild_command(none.iter().copied(), "root"), None);
+    }
+
+    /// Non-cargo commands, bare `-p` without `--test` (which would build ALL
+    /// of the package's test binaries), `--workspace` commands, and `--test`
+    /// after the ` -- ` separator must all be excluded from the union.
+    #[test]
+    fn test_batch_prebuild_skips_unsafe_contributors() {
+        let cmds = [
+            "pnpm test",
+            "pytest tests/",
+            "cargo nextest run -p gdeditor",
+            "cargo test --workspace --test broad_test",
+            "cargo test --test real_a",
+            "cargo test --test real_b -- --test not_a_target",
+        ];
+        let cmd = batch_prebuild_command(cmds.iter().copied(), "patina-engine").unwrap();
+        assert_eq!(
+            cmd,
+            "cargo build -p patina-engine --test real_a --test real_b"
+        );
+    }
+
+    #[test]
+    fn test_extract_crate_from_command_forms() {
+        use super::crate_breaker::extract_crate_from_command;
+        assert_eq!(
+            extract_crate_from_command("cargo test -p gdscene --test t").as_deref(),
+            Some("gdscene")
+        );
+        assert_eq!(
+            extract_crate_from_command("cargo test --package gd-render2d").as_deref(),
+            Some("gd-render2d")
+        );
+        assert_eq!(extract_crate_from_command("cargo test --test t"), None);
     }
 
     /// Regression: verify_commands calls rewrite_broad_command before execution.

@@ -30,7 +30,7 @@
 //! honors [`HEADER_DATA_FLAG_64`] so buffers produced by a double-precision
 //! Godot build load correctly (downcast to `f32`).
 
-use std::collections::HashMap;
+use crate::dictionary::Dictionary;
 
 use thiserror::Error;
 
@@ -337,9 +337,9 @@ fn encode_into(
         Variant::Dictionary(dict) => {
             put_u32(out, T_DICTIONARY);
             put_u32(out, dict.len() as u32);
-            for (key, val) in dict {
-                // This crate's Dictionary is String-keyed; keys encode as String.
-                encode_into(&Variant::String(key.clone()), out, depth + 1)?;
+            for (key, val) in dict.iter() {
+                // Keys are full Variants (Godot binary format), preserving type.
+                encode_into(key, out, depth + 1)?;
                 encode_into(val, out, depth + 1)?;
             }
         }
@@ -697,18 +697,12 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
                 return Err(VariantDecodeError::TypedContainer);
             }
             let count = decode_container_count(r)?;
-            let mut map = HashMap::new();
+            let mut map = Dictionary::new();
             for _ in 0..count {
                 let key = decode_from(r, depth + 1)?;
                 let value = decode_from(r, depth + 1)?;
-                // This crate's Dictionary is String-keyed. Non-String keys from
-                // external data are coerced to their string form (lossy, but our
-                // own encoder only ever emits String keys, so round-trips exactly).
-                let key_str = match key {
-                    Variant::String(s) => s,
-                    other => other.to_string_lossy(),
-                };
-                map.insert(key_str, value);
+                // Keys keep their decoded Variant type, round-tripping exactly.
+                map.insert(key, value);
             }
             Ok(Variant::Dictionary(map))
         }
@@ -933,15 +927,15 @@ mod tests {
             Variant::Vector2(Vector2::new(1.0, 2.0)),
         ]));
 
-        let mut d = HashMap::new();
+        let mut d = Dictionary::new();
         d.insert("pos".to_string(), Variant::Vector2(Vector2::new(1.0, 2.0)));
         d.insert("count".to_string(), Variant::Int(5));
         roundtrip(Variant::Dictionary(d));
 
         // Array of dicts of vectors (deep nesting).
-        let mut d1 = HashMap::new();
+        let mut d1 = Dictionary::new();
         d1.insert("a".to_string(), Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)));
-        let mut d2 = HashMap::new();
+        let mut d2 = Dictionary::new();
         d2.insert("b".to_string(), Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)));
         d2.insert("nested".to_string(), Variant::Array(vec![Variant::Int(9)]));
         roundtrip(Variant::Array(vec![
@@ -1062,7 +1056,7 @@ mod tests {
     #[test]
     fn truncated_input_errors_at_every_length() {
         // A deeply-structured value: array of a dict, a string, and a transform.
-        let mut d = HashMap::new();
+        let mut d = Dictionary::new();
         d.insert("k".to_string(), Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)));
         d.insert("s".to_string(), Variant::String("hello".into()));
         let v = Variant::Array(vec![

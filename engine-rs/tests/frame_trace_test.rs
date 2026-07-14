@@ -7,8 +7,8 @@
 //! - Frame numbers are monotonically increasing
 //! - The output matches the stored golden trace
 
+#[path = "support/oracle_fixture.rs"]
 mod oracle_fixture;
-
 use oracle_fixture::fixtures_dir;
 use serde_json::Value;
 use std::path::PathBuf;

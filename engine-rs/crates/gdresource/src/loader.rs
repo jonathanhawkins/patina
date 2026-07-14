@@ -12,7 +12,7 @@ use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use gdcore::ResourceUid;
-use gdvariant::Variant;
+use gdvariant::{Dictionary, Variant};
 
 use crate::resource::{ExtResource, Resource};
 
@@ -713,10 +713,10 @@ fn parse_array(s: &str) -> EngineResult<Variant> {
 fn parse_dictionary(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Dictionary(HashMap::new()));
+        return Ok(Variant::Dictionary(Dictionary::new()));
     }
     let pairs = split_args(s);
-    let mut map = HashMap::new();
+    let mut map = Dictionary::new();
     for pair in &pairs {
         let pair = pair.trim();
         // Find the colon separating key from value, but only outside of the key string.
@@ -1157,7 +1157,7 @@ mod tests {
     fn parse_empty_dictionary() {
         assert_eq!(
             parse_variant_value("{}").unwrap(),
-            Variant::Dictionary(HashMap::new())
+            Variant::Dictionary(Dictionary::new())
         );
     }
 

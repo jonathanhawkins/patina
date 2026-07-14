@@ -317,6 +317,223 @@ pub fn astar_find_path_3d(
 }
 
 // ---------------------------------------------------------------------------
+// Portal funnel + stitching helpers
+// ---------------------------------------------------------------------------
+
+/// Vertex-match tolerance used to extract the shared-edge geometry between two
+/// polygons already known to be adjacent within a region.
+const PORTAL_MATCH_TOL: f32 = 1.0;
+
+/// A stitched navigation graph spanning every region: polygon centroids, an
+/// adjacency list, and the portal edge (a `(left, right)` pair once oriented)
+/// crossed when moving between each adjacent pair.
+struct GlobalGraph {
+    positions: Vec<Vector2>,
+    neighbors: Vec<Vec<usize>>,
+    portals: HashMap<(usize, usize), (Vector2, Vector2)>,
+}
+
+/// Midpoint of two points.
+fn midpoint(a: Vector2, b: Vector2) -> Vector2 {
+    Vector2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
+}
+
+/// `true` when two points are within a hair of each other (funnel apex checks).
+fn same_point(a: Vector2, b: Vector2) -> bool {
+    (a - b).length_squared() < 1e-10
+}
+
+/// Records an undirected portal edge between polygons `i` and `j`, avoiding
+/// duplicate neighbor entries.
+fn add_edge(
+    neighbors: &mut [Vec<usize>],
+    portals: &mut HashMap<(usize, usize), (Vector2, Vector2)>,
+    i: usize,
+    j: usize,
+    edge: (Vector2, Vector2),
+) {
+    if !neighbors[i].contains(&j) {
+        neighbors[i].push(j);
+    }
+    if !neighbors[j].contains(&i) {
+        neighbors[j].push(i);
+    }
+    portals.insert((i, j), edge);
+    portals.insert((j, i), edge);
+}
+
+/// Returns the shared edge between two polygons as `(p, q)` when at least two of
+/// their vertices coincide within `tol`, or `None` when they touch at fewer than
+/// two points. The two most widely separated matched midpoints are chosen so the
+/// portal spans the full shared boundary. Used both for intra-region edges
+/// (small `tol`) and cross-region stitching (`edge_connection_margin`).
+fn shared_edge_within(a: &NavPolygon, b: &NavPolygon, tol: f32) -> Option<(Vector2, Vector2)> {
+    let tol_sq = tol * tol;
+    let mut matched: Vec<Vector2> = Vec::new();
+    for va in &a.vertices {
+        for vb in &b.vertices {
+            if (*va - *vb).length_squared() <= tol_sq {
+                let mid = midpoint(*va, *vb);
+                if !matched.iter().any(|m| same_point(*m, mid)) {
+                    matched.push(mid);
+                }
+            }
+        }
+    }
+    if matched.len() < 2 {
+        return None;
+    }
+    let mut best = (0usize, 1usize);
+    let mut best_d = -1.0_f32;
+    for i in 0..matched.len() {
+        for j in (i + 1)..matched.len() {
+            let d = (matched[i] - matched[j]).length_squared();
+            if d > best_d {
+                best_d = d;
+                best = (i, j);
+            }
+        }
+    }
+    Some((matched[best.0], matched[best.1]))
+}
+
+/// Orients a portal's two endpoints as `(left, right)` relative to travel from
+/// `ref_pt` along `forward`, so the funnel algorithm's winding tests are
+/// consistent. "Left" is the endpoint more counter-clockwise of the direction
+/// of travel (larger 2D cross product).
+fn orient_portal(p: Vector2, q: Vector2, ref_pt: Vector2, forward: Vector2) -> (Vector2, Vector2) {
+    let cp = forward.cross(p - ref_pt);
+    let cq = forward.cross(q - ref_pt);
+    if cp >= cq {
+        (p, q)
+    } else {
+        (q, p)
+    }
+}
+
+/// Twice the signed area of triangle `a,b,c`, using the clockwise-positive
+/// convention the funnel algorithm below is written against (positive when `c`
+/// is to the *right* of `a`→`b`). This is the sign primitive at the heart of
+/// the "simple stupid funnel" traversal — its handedness must match how
+/// [`orient_portal`] labels the `left`/`right` funnel walls, or the funnel
+/// rounds the wrong (outer) corner.
+fn tri_area2(a: Vector2, b: Vector2, c: Vector2) -> f32 {
+    (c.x - a.x) * (b.y - a.y) - (b.x - a.x) * (c.y - a.y)
+}
+
+/// The "simple stupid funnel" algorithm (Mikko Mononen): given the start and end
+/// points and the ordered `(left, right)` portal edges of a corridor, returns
+/// the tautest path that stays inside the corridor. A straight shot collapses to
+/// `[start, end]`; genuine corners emit intermediate waypoints hugging the
+/// portal vertices.
+fn string_pull(start: Vector2, end: Vector2, portals: &[(Vector2, Vector2)]) -> Vec<Vector2> {
+    // Full portal list: a degenerate start portal, the corridor, then a
+    // degenerate end portal.
+    let mut ports: Vec<(Vector2, Vector2)> = Vec::with_capacity(portals.len() + 2);
+    ports.push((start, start));
+    ports.extend_from_slice(portals);
+    ports.push((end, end));
+
+    let mut pts: Vec<Vector2> = vec![start];
+    let mut apex = start;
+    let mut portal_left = start;
+    let mut portal_right = start;
+    let mut apex_index = 0usize;
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+
+    let mut i = 1usize;
+    while i < ports.len() {
+        let (left, right) = ports[i];
+
+        // Update the right vertex.
+        if tri_area2(apex, portal_right, right) <= 0.0 {
+            if same_point(apex, portal_right) || tri_area2(apex, portal_left, right) > 0.0 {
+                portal_right = right;
+                right_index = i;
+            } else {
+                // Right crossed over left: left vertex becomes the new apex.
+                if !same_point(*pts.last().unwrap(), portal_left) {
+                    pts.push(portal_left);
+                }
+                apex = portal_left;
+                apex_index = left_index;
+                portal_left = apex;
+                portal_right = apex;
+                left_index = apex_index;
+                right_index = apex_index;
+                i = apex_index + 1;
+                continue;
+            }
+        }
+
+        // Update the left vertex.
+        if tri_area2(apex, portal_left, left) >= 0.0 {
+            if same_point(apex, portal_left) || tri_area2(apex, portal_right, left) < 0.0 {
+                portal_left = left;
+                left_index = i;
+            } else {
+                // Left crossed over right: right vertex becomes the new apex.
+                if !same_point(*pts.last().unwrap(), portal_right) {
+                    pts.push(portal_right);
+                }
+                apex = portal_right;
+                apex_index = right_index;
+                portal_left = apex;
+                portal_right = apex;
+                left_index = apex_index;
+                right_index = apex_index;
+                i = apex_index + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    if !same_point(*pts.last().unwrap(), end) {
+        pts.push(end);
+    }
+    pts
+}
+
+/// Distance from point `c` to segment `a`→`b`.
+fn point_segment_distance(c: Vector2, a: Vector2, b: Vector2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq < 1e-12 {
+        return (c - a).length();
+    }
+    let t = ((c - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    let closest = Vector2::new(a.x + ab.x * t, a.y + ab.y * t);
+    (c - closest).length()
+}
+
+/// Computes a detour waypoint that steers the segment `a`→`b` clear of a
+/// circular obstacle centered at `c` with radius `r`. The point is placed on the
+/// perpendicular through the obstacle, on the side already favored by the
+/// segment, at `r` plus a clearance margin from the center.
+fn detour_point(a: Vector2, b: Vector2, c: Vector2, r: f32) -> Vector2 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq < 1e-12 {
+        return Vector2::new(c.x, c.y + r * 1.5 + 1.0);
+    }
+    let t = ((c - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    let closest = Vector2::new(a.x + ab.x * t, a.y + ab.y * t);
+    // Unit perpendicular to the segment.
+    let inv_len = 1.0 / len_sq.sqrt();
+    let mut perp = Vector2::new(-ab.y * inv_len, ab.x * inv_len);
+    // Prefer the side the segment already leans toward (away from the center).
+    let away = closest - c;
+    if away.length_squared() > 1e-8 && perp.dot(away) < 0.0 {
+        perp = Vector2::new(-perp.x, -perp.y);
+    }
+    let clearance = r * 0.5 + 1.0;
+    Vector2::new(c.x + perp.x * (r + clearance), c.y + perp.y * (r + clearance))
+}
+
+// ---------------------------------------------------------------------------
 // NavigationServer2D
 // ---------------------------------------------------------------------------
 
@@ -333,7 +550,18 @@ pub struct NavigationServer2D {
     pub obstacles: Vec<NavigationObstacle2D>,
     /// Registered navigation links that bridge otherwise-disjoint regions.
     pub links: Vec<NavigationLink2D>,
+    /// Maximum distance between the edges of two *separate* regions for them to
+    /// be automatically stitched into one navigation graph, mirroring Godot's
+    /// `NavigationServer2D.map_set_edge_connection_margin`. Region edges whose
+    /// endpoints fall within this margin are treated as a shared portal so an
+    /// agent can walk from one region into the next without an explicit link.
+    pub edge_connection_margin: f32,
 }
+
+/// Default edge-connection margin used when a server is created. Matches the
+/// spirit of Godot's small positive default so that touching (or nearly
+/// touching) regions stitch, while clearly separated regions do not.
+pub const DEFAULT_EDGE_CONNECTION_MARGIN: f32 = 1.0;
 
 impl NavigationServer2D {
     /// Creates a new, empty navigation server.
@@ -342,7 +570,16 @@ impl NavigationServer2D {
             regions: Vec::new(),
             obstacles: Vec::new(),
             links: Vec::new(),
+            edge_connection_margin: DEFAULT_EDGE_CONNECTION_MARGIN,
         }
+    }
+
+    /// Sets the [`edge_connection_margin`](Self::edge_connection_margin) used to
+    /// stitch adjacent regions, mirroring Godot's
+    /// `map_set_edge_connection_margin`. Negative values are clamped to `0`
+    /// (no cross-region stitching).
+    pub fn set_edge_connection_margin(&mut self, margin: f32) {
+        self.edge_connection_margin = margin.max(0.0);
     }
 
     /// Adds a navigation mesh region and returns its index.
@@ -363,66 +600,201 @@ impl NavigationServer2D {
         self.links.len() - 1
     }
 
-    /// Finds a path from `from` to `to` using A\* on the navigation mesh,
-    /// then applies string-pulling for a smoother result.
+    /// Finds a path from `from` to `to` across *all* registered regions, using
+    /// A\* on the stitched polygon graph and portal-edge **funnel smoothing**
+    /// (the "simple stupid funnel" algorithm) for a taut, corner-hugging result.
     ///
-    /// Returns an empty `Vec` if no path is found.
+    /// Improvements over the old first-region-only, centroid-routed search
+    /// (pat-u3l8c.62):
+    /// * **Cross-region stitching.** Every region's polygons are flattened into
+    ///   one graph; polygons from *different* regions whose edges fall within
+    ///   [`edge_connection_margin`](Self::edge_connection_margin) are joined by a
+    ///   shared portal, and enabled [`NavigationLink2D`]s bridge disjoint
+    ///   regions — so a path can leave one region and continue in the next.
+    /// * **Funnel smoothing.** The corridor of portal edges is string-pulled so
+    ///   a straight shot collapses to `[from, to]` instead of zig-zagging
+    ///   through polygon centroids; genuine corners still produce waypoints.
+    /// * **Obstacle detours.** When an obstacle intersects the smoothed path we
+    ///   route *around* it (Godot never nulls a static path); the returned path
+    ///   is only empty when the endpoints are genuinely off-mesh or in
+    ///   graph-disconnected regions.
     pub fn find_path(&self, from: Vector2, to: Vector2) -> Vec<Vector2> {
-        // For now, search the first region that contains both points.
-        for region in &self.regions {
-            let start_poly = match region.find_polygon(from) {
-                Some(i) => i,
-                None => continue,
-            };
-            let goal_poly = match region.find_polygon(to) {
-                Some(i) => i,
-                None => continue,
-            };
+        let graph = self.build_global_graph();
+        if graph.positions.is_empty() {
+            return Vec::new();
+        }
 
-            if start_poly == goal_poly {
-                // Check obstacles
-                if !self.segment_blocked(from, to) {
-                    return vec![from, to];
-                }
-                return Vec::new();
+        let start = match self.global_polygon_containing(from) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let goal = match self.global_polygon_containing(to) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+
+        if start == goal {
+            // Same polygon: a direct hop, detoured around any obstacle.
+            return self.route_around_obstacles(&[from, to]);
+        }
+
+        let poly_path = match astar_find_path(start, goal, &graph.positions, &graph.neighbors) {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        // Collect the ordered portal edges the corridor crosses and orient each
+        // as (left, right) relative to the direction of travel, then funnel.
+        let mut portals: Vec<(Vector2, Vector2)> = Vec::with_capacity(poly_path.len());
+        for w in poly_path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let edge = graph.portals.get(&(a, b)).copied().unwrap_or_else(|| {
+                // No recorded portal geometry (should not happen for A*-adjacent
+                // nodes) — fall back to the midpoint of the two centroids so the
+                // corridor still threads through a sensible waypoint.
+                let m = midpoint(graph.positions[a], graph.positions[b]);
+                (m, m)
+            });
+            let forward = graph.positions[b] - graph.positions[a];
+            portals.push(orient_portal(edge.0, edge.1, graph.positions[a], forward));
+        }
+
+        let smooth = string_pull(from, to, &portals);
+        self.route_around_obstacles(&smooth)
+    }
+
+    /// Builds the stitched, portal-annotated navigation graph spanning every
+    /// region (see [`find_path`](Self::find_path)).
+    fn build_global_graph(&self) -> GlobalGraph {
+        let mut positions: Vec<Vector2> = Vec::new();
+        let mut polys: Vec<&NavPolygon> = Vec::new();
+        let mut region_of: Vec<usize> = Vec::new();
+        let mut base_indices: Vec<usize> = Vec::new();
+        for (ri, region) in self.regions.iter().enumerate() {
+            base_indices.push(positions.len());
+            for p in &region.polygons {
+                positions.push(p.centroid());
+                polys.push(p);
+                region_of.push(ri);
             }
+        }
+        let n = positions.len();
+        let mut neighbors = vec![Vec::new(); n];
+        let mut portals: HashMap<(usize, usize), (Vector2, Vector2)> = HashMap::new();
 
-            // Build positions (centroids) for A*
-            let positions: Vec<Vector2> = region.polygons.iter().map(|p| p.centroid()).collect();
-
-            if let Some(poly_path) =
-                astar_find_path(start_poly, goal_poly, &positions, &region.connections)
-            {
-                // String-pulling: build path through polygon centroids
-                let mut path = vec![from];
-                for &pi in &poly_path[1..poly_path.len().saturating_sub(1)] {
-                    path.push(positions[pi]);
+        // Intra-region connectivity (already computed from shared edges).
+        for (ri, region) in self.regions.iter().enumerate() {
+            let base = base_indices[ri];
+            for (i, conns) in region.connections.iter().enumerate() {
+                for &j in conns {
+                    let (gi, gj) = (base + i, base + j);
+                    let edge = shared_edge_within(polys[gi], polys[gj], PORTAL_MATCH_TOL)
+                        .unwrap_or_else(|| {
+                            let m = midpoint(positions[gi], positions[gj]);
+                            (m, m)
+                        });
+                    add_edge(&mut neighbors, &mut portals, gi, gj, edge);
                 }
-                path.push(to);
-
-                // Filter out segments blocked by obstacles
-                if self.path_blocked(&path) {
-                    return Vec::new();
-                }
-
-                return path;
             }
         }
 
-        Vec::new()
-    }
-
-    fn segment_blocked(&self, a: Vector2, b: Vector2) -> bool {
-        self.obstacles.iter().any(|o| o.blocks_segment(a, b))
-    }
-
-    fn path_blocked(&self, path: &[Vector2]) -> bool {
-        for i in 0..path.len().saturating_sub(1) {
-            if self.segment_blocked(path[i], path[i + 1]) {
-                return true;
+        // Cross-region stitching within the edge-connection margin.
+        let margin = self.edge_connection_margin.max(0.0);
+        if margin > 0.0 {
+            for a in 0..n {
+                for b in (a + 1)..n {
+                    if region_of[a] == region_of[b] {
+                        continue;
+                    }
+                    if let Some(edge) = shared_edge_within(polys[a], polys[b], margin) {
+                        add_edge(&mut neighbors, &mut portals, a, b, edge);
+                    }
+                }
             }
         }
-        false
+
+        // Explicit links bridge regions that share no geometry. The link segment
+        // itself acts as the portal the funnel threads through.
+        for link in &self.links {
+            if !link.enabled {
+                continue;
+            }
+            let a = self.global_polygon_near(&positions, link.start);
+            let b = self.global_polygon_near(&positions, link.end);
+            if let (Some(a), Some(b)) = (a, b) {
+                if a != b {
+                    let edge = (link.start, link.end);
+                    if !neighbors[a].contains(&b) {
+                        neighbors[a].push(b);
+                    }
+                    portals.insert((a, b), edge);
+                    if link.bidirectional {
+                        if !neighbors[b].contains(&a) {
+                            neighbors[b].push(a);
+                        }
+                        portals.insert((b, a), edge);
+                    }
+                }
+            }
+        }
+
+        GlobalGraph {
+            positions,
+            neighbors,
+            portals,
+        }
+    }
+
+    /// Reroutes a path around any circular obstacles that intersect its
+    /// segments, inserting detour waypoints so the returned path is never empty
+    /// on account of an obstacle (Godot keeps the static path). Segments clear
+    /// of obstacles are returned unchanged.
+    fn route_around_obstacles(&self, path: &[Vector2]) -> Vec<Vector2> {
+        if path.len() < 2 {
+            return path.to_vec();
+        }
+        if self.obstacles.is_empty() {
+            return path.to_vec();
+        }
+        let mut out = vec![path[0]];
+        for i in 0..path.len() - 1 {
+            let seg = self.detour_segment(path[i], path[i + 1], 0);
+            // `seg` starts at path[i]; append everything after it.
+            out.extend(seg.into_iter().skip(1));
+        }
+        out
+    }
+
+    /// Recursively splits the segment `a`→`b` around the obstacle it penetrates
+    /// most deeply, bailing out (returning the raw segment) once `MAX_DETOUR_DEPTH`
+    /// is reached so a fully-boxed-in path still returns a corridor rather than
+    /// nothing.
+    fn detour_segment(&self, a: Vector2, b: Vector2, depth: usize) -> Vec<Vector2> {
+        const MAX_DETOUR_DEPTH: usize = 6;
+        if depth >= MAX_DETOUR_DEPTH {
+            return vec![a, b];
+        }
+        // Pick the obstacle with the deepest penetration of this segment.
+        let mut worst: Option<(&NavigationObstacle2D, f32)> = None;
+        for o in &self.obstacles {
+            if o.blocks_segment(a, b) {
+                let pen = o.radius - point_segment_distance(o.position, a, b);
+                if worst.map_or(true, |(_, wp)| pen > wp) {
+                    worst = Some((o, pen));
+                }
+            }
+        }
+        let o = match worst {
+            Some((o, _)) => o,
+            None => return vec![a, b],
+        };
+
+        let via = detour_point(a, b, o.position, o.radius);
+        let left = self.detour_segment(a, via, depth + 1);
+        let right = self.detour_segment(via, b, depth + 1);
+        let mut combined = left;
+        combined.extend(right.into_iter().skip(1));
+        combined
     }
 
     /// Finds a path from `from` to `to`, bridging otherwise-disjoint regions
@@ -474,10 +846,7 @@ impl NavigationServer2D {
             None => return Vec::new(),
         };
         if start == goal {
-            if !self.segment_blocked(from, to) {
-                return vec![from, to];
-            }
-            return Vec::new();
+            return self.route_around_obstacles(&[from, to]);
         }
 
         if let Some(poly_path) = astar_find_path(start, goal, &positions, &neighbors) {
@@ -486,10 +855,7 @@ impl NavigationServer2D {
                 path.push(positions[pi]);
             }
             path.push(to);
-            if self.path_blocked(&path) {
-                return Vec::new();
-            }
-            return path;
+            return self.route_around_obstacles(&path);
         }
         Vec::new()
     }
@@ -1379,23 +1745,205 @@ mod tests {
     }
 
     #[test]
-    fn server_path_blocked_by_obstacle() {
+    fn server_path_detours_around_obstacle() {
+        // pat-u3l8c.62: Godot never nulls a *static* path just because an
+        // obstacle sits on it — it routes around. The old behavior returned an
+        // empty Vec here; the new behavior must return a non-empty detour whose
+        // every segment clears the obstacle.
         let mut server = NavigationServer2D::new();
-        // Single large polygon
         let poly = NavPolygon::new(vec![
             Vector2::new(0.0, 0.0),
             Vector2::new(20.0, 0.0),
             Vector2::new(20.0, 20.0),
             Vector2::new(0.0, 20.0),
         ]);
-        let mesh = NavMesh2D::new(vec![poly], 0.01);
-        server.add_region(mesh);
+        server.add_region(NavMesh2D::new(vec![poly], 0.01));
 
-        // Place obstacle right in the middle of the direct path
-        server.add_obstacle(NavigationObstacle2D::new(Vector2::new(10.0, 10.0), 5.0));
+        // Obstacle straddling the straight-line path from left to right.
+        let obs = NavigationObstacle2D::new(Vector2::new(10.0, 10.0), 5.0);
+        server.add_obstacle(obs);
 
-        let path = server.find_path(Vector2::new(1.0, 10.0), Vector2::new(19.0, 10.0));
-        assert!(path.is_empty());
+        let from = Vector2::new(1.0, 10.0);
+        let to = Vector2::new(19.0, 10.0);
+        let path = server.find_path(from, to);
+
+        assert!(
+            path.len() >= 3,
+            "expected a detour with an intermediate waypoint, got {path:?}"
+        );
+        assert!((path[0] - from).length() < EPSILON, "path must start at `from`");
+        assert!(
+            (path[path.len() - 1] - to).length() < EPSILON,
+            "path must end at `to`"
+        );
+        // No segment of the detour may pass through the obstacle.
+        for seg in path.windows(2) {
+            assert!(
+                !obs.blocks_segment(seg[0], seg[1]),
+                "detour segment {:?}->{:?} still crosses the obstacle",
+                seg[0],
+                seg[1]
+            );
+        }
+    }
+
+    // -- Funnel string-pulling (pat-u3l8c.62) -------------------------------
+
+    /// Three 10x10 squares in a row (`[0,10]`,`[10,20]`,`[20,30]`), each sharing
+    /// an edge with the next.
+    fn strip_of_three() -> NavMesh2D {
+        NavMesh2D::new(
+            vec![
+                NavPolygon::new(vec![
+                    Vector2::new(0.0, 0.0),
+                    Vector2::new(10.0, 0.0),
+                    Vector2::new(10.0, 10.0),
+                    Vector2::new(0.0, 10.0),
+                ]),
+                NavPolygon::new(vec![
+                    Vector2::new(10.0, 0.0),
+                    Vector2::new(20.0, 0.0),
+                    Vector2::new(20.0, 10.0),
+                    Vector2::new(10.0, 10.0),
+                ]),
+                NavPolygon::new(vec![
+                    Vector2::new(20.0, 0.0),
+                    Vector2::new(30.0, 0.0),
+                    Vector2::new(30.0, 10.0),
+                    Vector2::new(20.0, 10.0),
+                ]),
+            ],
+            0.01,
+        )
+    }
+
+    #[test]
+    fn funnel_collapses_straight_corridor() {
+        // A straight shot down a straight corridor must string-pull to exactly
+        // two points — no zig-zag through polygon centroids (the old bug).
+        let mut server = NavigationServer2D::new();
+        server.add_region(strip_of_three());
+
+        let from = Vector2::new(5.0, 5.0);
+        let to = Vector2::new(25.0, 5.0);
+        let path = server.find_path(from, to);
+
+        assert_eq!(path.len(), 2, "straight corridor should collapse: {path:?}");
+        assert!((path[0] - from).length() < EPSILON);
+        assert!((path[1] - to).length() < EPSILON);
+    }
+
+    /// An L-shaped mesh: bottom square, one above it, one to the right of that,
+    /// meeting at the reflex corner `(10,10)`.
+    fn l_shaped_mesh() -> NavMesh2D {
+        NavMesh2D::new(
+            vec![
+                NavPolygon::new(vec![
+                    Vector2::new(0.0, 0.0),
+                    Vector2::new(10.0, 0.0),
+                    Vector2::new(10.0, 10.0),
+                    Vector2::new(0.0, 10.0),
+                ]),
+                NavPolygon::new(vec![
+                    Vector2::new(0.0, 10.0),
+                    Vector2::new(10.0, 10.0),
+                    Vector2::new(10.0, 20.0),
+                    Vector2::new(0.0, 20.0),
+                ]),
+                NavPolygon::new(vec![
+                    Vector2::new(10.0, 10.0),
+                    Vector2::new(20.0, 10.0),
+                    Vector2::new(20.0, 20.0),
+                    Vector2::new(10.0, 20.0),
+                ]),
+            ],
+            0.01,
+        )
+    }
+
+    #[test]
+    fn funnel_bends_around_corner() {
+        // Around an L-bend the taut path cannot be a straight line — it must
+        // round the inner corner at (10,10), yielding an intermediate waypoint.
+        let mut server = NavigationServer2D::new();
+        server.add_region(l_shaped_mesh());
+
+        let from = Vector2::new(5.0, 5.0);
+        let to = Vector2::new(15.0, 15.0);
+        let path = server.find_path(from, to);
+
+        assert!(
+            path.len() >= 3,
+            "L-bend must produce a corner waypoint: {path:?}"
+        );
+        assert!((path[0] - from).length() < EPSILON);
+        assert!((path[path.len() - 1] - to).length() < EPSILON);
+        // Some interior waypoint hugs the reflex corner (10,10).
+        let corner = Vector2::new(10.0, 10.0);
+        assert!(
+            path[1..path.len() - 1]
+                .iter()
+                .any(|w| (*w - corner).length() < 1e-3),
+            "expected a waypoint at the reflex corner, got {path:?}"
+        );
+    }
+
+    // -- Cross-region stitching (pat-u3l8c.62) ------------------------------
+
+    #[test]
+    fn find_path_stitches_adjacent_regions() {
+        // Two separately-registered regions sharing the edge at x=10 must be
+        // stitched via edge_connection_margin so a path crosses between them.
+        let mut server = NavigationServer2D::new();
+        server.add_region(NavMesh2D::new(
+            vec![NavPolygon::new(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(10.0, 0.0),
+                Vector2::new(10.0, 10.0),
+                Vector2::new(0.0, 10.0),
+            ])],
+            0.01,
+        ));
+        server.add_region(NavMesh2D::new(
+            vec![NavPolygon::new(vec![
+                Vector2::new(10.0, 0.0),
+                Vector2::new(20.0, 0.0),
+                Vector2::new(20.0, 10.0),
+                Vector2::new(10.0, 10.0),
+            ])],
+            0.01,
+        ));
+
+        let from = Vector2::new(5.0, 5.0);
+        let to = Vector2::new(15.0, 5.0);
+        let path = server.find_path(from, to);
+        assert!(
+            !path.is_empty(),
+            "adjacent regions should stitch into a crossable path"
+        );
+        assert!((path[0] - from).length() < EPSILON);
+        assert!((path[path.len() - 1] - to).length() < EPSILON);
+    }
+
+    #[test]
+    fn find_path_no_stitch_across_gap() {
+        // Regions with a 10-unit gap are far beyond the edge-connection margin,
+        // so without an explicit link they remain mutually unreachable.
+        let server = disjoint_two_region_server_2d();
+        let path = server.find_path(Vector2::new(5.0, 5.0), Vector2::new(25.0, 5.0));
+        assert!(
+            path.is_empty(),
+            "regions separated by a gap must not auto-stitch: {path:?}"
+        );
+    }
+
+    #[test]
+    fn set_edge_connection_margin_clamps_negative() {
+        let mut server = NavigationServer2D::new();
+        server.set_edge_connection_margin(-5.0);
+        assert_eq!(server.edge_connection_margin, 0.0);
+        server.set_edge_connection_margin(3.5);
+        assert_eq!(server.edge_connection_margin, 3.5);
     }
 
     // -- NavigationObstacle2D -----------------------------------------------

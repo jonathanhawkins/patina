@@ -30,7 +30,7 @@ pub mod wgpu_pipeline;
 
 pub use compare::{compare_framebuffers_3d, diff_image_3d, DiffResult3D};
 pub use depth_buffer::DepthBuffer;
-pub use postprocess::{apply_camera_post, screen_space_dither};
+pub use postprocess::{apply_camera_post, apply_ssao_env, screen_space_dither};
 pub use rasterizer::{clip_to_screen, rasterize_triangle, ScreenVertex};
 pub use renderer::{equirect_uv, sample_equirect, FrameBuffer3D, RenderMode, SoftwareRenderer3D};
 pub use shader::{

@@ -2,7 +2,11 @@
 //!
 //! All drawing functions clip to the framebuffer bounds automatically.
 
+use std::collections::HashMap;
+
 use gdcore::math::{Color, Rect2, Transform2D, Vector2};
+use gdserver2d::shader::{execute_fragment, FragmentContext, FragmentInstruction};
+use gdvariant::variant::Variant;
 
 use crate::renderer::FrameBuffer;
 use crate::texture::Texture2D;
@@ -567,6 +571,70 @@ pub fn draw_texture_rect_blended(
             );
             if final_color.a > 0.001 {
                 fb.blend_pixel(px, py, final_color);
+            }
+        }
+    }
+}
+
+/// Draws an axis-aligned texture rect with a canvas_item `fragment()` shader
+/// applied per pixel (pat-u3l8c.45).
+///
+/// Mirrors [`draw_texture_rect_blended`], but for each covered pixel it builds a
+/// [`FragmentContext`] whose `COLOR` is the sampled texel × `modulate` (Godot's
+/// default canvas_item fragment output before any user code), `UV` spans 0..1
+/// across `rect`, and `TIME` is `time` seconds, then runs the parsed fragment
+/// `instructions`. An empty instruction list is a pure passthrough, producing
+/// the same result as [`draw_texture_rect_blended`].
+#[allow(clippy::too_many_arguments)]
+pub fn draw_texture_rect_shaded(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    rect: Rect2,
+    modulate: Color,
+    instructions: &[FragmentInstruction],
+    uniforms: &HashMap<String, Variant>,
+    time: f32,
+) {
+    if texture.width == 0 || texture.height == 0 {
+        return;
+    }
+
+    let x_min = (rect.position.x as i32).max(0) as u32;
+    let y_min = (rect.position.y as i32).max(0) as u32;
+    let x_max = ((rect.position.x + rect.size.x) as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((rect.position.y + rect.size.y) as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
+
+    for py in y_min..y_max {
+        for px in x_min..x_max {
+            let u = (px as f32 - rect.position.x) / rect.size.x;
+            let v = (py as f32 - rect.position.y) / rect.size.y;
+            let tx = ((u * texture.width as f32) as u32).min(texture.width - 1);
+            let ty = ((v * texture.height as f32) as u32).min(texture.height - 1);
+
+            let texel = texture.get_pixel(tx, ty);
+            // The incoming COLOR is the sampled texel modulated by the item's
+            // tint — the value Godot's default canvas_item fragment produces
+            // via `COLOR = texture(TEXTURE, UV) * MODULATE`.
+            let base = Color::new(
+                texel.r * modulate.r,
+                texel.g * modulate.g,
+                texel.b * modulate.b,
+                texel.a * modulate.a,
+            );
+
+            let ctx = FragmentContext {
+                color: base,
+                uv: (u, v),
+                screen_uv: (u, v),
+                time,
+            };
+            let out = execute_fragment(instructions, &ctx, uniforms);
+            if out.a > 0.001 {
+                fb.blend_pixel(px, py, out);
             }
         }
     }

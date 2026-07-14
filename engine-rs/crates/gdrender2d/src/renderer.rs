@@ -3,10 +3,14 @@
 //! Provides a fully CPU-based 2D renderer that rasterizes draw commands
 //! into a [`FrameBuffer`].
 
+use std::collections::HashMap;
+
 use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
 use gdserver2d::server::{FrameData, RenderingServer2D};
+use gdserver2d::shader::{parse_fragment_body, FragmentInstruction, ShaderMaterial};
 use gdserver2d::viewport::Viewport;
+use gdvariant::variant::Variant;
 
 use crate::draw;
 use crate::font;
@@ -294,6 +298,15 @@ impl SoftwareRenderer {
         self.textures.push((path.to_string(), texture));
     }
 
+    /// Attaches a shader material to a server-owned canvas item (created via
+    /// [`RenderingServer2D::create_canvas_item`]) so its axis-aligned textured
+    /// draws run the material's `fragment()` shader per-pixel (pat-u3l8c.45).
+    pub fn canvas_item_set_material(&mut self, id: CanvasItemId, material: ShaderMaterial) {
+        if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+            item.material = Some(material);
+        }
+    }
+
     /// Looks up a registered texture by path.
     fn find_texture(&self, path: &str) -> Option<&Texture2D> {
         self.textures
@@ -318,6 +331,26 @@ impl SoftwareRenderer {
 
         let global_transform = parent_transform * item.transform;
         let axis_aligned = Self::transform_is_axis_aligned(global_transform);
+
+        // pat-u3l8c.45: precompute this item's canvas_item fragment shader (if
+        // any) once per item. `uniforms` merges the shader's declared defaults
+        // with the material's runtime parameter overrides. Textured draws below
+        // run the shader per-pixel via `draw::draw_texture_rect_shaded`.
+        let shader_program: Option<(Vec<FragmentInstruction>, HashMap<String, Variant>)> = item
+            .material
+            .as_ref()
+            .and_then(|m| m.shader.as_ref().map(|sh| (m, sh)))
+            .map(|(m, sh)| {
+                let instructions = parse_fragment_body(&sh.source_code);
+                let mut uniforms: HashMap<String, Variant> = HashMap::new();
+                for u in &sh.uniforms {
+                    uniforms.insert(u.name.clone(), u.default_value.clone());
+                }
+                for (k, v) in &m.parameters {
+                    uniforms.insert(k.clone(), v.clone());
+                }
+                (instructions, uniforms)
+            });
 
         for cmd in &item.commands {
             match cmd {
@@ -372,7 +405,21 @@ impl SoftwareRenderer {
                     if let Some(tex) = self.find_texture(texture_path) {
                         if axis_aligned {
                             let transformed = Self::transform_rect(global_transform, *rect);
-                            draw::draw_texture_rect_blended(fb, tex, transformed, *modulate);
+                            if let Some((instructions, uniforms)) = shader_program.as_ref() {
+                                // pat-u3l8c.45: run the item's fragment shader
+                                // per-pixel over the sprite's destination rect.
+                                draw::draw_texture_rect_shaded(
+                                    fb,
+                                    tex,
+                                    transformed,
+                                    *modulate,
+                                    instructions,
+                                    uniforms,
+                                    0.0,
+                                );
+                            } else {
+                                draw::draw_texture_rect_blended(fb, tex, transformed, *modulate);
+                            }
                         } else {
                             draw::draw_texture_rect_transformed(
                                 fb,

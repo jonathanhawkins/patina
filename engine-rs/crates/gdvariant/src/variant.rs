@@ -9,6 +9,7 @@ use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
+use crate::dictionary::Dictionary;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -236,8 +237,8 @@ pub enum Variant {
     ObjectId(ObjectId),
     /// A heterogeneous ordered list.
     Array(Vec<Variant>),
-    /// A string-keyed map of variants.
-    Dictionary(HashMap<String, Variant>),
+    /// A Variant-keyed, insertion-ordered map (Godot `Dictionary`).
+    Dictionary(Dictionary),
     /// A callable reference (method or lambda).
     Callable(Box<CallableRef>),
     /// A loaded resource.
@@ -979,7 +980,7 @@ mod tests {
 
     #[test]
     fn display_dictionary() {
-        let mut d = std::collections::HashMap::new();
+        let mut d = Dictionary::new();
         d.insert("key".to_string(), Variant::Int(1));
         let v = Variant::Dictionary(d);
         assert_eq!(format!("{v}"), "{Dict; len=1}");
@@ -997,8 +998,8 @@ mod tests {
 
     #[test]
     fn clone_nested_dictionary() {
-        let mut inner = std::collections::HashMap::new();
-        inner.insert("a".into(), Variant::Int(1));
+        let mut inner = Dictionary::new();
+        inner.insert("a".to_string(), Variant::Int(1));
         let outer = Variant::Dictionary(inner);
         let cloned = outer.clone();
         assert_eq!(outer, cloned);
@@ -1008,9 +1009,9 @@ mod tests {
 
     #[test]
     fn dictionary_truthy() {
-        assert!(!Variant::Dictionary(std::collections::HashMap::new()).is_truthy());
-        let mut d = std::collections::HashMap::new();
-        d.insert("k".into(), Variant::Nil);
+        assert!(!Variant::Dictionary(Dictionary::new()).is_truthy());
+        let mut d = Dictionary::new();
+        d.insert("k", Variant::Nil);
         assert!(Variant::Dictionary(d).is_truthy());
     }
 

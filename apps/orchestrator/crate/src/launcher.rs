@@ -718,10 +718,31 @@ fn create_coordinator_window(config: &LaunchConfig) -> Result<()> {
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| {
-            // Auto-register and get the generated name
-            bootstrap_worker_identity(&config.project_root).ok()
+            // Auto-register and get the generated name. Mail-server hiccups
+            // are common during a flywheel restart (db-lock storms), so retry
+            // with backoff — an unregistered coordinator name means every
+            // inbox fetch fails and NO bead ever closes (observed live
+            // 2026-07-13: `Agent 'CoordinatorFallback' not found`).
+            for attempt in 1..=3u32 {
+                match bootstrap_worker_identity(&config.project_root) {
+                    Ok(name) => return Some(name),
+                    Err(e) => {
+                        eprintln!(
+                            "  coordinator identity bootstrap attempt {attempt}/3 failed: {e}"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(2 * u64::from(attempt)));
+                    }
+                }
+            }
+            None
         })
-        .unwrap_or_else(|| "CoordinatorFallback".to_string());
+        .unwrap_or_else(|| {
+            eprintln!("  CRITICAL: coordinator identity registration failed after 3 attempts.");
+            eprintln!("  Falling back to UNREGISTERED name 'CoordinatorFallback' — inbox fetches");
+            eprintln!("  WILL fail and no bead will close until an operator registers an agent");
+            eprintln!("  and updates .beads/coordinator_agent plus the daemon's AGENT_NAME.");
+            "CoordinatorFallback".to_string()
+        });
 
     // Write coordinator name to a discoverable file
     let coord_file = config.project_root.join(".beads/coordinator_agent");
@@ -1630,6 +1651,28 @@ mod tests {
             fn_body.contains("bootstrap_worker_identity"),
             "REGRESSION: coordinator must auto-register via bootstrap_worker_identity, \
              not use a hardcoded name. Agent Mail rejects non-adjective+noun names."
+        );
+    }
+
+    /// Regression (2026-07-13): a failed identity bootstrap must retry and
+    /// then warn LOUDLY — a silently unregistered coordinator name means no
+    /// inbox fetch ever succeeds and the swarm never closes a bead.
+    #[test]
+    fn test_coordinator_identity_bootstrap_retries_and_warns() {
+        let source = include_str!("launcher.rs");
+        let coord_section = source
+            .find("fn create_coordinator_window")
+            .expect("must exist");
+        let fn_end = source[coord_section..].find("\n}").unwrap_or(2000);
+        let fn_body = &source[coord_section..coord_section + fn_end];
+
+        assert!(
+            fn_body.contains("attempt"),
+            "identity bootstrap must retry on failure, not give up after one shot"
+        );
+        assert!(
+            fn_body.contains("CRITICAL"),
+            "the unregistered-fallback path must warn loudly"
         );
     }
 

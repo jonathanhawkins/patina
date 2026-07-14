@@ -20,6 +20,15 @@ use crate::scene_tree::SceneTree;
 ///
 /// Handles all types that the parser can read back: scalars, strings,
 /// math types, node paths, arrays, and dictionaries.
+/// Renders a dictionary key to its text form for `.tscn` output. String keys
+/// use their raw text; other Variant kinds use their lossy string form.
+fn dict_key_display(k: &Variant) -> String {
+    match k {
+        Variant::String(s) => s.clone(),
+        other => other.to_string_lossy(),
+    }
+}
+
 pub fn format_variant_value(v: &Variant) -> String {
     match v {
         Variant::Nil => "null".to_string(),
@@ -85,11 +94,16 @@ pub fn format_variant_value(v: &Variant) -> String {
             format!("[{}]", items.join(", "))
         }
         Variant::Dictionary(dict) => {
-            let mut keys: Vec<&String> = dict.keys().collect();
-            keys.sort();
-            let pairs: Vec<String> = keys
+            // Keys are Variants; render each to a stable display string and sort
+            // for deterministic output.
+            let mut pairs: Vec<(String, String)> = dict
                 .iter()
-                .map(|k| format!("\"{}\": {}", k, format_variant_value(&dict[*k])))
+                .map(|(k, v)| (dict_key_display(k), format_variant_value(v)))
+                .collect();
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            let pairs: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| format!("\"{}\": {}", k, v))
                 .collect();
             format!("{{{}}}", pairs.join(", "))
         }
@@ -376,6 +390,7 @@ fn write_connections(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gdvariant::Dictionary;
     use crate::node::Node;
     use crate::packed_scene::{add_packed_scene_to_tree, PackedScene};
     use crate::scene_tree::SceneTree;
@@ -495,7 +510,7 @@ mod tests {
 
     #[test]
     fn format_dictionary() {
-        let mut d = std::collections::HashMap::new();
+        let mut d = Dictionary::new();
         d.insert("b".to_string(), Variant::Int(2));
         d.insert("a".to_string(), Variant::Int(1));
         let result = format_variant_value(&Variant::Dictionary(d));
@@ -506,7 +521,7 @@ mod tests {
     #[test]
     fn format_empty_dictionary() {
         assert_eq!(
-            format_variant_value(&Variant::Dictionary(std::collections::HashMap::new())),
+            format_variant_value(&Variant::Dictionary(Dictionary::new())),
             "{}"
         );
     }

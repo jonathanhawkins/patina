@@ -278,6 +278,16 @@ pub struct Environment3D {
     /// viewport/project setting (default **false**), not an Environment
     /// property — it never appears in a Godot `.tscn`/`.tres`.
     pub use_debanding: bool,
+    /// Screen-space ambient occlusion enable (Godot's `ssao_enabled`, default
+    /// **false**). When on, the render path darkens creases using the depth
+    /// buffer before tonemapping.
+    pub ssao_enabled: bool,
+    /// SSAO sampling radius in world units (Godot's `ssao_radius`, default
+    /// **1.0**). Larger values widen the neighbourhood sampled for occlusion.
+    pub ssao_radius: f32,
+    /// SSAO strength multiplier (Godot's `ssao_intensity`, default **2.0**).
+    /// 0 leaves the framebuffer untouched.
+    pub ssao_intensity: f32,
 }
 
 /// How fog density accumulates with distance.
@@ -352,6 +362,10 @@ impl Default for Environment3D {
             // Off by default so deterministic framebuffer goldens stay stable;
             // enable for editor/sky paths that want Godot-like gradient dither.
             use_debanding: false,
+            // Godot 4.6 SSAO defaults (Environment).
+            ssao_enabled: false,
+            ssao_radius: 1.0,
+            ssao_intensity: 2.0,
         }
     }
 }
@@ -542,6 +556,21 @@ impl Environment3D {
                 "fog_depth_end" => {
                     if let Variant::Float(f) = value {
                         env.fog_depth_end = *f as f32;
+                    }
+                }
+                "ssao_enabled" => {
+                    if let Variant::Bool(b) = value {
+                        env.ssao_enabled = *b;
+                    }
+                }
+                "ssao_radius" => {
+                    if let Variant::Float(f) = value {
+                        env.ssao_radius = *f as f32;
+                    }
+                }
+                "ssao_intensity" => {
+                    if let Variant::Float(f) = value {
+                        env.ssao_intensity = *f as f32;
                     }
                 }
                 _ => {} // ignore unknown properties
@@ -747,6 +776,21 @@ impl Environment3D {
             props.push((
                 "fog_depth_end".into(),
                 Variant::Float(self.fog_depth_end as f64),
+            ));
+        }
+        if self.ssao_enabled != def.ssao_enabled {
+            props.push(("ssao_enabled".into(), Variant::Bool(self.ssao_enabled)));
+        }
+        if (self.ssao_radius - def.ssao_radius).abs() > f32::EPSILON {
+            props.push((
+                "ssao_radius".into(),
+                Variant::Float(self.ssao_radius as f64),
+            ));
+        }
+        if (self.ssao_intensity - def.ssao_intensity).abs() > f32::EPSILON {
+            props.push((
+                "ssao_intensity".into(),
+                Variant::Float(self.ssao_intensity as f64),
             ));
         }
         props
@@ -1110,6 +1154,45 @@ mod tests {
         assert!(reconstructed.fog_enabled);
         assert_eq!(reconstructed.fog_light_color, env.fog_light_color);
         assert!((reconstructed.fog_density - env.fog_density).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ssao_defaults_match_godot() {
+        let env = Environment3D::default();
+        assert!(!env.ssao_enabled);
+        assert!((env.ssao_radius - 1.0).abs() < f32::EPSILON);
+        assert!((env.ssao_intensity - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ssao_from_properties_parses_tscn_fields() {
+        let props: Vec<(&str, Variant)> = vec![
+            ("ssao_enabled", Variant::Bool(true)),
+            ("ssao_radius", Variant::Float(4.5)),
+            ("ssao_intensity", Variant::Float(3.0)),
+        ];
+        let env = Environment3D::from_properties(props.iter().map(|(k, v)| (*k, v)));
+        assert!(env.ssao_enabled);
+        assert!((env.ssao_radius - 4.5).abs() < 1e-5);
+        assert!((env.ssao_intensity - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ssao_to_properties_roundtrip() {
+        let env = Environment3D {
+            ssao_enabled: true,
+            ssao_radius: 2.5,
+            ssao_intensity: 1.5,
+            ..Default::default()
+        };
+        let props = env.to_properties();
+        // Only the three SSAO overrides should be emitted (all else default).
+        assert!(props.iter().any(|(k, _)| k == "ssao_enabled"));
+        let reconstructed =
+            Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+        assert!(reconstructed.ssao_enabled);
+        assert!((reconstructed.ssao_radius - 2.5).abs() < 1e-5);
+        assert!((reconstructed.ssao_intensity - 1.5).abs() < 1e-5);
     }
 
     #[test]

@@ -38,6 +38,18 @@ const CONTROL_CLASSES: &[&str] = &[
     "Label",
     "ColorRect",
     "TextureRect",
+    "RichTextLabel",
+    "ProgressBar",
+    "CheckBox",
+    "CheckButton",
+    "OptionButton",
+    "TabContainer",
+    "MarginContainer",
+    "ScrollContainer",
+    "GridContainer",
+    "VBoxContainer",
+    "HBoxContainer",
+    "CenterContainer",
 ];
 
 /// Renders the Control subtree rooted at `root` into `viewport`.
@@ -165,6 +177,146 @@ fn text_width(text: &str, scale: u32) -> f32 {
     (n * GLYPH_W + (n - 1.0) * GLYPH_GAP) * scale as f32
 }
 
+/// A run of text sharing one color, produced by [`parse_bbcode`].
+#[derive(Clone, Debug, PartialEq)]
+struct TextSpan {
+    text: String,
+    color: Color,
+}
+
+/// Parses a BBCode subset into colored spans. Recognized tags:
+/// `[color=#rrggbb]`/`[color=name]` … `[/color]` set the run color; `[b]`,
+/// `[i]`, `[u]`, `[s]` (and their closers) are stripped — the built-in bitmap
+/// font has no weight/style variants, so formatting only affects the stripped
+/// text. Unknown `[...]` tags are dropped. `default` colors untagged text.
+fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
+    let mut spans: Vec<TextSpan> = Vec::new();
+    // Color stack so nested `[color]` tags restore the outer color on `[/color]`.
+    let mut color_stack: Vec<Color> = vec![default];
+    let mut cur = String::new();
+    let mut chars = src.chars();
+
+    let flush = |cur: &mut String, color: Color, spans: &mut Vec<TextSpan>| {
+        if !cur.is_empty() {
+            spans.push(TextSpan {
+                text: std::mem::take(cur),
+                color,
+            });
+        }
+    };
+
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            // Collect up to the closing ']'.
+            let mut tag = String::new();
+            let mut closed = false;
+            for tc in chars.by_ref() {
+                if tc == ']' {
+                    closed = true;
+                    break;
+                }
+                tag.push(tc);
+            }
+            if !closed {
+                // Unterminated '[' — treat literally.
+                cur.push('[');
+                cur.push_str(&tag);
+                break;
+            }
+            let cur_color = *color_stack.last().unwrap();
+            let lower = tag.to_ascii_lowercase();
+            if let Some(spec) = lower.strip_prefix("color=") {
+                flush(&mut cur, cur_color, &mut spans);
+                color_stack.push(parse_bbcode_color(spec).unwrap_or(cur_color));
+            } else if lower == "/color" {
+                flush(&mut cur, cur_color, &mut spans);
+                if color_stack.len() > 1 {
+                    color_stack.pop();
+                }
+            } else {
+                // b/i/u/s and unknown tags: strip, no color change.
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    let cur_color = *color_stack.last().unwrap();
+    flush(&mut cur, cur_color, &mut spans);
+    spans
+}
+
+/// Parses a BBCode color spec: `#rgb`, `#rrggbb`, `#rrggbbaa`, or a small set of
+/// named colors. Returns `None` for anything unrecognized.
+fn parse_bbcode_color(spec: &str) -> Option<Color> {
+    let s = spec.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        return parse_hex_color(hex);
+    }
+    let named = match s.to_ascii_lowercase().as_str() {
+        "white" => Color::WHITE,
+        "black" => Color::BLACK,
+        "red" => Color::new(1.0, 0.0, 0.0, 1.0),
+        "green" => Color::new(0.0, 1.0, 0.0, 1.0),
+        "blue" => Color::new(0.0, 0.0, 1.0, 1.0),
+        "yellow" => Color::new(1.0, 1.0, 0.0, 1.0),
+        "cyan" => Color::new(0.0, 1.0, 1.0, 1.0),
+        "magenta" => Color::new(1.0, 0.0, 1.0, 1.0),
+        "gray" | "grey" => Color::new(0.5, 0.5, 0.5, 1.0),
+        "orange" => Color::new(1.0, 0.65, 0.0, 1.0),
+        _ => return None,
+    };
+    Some(named)
+}
+
+/// Parses `rgb`, `rrggbb`, or `rrggbbaa` hex (no leading `#`) into a `Color`.
+fn parse_hex_color(hex: &str) -> Option<Color> {
+    let h = hex.trim();
+    let comp = |s: &str| u8::from_str_radix(s, 16).ok().map(|v| v as f32 / 255.0);
+    match h.len() {
+        3 => {
+            let dup = |c: char| {
+                let s: String = [c, c].iter().collect();
+                comp(&s)
+            };
+            let mut it = h.chars();
+            let r = dup(it.next()?)?;
+            let g = dup(it.next()?)?;
+            let b = dup(it.next()?)?;
+            Some(Color::new(r, g, b, 1.0))
+        }
+        6 => Some(Color::new(
+            comp(&h[0..2])?,
+            comp(&h[2..4])?,
+            comp(&h[4..6])?,
+            1.0,
+        )),
+        8 => Some(Color::new(
+            comp(&h[0..2])?,
+            comp(&h[2..4])?,
+            comp(&h[4..6])?,
+            comp(&h[6..8])?,
+        )),
+        _ => None,
+    }
+}
+
+/// Reads a numeric (`float`/`int`) node property, if present.
+fn num_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<f64> {
+    match tree.get_node(node_id)?.get_property(key) {
+        Variant::Float(f) => Some(f),
+        Variant::Int(i) => Some(i as f64),
+        _ => None,
+    }
+}
+
+/// Reads a `bool`-typed node property, if present.
+fn bool_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<bool> {
+    match tree.get_node(node_id)?.get_property(key) {
+        Variant::Bool(b) => Some(b),
+        _ => None,
+    }
+}
+
 fn draw_control(
     tree: &SceneTree,
     node_id: NodeId,
@@ -252,6 +404,204 @@ fn draw_control(
                     });
                 }
             }
+        }
+        "RichTextLabel" => {
+            // Accept either `bbcode_text` (bbcode_enabled) or plain `text`.
+            let raw = string_prop(tree, node_id, "bbcode_text")
+                .filter(|s| !s.is_empty())
+                .or_else(|| string_prop(tree, node_id, "text"))
+                .unwrap_or_default();
+            if !raw.is_empty() {
+                let font_color = theme
+                    .get_color("RichTextLabel", "default_color")
+                    .unwrap_or(Color::WHITE);
+                let font_size = theme
+                    .get_font_size("RichTextLabel", "font_size")
+                    .unwrap_or(16);
+                let scale = text_scale(font_size);
+                let mut x = rect.position.x;
+                let y = rect.position.y;
+                for span in parse_bbcode(&raw, font_color) {
+                    if span.text.is_empty() {
+                        continue;
+                    }
+                    let w = text_width(&span.text, scale);
+                    out.push(DrawCommand::DrawString {
+                        text: span.text,
+                        position: Vector2::new(x, y),
+                        color: span.color,
+                        font_size: scale,
+                    });
+                    x += w + GLYPH_GAP * scale as f32;
+                }
+            }
+        }
+        "ProgressBar" => {
+            // Background trough.
+            let bg = stylebox_bg(
+                theme,
+                "ProgressBar",
+                "background",
+                Color::new(0.1, 0.1, 0.1, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: bg,
+                filled: true,
+            });
+            // Filled portion by (value - min) / (max - min).
+            let min = num_prop(tree, node_id, "min_value").unwrap_or(0.0);
+            let max = num_prop(tree, node_id, "max_value").unwrap_or(100.0);
+            let value = num_prop(tree, node_id, "value").unwrap_or(0.0);
+            let ratio = if max > min {
+                ((value - min) / (max - min)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if ratio > 0.0 {
+                let fill = stylebox_bg(
+                    theme,
+                    "ProgressBar",
+                    "fill",
+                    Color::new(0.4, 0.6, 0.9, 1.0),
+                );
+                let fill_rect = Rect2::new(
+                    rect.position,
+                    Vector2::new(rect.size.x * ratio as f32, rect.size.y),
+                );
+                out.push(DrawCommand::DrawRect {
+                    rect: fill_rect,
+                    color: fill,
+                    filled: true,
+                });
+            }
+        }
+        "CheckBox" | "CheckButton" => {
+            // Box glyph on the left, text to its right.
+            let checked = bool_prop(tree, node_id, "button_pressed").unwrap_or(false);
+            let box_side = rect.size.y.min(GLYPH_H * 3.0).max(8.0);
+            let box_rect = Rect2::new(
+                Vector2::new(
+                    rect.position.x,
+                    rect.position.y + (rect.size.y - box_side) * 0.5,
+                ),
+                Vector2::new(box_side, box_side),
+            );
+            let border = theme
+                .get_color("CheckBox", "font_color")
+                .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
+            // Outline (unfilled) box.
+            out.push(DrawCommand::DrawRect {
+                rect: box_rect,
+                color: border,
+                filled: false,
+            });
+            if checked {
+                // Inset filled square marks the checked state.
+                let inset = box_side * 0.25;
+                out.push(DrawCommand::DrawRect {
+                    rect: Rect2::new(
+                        Vector2::new(box_rect.position.x + inset, box_rect.position.y + inset),
+                        Vector2::new(box_side - inset * 2.0, box_side - inset * 2.0),
+                    ),
+                    color: border,
+                    filled: true,
+                });
+            }
+            let text = string_prop(tree, node_id, "text").unwrap_or_default();
+            if !text.is_empty() {
+                let font_size = theme.get_font_size("CheckBox", "font_size").unwrap_or(16);
+                let scale = text_scale(font_size);
+                let th = GLYPH_H * scale as f32;
+                out.push(DrawCommand::DrawString {
+                    text,
+                    position: Vector2::new(
+                        box_rect.position.x + box_side + GLYPH_GAP * 2.0 * scale as f32,
+                        rect.position.y + (rect.size.y - th) * 0.5,
+                    ),
+                    color: border,
+                    font_size: scale,
+                });
+            }
+        }
+        "OptionButton" => {
+            // Button background.
+            if let Some(sb) = theme.get_stylebox("OptionButton", "normal") {
+                out.extend(sb.draw(rect));
+            } else {
+                let bg = stylebox_bg(
+                    theme,
+                    "OptionButton",
+                    "normal",
+                    Color::new(0.2, 0.2, 0.2, 1.0),
+                );
+                out.push(DrawCommand::DrawRect {
+                    rect,
+                    color: bg,
+                    filled: true,
+                });
+            }
+            let font_color = theme
+                .get_color("OptionButton", "font_color")
+                .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
+            let font_size = theme
+                .get_font_size("OptionButton", "font_size")
+                .unwrap_or(16);
+            let scale = text_scale(font_size);
+            // Selected item text (falls back to `text`).
+            let text = string_prop(tree, node_id, "text")
+                .filter(|s| !s.is_empty())
+                .or_else(|| string_prop(tree, node_id, "selected_text"))
+                .unwrap_or_default();
+            if !text.is_empty() {
+                let th = GLYPH_H * scale as f32;
+                out.push(DrawCommand::DrawString {
+                    text,
+                    position: Vector2::new(
+                        rect.position.x + GLYPH_GAP * 2.0 * scale as f32,
+                        rect.position.y + (rect.size.y - th) * 0.5,
+                    ),
+                    color: font_color,
+                    font_size: scale,
+                });
+            }
+            // Down-arrow indicator on the right edge (small filled triangle
+            // approximated by a rect for the bitmap renderer).
+            let arrow_w = 6.0 * scale as f32;
+            let arrow_rect = Rect2::new(
+                Vector2::new(
+                    rect.position.x + rect.size.x - arrow_w - GLYPH_GAP * scale as f32,
+                    rect.position.y + (rect.size.y - arrow_w) * 0.5,
+                ),
+                Vector2::new(arrow_w, arrow_w),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect: arrow_rect,
+                color: font_color,
+                filled: true,
+            });
+        }
+        "TabContainer" => {
+            // Panel background behind the content area, plus a header strip.
+            let panel_bg =
+                stylebox_bg(theme, "TabContainer", "panel", Color::new(0.15, 0.15, 0.15, 1.0));
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: panel_bg,
+                filled: true,
+            });
+            let tab_bar_h = crate::control::TAB_BAR_HEIGHT.min(rect.size.y);
+            let header_bg = stylebox_bg(
+                theme,
+                "TabContainer",
+                "tab_selected",
+                Color::new(0.22, 0.22, 0.22, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect: Rect2::new(rect.position, Vector2::new(rect.size.x, tab_bar_h)),
+                color: header_bg,
+                filled: true,
+            });
         }
         _ => {}
     }
@@ -343,6 +693,173 @@ mod tests {
             }
             other => panic!("expected DrawString, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_bbcode_splits_color_spans() {
+        let spans = parse_bbcode("hi [color=#ff0000]red[/color] bye", Color::WHITE);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].text, "hi ");
+        assert!(approx(spans[0].color, Color::WHITE));
+        assert_eq!(spans[1].text, "red");
+        assert!(approx(spans[1].color, Color::new(1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(spans[2].text, " bye");
+        assert!(approx(spans[2].color, Color::WHITE));
+    }
+
+    #[test]
+    fn parse_bbcode_strips_formatting_tags() {
+        let spans = parse_bbcode("[b]bold[/b] [i]it[/i]", Color::WHITE);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "bold it");
+    }
+
+    #[test]
+    fn parse_bbcode_named_and_short_hex_colors() {
+        assert!(approx(
+            parse_bbcode_color("red").unwrap(),
+            Color::new(1.0, 0.0, 0.0, 1.0)
+        ));
+        assert!(approx(
+            parse_bbcode_color("#0f0").unwrap(),
+            Color::new(0.0, 1.0, 0.0, 1.0)
+        ));
+        assert!(parse_bbcode_color("notacolor").is_none());
+    }
+
+    #[test]
+    fn richtextlabel_emits_colored_spans() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut n = Node::new("R", "RichTextLabel");
+        n.set_property(
+            "bbcode_text",
+            Variant::String("a[color=#00ff00]b[/color]".to_owned()),
+        );
+        let id = tree.add_child(root, n).unwrap();
+        control::apply_anchor_preset(&mut tree, id, AnchorPreset::FullRect);
+
+        let mut vp = Viewport::new(64, 32, Color::BLACK);
+        let theme = Theme::default_theme();
+        render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(64.0, 32.0));
+
+        let cmds = &vp.get_sorted_items()[0].commands;
+        // Two DrawString spans: "a" (default) then "b" (green).
+        let strings: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::DrawString { text, color, .. } => Some((text.clone(), *color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strings.len(), 2);
+        assert_eq!(strings[0].0, "a");
+        assert_eq!(strings[1].0, "b");
+        assert!(approx(strings[1].1, Color::new(0.0, 1.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn progressbar_fill_width_tracks_value() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut n = Node::new("PB", "ProgressBar");
+        n.set_property("min_value", Variant::Float(0.0));
+        n.set_property("max_value", Variant::Float(100.0));
+        n.set_property("value", Variant::Float(25.0));
+        let id = tree.add_child(root, n).unwrap();
+        control::apply_anchor_preset(&mut tree, id, AnchorPreset::TopLeft);
+        control::set_offset_right(&mut tree, id, 200.0);
+        control::set_offset_bottom(&mut tree, id, 20.0);
+
+        let mut vp = Viewport::new(256, 64, Color::BLACK);
+        let theme = Theme::default_theme();
+        render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(256.0, 64.0));
+
+        let cmds = &vp.get_sorted_items()[0].commands;
+        // First rect = trough (full width), second = fill (25% width).
+        let rects: Vec<Rect2> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::DrawRect { rect, filled: true, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rects.len(), 2, "trough + fill");
+        assert!((rects[0].size.x - 200.0).abs() < 0.5);
+        assert!((rects[1].size.x - 50.0).abs() < 0.5, "25% of 200 = 50");
+    }
+
+    #[test]
+    fn checkbox_checked_adds_inner_mark() {
+        let make = |checked: bool| {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let mut n = Node::new("C", "CheckBox");
+            n.set_property("button_pressed", Variant::Bool(checked));
+            n.set_property("text", Variant::String("On".to_owned()));
+            let id = tree.add_child(root, n).unwrap();
+            control::apply_anchor_preset(&mut tree, id, AnchorPreset::TopLeft);
+            control::set_offset_right(&mut tree, id, 100.0);
+            control::set_offset_bottom(&mut tree, id, 24.0);
+            let mut vp = Viewport::new(128, 32, Color::BLACK);
+            let theme = Theme::default_theme();
+            render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(128.0, 32.0));
+            let cmds = &vp.get_sorted_items()[0].commands;
+            cmds.iter()
+                .filter(|c| matches!(c, DrawCommand::DrawRect { filled: true, .. }))
+                .count()
+        };
+        // Unchecked: no filled rect (only the outline box). Checked: one filled mark.
+        assert_eq!(make(false), 0);
+        assert_eq!(make(true), 1);
+    }
+
+    #[test]
+    fn optionbutton_draws_bg_text_and_arrow() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut n = Node::new("O", "OptionButton");
+        n.set_property("text", Variant::String("Pick".to_owned()));
+        let id = tree.add_child(root, n).unwrap();
+        control::apply_anchor_preset(&mut tree, id, AnchorPreset::TopLeft);
+        control::set_offset_right(&mut tree, id, 120.0);
+        control::set_offset_bottom(&mut tree, id, 30.0);
+
+        let mut vp = Viewport::new(128, 64, Color::BLACK);
+        let theme = Theme::default_theme();
+        render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(128.0, 64.0));
+
+        let cmds = &vp.get_sorted_items()[0].commands;
+        let has_string = cmds
+            .iter()
+            .any(|c| matches!(c, DrawCommand::DrawString { text, .. } if text == "Pick"));
+        let filled_rects = cmds
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::DrawRect { filled: true, .. }))
+            .count();
+        assert!(has_string, "selected text drawn");
+        assert!(filled_rects >= 2, "bg + arrow indicator");
+    }
+
+    #[test]
+    fn tabcontainer_draws_panel_and_header() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let id = tree
+            .add_child(root, Node::new("T", "TabContainer"))
+            .unwrap();
+        control::apply_anchor_preset(&mut tree, id, AnchorPreset::FullRect);
+
+        let mut vp = Viewport::new(200, 200, Color::BLACK);
+        let theme = Theme::default_theme();
+        render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(200.0, 200.0));
+
+        let cmds = &vp.get_sorted_items()[0].commands;
+        let filled = cmds
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::DrawRect { filled: true, .. }))
+            .count();
+        assert!(filled >= 2, "panel bg + header strip");
     }
 
     #[test]

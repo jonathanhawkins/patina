@@ -20,7 +20,7 @@ use gdphysics2d::area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState}
 use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D};
 use gdphysics2d::character::CharacterBody2D as PhysicsCharacterBody2D;
 use gdphysics2d::shape::Shape2D;
-use gdphysics2d::world::{CollisionEvent, PhysicsWorld2D};
+use gdphysics2d::world::{CollisionEvent, ContactState, PhysicsWorld2D};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
@@ -663,6 +663,54 @@ impl PhysicsServer {
                 signal_name,
                 &[Variant::ObjectId(body_node_id.object_id())],
             );
+        }
+    }
+
+    /// Processes body-body contact events from the last physics step and emits
+    /// `body_entered` / `body_exited` signals on `RigidBody2D` nodes that have
+    /// contact monitoring enabled.
+    ///
+    /// Mirrors Godot's `RigidBody2D` contact reporting: a body only reports
+    /// contacts when its `contact_monitor` property is `true` **and** its
+    /// `max_contacts_reported` property is greater than zero. Each side of a
+    /// contact pair is evaluated independently — a monitoring body emits the
+    /// signal with the *other* body's node `ObjectId` as the argument, matching
+    /// Godot's `body_entered(body: Node)` / `body_exited(body: Node)` contract.
+    /// Static bodies (which lack a `contact_monitor` property) naturally never
+    /// emit, while a monitoring rigid body still reports contact with them.
+    pub fn process_body_contact_signals(&self, tree: &mut SceneTree) {
+        for event in &self.last_collision_events {
+            let signal_name = match event.state {
+                ContactState::Entered => "body_entered",
+                ContactState::Exited => "body_exited",
+                // Persisting contacts do not re-fire enter/exit signals.
+                ContactState::Persisting => continue,
+            };
+            // Evaluate both directions: either body in the pair may monitor.
+            for (self_body, other_body) in
+                [(event.body_a, event.body_b), (event.body_b, event.body_a)]
+            {
+                let self_node = match self.body_to_node.get(&self_body) {
+                    Some(&id) => id,
+                    None => continue,
+                };
+                let other_node = match self.body_to_node.get(&other_body) {
+                    Some(&id) => id,
+                    None => continue,
+                };
+                // Godot gates contact reporting on both flags.
+                if !bool_prop(tree, self_node, "contact_monitor", false) {
+                    continue;
+                }
+                if u32_prop(tree, self_node, "max_contacts_reported", 0) == 0 {
+                    continue;
+                }
+                tree.emit_signal(
+                    self_node,
+                    signal_name,
+                    &[Variant::ObjectId(other_node.object_id())],
+                );
+            }
         }
     }
 
@@ -1410,6 +1458,163 @@ mod tests {
             args[0],
             Variant::ObjectId(body_id.object_id()),
             "signal arg should be the body node's ObjectId"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // pat-u3l8c.50 — RigidBody2D contact_monitor body_entered / body_exited
+    // -----------------------------------------------------------------------
+
+    /// Builds a `RigidBody2D` with a circular collision shape at `pos`.
+    /// When `monitor` is true the node opts into contact reporting via
+    /// `contact_monitor` + `max_contacts_reported` (Godot's gate).
+    fn add_rigid_circle(
+        tree: &mut SceneTree,
+        parent: NodeId,
+        name: &str,
+        pos: Vector2,
+        radius: f64,
+        monitor: bool,
+    ) -> NodeId {
+        let mut body = Node::new(name, "RigidBody2D");
+        body.set_property("position", Variant::Vector2(pos));
+        if monitor {
+            body.set_property("contact_monitor", Variant::Bool(true));
+            body.set_property("max_contacts_reported", Variant::Int(4));
+        }
+        let body_id = tree.add_child(parent, body).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(radius));
+        tree.add_child(body_id, s).unwrap();
+        body_id
+    }
+
+    #[test]
+    fn rigidbody2d_contact_monitor_emits_body_entered() {
+        use gdobject::signal::Connection;
+        use std::sync::{Arc, Mutex};
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Two overlapping rigid bodies (centres 8 apart, radii 5 → depth 2).
+        let a_id = add_rigid_circle(&mut tree, root, "A", Vector2::new(0.0, 0.0), 5.0, true);
+        let b_id = add_rigid_circle(&mut tree, root, "B", Vector2::new(8.0, 0.0), 5.0, false);
+
+        let received: Arc<Mutex<Vec<Variant>>> = Arc::new(Mutex::new(Vec::new()));
+        let got = received.clone();
+        tree.connect_signal(
+            a_id,
+            "body_entered",
+            Connection::with_callback(a_id.object_id(), "on_body_entered", move |args| {
+                got.lock().unwrap().extend_from_slice(args);
+                Variant::Nil
+            }),
+        );
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+        server.step_physics(0.0);
+        server.process_body_contact_signals(&mut tree);
+
+        let args = received.lock().unwrap();
+        assert_eq!(
+            args.len(),
+            1,
+            "monitoring RigidBody2D should fire body_entered exactly once"
+        );
+        assert_eq!(
+            args[0],
+            Variant::ObjectId(b_id.object_id()),
+            "body_entered arg should be the *other* body's node ObjectId"
+        );
+    }
+
+    #[test]
+    fn rigidbody2d_without_contact_monitor_emits_nothing() {
+        use gdobject::signal::Connection;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Neither body enables contact_monitor.
+        let a_id = add_rigid_circle(&mut tree, root, "A", Vector2::new(0.0, 0.0), 5.0, false);
+        let _b_id = add_rigid_circle(&mut tree, root, "B", Vector2::new(8.0, 0.0), 5.0, false);
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let cnt = count.clone();
+        tree.connect_signal(
+            a_id,
+            "body_entered",
+            Connection::with_callback(a_id.object_id(), "on_body_entered", move |_args| {
+                cnt.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            }),
+        );
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+        server.step_physics(0.0);
+        // A genuine contact must have been detected...
+        assert!(
+            !server.last_collision_events().is_empty(),
+            "overlapping bodies should produce a contact event"
+        );
+        server.process_body_contact_signals(&mut tree);
+
+        // ...but with contact_monitor disabled, no signal is emitted.
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "no body_entered without contact_monitor"
+        );
+    }
+
+    #[test]
+    fn rigidbody2d_contact_monitor_emits_body_exited() {
+        use gdobject::signal::Connection;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let a_id = add_rigid_circle(&mut tree, root, "A", Vector2::new(0.0, 0.0), 5.0, true);
+        let b_id = add_rigid_circle(&mut tree, root, "B", Vector2::new(8.0, 0.0), 5.0, false);
+
+        let exited = Arc::new(AtomicUsize::new(0));
+        let cnt = exited.clone();
+        tree.connect_signal(
+            a_id,
+            "body_exited",
+            Connection::with_callback(a_id.object_id(), "on_body_exited", move |_args| {
+                cnt.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            }),
+        );
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        // Frame 1: bodies overlap → contact entered (no exit yet).
+        server.step_physics(0.0);
+        server.process_body_contact_signals(&mut tree);
+        assert_eq!(exited.load(Ordering::SeqCst), 0, "no exit while overlapping");
+
+        // Move B far away so the pair separates.
+        if let Some(bid) = server.body_for_node(b_id) {
+            server.world.get_body_mut(bid).unwrap().position = Vector2::new(500.0, 0.0);
+        }
+
+        // Frame 2: contact ends → body_exited fires once.
+        server.step_physics(0.0);
+        server.process_body_contact_signals(&mut tree);
+        assert_eq!(
+            exited.load(Ordering::SeqCst),
+            1,
+            "body_exited should fire once when the contact ends"
         );
     }
 

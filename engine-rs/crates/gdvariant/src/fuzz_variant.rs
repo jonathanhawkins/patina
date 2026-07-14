@@ -7,6 +7,7 @@
 #[cfg(test)]
 mod tests {
     use crate::serialize::{from_json, to_json};
+    use crate::dictionary::Dictionary;
     use crate::variant::{Variant, VariantType};
     use gdcore::id::ObjectId;
     use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
@@ -90,7 +91,7 @@ mod tests {
                 prop_oneof![
                     prop::collection::vec(inner.clone(), 0..8).prop_map(Variant::Array),
                     prop::collection::hash_map("[a-z]{1,8}", inner, 0..6)
-                        .prop_map(Variant::Dictionary),
+                        .prop_map(|m| Variant::Dictionary(Dictionary::from(m))),
                 ]
             },
         )
@@ -215,7 +216,7 @@ mod tests {
 
         #[test]
         fn fuzz_dictionary_roundtrip(entries in prop::collection::hash_map("[a-z]{1,8}", arb_leaf_variant(), 0..8)) {
-            let v = Variant::Dictionary(entries);
+            let v = Variant::Dictionary(Dictionary::from(entries));
             assert_roundtrip_eq(&v, &roundtrip(&v));
         }
 
@@ -345,7 +346,7 @@ mod tests {
     fn edge_deeply_nested_dictionaries() {
         let mut v = Variant::String("leaf".into());
         for i in 0..10 {
-            let mut map = HashMap::new();
+            let mut map = Dictionary::new();
             map.insert(format!("level_{i}"), v);
             v = Variant::Dictionary(map);
         }
@@ -360,7 +361,7 @@ mod tests {
 
     #[test]
     fn edge_empty_dictionary_roundtrip() {
-        let v = Variant::Dictionary(HashMap::new());
+        let v = Variant::Dictionary(Dictionary::new());
         assert_roundtrip_eq(&v, &roundtrip(&v));
     }
 
@@ -446,7 +447,7 @@ mod tests {
             if i % 2 == 0 {
                 v = Variant::Array(vec![v]);
             } else {
-                let mut map = HashMap::new();
+                let mut map = Dictionary::new();
                 map.insert(format!("k{i}"), v);
                 v = Variant::Dictionary(map);
             }

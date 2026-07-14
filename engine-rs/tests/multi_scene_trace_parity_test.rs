@@ -11,9 +11,10 @@
 //! - ui_menu: Control nodes (Button, Label)
 //! - signals_complex: signal connections between nodes
 
+#[path = "support/oracle_fixture.rs"]
 mod oracle_fixture;
+#[path = "support/trace_compare.rs"]
 mod trace_compare;
-
 use oracle_fixture::fixtures_dir;
 use std::path::PathBuf;
 use trace_compare::{compare_traces, format_report, parse_events, TraceDiff};

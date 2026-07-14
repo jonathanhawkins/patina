@@ -330,7 +330,18 @@ impl Coordinator {
                     // Normal verification failed — reopen bead and notify worker.
                     // Repeated failures park the bead instead of round-robining
                     // it through the swarm forever (fail-streak parking).
-                    let (streak, park) = {
+                    // Bare timeouts are infrastructure failures (contended or
+                    // wedged lane), not evidence against the bead — they feed
+                    // the dyld breaker, never the park streak. Otherwise one
+                    // slow-lane period (cold cache, checkpoint gate) would
+                    // park innocent beads.
+                    let infra_timeout = vr
+                        .reject_reason
+                        .as_deref()
+                        .is_some_and(|r| r.contains("timed out after"));
+                    let (streak, park) = if infra_timeout {
+                        (0, false)
+                    } else {
                         let mut streaks = self.verify_fail_streaks.lock().unwrap();
                         bump_fail_streak(
                             &mut streaks,
@@ -416,25 +427,33 @@ impl Coordinator {
     /// Instead of blindly reopening, check if the acceptance tests pass.
     /// If they pass → close as done. If they fail → reopen for a new worker.
     fn verify_stale_bead(&self, bead_id: &str) {
-        // Get acceptance commands from bead description
-        let mut commands = match self.open_db() {
+        // Get acceptance commands from bead description, plus crate labels for
+        // the fallback scope.
+        let (mut commands, crate_labels) = match self.open_db() {
             Ok(db) => {
                 let desc = db::bead_description(&db, bead_id).ok().flatten();
+                let labels = db::bead_crate_labels(&db, bead_id).unwrap_or_default();
                 drop(db);
-                match desc {
+                let cmds = match desc {
                     Some(d) => verifier::extract_acceptance_commands(&d),
                     None => vec![],
-                }
+                };
+                (cmds, labels)
             }
-            Err(_) => vec![],
+            Err(_) => (vec![], vec![]),
         };
 
         if commands.is_empty() {
-            // Fallback: just verify the workspace compiles. Running the full test suite
-            // takes 15+ minutes and times out, creating a reopen loop. A successful build
-            // is a reasonable signal that the bead's work didn't break anything.
-            tracing::info!(bead = %bead_id, "Stale bead has no acceptance commands — using build check fallback");
-            commands.push("cargo build --workspace".to_string());
+            // Fallback: just verify the bead's crates compile. Running the full
+            // test suite takes 15+ minutes and times out, creating a reopen
+            // loop — and a full `cargo build --workspace` compiles and links
+            // every crate (wgpu/metal included), starving the verify lane.
+            commands = stale_fallback_commands(&crate_labels);
+            tracing::info!(
+                bead = %bead_id,
+                fallback = %commands.join(" && "),
+                "Stale bead has no acceptance commands — using scoped check fallback"
+            );
         }
 
         let _ = self.enqueue_verification(VerifyRequest {
@@ -1892,6 +1911,13 @@ impl Coordinator {
         if self.dry_run {
             return;
         }
+        // Defer while the verify lane is busy: a cold gate build saturates
+        // CPU and can push in-flight verifies past their timeout (false dyld
+        // trips + spurious park streaks). The 8s cycle cadence retries at the
+        // next quiet moment, before the attempt throttle is stamped.
+        if !self.pending_verifications.lock().unwrap().is_empty() {
+            return;
+        }
         *self.last_checkpoint_attempt.lock().unwrap() = Some(Instant::now());
         self.checkpoint_in_flight
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1915,14 +1941,21 @@ impl Coordinator {
             // wrapping while keeping its process-group timeout handling; the
             // absolute --manifest-path makes it cwd-independent. Costs a
             // second (persistent, warm) target dir on disk.
+            // nice -n 19: the gate must never outbid live verifies for CPU.
             let gate_cmd = format!(
-                "CARGO_TARGET_DIR='{}' cargo check --workspace --manifest-path '{}'",
+                "CARGO_TARGET_DIR='{}' nice -n 19 cargo check --workspace --manifest-path '{}'",
                 gate_target.display(),
                 root.join("engine-rs/Cargo.toml").display()
             );
-            let outcome = verifier::verify_commands(&root, &[gate_cmd], gate_timeout)
-                .map_err(|e| format!("workspace check not green: {e}"))
-                .and_then(|_| run_checkpoint_commit(&root, closes));
+            // catch_unwind: a panic here would otherwise leave
+            // checkpoint_in_flight latched true, silently disabling
+            // auto-checkpoints until the next restart.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                verifier::verify_commands(&root, &[gate_cmd], gate_timeout)
+                    .map_err(|e| format!("workspace check not green: {e}"))
+                    .and_then(|_| run_checkpoint_commit(&root, closes))
+            }))
+            .unwrap_or_else(|_| Err("checkpoint thread panicked".to_string()));
             let text = match &outcome {
                 Ok(msg) => {
                     *counter.lock().unwrap() = 0;
@@ -2145,6 +2178,41 @@ fn spawn_verifier_worker(
                         batch.len()
                     ),
                 );
+                // One shared warm-up build covering every scoped test target in
+                // the batch: N beads amortize a single dep-graph build instead
+                // of each paying compile+link separately. Best-effort — a
+                // failure (bogus target name, timeout) just logs and falls back
+                // to the per-bead builds below, never failing a bead. Skipped
+                // while the dyld breaker is open (a wedged host would hang it).
+                if breaker.should_launch() {
+                    let all_commands = batch
+                        .iter()
+                        .flat_map(|r| r.commands.iter().map(String::as_str));
+                    if let Some(prebuild) =
+                        verifier::batch_prebuild_command(all_commands, "patina-engine")
+                    {
+                        verifier_log_append(
+                            &verifier_log_path,
+                            &format!("BATCH-PREBUILD start: {prebuild}"),
+                        );
+                        let t0 = Instant::now();
+                        match verifier::verify_commands(&project_root, &[prebuild], timeout) {
+                            Ok(()) => verifier_log_append(
+                                &verifier_log_path,
+                                &format!("BATCH-PREBUILD done run_ms={}", t0.elapsed().as_millis()),
+                            ),
+                            Err(e) => verifier_log_append(
+                                &verifier_log_path,
+                                &format!(
+                                    "BATCH-PREBUILD failed run_ms={} (falling back to \
+                                     per-bead builds): {}",
+                                    t0.elapsed().as_millis(),
+                                    verifier::tail_chars(&format!("{e}"), 300)
+                                ),
+                            ),
+                        }
+                    }
+                }
             }
 
             for request in batch {
@@ -2174,6 +2242,14 @@ fn spawn_verifier_worker(
                             "SKIPPED bead={bead_id} — verify lane halted (dyld-wedge circuit breaker open)"
                         ),
                     );
+                        // Release the completion MESSAGE (it re-enqueues
+                        // cleanly after the B3 reaper reopens the bead) while
+                        // the bead itself stays pending — leaving the msg id
+                        // in the set strands it unacked-and-skipped in the
+                        // inbox forever.
+                        if let Some(id) = msg_id {
+                            pending_completion_msgs.lock().unwrap().remove(&id);
+                        }
                         continue;
                     }
                 }
@@ -2200,14 +2276,31 @@ fn spawn_verifier_worker(
                         tracing::warn!(krate = %krate, "crate-breakage breaker cleared");
                     }
                     if crate_breaker.any_tripped() {
-                        verifier_log_append(
-                            &verifier_log_path,
-                            &format!(
-                                "SKIPPED bead={bead_id} — crate-breakage breaker open ({})",
-                                crate_breaker.tripped_crates().join(", ")
-                            ),
-                        );
-                        continue;
+                        // Hold only verifies that would rebuild a broken
+                        // crate: the request's own crate, or unscoped
+                        // commands (broad build graphs). Other crates'
+                        // verifies proceed — one broken crate must not zero
+                        // the whole lane's throughput.
+                        let request_crate =
+                            verifier::crate_breaker::extract_request_crate(&request.commands);
+                        let held = match request_crate.as_deref() {
+                            Some(rc) => crate_breaker.is_tripped(rc),
+                            None => true,
+                        };
+                        if held {
+                            verifier_log_append(
+                                &verifier_log_path,
+                                &format!(
+                                    "SKIPPED bead={bead_id} — crate-breakage breaker open ({})",
+                                    crate_breaker.tripped_crates().join(", ")
+                                ),
+                            );
+                            // Same message-release as the dyld skip above.
+                            if let Some(id) = msg_id {
+                                pending_completion_msgs.lock().unwrap().remove(&id);
+                            }
+                            continue;
+                        }
                     }
                 }
 
@@ -2286,6 +2379,24 @@ fn order_batch_by_crate(batch: &mut [VerifyRequest]) {
     batch.sort_by_key(|r| {
         verifier::crate_breaker::extract_request_crate(&r.commands).unwrap_or_default()
     });
+}
+
+/// Fallback verify commands for a stale bead with no acceptance commands:
+/// `cargo check -p <crate>` for each of the bead's `crate:*` labels, or a
+/// workspace *check* (no codegen/link) when the bead is unlabeled. Never a
+/// full `cargo build --workspace` — compiling and linking every crate
+/// (wgpu/metal included) per stale bead is what starved the verify lane.
+fn stale_fallback_commands(crate_labels: &[String]) -> Vec<String> {
+    let pkgs: Vec<&str> = crate_labels
+        .iter()
+        .filter_map(|l| l.strip_prefix("crate:"))
+        .filter(|p| !p.is_empty())
+        .collect();
+    if pkgs.is_empty() {
+        vec!["cargo check --workspace".to_string()]
+    } else {
+        pkgs.iter().map(|p| format!("cargo check -p {p}")).collect()
+    }
 }
 
 /// Uncommitted files under a broken crate — the operator's suspect list for
@@ -2587,9 +2698,11 @@ fn run_checkpoint_commit(
 ) -> std::result::Result<String, String> {
     let branch_raw = git_capture(project_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let branch = branch_raw.trim();
-    if branch == "main" || branch == "master" {
+    if branch == "main" || branch == "master" || branch == "HEAD" {
+        // "HEAD" is rev-parse's spelling of a detached HEAD — committing
+        // there produces reflog-only orphans at the next checkout.
         return Err(format!(
-            "on default branch `{branch}` — auto-checkpoint refuses to commit here"
+            "on default branch or detached HEAD (`{branch}`) — auto-checkpoint refuses to commit here"
         ));
     }
     git_capture(project_root, &["add", "-A"])?;
@@ -2943,6 +3056,27 @@ mod tests {
         assert!(!stall_suppression_active(false, 3, false));
     }
 
+    /// The stale-recovery fallback must scope its compile check to the bead's
+    /// `crate:*` labels — never a full `cargo build --workspace` (which links
+    /// every crate per stale bead and starves the verify lane) — and use a
+    /// codegen-free workspace *check* only for unlabeled beads.
+    #[test]
+    fn stale_fallback_scopes_to_crate_labels() {
+        assert_eq!(
+            stale_fallback_commands(&["crate:gdscene".to_string(), "crate:gdrender2d".to_string()]),
+            vec!["cargo check -p gdscene", "cargo check -p gdrender2d"]
+        );
+        assert_eq!(
+            stale_fallback_commands(&[]),
+            vec!["cargo check --workspace"]
+        );
+        // Malformed labels (bare "crate:") can't produce an empty -p arg.
+        assert_eq!(
+            stale_fallback_commands(&["crate:".to_string()]),
+            vec!["cargo check --workspace"]
+        );
+    }
+
     fn verify_request(bead: &str, cmd: &str) -> VerifyRequest {
         VerifyRequest {
             bead_id: bead.to_string(),
@@ -3046,6 +3180,12 @@ mod tests {
         assert!(ok.contains("committed"), "{ok}");
         let ok2 = run_checkpoint_commit(root, 12).unwrap();
         assert!(ok2.contains("nothing to commit"), "{ok2}");
+
+        // Detached HEAD must refuse too — commits there orphan at the next
+        // checkout.
+        git(&["checkout", "--detach"]);
+        let err = run_checkpoint_commit(root, 13).unwrap_err();
+        assert!(err.contains("HEAD"), "{err}");
     }
 
     /// pat-f6ndj: the live verify lane must STOP launching verifies once the

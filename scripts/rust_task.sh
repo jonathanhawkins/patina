@@ -121,7 +121,10 @@ release_lock() {
 trap release_lock EXIT INT TERM
 acquire_lock "$@"
 
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+# The verifier lane is the sole builder (workers are blocked above), so it gets
+# most of the machine — 2 jobs starved the swarm's one bottleneck on an 18-core
+# box. Override per-invocation with CARGO_BUILD_JOBS=N.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-10}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
 # Amortize compilation across the many beads the verifier builds in sequence.

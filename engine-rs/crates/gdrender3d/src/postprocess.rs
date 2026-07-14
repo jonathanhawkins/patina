@@ -758,12 +758,13 @@ pub fn apply_ssao(
     depth: &[f32],
     width: usize,
     height: usize,
+    radius: i32,
     intensity: f32,
 ) {
     if depth.len() != width * height || pixels.len() != width * height {
         return;
     }
-    let radius = 2i32;
+    let radius = radius.max(1);
     let mut ao = vec![1.0f32; width * height];
     for y in 0..height as i32 {
         for x in 0..width as i32 {
@@ -804,17 +805,51 @@ pub fn apply_ssao(
     }
 }
 
+/// Depth-buffered SSAO post-chain pass gated on the environment (pat-u3l8c.36).
+///
+/// Runs [`apply_ssao`] over the linear-HDR framebuffer in place when
+/// [`Environment3D::ssao_enabled`] is set, mapping the world-space
+/// [`Environment3D::ssao_radius`] to a pixel neighbourhood and using
+/// [`Environment3D::ssao_intensity`] as the occlusion strength. `depth` is
+/// normalized linear depth, one value per pixel. This is the entry point the
+/// 3D render paths call just before [`apply_camera_post`] (SSAO belongs before
+/// tonemapping). It is a no-op when SSAO is disabled, its intensity is zero,
+/// or the buffer sizes do not match.
+pub fn apply_ssao_env(
+    pixels: &mut [Color],
+    depth: &[f32],
+    width: u32,
+    height: u32,
+    env: &Environment3D,
+) {
+    if !env.ssao_enabled || env.ssao_intensity <= 0.0 {
+        return;
+    }
+    let w = width as usize;
+    let h = height as usize;
+    if depth.len() != w * h || pixels.len() != w * h {
+        return;
+    }
+    // Map the world-space radius to a small pixel kernel; the default radius
+    // of 1.0 yields the standalone kernel's 2px neighbourhood.
+    let radius = (env.ssao_radius * 2.0).round().clamp(1.0, 8.0) as i32;
+    let mut rgb: Vec<[f32; 3]> = pixels.iter().map(|c| [c.r, c.g, c.b]).collect();
+    apply_ssao(&mut rgb, depth, w, h, radius, env.ssao_intensity);
+    for (c, s) in pixels.iter_mut().zip(rgb.iter()) {
+        c.r = s[0];
+        c.g = s[1];
+        c.b = s[2];
+    }
+}
+
 #[cfg(test)]
 mod ssao_tests {
     use super::*;
 
-    #[test]
-    fn ssao_darkens_depth_crease() {
-        let w = 8usize;
-        let h = 8usize;
-        let mut pixels = vec![[1.0f32, 1.0, 1.0]; w * h];
+    /// Builds an 8×8 framebuffer with a single deep center texel surrounded by
+    /// closer neighbours — a depth crease that SSAO should darken.
+    fn crease_depth(w: usize, h: usize) -> Vec<f32> {
         let mut depth = vec![1.0f32; w * h];
-        // Center pixel deeper with neighbors closer => AO
         depth[4 * w + 4] = 2.0;
         for dy in -1..=1 {
             for dx in -1..=1 {
@@ -824,11 +859,55 @@ mod ssao_tests {
                 depth[(4 + dy) as usize * w + (4 + dx) as usize] = 0.5;
             }
         }
-        apply_ssao(&mut pixels, &depth, w, h, 1.0);
+        depth
+    }
+
+    #[test]
+    fn ssao_darkens_depth_crease() {
+        let w = 8usize;
+        let h = 8usize;
+        let mut pixels = vec![[1.0f32, 1.0, 1.0]; w * h];
+        let depth = crease_depth(w, h);
+        apply_ssao(&mut pixels, &depth, w, h, 2, 1.0);
         assert!(
             pixels[4 * w + 4][0] < 0.95,
             "SSAO should darken crease, got {}",
             pixels[4 * w + 4][0]
         );
+    }
+
+    #[test]
+    fn ssao_env_disabled_is_noop() {
+        let w = 8usize;
+        let h = 8usize;
+        let mut pixels = vec![Color::new(1.0, 1.0, 1.0, 1.0); w * h];
+        let depth = crease_depth(w, h);
+        let env = Environment3D::default(); // ssao_enabled == false
+        apply_ssao_env(&mut pixels, &depth, w as u32, h as u32, &env);
+        assert!(
+            (pixels[4 * w + 4].r - 1.0).abs() < 1e-6,
+            "disabled SSAO must leave the framebuffer untouched"
+        );
+    }
+
+    #[test]
+    fn ssao_env_enabled_darkens_crease() {
+        let w = 8usize;
+        let h = 8usize;
+        let mut pixels = vec![Color::new(1.0, 1.0, 1.0, 1.0); w * h];
+        let depth = crease_depth(w, h);
+        let env = Environment3D {
+            ssao_enabled: true,
+            ssao_intensity: 1.0,
+            ..Default::default()
+        };
+        apply_ssao_env(&mut pixels, &depth, w as u32, h as u32, &env);
+        assert!(
+            pixels[4 * w + 4].r < 0.95,
+            "enabled SSAO should darken the crease, got {}",
+            pixels[4 * w + 4].r
+        );
+        // Alpha is preserved.
+        assert!((pixels[4 * w + 4].a - 1.0).abs() < 1e-6);
     }
 }

@@ -6,9 +6,10 @@
 //! be loaded, saved, and round-tripped without data loss.
 
 use gdcore::math::{Color, Vector3};
-use gdcore::math3d::Transform3D;
+use gdcore::math3d::{Aabb, Transform3D};
 
 use crate::light::{Light3D, LightType};
+use crate::occluder::OccluderInstance3D;
 
 // ===========================================================================
 // VoxelGI
@@ -314,7 +315,31 @@ impl LightmapGI {
     /// Bake a simple lightmap sample grid from lights (pat-p0s82.10).
     ///
     /// Produces `resolution × resolution` samples in the XZ plane at y=0.
+    /// This is the occluder-free path; see [`bake_samples_with_occluders`] to
+    /// account for shadow casters.
+    ///
+    /// [`bake_samples_with_occluders`]: Self::bake_samples_with_occluders
     pub fn bake_samples(&mut self, lights: &[Light3D], resolution: u32) {
+        self.bake_samples_with_occluders(lights, &[], resolution);
+    }
+
+    /// Bake a lightmap sample grid, tracing a shadow ray from each texel to
+    /// each light and dropping the light's contribution when an occluder
+    /// blocks it (pat-p0s82.10).
+    ///
+    /// Produces `resolution × resolution` samples in the XZ plane at y=0. The
+    /// net effect is that the side of a surface facing away from a light — the
+    /// side behind an occluder — bakes darker than the directly lit side.
+    pub fn bake_samples_with_occluders(
+        &mut self,
+        lights: &[Light3D],
+        occluders: &[OccluderInstance3D],
+        resolution: u32,
+    ) {
+        // Pre-compute world AABBs of occluders that carry a shape.
+        let occluder_aabbs: Vec<Aabb> =
+            occluders.iter().filter_map(|o| o.get_world_aabb()).collect();
+
         let res = resolution.max(2);
         self.lightmap_samples = Vec::with_capacity((res * res) as usize);
         for z in 0..res {
@@ -338,6 +363,10 @@ impl LightmapGI {
                             1.0 / (d * d)
                         }
                     };
+                    // Trace toward the light; skip if an occluder blocks it.
+                    if light_occluded(pos, light, &occluder_aabbs) {
+                        continue;
+                    }
                     r += light.color.r * light.energy * att;
                     g += light.color.g * light.energy * att;
                     b += light.color.b * light.energy * att;
@@ -365,12 +394,85 @@ impl LightmapGI {
         let iz = (fz * res as f32) as usize;
         self.lightmap_samples[iz * res as usize + ix]
     }
+
+    /// Apply the baked lightmap as the indirect-lighting term for a surface
+    /// with the given `albedo` at `world` position (pat-p0s82.10 shading path).
+    ///
+    /// The baked texel stores total irradiance, so the returned color is the
+    /// albedo modulated by the sampled lightmap. When the lightmap is not baked
+    /// the albedo passes through unchanged so unbaked scenes render normally.
+    pub fn shade(&self, albedo: Color, world: Vector3) -> Color {
+        if !self.baked || self.lightmap_samples.is_empty() {
+            return albedo;
+        }
+        let gi = self.sample_lightmap(world);
+        Color::new(albedo.r * gi.r, albedo.g * gi.g, albedo.b * gi.b, albedo.a)
+    }
+}
+
+/// Returns `true` if any occluder AABB blocks the straight-line path from a
+/// baked texel at `pos` to `light`.
+///
+/// For point/spot lights the segment runs from the texel to the light's
+/// position; for directional lights it runs a long distance up the incoming
+/// light direction (there is no finite light position).
+fn light_occluded(pos: Vector3, light: &Light3D, occluder_aabbs: &[Aabb]) -> bool {
+    if occluder_aabbs.is_empty() {
+        return false;
+    }
+    let light_point = match light.light_type {
+        LightType::Directional => pos - light.direction * 1.0e4,
+        LightType::Point | LightType::Spot => light.position,
+    };
+    occluder_aabbs
+        .iter()
+        .any(|aabb| segment_intersects_aabb(pos, light_point, *aabb))
+}
+
+/// Slab-test a segment `p0`→`p1` against an axis-aligned box.
+///
+/// Returns `true` when the segment enters the box for some parameter
+/// `t ∈ [0, 1]`.
+fn segment_intersects_aabb(p0: Vector3, p1: Vector3, aabb: Aabb) -> bool {
+    let min = aabb.position;
+    let max = aabb.position + aabb.size;
+    let dir = p1 - p0;
+    let mut tmin = 0.0f32;
+    let mut tmax = 1.0f32;
+    for axis in 0..3 {
+        let (o, d, lo, hi) = match axis {
+            0 => (p0.x, dir.x, min.x, max.x),
+            1 => (p0.y, dir.y, min.y, max.y),
+            _ => (p0.z, dir.z, min.z, max.z),
+        };
+        if d.abs() < 1e-8 {
+            // Segment is parallel to this slab; reject if the origin lies
+            // outside the slab's extent.
+            if o < lo || o > hi {
+                return false;
+            }
+        } else {
+            let inv = 1.0 / d;
+            let mut t1 = (lo - o) * inv;
+            let mut t2 = (hi - o) * inv;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+            }
+            tmin = tmin.max(t1);
+            tmax = tmax.min(t2);
+            if tmin > tmax {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::light::Light3DId;
+    use crate::occluder::Occluder3D;
 
     // -- VoxelGI tests --------------------------------------------------------
 
@@ -524,5 +626,96 @@ mod tests {
         assert!(!gi.interior);
         gi.interior = true;
         assert!(gi.interior);
+    }
+
+    #[test]
+    fn lightmapgi_bake_and_sample_roundtrip() {
+        let mut gi = LightmapGI::new(LightmapGIId(1));
+        let mut light = Light3D::directional(Light3DId(1));
+        light.color = Color::WHITE;
+        light.energy = 1.0;
+        gi.bake_samples(&[light], 8);
+        assert!(gi.baked);
+        assert_eq!(gi.lightmap_samples.len(), 64);
+        assert!(gi.light_data_path.is_some());
+        // A fully-lit directional bake reads bright everywhere.
+        let c = gi.sample_lightmap(Vector3::new(0.0, 0.0, 0.0));
+        assert!(c.r > 0.5, "directional bake should be lit, got {}", c.r);
+    }
+
+    #[test]
+    fn lightmapgi_unbaked_sample_is_black() {
+        let gi = LightmapGI::new(LightmapGIId(1));
+        assert_eq!(gi.sample_lightmap(Vector3::ZERO), Color::BLACK);
+    }
+
+    /// Fixture: a box occluder floating above the +X half of the bake plane.
+    /// A directional light straight down should leave the shadowed (+X) side
+    /// markedly darker than the exposed (-X) side.
+    #[test]
+    fn lightmapgi_occluder_darkens_opposite_side() {
+        let mut gi = LightmapGI::new(LightmapGIId(1));
+        let light = Light3D::directional(Light3DId(1)); // points (0,-1,0)
+
+        // Box over x∈[0,10], y∈[4,6], spanning z, casting a downward shadow.
+        let mut occ = OccluderInstance3D::with_occluder(Occluder3D::new_box(
+            Vector3::new(10.0, 2.0, 40.0),
+        ));
+        occ.transform.origin = Vector3::new(5.0, 5.0, 0.0);
+
+        gi.bake_samples_with_occluders(&[light], &[occ], 16);
+
+        let lit = gi.sample_lightmap(Vector3::new(-8.0, 0.0, 0.0));
+        let shadowed = gi.sample_lightmap(Vector3::new(8.0, 0.0, 0.0));
+        assert!(
+            lit.r > shadowed.r + 0.5,
+            "exposed side ({}) should be much brighter than occluded side ({})",
+            lit.r,
+            shadowed.r
+        );
+        assert!(
+            shadowed.r < 0.01,
+            "fully occluded texel should be dark, got {}",
+            shadowed.r
+        );
+    }
+
+    #[test]
+    fn lightmapgi_bake_without_occluders_is_uniform() {
+        // No occluders → the occluder-aware path matches the plain path.
+        let mut a = LightmapGI::new(LightmapGIId(1));
+        let mut b = LightmapGI::new(LightmapGIId(1));
+        let light = Light3D::directional(Light3DId(1));
+        a.bake_samples(&[light.clone()], 8);
+        b.bake_samples_with_occluders(&[light], &[], 8);
+        assert_eq!(a.lightmap_samples, b.lightmap_samples);
+        // A uniform directional bake has no dark spots.
+        assert!(a.lightmap_samples.iter().all(|c| c.r > 0.5));
+    }
+
+    #[test]
+    fn lightmapgi_shade_modulates_albedo_by_lightmap() {
+        let mut gi = LightmapGI::new(LightmapGIId(1));
+        let light = Light3D::directional(Light3DId(1));
+        let mut occ = OccluderInstance3D::with_occluder(Occluder3D::new_box(
+            Vector3::new(10.0, 2.0, 40.0),
+        ));
+        occ.transform.origin = Vector3::new(5.0, 5.0, 0.0);
+        gi.bake_samples_with_occluders(&[light], &[occ], 16);
+
+        let albedo = Color::new(0.8, 0.4, 0.2, 1.0);
+        let lit = gi.shade(albedo, Vector3::new(-8.0, 0.0, 0.0));
+        let shadowed = gi.shade(albedo, Vector3::new(8.0, 0.0, 0.0));
+        // Shaded albedo keeps its hue where lit and goes dark in shadow.
+        assert!(lit.r > shadowed.r + 0.3);
+        assert!(shadowed.r < 0.01);
+        assert!((lit.a - 1.0).abs() < f32::EPSILON, "alpha preserved");
+    }
+
+    #[test]
+    fn lightmapgi_shade_passthrough_when_unbaked() {
+        let gi = LightmapGI::new(LightmapGIId(1));
+        let albedo = Color::new(0.3, 0.6, 0.9, 1.0);
+        assert_eq!(gi.shade(albedo, Vector3::ZERO), albedo);
     }
 }

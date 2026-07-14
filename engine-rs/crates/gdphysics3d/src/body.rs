@@ -196,8 +196,8 @@ impl PhysicsBody3D {
             self.linear_velocity = self.linear_velocity + impulse * (1.0 / self.mass);
             let offset = position - self.position;
             let torque_impulse = offset.cross(impulse);
-            // Simplified: assume unit inertia tensor for now
-            self.angular_velocity = self.angular_velocity + torque_impulse * (1.0 / self.mass);
+            self.angular_velocity =
+                self.angular_velocity + self.apply_inverse_inertia(torque_impulse);
             self.wake_up();
         }
     }
@@ -215,8 +215,7 @@ impl PhysicsBody3D {
     /// Applies an instantaneous torque impulse.
     pub fn apply_torque_impulse(&mut self, impulse: Vector3) {
         if self.is_active_rigid() && self.mass > 0.0 {
-            // Simplified: assume unit inertia tensor
-            self.angular_velocity = self.angular_velocity + impulse * (1.0 / self.mass);
+            self.angular_velocity = self.angular_velocity + self.apply_inverse_inertia(impulse);
             self.wake_up();
         }
     }
@@ -246,8 +245,9 @@ impl PhysicsBody3D {
 
         self.position = self.position + self.linear_velocity * dt;
 
-        // Angular integration
-        let angular_accel = self.accumulated_torque * inv_mass;
+        // Angular integration: torque → angular acceleration via the inverse
+        // inertia tensor (I⁻¹ · τ), not the unit-inertia approximation.
+        let angular_accel = self.apply_inverse_inertia(self.accumulated_torque);
         self.angular_velocity = self.angular_velocity + angular_accel * dt;
 
         // Apply angular damping
@@ -378,6 +378,73 @@ impl PhysicsBody3D {
             BodyType3D::Rigid if self.mass > 0.0 => 1.0 / self.mass,
             _ => 0.0,
         }
+    }
+
+    // -- Inertia -----------------------------------------------------------
+
+    /// Returns the local-space (principal-axis) moment-of-inertia diagonal
+    /// `(Ixx, Iyy, Izz)` for this body's shape and mass.
+    ///
+    /// Collision shapes are authored on their principal axes (boxes aligned to
+    /// the axes, capsules/cylinders along Y, spheres symmetric), so the inertia
+    /// tensor is diagonal in local space and a single [`Vector3`] captures it.
+    /// Convex/concave/plane shapes fall back to a solid sphere of the shape's
+    /// bounding radius.
+    pub fn local_inertia(&self) -> Vector3 {
+        let m = self.mass.max(0.0);
+        if m <= 0.0 {
+            return Vector3::ZERO;
+        }
+        match &self.shape {
+            Shape3D::Sphere { radius } => {
+                let i = 0.4 * m * radius * radius;
+                Vector3::new(i, i, i)
+            }
+            Shape3D::BoxShape { half_extents } => {
+                let (hx, hy, hz) = (half_extents.x, half_extents.y, half_extents.z);
+                Vector3::new(
+                    (m / 3.0) * (hy * hy + hz * hz),
+                    (m / 3.0) * (hx * hx + hz * hz),
+                    (m / 3.0) * (hx * hx + hy * hy),
+                )
+            }
+            Shape3D::CapsuleShape { radius, height } | Shape3D::CylinderShape { radius, height } => {
+                // Solid cylinder about Y (spin axis) plus perpendicular axes.
+                let (r, h) = (*radius, *height);
+                let axis = 0.5 * m * r * r;
+                let perp = (m / 12.0) * (3.0 * r * r + h * h);
+                Vector3::new(perp, axis, perp)
+            }
+            _ => {
+                let size = self.shape.bounding_aabb().size;
+                let r = 0.5 * size.x.max(size.y).max(size.z).max(f32::EPSILON);
+                let i = 0.4 * m * r * r;
+                Vector3::new(i, i, i)
+            }
+        }
+    }
+
+    /// Returns the componentwise inverse of the local inertia diagonal.
+    ///
+    /// Returns [`Vector3::ZERO`] for static/kinematic bodies (they do not
+    /// rotate in response to impulses).
+    pub fn inverse_inertia_diagonal(&self) -> Vector3 {
+        if self.body_type != BodyType3D::Rigid {
+            return Vector3::ZERO;
+        }
+        let i = self.local_inertia();
+        let inv = |x: f32| if x > 1e-9 { 1.0 / x } else { 0.0 };
+        Vector3::new(inv(i.x), inv(i.y), inv(i.z))
+    }
+
+    /// Applies the world-space inverse inertia tensor to a world-space vector
+    /// (a torque or an angular impulse), returning the resulting world-space
+    /// angular quantity: `R · I_local⁻¹ · Rᵀ · v`.
+    pub fn apply_inverse_inertia(&self, world_vec: Vector3) -> Vector3 {
+        let inv = self.inverse_inertia_diagonal();
+        let local = self.rotation.inverse().xform(world_vec);
+        let scaled = Vector3::new(local.x * inv.x, local.y * inv.y, local.z * inv.z);
+        self.rotation.xform(scaled)
     }
 
     /// Returns `true` if this is a rigid body that is not frozen.
@@ -667,6 +734,85 @@ mod tests {
         // spans x in [4, 6].
         assert_eq!(aabb.position, Vector3::new(4.0, -1.0, -1.0));
         assert_eq!(aabb.size, Vector3::new(2.0, 2.0, 2.0));
+    }
+
+    // -- Inertia tensor (pat-u3l8c.59) ------------------------------------
+
+    #[test]
+    fn sphere_local_inertia_is_isotropic() {
+        // Solid sphere: I = 2/5 m r² on every axis.
+        let body = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            Vector3::ZERO,
+            Shape3D::Sphere { radius: 2.0 },
+            5.0,
+        );
+        let i = body.local_inertia();
+        let expected = 0.4 * 5.0 * 2.0 * 2.0;
+        assert!((i.x - expected).abs() < 1e-4);
+        assert!((i.y - expected).abs() < 1e-4);
+        assert!((i.z - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn box_local_inertia_is_anisotropic() {
+        // Box half-extents (1,2,3), mass 12 →
+        // Ixx = m/3 (hy²+hz²) = 4(4+9)=52, Iyy = 4(1+9)=40, Izz = 4(1+4)=20.
+        let body = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            Vector3::ZERO,
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(1.0, 2.0, 3.0),
+            },
+            12.0,
+        );
+        let i = body.local_inertia();
+        assert!((i.x - 52.0).abs() < 1e-3, "Ixx={}", i.x);
+        assert!((i.y - 40.0).abs() < 1e-3, "Iyy={}", i.y);
+        assert!((i.z - 20.0).abs() < 1e-3, "Izz={}", i.z);
+    }
+
+    #[test]
+    fn torque_impulse_scaled_by_inverse_inertia() {
+        // A box spins less about its high-inertia axis than its low-inertia axis
+        // under an equal torque impulse.
+        let make = || {
+            PhysicsBody3D::new(
+                BodyId3D(0),
+                BodyType3D::Rigid,
+                Vector3::ZERO,
+                Shape3D::BoxShape {
+                    half_extents: Vector3::new(1.0, 2.0, 3.0),
+                },
+                12.0,
+            )
+        };
+        // Ixx=52 (largest) → smallest spin; Izz=20 (smallest) → largest spin.
+        let mut about_x = make();
+        about_x.apply_torque_impulse(Vector3::new(10.0, 0.0, 0.0));
+        let mut about_z = make();
+        about_z.apply_torque_impulse(Vector3::new(0.0, 0.0, 10.0));
+        assert!((about_x.angular_velocity.x - 10.0 / 52.0).abs() < 1e-4);
+        assert!((about_z.angular_velocity.z - 10.0 / 20.0).abs() < 1e-4);
+        assert!(
+            about_z.angular_velocity.z > about_x.angular_velocity.x,
+            "low-inertia axis must spin faster"
+        );
+    }
+
+    #[test]
+    fn static_body_has_zero_inverse_inertia() {
+        let body = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Static,
+            Vector3::ZERO,
+            Shape3D::Sphere { radius: 1.0 },
+            1.0,
+        );
+        assert_eq!(body.inverse_inertia_diagonal(), Vector3::ZERO);
+        assert_eq!(body.apply_inverse_inertia(Vector3::new(1.0, 2.0, 3.0)), Vector3::ZERO);
     }
 
     #[test]

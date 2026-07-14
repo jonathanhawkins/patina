@@ -12,8 +12,10 @@ use std::collections::HashSet;
 use gdcore::math::Vector3;
 use gdcore::math3d::Quaternion;
 
+use crate::area3d::{Area3D, AreaId3D};
 use crate::body::{BodyId3D, PhysicsBody3D};
 use crate::collision;
+use crate::collision::CollisionResult3D;
 use crate::shape::Shape3D;
 use crate::world::RaycastHit3D;
 
@@ -556,6 +558,298 @@ impl PhysicsShapeQuery3D {
             .colliding
         })
     }
+
+    /// Reports contact witness point pairs between the query shape and each
+    /// overlapping body, mirroring Godot's `PhysicsDirectSpaceState3D::collide_shape`.
+    ///
+    /// Each entry is `[point_on_self, point_on_collider]` — the witness point on
+    /// the query shape's surface and on the collider's surface, separated along
+    /// the contact normal. Honors `collision_mask`, `exclude`, `max_results`, and
+    /// the `collide_with_bodies` flag. Returns an empty vec when
+    /// `collide_with_bodies` is false.
+    pub fn collide_shape<'a>(
+        &self,
+        bodies: impl IntoIterator<Item = &'a PhysicsBody3D>,
+    ) -> Vec<[Vector3; 2]> {
+        let mut out = Vec::new();
+        if !self.collide_with_bodies {
+            return out;
+        }
+        for body in bodies {
+            if self.exclude.contains(&body.id) {
+                continue;
+            }
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+            let cr = collision::test_collision_rot(
+                self.position,
+                Quaternion::IDENTITY,
+                &self.shape,
+                body.position,
+                body.rotation,
+                &body.shape,
+            );
+            if cr.colliding {
+                out.push(self.witness_points(body, &cr));
+                if self.max_results > 0 && out.len() >= self.max_results {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Returns rest information for the deepest contact between the query shape
+    /// and the body set, mirroring Godot's
+    /// `PhysicsDirectSpaceState3D::get_rest_info`.
+    ///
+    /// The reported `point` sits on the collider's surface, `normal` points from
+    /// the query shape toward the collider, and `linear_velocity` is the
+    /// collider's linear velocity. Honors `collision_mask`, `exclude`, and the
+    /// `collide_with_bodies` flag. Returns `None` if nothing overlaps.
+    pub fn get_rest_info<'a>(
+        &self,
+        bodies: impl IntoIterator<Item = &'a PhysicsBody3D>,
+    ) -> Option<RestInfo3D> {
+        if !self.collide_with_bodies {
+            return None;
+        }
+        let mut best: Option<RestInfo3D> = None;
+        for body in bodies {
+            if self.exclude.contains(&body.id) {
+                continue;
+            }
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+            let cr = collision::test_collision_rot(
+                self.position,
+                Quaternion::IDENTITY,
+                &self.shape,
+                body.position,
+                body.rotation,
+                &body.shape,
+            );
+            if cr.colliding {
+                let deeper = best.map_or(true, |b| cr.depth > b.depth);
+                if deeper {
+                    let [_self_pt, collider_pt] = self.witness_points(body, &cr);
+                    best = Some(RestInfo3D {
+                        collider: body.id,
+                        point: collider_pt,
+                        normal: cr.normal,
+                        linear_velocity: body.linear_velocity,
+                        depth: cr.depth,
+                    });
+                }
+            }
+        }
+        best
+    }
+
+    /// Scans a set of areas for overlap with the query shape, mirroring the
+    /// `collide_with_areas` path of Godot's space-state queries.
+    ///
+    /// Returns the ids of overlapping areas. Gated by the `collide_with_areas`
+    /// flag (returns empty when false) and filtered by `collision_mask` against
+    /// each area's `collision_layer`, honoring `max_results`.
+    pub fn intersect_areas<'a>(
+        &self,
+        areas: impl IntoIterator<Item = &'a Area3D>,
+    ) -> Vec<AreaId3D> {
+        let mut out = Vec::new();
+        if !self.collide_with_areas {
+            return out;
+        }
+        for area in areas {
+            if (self.collision_mask & area.collision_layer) == 0 {
+                continue;
+            }
+            let cr = collision::test_collision(
+                self.position,
+                &self.shape,
+                area.position,
+                &area.shape,
+            );
+            if cr.colliding {
+                out.push(area.id);
+                if self.max_results > 0 && out.len() >= self.max_results {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Computes the witness points `[point_on_self, point_on_collider]` for a
+    /// contact whose `normal` (query → collider) and geometry are described by
+    /// `cr`. Each point is projected onto its shape's surface along the normal.
+    fn witness_points(&self, body: &PhysicsBody3D, cr: &CollisionResult3D) -> [Vector3; 2] {
+        let n = cr.normal;
+        let point_on_self = self.position + n * support_radius(&self.shape, n);
+        let point_on_collider = body.position - n * support_radius(&body.shape, -n);
+        [point_on_self, point_on_collider]
+    }
+}
+
+// ===========================================================================
+// Rest info + support helpers
+// ===========================================================================
+
+/// Rest information for the deepest contact of a shape query.
+///
+/// Mirrors the payload of Godot's `PhysicsDirectSpaceState3D::get_rest_info`
+/// (collider, contact point, normal, and the collider's linear velocity).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RestInfo3D {
+    /// The colliding body.
+    pub collider: BodyId3D,
+    /// Contact point on the collider's surface (world space).
+    pub point: Vector3,
+    /// Contact normal, pointing from the query shape toward the collider.
+    pub normal: Vector3,
+    /// Linear velocity of the collider.
+    pub linear_velocity: Vector3,
+    /// Penetration depth of the contact.
+    pub depth: f32,
+}
+
+/// Distance from a shape's center to its surface along the unit direction `dir`
+/// (the shape's support width). Used to project witness points onto surfaces.
+///
+/// Rotation is not applied — capsule support uses the local `+Y` axis, which is
+/// exact for axis-aligned shapes and a close approximation otherwise.
+fn support_radius(shape: &Shape3D, dir: Vector3) -> f32 {
+    match shape {
+        Shape3D::Sphere { radius } => *radius,
+        Shape3D::BoxShape { half_extents } => {
+            half_extents.x * dir.x.abs()
+                + half_extents.y * dir.y.abs()
+                + half_extents.z * dir.z.abs()
+        }
+        Shape3D::CapsuleShape { radius, height } => {
+            let hs = (*height * 0.5 - *radius).max(0.0);
+            *radius + hs * dir.y.abs()
+        }
+        other => {
+            let aabb = other.bounding_aabb();
+            let half = aabb.size * 0.5;
+            half.x.max(half.y).max(half.z)
+        }
+    }
+}
+
+/// Tests whether `point` lies inside a shape positioned at `shape_pos` with the
+/// given rotation, by intersecting a degenerate point-sphere with the shape.
+fn shape_contains_point(
+    shape: &Shape3D,
+    shape_pos: Vector3,
+    shape_rot: Quaternion,
+    point: Vector3,
+) -> bool {
+    collision::test_collision_rot(
+        point,
+        Quaternion::IDENTITY,
+        &Shape3D::Sphere { radius: 1e-4 },
+        shape_pos,
+        shape_rot,
+        shape,
+    )
+    .colliding
+}
+
+// ===========================================================================
+// PhysicsPointQuery3D
+// ===========================================================================
+
+/// Configurable point query parameters, mirroring Godot's
+/// `PhysicsPointQueryParameters3D`. Finds all bodies (and optionally areas)
+/// whose shapes contain a world-space point.
+#[derive(Debug, Clone)]
+pub struct PhysicsPointQuery3D {
+    /// The world-space point to test.
+    pub position: Vector3,
+    /// Collision mask — only colliders on matching layers are tested.
+    pub collision_mask: u32,
+    /// Body IDs to exclude from the query.
+    pub exclude: HashSet<BodyId3D>,
+    /// Maximum number of results to return (0 = unlimited).
+    pub max_results: usize,
+    /// Whether to collide with bodies (default true).
+    pub collide_with_bodies: bool,
+    /// Whether to collide with areas (default false).
+    pub collide_with_areas: bool,
+}
+
+impl PhysicsPointQuery3D {
+    /// Creates a new point query at `position` with Godot-compatible defaults.
+    pub fn new(position: Vector3) -> Self {
+        Self {
+            position,
+            collision_mask: 0xFFFFFFFF,
+            exclude: HashSet::new(),
+            max_results: 32,
+            collide_with_bodies: true,
+            collide_with_areas: false,
+        }
+    }
+
+    /// Returns the ids of bodies whose shapes contain the query point.
+    ///
+    /// Gated by `collide_with_bodies`; honors `collision_mask`, `exclude`, and
+    /// `max_results`.
+    pub fn intersect_bodies<'a>(
+        &self,
+        bodies: impl IntoIterator<Item = &'a PhysicsBody3D>,
+    ) -> Vec<BodyId3D> {
+        let mut out = Vec::new();
+        if !self.collide_with_bodies {
+            return out;
+        }
+        for body in bodies {
+            if self.exclude.contains(&body.id) {
+                continue;
+            }
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+            if shape_contains_point(&body.shape, body.position, body.rotation, self.position) {
+                out.push(body.id);
+                if self.max_results > 0 && out.len() >= self.max_results {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Returns the ids of areas whose shapes contain the query point.
+    ///
+    /// Gated by `collide_with_areas`; honors `collision_mask` (against each
+    /// area's `collision_layer`) and `max_results`.
+    pub fn intersect_areas<'a>(
+        &self,
+        areas: impl IntoIterator<Item = &'a Area3D>,
+    ) -> Vec<AreaId3D> {
+        let mut out = Vec::new();
+        if !self.collide_with_areas {
+            return out;
+        }
+        for area in areas {
+            if (self.collision_mask & area.collision_layer) == 0 {
+                continue;
+            }
+            if shape_contains_point(&area.shape, area.position, Quaternion::IDENTITY, self.position)
+            {
+                out.push(area.id);
+                if self.max_results > 0 && out.len() >= self.max_results {
+                    break;
+                }
+            }
+        }
+        out
+    }
 }
 
 // ===========================================================================
@@ -912,5 +1206,167 @@ mod tests {
         let (safe, unsafe_) = query.cast_motion(bodies.iter());
         assert!((safe - 1.0).abs() < 1e-6, "safe {}", safe);
         assert!((unsafe_ - 1.0).abs() < 1e-6, "unsafe {}", unsafe_);
+    }
+
+    // -- PhysicsShapeQuery3D::collide_shape -----------------------------------
+
+    #[test]
+    fn collide_shape_reports_surface_witness_points() {
+        // Query sphere r=2 at origin overlaps body sphere r=1 at x=2.5
+        // (overlap 0.5). Normal is +X; the witness point on the query surface is
+        // x=2.0 and on the collider surface x=1.5.
+        let bodies = vec![sphere_body(1, Vector3::new(2.5, 0.0, 0.0))];
+        let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
+        let contacts = query.collide_shape(bodies.iter());
+        assert_eq!(contacts.len(), 1);
+        let [on_self, on_collider] = contacts[0];
+        assert!((on_self.x - 2.0).abs() < 0.01, "self {:?}", on_self);
+        assert!((on_collider.x - 1.5).abs() < 0.01, "collider {:?}", on_collider);
+    }
+
+    #[test]
+    fn collide_shape_respects_collide_with_bodies_flag() {
+        let bodies = vec![sphere_body(1, Vector3::new(1.0, 0.0, 0.0))];
+        let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
+        query.collide_with_bodies = false;
+        assert!(query.collide_shape(bodies.iter()).is_empty());
+    }
+
+    #[test]
+    fn collide_shape_honors_exclude_and_mask() {
+        let mut body = sphere_body(1, Vector3::new(1.0, 0.0, 0.0));
+        body.collision_layer = 0b0010;
+        let bodies = vec![body];
+        let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
+
+        query.collision_mask = 0b0001; // no layer match
+        assert!(query.collide_shape(bodies.iter()).is_empty());
+
+        query.collision_mask = 0b0010; // matches
+        assert_eq!(query.collide_shape(bodies.iter()).len(), 1);
+
+        query.exclude.insert(BodyId3D(1));
+        assert!(query.collide_shape(bodies.iter()).is_empty());
+    }
+
+    // -- PhysicsShapeQuery3D::get_rest_info -----------------------------------
+
+    #[test]
+    fn rest_info_reports_deepest_contact() {
+        // Two overlapping bodies; body 2 (x=2.0) penetrates deeper than body 1
+        // (x=2.5). Rest info must reference the deeper collider, its velocity,
+        // and a contact point on that collider's surface.
+        let shallow = sphere_body(1, Vector3::new(2.5, 0.0, 0.0));
+        let mut deep = sphere_body(2, Vector3::new(2.0, 0.0, 0.0));
+        deep.linear_velocity = Vector3::new(0.0, 3.0, 0.0);
+        let bodies = vec![shallow, deep];
+
+        let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
+        let info = query.get_rest_info(bodies.iter()).expect("overlap should yield rest info");
+        assert_eq!(info.collider, BodyId3D(2));
+        assert!((info.normal.x - 1.0).abs() < 0.01, "normal {:?}", info.normal);
+        assert!((info.linear_velocity.y - 3.0).abs() < 1e-6);
+        // Collider surface point: x = 2.0 - 1.0 = 1.0.
+        assert!((info.point.x - 1.0).abs() < 0.01, "point {:?}", info.point);
+        assert!(info.depth > 0.0);
+    }
+
+    #[test]
+    fn rest_info_none_without_overlap() {
+        let bodies = vec![sphere_body(1, Vector3::new(100.0, 0.0, 0.0))];
+        let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 1.0 }, Vector3::ZERO);
+        assert!(query.get_rest_info(bodies.iter()).is_none());
+    }
+
+    // -- PhysicsShapeQuery3D::intersect_areas (collide_with_areas) ------------
+
+    fn sphere_area(id: u64, pos: Vector3, radius: f32) -> Area3D {
+        Area3D::new(AreaId3D(id), pos, Shape3D::Sphere { radius })
+    }
+
+    #[test]
+    fn shape_query_scans_areas_when_enabled() {
+        let areas = vec![
+            sphere_area(1, Vector3::new(1.0, 0.0, 0.0)),   // overlapping
+            sphere_area(2, Vector3::new(100.0, 0.0, 0.0)), // far
+        ];
+        let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
+
+        // Disabled by default → no area scanning.
+        assert!(query.intersect_areas(areas.iter()).is_empty());
+
+        query.collide_with_areas = true;
+        let hits = query.intersect_areas(areas.iter());
+        assert_eq!(hits, vec![AreaId3D(1)]);
+    }
+
+    #[test]
+    fn shape_query_area_scan_honors_mask() {
+        let mut area = sphere_area(1, Vector3::new(1.0, 0.0, 0.0));
+        area.collision_layer = 0b0100;
+        let areas = vec![area];
+        let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
+        query.collide_with_areas = true;
+
+        query.collision_mask = 0b0001;
+        assert!(query.intersect_areas(areas.iter()).is_empty());
+
+        query.collision_mask = 0b0100;
+        assert_eq!(query.intersect_areas(areas.iter()).len(), 1);
+    }
+
+    // -- PhysicsPointQuery3D --------------------------------------------------
+
+    #[test]
+    fn point_query_finds_containing_body() {
+        // Point at (0.5,0,0) is inside the sphere (r=1) at origin, outside the
+        // sphere at x=10.
+        let bodies = vec![
+            sphere_body(1, Vector3::ZERO),
+            sphere_body(2, Vector3::new(10.0, 0.0, 0.0)),
+        ];
+        let query = PhysicsPointQuery3D::new(Vector3::new(0.5, 0.0, 0.0));
+        let hits = query.intersect_bodies(bodies.iter());
+        assert_eq!(hits, vec![BodyId3D(1)]);
+    }
+
+    #[test]
+    fn point_query_outside_returns_empty() {
+        let bodies = vec![sphere_body(1, Vector3::ZERO)];
+        let query = PhysicsPointQuery3D::new(Vector3::new(5.0, 0.0, 0.0));
+        assert!(query.intersect_bodies(bodies.iter()).is_empty());
+    }
+
+    #[test]
+    fn point_query_honors_exclude_mask_and_flag() {
+        let mut body = sphere_body(1, Vector3::ZERO);
+        body.collision_layer = 0b0010;
+        let bodies = vec![body];
+        let mut query = PhysicsPointQuery3D::new(Vector3::ZERO);
+
+        query.collision_mask = 0b0001; // no match
+        assert!(query.intersect_bodies(bodies.iter()).is_empty());
+
+        query.collision_mask = 0b0010; // match
+        assert_eq!(query.intersect_bodies(bodies.iter()).len(), 1);
+
+        query.exclude.insert(BodyId3D(1));
+        assert!(query.intersect_bodies(bodies.iter()).is_empty());
+        query.exclude.clear();
+
+        query.collide_with_bodies = false;
+        assert!(query.intersect_bodies(bodies.iter()).is_empty());
+    }
+
+    #[test]
+    fn point_query_scans_areas_when_enabled() {
+        let areas = vec![sphere_area(7, Vector3::ZERO, 1.0)];
+        let mut query = PhysicsPointQuery3D::new(Vector3::new(0.25, 0.0, 0.0));
+
+        // Areas off by default.
+        assert!(query.intersect_areas(areas.iter()).is_empty());
+
+        query.collide_with_areas = true;
+        assert_eq!(query.intersect_areas(areas.iter()), vec![AreaId3D(7)]);
     }
 }
