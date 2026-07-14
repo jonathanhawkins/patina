@@ -667,6 +667,7 @@ fn surviving_group_members(pgid: i32) -> Option<String> {
 pub mod circuit_breaker {
     use super::{classify_failure, run_command_capture};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::Duration;
 
     /// Outcome of a single verify run, as seen by [`VerifyCircuitBreaker`].
@@ -871,27 +872,69 @@ pub mod circuit_breaker {
         best.map(|(_, p)| p)
     }
 
-    /// Conservative auto-resume probe (pat-f6ndj): launch the most-recently-built
-    /// *local* test binary — ad-hoc-signed, exactly what the dyld-wedge breaks —
-    /// with `--list` under a 10s timeout. A prompt success proves the host can
-    /// launch freshly-built binaries again, so the lane may resume.
+    /// Auto-resume probe (pat-f6ndj, reworked 2026-07-14): compile a 1-line C
+    /// program to a FRESH path and launch it under a 10s timeout. A fresh
+    /// ad-hoc-signed binary is exactly what the launch-queue saturation blocks
+    /// (it must pass a serialized syspolicyd/Gatekeeper evaluation), yet on a
+    /// healthy host it evaluates in well under a second — so this cleanly
+    /// separates "queue drained, resume" from "still saturated, hold".
     ///
-    /// Returns `false` when no such binary is found, keeping the breaker safely
-    /// tripped. Deliberately does NOT fall back to a system binary: a cached
-    /// binary in the dyld shared cache launches fine even while the wedge
-    /// persists, so probing one would falsely resume the lane → relaunch a full
-    /// 900s verify → re-trip (oscillation that deepens the wedge).
+    /// The previous probe launched the most-recently-built *test* binary with
+    /// `--list`, but big engine binaries legitimately take 20-120s on their
+    /// first launch even on a healthy host — the 10s probe could never pass,
+    /// so a tripped breaker stayed open forever (observed live 2026-07-14:
+    /// lane halted 2h+ after the queue had drained). Deliberately does NOT
+    /// probe a system/cached binary: those launch from the dyld shared cache
+    /// even mid-saturation and would falsely resume the lane.
     pub fn probe_recent_test_binary(project_root: &Path) -> bool {
-        let candidates = [
-            project_root.join("engine-rs/target/debug/deps"),
-            project_root.join("engine-rs/target/release/deps"),
-            project_root.join("apps/orchestrator/crate/target/debug/deps"),
-            project_root.join("apps/orchestrator/crate/target/release/deps"),
-        ];
-        match newest_executable(&candidates) {
-            Some(bin) => probe_prebuilt_binary(&bin, Duration::from_secs(10)),
-            None => false,
+        let dir = std::env::temp_dir().join("patina-verifier-probe");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return false;
         }
+        // Unique source/binary per probe so every attempt is a brand-new
+        // inode + ad-hoc signature (a reused binary would be pre-evaluated).
+        let tag = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let src = dir.join(format!("probe-{tag}.c"));
+        let bin = dir.join(format!("probe-{tag}"));
+        if std::fs::write(&src, "int main(void){return 0;}\n").is_err() {
+            return false;
+        }
+        // Compile with the system clang (an old, cached binary — compiling is
+        // unaffected by the launch-queue saturation). ~0.3s on a healthy host.
+        let compiled = Command::new("/usr/bin/clang")
+            .arg(&src)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let result = if compiled {
+            let cmd = format!("'{}'", bin.display());
+            matches!(
+                run_command_capture(project_root, &cmd, Duration::from_secs(10)),
+                Ok(Some((status, _))) if status.success()
+            )
+        } else {
+            // No compiler → fall back to the old newest-binary probe rather
+            // than resuming blind.
+            let candidates = [
+                project_root.join("engine-rs/target/debug/deps"),
+                project_root.join("engine-rs/target/release/deps"),
+            ];
+            newest_executable(&candidates)
+                .map(|b| probe_prebuilt_binary(&b, Duration::from_secs(10)))
+                .unwrap_or(false)
+        };
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&bin);
+        result
     }
 }
 
@@ -1389,6 +1432,22 @@ mod tests {
         assert!(
             cb.record(VerifyOutcome::TimedOut).is_some(),
             "two fresh consecutive timeouts must trip the breaker"
+        );
+    }
+
+    /// The auto-resume probe must compile-and-launch a FRESH tiny binary and
+    /// return true on a healthy host. (On a host mid-launch-queue-saturation
+    /// this test fails by design — that is the condition the probe exists to
+    /// detect; wait for the drain and re-run.)
+    #[cfg(unix)]
+    #[test]
+    fn circuit_breaker_probe_compiles_fresh_binary() {
+        use super::circuit_breaker::probe_recent_test_binary;
+        let tmp = TempDir::new().unwrap();
+        assert!(
+            probe_recent_test_binary(tmp.path()),
+            "fresh-binary probe failed: either /usr/bin/clang is unavailable \
+             or the host launch queue is saturated (see /dyld-unwedge)"
         );
     }
 
