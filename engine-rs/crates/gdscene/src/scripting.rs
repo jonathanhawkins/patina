@@ -536,6 +536,62 @@ impl SceneAccess for SceneTreeAccessor {
             .ok()
             .map(|id| id.raw())
     }
+
+    fn instantiate_script(&mut self, path: &str) -> Option<u64> {
+        // Resolve `res://` to a CWD-relative filesystem path (mirrors
+        // `instantiate_packed_scene`; no project root is on the accessor).
+        let fs_path = path.strip_prefix("res://").unwrap_or(path);
+        let source = std::fs::read_to_string(fs_path).ok()?;
+        let base_class = script_base_class(&source);
+        // Name the instance after the script file stem, matching how a
+        // developer thinks of `load("enemy.gd").new()`.
+        let name = std::path::Path::new(fs_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Script")
+            .to_string();
+        let tree = self.tree_mut();
+        let root = tree.root_id();
+        // Attach under the root; the script's follow-up `add_child` reparents
+        // it to the desired parent (see `add_child`), mirroring scenes.
+        let node_id = tree
+            .add_child(root, crate::node::Node::new(name, base_class))
+            .ok()?;
+        match GDScriptNodeInstance::from_source(&source, node_id) {
+            Ok(instance) => tree.attach_script(node_id, Box::new(instance)),
+            // Non-fatal: the node exists without a live script (Godot logs and
+            // still yields an object); behaviour tests use a parseable script.
+            Err(_) => {}
+        }
+        Some(node_id.raw())
+    }
+}
+
+/// Extracts the base class from a GDScript's leading `extends` declaration,
+/// defaulting to `Node`. A path/quoted base (`extends "res://x.gd"`) resolves
+/// to a Node subtype we cannot name statically, so it falls back to `Node` —
+/// matching the autoload boot path's `base_class_from_source`.
+fn script_base_class(source: &str) -> String {
+    for raw in source.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("extends") {
+            // Require a separator so we don't match `extends_foo`.
+            let rest = match rest.strip_prefix([' ', '\t']) {
+                Some(r) => r.trim(),
+                None => return "Node".to_string(),
+            };
+            if rest.is_empty() || rest.starts_with('"') {
+                return "Node".to_string();
+            }
+            return rest.split_whitespace().next().unwrap_or("Node").to_string();
+        }
+        // First meaningful line isn't `extends` → default base class.
+        break;
+    }
+    "Node".to_string()
 }
 
 #[cfg(test)]

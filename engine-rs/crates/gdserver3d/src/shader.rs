@@ -528,7 +528,7 @@ pub fn uniform_type_wgsl_size(ty: UniformType) -> u32 {
 fn generate_wgsl(
     uniforms: &[ShaderUniform3D],
     render_modes: &RenderModeFlags,
-    _source: &str,
+    source: &str,
 ) -> String {
     let mut wgsl = String::with_capacity(2048);
 
@@ -593,33 +593,53 @@ fn generate_wgsl(
     );
     wgsl.push_str("    var color = base_color;\n");
 
-    // Apply albedo_color override if present.
-    if buffer_uniforms.iter().any(|u| u.name == "albedo_color") {
-        wgsl.push_str("    color = vec4<f32>(custom.albedo_color.rgb, color.a);\n");
-    }
+    // Prefer real fragment-body execution: if the shader's `fragment()` body
+    // transpiles to WGSL (UV math, arithmetic, mix, vec constructors), emit that
+    // so `color` reflects the actual shader source — not a hardcoded set of
+    // magic uniform names. Shaders whose body references custom uniforms,
+    // textures, or `TIME` (none of which the base pipeline binds) fall back to
+    // the uniform-override path below, preserving the previous behaviour.
+    let body = parse_fragment_body_3d(source);
+    let transpiled = if body.is_empty() {
+        None
+    } else {
+        fragment_body_to_wgsl_statements(&body)
+    };
+    if let Some(stmts) = transpiled {
+        for s in &stmts {
+            wgsl.push_str("    ");
+            wgsl.push_str(s);
+            wgsl.push('\n');
+        }
+    } else {
+        // Apply albedo_color override if present.
+        if buffer_uniforms.iter().any(|u| u.name == "albedo_color") {
+            wgsl.push_str("    color = vec4<f32>(custom.albedo_color.rgb, color.a);\n");
+        }
 
-    // Apply color_override.
-    if buffer_uniforms.iter().any(|u| u.name == "color_override") {
-        wgsl.push_str("    color = custom.color_override;\n");
-    }
+        // Apply color_override.
+        if buffer_uniforms.iter().any(|u| u.name == "color_override") {
+            wgsl.push_str("    color = custom.color_override;\n");
+        }
 
-    // Apply emission as additive.
-    if buffer_uniforms.iter().any(|u| u.name == "emission") {
-        wgsl.push_str("    color = vec4<f32>(min(color.rgb + custom.emission.rgb, vec3<f32>(1.0)), color.a);\n");
-    }
+        // Apply emission as additive.
+        if buffer_uniforms.iter().any(|u| u.name == "emission") {
+            wgsl.push_str("    color = vec4<f32>(min(color.rgb + custom.emission.rgb, vec3<f32>(1.0)), color.a);\n");
+        }
 
-    // Apply alpha override.
-    if buffer_uniforms.iter().any(|u| u.name == "alpha") {
-        wgsl.push_str("    color.a = custom.alpha;\n");
-    }
+        // Apply alpha override.
+        if buffer_uniforms.iter().any(|u| u.name == "alpha") {
+            wgsl.push_str("    color.a = custom.alpha;\n");
+        }
 
-    // Apply color_mix blending.
-    if buffer_uniforms.iter().any(|u| u.name == "color_mix") {
-        let has_factor = buffer_uniforms.iter().any(|u| u.name == "color_mix_factor");
-        if has_factor {
-            wgsl.push_str("    color = mix(color, custom.color_mix, custom.color_mix_factor);\n");
-        } else {
-            wgsl.push_str("    color = mix(color, custom.color_mix, 0.5);\n");
+        // Apply color_mix blending.
+        if buffer_uniforms.iter().any(|u| u.name == "color_mix") {
+            let has_factor = buffer_uniforms.iter().any(|u| u.name == "color_mix_factor");
+            if has_factor {
+                wgsl.push_str("    color = mix(color, custom.color_mix, custom.color_mix_factor);\n");
+            } else {
+                wgsl.push_str("    color = mix(color, custom.color_mix, 0.5);\n");
+            }
         }
     }
 
@@ -1281,6 +1301,119 @@ pub fn execute_fragment_3d(
     }
 
     color
+}
+
+// ---------------------------------------------------------------------------
+// 3D fragment AST → WGSL transpilation (GPU path)
+// ---------------------------------------------------------------------------
+
+/// Formats an `f32` as a WGSL float literal.
+///
+/// Rust's `{:?}` for floats always emits a decimal point or exponent (`1.0`,
+/// `0.5`, `1e-5`), all of which are valid WGSL float literals — so the value is
+/// typed `f32` rather than an abstract int. Non-finite values collapse to `0.0`
+/// since WGSL has no `inf`/`nan` literals.
+fn wgsl_f32(v: f32) -> String {
+    if !v.is_finite() {
+        return "0.0".to_string();
+    }
+    format!("{:?}", v)
+}
+
+/// Transpiles a [`FloatExpr3D`] to a WGSL expression string, or `None` when the
+/// expression references a feature the base spatial pipeline does not bind
+/// (custom uniforms or the `TIME` built-in). `UV` maps to the interpolated
+/// `in.uv` fragment input.
+fn float_expr_to_wgsl(expr: &FloatExpr3D) -> Option<String> {
+    Some(match expr {
+        FloatExpr3D::Literal(v) => wgsl_f32(*v),
+        FloatExpr3D::UvComponent(UvAxis3D::X) => "in.uv.x".to_string(),
+        FloatExpr3D::UvComponent(UvAxis3D::Y) => "in.uv.y".to_string(),
+        // TIME and custom uniforms are not bound in the base spatial pipeline.
+        FloatExpr3D::BuiltinTime => return None,
+        FloatExpr3D::Uniform(_) => return None,
+        FloatExpr3D::Sin(e) => format!("sin({})", float_expr_to_wgsl(e)?),
+        FloatExpr3D::Cos(e) => format!("cos({})", float_expr_to_wgsl(e)?),
+        FloatExpr3D::Fract(e) => format!("fract({})", float_expr_to_wgsl(e)?),
+        FloatExpr3D::Add(a, b) => {
+            format!("({} + {})", float_expr_to_wgsl(a)?, float_expr_to_wgsl(b)?)
+        }
+        FloatExpr3D::Sub(a, b) => {
+            format!("({} - {})", float_expr_to_wgsl(a)?, float_expr_to_wgsl(b)?)
+        }
+        FloatExpr3D::Mul(a, b) => {
+            format!("({} * {})", float_expr_to_wgsl(a)?, float_expr_to_wgsl(b)?)
+        }
+        FloatExpr3D::Neg(e) => format!("(-{})", float_expr_to_wgsl(e)?),
+    })
+}
+
+/// Transpiles a [`ColorExpr3D`] to a WGSL `vec4<f32>` expression string, or
+/// `None` when it references a custom uniform or texture sample (GPU custom
+/// uniform/texture binding is a follow-up). `COLOR`/`ALBEDO` refer to the
+/// running `color` accumulator.
+fn color_expr_to_wgsl(expr: &ColorExpr3D) -> Option<String> {
+    Some(match expr {
+        ColorExpr3D::Literal(r, g, b, a) => format!(
+            "vec4<f32>({}, {}, {}, {})",
+            wgsl_f32(*r),
+            wgsl_f32(*g),
+            wgsl_f32(*b),
+            wgsl_f32(*a)
+        ),
+        ColorExpr3D::Splat(v) => format!("vec4<f32>({})", wgsl_f32(*v)),
+        ColorExpr3D::Vec3(a, b, c) => format!(
+            "vec4<f32>({}, {}, {}, 1.0)",
+            float_expr_to_wgsl(a)?,
+            float_expr_to_wgsl(b)?,
+            float_expr_to_wgsl(c)?
+        ),
+        ColorExpr3D::BuiltinColor | ColorExpr3D::BuiltinAlbedo => "color".to_string(),
+        ColorExpr3D::Uniform(_) => return None,
+        ColorExpr3D::Mix(a, b, t) => format!(
+            "mix({}, {}, {})",
+            color_expr_to_wgsl(a)?,
+            color_expr_to_wgsl(b)?,
+            float_expr_to_wgsl(t)?
+        ),
+        ColorExpr3D::Texture(_, _, _) => return None,
+    })
+}
+
+/// Transpiles parsed fragment-body instructions into WGSL statements that
+/// mutate a mutable `color: vec4<f32>` variable (which the caller initialises to
+/// the base albedo). Returns `None` if any instruction references a feature not
+/// yet supported on the GPU path (custom uniforms, textures, or `TIME`), so the
+/// caller can fall back to the flat-albedo path rather than emit invalid WGSL.
+///
+/// This is the GPU-side counterpart to [`execute_fragment_3d`] (the CPU
+/// interpreter); both consume the same [`FragmentInstruction3D`] AST so the two
+/// backends agree.
+pub fn fragment_body_to_wgsl_statements(
+    instructions: &[FragmentInstruction3D],
+) -> Option<Vec<String>> {
+    let mut stmts = Vec::with_capacity(instructions.len());
+    for inst in instructions {
+        let stmt = match inst {
+            FragmentInstruction3D::SetColor(e) => {
+                format!("color = {};", color_expr_to_wgsl(e)?)
+            }
+            FragmentInstruction3D::SetColorRgb(e) | FragmentInstruction3D::SetAlbedo(e) => {
+                format!("color = vec4<f32>(({}).rgb, color.a);", color_expr_to_wgsl(e)?)
+            }
+            FragmentInstruction3D::SetColorAlpha(e) | FragmentInstruction3D::SetAlpha(e) => {
+                format!("color.a = {};", float_expr_to_wgsl(e)?)
+            }
+            FragmentInstruction3D::MultiplyColorRgb(e) => {
+                format!(
+                    "color = vec4<f32>(color.rgb * {}, color.a);",
+                    float_expr_to_wgsl(e)?
+                )
+            }
+        };
+        stmts.push(stmt);
+    }
+    Some(stmts)
 }
 
 /// Evaluates compiled 3D shaders against fragment data.
@@ -2028,6 +2161,90 @@ uniform bool enabled = true;
 
         assert!(wgsl.contains("color.a = custom.alpha"));
         assert!(wgsl.contains("mix(color, custom.color_mix, custom.color_mix_factor)"));
+    }
+
+    // ── WGSL fragment-body transpilation (real body execution, not magic
+    //    uniforms) ──
+
+    #[test]
+    fn wgsl_generation_reflects_uv_gradient_body() {
+        // A `fragment()` body that writes ALBEDO from UV must transpile to WGSL
+        // that reads the interpolated `in.uv` — not a hardcoded uniform override.
+        let compiler = ShaderCompiler3D::new();
+        let source =
+            "shader_type spatial;\nvoid fragment() { ALBEDO = vec3(UV.x, UV.y, 1.0); }";
+        let compiled = compiler.compile(ShaderType3D::Spatial, source);
+        let wgsl = compiled
+            .wgsl_program
+            .as_ref()
+            .expect("WGSL should be generated");
+
+        assert!(wgsl.contains("in.uv.x"), "WGSL should reference UV.x:\n{wgsl}");
+        assert!(wgsl.contains("in.uv.y"), "WGSL should reference UV.y");
+        assert!(wgsl.contains("fn custom_fragment"));
+    }
+
+    #[test]
+    fn fragment_body_to_wgsl_statements_uv_gradient() {
+        let body = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() { ALBEDO = vec3(UV.x, UV.y, 1.0); }",
+        );
+        assert!(!body.is_empty(), "UV gradient body should parse to instructions");
+        let stmts = fragment_body_to_wgsl_statements(&body).expect("UV gradient transpiles");
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("in.uv.x"));
+        assert!(stmts[0].contains("in.uv.y"));
+        assert!(stmts[0].starts_with("color = vec4<f32>("));
+    }
+
+    #[test]
+    fn fragment_body_to_wgsl_statements_arithmetic_and_fns() {
+        // sin/fract/arithmetic over UV all transpile to WGSL intrinsics.
+        let body = vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::Fract(Box::new(
+            FloatExpr3D::Mul(
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
+                Box::new(FloatExpr3D::Literal(4.0)),
+            ),
+        )))];
+        let stmts = fragment_body_to_wgsl_statements(&body).unwrap();
+        assert_eq!(stmts[0], "color.a = fract((in.uv.x * 4.0));");
+    }
+
+    #[test]
+    fn fragment_body_to_wgsl_statements_bails_on_custom_uniform() {
+        // A body referencing a custom uniform is not bindable in the base
+        // spatial pipeline (no group(3)), so transpilation bails to None.
+        let body = vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::Uniform(
+            "alpha".into(),
+        ))];
+        assert!(fragment_body_to_wgsl_statements(&body).is_none());
+    }
+
+    #[test]
+    fn fragment_body_to_wgsl_statements_bails_on_time() {
+        let body = vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::BuiltinTime)];
+        assert!(fragment_body_to_wgsl_statements(&body).is_none());
+    }
+
+    #[test]
+    fn wgsl_generation_uniform_only_body_keeps_override_fallback() {
+        // An empty body with an albedo_color uniform still emits the legacy
+        // uniform-override WGSL (transpilation only replaces recognised bodies).
+        let compiler = ShaderCompiler3D::new();
+        let source =
+            "shader_type spatial;\nuniform vec4 albedo_color : source_color;\nvoid fragment() {}";
+        let compiled = compiler.compile(ShaderType3D::Spatial, source);
+        let wgsl = compiled.wgsl_program.as_ref().unwrap();
+        assert!(wgsl.contains("custom.albedo_color"));
+    }
+
+    #[test]
+    fn wgsl_f32_always_typed_float() {
+        assert_eq!(wgsl_f32(1.0), "1.0");
+        assert_eq!(wgsl_f32(0.5), "0.5");
+        // Non-finite values collapse to a valid literal.
+        assert_eq!(wgsl_f32(f32::NAN), "0.0");
+        assert_eq!(wgsl_f32(f32::INFINITY), "0.0");
     }
 
     #[test]

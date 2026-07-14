@@ -213,16 +213,26 @@ impl ShaderMaterial {
 
 /// A compiled shader program ready for execution.
 ///
-/// Stores the parsed uniforms and the shader "program" (currently the source
-/// string — a future implementation would hold bytecode or an IR).
+/// Stores the parsed uniforms, the original source, an optional WGSL
+/// translation (for `canvas_item` shaders — the GPU-runnable subset), and the
+/// list of source constructs that fell outside the translated subset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledShader {
     /// The shader pipeline stage.
     pub shader_type: ShaderType,
     /// Parsed uniform declarations.
     pub uniforms: Vec<ShaderUniform>,
-    /// The compiled program representation (currently just the source).
+    /// The compiled program representation (the original source).
     pub program: String,
+    /// Generated WGSL fragment program for GPU execution.
+    ///
+    /// `Some` for `canvas_item` shaders (the supported subset); `None` for
+    /// shader stages this backend does not translate to WGSL.
+    pub wgsl_program: Option<String>,
+    /// Human-readable list of source constructs that are *not* represented in
+    /// the WGSL translation (see [`unsupported_features`]). Empty when the
+    /// whole shader lies within the supported subset.
+    pub unsupported: Vec<String>,
 }
 
 impl CompiledShader {
@@ -251,12 +261,26 @@ impl ShaderCompiler {
     }
 
     /// Compiles shader source into a [`CompiledShader`].
+    ///
+    /// For `canvas_item` shaders this also translates the recognised
+    /// `fragment()` subset into a runnable WGSL fragment program (see
+    /// [`generate_canvas_item_wgsl`]) and records any source constructs that
+    /// fell outside the supported subset (see [`unsupported_features`]).
     pub fn compile(&self, shader_type: ShaderType, source: &str) -> CompiledShader {
         let uniforms = parse_uniforms(source);
+        let unsupported = unsupported_features(source, shader_type);
+        let wgsl_program = match shader_type {
+            ShaderType::CanvasItem => Some(generate_canvas_item_wgsl(&uniforms, source)),
+            // Spatial shaders are translated by `gdserver3d`; particle/sky
+            // stages are not part of this backend's supported subset.
+            _ => None,
+        };
         CompiledShader {
             shader_type,
             uniforms,
             program: source.to_string(),
+            wgsl_program,
+            unsupported,
         }
     }
 }
@@ -681,6 +705,280 @@ pub fn execute_fragment(
     }
 
     color
+}
+
+// ---------------------------------------------------------------------------
+// GDShader (canvas_item) -> WGSL translation
+// ---------------------------------------------------------------------------
+
+/// Maps a [`UniformType`] to the WGSL type used in the generated
+/// `MaterialUniforms` struct / texture bindings.
+pub fn uniform_type_to_wgsl(ty: UniformType) -> &'static str {
+    match ty {
+        UniformType::Float => "f32",
+        UniformType::Vec2 => "vec2<f32>",
+        UniformType::Vec3 => "vec3<f32>",
+        UniformType::Vec4 => "vec4<f32>",
+        UniformType::Color => "vec4<f32>",
+        UniformType::Int => "i32",
+        UniformType::Bool => "u32", // WGSL uniform buffers cannot hold `bool`.
+        UniformType::Sampler2D => "texture_2d<f32>",
+        UniformType::Mat4 => "mat4x4<f32>",
+    }
+}
+
+/// Formats an `f32` as a WGSL float literal (always carrying a decimal point,
+/// so integer-valued constants are not parsed as abstract ints).
+fn wgsl_f32(v: f32) -> String {
+    if !v.is_finite() {
+        // WGSL has no inf/NaN literal; fall back to 0.0 to keep output valid.
+        return "0.0".to_string();
+    }
+    let s = format!("{v}");
+    if s.contains('.') || s.contains('e') || s.contains('E') {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
+/// Translates a [`FloatExpr`] to a WGSL `f32` expression.
+///
+/// `uniforms` is the set of non-sampler uniform names; a reference to an
+/// undeclared name degrades to `0.0` so the generated module stays valid.
+fn float_expr_to_wgsl(expr: &FloatExpr, uniforms: &[&str]) -> String {
+    match expr {
+        FloatExpr::Literal(v) => wgsl_f32(*v),
+        FloatExpr::BuiltinTime => "globals.time".to_string(),
+        FloatExpr::UvComponent(UvAxis::X) => "UV.x".to_string(),
+        FloatExpr::UvComponent(UvAxis::Y) => "UV.y".to_string(),
+        FloatExpr::Uniform(name) => {
+            if uniforms.contains(&name.as_str()) {
+                format!("material.{name}")
+            } else {
+                "0.0".to_string()
+            }
+        }
+        FloatExpr::Sin(inner) => format!("sin({})", float_expr_to_wgsl(inner, uniforms)),
+    }
+}
+
+/// Translates a [`ColorExpr`] to a WGSL `vec4<f32>` expression.
+///
+/// A reference to an undeclared uniform degrades to the built-in `COLOR`
+/// (passthrough) so the generated module stays valid.
+fn color_expr_to_wgsl(expr: &ColorExpr, uniforms: &[&str]) -> String {
+    match expr {
+        ColorExpr::Literal(r, g, b, a) => format!(
+            "vec4<f32>({}, {}, {}, {})",
+            wgsl_f32(*r),
+            wgsl_f32(*g),
+            wgsl_f32(*b),
+            wgsl_f32(*a)
+        ),
+        ColorExpr::Splat(v) => format!("vec4<f32>({})", wgsl_f32(*v)),
+        ColorExpr::BuiltinColor => "COLOR".to_string(),
+        ColorExpr::Uniform(name) => {
+            if uniforms.contains(&name.as_str()) {
+                format!("material.{name}")
+            } else {
+                "COLOR".to_string()
+            }
+        }
+        ColorExpr::Mix(a, b, t) => format!(
+            "mix({}, {}, {})",
+            color_expr_to_wgsl(a, uniforms),
+            color_expr_to_wgsl(b, uniforms),
+            float_expr_to_wgsl(t, uniforms)
+        ),
+    }
+}
+
+/// Generates a runnable WGSL fragment program from a Godot `canvas_item`
+/// shader source.
+///
+/// The generated module mirrors the CPU interpreter ([`execute_fragment`]):
+/// `COLOR` is initialised to `textureSample(TEXTURE, ..., UV) * MODULATE`, then
+/// the recognised `fragment()` statements are applied in order. Non-sampler
+/// uniforms are collected into a `MaterialUniforms` struct (bind group 2); the
+/// `TIME` built-in, when used, is sourced from a `Globals` uniform (group 0).
+///
+/// Constructs outside the supported subset are silently skipped here — call
+/// [`unsupported_features`] to enumerate them.
+pub fn generate_canvas_item_wgsl(uniforms: &[ShaderUniform], source: &str) -> String {
+    let instructions = parse_fragment_body(source);
+
+    let buffer_uniforms: Vec<&ShaderUniform> = uniforms
+        .iter()
+        .filter(|u| u.uniform_type != UniformType::Sampler2D)
+        .collect();
+    let uni_names: Vec<&str> = buffer_uniforms.iter().map(|u| u.name.as_str()).collect();
+
+    // Translate the fragment body first so we can tell which built-ins are used.
+    let mut body = String::new();
+    for inst in &instructions {
+        match inst {
+            FragmentInstruction::SetColor(e) => {
+                body.push_str(&format!(
+                    "    COLOR = {};\n",
+                    color_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::SetColorRgb(e) => {
+                body.push_str(&format!(
+                    "    COLOR = vec4<f32>(({}).rgb, COLOR.a);\n",
+                    color_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::SetColorAlpha(e) => {
+                body.push_str(&format!(
+                    "    COLOR.a = {};\n",
+                    float_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::MultiplyColorRgb(e) => {
+                body.push_str(&format!(
+                    "    COLOR = vec4<f32>(COLOR.rgb * ({}), COLOR.a);\n",
+                    float_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+            FragmentInstruction::MultiplyColor(e) => {
+                body.push_str(&format!(
+                    "    COLOR = COLOR * ({});\n",
+                    float_expr_to_wgsl(e, &uni_names)
+                ));
+            }
+        }
+    }
+    let uses_time = body.contains("globals.time");
+
+    let mut wgsl = String::with_capacity(1024);
+    wgsl.push_str("// Auto-generated WGSL from Godot `canvas_item` shader source.\n");
+    wgsl.push_str("// Fragment-stage subset — regenerated on each compilation.\n\n");
+
+    if uses_time {
+        wgsl.push_str("struct Globals {\n    time: f32,\n}\n");
+        wgsl.push_str("@group(0) @binding(0)\nvar<uniform> globals: Globals;\n\n");
+    }
+
+    if !buffer_uniforms.is_empty() {
+        wgsl.push_str("struct MaterialUniforms {\n");
+        for u in &buffer_uniforms {
+            wgsl.push_str(&format!(
+                "    {}: {},\n",
+                u.name,
+                uniform_type_to_wgsl(u.uniform_type)
+            ));
+        }
+        wgsl.push_str("}\n");
+        wgsl.push_str("@group(2) @binding(0)\nvar<uniform> material: MaterialUniforms;\n\n");
+    }
+
+    // A canvas_item always exposes the item's texture + sampler.
+    wgsl.push_str("@group(2) @binding(1) var TEXTURE: texture_2d<f32>;\n");
+    wgsl.push_str("@group(2) @binding(2) var TEXTURE_sampler: sampler;\n\n");
+
+    wgsl.push_str("struct FragmentInput {\n");
+    wgsl.push_str("    @location(0) uv: vec2<f32>,\n");
+    wgsl.push_str("    @location(1) modulate: vec4<f32>,\n");
+    wgsl.push_str("}\n\n");
+
+    wgsl.push_str("@fragment\n");
+    wgsl.push_str("fn fragment_main(in: FragmentInput) -> @location(0) vec4<f32> {\n");
+    wgsl.push_str("    let UV: vec2<f32> = in.uv;\n");
+    wgsl.push_str(
+        "    var COLOR: vec4<f32> = textureSample(TEXTURE, TEXTURE_sampler, UV) * in.modulate;\n",
+    );
+    wgsl.push_str(&body);
+    wgsl.push_str("    return COLOR;\n");
+    wgsl.push_str("}\n");
+
+    wgsl
+}
+
+/// Returns a WGSL-facing name for a shader stage.
+fn shader_type_name(ty: ShaderType) -> &'static str {
+    match ty {
+        ShaderType::Spatial => "spatial",
+        ShaderType::CanvasItem => "canvas_item",
+        ShaderType::Particles => "particles",
+        ShaderType::Sky => "sky",
+    }
+}
+
+/// Returns true if `source` contains a call/definition of `name(` at a word
+/// boundary (so `light(` does not match inside `highlight(`).
+fn contains_call(source: &str, name: &str) -> bool {
+    let pat = format!("{name}(");
+    let bytes = source.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = source[start..].find(pat.as_str()) {
+        let abs = start + rel;
+        let boundary = abs == 0 || {
+            let prev = bytes[abs - 1];
+            !(prev.is_ascii_alphanumeric() || prev == b'_')
+        };
+        if boundary {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Enumerates Godot shading-language constructs in `source` that fall *outside*
+/// the translated WGSL subset (see [`generate_canvas_item_wgsl`]).
+///
+/// The returned strings are human-readable and intended to be surfaced to the
+/// user (editor diagnostics, logs). An empty vector means the whole shader is
+/// within the supported subset. This is best-effort, not a full validator.
+pub fn unsupported_features(source: &str, shader_type: ShaderType) -> Vec<String> {
+    let mut out = Vec::new();
+
+    if shader_type != ShaderType::CanvasItem {
+        out.push(format!(
+            "shader_type `{}` is not translated to WGSL (canvas_item only)",
+            shader_type_name(shader_type)
+        ));
+    }
+
+    if source.contains("#include") {
+        out.push("`#include` preprocessor directive".to_string());
+    }
+    if contains_call(source, "vertex") {
+        out.push("`vertex()` stage (only `fragment()` is translated)".to_string());
+    }
+    if contains_call(source, "light") {
+        out.push("`light()` custom lighting processor".to_string());
+    }
+    if source.contains("SCREEN_TEXTURE")
+        || source.contains("hint_screen_texture")
+        || source.contains("screen_texture")
+    {
+        out.push("`SCREEN_TEXTURE` / screen-buffer sampling".to_string());
+    }
+    if source.contains("discard") {
+        out.push("`discard` statement".to_string());
+    }
+    if source.contains("struct ") {
+        out.push("user-defined `struct` types".to_string());
+    }
+
+    // Any statement inside fragment() the line parser cannot classify (control
+    // flow, local variables, unhandled built-ins, ...).
+    if let Some(body) = extract_function_body(source, "fragment") {
+        for line in body.lines() {
+            let t = line.trim().trim_end_matches(';').trim();
+            if t.is_empty() || t.starts_with("//") || t == "{" || t == "}" {
+                continue;
+            }
+            if parse_fragment_statement(t).is_none() {
+                out.push(format!("unrecognised fragment statement: `{t}`"));
+            }
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,5 +1752,182 @@ void fragment() {
         let ctx = FragmentContext::default();
         let result = eval_color_expr(&expr, &ctx, &HashMap::new());
         assert_eq!(result, ctx.color);
+    }
+
+    // -----------------------------------------------------------------------
+    // canvas_item -> WGSL translation (pat-p0s82.21)
+    // -----------------------------------------------------------------------
+
+    /// Braces in the generated WGSL must be balanced — a cheap structural
+    /// sanity check that the module is well-formed.
+    fn assert_brace_balanced(wgsl: &str) {
+        let open = wgsl.chars().filter(|c| *c == '{').count();
+        let close = wgsl.chars().filter(|c| *c == '}').count();
+        assert_eq!(open, close, "unbalanced braces in generated WGSL:\n{wgsl}");
+    }
+
+    #[test]
+    fn canvas_item_compile_emits_wgsl() {
+        let compiled = ShaderCompiler::new().compile(
+            ShaderType::CanvasItem,
+            "shader_type canvas_item;\nvoid fragment() {}\n",
+        );
+        let wgsl = compiled.wgsl_program.expect("canvas_item should emit WGSL");
+        assert!(wgsl.contains("@fragment"), "missing @fragment: {wgsl}");
+        assert!(wgsl.contains("fn fragment_main"), "missing entry point");
+        // The default COLOR samples the item texture.
+        assert!(
+            wgsl.contains("textureSample(TEXTURE, TEXTURE_sampler, UV)"),
+            "default COLOR should sample TEXTURE: {wgsl}"
+        );
+        assert!(compiled.unsupported.is_empty());
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_translates_color_literal() {
+        let src =
+            "shader_type canvas_item;\nvoid fragment() {\n    COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n}\n";
+        let wgsl = generate_canvas_item_wgsl(&[], src);
+        assert!(
+            wgsl.contains("COLOR = vec4<f32>(1.0, 0.0, 0.0, 1.0);"),
+            "color literal not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_uniform_struct_and_reference() {
+        let src =
+            "shader_type canvas_item;\nuniform vec4 tint;\nvoid fragment() {\n    COLOR = tint;\n}\n";
+        let uniforms = parse_uniforms(src);
+        let wgsl = generate_canvas_item_wgsl(&uniforms, src);
+        assert!(
+            wgsl.contains("struct MaterialUniforms"),
+            "no uniform struct"
+        );
+        assert!(
+            wgsl.contains("tint: vec4<f32>,"),
+            "tint field missing: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("var<uniform> material: MaterialUniforms;"),
+            "material binding missing"
+        );
+        assert!(
+            wgsl.contains("COLOR = material.tint;"),
+            "uniform reference not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_uv_and_time_builtins() {
+        let src = "shader_type canvas_item;\nvoid fragment() {\n    COLOR.a = UV.x;\n    COLOR.rgb *= sin(TIME);\n}\n";
+        let wgsl = generate_canvas_item_wgsl(&[], src);
+        assert!(
+            wgsl.contains("COLOR.a = UV.x;"),
+            "UV.x not translated: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("struct Globals"),
+            "TIME needs Globals: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("sin(globals.time)"),
+            "TIME builtin not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn canvas_item_wgsl_no_globals_without_time() {
+        let src = "shader_type canvas_item;\nvoid fragment() {\n    COLOR.a = UV.x;\n}\n";
+        let wgsl = generate_canvas_item_wgsl(&[], src);
+        assert!(
+            !wgsl.contains("struct Globals"),
+            "Globals emitted without TIME use: {wgsl}"
+        );
+    }
+
+    #[test]
+    fn canvas_item_wgsl_mix_expression() {
+        let src = "shader_type canvas_item;\nuniform vec4 tint;\nvoid fragment() {\n    COLOR = mix(vec4(0.0, 0.0, 0.0, 1.0), tint, 0.5);\n}\n";
+        let uniforms = parse_uniforms(src);
+        let wgsl = generate_canvas_item_wgsl(&uniforms, src);
+        assert!(
+            wgsl.contains("mix(vec4<f32>(0.0, 0.0, 0.0, 1.0), material.tint, 0.5)"),
+            "mix() not translated: {wgsl}"
+        );
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn shader_material_compiles_to_wgsl() {
+        // A ShaderMaterial carrying a canvas_item shader yields runnable WGSL.
+        let mut mat = ShaderMaterial::new();
+        mat.shader = Some(Shader::new(
+            ShaderType::CanvasItem,
+            "shader_type canvas_item;\nuniform vec4 modulate_color;\nvoid fragment() {\n    COLOR = modulate_color;\n}\n",
+        ));
+        let shader = mat.shader.as_ref().unwrap();
+        let compiled = ShaderCompiler::new().compile(shader.shader_type, &shader.source_code);
+        let wgsl = compiled
+            .wgsl_program
+            .expect("material shader should emit WGSL");
+        assert!(wgsl.contains("modulate_color: vec4<f32>,"));
+        assert!(wgsl.contains("COLOR = material.modulate_color;"));
+        assert_brace_balanced(&wgsl);
+    }
+
+    #[test]
+    fn non_canvas_item_has_no_wgsl_and_is_flagged() {
+        let compiled = ShaderCompiler::new().compile(
+            ShaderType::Spatial,
+            "shader_type spatial;\nvoid fragment() {}\n",
+        );
+        assert!(compiled.wgsl_program.is_none());
+        assert!(
+            compiled.unsupported.iter().any(|s| s.contains("spatial")),
+            "spatial stage should be flagged unsupported: {:?}",
+            compiled.unsupported
+        );
+    }
+
+    #[test]
+    fn unsupported_features_flags_known_constructs() {
+        let src = "shader_type canvas_item;\n#include \"lib.gdshaderinc\"\nvoid vertex() {\n    VERTEX.x += 1.0;\n}\nvoid fragment() {\n    for (int i = 0; i < 4; i++) {\n        COLOR.rgb *= 0.5;\n    }\n    discard;\n}\n";
+        let flags = unsupported_features(src, ShaderType::CanvasItem);
+        assert!(flags.iter().any(|s| s.contains("#include")), "{flags:?}");
+        assert!(flags.iter().any(|s| s.contains("vertex()")), "{flags:?}");
+        assert!(flags.iter().any(|s| s.contains("discard")), "{flags:?}");
+        // The `for` loop header is an unrecognised fragment statement.
+        assert!(
+            flags.iter().any(|s| s.contains("for (int i")),
+            "for-loop should be flagged: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn unsupported_features_empty_for_supported_shader() {
+        let src =
+            "shader_type canvas_item;\nuniform vec4 tint;\nvoid fragment() {\n    COLOR = tint;\n}\n";
+        let flags = unsupported_features(src, ShaderType::CanvasItem);
+        assert!(
+            flags.is_empty(),
+            "expected no unsupported flags, got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn uniform_type_wgsl_mapping() {
+        assert_eq!(uniform_type_to_wgsl(UniformType::Float), "f32");
+        assert_eq!(uniform_type_to_wgsl(UniformType::Vec2), "vec2<f32>");
+        assert_eq!(uniform_type_to_wgsl(UniformType::Color), "vec4<f32>");
+        assert_eq!(uniform_type_to_wgsl(UniformType::Mat4), "mat4x4<f32>");
+        assert_eq!(
+            uniform_type_to_wgsl(UniformType::Sampler2D),
+            "texture_2d<f32>"
+        );
     }
 }

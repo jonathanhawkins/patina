@@ -922,6 +922,135 @@ impl RenderPipeline3D {
             light_layout,
         }
     }
+
+    /// Builds a per-material pipeline variant that reuses this pipeline's bind
+    /// group layouts (camera / model / light — groups 0–2) but swaps in a custom
+    /// fragment module transpiled from a spatial shader's `fragment()` body (see
+    /// [`custom_spatial_module_wgsl`]). Only used for shaders that bind no extra
+    /// uniforms/textures, so the layout is identical and the existing camera /
+    /// model / light bind groups stay valid across a pipeline switch.
+    ///
+    /// `module_wgsl` must already be validated WGSL (the caller validates via
+    /// naga); `target_format` must match the render pass's colour attachment.
+    /// This mirrors [`RenderPipeline3D::new`]'s pipeline descriptor exactly,
+    /// changing only the shader module.
+    pub fn build_variant(
+        &self,
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        module_wgsl: &str,
+    ) -> wgpu::RenderPipeline {
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("patina-3d-custom-shader"),
+            source: wgpu::ShaderSource::Wgsl(module_wgsl.into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("patina-3d-custom-pipeline-layout"),
+            bind_group_layouts: &[
+                Some(&self.camera_layout),
+                Some(&self.model_layout),
+                Some(&self.light_layout),
+            ],
+            immediate_size: 0,
+        });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("patina-3d-custom-render-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_main"),
+                buffers: &[GpuVertex::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+}
+
+/// Builds a complete, naga-validated WGSL module for a spatial shader material
+/// whose `fragment()` body is transpilable to the base pipeline (UV math,
+/// arithmetic, `mix`, vector constructors — no custom uniforms, textures, or
+/// `TIME`). The module is [`SHADER_3D_WGSL`] with its fragment `albedo` source
+/// swapped from the flat `model.albedo` uniform to a per-fragment `custom_albedo`
+/// function transpiled from the shader body, so an `ALBEDO = vec3(UV.x, UV.y,
+/// 1.0)` shader renders a real UV gradient on the GPU instead of a flat colour.
+///
+/// Returns `None` when the body is empty, isn't UV/varying-driven, isn't
+/// transpilable, the base shader's shape changed, or (defensively) the produced
+/// module fails WGSL validation — in every such case the caller keeps the flat
+/// albedo path.
+pub fn custom_spatial_module_wgsl(compiled: &gdserver3d::CompiledShader3D) -> Option<String> {
+    if compiled.fragment_body.is_empty() {
+        return None;
+    }
+    let stmts = gdserver3d::shader::fragment_body_to_wgsl_statements(&compiled.fragment_body)?;
+    // Only divert to a per-material pipeline when the body is genuinely
+    // per-fragment (reads UV); constant / uniform-flat shaders keep the cheaper
+    // shared pipeline plus the resolved flat albedo.
+    if !stmts.iter().any(|s| s.contains("in.uv")) {
+        return None;
+    }
+
+    let mut func = String::new();
+    func.push_str("fn custom_albedo(in: VertexOutput) -> vec4<f32> {\n");
+    func.push_str("    var color: vec4<f32> = model.albedo;\n");
+    for s in &stmts {
+        func.push_str("    ");
+        func.push_str(s);
+        func.push('\n');
+    }
+    func.push_str("    return color;\n}\n\n");
+
+    // Insert `custom_albedo` before `fs_main` (WGSL requires a callee to be
+    // declared before its caller at module scope) and swap the flat albedo
+    // source for the per-fragment call.
+    let marker = "@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let albedo = model.albedo;";
+    if !SHADER_3D_WGSL.contains(marker) {
+        // The base shader changed shape; bail rather than emit a broken module.
+        return None;
+    }
+    let mut replacement = func;
+    replacement.push_str(
+        "@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let albedo = custom_albedo(in);",
+    );
+    let module = SHADER_3D_WGSL.replacen(marker, &replacement, 1);
+
+    // Never hand invalid WGSL to `create_shader_module` (a device validation
+    // error); validate up front and fall back to the flat path on failure.
+    if wgpu::naga::front::wgsl::parse_str(&module).is_err() {
+        return None;
+    }
+    Some(module)
 }
 
 /// Fullscreen procedural-sky background pipeline (see [`SKY_WGSL`]).
@@ -1870,6 +1999,13 @@ struct GpuDrawCall {
     roughness: f32,
     metallic: f32,
     shading_mode: u32,
+    /// When `Some`, a complete transpiled WGSL module for this draw's spatial
+    /// shader material whose `fragment()` body is evaluated per-fragment (e.g. a
+    /// UV-driven ALBEDO). The render pass builds a per-material pipeline from it
+    /// and binds that instead of the flat-albedo default pipeline. `None` for
+    /// plain materials and for shaders whose body isn't GPU-transpilable (those
+    /// keep the resolved flat albedo). See [`custom_spatial_module_wgsl`].
+    custom_module: Option<String>,
 }
 
 /// Max distinct meshes cached before the whole cache is dropped, bounding memory
@@ -2072,6 +2208,15 @@ impl GpuRenderer3D {
             if !inst.visible {
                 continue;
             }
+            // Transpile a per-fragment spatial shader body to a complete WGSL
+            // module once per instance (shared by all of its expanded draws), so
+            // UV/varying-driven shaders render on the GPU instead of collapsing
+            // to a flat albedo. `None` keeps the shared flat-albedo pipeline.
+            let custom_module = inst.shader_material.as_ref().and_then(|mat| {
+                let compiler = gdserver3d::ShaderCompiler3D::new();
+                let compiled = compiler.compile_material(mat)?;
+                custom_spatial_module_wgsl(&compiled)
+            });
             for entry in instance_draw_entries(inst) {
                 if entry.mesh.indices.is_empty() {
                     continue;
@@ -2090,6 +2235,7 @@ impl GpuRenderer3D {
                     roughness: entry.roughness,
                     metallic: entry.metallic,
                     shading_mode: entry.shading_mode,
+                    custom_module: custom_module.clone(),
                 });
             }
         }
@@ -2525,6 +2671,20 @@ impl GpuRenderer3D {
         let pipeline = self.editor_pipeline.as_ref().unwrap();
         let sky_pipeline = self.editor_sky_pipeline.as_ref().unwrap();
 
+        // Build a per-material pipeline for any draw carrying a transpiled custom
+        // fragment module (UV/varying-driven spatial shaders). Keyed by module
+        // source so identical shaders share one pipeline this frame; the module
+        // was already WGSL-validated in `custom_spatial_module_wgsl`.
+        let mut custom_pipelines: HashMap<&str, wgpu::RenderPipeline> = HashMap::new();
+        for call in &draw_calls {
+            if let Some(module) = &call.custom_module {
+                if !custom_pipelines.contains_key(module.as_str()) {
+                    let variant = pipeline.build_variant(device, color_format, module);
+                    custom_pipelines.insert(module.as_str(), variant);
+                }
+            }
+        }
+
         // Create color (linear HDR) and depth textures.
         let color_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("3d-color-target"),
@@ -2684,16 +2844,25 @@ impl GpuRenderer3D {
                 pass.draw(0..3, 0..1);
             }
 
-            pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &camera_bg, &[]);
-            pass.set_bind_group(2, &light_bg, &[]);
-
             // Draw each expanded instance from the cached geometry (pat-ism62 #2b).
+            // Groups 0 (camera) and 2 (lights) are (re)bound per draw so they stay
+            // valid across per-material pipeline switches (identical layouts).
             for call in &draw_calls {
                 let cached = match self.mesh_gpu_cache.get(&call.mesh_key) {
                     Some(c) => c,
                     None => continue,
                 };
+                // Per-material custom pipeline (real per-fragment shader body)
+                // when this draw carries a transpiled module; otherwise the
+                // shared flat-albedo pipeline.
+                let draw_pipeline = call
+                    .custom_module
+                    .as_deref()
+                    .and_then(|m| custom_pipelines.get(m))
+                    .unwrap_or(&pipeline.pipeline);
+                pass.set_pipeline(draw_pipeline);
+                pass.set_bind_group(0, &camera_bg, &[]);
+                pass.set_bind_group(2, &light_bg, &[]);
                 // Shade in linear (HDR target + post-process encode back to sRGB).
                 let alb = call.albedo.srgb_to_linear();
                 let emis = call.emission.srgb_to_linear();

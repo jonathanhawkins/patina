@@ -182,6 +182,17 @@ pub struct MainLoop {
     nav_agents_3d: HashMap<NodeId, NavigationAgent3D>,
 }
 
+/// Reads a numeric node property as `f32`, accepting either a `Float` or an
+/// `Int` variant (`.tscn` stores whole numbers like `speed_scale = 2` as ints).
+/// Returns `None` for any other variant so callers keep their existing default.
+fn prop_f32(v: Variant) -> Option<f32> {
+    match v {
+        Variant::Float(f) => Some(f as f32),
+        Variant::Int(i) => Some(i as f32),
+        _ => None,
+    }
+}
+
 impl MainLoop {
     /// Creates a new `MainLoop` that owns the given [`SceneTree`].
     pub fn new(tree: SceneTree) -> Self {
@@ -213,6 +224,7 @@ impl MainLoop {
     /// node's `particle_count` property. Simulators for nodes that vanished or
     /// stopped emitting are dropped once their remaining particles die out.
     pub fn process_particles(&mut self, dt: f32) {
+        use gdcore::math::{Color, Vector2};
         const PARTICLE_CLASSES: [&str; 4] = [
             "GPUParticles2D",
             "GPUParticles3D",
@@ -246,6 +258,40 @@ impl MainLoop {
                 }
             }
             emitter.one_shot = matches!(node.get_property("one_shot"), Variant::Bool(true));
+            if let Some(e) = prop_f32(node.get_property("explosiveness")) {
+                emitter.explosiveness = e.clamp(0.0, 1.0);
+            }
+            if let Some(s) = prop_f32(node.get_property("speed_scale")) {
+                emitter.speed_scale = s;
+            }
+            emitter.local_coords =
+                matches!(node.get_property("local_coords"), Variant::Bool(true));
+            // CPUParticles2D-style process properties drive per-particle motion so
+            // emitted particles actually travel across the frame. Godot exposes
+            // these on the CPUParticles2D node directly; GPUParticles2D reads them
+            // from its ParticleProcessMaterial, which we approximate with the same
+            // node keys so an authored velocity is honored in both cases.
+            if let Variant::Vector2(d) = node.get_property("direction") {
+                if d != Vector2::ZERO {
+                    emitter.material.direction = d;
+                }
+            }
+            if let Some(sp) = prop_f32(node.get_property("spread")) {
+                emitter.material.spread = sp;
+            }
+            if let Some(v) = prop_f32(node.get_property("initial_velocity_min")) {
+                emitter.material.initial_velocity_min = v;
+            }
+            if let Some(v) = prop_f32(node.get_property("initial_velocity_max")) {
+                emitter.material.initial_velocity_max = v;
+            }
+            if let Variant::Vector2(g) = node.get_property("gravity") {
+                emitter.material.gravity = g;
+            }
+            if let Variant::Color(c) = node.get_property("color") {
+                emitter.material.start_color = c;
+                emitter.material.end_color = c;
+            }
             configs.push((id, is_emitting, emitter));
         }
 
@@ -263,22 +309,34 @@ impl MainLoop {
             // that have already fired their full burst (don't re-enable them).
             let one_shot_finished =
                 emitter.one_shot && sim.total_emitted >= emitter.amount as u64;
-            sim.emitter.amount = emitter.amount;
-            sim.emitter.lifetime = emitter.lifetime;
-            sim.emitter.one_shot = emitter.one_shot;
-            sim.emitter.emitting = is_emitting && !one_shot_finished;
+            let emitting = is_emitting && !one_shot_finished;
+            // Replace the config wholesale (amount/lifetime/one_shot + material +
+            // explosiveness/speed_scale/local_coords) so authored motion params
+            // reach new particles, then restore the computed emitting flag.
+            sim.emitter = emitter;
+            sim.emitter.emitting = emitting;
             sim.step(dt);
         }
 
-        // Publish live counts back onto the nodes.
-        let counts: Vec<(NodeId, i64)> = self
+        // Publish live counts + per-particle draw data back onto the nodes so the
+        // render bridge (crate::scene_bridge) can rasterize each emitter's live
+        // particles as billboard quads. Positions/colors/scales are stored under
+        // internal (`_`-prefixed) keys so they never leak into oracle property
+        // dumps or the editor inspector.
+        let draws: Vec<(NodeId, Vec<(Vector2, Color, f32)>)> = self
             .particles
             .iter()
-            .map(|(id, sim)| (*id, sim.active_particles.len() as i64))
+            .map(|(id, sim)| (*id, sim.get_draw_commands()))
             .collect();
-        for (id, count) in counts {
+        for (id, cmds) in draws {
             if let Some(node) = self.tree.get_node_mut(id) {
-                node.set_property("particle_count", Variant::Int(count));
+                node.set_property("particle_count", Variant::Int(cmds.len() as i64));
+                let positions: Vec<Vector2> = cmds.iter().map(|(p, _, _)| *p).collect();
+                let colors: Vec<Color> = cmds.iter().map(|(_, c, _)| *c).collect();
+                let scales: Vec<f32> = cmds.iter().map(|(_, _, s)| *s).collect();
+                node.set_property("_particle_positions", Variant::PackedVector2Array(positions));
+                node.set_property("_particle_colors", Variant::PackedColorArray(colors));
+                node.set_property("_particle_scales", Variant::PackedFloat32Array(scales));
             }
         }
     }

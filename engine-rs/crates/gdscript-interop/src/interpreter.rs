@@ -5222,9 +5222,28 @@ impl Interpreter {
                     self.write_place(object_expr, Variant::Resource(new_ref))?;
                     Ok(Variant::Nil)
                 }
-                // GDScript resource `.new()` (script-class instantiation) isn't
-                // wired to a filesystem script loader yet; graceful Nil fallback.
-                "new" => Ok(Variant::Nil),
+                // GDScript resource `.new()`: instantiate the script class. The
+                // host (scene_access) loads the `.gd`, builds a scripted instance
+                // and returns its object id, mirroring PackedScene.instantiate().
+                // A missing/unloadable script → Nil (Godot's `new()` semantics).
+                "new" => {
+                    if res_ref.class_name != "GDScript" {
+                        // Non-script resources have no `.new()`; Godot yields null.
+                        return Ok(Variant::Nil);
+                    }
+                    let path = res_ref.path.clone();
+                    match self.scene_access.as_mut() {
+                        Some(access) => match access.instantiate_script(&path) {
+                            Some(raw) => {
+                                Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
+                            }
+                            None => Ok(Variant::Nil),
+                        },
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "GDScript.new() requires scene access".into(),
+                        ))),
+                    }
+                }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("Resource.{method}"),
                 ))),
@@ -11596,7 +11615,9 @@ match x:
         children: std::collections::HashMap<u64, Vec<u64>>,
         /// Scene paths that "exist" and can be instantiated.
         known_scenes: std::collections::HashSet<String>,
-        /// (path, root_id) for each instantiate call.
+        /// Script paths that "exist" and can be instantiated via `.new()`.
+        known_scripts: std::collections::HashSet<String>,
+        /// (path, root_id) for each instantiate/new call.
         instantiated: Vec<(String, u64)>,
     }
 
@@ -11651,6 +11672,16 @@ match x:
             let child = root + 10_000;
             st.children.insert(root, vec![child]);
             Some(root)
+        }
+        fn instantiate_script(&mut self, path: &str) -> Option<u64> {
+            let mut st = self.state.borrow_mut();
+            if !st.known_scripts.contains(path) {
+                return None;
+            }
+            st.next_id += 1;
+            let id = st.next_id;
+            st.instantiated.push((path.to_string(), id));
+            Some(id)
         }
     }
 
@@ -11728,6 +11759,50 @@ match x:
         let mut interp = Interpreter::new();
         let err = interp
             .run("return preload(\"res://x.tscn\").instantiate()\n")
+            .unwrap_err();
+        assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
+    }
+
+    #[test]
+    fn load_gd_new_creates_scripted_instance() {
+        // `load("x.gd")` yields a GDScript resource; `.new()` asks the host to
+        // build a scripted instance and returns its object id (pat-u3l8c.12).
+        let (mut interp, state) = mock_scene_interp(&[]);
+        state
+            .borrow_mut()
+            .known_scripts
+            .insert("res://enemy.gd".to_string());
+        let r = interp
+            .run("var e = load(\"res://enemy.gd\").new()\nreturn e\n")
+            .unwrap();
+        match r.return_value {
+            Some(Variant::ObjectId(oid)) => {
+                let st = state.borrow();
+                assert_eq!(st.instantiated.len(), 1);
+                assert_eq!(st.instantiated[0].0, "res://enemy.gd");
+                assert_eq!(st.instantiated[0].1, oid.raw());
+            }
+            other => panic!("expected ObjectId from load(gd).new(), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_missing_gd_new_returns_nil() {
+        // Script not registered → host returns None → Nil (Godot's `new()`).
+        let (mut interp, _state) = mock_scene_interp(&[]);
+        let r = interp
+            .run("return load(\"res://missing.gd\").new()\n")
+            .unwrap();
+        assert_eq!(r.return_value, Some(Variant::Nil));
+    }
+
+    #[test]
+    fn gd_new_without_scene_access_errors() {
+        // No scene access wired → cannot build a scripted instance → error,
+        // mirroring `instantiate()` on a PackedScene without scene access.
+        let mut interp = Interpreter::new();
+        let err = interp
+            .run("return load(\"res://x.gd\").new()\n")
             .unwrap_err();
         assert!(matches!(err.kind, RuntimeErrorKind::TypeError(_)));
     }

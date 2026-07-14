@@ -5,3 +5,4 @@
 mod platform_backend_test;
 mod platform_first_stable_layer_test;
 mod platform_targets_validation_test;
+mod windows_runtime_smoke_test;

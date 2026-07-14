@@ -132,6 +132,7 @@ fn draw_commands_for(
         "Sprite2D" | "AnimatedSprite2D" => sprite_commands(tree, node_id, modulate, texture_size),
         "ColorRect" => color_rect_commands(tree, node_id, modulate),
         "TextureRect" => texture_rect_commands(tree, node_id, modulate, texture_size),
+        "GPUParticles2D" | "CPUParticles2D" => particle_commands(tree, node_id, modulate),
         _ => Vec::new(),
     }
 }
@@ -204,6 +205,59 @@ fn texture_rect_commands(
         rect: Rect2::new(Vector2::ZERO, size),
         modulate,
     }]
+}
+
+/// Base edge length (px) of the solid billboard quad drawn for each live
+/// particle. A particle's `scale` multiplies this.
+const PARTICLE_QUAD_SIZE: f32 = 4.0;
+
+/// `GPUParticles2D`/`CPUParticles2D`: one small billboard quad per live particle.
+///
+/// The live particle set is produced by the `MainLoop` particle phase
+/// ([`crate::main_loop::MainLoop::process_particles`]) and published back onto
+/// the node each frame as parallel `_particle_positions` (`PackedVector2Array`,
+/// emitter-local space), `_particle_colors` (`PackedColorArray`), and
+/// `_particle_scales` (`PackedFloat32Array`). Each particle becomes a solid
+/// [`DrawCommand::DrawRect`] centered on its position, sized `PARTICLE_QUAD_SIZE
+/// × scale` and tinted by the particle color × the node's effective `modulate`.
+/// The commands are in the node's local space; the caller applies the emitter's
+/// global [`Transform2D`], so the whole cloud is positioned (and, for
+/// `local_coords`, moves) with the emitter.
+fn particle_commands(tree: &SceneTree, node_id: NodeId, modulate: Color) -> Vec<DrawCommand> {
+    let Some(node) = tree.get_node(node_id) else {
+        return Vec::new();
+    };
+    let positions = match node.get_property("_particle_positions") {
+        Variant::PackedVector2Array(v) => v,
+        _ => return Vec::new(),
+    };
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    let colors = match node.get_property("_particle_colors") {
+        Variant::PackedColorArray(v) => v,
+        _ => Vec::new(),
+    };
+    let scales = match node.get_property("_particle_scales") {
+        Variant::PackedFloat32Array(v) => v,
+        _ => Vec::new(),
+    };
+    let mut cmds = Vec::with_capacity(positions.len());
+    for (i, pos) in positions.iter().enumerate() {
+        let scale = scales.get(i).copied().unwrap_or(1.0);
+        let size = PARTICLE_QUAD_SIZE * if scale > 0.0 { scale } else { 1.0 };
+        let half = size / 2.0;
+        let color = colors.get(i).copied().unwrap_or(Color::WHITE);
+        cmds.push(DrawCommand::DrawRect {
+            rect: Rect2::new(
+                Vector2::new(pos.x - half, pos.y - half),
+                Vector2::new(size, size),
+            ),
+            color: mul_color(color, modulate),
+            filled: true,
+        });
+    }
+    cmds
 }
 
 // ---------------------------------------------------------------------------

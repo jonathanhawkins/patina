@@ -27,6 +27,8 @@ mod sky_parity_tests;
 pub mod test_adapter;
 #[cfg(feature = "gpu")]
 pub mod wgpu_pipeline;
+#[cfg(feature = "gpu")]
+pub use wgpu_pipeline::custom_spatial_module_wgsl;
 
 pub use compare::{compare_framebuffers_3d, diff_image_3d, DiffResult3D};
 pub use depth_buffer::DepthBuffer;

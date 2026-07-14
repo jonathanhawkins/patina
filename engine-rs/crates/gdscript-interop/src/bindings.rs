@@ -259,6 +259,19 @@ pub trait SceneAccess {
         None
     }
 
+    /// Instantiate a GDScript class loaded from `path` (a `.gd` file), building
+    /// a scripted instance and returning its root node's raw ObjectId.
+    ///
+    /// Mirrors [`instantiate_packed_scene`] for scenes: the host reads and
+    /// parses the script, creates a node of the script's base class with the
+    /// script attached, and returns its id (the script follows up with
+    /// `add_child` if it wants the instance parented). Powers GDScript's
+    /// `load("x.gd").new()`. Returns `None` if the script cannot be loaded
+    /// (Godot: `new()` on a bad script yields `null`).
+    fn instantiate_script(&mut self, _path: &str) -> Option<u64> {
+        None
+    }
+
     // -- Input methods (used by the `Input` singleton in GDScript) ----------
 
     /// Returns `true` if any key mapped to `action` is currently held.

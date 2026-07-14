@@ -326,6 +326,96 @@ uniform float alpha = 1.0;
 }
 
 // ===========================================================================
+// Real fragment-body execution (pat-nzgdu.20): a ShaderMaterial whose
+// `fragment()` writes ALBEDO from UV renders a per-fragment gradient — pixels
+// vary across the surface — in BOTH the software renderer and (transpiled to a
+// bindable WGSL module) the wgpu path, not a single flat magic-uniform colour.
+// ===========================================================================
+
+/// Renders a shader-material cube through the software renderer with the camera
+/// close enough that the cube fills much of the frame, and returns the number of
+/// distinct (quantised) non-background surface colours. A close camera + larger
+/// render guarantees enough surface pixels for a gradient to register.
+fn distinct_surface_colors(shader_code: &str) -> usize {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+
+    let cam = Node::new("Camera", "Camera3D");
+    let cam_id = tree.add_child(root, cam).unwrap();
+    gdscene::node3d::set_position(&mut tree, cam_id, Vector3::new(0.0, 0.0, 2.5));
+    gdscene::node3d::set_fov(&mut tree, cam_id, 50.0);
+    gdscene::node3d::set_camera_current(&mut tree, cam_id, true);
+
+    let mut mesh = Node::new("ShaderCube", "MeshInstance3D");
+    mesh.set_property("shader_code", Variant::String(shader_code.to_string()));
+    tree.add_child(root, mesh).unwrap();
+
+    let mut adapter = RenderServer3DAdapter::new(128, 128);
+    let (snapshot, frame) = adapter.render_frame(&tree);
+    assert_eq!(snapshot.visible_mesh_count, 1);
+    let mut set = std::collections::HashSet::new();
+    for p in &frame.pixels {
+        let q = (
+            (p.r.clamp(0.0, 1.0) * 255.0) as u8,
+            (p.g.clamp(0.0, 1.0) * 255.0) as u8,
+            (p.b.clamp(0.0, 1.0) * 255.0) as u8,
+        );
+        // Skip the (black) background; collect only rendered surface colours.
+        if q != (0, 0, 0) {
+            set.insert(q);
+        }
+    }
+    set.len()
+}
+
+#[test]
+fn shader_material_fragment_body_executes() {
+    // UV-driven ALBEDO → a gradient of many distinct colours across the cube.
+    let uv_colors = distinct_surface_colors(
+        "shader_type spatial;\nrender_mode unshaded;\nvoid fragment() { ALBEDO = vec3(UV.x, UV.y, 1.0); }",
+    );
+    // Flat control body → a single flat surface colour (proves the gradient is
+    // driven by the fragment body, not by lighting/normals).
+    let flat_colors = distinct_surface_colors(
+        "shader_type spatial;\nrender_mode unshaded;\nvoid fragment() { ALBEDO = vec3(0.3, 0.4, 0.5); }",
+    );
+
+    assert!(
+        flat_colors <= 2,
+        "a flat ALBEDO shader should render essentially one surface colour, got {flat_colors}"
+    );
+    assert!(
+        uv_colors >= 16 && uv_colors > flat_colors * 4,
+        "UV-driven ALBEDO must render a per-fragment gradient in the software \
+         renderer (many colours); got uv={uv_colors} vs flat={flat_colors}"
+    );
+
+    // wgpu path: the same fragment body transpiles to a complete, WGSL-validated
+    // pipeline module whose fragment stage computes ALBEDO per-fragment from UV.
+    // `custom_spatial_module_wgsl` returns `None` on any validation failure, so a
+    // `Some` result proves the body is *bound* as a real GPU program — not
+    // generated and thrown away. Runs under the `gpu` feature.
+    #[cfg(feature = "gpu")]
+    {
+        let compiler = ShaderCompiler3D::new();
+        let compiled = compiler.compile(
+            ShaderType3D::Spatial,
+            "shader_type spatial;\nrender_mode unshaded;\nvoid fragment() { ALBEDO = vec3(UV.x, UV.y, 1.0); }",
+        );
+        let module = gdrender3d::custom_spatial_module_wgsl(&compiled)
+            .expect("UV fragment body transpiles to a bindable GPU module");
+        assert!(
+            module.contains("fn custom_albedo") && module.contains("in.uv"),
+            "GPU module must compute ALBEDO per-fragment from the interpolated UV"
+        );
+        assert!(
+            module.contains("let albedo = custom_albedo(in);"),
+            "fs_main must source its albedo from the transpiled fragment body"
+        );
+    }
+}
+
+// ===========================================================================
 // Full pipeline: ShaderProcessor3D evaluation
 // ===========================================================================
 

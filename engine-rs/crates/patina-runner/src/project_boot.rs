@@ -140,3 +140,106 @@ fn load_scene_into_tree(
     add_packed_scene_to_tree(tree, parent, &packed)
         .map_err(|e| format!("failed to instance scene '{res_path}': {e}"))
 }
+
+#[cfg(test)]
+mod tests {
+    //! pat-nzgdu.3: the runner's project boot path must instantiate every
+    //! `[autoload]` entry under `/root` before the main scene, so scene scripts
+    //! can reference `/root/<Name>` in `_ready`. The shared `gdscene::autoload`
+    //! helper is unit-tested on its own; these tests cover the patina-runner
+    //! wiring (`boot_project`) end to end at the runner boot site.
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // `boot_project` mutates the process-global `res://` path roots via
+    // `set_path_roots`, so serialize these tests to stay robust under
+    // `cargo test` (nextest already isolates each test in its own process).
+    static BOOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "patina_nzgdu3_{}_{}_{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn boot_project_instantiates_script_autoloads_under_root() {
+        let _guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_temp_dir("script");
+        std::fs::write(
+            dir.join("project.godot"),
+            "[application]\nconfig/name=\"AutoloadBootTest\"\n\n\
+             [autoload]\nGlobal=\"*res://global.gd\"\nMusic=\"*res://music.gd\"\n",
+        )
+        .unwrap();
+        // Script autoloads: `boot_project` stores the script path on a bare Node
+        // and does not read the file, so the `.gd` files need not exist.
+
+        let booted = boot_project(&dir).expect("boot project.godot with autoloads");
+
+        // Both autoloads instantiated and tracked.
+        assert_eq!(booted.autoload_roots.len(), 2, "two autoloads instantiated");
+        let names: Vec<&str> = booted
+            .autoload_roots
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert!(names.contains(&"Global"), "Global autoload present");
+        assert!(names.contains(&"Music"), "Music autoload present");
+
+        // Reachable as `/root/<Name>` — Godot's autoload access path.
+        let global = booted
+            .tree
+            .get_node_by_path("/root/Global")
+            .expect("/root/Global exists");
+        assert_eq!(booted.tree.get_node(global).unwrap().name(), "Global");
+        assert!(
+            booted.tree.get_node_by_path("/root/Music").is_some(),
+            "/root/Music exists"
+        );
+
+        // No main scene declared → none instanced; autoloads still present.
+        assert!(booted.main_scene_root.is_none(), "no main scene declared");
+    }
+
+    #[test]
+    fn boot_project_autoloads_coexist_with_main_scene() {
+        let _guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_temp_dir("mainscene");
+        std::fs::write(
+            dir.join("project.godot"),
+            "[application]\nrun/main_scene=\"res://main.tscn\"\n\n\
+             [autoload]\nGlobal=\"*res://global.gd\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.tscn"),
+            "[gd_scene format=3]\n\n[node name=\"Main\" type=\"Node2D\"]\n",
+        )
+        .unwrap();
+
+        let booted = boot_project(&dir).expect("boot autoload + main scene");
+
+        // The main scene instanced under `/root` ...
+        let main_root = booted.main_scene_root.expect("main scene instanced");
+        assert_eq!(booted.tree.get_node(main_root).unwrap().name(), "Main");
+
+        // ... and the autoload constructed before it still lives under `/root`
+        // (Godot builds autoloads first so the main scene's `_ready` sees them).
+        assert_eq!(booted.autoload_roots.len(), 1, "autoload instantiated");
+        let global = booted
+            .tree
+            .get_node_by_path("/root/Global")
+            .expect("/root/Global survives main-scene instancing");
+        assert_eq!(booted.tree.get_node(global).unwrap().name(), "Global");
+    }
+}
