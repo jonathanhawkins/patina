@@ -1102,12 +1102,17 @@ fn light_to_gpu(light: &Light3D) -> GpuLightData {
         direction: [direction.x, direction.y, direction.z],
         spot_angle: light.spot_angle,
         // Light color is sRGB authoring → linear, times energy — the scene is
-        // shaded in linear space (matches the software `LightUniform`).
-        color: [
-            srgb_to_linear_channel(light.color.r) * light.energy,
-            srgb_to_linear_channel(light.color.g) * light.energy,
-            srgb_to_linear_channel(light.color.b) * light.energy,
-        ],
+        // shaded in linear space (matches the software `LightUniform`). A
+        // SKY_ONLY light (`affects_scene == false`) contributes no surface
+        // lighting; its sky sun disc is drawn separately from `self.lights`.
+        color: {
+            let shade_energy = if light.affects_scene { light.energy } else { 0.0 };
+            [
+                srgb_to_linear_channel(light.color.r) * shade_energy,
+                srgb_to_linear_channel(light.color.g) * shade_energy,
+                srgb_to_linear_channel(light.color.b) * shade_energy,
+            ]
+        },
         spot_angle_attenuation: light.spot_angle_attenuation,
         position: [light.position.x, light.position.y, light.position.z],
         shadow_map_index: -1,
@@ -3375,5 +3380,21 @@ mod tests {
         assert!((gpu.direction[0] - 0.6).abs() < 1e-6);
         assert!((gpu.direction[1] - 0.8).abs() < 1e-6);
         assert!((gpu.direction[2] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn light_to_gpu_sky_only_contributes_no_scene_color() {
+        // SKY_ONLY: draws the sky sun disc but must not shade geometry, so the
+        // shading color uploaded to the GPU is zero regardless of energy.
+        let mut light = Light3D::directional(Light3DId(1));
+        light.energy = 5.0;
+        light.affects_scene = false;
+        let gpu = light_to_gpu(&light);
+        assert_eq!(gpu.color, [0.0, 0.0, 0.0], "SKY_ONLY adds no surface light");
+
+        // The default (LIGHT_AND_SKY) still shades.
+        light.affects_scene = true;
+        let gpu = light_to_gpu(&light);
+        assert!(gpu.color[0] > 0.0, "LIGHT_AND_SKY must still shade the scene");
     }
 }

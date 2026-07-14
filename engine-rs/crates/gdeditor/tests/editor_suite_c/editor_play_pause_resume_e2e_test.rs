@@ -108,48 +108,62 @@ fn editor_play_pause_resume_reflects_runtime_state() {
     let s = status(port);
     assert_eq!(s["running"], false, "idle before play: {s}");
 
-    // Play → running, not paused, frame 0.
+    // Play → running, not paused. The pat-nzgdu.19 auto-driver begins advancing
+    // frames on its own, so `frame_count` is a non-negative number that may
+    // already be climbing (no longer pinned to 0 the way manual-only play was).
     let play = http_post(port, "/api/runtime/play", "");
     assert!(play.contains("200 OK"), "play ok: {play}");
     let s = status(port);
     assert_eq!(s["running"], true, "running after play: {s}");
     assert_eq!(s["paused"], false, "not paused after play: {s}");
-    assert_eq!(s["frame_count"], 0, "frame 0 after play: {s}");
+    assert!(
+        s["frame_count"].as_u64().is_some(),
+        "frame_count present after play: {s}"
+    );
 
-    // While running but NOT paused, a step is rejected: frame advance is gated
-    // on the paused flag, so this distinguishes a live runtime from a paused one.
+    // While running but NOT paused, a step is rejected: manual `/api/runtime/step`
+    // is the single-step control and is gated on the paused flag, so this
+    // distinguishes a live (auto-driven) runtime from a paused one.
     let step_live = http_post(port, "/api/runtime/step", "");
     assert!(
         step_live.contains("400"),
         "step while running-not-paused is rejected: {step_live}"
     );
 
-    // Pause → the served state reports paused.
+    // Pause → the served state reports paused, which also halts the auto-driver.
     let pause = http_post(port, "/api/runtime/pause", "");
     assert!(pause.contains("200 OK"), "pause ok: {pause}");
     let s = status(port);
     assert_eq!(s["running"], true, "still running while paused: {s}");
     assert_eq!(s["paused"], true, "paused after pause: {s}");
 
-    // Paused: stepping advances frames deterministically.
-    for expected in 1..=3u64 {
+    // Paused: the auto-driver is frozen, so the frame count is now a stable
+    // baseline and each manual step advances it by exactly one.
+    let base = s["frame_count"].as_u64().expect("paused frame_count is a number");
+    for i in 1..=3u64 {
         let step = http_post(port, "/api/runtime/step", "");
-        assert!(step.contains("200 OK"), "step {expected} ok: {step}");
+        assert!(step.contains("200 OK"), "step {i} ok: {step}");
         let s = status(port);
         assert_eq!(
-            s["frame_count"], expected,
-            "frame advances to {expected} while paused: {s}"
+            s["frame_count"].as_u64().unwrap(),
+            base + i,
+            "manual step advances the paused frame count by exactly one: {s}"
         );
     }
 
     // Resume (pause toggles back) → the served state reports not paused, and the
-    // frame counter is PRESERVED across the pause (resume is not a restart).
+    // frame counter is PRESERVED across the pause (resume is not a restart): it
+    // continues from base+3 and the auto-driver resumes advancing, so it is
+    // never reset to 0.
     let resume = http_post(port, "/api/runtime/pause", "");
     assert!(resume.contains("200 OK"), "resume ok: {resume}");
     let s = status(port);
     assert_eq!(s["running"], true, "still running after resume: {s}");
     assert_eq!(s["paused"], false, "not paused after resume: {s}");
-    assert_eq!(s["frame_count"], 3, "frame count preserved across resume: {s}");
+    assert!(
+        s["frame_count"].as_u64().unwrap() >= base + 3,
+        "frame count preserved (not reset) across resume: {s}"
+    );
 
     // Resume is a REAL un-pause: a step is now rejected again, exactly as it was
     // on the freshly-played (never-paused) runtime above. A cosmetic resume that

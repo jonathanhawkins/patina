@@ -216,6 +216,50 @@ pub enum SkyMaterial {
     Physical(PhysicalSkyMaterial),
 }
 
+/// Populates a sky material's optional panorama texture(s) from its stored
+/// resource path(s), using a caller-supplied `load` closure that maps a
+/// resource reference to decoded **linear** pixels.
+///
+/// This is the seam between scene-loading (which only records a texture's
+/// resource path — e.g. the normalized `"ExtResource:<id>"` form the `.tscn`
+/// parser stores in [`ProceduralSkyMaterial::sky_cover_path`]) and the renderer
+/// (which needs a [`PanoramaTexture`] of linear texels). It is deliberately
+/// decode-free so it lives in `gdserver3d` (no image-codec dependency): the host
+/// — the editor or runtime — provides `load`, which resolves the reference to a
+/// file and decodes+linearizes it (see `gdresource::load_color_texture_linear`).
+///
+/// `load` returning `None` (unresolved reference, unsupported/HDR format, decode
+/// failure) leaves the texture unset, so the material renders without that layer
+/// rather than failing — matching Godot, where a missing sky cover is simply not
+/// drawn. Materials whose texture is already populated (e.g. constructed in a
+/// test) or whose path is empty are left untouched, so this is idempotent.
+///
+/// Covers all three texture-bearing sky materials: `ProceduralSkyMaterial`'s
+/// `sky_cover`, `PhysicalSkyMaterial`'s `night_sky`, and the panorama of a
+/// `PanoramaSkyMaterial`.
+pub fn resolve_sky_material_textures(
+    material: &mut SkyMaterial,
+    mut load: impl FnMut(&str) -> Option<PanoramaTexture>,
+) {
+    match material {
+        SkyMaterial::Procedural(m) => {
+            if m.sky_cover.is_none() && !m.sky_cover_path.is_empty() {
+                m.sky_cover = load(&m.sky_cover_path);
+            }
+        }
+        SkyMaterial::Physical(m) => {
+            if m.night_sky.is_none() && !m.night_sky_path.is_empty() {
+                m.night_sky = load(&m.night_sky_path);
+            }
+        }
+        SkyMaterial::Panoramic(m) => {
+            if m.texture.is_none() && !m.panorama_path.is_empty() {
+                m.texture = load(&m.panorama_path);
+            }
+        }
+    }
+}
+
 /// A Sky resource that holds a material and rendering parameters.
 ///
 /// Maps to Godot's `Sky` resource. Used as the sky source for
@@ -752,5 +796,90 @@ mod tests {
         let sky = Sky::default();
         let cloned = sky.clone();
         assert_eq!(sky, cloned);
+    }
+
+    // -- resolve_sky_material_textures -----------------------------------------
+
+    fn one_pixel(c: Color) -> PanoramaTexture {
+        PanoramaTexture { width: 1, height: 1, pixels: vec![c] }
+    }
+
+    #[test]
+    fn resolve_loads_procedural_sky_cover_from_path() {
+        let mut sky = SkyMaterial::Procedural(ProceduralSkyMaterial {
+            sky_cover_path: "ExtResource:1_clouds".into(),
+            ..Default::default()
+        });
+        let mut seen = Vec::new();
+        resolve_sky_material_textures(&mut sky, |p| {
+            seen.push(p.to_string());
+            Some(one_pixel(Color::new(0.2, 0.4, 0.6, 1.0)))
+        });
+        // The loader is handed the raw stored reference (the parser's normalized
+        // `ExtResource:<id>` form), which the host resolves to a file.
+        assert_eq!(seen, vec!["ExtResource:1_clouds".to_string()]);
+        match sky {
+            SkyMaterial::Procedural(m) => {
+                let tex = m.sky_cover.expect("sky_cover populated");
+                assert_eq!(tex.pixels[0], Color::new(0.2, 0.4, 0.6, 1.0));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn resolve_loads_physical_night_sky_and_panorama() {
+        let mut phys = SkyMaterial::Physical(PhysicalSkyMaterial {
+            night_sky_path: "res://stars.png".into(),
+            ..Default::default()
+        });
+        resolve_sky_material_textures(&mut phys, |_| Some(one_pixel(Color::new(1.0, 1.0, 1.0, 1.0))));
+        assert!(matches!(&phys, SkyMaterial::Physical(m) if m.night_sky.is_some()));
+
+        let mut pano = SkyMaterial::Panoramic(PanoramicSkyMaterial {
+            panorama_path: "res://sky.png".into(),
+            ..Default::default()
+        });
+        resolve_sky_material_textures(&mut pano, |_| Some(one_pixel(Color::new(0.5, 0.5, 0.5, 1.0))));
+        assert!(matches!(&pano, SkyMaterial::Panoramic(m) if m.texture.is_some()));
+    }
+
+    #[test]
+    fn resolve_skips_empty_path_without_calling_loader() {
+        let mut sky = SkyMaterial::Procedural(ProceduralSkyMaterial::default());
+        let mut called = false;
+        resolve_sky_material_textures(&mut sky, |_| {
+            called = true;
+            Some(one_pixel(Color::new(1.0, 0.0, 0.0, 1.0)))
+        });
+        assert!(!called, "loader must not run for an empty texture path");
+        assert!(matches!(&sky, SkyMaterial::Procedural(m) if m.sky_cover.is_none()));
+    }
+
+    #[test]
+    fn resolve_is_idempotent_when_already_loaded() {
+        let existing = one_pixel(Color::new(0.1, 0.1, 0.1, 1.0));
+        let mut sky = SkyMaterial::Procedural(ProceduralSkyMaterial {
+            sky_cover_path: "res://clouds.png".into(),
+            sky_cover: Some(existing.clone()),
+            ..Default::default()
+        });
+        resolve_sky_material_textures(&mut sky, |_| {
+            panic!("loader must not run when the texture is already populated")
+        });
+        assert!(matches!(&sky, SkyMaterial::Procedural(m) if m.sky_cover == Some(existing.clone())));
+    }
+
+    #[test]
+    fn resolve_leaves_texture_unset_when_loader_returns_none() {
+        let mut sky = SkyMaterial::Procedural(ProceduralSkyMaterial {
+            sky_cover_path: "res://missing.exr".into(),
+            ..Default::default()
+        });
+        resolve_sky_material_textures(&mut sky, |_| None);
+        assert!(
+            matches!(&sky, SkyMaterial::Procedural(m) if m.sky_cover.is_none()),
+            "a failed load must leave the layer unset, not crash"
+        );
     }
 }

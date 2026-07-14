@@ -1047,6 +1047,10 @@ pub struct EditorServerHandle {
     viewport_cache: Arc<ViewportCache>,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Background thread that advances the runtime `MainLoop` every frame while
+    /// a scene is playing (pat-nzgdu.19). Shares `running`, so it exits when the
+    /// server is stopped.
+    driver_thread: Option<JoinHandle<()>>,
     /// Actual TCP port the server bound to (resolved when started with `0`).
     port: u16,
 }
@@ -1498,11 +1502,27 @@ impl EditorServerHandle {
             })
         });
 
+        // pat-nzgdu.19: continuous runtime driver. Godot advances the SceneTree
+        // every rendered frame while a game runs; Patina's Play only constructed
+        // a MainLoop and never ticked it (the sole `step()` was the manual
+        // `/api/runtime/step` "next frame" button). This background thread ticks
+        // the running MainLoop automatically at the frame cadence while
+        // `is_running && !is_paused && !runtime_suspended`, so a played scene's
+        // `_process`/`_physics_process`, tweens, Timers and physics advance with
+        // no client-driven stepping. It shares `running`, so it terminates when
+        // the server is stopped.
+        let driver_state = Arc::clone(&state);
+        let driver_running = Arc::clone(&running);
+        let driver_thread = Some(thread::spawn(move || {
+            run_runtime_driver(driver_state, driver_running);
+        }));
+
         Self {
             state,
             viewport_cache,
             running,
             thread,
+            driver_thread,
             port: bound_port,
         }
     }
@@ -1583,6 +1603,11 @@ impl EditorServerHandle {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
+        // pat-nzgdu.19: also wind down the runtime driver thread. It polls the
+        // shared `running` flag and exits within one frame interval.
+        if let Some(handle) = self.driver_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -1637,6 +1662,48 @@ fn run_server(
         }
         // Short sleep — connections queue in the OS backlog during this time.
         thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// pat-nzgdu.19: continuous runtime driver loop.
+///
+/// Runs on a dedicated background thread for the server's lifetime and advances
+/// the playing scene's [`MainLoop`] one frame per real frame interval — the
+/// server-side equivalent of Godot's `Main::iteration`, which ticks the
+/// SceneTree every rendered frame. Before this loop existed, Play built a
+/// `MainLoop` and flipped `is_running` but nothing ever stepped it unless a
+/// client POSTed `/api/runtime/step`, so `_process`/`_physics_process`, tweens,
+/// `Timer`s and physics never ran during editor Play.
+///
+/// Discipline: the state lock is held only for the duration of a single
+/// `step()` and **never** across the inter-frame sleep, so the HTTP worker
+/// threads that share `EditorState` (status polling, Stop/Pause, input) are not
+/// starved. A frame is stepped only while
+/// `is_running && !is_paused && !runtime_suspended` and a `run_main_loop`
+/// exists; otherwise the thread idles at the frame cadence, cheaply re-checking.
+/// `runtime_time_scale` is honored inside [`advance_running_main_loop`]. The
+/// loop exits as soon as `running` is cleared (server stop).
+fn run_runtime_driver(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>) {
+    // Bound the per-frame sleep so a pathological `delta_time` cannot wedge the
+    // driver: too small would busy-spin the CPU, too large would make Stop/Pause
+    // feel unresponsive (the loop only re-checks `running` once per sleep).
+    const MIN_FRAME_SECS: f64 = 1.0 / 1000.0;
+    const MAX_FRAME_SECS: f64 = 1.0 / 15.0;
+    while running.load(Ordering::Relaxed) {
+        let frame_secs = {
+            let mut st = state.lock().unwrap();
+            if st.is_running
+                && !st.is_paused
+                && !st.runtime_suspended
+                && st.run_main_loop.is_some()
+            {
+                advance_running_main_loop(&mut st);
+            }
+            st.delta_time
+        }; // lock dropped here — never held across the sleep below.
+        thread::sleep(Duration::from_secs_f64(
+            frame_secs.clamp(MIN_FRAME_SECS, MAX_FRAME_SECS),
+        ));
     }
 }
 
@@ -2195,6 +2262,8 @@ fn handle_connection(
         ("POST", "/api/runtime/pause") => api_runtime_pause(state, &mut stream),
         ("POST", "/api/runtime/step") => api_runtime_step(state, &mut stream),
         ("GET", "/api/runtime/status") => api_runtime_status(state, &mut stream),
+        // pat-nzgdu.23: live node inspection of the running scene (remote tree).
+        ("GET", "/api/runtime/node") => api_runtime_node(state, &req.query, &mut stream),
         // pat-j9yqh: game-view runtime toolbar controls
         ("POST", "/api/runtime/suspend") => api_runtime_suspend(state, &req.body, &mut stream),
         ("POST", "/api/runtime/time_scale") => api_runtime_time_scale(state, &req.body, &mut stream),
@@ -5428,6 +5497,7 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
 fn world_environment_from_scene(
     scene: &gdscene::packed_scene::PackedScene,
     tree: &gdscene::SceneTree,
+    project_root: Option<&str>,
 ) -> Option<gdserver3d::environment::Environment3D> {
     use gdserver3d::environment::Environment3D;
     use gdserver3d::sky::{Sky, SkyMaterial};
@@ -5463,7 +5533,7 @@ fn world_environment_from_scene(
     // Resolve the nested Sky → sky material.
     if let Some(sky_id) = env_props.get("sky").and_then(resref_id) {
         if let Some(sky_props) = scene.sub_resource_props(&sky_id) {
-            let material = sky_props
+            let mut material = sky_props
                 .get("sky_material")
                 .and_then(resref_id)
                 .and_then(|mat_id| {
@@ -5484,11 +5554,48 @@ fn world_environment_from_scene(
                 .unwrap_or_else(|| {
                     SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default())
                 });
+
+            // Load any panorama / sky_cover / night_sky texture the material
+            // references. The `.tscn` parser only records each texture's resource
+            // path; decode it here (sRGB→linear) so the layer actually renders.
+            // Requires a known project res:// root — without one (e.g. a bare
+            // scene load), the layer is left unset, exactly as Godot draws a Sky
+            // whose cover texture failed to load.
+            if let Some(root) = project_root {
+                let root = std::path::Path::new(root);
+                gdserver3d::sky::resolve_sky_material_textures(&mut material, |ref_str| {
+                    let res_path = resolve_texture_ref_to_res_path(scene, ref_str)?;
+                    let fs_path = resolve_res_path(root, &res_path).ok()?;
+                    let (width, height, pixels) =
+                        gdresource::importers::load_color_texture_linear(&fs_path).ok()?;
+                    Some(gdserver3d::sky::PanoramaTexture { width, height, pixels })
+                });
+            }
+
             env.sky = Some(Sky { material, ..Sky::default() });
         }
     }
 
     Some(env)
+}
+
+/// Resolves a sky-material texture reference — as stored by the `.tscn` parser —
+/// to a `res://` path. The parser normalizes `sky_cover = ExtResource("id")` to
+/// the string `"ExtResource:<id>"`, which we resolve via the scene's
+/// ext-resource table; a directly-embedded `res://…` path passes through.
+/// Returns `None` for anything else (e.g. an inline `SubResource` texture, which
+/// carries no file path).
+fn resolve_texture_ref_to_res_path(
+    scene: &gdscene::packed_scene::PackedScene,
+    ref_str: &str,
+) -> Option<String> {
+    if let Some(id) = ref_str.strip_prefix("ExtResource:") {
+        return scene.ext_resources().get(id).map(|e| e.path.clone());
+    }
+    if ref_str.starts_with("res://") {
+        return Some(ref_str.to_string());
+    }
+    None
 }
 
 fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
@@ -5536,7 +5643,10 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
             // (background, tonemap, glow, fog, ambient) like Godot; otherwise
             // restore the default editor preview environment. Only the inner
             // Environment3D is swapped — the preview sun/toggles are kept.
-            match world_environment_from_scene(&scene, &new_tree) {
+            // Cloned so the res:// root can be read while the match arms below
+            // mutably borrow `state`.
+            let project_root = state.project_root.clone();
+            match world_environment_from_scene(&scene, &new_tree, project_root.as_deref()) {
                 Some(env) => state.editor_viewport_3d.environment.load_from_environment(env),
                 None => {
                     state.editor_viewport_3d.environment.environment =
@@ -9574,17 +9684,19 @@ fn api_runtime_pause(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(stream, &format!(r#"{{"ok":true,"paused":{paused}}}"#));
 }
 
-fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let mut state = state.lock().unwrap();
-    if !state.is_running {
-        send_error(stream, 400, "not running");
-        return;
-    }
-    if !state.is_paused {
-        send_error(stream, 400, "not paused");
-        return;
-    }
-    let delta = state.delta_time;
+/// Advances the running [`MainLoop`] by exactly one frame and returns the new
+/// frame count. Shared by the manual single-step endpoint (`/api/runtime/step`)
+/// and the continuous runtime driver thread ([`run_runtime_driver`],
+/// pat-nzgdu.19).
+///
+/// The caller owns the running/pause/suspend gating and the state lock; this
+/// only performs the tick. The per-frame delta is scaled by
+/// `runtime_time_scale` (Godot's `Engine.time_scale` semantics: the wall-clock
+/// cadence is unchanged, but each frame advances game time by
+/// `delta * time_scale`). Engine input is drained after scripts run, mirroring
+/// the original step handler.
+fn advance_running_main_loop(state: &mut EditorState) -> u64 {
+    let delta = state.delta_time * state.runtime_time_scale;
     // The engine-owned InputState is populated by api_input_key_down/up via
     // push_event(). The bridge in MainLoop::step() converts it to the
     // script-facing InputSnapshot automatically. We still set a manual
@@ -9597,7 +9709,20 @@ fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     }
     // Clear per-frame input after scripts have run.
     state.clear_frame_input();
-    let frame = state.runtime_frame_count;
+    state.runtime_frame_count
+}
+
+fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    if !state.is_paused {
+        send_error(stream, 400, "not paused");
+        return;
+    }
+    let frame = advance_running_main_loop(&mut state);
     send_json(stream, &format!(r#"{{"ok":true,"frame_count":{frame}}}"#));
 }
 
@@ -9623,6 +9748,53 @@ fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             state.runtime_input_mode
         ),
     );
+}
+
+/// `GET /api/runtime/node?path=<node_path>` — reads a node's **live** properties
+/// from the running scene (the play-mode [`MainLoop`]'s tree), resolved by its
+/// absolute node path (e.g. `/root/Main/Player`). This is the runtime
+/// counterpart to `GET /api/node/<id>`: `/api/node` inspects the frozen editor
+/// scene, whereas this reflects the values a running scene's scripts mutate each
+/// frame — Godot's remote scene-tree inspector during Play. Script member
+/// variables are synced onto the node every time a script method runs
+/// (`call_script_with_access`), so a `_process`-incremented variable is
+/// observable here as the continuous driver (pat-nzgdu.19) advances it
+/// (pat-nzgdu.23).
+///
+/// Returns 400 when no scene is playing and 404 when the path resolves to no
+/// node in the running tree.
+fn api_runtime_node(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let path = match query_param(query, "path") {
+        Some(p) => url_decode(p),
+        None => {
+            send_error(stream, 400, "missing path parameter");
+            return;
+        }
+    };
+    let json = {
+        let state = state.lock().unwrap();
+        if !state.is_running {
+            send_error(stream, 400, "not running");
+            return;
+        }
+        let main_loop = match state.run_main_loop.as_ref() {
+            Some(ml) => ml,
+            None => {
+                send_error(stream, 400, "not running");
+                return;
+            }
+        };
+        let tree = main_loop.tree();
+        let node_id = match tree.get_node_by_path(&path) {
+            Some(id) => id,
+            None => {
+                send_error(stream, 404, "node not found");
+                return;
+            }
+        };
+        node_properties_json(tree, node_id, None).to_string()
+    };
+    send_json(stream, &json);
 }
 
 // --- pat-j9yqh: game-view runtime toolbar controls ---
@@ -14017,7 +14189,7 @@ environment = SubResource("env1")
         let root = tree.root_id();
         add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
 
-        let env = world_environment_from_scene(&scene, &tree).expect("world env");
+        let env = world_environment_from_scene(&scene, &tree, None).expect("world env");
         assert_eq!(
             env.background_mode,
             gdserver3d::environment::BackgroundMode::Sky
@@ -14045,7 +14217,100 @@ environment = SubResource("env1")
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
-        assert!(world_environment_from_scene(&scene, &tree).is_none());
+        assert!(world_environment_from_scene(&scene, &tree, None).is_none());
+    }
+
+    /// The `.tscn` that both sky-cover tests below load: a WorldEnvironment whose
+    /// ProceduralSkyMaterial references a `sky_cover` texture via `ExtResource`.
+    #[cfg(test)]
+    const SKY_COVER_TSCN: &str = r#"[gd_scene format=3]
+
+[ext_resource type="Texture2D" path="res://clouds.png" id="1_clouds"]
+
+[sub_resource type="ProceduralSkyMaterial" id="mat1"]
+sky_cover = ExtResource("1_clouds")
+
+[sub_resource type="Sky" id="sky1"]
+sky_material = SubResource("mat1")
+
+[sub_resource type="Environment" id="env1"]
+background_mode = 2
+sky = SubResource("sky1")
+
+[node name="World" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env1")
+"#;
+
+    /// End-to-end: a scene whose ProceduralSkyMaterial references a `sky_cover`
+    /// texture by `ExtResource` gets that texture decoded from disk — resolved
+    /// through the project res:// root — and stored as **linear** pixels on the
+    /// material. This is the seam that makes a Godot sky-cover layer actually
+    /// render (previously the path was recorded but never loaded).
+    #[test]
+    fn world_environment_loads_sky_cover_texture_from_project() {
+        use gdscene::packed_scene::PackedScene;
+        // 1x1 mid-gray (128) RGBA PNG, valid IHDR/IDAT/IEND.
+        const GRAY_PNG: [u8; 70] = [
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xda, 0x63, 0x68, 0x68, 0x68, 0xf8, 0x0f, 0x00, 0x05, 0x84, 0x02, 0x80, 0x53, 0x93,
+            0x74, 0x36, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let proj = tempfile::TempDir::new().unwrap();
+        std::fs::write(proj.path().join("clouds.png"), GRAY_PNG).unwrap();
+
+        gdobject::class_db::register_3d_classes();
+        let scene = PackedScene::from_tscn(SKY_COVER_TSCN).expect("parse tscn");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
+
+        let root_str = proj.path().to_str().unwrap();
+        let env =
+            world_environment_from_scene(&scene, &tree, Some(root_str)).expect("world env");
+        match env.sky.as_ref().map(|s| &s.material) {
+            Some(gdserver3d::sky::SkyMaterial::Procedural(m)) => {
+                let tex = m.sky_cover.as_ref().expect("sky_cover decoded from disk");
+                assert_eq!((tex.width, tex.height), (1, 1));
+                // Decoded through sRGB→linear: 128/255 sRGB ≈ 0.216 linear, so the
+                // stored texel must sit well below the ~0.502 raw sRGB value.
+                let px = tex.pixels[0];
+                assert!(
+                    px.r > 0.15 && px.r < 0.30,
+                    "expected linearized mid-gray ≈0.216, got {}",
+                    px.r
+                );
+            }
+            other => panic!("expected procedural sky with cover, got {other:?}"),
+        }
+    }
+
+    /// Without a project res:// root the same scene still resolves the material,
+    /// but the cover texture is left unset (no path resolution possible) — the
+    /// path is preserved so a later project-open can load it. Graceful, no crash.
+    #[test]
+    fn world_environment_sky_cover_unset_without_project_root() {
+        use gdscene::packed_scene::PackedScene;
+        gdobject::class_db::register_3d_classes();
+        let scene = PackedScene::from_tscn(SKY_COVER_TSCN).expect("parse tscn");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
+
+        let env = world_environment_from_scene(&scene, &tree, None).expect("world env");
+        match env.sky.as_ref().map(|s| &s.material) {
+            Some(gdserver3d::sky::SkyMaterial::Procedural(m)) => {
+                assert!(m.sky_cover.is_none(), "no project root → cover left unset");
+                // The parser normalizes ExtResource("id") to the "ExtResource:id"
+                // string form; the loader seam consumes exactly that.
+                assert_eq!(m.sky_cover_path, "ExtResource:1_clouds");
+            }
+            other => panic!("expected procedural sky, got {other:?}"),
+        }
     }
 
     /// The rate-limit exemption covers exactly the editor's own real-time view
@@ -14109,6 +14374,15 @@ environment = SubResource("env1")
         // Wait for server to be ready.
         thread::sleep(Duration::from_millis(100));
         (handle, port)
+    }
+
+    /// Reads the current `runtime_frame_count` from `GET /api/runtime/status`.
+    /// Used by manual-step tests to take a stable baseline once the runtime is
+    /// paused (the pat-nzgdu.19 driver only advances while running & unpaused).
+    fn status_frame_count(port: u16) -> u64 {
+        let v: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/runtime/status"))).unwrap();
+        v["frame_count"].as_u64().unwrap()
     }
 
     /// A gizmo drag transforms the whole multi-selection together (Godot
@@ -17485,10 +17759,13 @@ position = Vector2(10, 20)
         let (handle, port) = make_server();
         http_post(port, "/api/runtime/play", "");
         http_post(port, "/api/runtime/pause", "");
+        // Paused halts the pat-nzgdu.19 auto-driver, so the frame count is now
+        // stable; a single manual step must advance it by exactly one.
+        let base = status_frame_count(port);
         let resp = http_post(port, "/api/runtime/step", "");
         assert!(resp.contains("200 OK"));
         let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
-        assert_eq!(v["frame_count"], 1);
+        assert_eq!(v["frame_count"].as_u64().unwrap(), base + 1);
         handle.stop();
     }
     #[test]
@@ -17497,6 +17774,246 @@ position = Vector2(10, 20)
         assert!(http_post(port, "/api/runtime/step", "").contains("400"));
         http_post(port, "/api/runtime/play", "");
         assert!(http_post(port, "/api/runtime/step", "").contains("400"));
+        handle.stop();
+    }
+
+    /// pat-nzgdu.23: after Play WITHOUT pausing, the continuous runtime driver
+    /// (pat-nzgdu.19) must advance the running scene in real time — `_process`
+    /// runs every frame and `runtime_frame_count` climbs on its own, with no
+    /// client-driven stepping. This drives the editor server end-to-end: it
+    /// loads a scene whose script increments a counter in `_process`, plays
+    /// without pausing, lets the driver tick over ~250ms of wall time, and
+    /// asserts both the frame count (via `/api/runtime/status`) and the scripted
+    /// counter (via the runtime node property API) grew beyond their `_ready`
+    /// values. It also proves Pause freezes advancement and Next Frame still
+    /// single-steps.
+    #[test]
+    fn editor_play_advances_frames_realtime() {
+        use std::io::Write;
+
+        // A scene whose script bumps a counter every _process frame. `_ready`
+        // pins it to 0, so any value > 0 proves _process ran under the driver.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        let mut f = std::fs::File::create(dir.path().join("scripts/counter.gd")).unwrap();
+        f.write_all(
+            b"extends Node2D\n\nvar counter = 0\n\nfunc _ready():\n    self.counter = 0\n\nfunc _process(delta):\n    self.counter = self.counter + 1\n",
+        )
+        .unwrap();
+        drop(f);
+
+        // root -> Main(Node2D) carrying the counter script.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut main = Node::new("Main", "Node2D");
+        main.set_property(
+            "_script_path",
+            Variant::String("res://scripts/counter.gd".into()),
+        );
+        tree.add_child(root, main).unwrap();
+
+        let mut state = EditorState::new(tree);
+        state
+            .texture_cache
+            .set_project_root(dir.path().to_string_lossy().to_string());
+        let handle = EditorServerHandle::start(0, state);
+        let port = handle.port();
+        thread::sleep(Duration::from_millis(100));
+
+        // Reads the live `counter` off the running scene's node property API.
+        // Returns -1 when the property is absent (not yet synced).
+        let read_counter = |port: u16| -> i64 {
+            let resp = http_get(port, "/api/runtime/node?path=/root/Main");
+            let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+            v.get("properties")
+                .and_then(|p| p.as_array())
+                .and_then(|props| {
+                    props
+                        .iter()
+                        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("counter"))
+                })
+                .and_then(|p| p.get("value"))
+                .and_then(|val| val.get("value"))
+                .and_then(|x| x.as_i64())
+                .unwrap_or(-1)
+        };
+        // Play WITHOUT pausing. The counter's _ready baseline is 0; the driver
+        // then ticks _process on its own, so we assert it climbs beyond 0 below.
+        // (We deliberately do NOT assert it reads 0 right after play — the driver
+        // may already have advanced a frame or two by the time this HTTP read
+        // lands, which would make that assertion flaky.)
+        let resp = http_post(port, "/api/runtime/play", "");
+        assert!(resp.contains("200 OK"), "play failed: {resp}");
+
+        // Let the continuous driver tick over wall time (no stepping). The
+        // acceptance names ~250ms; we wait a little longer for margin on a
+        // CPU-saturated verifier where the driver thread may be starved.
+        thread::sleep(Duration::from_millis(400));
+
+        let frames = status_frame_count(port);
+        assert!(
+            frames > 0,
+            "runtime_frame_count must climb on its own under the driver, got {frames}"
+        );
+        let counter = read_counter(port);
+        assert!(
+            counter > 0,
+            "scripted _process counter must advance beyond its _ready value (0), got {counter}"
+        );
+
+        // Pause freezes advancement — neither the frame count nor the counter move.
+        let r = http_post(port, "/api/runtime/pause", "");
+        let pv: serde_json::Value = serde_json::from_str(extract_body(&r)).unwrap();
+        assert_eq!(pv["paused"], true, "pause should report paused=true");
+        let frames_paused = status_frame_count(port);
+        let counter_paused = read_counter(port);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            status_frame_count(port),
+            frames_paused,
+            "pause must freeze the driver's frame advance"
+        );
+        assert_eq!(
+            read_counter(port),
+            counter_paused,
+            "pause must freeze _process (counter must not move)"
+        );
+
+        // Next Frame still single-steps while paused: exactly one _process run.
+        let r = http_post(port, "/api/runtime/step", "");
+        let sv: serde_json::Value = serde_json::from_str(extract_body(&r)).unwrap();
+        assert_eq!(
+            sv["frame_count"].as_u64().unwrap(),
+            frames_paused + 1,
+            "Next Frame advances exactly one frame while paused"
+        );
+        assert_eq!(
+            read_counter(port),
+            counter_paused + 1,
+            "single-step runs _process exactly once"
+        );
+
+        handle.stop();
+    }
+
+    /// pat-nzgdu.23: the runtime node property API rejects reads when nothing is
+    /// playing (400) and 404s an unknown path while playing.
+    #[test]
+    fn runtime_node_requires_running_and_valid_path() {
+        let (handle, port) = make_server();
+        // Not running yet → 400.
+        assert!(
+            http_get(port, "/api/runtime/node?path=/root/Main").contains("400"),
+            "runtime node read must 400 when not running"
+        );
+        http_post(port, "/api/runtime/play", "");
+        // Running, but a bogus path → 404.
+        assert!(
+            http_get(port, "/api/runtime/node?path=/root/DoesNotExist").contains("404"),
+            "runtime node read must 404 for an unknown path"
+        );
+        // The real node resolves with a 200 + properties payload.
+        let resp = http_get(port, "/api/runtime/node?path=/root/Main");
+        assert!(resp.contains("200 OK"), "known runtime node should resolve: {resp}");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        assert_eq!(v["name"], "Main");
+        handle.stop();
+    }
+
+    /// Reads a script-synced member value (matched by node name) from the
+    /// currently-running `MainLoop` tree. GDScript member writes sync back to
+    /// node properties after each callback (see gdscene::scripting), so a
+    /// `_process` counter is observable here. Returns 0 if not running / absent.
+    fn running_script_counter(handle: &EditorServerHandle, node_name: &str, prop: &str) -> i64 {
+        let st = handle.state().lock().unwrap();
+        let Some(ml) = st.run_main_loop.as_ref() else {
+            return 0;
+        };
+        let tree = ml.tree();
+        for id in tree.all_nodes_in_tree_order() {
+            if let Some(node) = tree.get_node(id) {
+                if node.name() == node_name {
+                    return match node.get_property(prop) {
+                        Variant::Int(i) => i,
+                        Variant::Float(f) => f as i64,
+                        _ => 0,
+                    };
+                }
+            }
+        }
+        0
+    }
+
+    /// pat-nzgdu.19: after `POST /api/runtime/play`, the server-side runtime
+    /// driver advances the `MainLoop` every frame on its own. A scene whose
+    /// script increments a counter in `_process` sees both `runtime_frame_count`
+    /// (GET /api/runtime/status) and the script counter climb over ~0.5s WITHOUT
+    /// any `/api/runtime/step` call; `POST /api/runtime/stop` halts advancement.
+    #[test]
+    fn runtime_play_auto_advances_frames() {
+        // A project whose scene-root script bumps `frames` every `_process`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("autotick.gd"),
+            "extends Node2D\nvar frames = 0\nfunc _process(delta):\n    self.frames = self.frames + 1\n",
+        )
+        .unwrap();
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut ticker = Node::new("Ticker", "Node2D");
+        ticker.set_property("_script_path", Variant::String("res://autotick.gd".into()));
+        tree.add_child(root, ticker).unwrap();
+
+        let mut state = EditorState::new(tree);
+        // Resolve `res://autotick.gd` against the temp project dir.
+        state
+            .texture_cache
+            .set_project_root(tmp.path().to_string_lossy().to_string());
+
+        let handle = EditorServerHandle::start(0, state);
+        let port = handle.port();
+        thread::sleep(Duration::from_millis(100)); // server ready
+
+        // Play — and never POST /api/runtime/step. The driver thread advances.
+        let resp = http_post(port, "/api/runtime/play", "");
+        assert!(resp.contains("200 OK"), "play failed: {resp}");
+
+        // Let the driver run for ~0.5s (~30 frames at 60fps).
+        thread::sleep(Duration::from_millis(500));
+
+        // runtime_frame_count climbed with zero manual steps.
+        let v: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/runtime/status"))).unwrap();
+        assert_eq!(v["running"], true);
+        let auto_frames = v["frame_count"].as_u64().unwrap();
+        assert!(
+            auto_frames >= 5,
+            "runtime_frame_count should climb without manual steps, got {auto_frames}"
+        );
+
+        // The scene script's `_process` actually ran repeatedly: its synced
+        // `frames` member on the running tree climbed too (proves the driver
+        // ticks scripts/physics, not merely the frame counter).
+        let script_frames = running_script_counter(&handle, "Ticker", "frames");
+        assert!(
+            script_frames >= 5,
+            "script _process counter should climb via the auto-driver, got {script_frames}"
+        );
+
+        // Stop halts advancement: the run loop is torn down so no further frames
+        // advance (Godot _stop_pressed). frame_count resets to 0.
+        http_post(port, "/api/runtime/stop", "");
+        thread::sleep(Duration::from_millis(150));
+        let v: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/runtime/status"))).unwrap();
+        assert_eq!(v["running"], false);
+        assert_eq!(
+            v["frame_count"].as_u64().unwrap(),
+            0,
+            "stop must halt advancement"
+        );
+
         handle.stop();
     }
 
@@ -17669,8 +18186,12 @@ position = Vector2(10, 20)
         http_post(port, "/api/runtime/play", "");
         assert!(extract_body(&http_get(port, "/api/runtime/status")).contains("\"running\":true"));
         http_post(port, "/api/runtime/pause", "");
+        // Once paused the auto-driver (pat-nzgdu.19) stops advancing; a manual
+        // step then bumps the frame count by exactly one from the paused
+        // baseline.
+        let base = status_frame_count(port);
         http_post(port, "/api/runtime/step", "");
-        assert!(extract_body(&http_get(port, "/api/runtime/status")).contains("\"frame_count\":1"));
+        assert_eq!(status_frame_count(port), base + 1);
         http_post(port, "/api/runtime/stop", "");
         assert!(extract_body(&http_get(port, "/api/runtime/status")).contains("\"running\":false"));
         handle.stop();
@@ -18180,9 +18701,15 @@ position = Vector2(10, 20)
 
     // ---- Input tests ----
 
-    /// Helper: start runtime so input endpoints accept requests.
+    /// Helper: start runtime so input endpoints accept requests, then pause so
+    /// the pat-nzgdu.19 auto-driver does not tick. These input tests assert on
+    /// the per-frame `just_pressed`/`just_released` signals, which the driver
+    /// clears once per frame (Godot's one-frame semantics); pausing freezes them
+    /// so the assertions are deterministic. Input endpoints only gate on
+    /// `is_running` (not pause), so key/mouse posts still register while paused.
     fn start_runtime(port: u16) {
         http_post(port, "/api/runtime/play", "{}");
+        http_post(port, "/api/runtime/pause", "{}");
     }
 
     #[test]

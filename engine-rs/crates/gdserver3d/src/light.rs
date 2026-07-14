@@ -217,6 +217,13 @@ pub struct Light3D {
     /// uses this to keep its dim fill light out of the sky when the preview
     /// sun is toggled off.
     pub sky: bool,
+    /// Whether the light shades scene geometry. Godot's
+    /// `DirectionalLight3D.sky_mode = SKY_ONLY` sets this false: the light still
+    /// draws its sky sun disc ([`sky`](Self::sky) stays true) but contributes
+    /// nothing to surface lighting. The complement of [`sky`](Self::sky):
+    /// `LIGHT_ONLY` clears `sky`, `SKY_ONLY` clears `affects_scene`, and the
+    /// default `LIGHT_AND_SKY` leaves both set.
+    pub affects_scene: bool,
 }
 
 impl Light3D {
@@ -237,6 +244,7 @@ impl Light3D {
             omni_shadow_mode: OmniShadowMode::default(),
             angular_distance: 0.0,
             sky: true,
+            affects_scene: true,
         }
     }
 
@@ -257,6 +265,7 @@ impl Light3D {
             omni_shadow_mode: OmniShadowMode::default(),
             angular_distance: 0.0,
             sky: true,
+            affects_scene: true,
         }
     }
 
@@ -277,6 +286,7 @@ impl Light3D {
             omni_shadow_mode: OmniShadowMode::default(),
             angular_distance: 0.0,
             sky: true,
+            affects_scene: true,
         }
     }
 }

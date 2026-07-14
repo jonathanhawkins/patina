@@ -1485,6 +1485,126 @@ mod tests {
         assert!(RenderServer3DAdapter::resolve_shader_material(&tree, mesh_id).is_none());
     }
 
+    /// pat-nzgdu.21 acceptance: a `.tscn` with an `[ext_resource type="Shader"]`
+    /// (`.gdshader`) and a `[sub_resource type="ShaderMaterial"]` set as a
+    /// MeshInstance3D `material_override` loads through the resource pipeline
+    /// (PackedScene → node flattening → render-server ShaderMaterial3D) and
+    /// renders; and ClassDB can instantiate ShaderMaterial and set/get a shader
+    /// parameter.
+    #[test]
+    fn gdshader_scene_load_renders() {
+        use crate::PackedScene;
+
+        // External `.gdshader` referenced by the scene's `[ext_resource]`. An
+        // absolute path keeps the test hermetic: the render server strips a
+        // leading `res://` and otherwise loads the path verbatim, so an absolute
+        // path exercises the identical ext_resource → shader_path → load_gdshader
+        // chain without a cwd-relative `res://` dependency.
+        let dir = tempfile::TempDir::new().unwrap();
+        let shader_file = dir.path().join("tint.gdshader");
+        std::fs::write(
+            &shader_file,
+            "shader_type spatial;\nuniform float strength = 1.0;\nvoid fragment() { ALBEDO = vec3(strength); }\n",
+        )
+        .unwrap();
+        let shader_abs = shader_file.to_string_lossy().into_owned();
+
+        let tscn = format!(
+            r#"[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Shader" path="{shader_abs}" id="1_shd"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = ExtResource("1_shd")
+shader_parameter/strength = 0.75
+
+[node name="Shaded" type="MeshInstance3D"]
+material_override = SubResource("ShaderMaterial_1")
+"#
+        );
+
+        // Load through the resource pipeline and instance into a scene tree.
+        let packed = PackedScene::from_tscn(&tscn).expect("parse shader scene tscn");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mesh_id = crate::add_packed_scene_to_tree(&mut tree, root, &packed)
+            .expect("instance shader scene into tree");
+
+        // (1) The ShaderMaterial `material_override` flattened onto the node: the
+        //     external shader path plus the shader parameter.
+        {
+            let mesh = tree.get_node(mesh_id).unwrap();
+            assert_eq!(
+                mesh.get_property("shader_path"),
+                Variant::String(shader_abs.clone()),
+                "ext_resource .gdshader path flattened onto the node",
+            );
+            assert_eq!(
+                mesh.get_property("shader_parameter/strength"),
+                Variant::Float(0.75),
+                "ShaderMaterial shader_parameter flattened onto the node",
+            );
+        }
+
+        // (2) The render server resolves a ShaderMaterial3D that loaded the
+        //     external `.gdshader` source and bound the parameter.
+        let mat = RenderServer3DAdapter::resolve_shader_material(&tree, mesh_id)
+            .expect("scene ShaderMaterial resolves to a ShaderMaterial3D");
+        let shader = mat.shader.as_ref().expect("compiled shader present");
+        assert_eq!(shader.shader_type, ShaderType3D::Spatial);
+        assert!(
+            shader.source_code.contains("ALBEDO = vec3(strength)"),
+            "shader source loaded from the external .gdshader",
+        );
+        assert_eq!(
+            mat.get_shader_parameter("strength"),
+            Some(&Variant::Float(0.75)),
+            "shader parameter bound from the ShaderMaterial",
+        );
+
+        // (3) It actually renders: a current camera in front of the shaded mesh
+        //     yields a visible mesh and non-black output.
+        let cam = Node::new("Camera", "Camera3D");
+        let cam_id = tree.add_child(root, cam).unwrap();
+        node3d::set_position(&mut tree, cam_id, Vector3::new(0.0, 0.0, 10.0));
+        node3d::set_camera_current(&mut tree, cam_id, true);
+        node3d::set_position(&mut tree, mesh_id, Vector3::new(0.0, 0.0, 0.0));
+
+        let mut adapter = RenderServer3DAdapter::new(64, 64);
+        let (snapshot, _) = adapter.render_frame(&tree);
+        assert_eq!(snapshot.visible_mesh_count, 1, "the shaded mesh is visible");
+        assert!(
+            snapshot.nonblack_pixel_count > 0,
+            "the shaded mesh renders non-black output",
+        );
+
+        // (4) ClassDB can instantiate ShaderMaterial and set/get a shader
+        //     parameter.
+        gdobject::class_db::register_3d_classes();
+        assert!(
+            gdobject::class_db::can_instantiate("ShaderMaterial"),
+            "ClassDB can instantiate ShaderMaterial",
+        );
+        assert!(
+            gdobject::class_db::is_parent_class("ShaderMaterial", "Material"),
+            "ShaderMaterial inherits Material",
+        );
+        assert!(
+            gdobject::class_db::class_exists("ShaderInclude")
+                && gdobject::class_db::class_exists("ShaderGlobalsOverride"),
+            "ShaderInclude/ShaderGlobalsOverride registered in ClassDB",
+        );
+        let mut obj = gdobject::class_db::instantiate("ShaderMaterial")
+            .expect("ClassDB instantiates ShaderMaterial");
+        obj.base
+            .set_property("shader_parameter/strength", Variant::Float(0.5));
+        assert_eq!(
+            obj.base.get_property("shader_parameter/strength"),
+            Variant::Float(0.5),
+            "set/get shader parameter round-trips on the ShaderMaterial instance",
+        );
+    }
+
     #[test]
     fn frame_counter_increments() {
         let tree = SceneTree::new();

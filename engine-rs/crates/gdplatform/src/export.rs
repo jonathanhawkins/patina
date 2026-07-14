@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::web::WebExportConfig;
+
 // ---------------------------------------------------------------------------
 // BuildProfile
 // ---------------------------------------------------------------------------
@@ -291,6 +293,8 @@ pub struct PackageExecutor {
     output_dir: PathBuf,
     collected: Vec<ResourceEntry>,
     messages: Vec<String>,
+    /// Web (WASM) export settings, used only when `target_platform == "web"`.
+    web_config: WebExportConfig,
 }
 
 impl PackageExecutor {
@@ -306,7 +310,14 @@ impl PackageExecutor {
             output_dir: output_dir.into(),
             collected: Vec::new(),
             messages: Vec::new(),
+            web_config: WebExportConfig::default(),
         }
+    }
+
+    /// Builder: sets the web (WASM) export settings used by the `web` target.
+    pub fn with_web_config(mut self, web_config: WebExportConfig) -> Self {
+        self.web_config = web_config;
+        self
     }
 
     /// Returns the collected resource entries (populated after [`validate_and_collect`]).
@@ -480,6 +491,7 @@ impl PackageExecutor {
             "linux" => self.generate_linux_appimage(binary),
             "macos" => self.generate_macos_bundle(binary),
             "windows" => self.generate_windows_exe(binary),
+            "web" => self.generate_web_bundle(binary),
             _ => Ok(marker_path.clone()),
         };
         let bundle_path = match bundle {
@@ -497,6 +509,152 @@ impl PackageExecutor {
         let mut result = PackageResult::ok(marker_path.display().to_string(), total_size);
         result.messages = self.messages.clone();
         result
+    }
+
+    /// Generates a web (WASM) deployment bundle under the output directory,
+    /// mirroring Godot's web export (`export_plugin.cpp`). Next to the staging
+    /// manifest it writes:
+    ///
+    /// ```text
+    /// <output>/index.html            # shell: <canvas>, progress bar, error overlay
+    /// <output>/<slug>.js             # engine loader: start()/preloadFile/onProgress
+    /// <output>/<slug>.wasm           # the compiled engine module (supplied payload)
+    /// <output>/<slug>.pck            # packed project resources
+    /// <output>/manifest.webmanifest  # web app manifest
+    /// <output>/sw.js                 # service worker   (PWA only)
+    /// <output>/offline.html          # offline fallback (PWA only)
+    /// ```
+    ///
+    /// A real `.wasm` payload MUST be supplied via `binary`. When it is `None`
+    /// this returns [`PackageError::BundleFailed`] and deletes the staging
+    /// `.wasm` marker instead of faking success — Patina previously reported a
+    /// runnable build here while writing a text file named
+    /// `<app>.web.release.wasm`. When threading is enabled the bundle records
+    /// that it must be served with COOP/COEP cross-origin isolation headers.
+    ///
+    /// Returns the path to the generated `index.html` on success. pat-nzgdu.24.
+    pub fn generate_web_bundle(&mut self, binary: Option<&Path>) -> Result<PathBuf, PackageError> {
+        let platform = self.config.target_platform.as_str();
+        if platform != "web" {
+            return Err(PackageError::BundleFailed(format!(
+                "web bundle requires platform 'web', got '{platform}'"
+            )));
+        }
+
+        let app_name = self.config.app_name.clone();
+        let slug = web_asset_slug(&app_name);
+        let web = self.web_config.clone();
+
+        // The staging marker pre-written by `write_output` for the web target is
+        // a text file named `<app>.web.release.wasm` — exactly the fake this bead
+        // removes.
+        let marker_path = self
+            .output_dir
+            .join(ExportTemplate::from_config(self.config.clone()).output_filename());
+
+        // Without a compiled wasm payload we refuse to emit a runnable-looking
+        // bundle: drop the bogus `.wasm` marker and fail loudly.
+        let wasm_src = match binary {
+            Some(p) => p,
+            None => {
+                let _ = std::fs::remove_file(&marker_path);
+                return Err(PackageError::BundleFailed(
+                    "web export requires a compiled .wasm payload; none was supplied — \
+                     refusing to emit a placeholder .wasm (build the wasm runtime first)"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let wasm_name = format!("{slug}.wasm");
+        let js_name = format!("{slug}.js");
+        let pck_name = format!("{slug}.pck");
+
+        // 1. Engine module: copy the supplied payload in, and overwrite the bogus
+        //    `<app>.web.release.wasm` staging marker with the real bytes so the
+        //    reported output path is a genuine wasm rather than a text stub.
+        let wasm_bytes = std::fs::read(wasm_src).map_err(|e| {
+            PackageError::BundleFailed(format!("read wasm payload {}: {e}", wasm_src.display()))
+        })?;
+        write_file(&self.output_dir.join(&wasm_name), &wasm_bytes)?;
+        write_file(&marker_path, &wasm_bytes)?;
+
+        // 2. Packed project resources (<slug>.pck).
+        write_file(&self.output_dir.join(&pck_name), &self.build_web_pck())?;
+
+        // 3. Engine loader JS (start()/preloadFile/onProgress/onExit API).
+        write_file(
+            &self.output_dir.join(&js_name),
+            web_engine_loader_js(&slug, &wasm_name, &pck_name).as_bytes(),
+        )?;
+
+        // 4. Web app manifest.
+        write_file(
+            &self.output_dir.join("manifest.webmanifest"),
+            web_app_manifest(&app_name, &slug).as_bytes(),
+        )?;
+
+        // 5. index.html shell (canvas + progress + error/status overlay).
+        let index_path = self.output_dir.join("index.html");
+        write_file(&index_path, web_index_html(&app_name, &js_name, &web).as_bytes())?;
+
+        // 6. PWA: service worker + offline fallback page.
+        if web.pwa_enabled {
+            write_file(
+                &self.output_dir.join("sw.js"),
+                web_service_worker_js(&[
+                    "index.html",
+                    js_name.as_str(),
+                    wasm_name.as_str(),
+                    pck_name.as_str(),
+                    "manifest.webmanifest",
+                    "offline.html",
+                ])
+                .as_bytes(),
+            )?;
+            write_file(
+                &self.output_dir.join("offline.html"),
+                web_offline_html(&app_name).as_bytes(),
+            )?;
+        }
+
+        self.messages.push(format!(
+            "web bundle: index.html + {js_name} + {wasm_name} + {pck_name}{}",
+            if web.pwa_enabled {
+                " + PWA (sw.js, offline.html)"
+            } else {
+                ""
+            }
+        ));
+        if web.threads_enabled {
+            self.messages.push(
+                "web bundle requires COOP/COEP cross-origin isolation headers \
+                 (Cross-Origin-Opener-Policy: same-origin, \
+                 Cross-Origin-Embedder-Policy: require-corp) — threading enabled"
+                    .to_string(),
+            );
+        }
+
+        Ok(index_path)
+    }
+
+    /// Packs the collected project resources into a simple, self-describing
+    /// `.pck` blob: a `PATINA_PCK1` magic, a little-endian `u32` entry count,
+    /// then per entry a length-prefixed package path, a `u64` size, and the
+    /// file bytes. This is an honest data pack, not a placeholder.
+    fn build_web_pck(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PATINA_PCK1");
+        buf.extend_from_slice(&(self.collected.len() as u32).to_le_bytes());
+        for entry in &self.collected {
+            let path = entry.package_path.as_bytes();
+            buf.extend_from_slice(&(path.len() as u32).to_le_bytes());
+            buf.extend_from_slice(path);
+            let bytes = std::fs::read(&entry.source_path).unwrap_or_default();
+            buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            buf.extend_from_slice(&bytes);
+        }
+        buf
     }
 
     /// Generates a Linux AppImage-style layout under the output directory.
@@ -978,6 +1136,276 @@ fn set_executable(path: &Path) -> Result<(), PackageError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Web export helpers
+// ---------------------------------------------------------------------------
+
+/// Sanitizes an app name into a filesystem/URL-safe asset slug for web output
+/// (lowercase ASCII alphanumerics and `_`, never empty).
+fn web_asset_slug(app_name: &str) -> String {
+    let slug: String = app_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('_').to_string();
+    if slug.is_empty() {
+        "app".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Escapes `<`, `>`, `&`, and `"` for safe embedding in HTML text/attributes.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escapes a string for embedding inside a JSON double-quoted value.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Builds the `index.html` shell: a `<canvas>`, a `<progress>` bar, and an
+/// error/status overlay, plus the loader `<script>` and any `head_include`.
+///
+/// When `threads_enabled` the shell documents the COOP/COEP headers the host
+/// must send; when `pwa_enabled` it links the web manifest.
+fn web_index_html(app_name: &str, js_name: &str, web: &WebExportConfig) -> String {
+    const SHELL: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>__COEP__
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__APP__</title>__MANIFEST__
+    <style>
+      html, body { margin: 0; height: 100%; background: #1d1f21; color: #eee;
+                   font-family: system-ui, sans-serif; }
+      #canvas { display: block; margin: 0 auto; }
+      #status { position: absolute; inset: 0; display: flex; flex-direction: column;
+                align-items: center; justify-content: center; text-align: center; }
+      #status[hidden] { display: none; }
+      #status-progress { width: 50%; max-width: 320px; }
+      #status-error { color: #ff6b6b; white-space: pre-wrap; }
+    </style>
+    __HEAD__
+</head>
+<body>
+    <canvas id="canvas"__AUTOFOCUS__>Your browser does not support the canvas tag.</canvas>
+    <div id="status">
+      <div id="status-notice">Loading __APP__&hellip;</div>
+      <progress id="status-progress" value="0" max="100"__PROGRESS_HIDDEN__></progress>
+      <div id="status-error" role="alert" hidden></div>
+    </div>
+    <script src="__JS__"></script>
+    <script>
+      (function () {
+        var engine = new PatinaEngine();
+        var statusEl = document.getElementById('status');
+        var errorEl = document.getElementById('status-error');
+        var progressEl = document.getElementById('status-progress');
+        engine.onProgress = function (loaded, total) {
+          if (total > 0) { progressEl.value = (loaded / total) * 100; }
+        };
+        engine.onExit = function () { statusEl.hidden = true; };
+        engine.start({ canvas: document.getElementById('canvas') }).then(function () {
+          statusEl.hidden = true;
+        }).catch(function (err) {
+          errorEl.hidden = false;
+          errorEl.textContent = 'Failed to start: ' + err;
+        });
+      })();
+    </script>
+</body>
+</html>
+"#;
+    let coep = if web.threads_enabled {
+        "\n<!-- Threaded build: serve with Cross-Origin-Opener-Policy: same-origin \
+         and Cross-Origin-Embedder-Policy: require-corp -->"
+    } else {
+        ""
+    };
+    let manifest_link = if web.pwa_enabled {
+        "\n    <link rel=\"manifest\" href=\"manifest.webmanifest\">"
+    } else {
+        ""
+    };
+    let autofocus = if web.focus_canvas {
+        " tabindex=\"0\" autofocus"
+    } else {
+        ""
+    };
+    let progress_hidden = if web.show_preloader { "" } else { " hidden" };
+    SHELL
+        .replace("__COEP__", coep)
+        .replace("__MANIFEST__", manifest_link)
+        .replace("__HEAD__", &web.head_include)
+        .replace("__AUTOFOCUS__", autofocus)
+        .replace("__PROGRESS_HIDDEN__", progress_hidden)
+        .replace("__JS__", &html_escape(js_name))
+        .replace("__APP__", &html_escape(app_name))
+}
+
+/// Emits the engine-loader JavaScript: a `PatinaEngine` class exposing
+/// `start(config)`, `preloadFile(path)`, and `onProgress`/`onExit` callbacks,
+/// which streams the `.wasm` module and `.pck` data pack before instantiating.
+fn web_engine_loader_js(slug: &str, wasm_name: &str, pck_name: &str) -> String {
+    const LOADER: &str = r#"// Patina engine loader for __SLUG__ — generated by the web export pipeline.
+// Godot-style API: new PatinaEngine(); engine.preloadFile(p); engine.start(cfg).
+'use strict';
+(function (global) {
+  function PatinaEngine(config) {
+    this.config = config || {};
+    this.wasmUrl = '__WASM__';
+    this.pckUrl = '__PCK__';
+    this.preloadedFiles = [];
+    this.onProgress = null; // function(loaded, total)
+    this.onExit = null;     // function(exitCode)
+  }
+
+  // Register an extra file to fetch before start() resolves.
+  PatinaEngine.prototype.preloadFile = function (path) {
+    this.preloadedFiles.push(path);
+    return this;
+  };
+
+  PatinaEngine.prototype._fetchArrayBuffer = function (url) {
+    var self = this;
+    return fetch(url).then(function (resp) {
+      if (!resp.ok) { throw new Error('failed to fetch ' + url + ': ' + resp.status); }
+      return resp.arrayBuffer();
+    }).then(function (buf) {
+      if (self.onProgress) { self.onProgress(buf.byteLength, buf.byteLength); }
+      return buf;
+    });
+  };
+
+  // Fetch the wasm module + pck (+ any preloaded files), then instantiate.
+  PatinaEngine.prototype.start = function (config) {
+    Object.assign(this.config, config || {});
+    var self = this;
+    var jobs = [this._fetchArrayBuffer(this.wasmUrl), this._fetchArrayBuffer(this.pckUrl)]
+      .concat(this.preloadedFiles.map(function (p) { return self._fetchArrayBuffer(p); }));
+    return Promise.all(jobs).then(function (buffers) {
+      if (typeof WebAssembly === 'undefined') {
+        throw new Error('WebAssembly is not supported by this browser');
+      }
+      return WebAssembly.instantiate(buffers[0], self.config.imports || {});
+    });
+  };
+
+  global.PatinaEngine = PatinaEngine;
+})(typeof window !== 'undefined' ? window : this);
+"#;
+    LOADER
+        .replace("__SLUG__", slug)
+        .replace("__WASM__", wasm_name)
+        .replace("__PCK__", pck_name)
+}
+
+/// Emits a minimal web app manifest (JSON) for the exported game.
+fn web_app_manifest(app_name: &str, slug: &str) -> String {
+    const MANIFEST: &str = r##"{
+  "name": "__NAME__",
+  "short_name": "__NAME__",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#1d1f21",
+  "theme_color": "#1d1f21",
+  "icons": [
+    { "src": "__SLUG__.icon.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
+"##;
+    MANIFEST
+        .replace("__NAME__", &json_escape(app_name))
+        .replace("__SLUG__", slug)
+}
+
+/// Emits a PWA service worker that precaches the bundle and serves the offline
+/// page as a navigation fallback.
+fn web_service_worker_js(assets: &[&str]) -> String {
+    let list = assets
+        .iter()
+        .map(|a| format!("  \"./{a}\""))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    const SW: &str = r#"// Patina PWA service worker — precache + offline navigation fallback.
+'use strict';
+const CACHE = 'patina-cache-v1';
+const ASSETS = [
+__ASSETS__
+];
+self.addEventListener('install', function (e) {
+  e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(ASSETS); }));
+  self.skipWaiting();
+});
+self.addEventListener('activate', function (e) {
+  e.waitUntil(caches.keys().then(function (keys) {
+    return Promise.all(keys.filter(function (k) { return k !== CACHE; })
+      .map(function (k) { return caches.delete(k); }));
+  }));
+  self.clients.claim();
+});
+self.addEventListener('fetch', function (e) {
+  e.respondWith(
+    caches.match(e.request).then(function (hit) {
+      return hit || fetch(e.request).catch(function () {
+        return caches.match('./offline.html');
+      });
+    })
+  );
+});
+"#;
+    SW.replace("__ASSETS__", &list)
+}
+
+/// Emits the PWA offline fallback page.
+fn web_offline_html(app_name: &str) -> String {
+    const OFFLINE: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__APP__ &mdash; Offline</title>
+</head>
+<body>
+    <h1>__APP__</h1>
+    <p>You are offline. Reconnect to load the game.</p>
+</body>
+</html>
+"#;
+    OFFLINE.replace("__APP__", &html_escape(app_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1371,6 +1799,101 @@ mod tests {
         let result = exec.run();
         assert!(!result.success);
         assert!(result.messages[0].contains("unsupported platform"));
+    }
+
+    /// pat-nzgdu.24: the `web` target must emit a real deployable shell
+    /// (index.html + engine loader + manifest, plus PWA files) when a wasm
+    /// payload is supplied — and must refuse to fake success (no placeholder
+    /// `.wasm`) when it is not.
+    #[test]
+    fn web_export_generates_runnable_shell() {
+        let tmp = std::env::temp_dir().join("patina_test_web_export_shell");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("main.tscn"), "main scene").unwrap();
+
+        // A compiled wasm payload supplied by the build.
+        let wasm = tmp.join("engine.wasm");
+        let wasm_bytes: &[u8] = b"\0asm\x01\x00\x00\x00PATINA";
+        std::fs::write(&wasm, wasm_bytes).unwrap();
+
+        let web_cfg = crate::web::WebExportConfig {
+            threads_enabled: true,
+            pwa_enabled: true,
+            head_include: "<meta name=\"patina-head\" content=\"1\">".to_string(),
+            ..crate::web::WebExportConfig::default()
+        };
+        let cfg = ExportConfig::new("web", "Web Game").with_resource("main.tscn");
+        let out_dir = tmp.join("build_ok");
+        let mut exec = PackageExecutor::new(cfg, &tmp, &out_dir).with_web_config(web_cfg);
+
+        // --- Case A: real payload -> a runnable shell bundle -----------------
+        let result = exec.run_with_binary(Some(&wasm));
+        assert!(
+            result.success,
+            "web export with a wasm payload should succeed: {result:?}"
+        );
+
+        let index = std::fs::read_to_string(out_dir.join("index.html")).unwrap();
+        assert!(index.contains("<canvas"), "shell has a canvas");
+        assert!(index.contains("<progress"), "shell has a progress element");
+        assert!(
+            index.contains("id=\"status\"") && index.contains("id=\"status-error\""),
+            "shell has an error/status overlay"
+        );
+        assert!(index.contains("patina-head"), "head_include is injected");
+        assert!(
+            index.contains("Cross-Origin-Embedder-Policy"),
+            "threaded build documents COOP/COEP isolation"
+        );
+
+        // Engine loader JS exposing the required API surface.
+        let loader = std::fs::read_to_string(out_dir.join("web_game.js")).unwrap();
+        assert!(loader.contains("PatinaEngine"), "loader defines PatinaEngine");
+        assert!(loader.contains("start"), "loader exposes start()");
+        assert!(loader.contains("preloadFile"), "loader exposes preloadFile()");
+        assert!(loader.contains("onProgress"), "loader exposes onProgress");
+
+        // Web manifest + packed resources + the real wasm asset (embedded verbatim).
+        assert!(
+            out_dir.join("manifest.webmanifest").exists(),
+            "web manifest written"
+        );
+        assert!(out_dir.join("web_game.pck").exists(), "resources packed");
+        assert_eq!(
+            std::fs::read(out_dir.join("web_game.wasm")).unwrap(),
+            wasm_bytes,
+            "the supplied wasm payload is embedded verbatim"
+        );
+
+        // PWA extras.
+        assert!(out_dir.join("sw.js").exists(), "PWA service worker written");
+        assert!(
+            out_dir.join("offline.html").exists(),
+            "PWA offline page written"
+        );
+
+        // --- Case B: no payload -> explicit failure, no fake .wasm -----------
+        let cfg2 = ExportConfig::new("web", "Web Game").with_resource("main.tscn");
+        let out_dir2 = tmp.join("build_no_payload");
+        let mut exec2 = PackageExecutor::new(cfg2, &tmp, &out_dir2);
+        let result2 = exec2.run(); // no wasm payload
+        assert!(
+            !result2.success,
+            "payload-less web export must NOT report success"
+        );
+        assert!(
+            result2.messages.iter().any(|m| m.contains("wasm")),
+            "failure explains the missing wasm payload: {:?}",
+            result2.messages
+        );
+        // The bogus `<app>.web.release.wasm` placeholder must not survive.
+        assert!(
+            !out_dir2.join("Web Game.web.release.wasm").exists(),
+            "no placeholder .wasm is left behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

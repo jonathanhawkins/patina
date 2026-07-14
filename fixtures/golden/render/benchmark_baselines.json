@@ -5,43 +5,43 @@
     "grid_100": {
       "description": "10x10 grid of colored rectangles",
       "deterministic": true,
-      "mp_per_sec": 83.9,
-      "per_frame_ms": 10.987,
+      "mp_per_sec": 83.0,
+      "per_frame_ms": 11.104,
       "pixel_count": 921600
     },
     "grid_25": {
       "description": "5x5 grid of colored rectangles",
       "deterministic": true,
-      "mp_per_sec": 80.9,
-      "per_frame_ms": 11.388,
+      "mp_per_sec": 81.0,
+      "per_frame_ms": 11.383,
       "pixel_count": 921600
     },
     "grid_400": {
       "description": "20x20 grid of colored rectangles",
       "deterministic": true,
       "mp_per_sec": 85.3,
-      "per_frame_ms": 10.807,
+      "per_frame_ms": 10.798,
       "pixel_count": 921600
     },
     "mixed_fill_100": {
       "description": "100 items, alternating filled/unfilled",
       "deterministic": true,
-      "mp_per_sec": 135.5,
-      "per_frame_ms": 6.801,
+      "mp_per_sec": 141.5,
+      "per_frame_ms": 6.515,
       "pixel_count": 921600
     },
     "overlapping_z_50": {
       "description": "50 overlapping items with z-index sorting",
       "deterministic": true,
-      "mp_per_sec": 49.3,
-      "per_frame_ms": 18.701,
+      "mp_per_sec": 46.9,
+      "per_frame_ms": 19.661,
       "pixel_count": 921600
     },
     "single_rect": {
       "description": "Single centered rectangle (minimal baseline)",
       "deterministic": true,
-      "mp_per_sec": 186.0,
-      "per_frame_ms": 4.955,
+      "mp_per_sec": 201.9,
+      "per_frame_ms": 4.565,
       "pixel_count": 921600
     }
   },

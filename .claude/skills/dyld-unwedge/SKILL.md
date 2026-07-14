@@ -10,9 +10,14 @@ requires a reboot. It is a **saturated syspolicyd/Gatekeeper launch-evaluation
 queue**. Key mechanism (confirmed 2026-07-14 across two controlled episodes):
 
 - Ad-hoc-signed (never-notarized) binaries — i.e. everything cargo builds — pay
-  a serialized syspolicyd/XProtect evaluation **on launch, at a limited
-  sustained rate** (not one-time per binary: a pre-warmed binary hangs again
-  under storm load).
+  a serialized syspolicyd/XProtect evaluation on first launch (~5-25s for big
+  engine binaries, up to ~2min for the gdeditor lib test binary), and the
+  queue has limited sustained throughput: many never-evaluated binaries
+  launching concurrently back it up indefinitely.
+- Profile gotcha: `cargo build --tests` produces DEV-profile binaries;
+  `cargo test`/`cargo nextest` run TEST-profile binaries with different
+  hashes. Pre-warming the former does NOT cover the latter — pre-warm (or
+  first-run serially) the exact binaries the runner will launch.
 - `cargo nextest` spawns **one process per test**. A full-suite run = thousands
   of process spawns of huge binaries. At `NEXTEST_TEST_THREADS=8` this
   saturated the queue within a minute — twice. Every launch on the host then

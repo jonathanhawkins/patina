@@ -337,6 +337,12 @@ fn run_project_from_godot(arg_path: &Path, args: &Args) {
     );
 
     let mut main_loop = MainLoop::new(tree);
+    // pat-nzgdu.15: honor project.godot physics config (tick rate + 2D/3D
+    // gravity) before running any frames, mirroring Godot's boot.
+    main_loop.configure_from_project_settings(&booted.settings);
+    // Register 2D physics bodies so RigidBody2D/etc. actually simulate under the
+    // honored gravity (2D bodies are not auto-registered by `step`).
+    main_loop.register_physics_bodies();
     let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
 
     let mut output = json!({

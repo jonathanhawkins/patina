@@ -1,0 +1,16 @@
+; Test fixture project for pat-nzgdu.15 (honor physics config at boot).
+; Declares a non-default physics tick rate (30) and 2D gravity (490) plus a
+; RigidBody2D main scene, so the runner boot path can be asserted to honor them
+; (30 ticks / 490 gravity, not the Godot defaults of 60 / 980).
+
+config_version=5
+
+[application]
+
+config/name="PhysicsHonorFixture"
+run/main_scene="res://scenes/main.tscn"
+
+[physics]
+
+common/physics_ticks_per_second=30
+2d/default_gravity=490.0

@@ -784,6 +784,61 @@ impl MainLoop {
         self.physics_ticks_per_second
     }
 
+    /// Applies physics-related [`ProjectSettings`] to this main loop at boot,
+    /// mirroring how Godot configures `Engine.physics_ticks_per_second` and the
+    /// `PhysicsServer2D`/`PhysicsServer3D` space gravity from `project.godot`
+    /// (pat-nzgdu.15).
+    ///
+    /// Honored keys (falling back to Godot defaults when absent):
+    /// - `physics/common/physics_ticks_per_second`
+    /// - `physics/2d/default_gravity` × `physics/2d/default_gravity_vector`
+    ///   (default direction `(0, 1)`, i.e. downward in 2D screen space)
+    /// - `physics/3d/default_gravity` × `physics/3d/default_gravity_vector`
+    ///   (default direction `(0, -1, 0)`)
+    ///
+    /// This is the boot-path wiring the runner uses so a project that sets
+    /// 30 ticks or 490 gravity actually simulates at those values — no manual
+    /// `set_physics_ticks_per_second`/`set_gravity` call required.
+    pub fn configure_from_project_settings(&mut self, settings: &gdcore::ProjectSettings) {
+        use gdcore::{SettingsValue, Vector2, Vector3};
+
+        // Physics tick rate. Ignore non-positive values (Godot requires > 0).
+        if let Some(tps) = settings
+            .get("physics/common/physics_ticks_per_second")
+            .and_then(|v| v.as_int())
+        {
+            if tps > 0 {
+                self.physics_ticks_per_second = tps as u32;
+            }
+        }
+
+        // 2D gravity = scalar magnitude × direction vector.
+        let g2 = settings
+            .get("physics/2d/default_gravity")
+            .and_then(|v| v.as_float())
+            .unwrap_or(980.0) as f32;
+        let dir2 = match settings.get("physics/2d/default_gravity_vector") {
+            Some(SettingsValue::Vector2(x, y)) => Vector2::new(*x as f32, *y as f32),
+            _ => Vector2::new(0.0, 1.0),
+        };
+        self.physics_server
+            .set_gravity(Vector2::new(dir2.x * g2, dir2.y * g2));
+
+        // 3D gravity = scalar magnitude × direction vector.
+        let g3 = settings
+            .get("physics/3d/default_gravity")
+            .and_then(|v| v.as_float())
+            .unwrap_or(9.8) as f32;
+        let dir3 = match settings.get("physics/3d/default_gravity_vector") {
+            Some(SettingsValue::Vector3(x, y, z)) => {
+                Vector3::new(*x as f32, *y as f32, *z as f32)
+            }
+            _ => Vector3::new(0.0, -1.0, 0.0),
+        };
+        self.physics_server_3d
+            .set_gravity(Vector3::new(dir3.x * g3, dir3.y * g3, dir3.z * g3));
+    }
+
     /// Sets the maximum number of physics steps per frame (default 8).
     pub fn set_max_physics_steps_per_frame(&mut self, max_steps: u32) {
         assert!(max_steps > 0, "max_physics_steps_per_frame must be > 0");
@@ -2281,6 +2336,71 @@ mod tests {
         let (mut ml, _) = make_loop_with_child();
         ml.set_physics_ticks_per_second(120);
         assert_eq!(ml.physics_ticks_per_second(), 120);
+    }
+
+    #[test]
+    fn configure_from_project_settings_honors_tick_rate_and_gravity() {
+        use gdcore::{ProjectSettings, SettingsValue};
+
+        let mut settings = ProjectSettings::new();
+        settings.set(
+            "physics/common/physics_ticks_per_second",
+            SettingsValue::Int(30),
+        );
+        settings.set("physics/2d/default_gravity", SettingsValue::Float(490.0));
+        settings.set("physics/3d/default_gravity", SettingsValue::Float(4.9));
+
+        let (mut ml, _) = make_loop_with_child();
+        ml.configure_from_project_settings(&settings);
+
+        assert_eq!(ml.physics_ticks_per_second(), 30);
+        // 2D default direction is (0, 1) (downward); magnitude honored.
+        let g2 = ml.physics_server().gravity();
+        assert_eq!(g2.x, 0.0);
+        assert!((g2.y - 490.0).abs() < 1e-4, "2D gravity y = {}", g2.y);
+        // 3D default direction is (0, -1, 0).
+        let g3 = ml.physics_server_3d().gravity();
+        assert_eq!(g3.x, 0.0);
+        assert!((g3.y + 4.9).abs() < 1e-4, "3D gravity y = {}", g3.y);
+        assert_eq!(g3.z, 0.0);
+        // The 3D world (not merely the server's cached field) must honor it.
+        assert!((ml.physics_server_3d().world().gravity.y + 4.9).abs() < 1e-4);
+    }
+
+    #[test]
+    fn configure_from_project_settings_honors_explicit_gravity_vector() {
+        use gdcore::{ProjectSettings, SettingsValue};
+
+        let mut settings = ProjectSettings::new();
+        // Sideways 2D gravity: magnitude 100 along direction (1, 0).
+        settings.set("physics/2d/default_gravity", SettingsValue::Float(100.0));
+        settings.set(
+            "physics/2d/default_gravity_vector",
+            SettingsValue::Vector2(1.0, 0.0),
+        );
+
+        let (mut ml, _) = make_loop_with_child();
+        ml.configure_from_project_settings(&settings);
+
+        let g2 = ml.physics_server().gravity();
+        assert!((g2.x - 100.0).abs() < 1e-4, "2D gravity x = {}", g2.x);
+        assert_eq!(g2.y, 0.0);
+    }
+
+    #[test]
+    fn configure_from_project_settings_ignores_nonpositive_tick_rate() {
+        use gdcore::{ProjectSettings, SettingsValue};
+
+        let mut settings = ProjectSettings::new();
+        settings.set(
+            "physics/common/physics_ticks_per_second",
+            SettingsValue::Int(0),
+        );
+
+        let (mut ml, _) = make_loop_with_child();
+        ml.configure_from_project_settings(&settings);
+        // Non-positive tick rate is rejected; the default 60 is preserved.
+        assert_eq!(ml.physics_ticks_per_second(), 60);
     }
 
     #[test]

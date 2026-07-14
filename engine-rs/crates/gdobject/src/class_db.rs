@@ -729,6 +729,10 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("set_shader_parameter", 2))
             .method(MethodInfo::new("get_shader_parameter", 1)),
     );
+    // ShaderInclude → Resource (reusable `.gdshaderinc` fragments); Godot's
+    // ShaderGlobalsOverride is a Node that overrides project shader globals.
+    register_class(ClassRegistration::new("ShaderInclude").parent("Resource"));
+    register_class(ClassRegistration::new("ShaderGlobalsOverride").parent("Node"));
     register_class(
         ClassRegistration::new("BaseMaterial3D")
             .parent("Material")

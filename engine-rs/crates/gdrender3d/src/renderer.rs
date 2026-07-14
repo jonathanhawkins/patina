@@ -393,15 +393,21 @@ impl SoftwareRenderer3D {
                     LightType::Spot => l.direction.normalized(),
                     LightType::Point => Vector3::ZERO,
                 };
+                // SKY_ONLY lights (affects_scene == false) draw their sky sun
+                // disc but must not shade geometry, so zero their scene energy.
+                // The light keeps its slot — shadow-map indices stay aligned with
+                // `self.lights`, and the sky-sun path reads `self.lights` directly
+                // (not these uniforms), so its disc is unaffected.
+                let shade_energy = if l.affects_scene { l.energy } else { 0.0 };
                 LightUniform {
                     kind,
                     direction,
                     // Light color is sRGB authoring → linear, times energy
                     // (Godot shades in linear space).
                     color: Color::new(
-                        srgb_to_linear_channel(l.color.r) * l.energy,
-                        srgb_to_linear_channel(l.color.g) * l.energy,
-                        srgb_to_linear_channel(l.color.b) * l.energy,
+                        srgb_to_linear_channel(l.color.r) * shade_energy,
+                        srgb_to_linear_channel(l.color.g) * shade_energy,
+                        srgb_to_linear_channel(l.color.b) * shade_energy,
                         1.0,
                     ),
                     position: l.position,
@@ -1808,6 +1814,49 @@ mod tests {
 
         let nonblack = frame.pixels.iter().filter(|c| **c != Color::BLACK).count();
         assert!(nonblack > 100, "lambert lit cube should fill pixels");
+    }
+
+    #[test]
+    fn sky_only_light_does_not_shade_scene() {
+        // A SKY_ONLY directional light (affects_scene == false) draws its sky sun
+        // disc but must not light scene geometry. Render the same lit cube three
+        // ways and confirm SKY_ONLY shades exactly like a zero-energy light.
+        fn render_cube(energy: f32, affects_scene: bool) -> Vec<Color> {
+            let mut renderer = SoftwareRenderer3D::new();
+            let id = renderer.create_instance();
+            renderer.set_mesh(id, Mesh3D::cube(1.0));
+            renderer.set_material(id, Material3D::default());
+            renderer.set_transform(
+                id,
+                Transform3D {
+                    basis: Basis::IDENTITY,
+                    origin: Vector3::new(0.0, 0.0, -5.0),
+                },
+            );
+            let mut light = Light3D::directional(Light3DId(1));
+            light.direction = Vector3::new(0.0, 0.0, -1.0); // toward the camera-facing face
+            light.energy = energy;
+            light.affects_scene = affects_scene;
+            renderer.add_light(light.id);
+            renderer.update_light(&light);
+            renderer.render_frame(&Viewport3D::new(48, 48)).pixels
+        }
+
+        let lit = render_cube(5.0, true);
+        let sky_only = render_cube(5.0, false);
+        let zero_energy = render_cube(0.0, true);
+
+        // SKY_ONLY contributes nothing to shading — pixel-identical to energy 0.
+        assert_eq!(
+            sky_only, zero_energy,
+            "SKY_ONLY must shade the scene exactly like a zero-energy light"
+        );
+        // Guard against a no-op test: the light must matter when it does shade.
+        let sum = |px: &[Color]| px.iter().map(|c| c.r + c.g + c.b).sum::<f32>();
+        assert!(
+            sum(&lit) > sum(&sky_only) + 1.0,
+            "an affects_scene light must visibly shade the cube"
+        );
     }
 
     #[test]

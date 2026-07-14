@@ -257,6 +257,9 @@ pub struct WebExportConfig {
     pub show_preloader: bool,
     /// Focus canvas on page load.
     pub focus_canvas: bool,
+    /// Emit a PWA service worker + offline page + linkable web manifest so the
+    /// export is installable and works offline (mirrors Godot's PWA option).
+    pub pwa_enabled: bool,
 }
 
 impl Default for WebExportConfig {
@@ -271,6 +274,7 @@ impl Default for WebExportConfig {
             head_include: String::new(),
             show_preloader: true,
             focus_canvas: true,
+            pwa_enabled: false,
         }
     }
 }

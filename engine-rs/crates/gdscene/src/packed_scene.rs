@@ -534,6 +534,11 @@ impl PackedScene {
         root_node.set_unique_name(root_tmpl.unique_name);
         if let Some(ref inst) = root_tmpl.instance {
             root_node.set_property("_instance", Variant::String(inst.clone()));
+            // Preserve the resolved sub-scene path so the saver can rebuild the
+            // `[ext_resource type="PackedScene" ...]` entry (pat-nzgdu.18).
+            if let Some(path) = self.resolve_ext_resource_path(inst) {
+                root_node.set_property("_instance_path", Variant::String(path.to_string()));
+            }
         }
         if let Some(ref script_path) = root_tmpl.script_path {
             root_node.set_property("_script_path", Variant::String(script_path.clone()));
@@ -565,6 +570,10 @@ impl PackedScene {
             node.set_unique_name(tmpl.unique_name);
             if let Some(ref inst) = tmpl.instance {
                 node.set_property("_instance", Variant::String(inst.clone()));
+                // Preserve the resolved sub-scene path (pat-nzgdu.18).
+                if let Some(path) = self.resolve_ext_resource_path(inst) {
+                    node.set_property("_instance_path", Variant::String(path.to_string()));
+                }
             }
             if let Some(ref script_path) = tmpl.script_path {
                 node.set_property("_script_path", Variant::String(script_path.clone()));
@@ -740,6 +749,10 @@ impl PackedScene {
             node.set_unique_name(tmpl.unique_name);
             if let Some(ref inst) = tmpl.instance {
                 node.set_property("_instance", Variant::String(inst.clone()));
+                // Preserve the resolved sub-scene path (pat-nzgdu.18).
+                if let Some(path) = self.resolve_ext_resource_path(inst) {
+                    node.set_property("_instance_path", Variant::String(path.to_string()));
+                }
             }
             if let Some(ref script_path) = tmpl.script_path {
                 node.set_property("_script_path", Variant::String(script_path.clone()));

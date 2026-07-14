@@ -192,6 +192,17 @@ impl PhysicsServer3D {
         self.gravity
     }
 
+    /// Sets the global 3D gravity vector (m/s²).
+    ///
+    /// Mirrors Godot's `physics/3d/default_gravity` × `default_gravity_vector`
+    /// (default direction `(0, -1, 0)`). Boot code calls this when a project
+    /// overrides the default gravity. Propagates into the underlying
+    /// [`PhysicsWorld3D`] so integration actually honors the new value.
+    pub fn set_gravity(&mut self, gravity: Vector3) {
+        self.gravity = gravity;
+        self.world.gravity = gravity;
+    }
+
     /// Returns the number of tracked physics bodies.
     pub fn body_count(&self) -> usize {
         self.node_to_body.len()

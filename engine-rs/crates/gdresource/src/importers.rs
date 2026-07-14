@@ -226,6 +226,77 @@ pub fn import_webp_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>
     Ok(Arc::new(res))
 }
 
+/// Loads a `source_color` image (PNG / WebP / `.ctex`, honoring a `.import`
+/// sidecar) and returns its pixels converted **sRGB→linear** — for use as a sky
+/// panorama layer: [`ProceduralSkyMaterial::sky_cover`], the panorama of a
+/// `PanoramaSkyMaterial`, and [`PhysicalSkyMaterial::night_sky`]. Returns
+/// `(width, height, linear_pixels)` in row-major order.
+///
+/// Those three sky layers are Godot `source_color` samplers, so the sampler
+/// decodes sRGB→linear at sample time and the renderer uses the texels raw (see
+/// `gdserver3d`'s `PanoramaTexture` note). The on-disk decoders
+/// ([`import_image`] / [`import_webp`]) yield raw *normalized sRGB* values, so
+/// this applies [`gdcore::math::Color::srgb_to_linear`] per texel to satisfy
+/// that linear-pixel contract.
+///
+/// HDR panorama formats (`.exr` / `.hdr`) are not yet decodable and return a
+/// [`EngineError::Parse`] naming the format so a caller can log and skip rather
+/// than render a broken layer. A decoded-but-empty texture (e.g. a GPU-compressed
+/// `.ctex` with no CPU pixels) likewise errors instead of yielding garbage.
+pub fn load_color_texture_linear(
+    path: &Path,
+) -> EngineResult<(u32, u32, Vec<gdcore::math::Color>)> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let res = match ext.as_str() {
+        "webp" => import_webp(path)?,
+        "ctex" => load_ctex_file(path)?,
+        "exr" | "hdr" => {
+            return Err(EngineError::Parse(format!(
+                "HDR sky texture format '.{ext}' is not yet supported: {}",
+                path.display()
+            )));
+        }
+        // PNG and unknown extensions: `import_image` honors a `.import` sidecar
+        // (→ `.ctex`) and otherwise decodes a loose PNG by magic bytes.
+        _ => import_image(path)?,
+    };
+
+    let width = match res.get_property("width") {
+        Some(Variant::Int(w)) => (*w).max(0) as u32,
+        _ => 0,
+    };
+    let height = match res.get_property("height") {
+        Some(Variant::Int(h)) => (*h).max(0) as u32,
+        _ => 0,
+    };
+    let pixels: Vec<gdcore::math::Color> = match res.get_property("pixels") {
+        Some(Variant::Array(arr)) => arr
+            .iter()
+            .map(|v| match v {
+                // Decoders store normalized sRGB; linearize for source_color use.
+                Variant::Color(c) => c.srgb_to_linear(),
+                _ => gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    if width == 0 || height == 0 || pixels.len() != (width as usize) * (height as usize) {
+        return Err(EngineError::Parse(format!(
+            "texture has no usable CPU pixel data: {} ({width}x{height}, {} texels)",
+            path.display(),
+            pixels.len()
+        )));
+    }
+
+    Ok((width, height, pixels))
+}
+
 /// Decode PNG IDAT to linear RGBA floats in \[0,1\]. Returns None on failure.
 fn decode_png_pixels(data: &[u8]) -> Option<Vec<(f32, f32, f32, f32)>> {
     use miniz_oxide::inflate::decompress_to_vec_zlib;
@@ -933,6 +1004,78 @@ mod tests {
             }
             other => panic!("pixels missing: {other:?}"),
         }
+    }
+
+    /// Builds a real 1×1 RGBA PNG (valid deflate IDAT) filled with one color.
+    /// CRCs are zero — [`decode_png_pixels`] walks chunks by length and does not
+    /// validate them, so this is sufficient for round-trip decode tests.
+    fn solid_rgba_png(r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
+        use miniz_oxide::deflate::compress_to_vec_zlib;
+        let mut data = Vec::new();
+        data.extend_from_slice(&PNG_MAGIC);
+        // IHDR: 1×1, 8-bit, color type 6 (RGBA).
+        data.extend_from_slice(&13u32.to_be_bytes());
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.push(8);
+        data.push(6);
+        data.extend_from_slice(&[0u8, 0u8, 0u8]); // compression, filter, interlace
+        data.extend_from_slice(&[0u8; 4]); // CRC placeholder
+        // IDAT: one scanline = filter byte 0 followed by RGBA.
+        let idat = compress_to_vec_zlib(&[0u8, r, g, b, a], 6);
+        data.extend_from_slice(&(idat.len() as u32).to_be_bytes());
+        data.extend_from_slice(b"IDAT");
+        data.extend_from_slice(&idat);
+        data.extend_from_slice(&[0u8; 4]); // CRC placeholder
+        // IEND
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&[0u8; 4]);
+        data
+    }
+
+    #[test]
+    fn load_color_texture_linear_applies_srgb_to_linear() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("gray.png");
+        // sRGB mid-gray: byte 128 ≈ 0.502 normalized.
+        std::fs::write(&path, solid_rgba_png(128, 128, 128, 255)).unwrap();
+
+        let (w, h, pixels) = load_color_texture_linear(&path).unwrap();
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(pixels.len(), 1);
+        let c = pixels[0];
+        // srgb_to_linear(128/255) ≈ 0.216 — far below the ~0.502 sRGB value, so
+        // this proves the loader linearized rather than passing texels through raw.
+        let expected = gdcore::math::srgb_to_linear_channel(128.0 / 255.0);
+        assert!(
+            (c.r - expected).abs() < 1e-4,
+            "r={} expected≈{expected}",
+            c.r
+        );
+        assert!(
+            c.r < 0.30,
+            "linearized mid-gray must drop well below sRGB 0.5, got {}",
+            c.r
+        );
+        assert!(
+            (c.a - 1.0).abs() < 1e-6,
+            "alpha must be preserved (not linearized), got {}",
+            c.a
+        );
+    }
+
+    #[test]
+    fn load_color_texture_linear_rejects_hdr_formats() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sky.exr");
+        std::fs::write(&path, b"not really exr data").unwrap();
+        let err = load_color_texture_linear(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains(".exr"),
+            "error should name the unsupported format: {err}"
+        );
     }
 
     #[test]
