@@ -643,7 +643,11 @@ fn surviving_group_members(pgid: i32) -> Option<String> {
 /// When the kernel AMFI/code-sign wedge sets in, every freshly launched test
 /// binary hangs at `_dyld_start`. The verifier would otherwise keep launching a
 /// new 900s verify every cycle, each timing out and spawning ~26 more wedged
-/// processes — deepening the wedge (only a host reboot clears it). This breaker
+/// processes — deepening the wedge. (Root cause per 2026-07-14 diagnosis: each
+/// NEW binary's first launch pays a serialized syspolicyd/Gatekeeper
+/// evaluation, ~5-25s for big engine binaries; concurrent launches of many
+/// never-seen binaries saturate that queue so launches back up indefinitely.
+/// It drains once the launch storm stops — no reboot needed.) This breaker
 /// watches for that signature: after `N` consecutive wall-clock timeouts with
 /// no compile error in the output it trips, the lane stops launching new
 /// verifies, an operator alert is emitted, and the lane auto-resumes once a
@@ -708,8 +712,9 @@ pub mod circuit_breaker {
             format!(
                 "HOST-ISSUE: dyld-wedge suspected after {} consecutive verify timeouts \
                  (no compile error) — freshly launched test binaries are hanging at \
-                 _dyld_start (kernel AMFI/code-sign wedge). Verify lane HALTED; only a \
-                 host REBOOT clears this. Probing periodically to auto-resume.",
+                 _dyld_start (saturated syspolicyd first-launch evaluation queue). \
+                 Verify lane HALTED so the queue can drain; probing periodically to \
+                 auto-resume. Reboot is a last resort, not the fix.",
                 self.consecutive_timeouts
             )
         }
@@ -725,16 +730,23 @@ pub mod circuit_breaker {
             format!(
                 "The verifier lane halted after {n} consecutive verify timeouts with no \
                  compile error in the output.\n\n\
-                 Signature: every freshly launched test binary hangs at `_dyld_start` \
-                 (kernel AMFI / code-sign wedge). Each new verify deepens the wedge by \
-                 launching ~26 more hung processes, so the lane has stopped launching new \
-                 verifies to avoid pure harm.\n\n\
+                 Signature: every freshly launched test binary hangs at `_dyld_start`. \
+                 Root cause (2026-07-14 diagnosis): ad-hoc-signed (never-notarized) \
+                 binaries pay a serialized syspolicyd/Gatekeeper evaluation per LAUNCH at \
+                 limited sustained throughput. A high process-spawn rate (nextest \
+                 process-per-test fan-out, verify retry storms) saturates that queue, so \
+                 every launch on the host backs up indefinitely. Each new verify deepens \
+                 the backlog, so the lane has stopped launching to let it drain.\n\n\
                  Confirm: pick a hung child PID and run `sample <pid> 1`; if the stack \
-                 bottoms out at `_dyld_start` the wedge is confirmed. Only a host REBOOT \
-                 clears it — `cargo clean`, a `syspolicyd` restart, and killing cargo do NOT.\n\n\
+                 bottoms out at `_dyld_start` the diagnosis is confirmed.\n\n\
+                 Recovery WITHOUT reboot (see the /dyld-unwedge skill): kill the hung \
+                 launches, wait ~5-10 quiet minutes, then resume at a sustainable spawn \
+                 rate — NEXTEST_TEST_THREADS=1, or in-process `cargo test` for bulk runs. \
+                 Only if a freshly compiled hello-world still hangs after ~10 quiet \
+                 minutes does a reboot make sense.\n\n\
                  Auto-resume: the lane re-probes by launching a tiny prebuilt test binary \
-                 with `--list` under a 10s timeout; when that returns promptly the wedge \
-                 has cleared and verification resumes automatically.",
+                 with `--list` under a 10s timeout; when that returns promptly the queue \
+                 has drained and verification resumes automatically.",
                 n = self.consecutive_timeouts
             )
         }
