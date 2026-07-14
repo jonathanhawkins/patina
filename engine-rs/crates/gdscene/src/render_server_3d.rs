@@ -608,7 +608,8 @@ impl RenderServer3DAdapter {
 
             // Rebuild the quad every frame so region/flip/pixel_size edits apply.
             self.renderer.set_mesh(inst_id, sprite.to_mesh());
-            self.renderer.set_material(inst_id, Self::sprite_material(&sprite));
+            self.renderer
+                .set_material(inst_id, Self::sprite_material(&sprite));
             self.renderer.set_transform(inst_id, transform);
             self.renderer.set_visible(inst_id, visible);
 
@@ -2221,6 +2222,79 @@ material_override = SubResource("ShaderMaterial_1")
         assert!(
             snapshot.nonblack_pixel_count > 0,
             "gltf mesh with material should produce visible pixels"
+        );
+    }
+
+    // -- Sprite3D compositing into the 3D draw list (pat-u3l8c.39) ----------
+
+    /// Renders a scene containing one centered `Sprite3D` faced by a camera.
+    /// `billboard` is the Godot `BillboardMode` int; `modulate` tints the quad.
+    fn render_sprite_scene(
+        billboard: i64,
+        modulate: Color,
+    ) -> (RenderFrame3DSnapshot, FrameData3D) {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let cam = Node::new("Camera", "Camera3D");
+        let cam_id = tree.add_child(root, cam).unwrap();
+        node3d::set_position(&mut tree, cam_id, Vector3::new(0.0, 0.0, 5.0));
+        node3d::set_camera_current(&mut tree, cam_id, true);
+
+        let mut sprite = Node::new("Sprite", "Sprite3D");
+        // A 64x64 "texture" at pixel_size 0.08 -> ~5.1m quad, so it covers the
+        // view centre from 5m away without needing a real texture file.
+        sprite.set_property("texture_size", Variant::Vector2(Vector2::new(64.0, 64.0)));
+        sprite.set_property("pixel_size", Variant::Float(0.08));
+        sprite.set_property("modulate", Variant::Color(modulate));
+        sprite.set_property("billboard", Variant::Int(billboard));
+        let sprite_id = tree.add_child(root, sprite).unwrap();
+        node3d::set_position(&mut tree, sprite_id, Vector3::new(0.0, 0.0, 0.0));
+
+        let mut adapter = RenderServer3DAdapter::new(64, 64);
+        adapter.render_frame(&tree)
+    }
+
+    #[test]
+    fn sprite3d_composited_renders_visible_pixels() {
+        // The core acceptance check: a Sprite3D is composited into the 3D draw
+        // list and rasterises visible pixels (it was previously never drawn).
+        let (snapshot, _frame) = render_sprite_scene(0, Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(
+            snapshot.visible_mesh_count, 1,
+            "the Sprite3D quad should be one visible render instance"
+        );
+        assert!(
+            snapshot.nonblack_pixel_count > 0,
+            "Sprite3D should rasterise visible pixels into the frame"
+        );
+    }
+
+    #[test]
+    fn sprite3d_billboard_enabled_still_renders() {
+        // BillboardMode::Enabled (1) reorients the quad toward the camera; it
+        // must remain visible in the rendered frame.
+        let (snapshot, _frame) = render_sprite_scene(1, Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(snapshot.visible_mesh_count, 1);
+        assert!(
+            snapshot.nonblack_pixel_count > 0,
+            "a billboarded Sprite3D should still rasterise visible pixels"
+        );
+    }
+
+    #[test]
+    fn sprite3d_modulate_tints_rendered_center() {
+        // A green, unlit sprite paints its modulate colour at the view centre,
+        // proving the sprite material (not just geometry) reaches the pixels.
+        let (_snapshot, frame) = render_sprite_scene(0, Color::new(0.0, 1.0, 0.0, 1.0));
+        let center =
+            (frame.height / 2) as usize * frame.width as usize + (frame.width / 2) as usize;
+        let px = frame.pixels[center];
+        // Green-dominance is scale-invariant (survives tonemapping) and also
+        // rules out the black background (0,0,0 fails `g > r`).
+        assert!(
+            px.g > px.r && px.g > px.b,
+            "centre pixel should be green-dominant from the sprite modulate, got {px:?}"
         );
     }
 }

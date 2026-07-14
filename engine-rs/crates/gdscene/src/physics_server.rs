@@ -16,7 +16,9 @@
 use std::collections::HashMap;
 
 use gdcore::math::Vector2;
-use gdphysics2d::area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};
+use gdphysics2d::area2d::{
+    Area2D, AreaId, AreaOverlapEvent, AreaSpaceOverride, AreaStore, OverlapEvent, OverlapState,
+};
 use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D};
 use gdphysics2d::character::CharacterBody2D as PhysicsCharacterBody2D;
 use gdphysics2d::shape::Shape2D;
@@ -56,6 +58,28 @@ fn u32_prop(tree: &SceneTree, id: NodeId, key: &str, default: u32) -> u32 {
             _ => default,
         })
         .unwrap_or(default)
+}
+
+/// Reads a signed integer property from a node, defaulting to `default`.
+fn i32_prop(tree: &SceneTree, id: NodeId, key: &str, default: i32) -> i32 {
+    tree.get_node(id)
+        .map(|n| match n.get_property(key) {
+            Variant::Int(i) => i as i32,
+            Variant::Float(f) => f as i32,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+/// Maps a Godot `Area2D.SpaceOverride` enum integer to [`AreaSpaceOverride`].
+fn space_override_from_int(value: u32) -> AreaSpaceOverride {
+    match value {
+        1 => AreaSpaceOverride::Combine,
+        2 => AreaSpaceOverride::CombineReplace,
+        3 => AreaSpaceOverride::Replace,
+        4 => AreaSpaceOverride::ReplaceCombine,
+        _ => AreaSpaceOverride::Disabled,
+    }
 }
 
 /// Reads a bool property from a node, defaulting to `default`.
@@ -269,8 +293,10 @@ pub struct PhysicsServer {
     area_to_node: HashMap<AreaId, NodeId>,
     /// Collision events from the last physics step.
     last_collision_events: Vec<CollisionEvent>,
-    /// Overlap events from the last physics step.
+    /// Body-area overlap events from the last physics step.
     last_overlap_events: Vec<OverlapEvent>,
+    /// Area-area overlap events from the last physics step.
+    last_area_overlap_events: Vec<AreaOverlapEvent>,
     /// Physics trace log (frame-by-frame body positions).
     trace: Vec<PhysicsTraceEntry>,
     /// Whether tracing is enabled.
@@ -301,6 +327,7 @@ impl PhysicsServer {
             area_to_node: HashMap::new(),
             last_collision_events: Vec::new(),
             last_overlap_events: Vec::new(),
+            last_area_overlap_events: Vec::new(),
             trace: Vec::new(),
             tracing_enabled: false,
             trace_frame: 0,
@@ -342,9 +369,14 @@ impl PhysicsServer {
         &self.last_collision_events
     }
 
-    /// Returns the overlap events from the last physics step.
+    /// Returns the body-area overlap events from the last physics step.
     pub fn last_overlap_events(&self) -> &[OverlapEvent] {
         &self.last_overlap_events
+    }
+
+    /// Returns the area-area overlap events from the last physics step.
+    pub fn last_area_overlap_events(&self) -> &[AreaOverlapEvent] {
+        &self.last_area_overlap_events
     }
 
     /// Returns a reference to the underlying physics world.
@@ -434,6 +466,27 @@ impl PhysicsServer {
                 area.collision_layer = u32_prop(tree, node_id, "collision_layer", 1);
                 area.collision_mask = u32_prop(tree, node_id, "collision_mask", 1);
                 area.monitoring = bool_prop(tree, node_id, "monitoring", true);
+                // pat-u3l8c.51 — Area2D gravity/damp space overrides.
+                area.gravity_space_override =
+                    space_override_from_int(u32_prop(tree, node_id, "gravity_space_override", 0));
+                area.gravity = float_prop(tree, node_id, "gravity", 980.0) as f32;
+                area.gravity_direction =
+                    vec2_prop(tree, node_id, "gravity_direction", Vector2::new(0.0, 1.0));
+                area.gravity_is_point = bool_prop(tree, node_id, "gravity_point", false);
+                // `gravity_point_center` is stored world-space; the Godot node
+                // value is relative to the area, so offset by the area position.
+                area.gravity_point_center =
+                    pos + vec2_prop(tree, node_id, "gravity_point_center", Vector2::ZERO);
+                area.gravity_point_unit_distance =
+                    float_prop(tree, node_id, "gravity_point_unit_distance", 0.0) as f32;
+                area.linear_damp_space_override = space_override_from_int(u32_prop(
+                    tree,
+                    node_id,
+                    "linear_damp_space_override",
+                    0,
+                ));
+                area.linear_damp = float_prop(tree, node_id, "linear_damp", 0.1) as f32;
+                area.priority = i32_prop(tree, node_id, "priority", 0);
                 let area_id = self.area_store.add_area(area);
                 self.node_to_area.insert(node_id, area_id);
                 self.area_to_node.insert(area_id, node_id);
@@ -571,8 +624,39 @@ impl PhysicsServer {
     }
 
     /// Steps the physics simulation and detects overlaps.
+    ///
+    /// When any registered [`Area2D`] carries a non-`Disabled` gravity or
+    /// linear-damp space override (pat-u3l8c.51), the effective per-body gravity
+    /// and damping are computed from the [`AreaStore`] before integration and
+    /// fed into the world via
+    /// [`PhysicsWorld2D::step_with_area_overrides`](gdphysics2d::world::PhysicsWorld2D::step_with_area_overrides).
+    /// Otherwise the plain [`step`](gdphysics2d::world::PhysicsWorld2D::step) is
+    /// used, leaving default gravity behaviour untouched.
     pub fn step_physics(&mut self, dt: f32) {
-        self.last_collision_events = self.world.step(dt);
+        // Phase 0: compute per-body area gravity/damp overrides (only when an
+        // area actually declares one, so default behaviour is unaffected).
+        if self.area_store.has_space_overrides() {
+            let default_gravity = self.world.gravity();
+            let mut gravity_overrides: HashMap<BodyId, Vector2> = HashMap::new();
+            let mut damp_overrides: HashMap<BodyId, f32> = HashMap::new();
+            for &body_id in self.node_to_body.values() {
+                if let Some(body) = self.world.get_body(body_id) {
+                    // Only dynamic bodies integrate under gravity/damping.
+                    if body.body_type != BodyType::Rigid {
+                        continue;
+                    }
+                    let g = self.area_store.compute_body_gravity(body, default_gravity);
+                    let d = self.area_store.compute_body_damp(body, body.linear_damp);
+                    gravity_overrides.insert(body_id, g);
+                    damp_overrides.insert(body_id, d);
+                }
+            }
+            self.last_collision_events =
+                self.world
+                    .step_with_area_overrides(dt, &gravity_overrides, &damp_overrides);
+        } else {
+            self.last_collision_events = self.world.step(dt);
+        }
 
         // Detect area overlaps using the world's body storage.
         // We need to build a HashMap<BodyId, PhysicsBody2D> for the area store.
@@ -583,6 +667,8 @@ impl PhysicsServer {
             }
         }
         self.last_overlap_events = self.area_store.detect_overlaps(&body_map);
+        // Detect area-area overlaps (pat-u3l8c.51) for area_entered/area_exited.
+        self.last_area_overlap_events = self.area_store.detect_area_overlaps();
 
         self.trace_frame += 1;
     }
@@ -662,6 +748,37 @@ impl PhysicsServer {
                 area_node_id,
                 signal_name,
                 &[Variant::ObjectId(body_node_id.object_id())],
+            );
+        }
+    }
+
+    /// Processes area-area overlap events from the last physics step and emits
+    /// `area_entered` / `area_exited` signals on the monitoring Area2D node,
+    /// passing the *other* area's node `ObjectId` (pat-u3l8c.51).
+    ///
+    /// Mirrors [`process_overlap_signals`](Self::process_overlap_signals) but
+    /// for the directional area-area relation: the event's `area_id` is the
+    /// monitoring node that emits, and `other_area_id` is the argument. Because
+    /// the relation is directional, a mutually-overlapping pair emits on both
+    /// nodes, matching Godot's `Area2D.area_entered` / `area_exited` contract.
+    pub fn process_area_overlap_signals(&self, tree: &mut SceneTree) {
+        for event in &self.last_area_overlap_events {
+            let area_node_id = match self.area_to_node.get(&event.area_id) {
+                Some(&id) => id,
+                None => continue,
+            };
+            let other_node_id = match self.area_to_node.get(&event.other_area_id) {
+                Some(&id) => id,
+                None => continue,
+            };
+            let signal_name = match event.state {
+                OverlapState::Entered => "area_entered",
+                OverlapState::Exited => "area_exited",
+            };
+            tree.emit_signal(
+                area_node_id,
+                signal_name,
+                &[Variant::ObjectId(other_node_id.object_id())],
             );
         }
     }
@@ -1823,6 +1940,181 @@ mod tests {
             on_floor,
             Variant::Bool(true),
             "player should be on the floor at rest"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // pat-u3l8c.51 — Area2D gravity space override wired through step_physics,
+    // plus area_entered/area_exited signal dispatch.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn area_replace_gravity_lifts_body_while_control_falls() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Rigid body sitting inside an anti-gravity Area2D.
+        let mut body = Node::new("Floater", "RigidBody2D");
+        body.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        let body_id = tree.add_child(root, body).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(4.0));
+        tree.add_child(body_id, s).unwrap();
+
+        // Control rigid body far outside any area — falls under world gravity.
+        let mut control = Node::new("Faller", "RigidBody2D");
+        control.set_property("position", Variant::Vector2(Vector2::new(5000.0, 0.0)));
+        let control_id = tree.add_child(root, control).unwrap();
+        let mut cs = Node::new("Shape", "CollisionShape2D");
+        cs.set_property("radius", Variant::Float(4.0));
+        tree.add_child(control_id, cs).unwrap();
+
+        // Area2D covering the floater with a Replace override pointing up.
+        let mut area = Node::new("AntiGravity", "Area2D");
+        area.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        area.set_property("gravity_space_override", Variant::Int(3)); // Replace
+        area.set_property("gravity", Variant::Float(980.0));
+        area.set_property("gravity_direction", Variant::Vector2(Vector2::new(0.0, -1.0)));
+        let area_id = tree.add_child(root, area).unwrap();
+        let mut asx = Node::new("Shape", "CollisionShape2D");
+        asx.set_property("radius", Variant::Float(500.0));
+        tree.add_child(area_id, asx).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        for _ in 0..30 {
+            server.step_physics(1.0 / 60.0);
+        }
+
+        let floater_y = server
+            .world()
+            .get_body(server.body_for_node(body_id).unwrap())
+            .unwrap()
+            .position
+            .y;
+        let faller_y = server
+            .world()
+            .get_body(server.body_for_node(control_id).unwrap())
+            .unwrap()
+            .position
+            .y;
+        assert!(
+            floater_y < -1.0,
+            "body in a Replace anti-gravity area should rise (negative Y), got {floater_y}"
+        );
+        assert!(
+            faller_y > 1.0,
+            "control body should fall under default gravity, got {faller_y}"
+        );
+    }
+
+    #[test]
+    fn default_area_does_not_change_gravity() {
+        // An Area2D with the default (Disabled) override must not perturb a
+        // body's fall — the plain step path is used.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut body = Node::new("Ball", "RigidBody2D");
+        body.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        let body_id = tree.add_child(root, body).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(4.0));
+        tree.add_child(body_id, s).unwrap();
+
+        let mut area = Node::new("Zone", "Area2D");
+        area.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        let area_id = tree.add_child(root, area).unwrap();
+        let mut asx = Node::new("Shape", "CollisionShape2D");
+        asx.set_property("radius", Variant::Float(500.0));
+        tree.add_child(area_id, asx).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+        for _ in 0..30 {
+            server.step_physics(1.0 / 60.0);
+        }
+
+        let y = server
+            .world()
+            .get_body(server.body_for_node(body_id).unwrap())
+            .unwrap()
+            .position
+            .y;
+        // 30 steps of default gravity ⇒ the body should have fallen well past 0.
+        assert!(y > 1.0, "disabled-override area must not stop the fall, got {y}");
+    }
+
+    #[test]
+    fn area2d_area_entered_and_exited_signals_fire() {
+        use gdobject::signal::Connection;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Two overlapping Area2D nodes (default layer/mask ⇒ mutually detected).
+        let mut a = Node::new("A", "Area2D");
+        a.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        let a_id = tree.add_child(root, a).unwrap();
+        let mut sa = Node::new("Shape", "CollisionShape2D");
+        sa.set_property("radius", Variant::Float(10.0));
+        tree.add_child(a_id, sa).unwrap();
+
+        let mut b = Node::new("B", "Area2D");
+        b.set_property("position", Variant::Vector2(Vector2::new(5.0, 0.0)));
+        let b_id = tree.add_child(root, b).unwrap();
+        let mut sb = Node::new("Shape", "CollisionShape2D");
+        sb.set_property("radius", Variant::Float(10.0));
+        tree.add_child(b_id, sb).unwrap();
+
+        let entered = Arc::new(AtomicUsize::new(0));
+        let e = entered.clone();
+        tree.connect_signal(
+            a_id,
+            "area_entered",
+            Connection::with_callback(a_id.object_id(), "on_area_entered", move |_args| {
+                e.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            }),
+        );
+        let exited = Arc::new(AtomicUsize::new(0));
+        let x = exited.clone();
+        tree.connect_signal(
+            a_id,
+            "area_exited",
+            Connection::with_callback(a_id.object_id(), "on_area_exited", move |_args| {
+                x.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            }),
+        );
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        // Frame 1: areas overlap ⇒ area_entered fires on A (for B).
+        server.step_physics(0.0);
+        assert!(
+            !server.last_area_overlap_events().is_empty(),
+            "overlapping areas should produce area-area events"
+        );
+        server.process_area_overlap_signals(&mut tree);
+        assert_eq!(entered.load(Ordering::SeqCst), 1, "area_entered fires once");
+        assert_eq!(exited.load(Ordering::SeqCst), 0);
+
+        // Move B far away so the pair separates.
+        let b_area = server.area_for_node(b_id).unwrap();
+        server.area_store.get_area_mut(b_area).unwrap().position = Vector2::new(1000.0, 0.0);
+
+        // Frame 2: no longer overlapping ⇒ area_exited fires on A.
+        server.step_physics(0.0);
+        server.process_area_overlap_signals(&mut tree);
+        assert_eq!(
+            exited.load(Ordering::SeqCst),
+            1,
+            "area_exited should fire once when the areas separate"
         );
     }
 }

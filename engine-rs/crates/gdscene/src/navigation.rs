@@ -509,6 +509,18 @@ fn point_segment_distance(c: Vector2, a: Vector2, b: Vector2) -> f32 {
     (c - closest).length()
 }
 
+/// Closest point on segment `a`→`b` to point `c` (the point form of
+/// [`point_segment_distance`]). Used by the closest-point queries.
+fn closest_point_on_segment(c: Vector2, a: Vector2, b: Vector2) -> Vector2 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq < 1e-12 {
+        return a;
+    }
+    let t = ((c - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    Vector2::new(a.x + ab.x * t, a.y + ab.y * t)
+}
+
 /// Computes a detour waypoint that steers the segment `a`→`b` clear of a
 /// circular obstacle centered at `c` with radius `r`. The point is placed on the
 /// perpendicular through the obstacle, on the side already favored by the
@@ -530,7 +542,10 @@ fn detour_point(a: Vector2, b: Vector2, c: Vector2, r: f32) -> Vector2 {
         perp = Vector2::new(-perp.x, -perp.y);
     }
     let clearance = r * 0.5 + 1.0;
-    Vector2::new(c.x + perp.x * (r + clearance), c.y + perp.y * (r + clearance))
+    Vector2::new(
+        c.x + perp.x * (r + clearance),
+        c.y + perp.y * (r + clearance),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +601,93 @@ impl NavigationServer2D {
     pub fn add_region(&mut self, mesh: NavMesh2D) -> usize {
         self.regions.push(mesh);
         self.regions.len() - 1
+    }
+
+    /// Returns the point on the navigation mesh closest to `to_point`
+    /// (Godot `NavigationServer2D.map_get_closest_point`).
+    ///
+    /// If `to_point` already lies inside a region polygon it is returned
+    /// unchanged (it is already on the mesh); otherwise the nearest point on any
+    /// region polygon's boundary is returned. With no regions, `to_point` is
+    /// returned unchanged.
+    pub fn map_get_closest_point(&self, to_point: Vector2) -> Vector2 {
+        let mut best = to_point;
+        let mut best_dist = f32::INFINITY;
+        let mut found = false;
+        for mesh in &self.regions {
+            for poly in &mesh.polygons {
+                if poly.contains_point(to_point) {
+                    return to_point;
+                }
+                let verts = &poly.vertices;
+                let n = verts.len();
+                for i in 0..n {
+                    let a = verts[i];
+                    let b = verts[(i + 1) % n];
+                    let cp = closest_point_on_segment(to_point, a, b);
+                    let d = (cp - to_point).length_squared();
+                    if d < best_dist {
+                        best_dist = d;
+                        best = cp;
+                        found = true;
+                    }
+                }
+            }
+        }
+        if found {
+            best
+        } else {
+            to_point
+        }
+    }
+
+    /// Returns the index of the region owning the mesh point closest to
+    /// `to_point` (Godot `map_get_closest_point_owner`), or `None` when there
+    /// are no regions.
+    pub fn map_get_closest_point_owner(&self, to_point: Vector2) -> Option<usize> {
+        let mut best_owner: Option<usize> = None;
+        let mut best_dist = f32::INFINITY;
+        for (ri, mesh) in self.regions.iter().enumerate() {
+            for poly in &mesh.polygons {
+                if poly.contains_point(to_point) {
+                    return Some(ri);
+                }
+                let verts = &poly.vertices;
+                let n = verts.len();
+                for i in 0..n {
+                    let cp = closest_point_on_segment(to_point, verts[i], verts[(i + 1) % n]);
+                    let d = (cp - to_point).length_squared();
+                    if d < best_dist {
+                        best_dist = d;
+                        best_owner = Some(ri);
+                    }
+                }
+            }
+        }
+        best_owner
+    }
+
+    /// Returns the point on the navigation mesh closest to the segment
+    /// `start`→`end` (Godot `map_get_closest_point_to_segment`). The segment is
+    /// sampled and the mesh point nearest any sample is returned.
+    pub fn map_get_closest_point_to_segment(&self, start: Vector2, end: Vector2) -> Vector2 {
+        const SAMPLES: usize = 16;
+        let mut best = self.map_get_closest_point(start);
+        let mut best_dist = (best - start).length_squared();
+        for i in 0..=SAMPLES {
+            let t = i as f32 / SAMPLES as f32;
+            let s = Vector2::new(
+                start.x + (end.x - start.x) * t,
+                start.y + (end.y - start.y) * t,
+            );
+            let cp = self.map_get_closest_point(s);
+            let d = (cp - s).length_squared();
+            if d < best_dist {
+                best_dist = d;
+                best = cp;
+            }
+        }
+        best
     }
 
     /// Adds an obstacle and returns its index.
@@ -902,6 +1004,23 @@ impl Default for NavigationServer2D {
 // NavigationAgent2D
 // ---------------------------------------------------------------------------
 
+/// A navigation milestone signal produced by an agent this step (pat-u3l8c.64),
+/// mirroring Godot's `NavigationAgent2D` signals. The runtime drains these via
+/// [`NavigationAgent2D::drain_signals`] and emits the matching Godot signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavAgentSignal {
+    /// The path was recomputed (`path_changed`).
+    PathChanged,
+    /// An intermediate path waypoint was reached (`waypoint_reached`).
+    WaypointReached,
+    /// The final target was reached (`target_reached`).
+    TargetReached,
+    /// The path was fully traversed (`navigation_finished`).
+    NavigationFinished,
+    /// A safe avoidance velocity was computed (`velocity_computed`).
+    VelocityComputed,
+}
+
 /// Per-node navigation agent helpers, mirroring Godot's `NavigationAgent2D`.
 #[derive(Debug, Clone)]
 pub struct NavigationAgent2D {
@@ -923,6 +1042,8 @@ pub struct NavigationAgent2D {
     /// target — so the runtime fires it exactly once per navigation. Reset by
     /// [`set_target_position`](Self::set_target_position). (pat-nzgdu.10)
     pub finished_emitted: bool,
+    /// Navigation milestone signals produced since the last drain (pat-u3l8c.64).
+    pending_signals: Vec<NavAgentSignal>,
 }
 
 impl NavigationAgent2D {
@@ -937,6 +1058,7 @@ impl NavigationAgent2D {
             radius: 10.0,
             max_speed: 100.0,
             finished_emitted: false,
+            pending_signals: Vec::new(),
         }
     }
 
@@ -952,6 +1074,7 @@ impl NavigationAgent2D {
         self.path_index = if self.path.len() > 1 { 1 } else { 0 };
         // A fresh target restarts the navigation lifecycle.
         self.finished_emitted = false;
+        self.pending_signals.push(NavAgentSignal::PathChanged);
     }
 
     /// Returns the next position along the path, advancing the waypoint index
@@ -965,6 +1088,7 @@ impl NavigationAgent2D {
             let wp = self.path[self.path_index];
             if (wp - current).length() <= self.path_desired_distance {
                 self.path_index += 1;
+                self.pending_signals.push(NavAgentSignal::WaypointReached);
             } else {
                 break;
             }
@@ -972,6 +1096,13 @@ impl NavigationAgent2D {
         if self.path_index < self.path.len() {
             self.path[self.path_index]
         } else {
+            // Path fully consumed → arrived at the target (fire once).
+            if !self.finished_emitted {
+                self.finished_emitted = true;
+                self.pending_signals.push(NavAgentSignal::TargetReached);
+                self.pending_signals
+                    .push(NavAgentSignal::NavigationFinished);
+            }
             self.target_position
         }
     }
@@ -1018,6 +1149,31 @@ impl NavigationAgent2D {
             return preferred;
         }
         rvo_avoidance_velocity(current, preferred, others, self.radius, self.max_speed)
+    }
+
+    /// Godot's `set_velocity`: filters `preferred` through avoidance (see
+    /// [`compute_safe_velocity`](Self::compute_safe_velocity)), records a
+    /// `velocity_computed` milestone carrying the safe velocity, and returns it.
+    pub fn set_velocity(
+        &mut self,
+        current: Vector2,
+        preferred: Vector2,
+        others: &[(Vector2, f32)],
+    ) -> Vector2 {
+        let safe = self.compute_safe_velocity(current, preferred, others);
+        self.pending_signals.push(NavAgentSignal::VelocityComputed);
+        safe
+    }
+
+    /// Removes and returns the navigation milestone signals produced since the
+    /// last drain, so the runtime can emit the matching Godot signals.
+    pub fn drain_signals(&mut self) -> Vec<NavAgentSignal> {
+        std::mem::take(&mut self.pending_signals)
+    }
+
+    /// Non-draining view of the pending signals (for inspection/tests).
+    pub fn pending_signals(&self) -> &[NavAgentSignal] {
+        &self.pending_signals
     }
 
     /// Advances the agent by `dt` seconds along its path, avoiding the nearby
@@ -1492,7 +1648,11 @@ pub fn rvo_avoidance_velocity_3d(
     }
     let sp = v.length();
     if sp > max_speed && sp > 1e-6 {
-        v = Vector3::new(v.x / sp * max_speed, v.y / sp * max_speed, v.z / sp * max_speed);
+        v = Vector3::new(
+            v.x / sp * max_speed,
+            v.y / sp * max_speed,
+            v.z / sp * max_speed,
+        );
     }
     v
 }
@@ -1771,7 +1931,10 @@ mod tests {
             path.len() >= 3,
             "expected a detour with an intermediate waypoint, got {path:?}"
         );
-        assert!((path[0] - from).length() < EPSILON, "path must start at `from`");
+        assert!(
+            (path[0] - from).length() < EPSILON,
+            "path must start at `from`"
+        );
         assert!(
             (path[path.len() - 1] - to).length() < EPSILON,
             "path must end at `to`"
@@ -2282,7 +2445,11 @@ mod tests {
         let next = a.step(Vector2::ZERO, 1.0, &others);
         // Deflected to the -y side (away from the neighbor) and slowed in x.
         assert!(next.y < -0.1, "expected -y deflection, got y = {}", next.y);
-        assert!(next.x > 0.0 && next.x < 10.0, "expected slowed forward x, got {}", next.x);
+        assert!(
+            next.x > 0.0 && next.x < 10.0,
+            "expected slowed forward x, got {}",
+            next.x
+        );
     }
 
     #[test]
@@ -2320,9 +2487,18 @@ mod tests {
             min_y_off = min_y_off.min(p_off.y);
         }
 
-        assert!(min_y_on < -0.1, "avoidance should deflect off-axis, min_y = {min_y_on}");
-        assert!(approx_eq(min_y_off, 0.0), "no-avoidance path must stay on axis, min_y = {min_y_off}");
-        assert!(p_on.x > 1.0 && p_off.x > 1.0, "agents must still progress along x");
+        assert!(
+            min_y_on < -0.1,
+            "avoidance should deflect off-axis, min_y = {min_y_on}"
+        );
+        assert!(
+            approx_eq(min_y_off, 0.0),
+            "no-avoidance path must stay on axis, min_y = {min_y_off}"
+        );
+        assert!(
+            p_on.x > 1.0 && p_off.x > 1.0,
+            "agents must still progress along x"
+        );
     }
 
     #[test]
@@ -2336,7 +2512,11 @@ mod tests {
             2.0,
         );
         assert!(v.x < pref.x, "should be pushed back in x, got {}", v.x);
-        assert!(v.length() <= 2.0 + 1e-3, "speed must be clamped, got {}", v.length());
+        assert!(
+            v.length() <= 2.0 + 1e-3,
+            "speed must be clamped, got {}",
+            v.length()
+        );
     }
 
     /// Builds a 3D agent moving straight along +x with the given avoidance flag.
@@ -2359,7 +2539,11 @@ mod tests {
         // Deflected on -z (away from neighbor), y untouched, slowed in x.
         assert!(next.z < -0.1, "expected -z deflection, got z = {}", next.z);
         assert!(approx_eq(next.y, 0.0), "y = {}", next.y);
-        assert!(next.x > 0.0 && next.x < 10.0, "expected slowed forward x, got {}", next.x);
+        assert!(
+            next.x > 0.0 && next.x < 10.0,
+            "expected slowed forward x, got {}",
+            next.x
+        );
     }
 
     #[test]
@@ -2369,5 +2553,148 @@ mod tests {
         let next = a.step(Vector3::ZERO, 1.0, &others);
         assert!(approx_eq(next.x, 10.0), "x = {}", next.x);
         assert!(approx_eq(next.z, 0.0), "z = {}", next.z);
+    }
+
+    // -- Closest-point query family (pat-u3l8c.63) --------------------------
+
+    fn square_region_server() -> NavigationServer2D {
+        let mut server = NavigationServer2D::new();
+        server.add_region(NavMesh2D::new(
+            vec![NavPolygon::new(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(10.0, 0.0),
+                Vector2::new(10.0, 10.0),
+                Vector2::new(0.0, 10.0),
+            ])],
+            0.1,
+        ));
+        server
+    }
+
+    #[test]
+    fn map_closest_point_inside_returns_point() {
+        let server = square_region_server();
+        let inside = Vector2::new(5.0, 5.0);
+        assert_eq!(server.map_get_closest_point(inside), inside);
+    }
+
+    #[test]
+    fn map_closest_point_outside_snaps_to_boundary() {
+        let server = square_region_server();
+        // 5 units right of the square's right edge (x=10) at y=5.
+        let cp = server.map_get_closest_point(Vector2::new(15.0, 5.0));
+        assert!((cp.x - 10.0).abs() < 1e-4, "x -> right edge, got {}", cp.x);
+        assert!((cp.y - 5.0).abs() < 1e-4, "y stays 5, got {}", cp.y);
+    }
+
+    #[test]
+    fn map_closest_point_owner_returns_region() {
+        let server = square_region_server();
+        assert_eq!(
+            server.map_get_closest_point_owner(Vector2::new(15.0, 5.0)),
+            Some(0)
+        );
+        assert_eq!(
+            server.map_get_closest_point_owner(Vector2::new(5.0, 5.0)),
+            Some(0)
+        );
+        assert_eq!(
+            NavigationServer2D::new().map_get_closest_point_owner(Vector2::ZERO),
+            None
+        );
+    }
+
+    #[test]
+    fn map_closest_point_to_segment_snaps_to_mesh() {
+        let server = square_region_server();
+        // A vertical segment at x=15, right of the square.
+        let cp = server
+            .map_get_closest_point_to_segment(Vector2::new(15.0, 0.0), Vector2::new(15.0, 10.0));
+        assert!((cp.x - 10.0).abs() < 1e-4, "x -> right edge, got {}", cp.x);
+        assert!(
+            cp.y >= -1e-4 && cp.y <= 10.0 + 1e-4,
+            "y in [0,10], got {}",
+            cp.y
+        );
+    }
+
+    // -- NavigationAgent2D milestone signals (pat-u3l8c.64) -----------------
+
+    #[test]
+    fn agent_signals_fire_at_navigation_milestones() {
+        let mut server = NavigationServer2D::new();
+        server.add_region(NavMesh2D::new(
+            vec![NavPolygon::new(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(100.0, 0.0),
+                Vector2::new(100.0, 100.0),
+                Vector2::new(0.0, 100.0),
+            ])],
+            0.1,
+        ));
+        let mut agent = NavigationAgent2D::new();
+        let start = Vector2::new(10.0, 10.0);
+        agent.set_target_position(Vector2::new(90.0, 10.0), start, &server);
+        assert!(
+            agent
+                .pending_signals()
+                .contains(&NavAgentSignal::PathChanged),
+            "set_target_position should emit path_changed"
+        );
+
+        // Walk the agent along its path to the target.
+        let mut current = start;
+        for _ in 0..500 {
+            let next = agent.get_next_path_position(current);
+            let dir = next - current;
+            let len = dir.length();
+            if len < 1e-6 {
+                break;
+            }
+            let step = len.min(5.0);
+            current = Vector2::new(
+                current.x + dir.x / len * step,
+                current.y + dir.y / len * step,
+            );
+        }
+
+        let signals = agent.drain_signals();
+        assert!(
+            signals.contains(&NavAgentSignal::WaypointReached),
+            "should reach a waypoint: {signals:?}"
+        );
+        assert!(
+            signals.contains(&NavAgentSignal::TargetReached),
+            "should reach the target: {signals:?}"
+        );
+        assert!(
+            signals.contains(&NavAgentSignal::NavigationFinished),
+            "navigation should finish: {signals:?}"
+        );
+        // Finished fires exactly once; draining again yields nothing.
+        assert!(agent.drain_signals().is_empty());
+    }
+
+    #[test]
+    fn set_velocity_passthrough_and_signals_without_avoidance() {
+        let mut agent = NavigationAgent2D::new(); // avoidance off by default
+        let preferred = Vector2::new(50.0, 25.0);
+        let safe = agent.set_velocity(Vector2::ZERO, preferred, &[]);
+        assert_eq!(safe, preferred, "no avoidance -> velocity passes through");
+        assert_eq!(
+            agent.drain_signals(),
+            vec![NavAgentSignal::VelocityComputed]
+        );
+    }
+
+    #[test]
+    fn set_velocity_fires_signal_with_avoidance_enabled() {
+        let mut agent = NavigationAgent2D::new();
+        agent.set_avoidance_enabled(true);
+        let others = [(Vector2::new(5.0, 0.0), 5.0)];
+        let _ = agent.set_velocity(Vector2::ZERO, Vector2::new(50.0, 0.0), &others);
+        assert!(agent
+            .pending_signals()
+            .contains(&NavAgentSignal::VelocityComputed));
     }
 }

@@ -351,6 +351,11 @@ pub struct Interpreter {
     current_function: Option<String>,
     call_stack_frames: Vec<StackFrame>,
     warnings: Vec<ScriptWarning>,
+    /// Runtime error/warning channel populated by `push_error`, `push_warning`,
+    /// and `printerr` (pat-u3l8c.20). Distinct from `output` (the `print`
+    /// stream) so tests and tooling can observe the error stream, including the
+    /// source location appended by `push_error`/`push_warning`.
+    errors: Vec<String>,
     /// Scene-tree access for `get_node`, `emit_signal`, etc.
     pub(crate) scene_access: Option<Box<dyn SceneAccess>>,
     /// The raw NodeId of the node this script is attached to.
@@ -389,6 +394,7 @@ impl Clone for Interpreter {
             current_function: self.current_function.clone(),
             call_stack_frames: self.call_stack_frames.clone(),
             warnings: self.warnings.clone(),
+            errors: self.errors.clone(),
             scene_access: None,
             current_node_id: self.current_node_id,
             coroutine_host: crate::coroutine::CoroutineHost::new(),
@@ -559,6 +565,7 @@ impl Interpreter {
             current_function: None,
             call_stack_frames: Vec::new(),
             warnings: Vec::new(),
+            errors: Vec::new(),
             scene_access: None,
             current_node_id: None,
             coroutine_host: crate::coroutine::CoroutineHost::new(),
@@ -579,6 +586,13 @@ impl Interpreter {
 
     pub fn warnings(&self) -> &[ScriptWarning] {
         &self.warnings
+    }
+
+    /// The runtime error/warning channel (`push_error`, `push_warning`,
+    /// `printerr` output), in emission order. Each `push_error`/`push_warning`
+    /// entry carries the appended source location (`... at: <fn>:<line>`).
+    pub fn errors(&self) -> &[String] {
+        &self.errors
     }
 
     fn make_location(&self) -> SourceLocation {
@@ -984,7 +998,8 @@ impl Interpreter {
         let prev_self = self.self_instance.take();
         self.self_instance = Some(instance.clone());
         for (name, func_def) in &instance.class_def.methods {
-            self.function_registry.insert(name.clone(), func_def.clone());
+            self.function_registry
+                .insert(name.clone(), func_def.clone());
         }
         let result = f(self);
         if let Some(ref updated) = self.self_instance {
@@ -1038,7 +1053,8 @@ impl Interpreter {
         // Bind the resumed value (the emitted signal argument) to the target of
         // `var v = await sig` before running the remaining statements (pat-nzgdu.6).
         if let Some(ref name) = co.bind_target {
-            self.environment.define(name.clone(), co.resume_value.clone());
+            self.environment
+                .define(name.clone(), co.resume_value.clone());
         }
 
         let mut return_val = Variant::Nil;
@@ -1758,6 +1774,14 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "JSON") {
                             return call_json_static(member, &evaluated_args);
                         }
+                        // ClassDB reflection singleton (pat-u3l8c.21).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "ClassDB") {
+                            return call_classdb_static(member, &evaluated_args);
+                        }
+                        // ProjectSettings singleton (pat-u3l8c.21).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "ProjectSettings") {
+                            return call_projectsettings_static(member, &evaluated_args);
+                        }
                         // Handle ClassName.new() — runtime node creation / RefCounted helpers
                         if member == "new" {
                             if let Expr::Ident(class_name) = object.as_ref() {
@@ -1939,7 +1963,9 @@ impl Interpreter {
                 }
                 // Fallback: return ClassInstance properties as Dictionary
                 if let Some(ref inst) = self.self_instance {
-                    Ok(Variant::Dictionary(Dictionary::from(inst.properties.clone())))
+                    Ok(Variant::Dictionary(Dictionary::from(
+                        inst.properties.clone(),
+                    )))
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "'self' used outside of a class instance".into(),
@@ -3116,7 +3142,9 @@ impl Interpreter {
             }
             "fmod" => {
                 Self::require_args("fmod", args, 2)?;
-                Ok(Some(Variant::Float(to_float(&args[0])? % to_float(&args[1])?)))
+                Ok(Some(Variant::Float(
+                    to_float(&args[0])? % to_float(&args[1])?,
+                )))
             }
             "posmod" => {
                 Self::require_args("posmod", args, 2)?;
@@ -3201,7 +3229,9 @@ impl Interpreter {
                 let from = to_float(&args[0])?;
                 let to = to_float(&args[1])?;
                 let weight = to_float(&args[2])?;
-                Ok(Some(Variant::Float(from + angle_difference(from, to) * weight)))
+                Ok(Some(Variant::Float(
+                    from + angle_difference(from, to) * weight,
+                )))
             }
             "wrapi" => {
                 Self::require_args("wrapi", args, 3)?;
@@ -3288,6 +3318,181 @@ impl Interpreter {
                     to_float(&args[0])?.ln() * 8.685889638065037,
                 )))
             }
+
+            // -- Print / error family (pat-u3l8c.20) --------------------------
+            "prints" => {
+                let line: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+                self.output.push(line.join(" "));
+                Ok(Some(Variant::Nil))
+            }
+            "printt" => {
+                let line: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+                self.output.push(line.join("\t"));
+                Ok(Some(Variant::Nil))
+            }
+            "printerr" => {
+                // Concatenate args (no separator) onto the error channel.
+                let line: String = args.iter().map(|a| format!("{a}")).collect();
+                self.errors.push(line);
+                Ok(Some(Variant::Nil))
+            }
+            "print_rich" => {
+                // Concatenate then strip BBCode tags (headless has no console).
+                let joined: String = args.iter().map(|a| format!("{a}")).collect();
+                self.output.push(strip_bbcode(&joined));
+                Ok(Some(Variant::Nil))
+            }
+            "print_debug" => {
+                let joined: String = args.iter().map(|a| format!("{a}")).collect();
+                let func = self.current_function.as_deref().unwrap_or("GDScript");
+                self.output
+                    .push(format!("{joined}\n   At: {func}:{}", self.current_line));
+                Ok(Some(Variant::Nil))
+            }
+            "push_error" => {
+                Self::require_args("push_error", args, 1)?;
+                let msg = format!("{}", args[0]);
+                self.errors.push(format!(
+                    "{msg}\n   at: {}:{}",
+                    self.current_function.as_deref().unwrap_or("<anonymous>"),
+                    self.current_line
+                ));
+                Ok(Some(Variant::Nil))
+            }
+            "push_warning" => {
+                Self::require_args("push_warning", args, 1)?;
+                let msg = format!("{}", args[0]);
+                // `ScriptWarning` has no free-form variant, so route warnings to
+                // the error channel with a "WARNING: " prefix and source line.
+                self.errors.push(format!(
+                    "WARNING: {msg}\n   at: {}:{}",
+                    self.current_function.as_deref().unwrap_or("<anonymous>"),
+                    self.current_line
+                ));
+                Ok(Some(Variant::Nil))
+            }
+
+            // -- Serialization (pat-u3l8c.20) ---------------------------------
+            "var_to_str" => {
+                Self::require_args("var_to_str", args, 1)?;
+                Ok(Some(Variant::String(variant_to_gd_string(&args[0]))))
+            }
+            "str_to_var" => {
+                Self::require_args("str_to_var", args, 1)?;
+                let s = match &args[0] {
+                    Variant::String(s) => s.clone(),
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "str_to_var() expects String, got {}",
+                            other.variant_type()
+                        ))))
+                    }
+                };
+                Ok(Some(gd_string_to_variant(&s)))
+            }
+            "var_to_bytes" => {
+                Self::require_args("var_to_bytes", args, 1)?;
+                let bytes = gdvariant::binary::encode_variant(&args[0]).map_err(|e| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(format!("var_to_bytes: {e:?}")))
+                })?;
+                Ok(Some(Variant::PackedByteArray(bytes)))
+            }
+            "bytes_to_var" => {
+                Self::require_args("bytes_to_var", args, 1)?;
+                let buf = match &args[0] {
+                    Variant::PackedByteArray(b) => b,
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "bytes_to_var() expects PackedByteArray, got {}",
+                            other.variant_type()
+                        ))))
+                    }
+                };
+                let (v, _used) = gdvariant::binary::decode_variant(buf).map_err(|e| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(format!("bytes_to_var: {e:?}")))
+                })?;
+                Ok(Some(v))
+            }
+
+            // -- Utility (pat-u3l8c.20) ---------------------------------------
+            "type_string" => {
+                Self::require_args("type_string", args, 1)?;
+                let code = to_int(&args[0])?;
+                Ok(Some(Variant::String(type_code_to_name(code).to_string())))
+            }
+            "hash" => {
+                Self::require_args("hash", args, 1)?;
+                Ok(Some(Variant::Int(variant_hash(&args[0]))))
+            }
+            "Color8" => {
+                Self::require_args_range("Color8", args, 3, 4)?;
+                let r = to_int(&args[0])? as f32 / 255.0;
+                let g = to_int(&args[1])? as f32 / 255.0;
+                let b = to_int(&args[2])? as f32 / 255.0;
+                let a = if args.len() == 4 {
+                    to_int(&args[3])? as f32 / 255.0
+                } else {
+                    1.0
+                };
+                Ok(Some(Variant::Color(gdcore::math::Color::new(r, g, b, a))))
+            }
+            "char" => {
+                Self::require_args("char", args, 1)?;
+                let code = to_int(&args[0])?;
+                let s = u32::try_from(code)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(|c| c.to_string())
+                    .unwrap_or_default();
+                Ok(Some(Variant::String(s)))
+            }
+            "ord" => {
+                Self::require_args("ord", args, 1)?;
+                let s = match &args[0] {
+                    Variant::String(s) => s,
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "ord() expects a single-character String, got {}",
+                            other.variant_type()
+                        ))))
+                    }
+                };
+                let mut chars = s.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) => Ok(Some(Variant::Int(c as i64))),
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "ord() expects a string of exactly one character".into(),
+                    ))),
+                }
+            }
+            "is_instance_of" => {
+                Self::require_args("is_instance_of", args, 2)?;
+                // Second arg is either a Variant.Type code (Int) or a type/class
+                // name (String/StringName); reuse the `is` operator's logic.
+                let result = match &args[1] {
+                    Variant::Int(code) => {
+                        crate::global_constants::variant_type_code(&args[0]) == *code
+                    }
+                    Variant::String(type_name) => self.value_is_type(&args[0], type_name),
+                    Variant::StringName(sn) => self.value_is_type(&args[0], sn.as_str()),
+                    _ => false,
+                };
+                Ok(Some(Variant::Bool(result)))
+            }
+            // Object/weakref infrastructure is out of scope for the headless
+            // interpreter (no live object registry reachable here). `weakref`
+            // returns its argument unchanged as a best-effort passthrough;
+            // `instance_from_id` has no id->object map and returns Nil. Both are
+            // registered so they don't fall through to "unknown function".
+            "weakref" => {
+                Self::require_args("weakref", args, 1)?;
+                Ok(Some(args[0].clone()))
+            }
+            "instance_from_id" => {
+                Self::require_args("instance_from_id", args, 1)?;
+                Ok(Some(Variant::Nil))
+            }
+
             _ => Ok(None), // Not a built-in
         }
     }
@@ -3633,7 +3838,9 @@ impl Interpreter {
                         Variant::Nil
                     })
                 }
-                "pop_back" => self.array_mutate(arr, object_expr, |a| a.pop().unwrap_or(Variant::Nil)),
+                "pop_back" => {
+                    self.array_mutate(arr, object_expr, |a| a.pop().unwrap_or(Variant::Nil))
+                }
                 "pop_front" => self.array_mutate(arr, object_expr, |a| {
                     if a.is_empty() {
                         Variant::Nil
@@ -3833,7 +4040,11 @@ impl Interpreter {
                     } else {
                         i64::MAX
                     };
-                    let step = if args.len() >= 3 { to_int(&args[2])? } else { 1 };
+                    let step = if args.len() >= 3 {
+                        to_int(&args[2])?
+                    } else {
+                        1
+                    };
                     Ok(Variant::Array(array_slice(arr, begin, end, step)?))
                 }
                 "map" => {
@@ -3850,7 +4061,10 @@ impl Interpreter {
                     let callable = extract_callable(&args[0])?;
                     let mut out = Vec::new();
                     for elem in arr {
-                        if self.invoke_callable(&callable, &[elem.clone()])?.is_truthy() {
+                        if self
+                            .invoke_callable(&callable, &[elem.clone()])?
+                            .is_truthy()
+                        {
                             out.push(elem.clone());
                         }
                     }
@@ -3860,7 +4074,10 @@ impl Interpreter {
                     Self::require_args("any", args, 1)?;
                     let callable = extract_callable(&args[0])?;
                     for elem in arr {
-                        if self.invoke_callable(&callable, &[elem.clone()])?.is_truthy() {
+                        if self
+                            .invoke_callable(&callable, &[elem.clone()])?
+                            .is_truthy()
+                        {
                             return Ok(Variant::Bool(true));
                         }
                     }
@@ -3870,7 +4087,10 @@ impl Interpreter {
                     Self::require_args("all", args, 1)?;
                     let callable = extract_callable(&args[0])?;
                     for elem in arr {
-                        if !self.invoke_callable(&callable, &[elem.clone()])?.is_truthy() {
+                        if !self
+                            .invoke_callable(&callable, &[elem.clone()])?
+                            .is_truthy()
+                        {
                             return Ok(Variant::Bool(false));
                         }
                     }
@@ -3949,8 +4169,7 @@ impl Interpreter {
                 "containsn" => {
                     Self::require_args("containsn", args, 1)?;
                     Ok(Variant::Bool(
-                        s.to_lowercase()
-                            .contains(&arg_str(&args[0]).to_lowercase()),
+                        s.to_lowercase().contains(&arg_str(&args[0]).to_lowercase()),
                     ))
                 }
                 "split" => {
@@ -4021,8 +4240,7 @@ impl Interpreter {
                 }
                 "findn" => {
                     Self::require_args_range("findn", args, 1, 2)?;
-                    let needle: Vec<char> =
-                        arg_str(&args[0]).to_lowercase().chars().collect();
+                    let needle: Vec<char> = arg_str(&args[0]).to_lowercase().chars().collect();
                     let from = args
                         .get(1)
                         .map(|v| to_int(v).unwrap_or(0).max(0) as usize)
@@ -4042,8 +4260,7 @@ impl Interpreter {
                 }
                 "rfindn" => {
                     Self::require_args_range("rfindn", args, 1, 2)?;
-                    let needle: Vec<char> =
-                        arg_str(&args[0]).to_lowercase().chars().collect();
+                    let needle: Vec<char> = arg_str(&args[0]).to_lowercase().chars().collect();
                     let chars: Vec<char> = s.to_lowercase().chars().collect();
                     let from = match args.get(1).map(|v| to_int(v).unwrap_or(-1)) {
                         Some(f) if f >= 0 => Some(f as usize),
@@ -4067,8 +4284,7 @@ impl Interpreter {
                 }
                 "countn" => {
                     Self::require_args_range("countn", args, 1, 3)?;
-                    let needle: Vec<char> =
-                        arg_str(&args[0]).to_lowercase().chars().collect();
+                    let needle: Vec<char> = arg_str(&args[0]).to_lowercase().chars().collect();
                     let chars: Vec<char> = s.to_lowercase().chars().collect();
                     let from = args
                         .get(1)
@@ -4083,14 +4299,9 @@ impl Interpreter {
                 "substr" => {
                     Self::require_args_range("substr", args, 1, 2)?;
                     let from = to_int(&args[0])?.max(0) as usize;
-                    let len = args
-                        .get(1)
-                        .map(|v| to_int(v).unwrap_or(-1))
-                        .unwrap_or(-1);
+                    let len = args.get(1).map(|v| to_int(v).unwrap_or(-1)).unwrap_or(-1);
                     let take = if len < 0 { usize::MAX } else { len as usize };
-                    Ok(Variant::String(
-                        s.chars().skip(from).take(take).collect(),
-                    ))
+                    Ok(Variant::String(s.chars().skip(from).take(take).collect()))
                 }
                 "left" => {
                     Self::require_args("left", args, 1)?;
@@ -4754,13 +4965,11 @@ impl Interpreter {
                         }
                         let method = match &args[0] {
                             Variant::String(s) => s.clone(),
-                            other => {
-                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                    format!(
-                                        "call_deferred() method name must be a String, got {other:?}"
-                                    ),
-                                )))
-                            }
+                            other => return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                format!(
+                                    "call_deferred() method name must be a String, got {other:?}"
+                                ),
+                            ))),
                         };
                         if let Some(ref mut access) = self.scene_access {
                             access.call_deferred(id, &method, &args[1..]);
@@ -5085,6 +5294,33 @@ impl Interpreter {
                         }
                     }
                 },
+                // Callable.bind(...args): returns a new Callable with `args`
+                // appended after any call-site arguments (Godot semantics).
+                "bind" => Ok(Variant::Callable(Box::new(CallableRef::Bound {
+                    inner: Box::new((**callable_ref).clone()),
+                    bound_args: args.to_vec(),
+                }))),
+                // Callable.unbind(n): returns a new Callable that drops the last
+                // `n` call-site arguments before delegating to this callable.
+                "unbind" => {
+                    if args.len() != 1 {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "unbind() takes 1 argument".into(),
+                        )));
+                    }
+                    let n = match &args[0] {
+                        Variant::Int(i) if *i >= 0 => *i as usize,
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "unbind() argument must be a non-negative integer".into(),
+                            )));
+                        }
+                    };
+                    Ok(Variant::Callable(Box::new(CallableRef::Unbound {
+                        inner: Box::new((**callable_ref).clone()),
+                        unbind_count: n,
+                    })))
+                }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("Callable.{method}"),
                 ))),
@@ -5127,9 +5363,7 @@ impl Interpreter {
                     match self.scene_access.as_mut() {
                         Some(access) => match access.instantiate_packed_scene(&path) {
                             // Missing / unloadable scene → null (Godot semantics).
-                            Some(raw) => {
-                                Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
-                            }
+                            Some(raw) => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))),
                             None => Ok(Variant::Nil),
                         },
                         None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -5137,9 +5371,7 @@ impl Interpreter {
                         ))),
                     }
                 }
-                "can_instantiate" => {
-                    Ok(Variant::Bool(res_ref.class_name == "PackedScene"))
-                }
+                "can_instantiate" => Ok(Variant::Bool(res_ref.class_name == "PackedScene")),
                 // ShaderMaterial.set_shader_parameter(name, value): stored under
                 // the `shader_parameter/<name>` property key so the value round-
                 // trips through tscn/tres and is picked up by the 3D render
@@ -5234,9 +5466,7 @@ impl Interpreter {
                     let path = res_ref.path.clone();
                     match self.scene_access.as_mut() {
                         Some(access) => match access.instantiate_script(&path) {
-                            Some(raw) => {
-                                Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
-                            }
+                            Some(raw) => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))),
                             None => Ok(Variant::Nil),
                         },
                         None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -5286,7 +5516,10 @@ impl Interpreter {
                 Self::require_args("get", args, 1)?;
                 let i = to_int(&args[0])?;
                 let idx = resolve(i).ok_or_else(|| {
-                    RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds { index: i, length: len })
+                    RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                        index: i,
+                        length: len,
+                    })
                 })?;
                 Ok(obj.packed_get(idx).unwrap())
             }
@@ -5294,7 +5527,10 @@ impl Interpreter {
                 Self::require_args("set", args, 2)?;
                 let i = to_int(&args[0])?;
                 let idx = resolve(i).ok_or_else(|| {
-                    RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds { index: i, length: len })
+                    RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                        index: i,
+                        length: len,
+                    })
                 })?;
                 let mut updated = obj.clone();
                 if !updated.packed_set(idx, &args[1]) {
@@ -5340,8 +5576,16 @@ impl Interpreter {
                 Ok(Variant::Nil)
             }
             "slice" => {
-                let begin = if args.is_empty() { 0 } else { to_int(&args[0])? };
-                let end = if args.len() >= 2 { to_int(&args[1])? } else { len as i64 };
+                let begin = if args.is_empty() {
+                    0
+                } else {
+                    to_int(&args[0])?
+                };
+                let end = if args.len() >= 2 {
+                    to_int(&args[1])?
+                } else {
+                    len as i64
+                };
                 Ok(obj.packed_slice(begin, end).unwrap())
             }
             "to_byte_array" => obj.packed_to_byte_array().ok_or_else(|| {
@@ -5885,12 +6129,9 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
                     length: a.len(),
                 }))
         }
-        (Variant::Dictionary(d), key) => d
-            .get(key)
-            .cloned()
-            .ok_or_else(|| {
-                RuntimeError::new(RuntimeErrorKind::UndefinedVariable(key.to_string_lossy()))
-            }),
+        (Variant::Dictionary(d), key) => d.get(key).cloned().ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::UndefinedVariable(key.to_string_lossy()))
+        }),
         (Variant::String(s), Variant::Int(i)) => {
             let index = if *i < 0 {
                 (s.len() as i64 + i) as usize
@@ -5979,7 +6220,12 @@ fn extract_callable(v: &Variant) -> Result<CallableRef, RuntimeError> {
 
 /// Godot `Array.slice(begin, end, step)` semantics, including negative indices
 /// and negative step. Mirrors `core/variant/array.cpp`.
-fn array_slice(arr: &[Variant], begin: i64, end: i64, step: i64) -> Result<Vec<Variant>, RuntimeError> {
+fn array_slice(
+    arr: &[Variant],
+    begin: i64,
+    end: i64,
+    step: i64,
+) -> Result<Vec<Variant>, RuntimeError> {
     if step == 0 {
         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
             "slice() step cannot be zero".into(),
@@ -6129,7 +6375,9 @@ fn str_to_int(s: &str) -> i64 {
     let mut val: i64 = 0;
     let mut any = false;
     while i < chars.len() && chars[i].is_ascii_digit() {
-        val = val.wrapping_mul(10).wrapping_add((chars[i] as u8 - b'0') as i64);
+        val = val
+            .wrapping_mul(10)
+            .wrapping_add((chars[i] as u8 - b'0') as i64);
         i += 1;
         any = true;
     }
@@ -6762,6 +7010,419 @@ fn nearest_po2(x: i64) -> i64 {
     n |= n >> 32;
     (n + 1) as i64
 }
+
+// ---------------------------------------------------------------------------
+// pat-u3l8c.20 builtin helpers: BBCode stripping, Godot-text (de)serialization,
+// hashing, and Variant.Type name mapping.
+// ---------------------------------------------------------------------------
+
+/// Removes BBCode tag spans (`[...]`) from `s`, keeping only the visible text.
+/// A simple state machine drops every character from an opening `[` up to and
+/// including the matching `]`. Used by the `print_rich` builtin.
+fn strip_bbcode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '[' => in_tag = true,
+            ']' if in_tag => in_tag = false,
+            _ if in_tag => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Formats an `f64` the way Godot serializes floats: always with a decimal
+/// point so an integral value like `5.0` renders as `"5.0"` (not `"5"`), which
+/// keeps `str_to_var` from re-parsing it as an `int`.
+fn format_gd_float(f: f64) -> String {
+    let s = format!("{f}");
+    if s.contains('.') || s.contains('e') || s.contains('E') || s.contains("inf") || s.contains("nan")
+    {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
+/// Escapes `"` and `\` so a string can be embedded in `var_to_str` output.
+fn gd_escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Godot-text serialization of a [`Variant`] (`var_to_str`). Round-trips with
+/// [`gd_string_to_variant`] for the supported set; any other variant falls back
+/// to its `Display` form.
+fn variant_to_gd_string(v: &Variant) -> String {
+    match v {
+        Variant::Nil => "null".to_string(),
+        Variant::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Variant::Int(i) => i.to_string(),
+        Variant::Float(f) => format_gd_float(*f),
+        Variant::String(s) => format!("\"{}\"", gd_escape_string(s)),
+        Variant::Vector2(p) => format!(
+            "Vector2({}, {})",
+            format_gd_float(p.x as f64),
+            format_gd_float(p.y as f64)
+        ),
+        Variant::Vector3(p) => format!(
+            "Vector3({}, {}, {})",
+            format_gd_float(p.x as f64),
+            format_gd_float(p.y as f64),
+            format_gd_float(p.z as f64)
+        ),
+        Variant::Color(c) => format!(
+            "Color({}, {}, {}, {})",
+            format_gd_float(c.r as f64),
+            format_gd_float(c.g as f64),
+            format_gd_float(c.b as f64),
+            format_gd_float(c.a as f64)
+        ),
+        Variant::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(variant_to_gd_string).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Variant::Dictionary(d) => {
+            if d.is_empty() {
+                "{}".to_string()
+            } else {
+                let items: Vec<String> = d
+                    .iter()
+                    .map(|(k, val)| {
+                        format!("{}: {}", variant_to_gd_string(k), variant_to_gd_string(val))
+                    })
+                    .collect();
+                format!("{{ {} }}", items.join(", "))
+            }
+        }
+        other => format!("{other}"),
+    }
+}
+
+/// A tiny recursive-descent cursor for [`gd_string_to_variant`].
+struct GdTextParser {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl GdTextParser {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(c) = self.peek() {
+            if c.is_whitespace() {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn read_ident(&mut self) -> String {
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                s.push(c);
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    fn parse_value(&mut self) -> Option<Variant> {
+        self.skip_ws();
+        let c = self.peek()?;
+        match c {
+            '"' => self.parse_string(),
+            '[' => self.parse_array(),
+            '{' => self.parse_dict(),
+            '-' | '+' | '.' => self.parse_number(),
+            _ if c.is_ascii_digit() => self.parse_number(),
+            _ if c.is_ascii_alphabetic() || c == '_' => self.parse_ident_or_ctor(),
+            _ => None,
+        }
+    }
+
+    fn parse_string(&mut self) -> Option<Variant> {
+        self.pos += 1; // consume opening quote
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            self.pos += 1;
+            match c {
+                '"' => return Some(Variant::String(s)),
+                '\\' => {
+                    let esc = self.peek()?;
+                    self.pos += 1;
+                    match esc {
+                        'n' => s.push('\n'),
+                        't' => s.push('\t'),
+                        other => s.push(other),
+                    }
+                }
+                _ => s.push(c),
+            }
+        }
+        None // unterminated
+    }
+
+    fn parse_number(&mut self) -> Option<Variant> {
+        let start = self.pos;
+        if matches!(self.peek(), Some('-') | Some('+')) {
+            self.pos += 1;
+        }
+        let mut is_float = false;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() {
+                self.pos += 1;
+            } else if c == '.' || c == 'e' || c == 'E' {
+                is_float = true;
+                self.pos += 1;
+                if (c == 'e' || c == 'E') && matches!(self.peek(), Some('-') | Some('+')) {
+                    self.pos += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        let text: String = self.chars[start..self.pos].iter().collect();
+        if is_float {
+            text.parse::<f64>().ok().map(Variant::Float)
+        } else {
+            text.parse::<i64>().ok().map(Variant::Int)
+        }
+    }
+
+    fn parse_array(&mut self) -> Option<Variant> {
+        self.pos += 1; // consume '['
+        let mut arr = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(']') {
+            self.pos += 1;
+            return Some(Variant::Array(arr));
+        }
+        loop {
+            let v = self.parse_value()?;
+            arr.push(v);
+            self.skip_ws();
+            match self.peek()? {
+                ',' => self.pos += 1,
+                ']' => {
+                    self.pos += 1;
+                    return Some(Variant::Array(arr));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn parse_dict(&mut self) -> Option<Variant> {
+        self.pos += 1; // consume '{'
+        let mut d = Dictionary::new();
+        self.skip_ws();
+        if self.peek() == Some('}') {
+            self.pos += 1;
+            return Some(Variant::Dictionary(d));
+        }
+        loop {
+            let key = self.parse_value()?;
+            self.skip_ws();
+            if self.peek()? != ':' {
+                return None;
+            }
+            self.pos += 1; // consume ':'
+            let val = self.parse_value()?;
+            d.insert(key, val);
+            self.skip_ws();
+            match self.peek()? {
+                ',' => self.pos += 1,
+                '}' => {
+                    self.pos += 1;
+                    return Some(Variant::Dictionary(d));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Reads `n` comma-separated numeric components wrapped in `( ... )`.
+    fn parse_ctor_floats(&mut self, n: usize) -> Option<Vec<f32>> {
+        self.skip_ws();
+        if self.peek()? != '(' {
+            return None;
+        }
+        self.pos += 1;
+        let mut vals = Vec::with_capacity(n);
+        for i in 0..n {
+            let f = match self.parse_value()? {
+                Variant::Float(f) => f as f32,
+                Variant::Int(x) => x as f32,
+                _ => return None,
+            };
+            vals.push(f);
+            self.skip_ws();
+            if i + 1 < n {
+                if self.peek()? != ',' {
+                    return None;
+                }
+                self.pos += 1;
+            }
+        }
+        self.skip_ws();
+        if self.peek()? != ')' {
+            return None;
+        }
+        self.pos += 1;
+        Some(vals)
+    }
+
+    fn parse_ident_or_ctor(&mut self) -> Option<Variant> {
+        let ident = self.read_ident();
+        match ident.as_str() {
+            "null" => Some(Variant::Nil),
+            "true" => Some(Variant::Bool(true)),
+            "false" => Some(Variant::Bool(false)),
+            "Vector2" => {
+                let v = self.parse_ctor_floats(2)?;
+                Some(Variant::Vector2(gdcore::math::Vector2::new(v[0], v[1])))
+            }
+            "Vector3" => {
+                let v = self.parse_ctor_floats(3)?;
+                Some(Variant::Vector3(gdcore::math::Vector3::new(v[0], v[1], v[2])))
+            }
+            "Color" => {
+                let v = self.parse_ctor_floats(4)?;
+                Some(Variant::Color(gdcore::math::Color::new(v[0], v[1], v[2], v[3])))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Parses Godot-text (`str_to_var`) back into a [`Variant`], the inverse of
+/// [`variant_to_gd_string`] for the supported set (null/bool/int/float/String/
+/// Vector2/Vector3/Color/Array/Dictionary). Returns [`Variant::Nil`] on any
+/// parse failure.
+fn gd_string_to_variant(s: &str) -> Variant {
+    let mut p = GdTextParser {
+        chars: s.chars().collect(),
+        pos: 0,
+    };
+    p.parse_value().unwrap_or(Variant::Nil)
+}
+
+/// Deterministic (within a run) hash of a [`Variant`] for the `hash` builtin.
+/// Uses `DefaultHasher`; need not match Godot's exact hash values.
+fn variant_hash(v: &Variant) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+    let mut h = DefaultHasher::new();
+    hash_variant_into(v, &mut h);
+    h.finish() as i64
+}
+
+/// Feeds a [`Variant`]'s structure into `h`, recursing into arrays/dictionaries.
+fn hash_variant_into<H: std::hash::Hasher>(v: &Variant, h: &mut H) {
+    use std::hash::Hash;
+    // Tag by discriminant so distinct types can't collide trivially.
+    std::mem::discriminant(v).hash(h);
+    match v {
+        Variant::Nil => {}
+        Variant::Bool(b) => b.hash(h),
+        Variant::Int(i) => i.hash(h),
+        Variant::Float(f) => f.to_bits().hash(h),
+        Variant::String(s) => s.hash(h),
+        Variant::StringName(s) => s.as_str().hash(h),
+        Variant::Vector2(p) => {
+            p.x.to_bits().hash(h);
+            p.y.to_bits().hash(h);
+        }
+        Variant::Vector3(p) => {
+            p.x.to_bits().hash(h);
+            p.y.to_bits().hash(h);
+            p.z.to_bits().hash(h);
+        }
+        Variant::Color(c) => {
+            c.r.to_bits().hash(h);
+            c.g.to_bits().hash(h);
+            c.b.to_bits().hash(h);
+            c.a.to_bits().hash(h);
+        }
+        Variant::Array(arr) => {
+            (arr.len() as u64).hash(h);
+            for e in arr {
+                hash_variant_into(e, h);
+            }
+        }
+        Variant::Dictionary(d) => {
+            (d.len() as u64).hash(h);
+            for (k, val) in d.iter() {
+                hash_variant_into(k, h);
+                hash_variant_into(val, h);
+            }
+        }
+        other => format!("{other}").hash(h),
+    }
+}
+
+/// Maps a Godot `Variant.Type` integer code to its type name, matching the
+/// `type_string()` builtin. Unknown codes yield `""` (as Godot does).
+fn type_code_to_name(code: i64) -> &'static str {
+    match code {
+        0 => "Nil",
+        1 => "bool",
+        2 => "int",
+        3 => "float",
+        4 => "String",
+        5 => "Vector2",
+        6 => "Vector2i",
+        7 => "Rect2",
+        8 => "Rect2i",
+        9 => "Vector3",
+        10 => "Vector3i",
+        11 => "Transform2D",
+        12 => "Vector4",
+        13 => "Vector4i",
+        14 => "Plane",
+        15 => "Quaternion",
+        16 => "AABB",
+        17 => "Basis",
+        18 => "Transform3D",
+        19 => "Projection",
+        20 => "Color",
+        21 => "StringName",
+        22 => "NodePath",
+        23 => "RID",
+        24 => "Object",
+        25 => "Callable",
+        26 => "Signal",
+        27 => "Dictionary",
+        28 => "Array",
+        29 => "PackedByteArray",
+        30 => "PackedInt32Array",
+        31 => "PackedInt64Array",
+        32 => "PackedFloat32Array",
+        33 => "PackedFloat64Array",
+        34 => "PackedStringArray",
+        35 => "PackedVector2Array",
+        36 => "PackedVector3Array",
+        37 => "PackedColorArray",
+        _ => "",
+    }
+}
+
 fn deterministic_randi() -> i64 {
     use std::sync::atomic::{AtomicI64, Ordering};
     static COUNTER: AtomicI64 = AtomicI64::new(42);
@@ -6970,8 +7631,9 @@ fn call_file_access_instance(
                 }
             };
             FileAccess::with_handle_mut(id, |fa| {
-                fa.get_buffer(len)
-                    .map(|b| Variant::Array(b.into_iter().map(|x| Variant::Int(x as i64)).collect()))
+                fa.get_buffer(len).map(|b| {
+                    Variant::Array(b.into_iter().map(|x| Variant::Int(x as i64)).collect())
+                })
             })
             .map_err(engine_err_to_runtime)
         }
@@ -7064,13 +7726,11 @@ fn call_dir_access_instance(
 ) -> Result<Variant, RuntimeError> {
     use gdcore::DirAccess;
     match method {
-        "list_dir_begin" => {
-            DirAccess::with_handle_mut(id, |da| {
-                da.list_dir_begin()?;
-                Ok(Variant::Int(0))
-            })
-            .map_err(engine_err_to_runtime)
-        }
+        "list_dir_begin" => DirAccess::with_handle_mut(id, |da| {
+            da.list_dir_begin()?;
+            Ok(Variant::Int(0))
+        })
+        .map_err(engine_err_to_runtime),
         "get_next" => DirAccess::with_handle_mut(id, |da| Ok(Variant::String(da.get_next())))
             .map_err(engine_err_to_runtime),
         "current_is_dir" => {
@@ -7194,8 +7854,189 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
             }
             Ok(Variant::Bool(cfg!(debug_assertions)))
         }
+        // -- Expanded OS surface (pat-u3l8c.21) -----------------------------
+        "get_environment" => {
+            let var = match args.first() {
+                Some(Variant::String(s)) => s.as_str(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "OS.get_environment() takes a variable-name string".into(),
+                    )))
+                }
+            };
+            Ok(Variant::String(std::env::var(var).unwrap_or_default()))
+        }
+        "has_environment" => {
+            let var = match args.first() {
+                Some(Variant::String(s)) => s.as_str(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "OS.has_environment() takes a variable-name string".into(),
+                    )))
+                }
+            };
+            Ok(Variant::Bool(std::env::var(var).is_ok()))
+        }
+        "get_cmdline_args" => {
+            // Godot returns the args after the executable as a PackedStringArray.
+            let args_vec: Vec<String> = std::env::args().skip(1).collect();
+            Ok(Variant::PackedStringArray(args_vec))
+        }
+        "get_user_data_dir" => Ok(Variant::String(os_user_data_dir())),
+        "has_feature" => {
+            let feat = match args.first() {
+                Some(Variant::String(s)) => s.as_str(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "OS.has_feature() takes a feature-name string".into(),
+                    )))
+                }
+            };
+            let present = match feat {
+                "debug" => cfg!(debug_assertions),
+                "release" => !cfg!(debug_assertions),
+                "editor" => false,
+                "template" => true,
+                "macos" => cfg!(target_os = "macos"),
+                "windows" => cfg!(target_os = "windows"),
+                "linux" | "linuxbsd" => cfg!(target_os = "linux"),
+                "web" => cfg!(target_arch = "wasm32"),
+                "x86_64" => cfg!(target_arch = "x86_64"),
+                "arm64" | "aarch64" => cfg!(target_arch = "aarch64"),
+                "64" => cfg!(target_pointer_width = "64"),
+                "32" => cfg!(target_pointer_width = "32"),
+                "pc" | "desktop" => {
+                    cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux"))
+                }
+                "mobile" => false,
+                _ => false,
+            };
+            Ok(Variant::Bool(present))
+        }
+        "execute" => {
+            // OS.execute(path, arguments) -> exit code (-1 if launch failed).
+            let path = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "OS.execute() first argument must be an executable path".into(),
+                    )))
+                }
+            };
+            let cmd_args: Vec<String> = match args.get(1) {
+                Some(Variant::Array(a)) => a.iter().map(|v| v.to_string_lossy()).collect(),
+                Some(Variant::PackedStringArray(a)) => a.clone(),
+                None | Some(Variant::Nil) => Vec::new(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "OS.execute() arguments must be an array of strings".into(),
+                    )))
+                }
+            };
+            match std::process::Command::new(&path).args(&cmd_args).output() {
+                Ok(out) => Ok(Variant::Int(out.status.code().unwrap_or(-1) as i64)),
+                Err(_) => Ok(Variant::Int(-1)),
+            }
+        }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("OS.{other}"),
+        ))),
+    }
+}
+
+/// `ClassDB` singleton — read-only reflection over the registered class table
+/// (pat-u3l8c.21). Exposes the existing `gdobject::class_db` registry to script.
+fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    fn class_name_arg(args: &[Variant], idx: usize, who: &str) -> Result<String, RuntimeError> {
+        match args.get(idx) {
+            Some(Variant::String(s)) => Ok(s.clone()),
+            Some(Variant::StringName(sn)) => Ok(sn.as_str().to_string()),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{who} expects a class-name string argument"
+            )))),
+        }
+    }
+    match method {
+        "class_exists" => {
+            let name = class_name_arg(args, 0, "ClassDB.class_exists()")?;
+            Ok(Variant::Bool(gdobject::class_exists(&name)))
+        }
+        "can_instantiate" => {
+            let name = class_name_arg(args, 0, "ClassDB.can_instantiate()")?;
+            Ok(Variant::Bool(gdobject::class_db::can_instantiate(&name)))
+        }
+        "class_has_method" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_has_method()")?;
+            let m = class_name_arg(args, 1, "ClassDB.class_has_method()")?;
+            Ok(Variant::Bool(gdobject::class_has_method(&class, &m)))
+        }
+        "get_class_list" => Ok(Variant::PackedStringArray(
+            gdobject::class_db::get_class_list(),
+        )),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("ClassDB.{other}"),
+        ))),
+    }
+}
+
+/// Best-effort per-user writable data dir (Godot's `user://` root).
+fn os_user_data_dir() -> String {
+    let base = if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/Library/Application Support"))
+            .unwrap_or_default()
+    } else if cfg!(target_os = "windows") {
+        std::env::var("APPDATA").unwrap_or_default()
+    } else {
+        std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.local/share")))
+            .unwrap_or_default()
+    };
+    if base.is_empty() {
+        "user://".to_string()
+    } else {
+        format!("{base}/Patina")
+    }
+}
+
+/// `ProjectSettings` singleton (pat-u3l8c.21). No `project.godot` is loaded in
+/// the interpreter runtime, so `get_setting` returns the caller default (Godot
+/// semantics for a missing setting) and `globalize_path` resolves the
+/// `res://` / `user://` schemes to filesystem paths.
+fn call_projectsettings_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "get_setting" => Ok(args.get(1).cloned().unwrap_or(Variant::Nil)),
+        "has_setting" => Ok(Variant::Bool(false)),
+        "globalize_path" => {
+            let path = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "ProjectSettings.globalize_path() takes a path string".into(),
+                    )))
+                }
+            };
+            let globalized = if let Some(rest) = path.strip_prefix("user://") {
+                format!("{}/{}", os_user_data_dir().trim_end_matches('/'), rest)
+            } else if let Some(rest) = path.strip_prefix("res://") {
+                let base = std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.to_str().map(str::to_string))
+                    .unwrap_or_default();
+                if base.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{}/{}", base.trim_end_matches('/'), rest)
+                }
+            } else {
+                path.clone()
+            };
+            Ok(Variant::String(globalized))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("ProjectSettings.{other}"),
         ))),
     }
 }
@@ -7504,9 +8345,8 @@ fn call_config_file_instance(
                 .map_err(engine_err_to_runtime)?;
             let text = fa.get_as_text().map_err(engine_err_to_runtime)?;
             ConfigFile::with_handle_mut(id, |cfg| {
-                let loaded = ConfigFile::load_from_string(&text).map_err(|e| {
-                    gdcore::EngineError::Parse(format!("ConfigFile.load: {e}"))
-                })?;
+                let loaded = ConfigFile::load_from_string(&text)
+                    .map_err(|e| gdcore::EngineError::Parse(format!("ConfigFile.load: {e}")))?;
                 *cfg = loaded;
                 Ok(Variant::Int(0))
             })
@@ -7925,6 +8765,54 @@ return sum
         assert_eq!(run_val(src), Variant::Int(60));
     }
 
+    // -- Callable.bind/unbind + ConnectFlags constants (pat-u3l8c.17) --------
+
+    #[test]
+    fn callable_bind_appends_argument() {
+        // `.bind(10)` appends 10 after the call-site arg, so add(5, 10) == 15.
+        let src = "\
+func add(a, b):
+    return a + b
+return Callable(null, \"add\").bind(10).call(5)
+";
+        assert_eq!(run_val(src), Variant::Int(15));
+    }
+
+    #[test]
+    fn callable_bind_multiple_arguments() {
+        // `.bind(2, 3)` appends both, so addv(1, 2, 3) == 6.
+        let src = "\
+func addv(a, b, c):
+    return a + b + c
+return Callable(null, \"addv\").bind(2, 3).call(1)
+";
+        assert_eq!(run_val(src), Variant::Int(6));
+    }
+
+    #[test]
+    fn callable_unbind_drops_trailing_argument() {
+        // `.unbind(1)` drops the last call-site arg, so the extra 999 never
+        // reaches echo1 and the call returns its single argument unchanged.
+        let src = "\
+func echo1(a):
+    return a
+return Callable(null, \"echo1\").unbind(1).call(42, 999)
+";
+        assert_eq!(run_val(src), Variant::Int(42));
+    }
+
+    #[test]
+    fn connect_flag_constants_resolve() {
+        // Godot Object.ConnectFlags are exposed as @GlobalScope barewords.
+        assert_eq!(run_val("return CONNECT_DEFERRED\n"), Variant::Int(1));
+        assert_eq!(run_val("return CONNECT_PERSIST\n"), Variant::Int(2));
+        assert_eq!(run_val("return CONNECT_ONE_SHOT\n"), Variant::Int(4));
+        assert_eq!(
+            run_val("return CONNECT_REFERENCE_COUNTED\n"),
+            Variant::Int(8)
+        );
+    }
+
     // -- Functions ----------------------------------------------------------
 
     #[test]
@@ -8084,9 +8972,197 @@ return d[\"b\"]
         // `TYPE_*` constants: TYPE_INT == 2, TYPE_STRING == 4. (pat-nzgdu.7)
         assert_eq!(run_val("return typeof(42)\n"), Variant::Int(2));
         assert_eq!(run_val("return typeof(\"hi\")\n"), Variant::Int(4));
-        assert_eq!(run_val("return typeof(42) == TYPE_INT\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("return typeof(42) == TYPE_INT\n"),
+            Variant::Bool(true)
+        );
         assert_eq!(
             run_val("return typeof(3.14) == TYPE_FLOAT\n"),
+            Variant::Bool(true)
+        );
+    }
+
+    // -- pat-u3l8c.20 builtins: print/error family, serialization, utility --
+
+    /// Runs `src` and returns the interpreter so tests can inspect `errors()`.
+    fn run_interp(src: &str) -> Interpreter {
+        let mut interp = Interpreter::new();
+        interp.run(src).unwrap();
+        interp
+    }
+
+    #[test]
+    fn builtin_prints_space_separated() {
+        let r = run("prints(\"a\", \"b\", \"c\")\n");
+        assert_eq!(r.output, vec!["a b c"]);
+    }
+
+    #[test]
+    fn builtin_printt_tab_separated() {
+        let r = run("printt(\"a\", \"b\")\n");
+        assert_eq!(r.output, vec!["a\tb"]);
+    }
+
+    #[test]
+    fn builtin_push_error_surfaces_line() {
+        let interp = run_interp("push_error(\"boom\")\n");
+        assert_eq!(interp.errors().len(), 1);
+        let entry = &interp.errors()[0];
+        assert!(entry.contains("boom"), "message missing: {entry}");
+        assert!(entry.contains("at:"), "source location missing: {entry}");
+        // A line number is appended after the final ':'.
+        let line_num = entry.rsplit(':').next().unwrap().trim();
+        assert!(
+            line_num.parse::<i64>().is_ok(),
+            "line number not present: {entry}"
+        );
+    }
+
+    #[test]
+    fn builtin_printerr_routes_to_error_channel() {
+        let interp = run_interp("printerr(\"oops\", 42)\n");
+        assert_eq!(interp.errors().len(), 1);
+        assert_eq!(interp.errors()[0], "oops42");
+    }
+
+    #[test]
+    fn builtin_print_rich_strips_bbcode() {
+        let r = run("print_rich(\"[b]bold[/b] text\")\n");
+        assert_eq!(r.output, vec!["bold text"]);
+    }
+
+    #[test]
+    fn builtin_var_to_str_str_to_var_roundtrip() {
+        let mut d = Dictionary::new();
+        d.insert(Variant::String("a".into()), Variant::Int(1));
+        d.insert(Variant::String("b".into()), Variant::Float(2.5));
+        let cases = vec![
+            Variant::Int(42),
+            Variant::Int(-7),
+            Variant::Float(3.5),
+            Variant::String("hello world".into()),
+            Variant::Bool(true),
+            Variant::Bool(false),
+            Variant::Nil,
+            Variant::Vector2(Vector2::new(1.0, 2.0)),
+            Variant::Array(vec![
+                Variant::Int(1),
+                Variant::String("x".into()),
+                Variant::Bool(false),
+            ]),
+            Variant::Dictionary(d),
+        ];
+        for v in cases {
+            let text = variant_to_gd_string(&v);
+            let back = gd_string_to_variant(&text);
+            assert_eq!(back, v, "round-trip failed for {v:?} via {text:?}");
+        }
+    }
+
+    #[test]
+    fn builtin_var_to_bytes_bytes_to_var_roundtrip() {
+        // Exercise via GDScript so the builtins (not just the codec) are covered.
+        assert_eq!(
+            run_val("return bytes_to_var(var_to_bytes(42))\n"),
+            Variant::Int(42)
+        );
+        assert_eq!(
+            run_val("return bytes_to_var(var_to_bytes(\"hi\"))\n"),
+            Variant::String("hi".into())
+        );
+        assert_eq!(
+            run_val("return bytes_to_var(var_to_bytes([1, 2, 3]))\n"),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+        );
+        // var_to_bytes yields a PackedByteArray.
+        assert!(matches!(
+            run_val("return var_to_bytes(7)\n"),
+            Variant::PackedByteArray(_)
+        ));
+    }
+
+    #[test]
+    fn builtin_type_string_names() {
+        assert_eq!(
+            run_val("return type_string(2)\n"),
+            Variant::String("int".into())
+        );
+        assert_eq!(
+            run_val("return type_string(4)\n"),
+            Variant::String("String".into())
+        );
+        assert_eq!(
+            run_val("return type_string(5)\n"),
+            Variant::String("Vector2".into())
+        );
+        assert_eq!(
+            run_val("return type_string(29)\n"),
+            Variant::String("PackedByteArray".into())
+        );
+        // Unknown codes map to the empty string (matching Godot).
+        assert_eq!(
+            run_val("return type_string(999)\n"),
+            Variant::String(String::new())
+        );
+    }
+
+    #[test]
+    fn builtin_color8() {
+        assert_eq!(
+            run_val("return Color8(255, 0, 0)\n"),
+            Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            run_val("return Color8(0, 255, 0, 128)\n"),
+            Variant::Color(Color::new(0.0, 1.0, 0.0, 128.0 / 255.0))
+        );
+    }
+
+    #[test]
+    fn builtin_char_ord_roundtrip() {
+        assert_eq!(run_val("return char(65)\n"), Variant::String("A".into()));
+        assert_eq!(run_val("return ord(\"A\")\n"), Variant::Int(65));
+        assert_eq!(run_val("return ord(char(97))\n"), Variant::Int(97));
+        // Invalid code point yields an empty string.
+        assert_eq!(run_val("return char(-1)\n"), Variant::String(String::new()));
+    }
+
+    #[test]
+    fn builtin_hash_deterministic() {
+        assert_eq!(
+            run_val("return hash(\"abc\") == hash(\"abc\")\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return hash(12345) == hash(12345)\n"),
+            Variant::Bool(true)
+        );
+        // Distinct values (overwhelmingly likely) hash differently.
+        assert_eq!(
+            run_val("return hash(\"abc\") == hash(\"abd\")\n"),
+            Variant::Bool(false)
+        );
+        // Direct helper determinism.
+        assert_eq!(
+            variant_hash(&Variant::Int(42)),
+            variant_hash(&Variant::Int(42))
+        );
+    }
+
+    #[test]
+    fn builtin_is_instance_of_type_code_and_name() {
+        // Int type code (TYPE_INT == 2).
+        assert_eq!(
+            run_val("return is_instance_of(5, TYPE_INT)\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return is_instance_of(5, TYPE_STRING)\n"),
+            Variant::Bool(false)
+        );
+        // Type name string.
+        assert_eq!(
+            run_val("return is_instance_of(\"hi\", \"String\")\n"),
             Variant::Bool(true)
         );
     }
@@ -9623,6 +10699,128 @@ var speed = 10
     }
 
     // -----------------------------------------------------------------------
+    // Expanded OS singleton surface (pat-u3l8c.21)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn os_get_environment_unset_returns_empty() {
+        // An unset variable resolves to "" (Godot semantics), deterministically.
+        let v = run_val("return OS.get_environment(\"PATINA_DEFINITELY_UNSET_VAR_XYZ\")\n");
+        assert_eq!(v, Variant::String(String::new()));
+    }
+
+    #[test]
+    fn os_has_environment_unset_is_false() {
+        let v = run_val("return OS.has_environment(\"PATINA_DEFINITELY_UNSET_VAR_XYZ\")\n");
+        assert_eq!(v, Variant::Bool(false));
+    }
+
+    #[test]
+    fn os_has_feature_known_flags() {
+        // Deterministic regardless of build mode / host platform.
+        assert_eq!(run_val("return OS.has_feature(\"template\")\n"), Variant::Bool(true));
+        assert_eq!(run_val("return OS.has_feature(\"editor\")\n"), Variant::Bool(false));
+        assert_eq!(
+            run_val("return OS.has_feature(\"totally_unknown_feature\")\n"),
+            Variant::Bool(false)
+        );
+    }
+
+    #[test]
+    fn os_get_cmdline_args_is_packed_string_array() {
+        let v = run_val("return OS.get_cmdline_args()\n");
+        assert!(matches!(v, Variant::PackedStringArray(_)), "got {v:?}");
+    }
+
+    #[test]
+    fn os_get_user_data_dir_nonempty() {
+        match run_val("return OS.get_user_data_dir()\n") {
+            Variant::String(s) => assert!(!s.is_empty(), "user data dir should be non-empty"),
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn os_execute_echo_returns_zero() {
+        // /bin/echo exists on macOS + Linux and exits 0.
+        let v = run_val("return OS.execute(\"/bin/echo\", [\"hi\"])\n");
+        assert_eq!(v, Variant::Int(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // ClassDB reflection singleton (pat-u3l8c.21)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classdb_class_exists_unknown_is_false() {
+        // Returning Bool(false) (not an UndefinedFunction error) proves the
+        // ClassDB routing -> gdobject::class_exists wiring is live.
+        let v = run_val("return ClassDB.class_exists(\"__PatinaNoSuchClass__\")\n");
+        assert_eq!(v, Variant::Bool(false));
+    }
+
+    #[test]
+    fn classdb_can_instantiate_unknown_is_false() {
+        let v = run_val("return ClassDB.can_instantiate(\"__PatinaNoSuchClass__\")\n");
+        assert_eq!(v, Variant::Bool(false));
+    }
+
+    #[test]
+    fn classdb_class_has_method_unknown_is_false() {
+        let v = run_val("return ClassDB.class_has_method(\"__PatinaNoSuchClass__\", \"foo\")\n");
+        assert_eq!(v, Variant::Bool(false));
+    }
+
+    #[test]
+    fn classdb_get_class_list_is_packed_string_array() {
+        let v = run_val("return ClassDB.get_class_list()\n");
+        assert!(matches!(v, Variant::PackedStringArray(_)), "got {v:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // ProjectSettings singleton (pat-u3l8c.21)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn projectsettings_get_setting_returns_default() {
+        // A missing setting yields the caller-supplied default (Godot semantics).
+        let v = run_val("return ProjectSettings.get_setting(\"application/config/nope\", 42)\n");
+        assert_eq!(v, Variant::Int(42));
+    }
+
+    #[test]
+    fn projectsettings_get_setting_no_default_is_nil() {
+        let v = run_val("return ProjectSettings.get_setting(\"application/config/nope\")\n");
+        assert_eq!(v, Variant::Nil);
+    }
+
+    #[test]
+    fn projectsettings_has_setting_is_false() {
+        assert_eq!(
+            run_val("return ProjectSettings.has_setting(\"anything\")\n"),
+            Variant::Bool(false)
+        );
+    }
+
+    #[test]
+    fn projectsettings_globalize_user_path() {
+        match run_val("return ProjectSettings.globalize_path(\"user://save.dat\")\n") {
+            Variant::String(s) => {
+                assert!(!s.starts_with("user://"), "should resolve the scheme: {s}");
+                assert!(s.ends_with("save.dat"), "should keep the filename: {s}");
+            }
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn projectsettings_globalize_absolute_passthrough() {
+        let v = run_val("return ProjectSettings.globalize_path(\"/already/global.txt\")\n");
+        assert_eq!(v, Variant::String("/already/global.txt".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
     // print() with multiple args (interpreter)
     // -----------------------------------------------------------------------
 
@@ -10981,7 +12179,10 @@ func get_speed():
     #[test]
     fn assert_true_passes() {
         assert_eq!(run_val("assert(true)\nreturn 7\n"), Variant::Int(7));
-        assert_eq!(run_val("assert(1 < 2, \"ok\")\nreturn 7\n"), Variant::Int(7));
+        assert_eq!(
+            run_val("assert(1 < 2, \"ok\")\nreturn 7\n"),
+            Variant::Int(7)
+        );
     }
 
     #[test]
@@ -11268,7 +12469,10 @@ match x:
             Variant::Bool(false)
         );
         assert_eq!(run_val("return is_zero_approx(0.0)\n"), Variant::Bool(true));
-        assert_eq!(run_val("return is_zero_approx(0.1)\n"), Variant::Bool(false));
+        assert_eq!(
+            run_val("return is_zero_approx(0.1)\n"),
+            Variant::Bool(false)
+        );
     }
 
     #[test]
@@ -11346,7 +12550,9 @@ match x:
             )
             .unwrap();
         let mut inst = interp.instantiate_class(&cd).unwrap();
-        let r = interp.call_instance_method(&mut inst, "setit", &[]).unwrap();
+        let r = interp
+            .call_instance_method(&mut inst, "setit", &[])
+            .unwrap();
         assert_eq!(r, Variant::Int(7));
         assert_eq!(
             inst.properties.get("grid"),
@@ -11385,11 +12591,20 @@ match x:
             run_val("var a = [1, 2]\na.push_front(0)\nreturn a\n"),
             Variant::Array(vec![Variant::Int(0), Variant::Int(1), Variant::Int(2)])
         );
-        assert_eq!(run_val("var a = [1, 2, 3]\nreturn a.pop_front()\n"), Variant::Int(1));
-        assert_eq!(run_val("var a = [1, 2, 3]\nreturn a.pop_at(1)\n"), Variant::Int(2));
+        assert_eq!(
+            run_val("var a = [1, 2, 3]\nreturn a.pop_front()\n"),
+            Variant::Int(1)
+        );
+        assert_eq!(
+            run_val("var a = [1, 2, 3]\nreturn a.pop_at(1)\n"),
+            Variant::Int(2)
+        );
         assert_eq!(run_val("return [5, 6, 7].front()\n"), Variant::Int(5));
         assert_eq!(run_val("return [5, 6, 7].back()\n"), Variant::Int(7));
-        assert_eq!(run_val("var a = [1, 2]\na.clear()\nreturn a.is_empty()\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("var a = [1, 2]\na.clear()\nreturn a.is_empty()\n"),
+            Variant::Bool(true)
+        );
     }
 
     #[test]
@@ -11509,11 +12724,20 @@ match x:
     #[test]
     fn string_search_methods() {
         assert_eq!(run_val("return \"hello\".find(\"l\")\n"), Variant::Int(2));
-        assert_eq!(run_val("return \"hello\".find(\"l\", 3)\n"), Variant::Int(3));
+        assert_eq!(
+            run_val("return \"hello\".find(\"l\", 3)\n"),
+            Variant::Int(3)
+        );
         assert_eq!(run_val("return \"hello\".rfind(\"l\")\n"), Variant::Int(3));
-        assert_eq!(run_val("return \"Hello\".findn(\"HELLO\")\n"), Variant::Int(0));
+        assert_eq!(
+            run_val("return \"Hello\".findn(\"HELLO\")\n"),
+            Variant::Int(0)
+        );
         assert_eq!(run_val("return \"a-b-c\".count(\"-\")\n"), Variant::Int(2));
-        assert_eq!(run_val("return \"hello\".contains(\"ell\")\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("return \"hello\".contains(\"ell\")\n"),
+            Variant::Bool(true)
+        );
         assert_eq!(
             run_val("return \"Hello\".containsn(\"hello\")\n"),
             Variant::Bool(true)
@@ -11539,9 +12763,18 @@ match x:
         assert_eq!(run_val("return \"  -7x\".to_int()\n"), Variant::Int(-7));
         assert_eq!(run_val("return \"abc\".to_int()\n"), Variant::Int(0));
         assert!((run_float("return \"3.14xy\".to_float()\n") - 3.14).abs() < 1e-9);
-        assert_eq!(run_val("return \"42\".is_valid_int()\n"), Variant::Bool(true));
-        assert_eq!(run_val("return \"4a\".is_valid_int()\n"), Variant::Bool(false));
-        assert_eq!(run_val("return \"3.14\".is_valid_float()\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("return \"42\".is_valid_int()\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return \"4a\".is_valid_int()\n"),
+            Variant::Bool(false)
+        );
+        assert_eq!(
+            run_val("return \"3.14\".is_valid_float()\n"),
+            Variant::Bool(true)
+        );
         assert_eq!(run_val("return \"ff\".hex_to_int()\n"), Variant::Int(255));
         assert_eq!(run_val("return \"0xff\".hex_to_int()\n"), Variant::Int(255));
         assert_eq!(run_val("return \"101\".bin_to_int()\n"), Variant::Int(5));
@@ -11550,11 +12783,26 @@ match x:
 
     #[test]
     fn string_case_conversions() {
-        assert_eq!(run_str("return \"hello_world\".capitalize()\n"), "Hello World");
-        assert_eq!(run_str("return \"helloWorld\".capitalize()\n"), "Hello World");
-        assert_eq!(run_str("return \"helloWorld\".to_snake_case()\n"), "hello_world");
-        assert_eq!(run_str("return \"hello_world\".to_camel_case()\n"), "helloWorld");
-        assert_eq!(run_str("return \"hello_world\".to_pascal_case()\n"), "HelloWorld");
+        assert_eq!(
+            run_str("return \"hello_world\".capitalize()\n"),
+            "Hello World"
+        );
+        assert_eq!(
+            run_str("return \"helloWorld\".capitalize()\n"),
+            "Hello World"
+        );
+        assert_eq!(
+            run_str("return \"helloWorld\".to_snake_case()\n"),
+            "hello_world"
+        );
+        assert_eq!(
+            run_str("return \"hello_world\".to_camel_case()\n"),
+            "helloWorld"
+        );
+        assert_eq!(
+            run_str("return \"hello_world\".to_pascal_case()\n"),
+            "HelloWorld"
+        );
     }
 
     #[test]
@@ -11565,7 +12813,10 @@ match x:
         assert_eq!(run_str("return \"a/b/c.txt\".get_base_dir()\n"), "a/b");
         assert_eq!(run_str("return \"a\".path_join(\"b\")\n"), "a/b");
         assert_eq!(run_str("return \"a/./b/../c\".simplify_path()\n"), "a/c");
-        assert_eq!(run_val("return \"/a/b\".is_absolute_path()\n"), Variant::Bool(true));
+        assert_eq!(
+            run_val("return \"/a/b\".is_absolute_path()\n"),
+            Variant::Bool(true)
+        );
         assert_eq!(
             run_val("return \"a/b\".is_relative_path()\n"),
             Variant::Bool(true)
@@ -11574,7 +12825,10 @@ match x:
 
     #[test]
     fn string_format_and_escapes() {
-        assert_eq!(run_str("return \"{0} {1}\".format([\"a\", \"b\"])\n"), "a b");
+        assert_eq!(
+            run_str("return \"{0} {1}\".format([\"a\", \"b\"])\n"),
+            "a b"
+        );
         assert_eq!(run_str("return \"{} {}\".format([\"x\", \"y\"])\n"), "x y");
         assert_eq!(
             run_str("return \"{name}\".format({\"name\": \"Bob\"})\n"),
@@ -11595,7 +12849,10 @@ match x:
         );
         assert!((run_float("return \"test\".similarity(\"test\")\n") - 1.0).abs() < 1e-9);
         assert!((run_float("return \"abc\".similarity(\"xyz\")\n")).abs() < 1e-9);
-        assert_eq!(run_val("return \"a\".casecmp_to(\"b\")\n"), Variant::Int(-1));
+        assert_eq!(
+            run_val("return \"a\".casecmp_to(\"b\")\n"),
+            Variant::Int(-1)
+        );
         assert_eq!(run_val("return \"b\".casecmp_to(\"a\")\n"), Variant::Int(1));
         assert_eq!(
             run_val("return \"file10\".naturalnocasecmp_to(\"file9\")\n"),
@@ -11685,7 +12942,9 @@ match x:
         }
     }
 
-    fn mock_scene_interp(known: &[&str]) -> (Interpreter, std::rc::Rc<std::cell::RefCell<MockSceneState>>) {
+    fn mock_scene_interp(
+        known: &[&str],
+    ) -> (Interpreter, std::rc::Rc<std::cell::RefCell<MockSceneState>>) {
         let mut state = MockSceneState::default();
         state.next_id = 100; // keep instantiated ids clear of current_node_id
         for s in known {
@@ -11693,7 +12952,12 @@ match x:
         }
         let state = std::rc::Rc::new(std::cell::RefCell::new(state));
         let mut interp = Interpreter::new();
-        interp.set_scene_access(Box::new(MockSceneAccess { state: state.clone() }), 1);
+        interp.set_scene_access(
+            Box::new(MockSceneAccess {
+                state: state.clone(),
+            }),
+            1,
+        );
         (interp, state)
     }
 
@@ -11731,7 +12995,11 @@ match x:
         // The subtree exists (root has a child).
         assert!(!st.children.get(&root_id).unwrap().is_empty());
         // add_child(self=1, root) wired the spawned root under the caller node.
-        assert!(st.children.get(&1).map(|c| c.contains(&root_id)).unwrap_or(false));
+        assert!(st
+            .children
+            .get(&1)
+            .map(|c| c.contains(&root_id))
+            .unwrap_or(false));
     }
 
     #[test]
@@ -11878,13 +13146,21 @@ match x:
 
     /// Interpreter wired to the audio-dispatch mock, with the script's own node
     /// id at 1 and the `Player` target at 42.
-    fn audio_dispatch_interp() -> (Interpreter, std::rc::Rc<std::cell::RefCell<AudioDispatchState>>) {
+    fn audio_dispatch_interp() -> (
+        Interpreter,
+        std::rc::Rc<std::cell::RefCell<AudioDispatchState>>,
+    ) {
         let state = std::rc::Rc::new(std::cell::RefCell::new(AudioDispatchState {
             player_id: 42,
             ..Default::default()
         }));
         let mut interp = Interpreter::new();
-        interp.set_scene_access(Box::new(AudioDispatchAccess { state: state.clone() }), 1);
+        interp.set_scene_access(
+            Box::new(AudioDispatchAccess {
+                state: state.clone(),
+            }),
+            1,
+        );
         (interp, state)
     }
 
@@ -11927,10 +13203,21 @@ match x:
             Some(Variant::Array(a)) => a,
             other => panic!("expected Array, got {other:?}"),
         };
-        assert_eq!(arr.get(0), Some(&Variant::Bool(true)), "is_playing() true after play()");
-        assert_eq!(arr.get(1), Some(&Variant::Bool(false)), "is_playing() false after stop()");
+        assert_eq!(
+            arr.get(0),
+            Some(&Variant::Bool(true)),
+            "is_playing() true after play()"
+        );
+        assert_eq!(
+            arr.get(1),
+            Some(&Variant::Bool(false)),
+            "is_playing() false after stop()"
+        );
         // No lingering true state on the boundary.
-        assert_eq!(state.borrow().prop(42, "playing"), Some(Variant::Bool(false)));
+        assert_eq!(
+            state.borrow().prop(42, "playing"),
+            Some(Variant::Bool(false))
+        );
     }
 
     #[test]
@@ -12096,6 +13383,9 @@ match x:
     #[test]
     fn packed_array_index_out_of_bounds_errors() {
         let err = run_err("var a = PackedInt32Array([1])\nreturn a[5]\n");
-        assert!(matches!(err.kind, RuntimeErrorKind::IndexOutOfBounds { .. }));
+        assert!(matches!(
+            err.kind,
+            RuntimeErrorKind::IndexOutOfBounds { .. }
+        ));
     }
 }

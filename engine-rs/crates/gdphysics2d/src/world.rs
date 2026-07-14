@@ -170,10 +170,59 @@ impl PhysicsWorld2D {
     ///
     /// Returns collision events for this frame (entered, persisting, exited).
     pub fn step(&mut self, dt: f32) -> Vec<CollisionEvent> {
-        // Phase 1: Integrate (apply world gravity + per-body damping)
+        self.step_inner(dt, None, None)
+    }
+
+    /// Steps the simulation applying per-body area gravity/damp overrides.
+    ///
+    /// Behaves exactly like [`step`](Self::step) except that, during the
+    /// integrate phase, a body whose [`BodyId`] appears in `gravity_overrides`
+    /// is integrated with that gravity vector instead of the world's global
+    /// gravity, and a body appearing in `damp_overrides` is integrated with that
+    /// linear-damp coefficient instead of its own. Bodies absent from a map use
+    /// the usual world gravity / own damping.
+    ///
+    /// This is how `Area2D` gravity/damp space overrides are applied: an owner
+    /// (e.g. the scene `PhysicsServer`, which holds the `AreaStore` alongside
+    /// the bodies) computes the effective per-body gravity/damp via
+    /// [`AreaStore::compute_body_gravity`](crate::area2d::AreaStore::compute_body_gravity)
+    /// and [`compute_body_damp`](crate::area2d::AreaStore::compute_body_damp),
+    /// then drives the world through this method.
+    pub fn step_with_area_overrides(
+        &mut self,
+        dt: f32,
+        gravity_overrides: &HashMap<BodyId, Vector2>,
+        damp_overrides: &HashMap<BodyId, f32>,
+    ) -> Vec<CollisionEvent> {
+        self.step_inner(dt, Some(gravity_overrides), Some(damp_overrides))
+    }
+
+    /// Shared implementation of [`step`](Self::step) and
+    /// [`step_with_area_overrides`](Self::step_with_area_overrides).
+    fn step_inner(
+        &mut self,
+        dt: f32,
+        gravity_overrides: Option<&HashMap<BodyId, Vector2>>,
+        damp_overrides: Option<&HashMap<BodyId, f32>>,
+    ) -> Vec<CollisionEvent> {
+        // Phase 1: Integrate (apply world gravity + per-body damping, replacing
+        // either with a per-body area override when one is supplied).
         let gravity = self.gravity;
         for body in self.bodies.values_mut() {
-            body.integrate(dt, gravity);
+            let g = gravity_overrides
+                .and_then(|m| m.get(&body.id).copied())
+                .unwrap_or(gravity);
+            match damp_overrides.and_then(|m| m.get(&body.id).copied()) {
+                Some(d) => {
+                    // Temporarily swap in the effective damp so `integrate`
+                    // (which reads `body.linear_damp`) uses it, then restore.
+                    let saved = body.linear_damp;
+                    body.linear_damp = d;
+                    body.integrate(dt, g);
+                    body.linear_damp = saved;
+                }
+                None => body.integrate(dt, g),
+            }
         }
 
         // Phase 1.5: Apply joint constraints (iterated for convergence)
@@ -754,6 +803,65 @@ mod tests {
             "damped velocity {vx} != expected {expected}"
         );
         assert!(vx < 50.0 && vx > 0.0, "velocity should decay, got {vx}");
+    }
+
+    #[test]
+    fn world_step_with_area_overrides_applies_per_body_gravity_and_damp() {
+        use std::collections::HashMap;
+
+        // Body A gets a zero-gravity override (as if inside an anti-gravity
+        // area); body B is absent from the map and falls under world gravity.
+        let mut world = PhysicsWorld2D::new();
+        let mut a = make_rigid_circle(Vector2::ZERO, 1.0);
+        a.collision_layer = 0;
+        a.collision_mask = 0;
+        let mut b = make_rigid_circle(Vector2::new(1000.0, 0.0), 1.0);
+        b.collision_layer = 0;
+        b.collision_mask = 0;
+        let id_a = world.add_body(a);
+        let id_b = world.add_body(b);
+
+        let mut gravity_overrides: HashMap<BodyId, Vector2> = HashMap::new();
+        gravity_overrides.insert(id_a, Vector2::ZERO); // A: no gravity
+        let damp_overrides: HashMap<BodyId, f32> = HashMap::new();
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..30 {
+            world.step_with_area_overrides(dt, &gravity_overrides, &damp_overrides);
+        }
+
+        let ya = world.get_body(id_a).unwrap().position.y;
+        let yb = world.get_body(id_b).unwrap().position.y;
+        assert!(ya.abs() < 1e-5, "override to zero gravity must not fall, got {ya}");
+        assert!(yb > 0.0, "body without override must fall, got {yb}");
+
+        // A damp override replaces the body's own damping during integration and
+        // is restored afterwards (the stored field is left untouched).
+        let mut world2 = PhysicsWorld2D::new();
+        world2.set_gravity(Vector2::ZERO);
+        let mut c = make_rigid_circle(Vector2::ZERO, 1.0);
+        c.collision_layer = 0;
+        c.collision_mask = 0;
+        c.linear_velocity = Vector2::new(100.0, 0.0);
+        c.linear_damp = 0.0; // no self-damping
+        let id_c = world2.add_body(c);
+
+        let mut damp2: HashMap<BodyId, f32> = HashMap::new();
+        damp2.insert(id_c, 5.0); // strong area damping
+        let no_gravity: HashMap<BodyId, Vector2> = HashMap::new();
+        for _ in 0..30 {
+            world2.step_with_area_overrides(dt, &no_gravity, &damp2);
+        }
+        let body_c = world2.get_body(id_c).unwrap();
+        assert!(
+            body_c.linear_velocity.x < 100.0,
+            "damp override must decay velocity, got {}",
+            body_c.linear_velocity.x
+        );
+        assert_eq!(
+            body_c.linear_damp, 0.0,
+            "the body's own linear_damp must be restored after the step"
+        );
     }
 
     #[test]

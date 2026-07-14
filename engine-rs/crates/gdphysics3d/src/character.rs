@@ -2,12 +2,39 @@
 //!
 //! Provides [`CharacterBody3D`] with `move_and_slide` for 3D movement that
 //! slides along surfaces and detects floor/wall/ceiling contacts.
+//!
+//! This mirrors Godot 4's `CharacterBody3D::move_and_slide` behaviour: motion
+//! modes (grounded vs floating), moving-platform carry and on-leave velocity,
+//! floor snapping onto slopes/stairs, and the slope knobs (`floor_stop_on_slope`,
+//! `floor_constant_speed`, `floor_block_on_wall`, `wall_min_slide_angle`).
 
 use gdcore::math::Vector3;
 
 use crate::body::PhysicsBody3D;
 use crate::collision;
 use crate::shape::Shape3D;
+
+/// How the character interprets surfaces during `move_and_slide`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MotionMode {
+    /// Floor/wall/ceiling classification, snapping and platform carry are active.
+    #[default]
+    Grounded,
+    /// Every surface is treated as a wall — pure sliding, no floor concept.
+    Floating,
+}
+
+/// What velocity a character keeps when it leaves a moving platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlatformOnLeave {
+    /// Add the full platform velocity to the outgoing velocity.
+    #[default]
+    AddVelocity,
+    /// Add only the component of the platform velocity along `up_direction`.
+    AddUpwardVelocity,
+    /// Add nothing — the platform velocity is discarded.
+    DoNotAddVelocity,
+}
 
 /// A kinematic character controller that slides along surfaces in 3D.
 #[derive(Debug, Clone)]
@@ -25,21 +52,59 @@ pub struct CharacterBody3D {
     /// Collision mask bitmask.
     pub collision_mask: u32,
 
+    /// Motion mode (grounded vs floating).
+    pub motion_mode: MotionMode,
+    /// Distance (world units) the shape is cast downward to stay glued to the
+    /// floor when the character would otherwise leave it. `0` disables snapping.
+    pub floor_snap_length: f32,
+    /// When `true`, the character does not slide down a walkable slope while it
+    /// has no horizontal input.
+    pub floor_stop_on_slope: bool,
+    /// When `true`, horizontal speed is preserved while moving along a slope
+    /// (the slope projection does not slow the character down).
+    pub floor_constant_speed: bool,
+    /// When `true`, a grounded character cannot climb a wall it walks into.
+    pub floor_block_on_wall: bool,
+    /// Minimum wall angle (radians, measured from up) required to slide; below
+    /// it the character stops instead of sliding, preventing jitter.
+    pub wall_min_slide_angle: f32,
+    /// Maximum number of slide iterations per motion step.
+    pub max_slides: u32,
+    /// Velocity kept when the character leaves a moving platform.
+    pub platform_on_leave: PlatformOnLeave,
+
     on_floor: bool,
     on_wall: bool,
     on_ceiling: bool,
     floor_normal: Vector3,
     wall_normal: Vector3,
+    /// Velocity of the floor body the character currently stands on.
+    platform_velocity: Vector3,
 }
-
-/// Maximum number of slide iterations per `move_and_slide` call.
-const MAX_SLIDES: usize = 6;
 
 /// Maximum sub-steps for large motions to prevent tunneling.
 const MAX_SUBSTEPS: usize = 32;
 
 /// Floor angle threshold (approximately 45 degrees).
 const DEFAULT_FLOOR_MAX_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
+
+/// Default number of slide iterations per motion step (Godot 4 default).
+const DEFAULT_MAX_SLIDES: u32 = 6;
+
+/// Default floor snap length (Godot 4 default).
+const DEFAULT_FLOOR_SNAP_LENGTH: f32 = 0.1;
+
+/// Default minimum wall slide angle: 15 degrees in radians (Godot 4 default).
+const DEFAULT_WALL_MIN_SLIDE_ANGLE: f32 = 0.2617994;
+
+/// Downward probe margin used to detect the floor the character rests on.
+const FLOOR_PROBE_MARGIN: f32 = 0.08;
+
+/// Number of samples taken when casting the shape down for floor snapping.
+const SNAP_SAMPLES: usize = 16;
+
+/// Horizontal-input magnitude below which `floor_stop_on_slope` engages.
+const STOP_ON_SLOPE_EPS: f32 = 1e-3;
 
 impl CharacterBody3D {
     /// Creates a new character body at the given position.
@@ -51,11 +116,20 @@ impl CharacterBody3D {
             floor_max_angle: DEFAULT_FLOOR_MAX_ANGLE,
             collision_layer: 1,
             collision_mask: 1,
+            motion_mode: MotionMode::Grounded,
+            floor_snap_length: DEFAULT_FLOOR_SNAP_LENGTH,
+            floor_stop_on_slope: true,
+            floor_constant_speed: false,
+            floor_block_on_wall: true,
+            wall_min_slide_angle: DEFAULT_WALL_MIN_SLIDE_ANGLE,
+            max_slides: DEFAULT_MAX_SLIDES,
+            platform_on_leave: PlatformOnLeave::AddVelocity,
             on_floor: false,
             on_wall: false,
             on_ceiling: false,
             floor_normal: Vector3::ZERO,
             wall_normal: Vector3::ZERO,
+            platform_velocity: Vector3::ZERO,
         }
     }
 
@@ -74,57 +148,150 @@ impl CharacterBody3D {
 
     /// Moves the character by `velocity`, sliding along colliding surfaces.
     ///
-    /// Returns the resulting velocity after sliding. Populates floor/wall/ceiling
-    /// state for queries. Uses sub-stepping for large motions to prevent tunneling.
+    /// `velocity` is this frame's motion. Returns the resulting velocity after
+    /// sliding (the character's own velocity, excluding any platform carry, but
+    /// including on-leave platform velocity). Populates floor/wall/ceiling state
+    /// for queries. Uses sub-stepping for large motions to prevent tunneling.
+    ///
+    /// In [`MotionMode::Grounded`] this also carries the character with a moving
+    /// floor body, snaps the character down onto slopes/stairs, applies the
+    /// slope knobs, and adds the platform velocity back on leave. In
+    /// [`MotionMode::Floating`] every surface is a wall and none of that runs.
     pub fn move_and_slide(&mut self, velocity: Vector3, bodies: &[&PhysicsBody3D]) -> Vector3 {
+        let was_on_floor = self.on_floor;
+        let previous_platform_velocity = self.platform_velocity;
+
+        // Reset contact state for this call.
         self.on_floor = false;
         self.on_wall = false;
         self.on_ceiling = false;
         self.floor_normal = Vector3::ZERO;
         self.wall_normal = Vector3::ZERO;
 
-        let speed = velocity.length();
-        if speed < 1e-8 {
-            return velocity;
+        let grounded_mode = self.motion_mode == MotionMode::Grounded;
+
+        // --- Platform detection & carry (Grounded only) ----------------------
+        // Probe the floor beneath us; capture the floor body's velocity so the
+        // character is carried, and remember the floor normal for the slope
+        // knobs below.
+        let mut motion = velocity;
+        let mut probed_floor_normal: Option<Vector3> = None;
+        if grounded_mode {
+            if let Some((idx, normal)) = self.probe_floor(bodies) {
+                self.platform_velocity = bodies[idx].linear_velocity;
+                motion = motion + self.platform_velocity;
+                probed_floor_normal = Some(normal);
+            } else {
+                self.platform_velocity = Vector3::ZERO;
+            }
+        } else {
+            self.platform_velocity = Vector3::ZERO;
         }
 
-        // Subdivide motion if it exceeds the shape's safe step distance.
-        let safe_dist = self.safe_step_distance();
-        let num_steps = ((speed / safe_dist).ceil() as usize).clamp(1, MAX_SUBSTEPS);
-        let inv_steps = 1.0 / num_steps as f32;
-        let _step_vel = velocity * inv_steps;
+        // --- Slope knobs affecting the motion --------------------------------
+        if let Some(floor_normal) = probed_floor_normal {
+            let up = self.up_direction;
+            let horizontal_input = velocity - up * velocity.dot(up);
+            let horizontal_len = horizontal_input.length();
+            let is_slope = floor_normal.dot(up) < 1.0 - 1e-4;
+            if is_slope {
+                if self.floor_stop_on_slope && horizontal_len < STOP_ON_SLOPE_EPS {
+                    // No horizontal input on a walkable slope: cancel the motion
+                    // so gravity does not slide the character downhill.
+                    motion = Vector3::ZERO;
+                } else if self.floor_constant_speed && horizontal_len > STOP_ON_SLOPE_EPS {
+                    // Preserve the horizontal speed magnitude along the slope by
+                    // rescaling the slope-tangent motion.
+                    let tangential = motion - floor_normal * motion.dot(floor_normal);
+                    let horiz_tan = tangential - up * tangential.dot(up);
+                    let horiz_tan_len = horiz_tan.length();
+                    if horiz_tan_len > 1e-6 {
+                        motion = tangential * (horizontal_len / horiz_tan_len);
+                    }
+                }
+            }
+        }
 
+        // --- Apply the sliding motion, sub-stepping large moves. -------------
+        let mut motion_out = motion;
+        let speed = motion.length();
+        if speed >= 1e-8 {
+            let safe_dist = self.safe_step_distance();
+            let num_steps = ((speed / safe_dist).ceil() as usize).clamp(1, MAX_SUBSTEPS);
+            let inv_steps = 1.0 / num_steps as f32;
+
+            for _ in 0..num_steps {
+                let sub = motion_out * inv_steps;
+                if sub.length_squared() < 1e-8 {
+                    break;
+                }
+
+                let sub_result = self.slide_step(sub, bodies, was_on_floor);
+
+                // If a component was absorbed by collision, zero it so later
+                // sub-steps stop advancing along it.
+                if sub.x.abs() > 1e-8 && sub_result.x.abs() < sub.x.abs() * 0.1 {
+                    motion_out.x = 0.0;
+                }
+                if sub.y.abs() > 1e-8 && sub_result.y.abs() < sub.y.abs() * 0.1 {
+                    motion_out.y = 0.0;
+                }
+                if sub.z.abs() > 1e-8 && sub_result.z.abs() < sub.z.abs() * 0.1 {
+                    motion_out.z = 0.0;
+                }
+            }
+        }
+
+        // Map absorbed axes onto the character's OWN velocity for the return
+        // value (platform carry is intentionally excluded from the result).
         let mut output_vel = velocity;
+        if motion.x.abs() > 1e-8 && motion_out.x == 0.0 {
+            output_vel.x = 0.0;
+        }
+        if motion.y.abs() > 1e-8 && motion_out.y == 0.0 {
+            output_vel.y = 0.0;
+        }
+        if motion.z.abs() > 1e-8 && motion_out.z == 0.0 {
+            output_vel.z = 0.0;
+        }
 
-        for _ in 0..num_steps {
-            // Use the current output_vel direction, scaled to one sub-step.
-            let sub_vel = output_vel * inv_steps;
-            if sub_vel.length_squared() < 1e-8 {
-                break;
-            }
+        // --- Floor snapping (Grounded only) ----------------------------------
+        if grounded_mode {
+            self.apply_floor_snap(was_on_floor, velocity, bodies);
+        }
 
-            let sub_result = self.slide_step(sub_vel, bodies);
-
-            // If a component was absorbed by collision, zero it in the output.
-            if sub_vel.x.abs() > 1e-8 && sub_result.x.abs() < sub_vel.x.abs() * 0.1 {
-                output_vel.x = 0.0;
+        // --- On-leave velocity -----------------------------------------------
+        if grounded_mode && was_on_floor && !self.on_floor {
+            match self.platform_on_leave {
+                PlatformOnLeave::AddVelocity => {
+                    output_vel = output_vel + previous_platform_velocity;
+                }
+                PlatformOnLeave::AddUpwardVelocity => {
+                    let up_comp = previous_platform_velocity.dot(self.up_direction);
+                    output_vel = output_vel + self.up_direction * up_comp;
+                }
+                PlatformOnLeave::DoNotAddVelocity => {}
             }
-            if sub_vel.y.abs() > 1e-8 && sub_result.y.abs() < sub_vel.y.abs() * 0.1 {
-                output_vel.y = 0.0;
-            }
-            if sub_vel.z.abs() > 1e-8 && sub_result.z.abs() < sub_vel.z.abs() * 0.1 {
-                output_vel.z = 0.0;
-            }
+            // We are airborne now — forget the platform we were standing on.
+            self.platform_velocity = Vector3::ZERO;
         }
 
         output_vel
     }
 
     /// Performs a single slide step with the given step velocity.
-    fn slide_step(&mut self, step_vel: Vector3, bodies: &[&PhysicsBody3D]) -> Vector3 {
+    ///
+    /// `was_on_floor` reports whether the character was grounded at the start of
+    /// the `move_and_slide` call; it gates the grounded wall knobs.
+    fn slide_step(
+        &mut self,
+        step_vel: Vector3,
+        bodies: &[&PhysicsBody3D],
+        was_on_floor: bool,
+    ) -> Vector3 {
         let mut remaining = step_vel;
 
-        for _ in 0..MAX_SLIDES {
+        for _ in 0..self.max_slides {
             if remaining.length_squared() < 1e-8 {
                 break;
             }
@@ -168,6 +335,34 @@ impl CharacterBody3D {
             // Slide: remove the velocity component along the surface normal.
             let vel_along_normal = remaining.dot(surface_normal);
             remaining = remaining - surface_normal * vel_along_normal;
+
+            // Grounded wall knobs only apply to wall surfaces.
+            let up_dot = surface_normal.dot(self.up_direction);
+            let floor_cos = self.floor_max_angle.cos();
+            let is_wall_surface = self.motion_mode == MotionMode::Grounded
+                && up_dot <= floor_cos
+                && up_dot >= -floor_cos;
+
+            if is_wall_surface {
+                // wall_min_slide_angle: near-floor "wall" edges shouldn't slide
+                // (jitter guard) — stop instead.
+                if self.wall_min_slide_angle > 0.0 {
+                    let angle_from_up = up_dot.clamp(-1.0, 1.0).acos();
+                    if angle_from_up < self.wall_min_slide_angle {
+                        remaining = Vector3::ZERO;
+                        break;
+                    }
+                }
+                // floor_block_on_wall: a grounded character cannot climb the wall
+                // it walks into — drop any upward slide component.
+                if was_on_floor && self.floor_block_on_wall {
+                    let up = self.up_direction;
+                    let up_comp = remaining.dot(up);
+                    if up_comp > 0.0 {
+                        remaining = remaining - up * up_comp;
+                    }
+                }
+            }
         }
 
         remaining
@@ -215,13 +410,113 @@ impl CharacterBody3D {
         }
     }
 
+    /// Probes for the floor body directly beneath the character.
+    ///
+    /// Returns the index (into `bodies`) of the floor body and the surface
+    /// normal, or `None` when the character is not resting on a floor. The shape
+    /// is offset a small margin downward so a resting (just-touching) contact is
+    /// detected.
+    fn probe_floor(&self, bodies: &[&PhysicsBody3D]) -> Option<(usize, Vector3)> {
+        let probe_pos = self.position - self.up_direction * FLOOR_PROBE_MARGIN;
+        let floor_cos = self.floor_max_angle.cos();
+        let mut best: Option<(usize, f32, Vector3)> = None;
+
+        for (i, body) in bodies.iter().enumerate() {
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+            let r = collision::test_collision(probe_pos, &self.shape, body.position, &body.shape);
+            if r.colliding && r.depth > 0.0 {
+                let normal = -r.normal;
+                if normal.dot(self.up_direction) > floor_cos
+                    && (best.is_none() || r.depth > best.as_ref().unwrap().1)
+                {
+                    best = Some((i, r.depth, normal));
+                }
+            }
+        }
+
+        best.map(|(i, _, n)| (i, n))
+    }
+
+    /// Finds the deepest floor-angled contact at `probe_pos`, returning the
+    /// surface normal and penetration depth.
+    fn deepest_floor_contact(
+        &self,
+        probe_pos: Vector3,
+        bodies: &[&PhysicsBody3D],
+    ) -> Option<(Vector3, f32)> {
+        let floor_cos = self.floor_max_angle.cos();
+        let mut best: Option<(Vector3, f32)> = None;
+
+        for body in bodies {
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+            let r = collision::test_collision(probe_pos, &self.shape, body.position, &body.shape);
+            if r.colliding && r.depth > 0.0 {
+                let normal = -r.normal;
+                if normal.dot(self.up_direction) > floor_cos
+                    && (best.is_none() || r.depth > best.as_ref().unwrap().1)
+                {
+                    best = Some((normal, r.depth));
+                }
+            }
+        }
+
+        best
+    }
+
+    /// Casts the shape downward up to `floor_snap_length` to keep the character
+    /// glued to slopes/stairs when it would otherwise leave the floor.
+    fn apply_floor_snap(
+        &mut self,
+        was_on_floor: bool,
+        velocity: Vector3,
+        bodies: &[&PhysicsBody3D],
+    ) {
+        if self.floor_snap_length <= 0.0 || self.on_floor {
+            return;
+        }
+        // Never snap while moving upward relative to the up direction.
+        let along_up = velocity.dot(self.up_direction);
+        if along_up > 1e-6 {
+            return;
+        }
+        // Only snap when we were grounded or are actively descending.
+        let descending = along_up < -1e-6;
+        if !was_on_floor && !descending {
+            return;
+        }
+
+        for i in 1..=SNAP_SAMPLES {
+            let t = self.floor_snap_length * (i as f32 / SNAP_SAMPLES as f32);
+            let probe_pos = self.position - self.up_direction * t;
+            if let Some((normal, depth)) = self.deepest_floor_contact(probe_pos, bodies) {
+                self.position = probe_pos + normal * depth;
+                self.on_floor = true;
+                self.floor_normal = normal;
+                return;
+            }
+        }
+    }
+
     /// Classifies a collision normal as floor, wall, or ceiling.
+    ///
+    /// In [`MotionMode::Floating`] every surface is a wall.
     fn classify_surface(&mut self, normal: Vector3) {
+        if self.motion_mode == MotionMode::Floating {
+            self.on_wall = true;
+            self.wall_normal = normal;
+            return;
+        }
+
         let dot = normal.dot(self.up_direction);
-        if dot > self.floor_max_angle.cos() {
+        let floor_cos = self.floor_max_angle.cos();
+        if dot > floor_cos {
             self.on_floor = true;
             self.floor_normal = normal;
-        } else if dot < -(self.floor_max_angle.cos()) {
+        } else if dot < -floor_cos {
             self.on_ceiling = true;
         } else {
             self.on_wall = true;
@@ -252,6 +547,22 @@ impl CharacterBody3D {
     /// Returns the wall normal from the last `move_and_slide` call.
     pub fn get_wall_normal(&self) -> Vector3 {
         self.wall_normal
+    }
+
+    /// Returns the velocity of the floor body the character stands on (the
+    /// moving-platform velocity used for carry).
+    pub fn get_platform_velocity(&self) -> Vector3 {
+        self.platform_velocity
+    }
+
+    /// Returns the angle (radians) between the floor normal and `up_direction`.
+    ///
+    /// `0` on flat ground; larger on steeper slopes.
+    pub fn get_floor_angle(&self) -> f32 {
+        self.floor_normal
+            .dot(self.up_direction)
+            .clamp(-1.0, 1.0)
+            .acos()
     }
 }
 
@@ -302,6 +613,25 @@ mod tests {
         body
     }
 
+    /// A 30-degree ramp: an infinite plane through the origin whose surface
+    /// normal is tilted 30 degrees from vertical toward +X. The walkable
+    /// (empty) side descends toward +X.
+    fn make_slope_plane_30() -> PhysicsBody3D {
+        let normal = Vector3::new(0.5, 0.866_025_4, 0.0);
+        let mut body = PhysicsBody3D::new(
+            BodyId3D(10),
+            BodyType3D::Static,
+            Vector3::ZERO,
+            Shape3D::WorldBoundaryShape {
+                normal,
+                distance: 0.0,
+            },
+            1.0,
+        );
+        body.collision_layer = 1;
+        body
+    }
+
     #[test]
     fn move_and_slide_no_collision() {
         let mut character = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
@@ -345,10 +675,8 @@ mod tests {
 
     #[test]
     fn move_and_slide_detects_ceiling() {
-        let mut character = CharacterBody3D::new(
-            Vector3::new(0.0, -2.0, 0.0),
-            Shape3D::Sphere { radius: 1.0 },
-        );
+        let mut character =
+            CharacterBody3D::new(Vector3::new(0.0, -2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
         // Ceiling box centered at y=1, half_extents (100, 1, 100) => bottom edge at y=0
         // Character at y=-2, moves up by 2.5 => center at y=0.5 (inside ceiling box)
         let ceiling = make_static_ceiling(1.0);
@@ -420,5 +748,217 @@ mod tests {
         assert!((character.position.y - 2.0).abs() < 1e-6);
         assert!((character.position.z - 3.0).abs() < 1e-6);
         assert!(result.length_squared() < 1e-8);
+    }
+
+    // -- move_and_slide parity (pat-u3l8c.58) --------------------------------
+
+    #[test]
+    fn character_snaps_to_floor_on_slope() {
+        // A character resting on a 30-degree slope that moves horizontally
+        // (toward the descending side) stays glued to the slope thanks to
+        // floor snapping; with floor_snap_length = 0 it launches off.
+        //
+        // Resting sphere (radius 1) center at x=0 sits at y = 1 / cos(30) ~= 1.1547.
+        let run = |snap_len: f32| -> (bool, f32) {
+            let slope = make_slope_plane_30();
+            let bodies: Vec<&PhysicsBody3D> = vec![&slope];
+            let mut c = CharacterBody3D::new(
+                Vector3::new(0.0, 1.154_700_5, 0.0),
+                Shape3D::Sphere { radius: 1.0 },
+            );
+            c.floor_snap_length = snap_len;
+            // Move horizontally (descending side) with a touch of gravity.
+            c.move_and_slide(Vector3::new(0.1, -0.01, 0.0), &bodies);
+            (c.is_on_floor(), c.position.y)
+        };
+
+        let (snapped_floor, snapped_y) = run(0.2);
+        let (nosnap_floor, nosnap_y) = run(0.0);
+
+        assert!(snapped_floor, "with snapping the character stays on the floor");
+        assert!(!nosnap_floor, "without snapping the character leaves the floor");
+        assert!(
+            snapped_y < nosnap_y - 1e-3,
+            "snapped y tracks the descending slope (lower) than the floating y: {snapped_y} vs {nosnap_y}"
+        );
+    }
+
+    #[test]
+    fn character_carried_by_moving_platform() {
+        // A floor body with a nonzero velocity carries the resting character.
+        let mut platform = PhysicsBody3D::new(
+            BodyId3D(20),
+            BodyType3D::Kinematic,
+            Vector3::new(0.0, -1.0, 0.0),
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(100.0, 1.0, 100.0),
+            },
+            1.0,
+        );
+        platform.collision_layer = 1;
+        platform.linear_velocity = Vector3::new(2.0, 0.0, 0.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&platform];
+
+        // Sphere (radius 1) resting on the platform top (y=0).
+        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        // No own velocity — the platform alone should move the character.
+        c.move_and_slide(Vector3::ZERO, &bodies);
+
+        assert!(
+            (c.position.x - 2.0).abs() < 1e-3,
+            "character carried by platform velocity, got x = {}",
+            c.position.x
+        );
+        assert!(
+            (c.get_platform_velocity().x - 2.0).abs() < 1e-6,
+            "platform velocity is exposed, got {:?}",
+            c.get_platform_velocity()
+        );
+    }
+
+    #[test]
+    fn character_platform_on_leave_add_velocity() {
+        let bodies: Vec<&PhysicsBody3D> = vec![];
+
+        // AddVelocity: the outgoing velocity retains the full platform velocity.
+        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c.platform_on_leave = PlatformOnLeave::AddVelocity;
+        // Simulate "was standing on a platform moving at +2 X last frame".
+        c.on_floor = true;
+        c.platform_velocity = Vector3::new(2.0, 0.0, 0.0);
+        let out = c.move_and_slide(Vector3::new(0.0, 5.0, 0.0), &bodies); // jump straight up
+        assert!(!c.is_on_floor(), "character left the floor");
+        assert!(
+            (out.x - 2.0).abs() < 1e-4,
+            "AddVelocity keeps the platform velocity, got {:?}",
+            out
+        );
+        assert!((out.y - 5.0).abs() < 1e-4, "own jump velocity preserved");
+
+        // DoNotAddVelocity: the outgoing velocity keeps nothing from the platform.
+        let mut c2 =
+            CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c2.platform_on_leave = PlatformOnLeave::DoNotAddVelocity;
+        c2.on_floor = true;
+        c2.platform_velocity = Vector3::new(2.0, 0.0, 0.0);
+        let out2 = c2.move_and_slide(Vector3::new(0.0, 5.0, 0.0), &bodies);
+        assert!(
+            out2.x.abs() < 1e-4,
+            "DoNotAddVelocity keeps nothing from the platform, got {:?}",
+            out2
+        );
+    }
+
+    #[test]
+    fn character_platform_on_leave_add_upward_velocity() {
+        let bodies: Vec<&PhysicsBody3D> = vec![];
+        // AddUpwardVelocity keeps only the up-axis component of the platform.
+        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c.platform_on_leave = PlatformOnLeave::AddUpwardVelocity;
+        c.on_floor = true;
+        c.platform_velocity = Vector3::new(2.0, 3.0, 0.0); // moving up-and-sideways
+        let out = c.move_and_slide(Vector3::new(0.0, 5.0, 0.0), &bodies);
+        assert!(out.x.abs() < 1e-4, "sideways platform component dropped, got {:?}", out);
+        assert!(
+            (out.y - 8.0).abs() < 1e-4,
+            "only the upward platform component (3) is added to the jump (5), got {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn character_motion_mode_floating_ignores_floor() {
+        let mut character =
+            CharacterBody3D::new(Vector3::new(0.0, 2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        character.motion_mode = MotionMode::Floating;
+        let floor = make_static_floor(-1.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&floor];
+
+        character.move_and_slide(Vector3::new(0.0, -2.5, 0.0), &bodies);
+        assert!(
+            !character.is_on_floor(),
+            "Floating mode must not register floor contacts"
+        );
+        assert!(
+            character.is_on_wall(),
+            "Floating mode treats the surface as a wall"
+        );
+    }
+
+    #[test]
+    fn character_max_slides_is_configurable() {
+        let floor = make_static_floor(-1.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&floor];
+
+        // max_slides = 0: the slide loop never runs, so the character neither
+        // moves via sliding nor resolves the floor.
+        let mut c0 =
+            CharacterBody3D::new(Vector3::new(0.0, 2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c0.max_slides = 0;
+        c0.move_and_slide(Vector3::new(0.0, -2.5, 0.0), &bodies);
+        assert!(
+            (c0.position.y - 2.0).abs() < 1e-6,
+            "with max_slides = 0 the slide loop is a no-op, got y = {}",
+            c0.position.y
+        );
+        assert!(!c0.is_on_floor(), "no slide iterations means no floor contact");
+
+        // max_slides = 6 (default): the floor is resolved.
+        let mut c6 =
+            CharacterBody3D::new(Vector3::new(0.0, 2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c6.max_slides = 6;
+        c6.move_and_slide(Vector3::new(0.0, -2.5, 0.0), &bodies);
+        assert!(
+            c6.is_on_floor(),
+            "with slide iterations available the floor is resolved"
+        );
+        assert!(c6.position.y < 2.0, "the character moved toward the floor");
+    }
+
+    #[test]
+    fn floor_stop_on_slope_keeps_character_still() {
+        // A character resting on a 30-degree slope with only gravity (no
+        // horizontal input) should not slide downhill when floor_stop_on_slope
+        // is enabled; with it disabled it slides toward the descending side.
+        let run = |stop: bool| -> f32 {
+            let slope = make_slope_plane_30();
+            let bodies: Vec<&PhysicsBody3D> = vec![&slope];
+            let mut c = CharacterBody3D::new(
+                Vector3::new(0.0, 1.154_700_5, 0.0),
+                Shape3D::Sphere { radius: 1.0 },
+            );
+            c.floor_stop_on_slope = stop;
+            c.floor_snap_length = 0.2;
+            c.move_and_slide(Vector3::new(0.0, -0.1, 0.0), &bodies); // gravity only
+            c.position.x
+        };
+
+        let stop_x = run(true);
+        let slide_x = run(false);
+
+        assert!(
+            stop_x.abs() < 0.02,
+            "floor_stop_on_slope keeps the character in place, got x = {stop_x}"
+        );
+        assert!(
+            slide_x > 0.05,
+            "without floor_stop_on_slope the character slides downhill, got x = {slide_x}"
+        );
+        assert!(stop_x < slide_x, "stopping must move less than sliding");
+    }
+
+    #[test]
+    fn get_floor_angle_flat_floor_is_zero() {
+        let mut c =
+            CharacterBody3D::new(Vector3::new(0.0, 2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        let floor = make_static_floor(-1.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&floor];
+        c.move_and_slide(Vector3::new(0.0, -2.5, 0.0), &bodies);
+        assert!(c.is_on_floor());
+        assert!(
+            c.get_floor_angle() < 0.05,
+            "flat floor angle should be ~0, got {}",
+            c.get_floor_angle()
+        );
     }
 }

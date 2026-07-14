@@ -1101,6 +1101,11 @@ impl MainLoop {
             // Emit body_entered / body_exited signals on Area2D nodes.
             self.physics_server.process_overlap_signals(&mut self.tree);
 
+            // Emit area_entered / area_exited signals between overlapping Area2D
+            // nodes (pat-u3l8c.51).
+            self.physics_server
+                .process_area_overlap_signals(&mut self.tree);
+
             // Emit body_entered / body_exited signals on contact-monitoring
             // RigidBody2D nodes (contact_monitor + max_contacts_reported).
             self.physics_server

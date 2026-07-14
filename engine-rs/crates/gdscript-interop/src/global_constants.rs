@@ -15,6 +15,11 @@ use gdvariant::{Variant, VariantType};
 /// constants (the caller then continues normal identifier resolution).
 pub fn global_constant(name: &str) -> Option<Variant> {
     let v: i64 = match name {
+        // -- Object.ConnectFlags (4) — signal connection flags (pat-u3l8c.17) --
+        "CONNECT_DEFERRED" => 1,
+        "CONNECT_PERSIST" => 2,
+        "CONNECT_ONE_SHOT" => 4,
+        "CONNECT_REFERENCE_COUNTED" => 8,
         // -- Side (4) --
         "SIDE_LEFT" => 0,
         "SIDE_TOP" => 1,
@@ -560,7 +565,26 @@ pub fn global_constant(name: &str) -> Option<Variant> {
 pub fn is_global_enum(name: &str) -> bool {
     matches!(
         name,
-        "Side" | "Corner" | "Orientation" | "ClockDirection" | "HorizontalAlignment" | "VerticalAlignment" | "InlineAlignment" | "EulerOrder" | "Key" | "KeyModifierMask" | "KeyLocation" | "MouseButton" | "MouseButtonMask" | "JoyButton" | "JoyAxis" | "MIDIMessage" | "Error" | "PropertyHint" | "PropertyUsageFlags" | "MethodFlags"
+        "Side"
+            | "Corner"
+            | "Orientation"
+            | "ClockDirection"
+            | "HorizontalAlignment"
+            | "VerticalAlignment"
+            | "InlineAlignment"
+            | "EulerOrder"
+            | "Key"
+            | "KeyModifierMask"
+            | "KeyLocation"
+            | "MouseButton"
+            | "MouseButtonMask"
+            | "JoyButton"
+            | "JoyAxis"
+            | "MIDIMessage"
+            | "Error"
+            | "PropertyHint"
+            | "PropertyUsageFlags"
+            | "MethodFlags"
     )
 }
 
@@ -615,4 +639,3 @@ pub fn variant_type_code(v: &Variant) -> i64 {
         VariantType::PackedColorArray => 37,
     }
 }
-

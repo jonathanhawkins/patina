@@ -602,6 +602,51 @@ mod tests {
     use crate::node::Node;
     use crate::scene_tree::SceneTree;
 
+    // pat-u3l8c.12: `load("x.gd").new()` — the accessor loads the script, makes
+    // a node of its base class with the script attached, and returns its id.
+    #[test]
+    fn script_base_class_reads_extends_or_defaults_to_node() {
+        assert_eq!(script_base_class("extends Node2D\nvar x = 1\n"), "Node2D");
+        assert_eq!(script_base_class("# hi\nextends Control\n"), "Control");
+        assert_eq!(script_base_class("var x = 1\n"), "Node");
+        assert_eq!(script_base_class(""), "Node");
+        // A path/quoted base can't be named statically → Node.
+        assert_eq!(script_base_class("extends \"res://base.gd\"\n"), "Node");
+    }
+
+    #[test]
+    fn accessor_instantiate_script_attaches_script_node() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir()
+            .join(format!("patina_u3l8c12_{}_{}.gd", std::process::id(), n));
+        std::fs::write(&path, "extends Node2D\nvar hp = 7\n").unwrap();
+        // Absolute path (no `res://`) is read directly, avoiding CWD coupling.
+        let path_str = path.to_str().unwrap().to_string();
+
+        let mut tree = SceneTree::new();
+        let tree_ptr = &mut tree as *mut SceneTree;
+        let raw = {
+            let mut acc = unsafe { SceneTreeAccessor::new(tree_ptr) };
+            acc.instantiate_script(&path_str)
+        };
+        let raw = raw.expect("script instantiated");
+
+        let node_id = NodeId::from_object_id(ObjectId::from_raw(raw));
+        assert!(
+            tree.get_script(node_id).is_some(),
+            "the scripted instance has its script attached"
+        );
+        assert_eq!(
+            tree.get_node(node_id).unwrap().class_name(),
+            "Node2D",
+            "node uses the script's base class"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     const PLAYER_SCRIPT: &str = "\
 extends Node2D
 var speed = 100.0

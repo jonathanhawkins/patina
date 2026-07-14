@@ -266,8 +266,14 @@ fn rasterize_instances_into_shadow(
 /// Resolution for omni shadow cubemap faces.
 pub const OMNI_SHADOW_SIZE: u32 = 128;
 
-/// Generates cubemap shadow maps for all point lights with shadows enabled
-/// and `omni_shadow_mode == Cube`.
+/// Generates cubemap shadow maps for all shadow-casting point lights, in BOTH
+/// omni shadow modes — the Godot default `DualParaboloid` and `Cube`.
+///
+/// Godot's omni lights default to `DualParaboloid`; previously only `Cube`
+/// lights got a map here, so every default omni light was silently shadowless
+/// in both the software and wgpu paths (which share this generator via
+/// `pack_omni_cubemaps`). A cubemap is a valid occlusion representation for
+/// either mode, so we render one for both (pat-u3l8c.35).
 ///
 /// Returns a vec parallel to `lights` — entries are `Some` for qualifying
 /// point lights, `None` otherwise.
@@ -280,7 +286,10 @@ pub fn generate_omni_shadow_cubemaps(
         .map(|l| {
             if l.shadow_enabled
                 && l.light_type == LightType::Point
-                && l.omni_shadow_mode == OmniShadowMode::Cube
+                && matches!(
+                    l.omni_shadow_mode,
+                    OmniShadowMode::DualParaboloid | OmniShadowMode::Cube
+                )
             {
                 Some(generate_omni_shadow_cubemap(l, instances))
             } else {
@@ -603,6 +612,48 @@ mod tests {
                  return its recorded depth, got {stored}"
             );
         }
+    }
+
+    /// Godot omni lights default to `DualParaboloid`, and that default MUST cast
+    /// a shadow. The audit found `DualParaboloid` returned `None` here, so every
+    /// default omni light was silently shadowless in BOTH render paths (the
+    /// software renderer and the wgpu path share this generator via
+    /// `pack_omni_cubemaps`). A default-mode point light must now get a cubemap
+    /// whose sample toward an occluder returns the occluder's recorded depth
+    /// (pat-u3l8c.35).
+    #[test]
+    fn omni_default_dual_paraboloid_light_casts_shadow() {
+        use gdserver3d::instance::{Instance3D, Instance3DId};
+        use gdserver3d::light::OmniShadowMode;
+
+        let light_pos = Vector3::new(0.5, 0.0, 1.0);
+        let mut light = Light3D::point(Light3DId(1), light_pos);
+        light.range = 20.0;
+        light.shadow_enabled = true;
+        // Deliberately do NOT set omni_shadow_mode: it must default to
+        // DualParaboloid, the mode that previously produced no shadow map.
+        assert!(
+            matches!(light.omni_shadow_mode, OmniShadowMode::DualParaboloid),
+            "Godot omni lights default to DualParaboloid",
+        );
+
+        // Occluder on the light's −Z face.
+        let rel = Vector3::new(0.0, 0.0, -1.5);
+        let mut inst = Instance3D::new(Instance3DId(1));
+        inst.mesh = Some(Mesh3D::cube(0.6));
+        inst.transform.origin = light_pos + rel;
+
+        let maps = generate_omni_shadow_cubemaps(&[light], &[inst]);
+        let cm = maps[0]
+            .as_ref()
+            .expect("a default (DualParaboloid) omni light must get a shadow map");
+        let stored = cm.sample(rel);
+        let dist = rel.length();
+        assert!(
+            stored < dist + 0.35 && stored > dist - 0.65,
+            "default omni light must record the occluder depth toward {rel:?} \
+             (dist {dist:.2}), got {stored}",
+        );
     }
 
     /// At Godot's maximum spot half-angle (90°) the full fov reaches π, where

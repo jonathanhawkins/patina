@@ -25,6 +25,30 @@ pub enum OverlapState {
     Exited,
 }
 
+/// How an [`Area2D`] combines its gravity/damp with lower-priority areas and the
+/// world default, matching Godot's `Area2D.SpaceOverride` enum.
+///
+/// The discriminant order mirrors Godot's enum
+/// (`SPACE_OVERRIDE_DISABLED = 0` … `SPACE_OVERRIDE_REPLACE_COMBINE = 4`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AreaSpaceOverride {
+    /// This area does not affect gravity/damping (`SPACE_OVERRIDE_DISABLED`).
+    #[default]
+    Disabled,
+    /// Add this area's value to whatever was computed so far
+    /// (`SPACE_OVERRIDE_COMBINE`).
+    Combine,
+    /// Add this area's value, then stop processing lower-priority areas and the
+    /// default (`SPACE_OVERRIDE_COMBINE_REPLACE`).
+    CombineReplace,
+    /// Replace everything so far with this area's value, then stop
+    /// (`SPACE_OVERRIDE_REPLACE`).
+    Replace,
+    /// Replace everything so far with this area's value, but keep processing
+    /// lower-priority areas (`SPACE_OVERRIDE_REPLACE_COMBINE`).
+    ReplaceCombine,
+}
+
 /// An overlap event between an area and a body.
 #[derive(Debug, Clone, Copy)]
 pub struct OverlapEvent {
@@ -33,6 +57,22 @@ pub struct OverlapEvent {
     /// The body that entered or exited.
     pub body_id: BodyId,
     /// Whether the body entered or exited.
+    pub state: OverlapState,
+}
+
+/// An overlap event between two areas.
+///
+/// The pair is *directional*: `area_id` is the monitoring area that detected
+/// `other_area_id`. `(A, B)` and `(B, A)` are independent events, matching
+/// Godot's `Area2D.area_entered(area)` / `area_exited(area)` contract where each
+/// area reports the other from its own perspective.
+#[derive(Debug, Clone, Copy)]
+pub struct AreaOverlapEvent {
+    /// The monitoring area that detected the overlap.
+    pub area_id: AreaId,
+    /// The other area that entered or exited `area_id`.
+    pub other_area_id: AreaId,
+    /// Whether the other area entered or exited.
     pub state: OverlapState,
 }
 
@@ -51,6 +91,37 @@ pub struct Area2D {
     pub collision_mask: u32,
     /// Whether this area is actively detecting overlaps.
     pub monitoring: bool,
+
+    /// How this area overrides gravity in the space it occupies
+    /// (Godot `gravity_space_override`). Defaults to
+    /// [`AreaSpaceOverride::Disabled`].
+    pub gravity_space_override: AreaSpaceOverride,
+    /// Gravity magnitude in px/s² (Godot `gravity`). Defaults to `980.0`.
+    pub gravity: f32,
+    /// Directional gravity's unit direction (Godot `gravity_direction`).
+    /// Only used when [`gravity_is_point`](Self::gravity_is_point) is `false`.
+    /// Defaults to `(0, 1)` (down).
+    pub gravity_direction: Vector2,
+    /// Whether gravity points toward [`gravity_point_center`](Self::gravity_point_center)
+    /// instead of a fixed direction (Godot `gravity_point`). Defaults to `false`.
+    pub gravity_is_point: bool,
+    /// World-space attractor point for point gravity
+    /// (Godot `gravity_point_center`, resolved to world space). Defaults to
+    /// [`Vector2::ZERO`].
+    pub gravity_point_center: Vector2,
+    /// Distance (px) at which point gravity equals [`gravity`](Self::gravity)
+    /// (Godot `gravity_point_unit_distance`). `0.0` disables distance falloff.
+    pub gravity_point_unit_distance: f32,
+    /// How this area overrides linear damping in the space it occupies
+    /// (Godot `linear_damp_space_override`). Defaults to
+    /// [`AreaSpaceOverride::Disabled`].
+    pub linear_damp_space_override: AreaSpaceOverride,
+    /// Linear damping coefficient applied to bodies in this area
+    /// (Godot `linear_damp`). Defaults to `0.1`.
+    pub linear_damp: f32,
+    /// Processing priority: higher-priority areas are applied first when
+    /// combining overrides (Godot `priority`). Defaults to `0`.
+    pub priority: i32,
 }
 
 impl Area2D {
@@ -63,6 +134,44 @@ impl Area2D {
             collision_layer: 1,
             collision_mask: 1,
             monitoring: true,
+            gravity_space_override: AreaSpaceOverride::Disabled,
+            gravity: 980.0,
+            gravity_direction: Vector2::new(0.0, 1.0),
+            gravity_is_point: false,
+            gravity_point_center: Vector2::ZERO,
+            gravity_point_unit_distance: 0.0,
+            linear_damp_space_override: AreaSpaceOverride::Disabled,
+            linear_damp: 0.1,
+            priority: 0,
+        }
+    }
+
+    /// Returns this area's gravity contribution at `body_pos`.
+    ///
+    /// For point gravity the result points from `body_pos` toward
+    /// [`gravity_point_center`](Self::gravity_point_center); when
+    /// [`gravity_point_unit_distance`](Self::gravity_point_unit_distance) is
+    /// positive the magnitude falls off with the inverse square of distance
+    /// (matching Godot's `godot_area_2d.cpp`). For directional gravity the
+    /// result is `gravity_direction.normalized() * gravity`.
+    pub fn compute_gravity(&self, body_pos: Vector2) -> Vector2 {
+        if self.gravity_is_point {
+            let to_center = self.gravity_point_center - body_pos;
+            let dist = to_center.length();
+            if dist <= 1e-6 {
+                return Vector2::ZERO;
+            }
+            let dir = to_center / dist;
+            let mut mag = self.gravity;
+            if self.gravity_point_unit_distance > 0.0 {
+                let ratio = self.gravity_point_unit_distance / dist;
+                mag *= ratio * ratio;
+            }
+            dir * mag
+        } else {
+            // `normalized()` returns ZERO for a zero-length direction, so this
+            // naturally guards against a degenerate `gravity_direction`.
+            self.gravity_direction.normalized() * self.gravity
         }
     }
 }
@@ -73,6 +182,8 @@ pub struct AreaStore {
     next_id: u64,
     /// Previous frame overlaps: (area_id, body_id) pairs.
     previous_overlaps: HashSet<(AreaId, BodyId)>,
+    /// Previous frame area-area overlaps: directional (monitor, other) pairs.
+    previous_area_overlaps: HashSet<(AreaId, AreaId)>,
 }
 
 impl AreaStore {
@@ -82,6 +193,7 @@ impl AreaStore {
             areas: HashMap::new(),
             next_id: 1,
             previous_overlaps: HashSet::new(),
+            previous_area_overlaps: HashSet::new(),
         }
     }
 
@@ -191,6 +303,199 @@ impl AreaStore {
         }
 
         self.previous_overlaps = current_overlaps;
+        events
+    }
+
+    /// Returns the monitoring areas overlapping `body` (respecting layer/mask),
+    /// sorted by [`priority`](Area2D::priority) ascending.
+    ///
+    /// Uses the same collision test as [`detect_overlaps`](Self::detect_overlaps)
+    /// (`colliding && depth > 0`) so gravity/damp overrides and enter/exit
+    /// events agree on what "inside" means.
+    fn overlapping_areas_sorted(&self, body: &PhysicsBody2D) -> Vec<&Area2D> {
+        let tf_body = Transform2D::translated(body.position);
+        let mut overlapping: Vec<&Area2D> = self
+            .areas
+            .values()
+            .filter(|area| {
+                if !area.monitoring {
+                    return false;
+                }
+                if (area.collision_mask & body.collision_layer) == 0 {
+                    return false;
+                }
+                let tf_area = Transform2D::translated(area.position);
+                matches!(
+                    collision::test_collision(&area.shape, &tf_area, &body.shape, &tf_body),
+                    Some(r) if r.colliding && r.depth > 0.0
+                )
+            })
+            .collect();
+        overlapping.sort_by(|a, b| a.priority.cmp(&b.priority));
+        overlapping
+    }
+
+    /// Computes the effective gravity acting on `body`, faithful to Godot's
+    /// `GodotBody2D::integrate_forces` area-override loop.
+    ///
+    /// Overlapping monitoring areas are visited from highest to lowest priority;
+    /// each area's [`gravity_space_override`](Area2D::gravity_space_override)
+    /// combines/replaces the accumulated gravity. When no area with a `Replace`
+    /// or `CombineReplace` override stops the loop, `default_gravity` is added.
+    ///
+    /// The returned vector is the total gravity *before* the body's own
+    /// `gravity_scale` is applied (the integrator multiplies by `gravity_scale`,
+    /// as Godot does).
+    pub fn compute_body_gravity(&self, body: &PhysicsBody2D, default_gravity: Vector2) -> Vector2 {
+        let overlapping = self.overlapping_areas_sorted(body);
+        let mut gravity = Vector2::ZERO;
+        let mut stopped = false;
+        // Highest priority first.
+        for area in overlapping.iter().rev() {
+            match area.gravity_space_override {
+                AreaSpaceOverride::Disabled => continue,
+                AreaSpaceOverride::Combine => {
+                    gravity = gravity + area.compute_gravity(body.position);
+                }
+                AreaSpaceOverride::CombineReplace => {
+                    gravity = gravity + area.compute_gravity(body.position);
+                    stopped = true;
+                }
+                AreaSpaceOverride::Replace => {
+                    gravity = area.compute_gravity(body.position);
+                    stopped = true;
+                }
+                AreaSpaceOverride::ReplaceCombine => {
+                    gravity = area.compute_gravity(body.position);
+                }
+            }
+            if stopped {
+                break;
+            }
+        }
+        if !stopped {
+            gravity = gravity + default_gravity;
+        }
+        gravity
+    }
+
+    /// Computes the effective linear damping acting on `body`, mirroring
+    /// [`compute_body_gravity`](Self::compute_body_gravity) but for the scalar
+    /// [`linear_damp_space_override`](Area2D::linear_damp_space_override).
+    ///
+    /// `default_damp` is the baseline damping (typically the body's own
+    /// `linear_damp`) added when no area stops the override chain.
+    pub fn compute_body_damp(&self, body: &PhysicsBody2D, default_damp: f32) -> f32 {
+        let overlapping = self.overlapping_areas_sorted(body);
+        let mut damp = 0.0_f32;
+        let mut stopped = false;
+        for area in overlapping.iter().rev() {
+            match area.linear_damp_space_override {
+                AreaSpaceOverride::Disabled => continue,
+                AreaSpaceOverride::Combine => {
+                    damp += area.linear_damp;
+                }
+                AreaSpaceOverride::CombineReplace => {
+                    damp += area.linear_damp;
+                    stopped = true;
+                }
+                AreaSpaceOverride::Replace => {
+                    damp = area.linear_damp;
+                    stopped = true;
+                }
+                AreaSpaceOverride::ReplaceCombine => {
+                    damp = area.linear_damp;
+                }
+            }
+            if stopped {
+                break;
+            }
+        }
+        if !stopped {
+            damp += default_damp;
+        }
+        damp
+    }
+
+    /// Returns `true` if any area has a non-`Disabled` gravity or linear-damp
+    /// space override, i.e. per-body gravity/damp computation is worth running.
+    pub fn has_space_overrides(&self) -> bool {
+        self.areas.values().any(|a| {
+            a.gravity_space_override != AreaSpaceOverride::Disabled
+                || a.linear_damp_space_override != AreaSpaceOverride::Disabled
+        })
+    }
+
+    /// Detects overlaps between pairs of areas and returns enter/exit events.
+    ///
+    /// The relation is *directional*: for each ordered pair `(A, B)` of distinct
+    /// areas where `A` is monitoring and `A.collision_mask & B.collision_layer`
+    /// is non-zero and their shapes overlap, `(A.id, B.id)` is recorded. New
+    /// pairs emit [`OverlapState::Entered`]; pairs present last frame but not
+    /// this frame emit [`OverlapState::Exited`]. Mirroring
+    /// [`detect_overlaps`](Self::detect_overlaps), pairs whose monitoring area
+    /// stopped monitoring silently drop their previous state instead of firing
+    /// an exit.
+    pub fn detect_area_overlaps(&mut self) -> Vec<AreaOverlapEvent> {
+        let mut current: HashSet<(AreaId, AreaId)> = HashSet::new();
+        let mut events = Vec::new();
+
+        let non_monitoring: HashSet<AreaId> = self
+            .areas
+            .values()
+            .filter(|a| !a.monitoring)
+            .map(|a| a.id)
+            .collect();
+
+        for a in self.areas.values() {
+            if !a.monitoring {
+                continue;
+            }
+            let tf_a = Transform2D::translated(a.position);
+            for b in self.areas.values() {
+                if a.id == b.id {
+                    continue;
+                }
+                if (a.collision_mask & b.collision_layer) == 0 {
+                    continue;
+                }
+                let tf_b = Transform2D::translated(b.position);
+                if let Some(result) =
+                    collision::test_collision(&a.shape, &tf_a, &b.shape, &tf_b)
+                {
+                    if result.colliding && result.depth > 0.0 {
+                        current.insert((a.id, b.id));
+                    }
+                }
+            }
+        }
+
+        // Entered: pairs new this frame.
+        for &pair in &current {
+            if !self.previous_area_overlaps.contains(&pair) {
+                events.push(AreaOverlapEvent {
+                    area_id: pair.0,
+                    other_area_id: pair.1,
+                    state: OverlapState::Entered,
+                });
+            }
+        }
+
+        // Exited: pairs gone this frame, unless the monitor stopped monitoring.
+        for &pair in &self.previous_area_overlaps {
+            if non_monitoring.contains(&pair.0) {
+                continue;
+            }
+            if !current.contains(&pair) {
+                events.push(AreaOverlapEvent {
+                    area_id: pair.0,
+                    other_area_id: pair.1,
+                    state: OverlapState::Exited,
+                });
+            }
+        }
+
+        self.previous_area_overlaps = current;
         events
     }
 }
@@ -313,5 +618,172 @@ mod tests {
 
         let events = store.detect_overlaps(&bodies);
         assert_eq!(events.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // pat-u3l8c.51 — Area2D gravity/damp space overrides + point gravity
+    // -----------------------------------------------------------------------
+
+    /// Adds a large circular area at the origin so any test body overlaps it.
+    fn add_big_area(store: &mut AreaStore) -> AreaId {
+        store.add_area(Area2D::new(
+            AreaId(0),
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 100.0 },
+        ))
+    }
+
+    #[test]
+    fn area_directional_gravity_replace_applies() {
+        let mut store = AreaStore::new();
+        let aid = add_big_area(&mut store);
+        {
+            let area = store.get_area_mut(aid).unwrap();
+            area.gravity_space_override = AreaSpaceOverride::Replace;
+            area.gravity = 500.0;
+            area.gravity_direction = Vector2::new(0.0, -1.0); // up
+        }
+        let body = make_body(1, Vector2::ZERO);
+        let default_gravity = Vector2::new(0.0, 980.0);
+
+        let g = store.compute_body_gravity(&body, default_gravity);
+        // Replace ⇒ the area's gravity only, NOT the default.
+        assert!(g.x.abs() < 1e-4, "x should be 0, got {}", g.x);
+        assert!((g.y + 500.0).abs() < 1e-4, "expected (0,-500), got {:?}", g);
+    }
+
+    #[test]
+    fn area_point_gravity_pulls_toward_center() {
+        let center = Vector2::ZERO;
+        let mut area = Area2D::new(AreaId(1), center, Shape2D::Circle { radius: 100.0 });
+        area.gravity_is_point = true;
+        area.gravity = 100.0;
+        area.gravity_point_center = center;
+        area.gravity_point_unit_distance = 0.0; // no falloff
+
+        // Body to the right of the center is pulled left (toward the center).
+        let g = area.compute_gravity(Vector2::new(10.0, 0.0));
+        assert!(g.x < 0.0, "gravity should point toward center, got {:?}", g);
+        assert!(g.y.abs() < 1e-4);
+        assert!(
+            (g.length() - 100.0).abs() < 1e-4,
+            "no unit distance ⇒ magnitude == gravity, got {}",
+            g.length()
+        );
+
+        // With unit_distance > 0 the magnitude falls off with distance:
+        // closer ⇒ stronger.
+        area.gravity_point_unit_distance = 10.0;
+        let near = area.compute_gravity(Vector2::new(5.0, 0.0)).length();
+        let far = area.compute_gravity(Vector2::new(20.0, 0.0)).length();
+        assert!(near > far, "closer must be stronger: near={near}, far={far}");
+    }
+
+    #[test]
+    fn area_gravity_combine_adds_to_default() {
+        let mut store = AreaStore::new();
+        let aid = add_big_area(&mut store);
+        {
+            let area = store.get_area_mut(aid).unwrap();
+            area.gravity_space_override = AreaSpaceOverride::Combine;
+            area.gravity = 200.0;
+            area.gravity_direction = Vector2::new(0.0, 1.0); // down (same as default)
+        }
+        let body = make_body(1, Vector2::ZERO);
+        let default_gravity = Vector2::new(0.0, 980.0);
+
+        let g = store.compute_body_gravity(&body, default_gravity);
+        // Combine ⇒ area gravity + default: (0,200) + (0,980) = (0,1180).
+        assert!(g.x.abs() < 1e-4);
+        assert!((g.y - 1180.0).abs() < 1e-3, "expected (0,1180), got {:?}", g);
+    }
+
+    #[test]
+    fn area_gravity_priority_replace_wins() {
+        let mut store = AreaStore::new();
+        // Low-priority Combine area pointing down.
+        let low = add_big_area(&mut store);
+        {
+            let a = store.get_area_mut(low).unwrap();
+            a.priority = 0;
+            a.gravity_space_override = AreaSpaceOverride::Combine;
+            a.gravity = 300.0;
+            a.gravity_direction = Vector2::new(0.0, 1.0);
+        }
+        // High-priority Replace area pointing up.
+        let high = add_big_area(&mut store);
+        {
+            let a = store.get_area_mut(high).unwrap();
+            a.priority = 10;
+            a.gravity_space_override = AreaSpaceOverride::Replace;
+            a.gravity = 400.0;
+            a.gravity_direction = Vector2::new(0.0, -1.0);
+        }
+        let body = make_body(1, Vector2::ZERO);
+        let default_gravity = Vector2::new(0.0, 980.0);
+
+        let g = store.compute_body_gravity(&body, default_gravity);
+        // Highest-priority Replace wins and stops the chain: (0,-400) only.
+        assert!(g.x.abs() < 1e-4);
+        assert!(
+            (g.y + 400.0).abs() < 1e-3,
+            "high-priority Replace should win, got {:?}",
+            g
+        );
+    }
+
+    #[test]
+    fn area_linear_damp_override() {
+        let mut store = AreaStore::new();
+        let aid = add_big_area(&mut store);
+        store.get_area_mut(aid).unwrap().linear_damp_space_override = AreaSpaceOverride::Replace;
+        store.get_area_mut(aid).unwrap().linear_damp = 5.0;
+
+        let body = make_body(1, Vector2::ZERO);
+        // Replace ⇒ area damp only; the default is ignored.
+        let d = store.compute_body_damp(&body, 0.1);
+        assert!((d - 5.0).abs() < 1e-4, "expected 5.0, got {d}");
+
+        // Combine ⇒ area damp + default.
+        store.get_area_mut(aid).unwrap().linear_damp_space_override = AreaSpaceOverride::Combine;
+        let d2 = store.compute_body_damp(&body, 0.1);
+        assert!((d2 - 5.1).abs() < 1e-4, "Combine: 5.0 + 0.1 = 5.1, got {d2}");
+    }
+
+    #[test]
+    fn area_area_enter_and_exit() {
+        let mut store = AreaStore::new();
+        // Two overlapping monitoring areas (default layer/mask = 1 ⇒ aligned).
+        let a = store.add_area(Area2D::new(
+            AreaId(0),
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 5.0 },
+        ));
+        let b = store.add_area(Area2D::new(
+            AreaId(0),
+            Vector2::new(3.0, 0.0),
+            Shape2D::Circle { radius: 5.0 },
+        ));
+
+        // Frame 1: both directional pairs (a→b) and (b→a) enter.
+        let events = store.detect_area_overlaps();
+        assert_eq!(events.len(), 2, "both ordered pairs should enter");
+        assert!(events.iter().all(|e| e.state == OverlapState::Entered));
+        assert!(events
+            .iter()
+            .any(|e| e.area_id == a && e.other_area_id == b));
+        assert!(events
+            .iter()
+            .any(|e| e.area_id == b && e.other_area_id == a));
+
+        // Frame 2: no change ⇒ no events.
+        let events = store.detect_area_overlaps();
+        assert!(events.is_empty(), "stable overlap fires no events");
+
+        // Move b away ⇒ both pairs exit.
+        store.get_area_mut(b).unwrap().position = Vector2::new(100.0, 0.0);
+        let events = store.detect_area_overlaps();
+        assert_eq!(events.len(), 2, "both ordered pairs should exit");
+        assert!(events.iter().all(|e| e.state == OverlapState::Exited));
     }
 }

@@ -1332,8 +1332,14 @@ fn shadow_state_key<'a>(
     for l in lights {
         let casts = l.shadow_enabled
             && (matches!(l.light_type, LightType::Directional | LightType::Spot)
+                // Both omni shadow modes cast (default DualParaboloid + Cube),
+                // matching generate_omni_shadow_cubemaps (pat-u3l8c.35).
                 || (l.light_type == LightType::Point
-                    && l.omni_shadow_mode == gdserver3d::light::OmniShadowMode::Cube));
+                    && matches!(
+                        l.omni_shadow_mode,
+                        gdserver3d::light::OmniShadowMode::DualParaboloid
+                            | gdserver3d::light::OmniShadowMode::Cube
+                    )));
         any_shadow |= casts;
         h.write_u64(l.id.0);
         h.write_u8(casts as u8);

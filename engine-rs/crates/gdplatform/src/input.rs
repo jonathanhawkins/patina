@@ -505,6 +505,48 @@ impl Default for InputMap {
 ///
 /// Call `process_event` for each event, query state with `is_key_pressed` etc.,
 /// and call `flush_frame` at the end of each frame to reset per-frame state.
+/// Mouse capture/visibility mode, mirroring Godot's `Input.MouseMode`
+/// (`Input.set_mouse_mode` / `MOUSE_MODE_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MouseMode {
+    /// Cursor visible and free — Godot `MOUSE_MODE_VISIBLE` (0).
+    #[default]
+    Visible,
+    /// Cursor hidden but free — `MOUSE_MODE_HIDDEN` (1).
+    Hidden,
+    /// Cursor hidden and locked to the window center — `MOUSE_MODE_CAPTURED` (2).
+    Captured,
+    /// Cursor visible but confined to the window — `MOUSE_MODE_CONFINED` (3).
+    Confined,
+    /// Cursor hidden and confined — `MOUSE_MODE_CONFINED_HIDDEN` (4).
+    ConfinedHidden,
+}
+
+impl MouseMode {
+    /// Returns the Godot integer value for this mode.
+    pub fn to_godot(self) -> i64 {
+        match self {
+            MouseMode::Visible => 0,
+            MouseMode::Hidden => 1,
+            MouseMode::Captured => 2,
+            MouseMode::Confined => 3,
+            MouseMode::ConfinedHidden => 4,
+        }
+    }
+
+    /// Parses a Godot mouse-mode integer, returning `None` for unknown values.
+    pub fn from_godot(value: i64) -> Option<MouseMode> {
+        Some(match value {
+            0 => MouseMode::Visible,
+            1 => MouseMode::Hidden,
+            2 => MouseMode::Captured,
+            3 => MouseMode::Confined,
+            4 => MouseMode::ConfinedHidden,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InputState {
     keys_pressed: HashSet<Key>,
@@ -532,6 +574,12 @@ pub struct InputState {
     action_strengths: HashMap<String, f32>,
     /// Optional input map for action resolution.
     input_map: Option<InputMap>,
+    /// Current mouse capture/visibility mode (`Input.set_mouse_mode`).
+    mouse_mode: MouseMode,
+    /// Connected joypad device ids (`Input.get_connected_joypads`).
+    connected_joypads: HashSet<u32>,
+    /// Active joypad vibration per device: `(weak, strong, duration_seconds)`.
+    joy_vibration: HashMap<u32, (f32, f32, f32)>,
 }
 
 impl InputState {
@@ -554,6 +602,9 @@ impl InputState {
             actions_just_released: HashSet::new(),
             action_strengths: HashMap::new(),
             input_map: None,
+            mouse_mode: MouseMode::Visible,
+            connected_joypads: HashSet::new(),
+            joy_vibration: HashMap::new(),
         }
     }
 
@@ -783,6 +834,78 @@ impl InputState {
         self.gamepad_buttons_just_released.clear();
         self.actions_just_pressed.clear();
         self.actions_just_released.clear();
+    }
+
+    // -- Mouse mode (Input.set_mouse_mode / get_mouse_mode) -----------------
+
+    /// Sets the mouse capture/visibility mode (`Input.set_mouse_mode`).
+    pub fn set_mouse_mode(&mut self, mode: MouseMode) {
+        self.mouse_mode = mode;
+    }
+
+    /// Returns the current mouse capture/visibility mode (`Input.get_mouse_mode`).
+    pub fn mouse_mode(&self) -> MouseMode {
+        self.mouse_mode
+    }
+
+    // -- Programmatic actions (Input.action_press / action_release) ---------
+
+    /// Presses `action` programmatically with the given strength, mirroring
+    /// Godot's `Input.action_press`. Updates just-pressed edge state so
+    /// `is_action_just_pressed` reports it for this frame.
+    pub fn action_press(&mut self, action: &str, strength: f32) {
+        self.action_strengths.insert(action.to_string(), strength);
+        if self.actions_pressed.insert(action.to_string()) {
+            self.actions_just_pressed.insert(action.to_string());
+        }
+    }
+
+    /// Releases `action` programmatically (Godot's `Input.action_release`),
+    /// updating just-released edge state.
+    pub fn action_release(&mut self, action: &str) {
+        self.action_strengths.insert(action.to_string(), 0.0);
+        if self.actions_pressed.remove(action) {
+            self.actions_just_released.insert(action.to_string());
+        }
+    }
+
+    // -- Joypad enumeration & vibration -------------------------------------
+
+    /// Marks joypad `device` as connected.
+    pub fn connect_joypad(&mut self, device: u32) {
+        self.connected_joypads.insert(device);
+    }
+
+    /// Marks joypad `device` as disconnected and clears any active vibration.
+    pub fn disconnect_joypad(&mut self, device: u32) {
+        self.connected_joypads.remove(&device);
+        self.joy_vibration.remove(&device);
+    }
+
+    /// Returns the connected joypad device ids in ascending order
+    /// (`Input.get_connected_joypads`).
+    pub fn connected_joypads(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.connected_joypads.iter().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Starts a vibration on `device` (`Input.start_joy_vibration`): `weak` and
+    /// `strong` motor magnitudes in `[0,1]`, for `duration` seconds
+    /// (`0` = indefinite).
+    pub fn start_joy_vibration(&mut self, device: u32, weak: f32, strong: f32, duration: f32) {
+        self.joy_vibration.insert(device, (weak, strong, duration));
+    }
+
+    /// Stops any vibration on `device` (`Input.stop_joy_vibration`).
+    pub fn stop_joy_vibration(&mut self, device: u32) {
+        self.joy_vibration.remove(&device);
+    }
+
+    /// Returns the active vibration `(weak, strong, duration)` for `device`,
+    /// or `None` if it is not vibrating.
+    pub fn joy_vibration(&self, device: u32) -> Option<(f32, f32, f32)> {
+        self.joy_vibration.get(&device).copied()
     }
 
     /// Returns `true` if the given key became pressed this frame.
@@ -1330,6 +1453,78 @@ impl InputMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // pat-u3l8c.22: mouse mode, programmatic actions, joypad enumeration and
+    // vibration state (the gdplatform foundation for the Input singleton).
+
+    #[test]
+    fn mouse_mode_defaults_to_visible_and_can_be_set() {
+        let mut input = InputState::new();
+        assert_eq!(input.mouse_mode(), MouseMode::Visible);
+        input.set_mouse_mode(MouseMode::Captured);
+        assert_eq!(input.mouse_mode(), MouseMode::Captured);
+    }
+
+    #[test]
+    fn mouse_mode_godot_int_mapping() {
+        assert_eq!(MouseMode::Visible.to_godot(), 0);
+        assert_eq!(MouseMode::Captured.to_godot(), 2);
+        assert_eq!(MouseMode::ConfinedHidden.to_godot(), 4);
+        assert_eq!(MouseMode::from_godot(2), Some(MouseMode::Captured));
+        assert_eq!(MouseMode::from_godot(4), Some(MouseMode::ConfinedHidden));
+        assert_eq!(MouseMode::from_godot(99), None);
+    }
+
+    #[test]
+    fn action_press_and_release_update_action_state() {
+        let mut input = InputState::new();
+        assert!(!input.is_action_pressed("jump"));
+
+        input.action_press("jump", 1.0);
+        assert!(input.is_action_pressed("jump"));
+        assert!(input.is_action_just_pressed("jump"));
+
+        // Edge state clears next frame; held state persists.
+        input.flush_frame();
+        assert!(input.is_action_pressed("jump"));
+        assert!(!input.is_action_just_pressed("jump"));
+
+        input.action_release("jump");
+        assert!(!input.is_action_pressed("jump"));
+        assert!(input.is_action_just_released("jump"));
+    }
+
+    #[test]
+    fn joypad_connect_enumerate_and_disconnect() {
+        let mut input = InputState::new();
+        assert!(input.connected_joypads().is_empty());
+
+        input.connect_joypad(2);
+        input.connect_joypad(0);
+        // Enumerated in ascending order regardless of connect order.
+        assert_eq!(input.connected_joypads(), vec![0, 2]);
+
+        input.disconnect_joypad(0);
+        assert_eq!(input.connected_joypads(), vec![2]);
+    }
+
+    #[test]
+    fn joy_vibration_start_stop_and_cleared_on_disconnect() {
+        let mut input = InputState::new();
+        assert_eq!(input.joy_vibration(0), None);
+
+        input.start_joy_vibration(0, 0.5, 0.9, 1.0);
+        assert_eq!(input.joy_vibration(0), Some((0.5, 0.9, 1.0)));
+
+        input.stop_joy_vibration(0);
+        assert_eq!(input.joy_vibration(0), None);
+
+        // Disconnecting a device clears any active vibration too.
+        input.connect_joypad(1);
+        input.start_joy_vibration(1, 0.2, 0.2, 0.0);
+        input.disconnect_joypad(1);
+        assert_eq!(input.joy_vibration(1), None);
+    }
 
     #[test]
     fn key_variants_are_distinct() {

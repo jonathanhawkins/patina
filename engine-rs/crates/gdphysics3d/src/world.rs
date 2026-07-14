@@ -9,6 +9,7 @@ use crate::area3d::{Area3D, AreaId3D, AreaStore3D, SpaceOverride};
 use crate::body::BodyType3D;
 use crate::body::{BodyId3D, ContactPoint3D, PhysicsBody3D};
 use crate::collision;
+use crate::joint::{Joint3D, JointId3D};
 use crate::shape::Shape3D;
 
 /// Half the largest bounding-box extent of a shape — a conservative sphere
@@ -89,6 +90,8 @@ pub struct PhysicsWorld3D {
     soft_bodies: Vec<gdphysics2d::softbody3d::SoftBody3D>,
     /// Areas whose space overrides (gravity/damp) are applied during the step.
     area_store: AreaStore3D,
+    /// Joints solved after integration each step (pat-u3l8c.57).
+    joints: Vec<Joint3D>,
 }
 
 impl PhysicsWorld3D {
@@ -100,7 +103,28 @@ impl PhysicsWorld3D {
             gravity: Vector3::new(0.0, -9.8, 0.0),
             soft_bodies: Vec::new(),
             area_store: AreaStore3D::new(),
+            joints: Vec::new(),
         }
+    }
+
+    // -- Joint management (pat-u3l8c.57) -----------------------------------
+
+    /// Adds a joint to be solved each step. Returns its [`JointId3D`] (the id
+    /// the joint was created with).
+    pub fn add_joint(&mut self, joint: Joint3D) -> JointId3D {
+        let id = joint.id();
+        self.joints.push(joint);
+        id
+    }
+
+    /// Number of joints registered in the world.
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
+    /// Returns a reference to a joint by id.
+    pub fn get_joint(&self, id: JointId3D) -> Option<&Joint3D> {
+        self.joints.iter().find(|j| j.id() == id)
     }
 
     // -- Area management ---------------------------------------------------
@@ -261,10 +285,8 @@ impl PhysicsWorld3D {
                 // body's centre of mass for tilted/edge contacts, so the normal
                 // impulse can induce rotation (a tumbling box), unlike a plain
                 // centre-line midpoint.
-                let support_a =
-                    support_point(&shape_a, pos_a, rot_a, result.normal);
-                let support_b =
-                    support_point(&shape_b, pos_b, rot_b, result.normal * -1.0);
+                let support_a = support_point(&shape_a, pos_a, rot_a, result.normal);
+                let support_b = support_point(&shape_b, pos_b, rot_b, result.normal * -1.0);
                 let contact_pos = (support_a + support_b) * 0.5;
                 if let Some(a) = self.bodies.get_mut(&id_a) {
                     a.add_contact(ContactPoint3D {
@@ -317,8 +339,7 @@ impl PhysicsWorld3D {
 
                     // Only resolve if bodies are approaching at the contact.
                     if vel_along_normal > 0.0 {
-                        let restitution =
-                            self.bodies[&id_a].bounce.min(self.bodies[&id_b].bounce);
+                        let restitution = self.bodies[&id_a].bounce.min(self.bodies[&id_b].bounce);
 
                         // Effective mass along the normal including the angular
                         // contribution of each body: 1/m_a + 1/m_b +
@@ -359,9 +380,8 @@ impl PhysicsWorld3D {
                         let tangent_len = tangent.length();
                         if tangent_len > 1e-8 {
                             let tangent_dir = tangent * (1.0 / tangent_len);
-                            let friction_coeff = (self.bodies[&id_a].friction
-                                * self.bodies[&id_b].friction)
-                                .sqrt();
+                            let friction_coeff =
+                                (self.bodies[&id_a].friction * self.bodies[&id_b].friction).sqrt();
                             // Effective mass along the tangent direction.
                             let raxt = ra.cross(tangent_dir);
                             let rbxt = rb.cross(tangent_dir);
@@ -395,6 +415,78 @@ impl PhysicsWorld3D {
                         }
                     }
                 }
+            }
+        }
+
+        // Solve joint constraints (pin position correction + hinge motor)
+        // after integration and contact resolution (pat-u3l8c.57).
+        self.solve_joints(dt);
+    }
+
+    /// Applies the registered joints to their bodies for this step.
+    ///
+    /// Two-phase to satisfy the borrow checker: gather per-body directives from
+    /// the joints (immutable borrows), then apply them to the bodies (mutable).
+    /// Covers PinJoint3D (position correction toward the shared pivot, weighted
+    /// by inverse mass) and the HingeJoint3D motor (drives body B's angular
+    /// velocity about the hinge axis toward the target). Limits, sliders, and
+    /// ConeTwist/6DOF are not yet solved.
+    fn solve_joints(&mut self, dt: f32) {
+        let mut ang_deltas: Vec<(BodyId3D, Vector3)> = Vec::new();
+        let mut pin_moves: Vec<(BodyId3D, Vector3)> = Vec::new();
+
+        for j in &self.joints {
+            if !j.is_enabled() {
+                continue;
+            }
+            match j {
+                Joint3D::Hinge(h) if h.motor_enabled => {
+                    let (_a, b_id) = j.bodies();
+                    if let Some(body) = self.bodies.get(&b_id) {
+                        if body.body_type != BodyType3D::Rigid {
+                            continue;
+                        }
+                        let world_axis = body.rotation.xform(h.axis).normalized();
+                        let current = body.angular_velocity.dot(world_axis);
+                        let impulse = h.compute_motor_impulse(current, dt);
+                        ang_deltas.push((b_id, world_axis * impulse));
+                    }
+                }
+                Joint3D::Pin(p) => {
+                    let (a_id, b_id) = j.bodies();
+                    if let (Some(ba), Some(bb)) = (self.bodies.get(&a_id), self.bodies.get(&b_id)) {
+                        let world_a = ba.position + ba.rotation.xform(p.local_a);
+                        let world_b = bb.position + bb.rotation.xform(p.local_b);
+                        // `error` points from A's pivot to B's pivot.
+                        let error = p.compute_error(world_a, world_b);
+                        let inv_a = ba.inverse_mass();
+                        let inv_b = bb.inverse_mass();
+                        let total = inv_a + inv_b;
+                        if total > 0.0 {
+                            let corr = error * p.bias;
+                            if inv_a > 0.0 {
+                                // A moves toward B.
+                                pin_moves.push((a_id, corr * (inv_a / total)));
+                            }
+                            if inv_b > 0.0 {
+                                // B moves toward A.
+                                pin_moves.push((b_id, corr * (-(inv_b / total))));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (id, dw) in ang_deltas {
+            if let Some(body) = self.bodies.get_mut(&id) {
+                body.angular_velocity = body.angular_velocity + dw;
+            }
+        }
+        for (id, dp) in pin_moves {
+            if let Some(body) = self.bodies.get_mut(&id) {
+                body.position = body.position + dp;
             }
         }
     }
@@ -484,7 +576,8 @@ impl PhysicsWorld3D {
                 continue;
             }
             // Godot layer/mask semantics (symmetric).
-            if (self_mask & other.collision_layer) == 0 && (other.collision_mask & self_layer) == 0 {
+            if (self_mask & other.collision_layer) == 0 && (other.collision_mask & self_layer) == 0
+            {
                 continue;
             }
             let r = r_self + bounding_radius(&other.shape);
@@ -634,6 +727,76 @@ mod tests {
         let removed = world.remove_body(id);
         assert!(removed.is_some());
         assert_eq!(world.body_count(), 0);
+    }
+
+    // -- Joint constraint solving (pat-u3l8c.57) ----------------------------
+
+    fn small_sphere(pos: Vector3, ty: BodyType3D, mass: f32) -> PhysicsBody3D {
+        PhysicsBody3D::new(BodyId3D(0), ty, pos, Shape3D::Sphere { radius: 0.1 }, mass)
+    }
+
+    #[test]
+    fn add_joint_registers_and_is_retrievable() {
+        let mut world = PhysicsWorld3D::new();
+        let a = world.add_body(sphere_body(Vector3::ZERO));
+        let b = world.add_body(sphere_body(Vector3::new(0.0, -3.0, 0.0)));
+        let jid = JointId3D(7);
+        world.add_joint(Joint3D::Pin(crate::joint::PinJoint3D::new(jid, a, b)));
+        assert_eq!(world.joint_count(), 1);
+        assert!(world.get_joint(jid).is_some());
+    }
+
+    #[test]
+    fn pin_joint_pulls_body_toward_shared_pivot() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO; // isolate the constraint from gravity
+        let a = world.add_body(small_sphere(Vector3::ZERO, BodyType3D::Static, 0.0));
+        let b = world.add_body(small_sphere(
+            Vector3::new(2.0, 0.0, 0.0),
+            BodyType3D::Rigid,
+            1.0,
+        ));
+        // Default pin: pivots at both body centres — the constraint wants the
+        // two centres coincident, so the rigid B is pulled toward the static A.
+        world.add_joint(Joint3D::Pin(crate::joint::PinJoint3D::new(
+            JointId3D(1),
+            a,
+            b,
+        )));
+
+        let x0 = world.get_body(b).unwrap().position.x; // 2.0
+        for _ in 0..40 {
+            world.step(1.0 / 60.0);
+        }
+        let x1 = world.get_body(b).unwrap().position.x;
+        assert!(x1 < x0, "pin should pull B toward A (x {x1} < {x0})");
+        assert!(
+            x1 < 1.0,
+            "pin should substantially close the 2.0 gap, got {x1}"
+        );
+    }
+
+    #[test]
+    fn hinge_motor_drives_angular_velocity_toward_target() {
+        let mut world = PhysicsWorld3D::new();
+        world.gravity = Vector3::ZERO;
+        // A far away so it never collides with B; the motor only drives B.
+        let a = world.add_body(sphere_body(Vector3::new(100.0, 0.0, 0.0)));
+        let b = world.add_body(sphere_body(Vector3::ZERO));
+        let hinge = crate::joint::HingeJoint3D::new(JointId3D(1), a, b)
+            .with_axis(Vector3::new(0.0, 1.0, 0.0))
+            .with_motor(5.0, 100.0);
+        world.add_joint(Joint3D::Hinge(hinge));
+
+        for _ in 0..180 {
+            world.step(1.0 / 60.0);
+        }
+        let wy = world.get_body(b).unwrap().angular_velocity.y;
+        assert!(wy > 1.0, "motor should spin B up about +Y, got {wy}");
+        assert!(
+            wy <= 5.05,
+            "motor should not overshoot its target, got {wy}"
+        );
     }
 
     #[test]
@@ -931,7 +1094,10 @@ mod tests {
 
         world.step(1.0 / 60.0);
         let vx = world.get_body(id).unwrap().linear_velocity.x;
-        assert!(vx < 10.0 && vx > 0.0, "area damp should slow but not reverse, vx={vx}");
+        assert!(
+            vx < 10.0 && vx > 0.0,
+            "area damp should slow but not reverse, vx={vx}"
+        );
     }
 
     // -- Continuous collision detection (pat-u3l8c.59) --------------------
@@ -963,7 +1129,10 @@ mod tests {
 
         world.step(1.0 / 60.0);
         let x = world.get_body(id).unwrap().position.x;
-        assert!(x < 0.5, "CCD must stop the bullet at the wall (x={x}), not tunnel to +5");
+        assert!(
+            x < 0.5,
+            "CCD must stop the bullet at the wall (x={x}), not tunnel to +5"
+        );
     }
 
     #[test]
@@ -1056,7 +1225,10 @@ mod tests {
 
         world.step(1.0 / 60.0);
         let av = world.get_body(id).unwrap().angular_velocity;
-        assert!(av.length() < 1e-5, "head-on contact must stay linear, av={av:?}");
+        assert!(
+            av.length() < 1e-5,
+            "head-on contact must stay linear, av={av:?}"
+        );
     }
 
     // -- Collision layer/mask filtering -----------------------------------
@@ -1210,9 +1382,6 @@ mod tests {
         assert_eq!(world.body_count(), 1000);
     }
 }
-
-
-
 
 #[cfg(test)]
 mod softbody_world_tests {
