@@ -292,6 +292,12 @@ pub fn global_constant(name: &str) -> Option<Variant> {
         "MOUSE_BUTTON_MASK_MIDDLE" => 4,
         "MOUSE_BUTTON_MASK_MB_XBUTTON1" => 128,
         "MOUSE_BUTTON_MASK_MB_XBUTTON2" => 256,
+        // -- Input.MouseMode (5) — Input.set_mouse_mode / get_mouse_mode (pat-u3l8c.22) --
+        "MOUSE_MODE_VISIBLE" => 0,
+        "MOUSE_MODE_HIDDEN" => 1,
+        "MOUSE_MODE_CAPTURED" => 2,
+        "MOUSE_MODE_CONFINED" => 3,
+        "MOUSE_MODE_CONFINED_HIDDEN" => 4,
         // -- JoyButton (24) --
         "JOY_BUTTON_INVALID" => -1,
         "JOY_BUTTON_A" => 0,
@@ -637,5 +643,23 @@ pub fn variant_type_code(v: &Variant) -> i64 {
         VariantType::PackedVector2Array => 35,
         VariantType::PackedVector3Array => 36,
         VariantType::PackedColorArray => 37,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // pat-u3l8c.22: Input.MouseMode constants resolve to Godot's integer values.
+    #[test]
+    fn mouse_mode_constants_resolve() {
+        assert_eq!(global_constant("MOUSE_MODE_VISIBLE"), Some(Variant::Int(0)));
+        assert_eq!(global_constant("MOUSE_MODE_HIDDEN"), Some(Variant::Int(1)));
+        assert_eq!(global_constant("MOUSE_MODE_CAPTURED"), Some(Variant::Int(2)));
+        assert_eq!(global_constant("MOUSE_MODE_CONFINED"), Some(Variant::Int(3)));
+        assert_eq!(
+            global_constant("MOUSE_MODE_CONFINED_HIDDEN"),
+            Some(Variant::Int(4))
+        );
     }
 }

@@ -19,15 +19,15 @@
 use std::collections::HashMap;
 
 use crate::audio_server_bridge::AudioServerBridge;
-use crate::physics_server::PhysicsServer;
-use crate::physics_server_3d::PhysicsServer3D;
-use crate::node::NodeId;
 use crate::navigation::{
     NavMesh2D, NavMesh3D, NavPolygon, NavPolygon3D, NavigationAgent2D, NavigationAgent3D,
     NavigationServer2D, NavigationServer3D,
 };
+use crate::node::NodeId;
 use crate::particle::{ParticleEmitter, ParticleSimulator};
 use crate::path3d::{Curve2D, Curve3D, PathFollow2D, PathFollow3D, PathFollowRotation};
+use crate::physics_server::PhysicsServer;
+use crate::physics_server_3d::PhysicsServer3D;
 use crate::scene_tree::SceneTree;
 use crate::scripting::InputSnapshot;
 use crate::trace::{TraceEvent, TraceEventType};
@@ -264,8 +264,7 @@ impl MainLoop {
             if let Some(s) = prop_f32(node.get_property("speed_scale")) {
                 emitter.speed_scale = s;
             }
-            emitter.local_coords =
-                matches!(node.get_property("local_coords"), Variant::Bool(true));
+            emitter.local_coords = matches!(node.get_property("local_coords"), Variant::Bool(true));
             // CPUParticles2D-style process properties drive per-particle motion so
             // emitted particles actually travel across the frame. Godot exposes
             // these on the CPUParticles2D node directly; GPUParticles2D reads them
@@ -307,8 +306,7 @@ impl MainLoop {
                 .or_insert_with(|| ParticleSimulator::new(emitter.clone()));
             // Sync config from the node each frame. Preserve one-shot emitters
             // that have already fired their full burst (don't re-enable them).
-            let one_shot_finished =
-                emitter.one_shot && sim.total_emitted >= emitter.amount as u64;
+            let one_shot_finished = emitter.one_shot && sim.total_emitted >= emitter.amount as u64;
             let emitting = is_emitting && !one_shot_finished;
             // Replace the config wholesale (amount/lifetime/one_shot + material +
             // explosiveness/speed_scale/local_coords) so authored motion params
@@ -334,7 +332,10 @@ impl MainLoop {
                 let positions: Vec<Vector2> = cmds.iter().map(|(p, _, _)| *p).collect();
                 let colors: Vec<Color> = cmds.iter().map(|(_, c, _)| *c).collect();
                 let scales: Vec<f32> = cmds.iter().map(|(_, _, s)| *s).collect();
-                node.set_property("_particle_positions", Variant::PackedVector2Array(positions));
+                node.set_property(
+                    "_particle_positions",
+                    Variant::PackedVector2Array(positions),
+                );
                 node.set_property("_particle_colors", Variant::PackedColorArray(colors));
                 node.set_property("_particle_scales", Variant::PackedFloat32Array(scales));
             }
@@ -888,9 +889,7 @@ impl MainLoop {
             .and_then(|v| v.as_float())
             .unwrap_or(9.8) as f32;
         let dir3 = match settings.get("physics/3d/default_gravity_vector") {
-            Some(SettingsValue::Vector3(x, y, z)) => {
-                Vector3::new(*x as f32, *y as f32, *z as f32)
-            }
+            Some(SettingsValue::Vector3(x, y, z)) => Vector3::new(*x as f32, *y as f32, *z as f32),
             _ => Vector3::new(0.0, -1.0, 0.0),
         };
         self.physics_server_3d
@@ -1067,7 +1066,10 @@ impl MainLoop {
             let script_snap = InputSnapshot {
                 pressed_keys: platform_snap.pressed_key_names().into_iter().collect(),
                 just_pressed_keys: platform_snap.just_pressed_key_names().into_iter().collect(),
-                just_released_keys: platform_snap.just_released_key_names().into_iter().collect(),
+                just_released_keys: platform_snap
+                    .just_released_key_names()
+                    .into_iter()
+                    .collect(),
                 input_map: platform_snap.action_pressed_key_map(),
                 mouse_position: mouse_pos,
                 mouse_buttons_pressed,
@@ -1438,7 +1440,11 @@ mod tests {
 
         // And the live count must be published back onto the node so game code
         // / the editor can observe it.
-        match ml.tree().get_node(pid).map(|n| n.get_property("particle_count")) {
+        match ml
+            .tree()
+            .get_node(pid)
+            .map(|n| n.get_property("particle_count"))
+        {
             Some(gdvariant::Variant::Int(c)) => assert!(
                 c > 0,
                 "particle_count property should be published > 0, got {}",
@@ -1598,7 +1604,11 @@ mod tests {
         let mut ml = MainLoop::new(tree);
         ml.step(1.0 / 60.0);
         let p0 = crate::node2d::get_position(ml.tree(), fid);
-        assert!(p0.length() < 1e-2, "progress 0 should be at curve start, got {:?}", p0);
+        assert!(
+            p0.length() < 1e-2,
+            "progress 0 should be at curve start, got {:?}",
+            p0
+        );
 
         ml.tree_mut()
             .get_node_mut(fid)
@@ -1642,7 +1652,10 @@ mod tests {
         let mut follow = Node::new("Follow", "PathFollow3D");
         follow.set_property("progress", gdvariant::Variant::Float(5.0));
         // rotation_mode defaults to None; seed a distinctive rotation.
-        follow.set_property("rotation", gdvariant::Variant::Vector3(Vector3::new(0.5, 0.5, 0.5)));
+        follow.set_property(
+            "rotation",
+            gdvariant::Variant::Vector3(Vector3::new(0.5, 0.5, 0.5)),
+        );
         let fid = tree.add_child(path_id, follow).unwrap();
 
         let mut ml = MainLoop::new(tree);
@@ -1650,13 +1663,15 @@ mod tests {
 
         // Position still projects onto the curve...
         let p = crate::node3d::get_position(ml.tree(), fid);
-        assert!((p.x - 5.0).abs() < 1e-2, "None mode still positions, got x={}", p.x);
+        assert!(
+            (p.x - 5.0).abs() < 1e-2,
+            "None mode still positions, got x={}",
+            p.x
+        );
         // ...but rotation is left as seeded.
         let rot = crate::node3d::get_rotation(ml.tree(), fid);
         assert!(
-            (rot.x - 0.5).abs() < 1e-6
-                && (rot.y - 0.5).abs() < 1e-6
-                && (rot.z - 0.5).abs() < 1e-6,
+            (rot.x - 0.5).abs() < 1e-6 && (rot.y - 0.5).abs() < 1e-6 && (rot.z - 0.5).abs() < 1e-6,
             "rotation mode None must not modify rotation, got {:?}",
             rot,
         );
@@ -1702,7 +1717,10 @@ mod tests {
         }
 
         let mut agent = Node::new("Agent", "NavigationAgent2D");
-        agent.set_property("position", gdvariant::Variant::Vector2(Vector2::new(0.0, 0.0)));
+        agent.set_property(
+            "position",
+            gdvariant::Variant::Vector2(Vector2::new(0.0, 0.0)),
+        );
         agent.set_property(
             "target_position",
             gdvariant::Variant::Vector2(Vector2::new(100.0, 0.0)),
@@ -1770,7 +1788,11 @@ mod tests {
             next_early,
             next_late,
         );
-        assert!(pos_late.x > 90.0, "agent should reach near the target, x={}", pos_late.x);
+        assert!(
+            pos_late.x > 90.0,
+            "agent should reach near the target, x={}",
+            pos_late.x
+        );
     }
 
     /// pat-nzgdu.10 acceptance: a scene with a NavigationRegion2D + a
@@ -1819,7 +1841,10 @@ mod tests {
         }
 
         let mut agent = Node::new("Agent", "NavigationAgent2D");
-        agent.set_property("position", gdvariant::Variant::Vector2(Vector2::new(0.0, 0.0)));
+        agent.set_property(
+            "position",
+            gdvariant::Variant::Vector2(Vector2::new(0.0, 0.0)),
+        );
         agent.set_property(
             "target_position",
             gdvariant::Variant::Vector2(Vector2::new(100.0, 0.0)),
@@ -1871,7 +1896,11 @@ mod tests {
         );
         // The agent reached near the target.
         let pos = crate::node2d::get_position(ml.tree(), aid);
-        assert!(pos.x > 90.0, "agent should reach near the target, x={}", pos.x);
+        assert!(
+            pos.x > 90.0,
+            "agent should reach near the target, x={}",
+            pos.x
+        );
         // Guidance advanced monotonically toward +X (never regressed).
         assert!(samples.len() >= 2, "expected multiple guidance samples");
         for w in samples.windows(2) {
@@ -1971,7 +2000,10 @@ mod tests {
         // RayCast2D at the origin pointing right, long enough to reach the wall.
         let mut ray = Node::new("Ray", "RayCast2D");
         ray.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
-        ray.set_property("target_position", Variant::Vector2(Vector2::new(150.0, 0.0)));
+        ray.set_property(
+            "target_position",
+            Variant::Vector2(Vector2::new(150.0, 0.0)),
+        );
         let ray_id = tree.add_child(root, ray).unwrap();
 
         let mut ml = MainLoop::new(tree);
@@ -1987,9 +2019,17 @@ mod tests {
             "RayCast2D should hit the wall, got {:?}",
             colliding,
         );
-        match ml.tree().get_node(ray_id).map(|n| n.get_property("collider")) {
+        match ml
+            .tree()
+            .get_node(ray_id)
+            .map(|n| n.get_property("collider"))
+        {
             Some(Variant::Int(raw)) => {
-                assert_eq!(raw as u64, wall_id.raw(), "collider should be the wall node")
+                assert_eq!(
+                    raw as u64,
+                    wall_id.raw(),
+                    "collider should be the wall node"
+                )
             }
             other => panic!("expected collider Int, got {:?}", other),
         }
@@ -2072,7 +2112,10 @@ mod tests {
             ml.step(1.0 / 60.0);
         }
         let count = fired.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(count >= 15, "repeating timer should fire ~20 times, got {count}");
+        assert!(
+            count >= 15,
+            "repeating timer should fire ~20 times, got {count}"
+        );
     }
 
     /// App-level: a paused Timer never fires; without autostart it stays
@@ -2143,7 +2186,12 @@ mod tests {
         let mut ml = MainLoop::new(tree);
         ml.step(1.0 / 60.0);
 
-        let time_left = match ml.tree().get_node(timer_id).unwrap().get_property("time_left") {
+        let time_left = match ml
+            .tree()
+            .get_node(timer_id)
+            .unwrap()
+            .get_property("time_left")
+        {
             gdvariant::Variant::Float(f) => f,
             other => panic!("expected Float time_left, got {other:?}"),
         };
@@ -3632,7 +3680,10 @@ mod tests {
 
         // Grounded: floor snap keeps the body glued to the floor top (center
         // y≈2) rather than sinking or drifting off.
-        assert!(on_floor, "body should ride the floor, got is_on_floor=false");
+        assert!(
+            on_floor,
+            "body should ride the floor, got is_on_floor=false"
+        );
         assert!(
             (pos.y - 2.0).abs() < 1.0,
             "body should rest on floor top (center y≈2), got y={:.2}",

@@ -889,8 +889,7 @@ impl PhysicsServer {
             ) as f32;
             character.floor_snap_length =
                 float_prop(tree, node_id, "floor_snap_length", 0.0) as f32;
-            character.floor_stop_on_slope =
-                bool_prop(tree, node_id, "floor_stop_on_slope", false);
+            character.floor_stop_on_slope = bool_prop(tree, node_id, "floor_stop_on_slope", false);
             character.floor_constant_speed =
                 bool_prop(tree, node_id, "floor_constant_speed", false);
             character.floor_block_on_wall = bool_prop(tree, node_id, "floor_block_on_wall", true);
@@ -1718,7 +1717,11 @@ mod tests {
         // Frame 1: bodies overlap → contact entered (no exit yet).
         server.step_physics(0.0);
         server.process_body_contact_signals(&mut tree);
-        assert_eq!(exited.load(Ordering::SeqCst), 0, "no exit while overlapping");
+        assert_eq!(
+            exited.load(Ordering::SeqCst),
+            0,
+            "no exit while overlapping"
+        );
 
         // Move B far away so the pair separates.
         if let Some(bid) = server.body_for_node(b_id) {
@@ -1974,7 +1977,10 @@ mod tests {
         area.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
         area.set_property("gravity_space_override", Variant::Int(3)); // Replace
         area.set_property("gravity", Variant::Float(980.0));
-        area.set_property("gravity_direction", Variant::Vector2(Vector2::new(0.0, -1.0)));
+        area.set_property(
+            "gravity_direction",
+            Variant::Vector2(Vector2::new(0.0, -1.0)),
+        );
         let area_id = tree.add_child(root, area).unwrap();
         let mut asx = Node::new("Shape", "CollisionShape2D");
         asx.set_property("radius", Variant::Float(500.0));
@@ -2043,7 +2049,10 @@ mod tests {
             .position
             .y;
         // 30 steps of default gravity ⇒ the body should have fallen well past 0.
-        assert!(y > 1.0, "disabled-override area must not stop the fall, got {y}");
+        assert!(
+            y > 1.0,
+            "disabled-override area must not stop the fall, got {y}"
+        );
     }
 
     #[test]

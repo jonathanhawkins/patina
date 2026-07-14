@@ -49,7 +49,6 @@ pub struct DeferredCall {
     pub args: Vec<Variant>,
 }
 
-
 /// One-shot timer created by [`SceneTree::create_timer`] (Godot SceneTreeTimer).
 #[derive(Debug, Clone)]
 pub struct SceneTreeTimer {
@@ -325,10 +324,7 @@ impl SceneTree {
         let timer_ids: Vec<NodeId> = self
             .all_nodes_in_tree_order()
             .into_iter()
-            .filter(|&id| {
-                self.get_node(id)
-                    .is_some_and(|n| n.class_name() == "Timer")
-            })
+            .filter(|&id| self.get_node(id).is_some_and(|n| n.class_name() == "Timer"))
             .collect();
 
         for id in timer_ids {
@@ -1415,7 +1411,8 @@ impl SceneTree {
             let base_node = if root_node.is_empty() || root_node == "." {
                 node_id
             } else {
-                self.get_node_or_null(node_id, &root_node).unwrap_or(node_id)
+                self.get_node_or_null(node_id, &root_node)
+                    .unwrap_or(node_id)
             };
 
             // Apply ordinary property tracks to their resolved target nodes,
@@ -2458,7 +2455,9 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
-        let child = tree.add_child(parent, Node::new("Child", "Node2D")).unwrap();
+        let child = tree
+            .add_child(parent, Node::new("Child", "Node2D"))
+            .unwrap();
         let grandchild = tree
             .add_child(child, Node::new("GrandChild", "Node2D"))
             .unwrap();
@@ -2505,8 +2504,12 @@ mod tests {
         // duplicate unique name within the same owner is flagged as a warning.
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let a = tree.add_child(root, Node::new("ContainerA", "Node")).unwrap();
-        let b = tree.add_child(root, Node::new("ContainerB", "Node")).unwrap();
+        let a = tree
+            .add_child(root, Node::new("ContainerA", "Node"))
+            .unwrap();
+        let b = tree
+            .add_child(root, Node::new("ContainerB", "Node"))
+            .unwrap();
         let foo1 = tree.add_child(a, Node::new("Foo", "Node")).unwrap();
         let foo2 = tree.add_child(b, Node::new("Foo", "Node")).unwrap();
         // Scene nodes are owned by the scene root (the unique-name scope).
@@ -2946,7 +2949,12 @@ mod tests {
         fn process_animations_dispatches_method_track() {
             let (mut tree, id) = tree_with_node();
             let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-            tree.attach_script(id, Box::new(RecordingScript { calls: calls.clone() }));
+            tree.attach_script(
+                id,
+                Box::new(RecordingScript {
+                    calls: calls.clone(),
+                }),
+            );
 
             let mut player = AnimationPlayer::new();
             let mut anim = Animation::new("fx", 2.0);
@@ -3760,9 +3768,7 @@ mod tests {
                         flags: gdscript_interop::bindings::MethodFlags::NORMAL,
                     }]
                 }
-                fn list_properties(
-                    &self,
-                ) -> Vec<gdscript_interop::bindings::ScriptPropertyInfo> {
+                fn list_properties(&self) -> Vec<gdscript_interop::bindings::ScriptPropertyInfo> {
                     Vec::new()
                 }
                 fn get_script_name(&self) -> &str {
@@ -4086,7 +4092,9 @@ mod tests {
         tree.process_timers(0.2);
         let signals = tree.take_timeout_signals();
         assert!(
-            signals.iter().any(|s| s == "timeout" || s.starts_with("timeout_")),
+            signals
+                .iter()
+                .any(|s| s == "timeout" || s.starts_with("timeout_")),
             "expected timeout signal, got {signals:?}"
         );
         assert!(tree.get_timer(id).is_none(), "timer drained after fire");
@@ -4112,7 +4120,9 @@ mod multiplayer_tests {
             name: &str,
             args: &[Variant],
         ) -> Result<Variant, gdscript_interop::bindings::ScriptError> {
-            self.calls.borrow_mut().push((name.to_string(), args.to_vec()));
+            self.calls
+                .borrow_mut()
+                .push((name.to_string(), args.to_vec()));
             Ok(Variant::Nil)
         }
         fn get_property(&self, _name: &str) -> Option<Variant> {
@@ -4167,7 +4177,12 @@ mod multiplayer_tests {
         let root = tree.root_id();
         let player = tree.add_child(root, Node::new("Player", "Node")).unwrap();
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        tree.attach_script(player, Box::new(RecordingScript { calls: calls.clone() }));
+        tree.attach_script(
+            player,
+            Box::new(RecordingScript {
+                calls: calls.clone(),
+            }),
+        );
         tree.get_multiplayer_mut()
             .set_multiplayer_peer(Box::new(client_peer));
 

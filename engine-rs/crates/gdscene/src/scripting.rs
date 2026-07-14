@@ -186,7 +186,12 @@ impl ScriptInstance for GDScriptNodeInstance {
         // that override `_notification` receive it (pat-nzgdu.13). The caller
         // (SceneTree::notify_script) has already installed scene access, so a
         // `_notification` body can call get_node/emit_signal like any callback.
-        if self.instance.class_def.methods.contains_key("_notification") {
+        if self
+            .instance
+            .class_def
+            .methods
+            .contains_key("_notification")
+        {
             let _ = self.interpreter.call_instance_method(
                 &mut self.instance,
                 "_notification",
@@ -619,8 +624,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("patina_u3l8c12_{}_{}.gd", std::process::id(), n));
+        let path =
+            std::env::temp_dir().join(format!("patina_u3l8c12_{}_{}.gd", std::process::id(), n));
         std::fs::write(&path, "extends Node2D\nvar hp = 7\n").unwrap();
         // Absolute path (no `res://`) is read directly, avoiding CWD coupling.
         let path_str = path.to_str().unwrap().to_string();

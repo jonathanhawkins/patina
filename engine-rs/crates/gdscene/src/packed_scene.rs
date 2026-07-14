@@ -148,9 +148,7 @@ impl PackedScene {
                             tmpl.properties.insert(key, value);
                         }
                         Err(_) => {
-                            tracing::warn!(
-                                "skipping unparseable multi-line value for key '{key}'"
-                            );
+                            tracing::warn!("skipping unparseable multi-line value for key '{key}'");
                         }
                     }
                 }
@@ -358,16 +356,19 @@ impl PackedScene {
             }
         };
         for tmpl in &mut templates {
-            let mat_id = sub_ref_id(tmpl.properties.get("surface_material_override/0")).or_else(|| {
-                sub_ref_id(tmpl.properties.get("mesh"))
-                    .and_then(|mesh_id| sub_resource_props.get(&mesh_id))
-                    .and_then(|p| sub_ref_id(p.get("material")))
-            });
+            let mat_id =
+                sub_ref_id(tmpl.properties.get("surface_material_override/0")).or_else(|| {
+                    sub_ref_id(tmpl.properties.get("mesh"))
+                        .and_then(|mesh_id| sub_resource_props.get(&mesh_id))
+                        .and_then(|p| sub_ref_id(p.get("material")))
+                });
             if let Some(mat_id) = mat_id {
-                if let Some(Variant::Color(c)) =
-                    sub_resource_props.get(&mat_id).and_then(|p| p.get("albedo_color"))
+                if let Some(Variant::Color(c)) = sub_resource_props
+                    .get(&mat_id)
+                    .and_then(|p| p.get("albedo_color"))
                 {
-                    tmpl.properties.insert("albedo_color".into(), Variant::Color(*c));
+                    tmpl.properties
+                        .insert("albedo_color".into(), Variant::Color(*c));
                 }
             }
         }
@@ -399,8 +400,9 @@ impl PackedScene {
             // Resolve the shader source: inline Shader sub-resource `code`, or an
             // external `.gdshader` path via ext_resource.
             if let Some(shader_id) = sub_ref_id(smat_props.get("shader")) {
-                if let Some(Variant::String(code)) =
-                    sub_resource_props.get(&shader_id).and_then(|p| p.get("code"))
+                if let Some(Variant::String(code)) = sub_resource_props
+                    .get(&shader_id)
+                    .and_then(|p| p.get("code"))
                 {
                     let shader = gdresource::importers::shader_from_source(code, "");
                     tmpl.properties
@@ -1272,7 +1274,10 @@ mesh = SubResource("Sphere_1")
 "#;
         let scene = PackedScene::from_tscn(tscn).unwrap();
         let nodes = scene.instance().unwrap();
-        let ball = nodes.iter().find(|n| n.name() == "Ball").expect("Ball node");
+        let ball = nodes
+            .iter()
+            .find(|n| n.name() == "Ball")
+            .expect("Ball node");
         // `mesh = SubResource("id")` keeps its raw value; the resolved primitive
         // marker goes to the `__viewport_mesh__` companion for the viewport.
         assert_eq!(
@@ -1306,16 +1311,30 @@ shape = SubResource("Sph_1")
         let scene = PackedScene::from_tscn(tscn).unwrap();
         let nodes = scene.instance().unwrap();
         let vp = |n: &str| -> Variant {
-            nodes.iter().find(|x| x.name() == n).unwrap().get_property("__viewport_shape__")
+            nodes
+                .iter()
+                .find(|x| x.name() == n)
+                .unwrap()
+                .get_property("__viewport_shape__")
         };
         let raw = |n: &str| -> Variant {
-            nodes.iter().find(|x| x.name() == n).unwrap().get_property("shape")
+            nodes
+                .iter()
+                .find(|x| x.name() == n)
+                .unwrap()
+                .get_property("shape")
         };
         // `shape = SubResource("id")` keeps its raw value; the resolved shape
         // marker (type + real extents) goes to the `__viewport_shape__` companion.
         assert_eq!(raw("BoxCol"), Variant::String("SubResource:Box_1".into()));
-        assert_eq!(vp("BoxCol"), Variant::String("shape:BoxShape3D|2,1,3".into()));
-        assert_eq!(vp("SphCol"), Variant::String("shape:SphereShape3D|0.75".into()));
+        assert_eq!(
+            vp("BoxCol"),
+            Variant::String("shape:BoxShape3D|2,1,3".into())
+        );
+        assert_eq!(
+            vp("SphCol"),
+            Variant::String("shape:SphereShape3D|0.75".into())
+        );
     }
 
     #[test]

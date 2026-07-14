@@ -474,7 +474,8 @@ impl AStarGrid2D {
         self.region_pos = position;
         self.region_size = size;
         // Drop overrides that fell outside the new region.
-        self.cells.retain(|id, _| Self::in_region(position, size, *id));
+        self.cells
+            .retain(|id, _| Self::in_region(position, size, *id));
     }
 
     pub fn get_region(&self) -> (Vector2i, Vector2i) {

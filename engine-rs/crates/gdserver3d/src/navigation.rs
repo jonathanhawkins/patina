@@ -229,6 +229,20 @@ pub fn bake_navigation_mesh(
             continue; // Too steep.
         }
 
+        // Narrow-area filter (agent-radius offset, pat-u3l8c.65): a triangle
+        // whose inscribed circle is smaller than the agent radius cannot fit the
+        // agent, so it is excluded from the walkable mesh. `len` == 2 * area, and
+        // the inradius == area / semiperimeter == len / perimeter.
+        if params.agent_radius > 0.0 {
+            let ab = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2) + (b.z - a.z).powi(2)).sqrt();
+            let bc = ((c.x - b.x).powi(2) + (c.y - b.y).powi(2) + (c.z - b.z).powi(2)).sqrt();
+            let ca = ((a.x - c.x).powi(2) + (a.y - c.y).powi(2) + (a.z - c.z).powi(2)).sqrt();
+            let perimeter = ab + bc + ca;
+            if perimeter > 1e-6 && len / perimeter < params.agent_radius {
+                continue; // Too narrow for the agent.
+            }
+        }
+
         // Add vertices and polygon.
         let base_idx = vertices.len() as u32;
         vertices.push(a);
@@ -689,6 +703,43 @@ mod tests {
         let region = NavigationRegion3D::new();
         assert!(!region.get_navigation_layer_value(0));
         assert!(!region.get_navigation_layer_value(33));
+    }
+
+    #[test]
+    fn bake_excludes_narrow_triangles_by_agent_radius() {
+        let mut params = NavigationMesh3D::new();
+        params.agent_radius = 0.5;
+
+        // A wide flat triangle (inradius ~1.24 > 0.5) is walkable.
+        let mut wide = BakeSourceGeometry3D::new();
+        wide.add_triangle(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 4.0),
+        );
+        assert_eq!(bake_navigation_mesh(&params, &wide).polygon_count(), 1);
+
+        // A thin sliver (inradius ~0.1 < 0.5) is too narrow for the agent.
+        let mut thin = BakeSourceGeometry3D::new();
+        thin.add_triangle(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::new(5.0, 0.0, 0.2),
+        );
+        assert_eq!(bake_navigation_mesh(&params, &thin).polygon_count(), 0);
+    }
+
+    #[test]
+    fn bake_zero_agent_radius_keeps_thin_triangles() {
+        let mut params = NavigationMesh3D::new();
+        params.agent_radius = 0.0; // disables the narrow-area filter
+        let mut thin = BakeSourceGeometry3D::new();
+        thin.add_triangle(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::new(5.0, 0.0, 0.2),
+        );
+        assert_eq!(bake_navigation_mesh(&params, &thin).polygon_count(), 1);
     }
 
     #[test]

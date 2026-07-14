@@ -130,7 +130,15 @@ fn render_node(
     } else {
         // Non-control node: pass the parent rect straight through to children.
         for child in children_of(tree, node_id) {
-            render_node(tree, child, theme, viewport, parent_global, parent_size, order);
+            render_node(
+                tree,
+                child,
+                theme,
+                viewport,
+                parent_global,
+                parent_size,
+                order,
+            );
         }
     }
 }
@@ -383,7 +391,9 @@ fn draw_control(
         "Label" => {
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
-                let font_color = theme.get_color("Label", "font_color").unwrap_or(Color::WHITE);
+                let font_color = theme
+                    .get_color("Label", "font_color")
+                    .unwrap_or(Color::WHITE);
                 let font_size = theme.get_font_size("Label", "font_size").unwrap_or(16);
                 let scale = text_scale(font_size);
                 out.push(DrawCommand::DrawString {
@@ -459,12 +469,8 @@ fn draw_control(
                 0.0
             };
             if ratio > 0.0 {
-                let fill = stylebox_bg(
-                    theme,
-                    "ProgressBar",
-                    "fill",
-                    Color::new(0.4, 0.6, 0.9, 1.0),
-                );
+                let fill =
+                    stylebox_bg(theme, "ProgressBar", "fill", Color::new(0.4, 0.6, 0.9, 1.0));
                 let fill_rect = Rect2::new(
                     rect.position,
                     Vector2::new(rect.size.x * ratio as f32, rect.size.y),
@@ -583,8 +589,12 @@ fn draw_control(
         }
         "TabContainer" => {
             // Panel background behind the content area, plus a header strip.
-            let panel_bg =
-                stylebox_bg(theme, "TabContainer", "panel", Color::new(0.15, 0.15, 0.15, 1.0));
+            let panel_bg = stylebox_bg(
+                theme,
+                "TabContainer",
+                "panel",
+                Color::new(0.15, 0.15, 0.15, 1.0),
+            );
             out.push(DrawCommand::DrawRect {
                 rect,
                 color: panel_bg,
@@ -684,7 +694,10 @@ mod tests {
 
         let cmds = &vp.get_sorted_items()[0].commands;
         assert_eq!(cmds.len(), 2, "button = bg rect + text");
-        assert!(matches!(cmds[0], DrawCommand::DrawRect { filled: true, .. }));
+        assert!(matches!(
+            cmds[0],
+            DrawCommand::DrawRect { filled: true, .. }
+        ));
         match &cmds[1] {
             DrawCommand::DrawString { text, position, .. } => {
                 assert_eq!(text, "OK");
@@ -780,7 +793,9 @@ mod tests {
         let rects: Vec<Rect2> = cmds
             .iter()
             .filter_map(|c| match c {
-                DrawCommand::DrawRect { rect, filled: true, .. } => Some(*rect),
+                DrawCommand::DrawRect {
+                    rect, filled: true, ..
+                } => Some(*rect),
                 _ => None,
             })
             .collect();
@@ -882,7 +897,13 @@ mod tests {
 
         let mut vp = Viewport::new(256, 256, Color::BLACK);
         let theme = Theme::default_theme();
-        render_control_tree(&mut tree, panel, &theme, &mut vp, Vector2::new(256.0, 256.0));
+        render_control_tree(
+            &mut tree,
+            panel,
+            &theme,
+            &mut vp,
+            Vector2::new(256.0, 256.0),
+        );
 
         let items = vp.get_sorted_items();
         assert_eq!(items.len(), 2, "panel + button");

@@ -102,8 +102,7 @@ impl StyleBoxFlat {
             push_rounded(&mut out, sr, r + s, self.shadow_color);
         }
 
-        let has_border =
-            self.border_width.iter().any(|w| *w > 0.0) && self.border_color.a > 0.0;
+        let has_border = self.border_width.iter().any(|w| *w > 0.0) && self.border_color.a > 0.0;
         if has_border {
             // Border layer, then the background inset by the border widths.
             push_rounded(&mut out, rect, r, self.border_color);
@@ -302,7 +301,10 @@ fn push_rounded(out: &mut Vec<DrawCommand>, rect: Rect2, radius: f32, color: Col
     if rect.size.x <= 0.0 || rect.size.y <= 0.0 || color.a <= 0.0 {
         return;
     }
-    let r = radius.min(rect.size.x * 0.5).min(rect.size.y * 0.5).max(0.0);
+    let r = radius
+        .min(rect.size.x * 0.5)
+        .min(rect.size.y * 0.5)
+        .max(0.0);
     if r <= 0.0 {
         out.push(DrawCommand::DrawRect {
             rect,
@@ -498,7 +500,10 @@ fn extract_attr(line: &str, name: &str) -> Option<String> {
 
 fn parse_tscn_value(s: &str) -> Option<Variant> {
     if let Some(inner) = s.strip_prefix("Color(").and_then(|x| x.strip_suffix(')')) {
-        let n: Vec<f32> = inner.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let n: Vec<f32> = inner
+            .split(',')
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
         return match n.len() {
             4 => Some(Variant::Color(Color::new(n[0], n[1], n[2], n[3]))),
             3 => Some(Variant::Color(Color::new(n[0], n[1], n[2], 1.0))),
@@ -506,7 +511,10 @@ fn parse_tscn_value(s: &str) -> Option<Variant> {
         };
     }
     if let Some(inner) = s.strip_prefix("Vector2(").and_then(|x| x.strip_suffix(')')) {
-        let n: Vec<f32> = inner.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let n: Vec<f32> = inner
+            .split(',')
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
         return if n.len() == 2 {
             Some(Variant::Vector2(Vector2::new(n[0], n[1])))
         } else {
@@ -587,7 +595,10 @@ mod tests {
         });
         let cmds = sb.draw(Rect2::new(Vector2::ZERO, Vector2::new(50.0, 40.0)));
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(cmds[0], DrawCommand::DrawRect { filled: true, .. }));
+        assert!(matches!(
+            cmds[0],
+            DrawCommand::DrawRect { filled: true, .. }
+        ));
     }
 
     #[test]
@@ -599,7 +610,10 @@ mod tests {
             corner_radius: [8.0; 4],
             ..Default::default()
         });
-        let cmds = sb.draw(Rect2::new(Vector2::new(10.0, 10.0), Vector2::new(80.0, 60.0)));
+        let cmds = sb.draw(Rect2::new(
+            Vector2::new(10.0, 10.0),
+            Vector2::new(80.0, 60.0),
+        ));
         // border layer (2 bars + 4 discs) + bg layer (2 bars + 4 discs) = 12.
         assert_eq!(cmds.len(), 12);
         let circles = cmds
@@ -634,7 +648,10 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             DrawCommand::DrawRect { rect, .. } => {
-                assert!((rect.size.y - 3.0).abs() < 1e-5, "horizontal line thickness");
+                assert!(
+                    (rect.size.y - 3.0).abs() < 1e-5,
+                    "horizontal line thickness"
+                );
             }
             other => panic!("expected DrawRect, got {other:?}"),
         }

@@ -182,7 +182,14 @@ pub fn process(tree: &mut SceneTree, physics: &PhysicsServer3D, node_id: NodeId)
             let margin = get_margin(tree, node_id);
             let retracted = (distance - margin).clamp(0.0, spring_length);
             let collider_node = physics.node_for_body(hit.body_id);
-            store_hit(tree, node_id, retracted, collider_node, hit.point, hit.normal);
+            store_hit(
+                tree,
+                node_id,
+                retracted,
+                collider_node,
+                hit.point,
+                hit.normal,
+            );
             true
         }
         None => {
@@ -263,10 +270,11 @@ pub fn is_colliding(tree: &SceneTree, node_id: NodeId) -> bool {
 
 /// Returns the scene node that was hit, if any.
 pub fn get_collider(tree: &SceneTree, node_id: NodeId) -> Option<NodeId> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("_hit_collider") {
-        Variant::ObjectId(id) => Some(NodeId::from_object_id(id)),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("_hit_collider") {
+            Variant::ObjectId(id) => Some(NodeId::from_object_id(id)),
+            _ => None,
+        })
 }
 
 /// Returns the hit point in world space (zero if no hit).
@@ -367,7 +375,11 @@ mod tests {
         assert!(!process(&mut tree, &physics2, arm_id));
         assert!(!is_colliding(&tree, arm_id));
         let length = get_hit_length(&tree, arm_id);
-        assert!((length - 10.0).abs() < 1e-4, "length should be full spring length, got {}", length);
+        assert!(
+            (length - 10.0).abs() < 1e-4,
+            "length should be full spring length, got {}",
+            length
+        );
     }
 
     #[test]

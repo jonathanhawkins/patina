@@ -52,7 +52,11 @@ fn basis_determinant_2d(t: &Transform2D) -> f32 {
 }
 
 fn transform2d_scale(t: &Transform2D) -> Vector2 {
-    let sign = if basis_determinant_2d(t) < 0.0 { -1.0 } else { 1.0 };
+    let sign = if basis_determinant_2d(t) < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
     Vector2::new(t.x.length(), sign * t.y.length())
 }
 
@@ -60,7 +64,11 @@ fn transform2d_skew(t: &Transform2D) -> f32 {
     if t.x.length_squared() == 0.0 || t.y.length_squared() == 0.0 {
         return 0.0;
     }
-    let sign = if basis_determinant_2d(t) < 0.0 { -1.0 } else { 1.0 };
+    let sign = if basis_determinant_2d(t) < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
     let xn = t.x.normalized();
     let yn = t.y.normalized();
     let dot = xn.dot(Vector2::new(sign * yn.x, sign * yn.y));

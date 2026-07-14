@@ -67,7 +67,13 @@ pub fn build_canvas_viewport(
 ) -> Viewport {
     let mut viewport = Viewport::new(width, height, clear_color);
     let mut next_id: u64 = 1;
-    visit(tree, tree.root_id(), &mut viewport, &mut next_id, texture_size);
+    visit(
+        tree,
+        tree.root_id(),
+        &mut viewport,
+        &mut next_id,
+        texture_size,
+    );
     viewport
 }
 
@@ -360,12 +366,18 @@ z_index = 1
         // reference; register a solid-green texture under that exact key so the
         // renderer resolves it — no hardcoding of the parser's ref format.
         let sprite_id = find_by_name(&tree, "Sprite").expect("sprite node");
-        assert_eq!(tree.get_node(sprite_id).map(|n| n.parent()), Some(Some(root)));
+        assert_eq!(
+            tree.get_node(sprite_id).map(|n| n.parent()),
+            Some(Some(root))
+        );
         let tex_ref = node2d::get_texture_path(&tree, sprite_id).expect("sprite texture ref");
 
         let size_of = |_p: &str| -> Option<Vector2> { Some(Vector2::new(24.0, 24.0)) };
         let mut renderer = SoftwareRenderer::new();
-        renderer.register_texture(&tex_ref, Texture2D::solid(24, 24, Color::new(0.0, 1.0, 0.0, 1.0)));
+        renderer.register_texture(
+            &tex_ref,
+            Texture2D::solid(24, 24, Color::new(0.0, 1.0, 0.0, 1.0)),
+        );
 
         let frame = render_scene_to_frame(&tree, &mut renderer, 256, 256, Color::BLACK, &size_of);
         assert_eq!(frame.width, 256);
@@ -420,11 +432,17 @@ color = Color(1, 0, 0, 1)
 
         let w = 128usize;
         let visible = render_scene_to_frame(&tree, &mut renderer, 128, 128, Color::BLACK, &size_of);
-        assert!(visible.pixels[60 * w + 60].r > 0.5, "rect should be visible before hiding");
+        assert!(
+            visible.pixels[60 * w + 60].r > 0.5,
+            "rect should be visible before hiding"
+        );
 
         let rect_id = find_by_name(&tree, "Rect").expect("rect node");
         node2d::set_visible(&mut tree, rect_id, false);
         let hidden = render_scene_to_frame(&tree, &mut renderer, 128, 128, Color::BLACK, &size_of);
-        assert!(hidden.pixels[60 * w + 60].r < 0.5, "hidden rect must not be drawn");
+        assert!(
+            hidden.pixels[60 * w + 60].r < 0.5,
+            "hidden rect must not be drawn"
+        );
     }
 }

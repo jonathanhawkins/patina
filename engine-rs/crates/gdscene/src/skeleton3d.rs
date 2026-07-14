@@ -92,12 +92,11 @@ pub fn find_bone(tree: &SceneTree, node_id: NodeId, name: &str) -> Option<usize>
 
 /// Returns the name of bone at `idx`, or `None` if out of range.
 pub fn get_bone_name(tree: &SceneTree, node_id: NodeId, idx: usize) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| {
-        match n.get_property(&bone_name_key(idx)) {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property(&bone_name_key(idx)) {
             Variant::String(s) => Some(s),
             _ => None,
-        }
-    })
+        })
 }
 
 /// Sets the name of bone at `idx`.
@@ -149,12 +148,7 @@ pub fn get_bone_children(tree: &SceneTree, node_id: NodeId, parent_idx: i64) -> 
 // ===========================================================================
 
 /// Sets the rest (bind) pose for bone `idx`.
-pub fn set_bone_rest(
-    tree: &mut SceneTree,
-    node_id: NodeId,
-    idx: usize,
-    rest: Transform3D,
-) {
+pub fn set_bone_rest(tree: &mut SceneTree, node_id: NodeId, idx: usize, rest: Transform3D) {
     if idx < get_bone_count(tree, node_id) {
         if let Some(node) = tree.get_node_mut(node_id) {
             node.set_property(&bone_rest_key(idx), Variant::Transform3D(rest));
@@ -177,12 +171,7 @@ pub fn get_bone_rest(tree: &SceneTree, node_id: NodeId, idx: usize) -> Transform
 // ===========================================================================
 
 /// Sets the current pose for bone `idx`.
-pub fn set_bone_pose(
-    tree: &mut SceneTree,
-    node_id: NodeId,
-    idx: usize,
-    pose: Transform3D,
-) {
+pub fn set_bone_pose(tree: &mut SceneTree, node_id: NodeId, idx: usize, pose: Transform3D) {
     if idx < get_bone_count(tree, node_id) {
         if let Some(node) = tree.get_node_mut(node_id) {
             node.set_property(&bone_pose_key(idx), Variant::Transform3D(pose));
@@ -287,12 +276,11 @@ pub fn set_bone_attachment_bone_name(tree: &mut SceneTree, node_id: NodeId, name
 
 /// Reads the `"bone_name"` property from a BoneAttachment3D node.
 pub fn get_bone_attachment_bone_name(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id).and_then(|n| {
-        match n.get_property("bone_name") {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("bone_name") {
             Variant::String(s) if !s.is_empty() => Some(s),
             _ => None,
-        }
-    })
+        })
 }
 
 /// Sets the `"bone_idx"` property on a BoneAttachment3D node.
@@ -555,26 +543,41 @@ mod tests {
 
         // Hip at Y=1
         let hip = add_bone(&mut tree, skel_id, "Hip");
-        set_bone_rest(&mut tree, skel_id, hip, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 1.0, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            hip,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 1.0, 0.0),
+            },
+        );
 
         // Spine at Y=0.5 relative to Hip
         let spine = add_bone(&mut tree, skel_id, "Spine");
         set_bone_parent(&mut tree, skel_id, spine, hip as i64);
-        set_bone_rest(&mut tree, skel_id, spine, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 0.5, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            spine,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 0.5, 0.0),
+            },
+        );
 
         // Head at Y=0.3 relative to Spine
         let head = add_bone(&mut tree, skel_id, "Head");
         set_bone_parent(&mut tree, skel_id, head, spine as i64);
-        set_bone_rest(&mut tree, skel_id, head, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 0.3, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            head,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 0.3, 0.0),
+            },
+        );
 
         let hip_global = get_bone_global_pose(&tree, skel_id, hip);
         let spine_global = get_bone_global_pose(&tree, skel_id, spine);
@@ -593,23 +596,38 @@ mod tests {
         let skel_id = tree.add_child(root, skel).unwrap();
 
         let hip = add_bone(&mut tree, skel_id, "Hip");
-        set_bone_rest(&mut tree, skel_id, hip, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 1.0, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            hip,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 1.0, 0.0),
+            },
+        );
 
         let spine = add_bone(&mut tree, skel_id, "Spine");
         set_bone_parent(&mut tree, skel_id, spine, hip as i64);
-        set_bone_rest(&mut tree, skel_id, spine, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 0.5, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            spine,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 0.5, 0.0),
+            },
+        );
 
         // Apply a pose offset to spine: shift X by 1.0
-        set_bone_pose(&mut tree, skel_id, spine, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(1.0, 0.0, 0.0),
-        });
+        set_bone_pose(
+            &mut tree,
+            skel_id,
+            spine,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(1.0, 0.0, 0.0),
+            },
+        );
 
         let spine_global = get_bone_global_pose(&tree, skel_id, spine);
         // Hip rest origin (0,1,0) + spine rest origin (0,0.5,0) + spine pose (1,0,0)
@@ -658,16 +676,26 @@ mod tests {
         let skel_id = tree.add_child(root, skel).unwrap();
 
         let hip = add_bone(&mut tree, skel_id, "Hip");
-        set_bone_rest(&mut tree, skel_id, hip, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 1.0, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            hip,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 1.0, 0.0),
+            },
+        );
         let spine = add_bone(&mut tree, skel_id, "Spine");
         set_bone_parent(&mut tree, skel_id, spine, hip as i64);
-        set_bone_rest(&mut tree, skel_id, spine, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 0.5, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            spine,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 0.5, 0.0),
+            },
+        );
 
         let poses = bone_pose_array(&tree, skel_id);
         assert_eq!(poses.len(), 2);
@@ -694,10 +722,15 @@ mod tests {
         let b0 = add_bone(&mut tree, skel_id, "Root");
         let b1 = add_bone(&mut tree, skel_id, "Tip");
         set_bone_parent(&mut tree, skel_id, b1, b0 as i64);
-        set_bone_rest(&mut tree, skel_id, b1, Transform3D {
-            basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 1.0, 0.0),
-        });
+        set_bone_rest(
+            &mut tree,
+            skel_id,
+            b1,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 1.0, 0.0),
+            },
+        );
 
         // Register a Skin whose binds invert each bone's rest global pose.
         let mut skin = Skin::new();
@@ -719,15 +752,23 @@ mod tests {
         assert!((rest_skinned.vertices[1] - Vector3::new(0.0, 2.0, 0.0)).length() < 1e-4);
 
         // Rotate bone1 90° about Z at its joint; the tip vertex swings sideways.
-        set_bone_pose(&mut tree, skel_id, b1, Transform3D {
-            basis: Basis::from_euler(Vector3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2)),
-            origin: Vector3::ZERO,
-        });
+        set_bone_pose(
+            &mut tree,
+            skel_id,
+            b1,
+            Transform3D {
+                basis: Basis::from_euler(Vector3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2)),
+                origin: Vector3::ZERO,
+            },
+        );
         let posed = bone_pose_array(&tree, skel_id);
         let posed_skinned = skin_mesh(&mesh, &skin, &posed);
 
         let moved = (posed_skinned.vertices[1] - rest_skinned.vertices[1]).length();
-        assert!(moved > 0.5, "posed skin should move the tip vertex ({moved})");
+        assert!(
+            moved > 0.5,
+            "posed skin should move the tip vertex ({moved})"
+        );
         // Root vertex (bind 0, unposed) stays put.
         assert!((posed_skinned.vertices[0] - Vector3::ZERO).length() < 1e-4);
     }

@@ -267,8 +267,7 @@ impl PhysicsServer3D {
                         // node so authored values drive the simulation.
                         body.collision_layer = u32_prop_3d(tree, nid, "collision_layer", 1);
                         body.collision_mask = u32_prop_3d(tree, nid, "collision_mask", 1);
-                        body.gravity_scale =
-                            float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
+                        body.gravity_scale = float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
                         body.linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
                         body.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
                         body.friction = float_prop_3d(tree, nid, "friction", 0.5) as f32;
@@ -545,7 +544,11 @@ mod tests {
 
         match shape_from_node_3d(&tree, nid) {
             Some(Shape3D::ConcavePolygonShape { faces }) => {
-                assert_eq!(faces.len(), 3, "trimesh faces must be populated from `data`");
+                assert_eq!(
+                    faces.len(),
+                    3,
+                    "trimesh faces must be populated from `data`"
+                );
             }
             other => panic!("expected populated ConcavePolygonShape, got {other:?}"),
         }
@@ -610,7 +613,9 @@ mod tests {
     fn rotation_syncs_back_to_node() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let body_nid = tree.add_child(root, Node::new("Spinner", "RigidBody3D")).unwrap();
+        let body_nid = tree
+            .add_child(root, Node::new("Spinner", "RigidBody3D"))
+            .unwrap();
 
         let mut server = PhysicsServer3D::new();
         server.sync_to_physics(&tree);

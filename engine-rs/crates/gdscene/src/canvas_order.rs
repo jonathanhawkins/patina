@@ -155,7 +155,10 @@ mod tests {
         let root = tree.root_id();
         let mut parent = Node::new("P", "Node2D");
         parent.set_property("modulate", Variant::Color(Color::new(0.5, 0.5, 0.5, 1.0)));
-        parent.set_property("self_modulate", Variant::Color(Color::new(0.5, 0.5, 0.5, 1.0)));
+        parent.set_property(
+            "self_modulate",
+            Variant::Color(Color::new(0.5, 0.5, 0.5, 1.0)),
+        );
         let p_id = tree.add_child(root, parent).unwrap();
         let mut child = Node::new("C", "Node2D");
         child.set_property("modulate", Variant::Color(Color::new(0.5, 0.5, 0.5, 1.0)));
@@ -163,10 +166,18 @@ mod tests {
 
         // Child inherits parent.modulate * child.modulate = 0.25 (self_modulate excluded).
         let child_inh = inherited_modulate(&tree, c_id);
-        assert!(approx(child_inh.r, 0.25), "child inherited modulate {}", child_inh.r);
+        assert!(
+            approx(child_inh.r, 0.25),
+            "child inherited modulate {}",
+            child_inh.r
+        );
         // Parent's own draw color includes its self_modulate: 0.5 * 0.5 = 0.25.
         let parent_eff = effective_modulate(&tree, p_id);
-        assert!(approx(parent_eff.r, 0.25), "parent effective {}", parent_eff.r);
+        assert!(
+            approx(parent_eff.r, 0.25),
+            "parent effective {}",
+            parent_eff.r
+        );
     }
 
     #[test]
@@ -203,7 +214,10 @@ mod tests {
         let second_id = tree.add_child(p_id, second).unwrap();
 
         // No y_sort -> insertion order preserved despite Y values.
-        assert_eq!(draw_ordered_children(&tree, p_id), vec![first_id, second_id]);
+        assert_eq!(
+            draw_ordered_children(&tree, p_id),
+            vec![first_id, second_id]
+        );
     }
 
     #[test]

@@ -398,20 +398,24 @@ fn collect_resource_tables(tree: &SceneTree, node_ids: &[NodeId]) -> ResourceTab
 
         // Script external resource: raw `script = ExtResource("id")` reference
         // paired with the resolved `_script_path` companion.
-        if let (Variant::String(script_ref), Variant::String(path)) =
-            (node.get_property("script"), node.get_property("_script_path"))
-        {
+        if let (Variant::String(script_ref), Variant::String(path)) = (
+            node.get_property("script"),
+            node.get_property("_script_path"),
+        ) {
             if let Some(id) = parse_ext_resource_id(&script_ref) {
                 ext_by_id.entry(id).or_insert(("Script".to_string(), path));
             }
         }
 
         // Instanced sub-scene external resource: `_instance` ref + resolved path.
-        if let (Variant::String(inst_ref), Variant::String(path)) =
-            (node.get_property("_instance"), node.get_property("_instance_path"))
-        {
+        if let (Variant::String(inst_ref), Variant::String(path)) = (
+            node.get_property("_instance"),
+            node.get_property("_instance_path"),
+        ) {
             if let Some(id) = parse_ext_resource_id(&inst_ref) {
-                ext_by_id.entry(id).or_insert(("PackedScene".to_string(), path));
+                ext_by_id
+                    .entry(id)
+                    .or_insert(("PackedScene".to_string(), path));
             }
         }
 
@@ -611,7 +615,6 @@ fn write_connections(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gdvariant::Dictionary;
     use crate::node::Node;
     use crate::packed_scene::{add_packed_scene_to_tree, PackedScene};
     use crate::scene_tree::SceneTree;
@@ -619,6 +622,7 @@ mod tests {
     use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
     use gdcore::node_path::NodePath;
     use gdobject::signal::Connection;
+    use gdvariant::Dictionary;
 
     // -- format_variant_value tests -----------------------------------------
 
@@ -994,7 +998,9 @@ health = 100
             Vector2::new(1.0, 2.0),
             Vector2::new(-3.0, 4.0),
         ]));
-        packed_roundtrip(Variant::PackedVector3Array(vec![Vector3::new(1.0, 2.0, 3.0)]));
+        packed_roundtrip(Variant::PackedVector3Array(vec![Vector3::new(
+            1.0, 2.0, 3.0,
+        )]));
         packed_roundtrip(Variant::PackedColorArray(vec![Color::new(
             1.0, 0.0, 0.5, 1.0,
         )]));

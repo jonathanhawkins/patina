@@ -822,6 +822,13 @@ pub struct MultiplayerSynchronizer {
     property_values: HashMap<String, String>,
     /// Last time (ms) a sync packet was emitted (`0` = never).
     last_sync_ms: u64,
+    /// Per-peer visibility overrides (Godot per-peer visibility). A peer absent
+    /// from the map falls back to `public_visibility`.
+    visibility: HashMap<PeerId, bool>,
+    /// Default visibility for peers without an explicit override.
+    public_visibility: bool,
+    /// Optional replication config describing spawn/sync properties.
+    replication_config: SceneReplicationConfig,
 }
 
 impl MultiplayerSynchronizer {
@@ -834,7 +841,52 @@ impl MultiplayerSynchronizer {
             net_id: 0,
             property_values: HashMap::new(),
             last_sync_ms: 0,
+            visibility: HashMap::new(),
+            public_visibility: true,
+            replication_config: SceneReplicationConfig::new(),
         }
+    }
+
+    /// Sets whether this synchronizer is visible to `peer`
+    /// (Godot `set_visibility_for`); overrides the public default.
+    pub fn set_visibility_for(&mut self, peer: PeerId, visible: bool) {
+        self.visibility.insert(peer, visible);
+    }
+
+    /// Clears the per-peer visibility override for `peer`, reverting to the
+    /// public default.
+    pub fn clear_visibility_for(&mut self, peer: PeerId) {
+        self.visibility.remove(&peer);
+    }
+
+    /// Returns whether this synchronizer is visible to `peer`
+    /// (Godot `is_visible_to`).
+    pub fn is_visible_to(&self, peer: PeerId) -> bool {
+        self.visibility
+            .get(&peer)
+            .copied()
+            .unwrap_or(self.public_visibility)
+    }
+
+    /// Sets the default visibility for peers without an override
+    /// (Godot `set_visibility_public`).
+    pub fn set_visibility_public(&mut self, visible: bool) {
+        self.public_visibility = visible;
+    }
+
+    /// Returns the default (public) visibility.
+    pub fn is_visibility_public(&self) -> bool {
+        self.public_visibility
+    }
+
+    /// Returns the scene replication config (Godot `replication_config`).
+    pub fn replication_config(&self) -> &SceneReplicationConfig {
+        &self.replication_config
+    }
+
+    /// Mutable access to the scene replication config.
+    pub fn replication_config_mut(&mut self) -> &mut SceneReplicationConfig {
+        &mut self.replication_config
     }
 
     /// Add a property path to the synchronization set.
@@ -916,6 +968,11 @@ impl MultiplayerSynchronizer {
         if props.is_empty() {
             return Ok(false);
         }
+        // Godot per-peer visibility: a peer this synchronizer is hidden from
+        // receives no sync packets.
+        if !self.is_visible_to(to) {
+            return Ok(false);
+        }
         if !force
             && self.last_sync_ms > 0
             && now_ms.saturating_sub(self.last_sync_ms) < self.sync_interval_ms as u64
@@ -952,12 +1009,239 @@ impl MultiplayerSynchronizer {
 }
 
 // ===========================================================================
+// SceneReplicationConfig (pat-u3l8c.80)
+// ===========================================================================
+
+/// Per-property replication mode, mirroring Godot's
+/// `SceneReplicationConfig.ReplicationMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplicationMode {
+    /// Never replicated (`REPLICATION_MODE_NEVER`, 0).
+    Never,
+    /// Replicated on every sync tick (`REPLICATION_MODE_ALWAYS`, 1).
+    #[default]
+    Always,
+    /// Replicated only when the value changes (`REPLICATION_MODE_ON_CHANGE`, 2).
+    OnChange,
+}
+
+impl ReplicationMode {
+    /// The Godot integer value for this mode.
+    pub fn to_godot(self) -> i64 {
+        match self {
+            ReplicationMode::Never => 0,
+            ReplicationMode::Always => 1,
+            ReplicationMode::OnChange => 2,
+        }
+    }
+}
+
+/// A single property entry in a [`SceneReplicationConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicationProperty {
+    /// The node-relative property path (e.g. `.:position`).
+    pub path: String,
+    /// Whether the property is part of the spawn state.
+    pub spawn: bool,
+    /// Whether the property is part of the periodic sync state.
+    pub sync: bool,
+    /// When the sync value is sent.
+    pub mode: ReplicationMode,
+}
+
+/// Bounded slice of Godot's `SceneReplicationConfig`: an ordered set of
+/// properties, each flagged for spawn and/or sync replication with a mode.
+#[derive(Debug, Clone, Default)]
+pub struct SceneReplicationConfig {
+    properties: Vec<ReplicationProperty>,
+}
+
+impl SceneReplicationConfig {
+    /// Creates an empty config.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn index_of(&self, path: &str) -> Option<usize> {
+        self.properties.iter().position(|p| p.path == path)
+    }
+
+    /// Adds a property (defaults: spawn + sync, `Always`). No-op if present.
+    pub fn add_property(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        if self.index_of(&path).is_none() {
+            self.properties.push(ReplicationProperty {
+                path,
+                spawn: true,
+                sync: true,
+                mode: ReplicationMode::Always,
+            });
+        }
+    }
+
+    /// Removes a property. No-op if absent.
+    pub fn remove_property(&mut self, path: &str) {
+        if let Some(i) = self.index_of(path) {
+            self.properties.remove(i);
+        }
+    }
+
+    /// Whether `path` is present.
+    pub fn has_property(&self, path: &str) -> bool {
+        self.index_of(path).is_some()
+    }
+
+    /// The registration index of `path` (Godot `property_get_index`).
+    pub fn property_get_index(&self, path: &str) -> Option<usize> {
+        self.index_of(path)
+    }
+
+    /// All property paths in registration order.
+    pub fn get_properties(&self) -> Vec<String> {
+        self.properties.iter().map(|p| p.path.clone()).collect()
+    }
+
+    /// Sets whether `path` is part of the spawn state.
+    pub fn property_set_spawn(&mut self, path: &str, enabled: bool) {
+        if let Some(i) = self.index_of(path) {
+            self.properties[i].spawn = enabled;
+        }
+    }
+
+    /// Whether `path` is part of the spawn state (false if absent).
+    pub fn property_get_spawn(&self, path: &str) -> bool {
+        self.index_of(path)
+            .map(|i| self.properties[i].spawn)
+            .unwrap_or(false)
+    }
+
+    /// Sets whether `path` is part of the periodic sync state.
+    pub fn property_set_sync(&mut self, path: &str, enabled: bool) {
+        if let Some(i) = self.index_of(path) {
+            self.properties[i].sync = enabled;
+        }
+    }
+
+    /// Whether `path` is part of the sync state (false if absent).
+    pub fn property_get_sync(&self, path: &str) -> bool {
+        self.index_of(path)
+            .map(|i| self.properties[i].sync)
+            .unwrap_or(false)
+    }
+
+    /// Sets the replication mode for `path`.
+    pub fn property_set_replication_mode(&mut self, path: &str, mode: ReplicationMode) {
+        if let Some(i) = self.index_of(path) {
+            self.properties[i].mode = mode;
+        }
+    }
+
+    /// The replication mode for `path` (`Always` if absent).
+    pub fn property_get_replication_mode(&self, path: &str) -> ReplicationMode {
+        self.index_of(path)
+            .map(|i| self.properties[i].mode)
+            .unwrap_or(ReplicationMode::Always)
+    }
+
+    /// Property paths flagged for the spawn state, in order.
+    pub fn spawn_properties(&self) -> Vec<String> {
+        self.properties
+            .iter()
+            .filter(|p| p.spawn)
+            .map(|p| p.path.clone())
+            .collect()
+    }
+
+    /// Property paths flagged for the sync state (excluding `Never`), in order.
+    pub fn sync_properties(&self) -> Vec<String> {
+        self.properties
+            .iter()
+            .filter(|p| p.sync && p.mode != ReplicationMode::Never)
+            .map(|p| p.path.clone())
+            .collect()
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // pat-u3l8c.80: per-peer visibility + SceneReplicationConfig.
+    #[test]
+    fn synchronizer_visibility_defaults_and_overrides() {
+        let mut sync = MultiplayerSynchronizer::new(0);
+        assert!(sync.is_visible_to(PeerId(2)), "public by default");
+        assert!(sync.is_visibility_public());
+
+        sync.set_visibility_for(PeerId(2), false);
+        assert!(!sync.is_visible_to(PeerId(2)), "hidden from peer 2");
+        assert!(sync.is_visible_to(PeerId(3)), "still visible to peer 3");
+
+        sync.clear_visibility_for(PeerId(2));
+        assert!(sync.is_visible_to(PeerId(2)), "override cleared");
+
+        sync.set_visibility_public(false);
+        assert!(!sync.is_visible_to(PeerId(3)), "private hides un-overridden peers");
+        sync.set_visibility_for(PeerId(3), true);
+        assert!(sync.is_visible_to(PeerId(3)), "explicit override wins");
+    }
+
+    #[test]
+    fn synchronizer_hidden_peer_gets_no_sync() {
+        let mut sync = MultiplayerSynchronizer::new(0);
+        sync.set_property_value("position", "10,20");
+        let mut peer = MockNetworkPeer::new(PeerId::SERVER);
+
+        // Visible → a forced poll sends a packet.
+        assert!(sync.poll_outbound(&mut peer, PeerId(2), 1000, true).unwrap());
+
+        // Hidden from that peer → no packet even when forced.
+        sync.set_visibility_for(PeerId(2), false);
+        assert!(!sync.poll_outbound(&mut peer, PeerId(2), 2000, true).unwrap());
+    }
+
+    #[test]
+    fn scene_replication_config_spawn_and_sync_partitioning() {
+        let mut cfg = SceneReplicationConfig::new();
+        cfg.add_property("position");
+        cfg.add_property("health");
+        cfg.add_property("name");
+        cfg.add_property("position"); // duplicate is a no-op
+
+        assert!(cfg.has_property("position"));
+        assert_eq!(cfg.property_get_index("health"), Some(1));
+        assert_eq!(cfg.get_properties().len(), 3);
+        assert!(cfg.property_get_spawn("position"));
+        assert!(cfg.property_get_sync("position"));
+
+        // `name` becomes spawn-only; `health` becomes sync-only.
+        cfg.property_set_sync("name", false);
+        cfg.property_set_spawn("health", false);
+        assert_eq!(
+            cfg.spawn_properties(),
+            vec!["position".to_string(), "name".to_string()]
+        );
+        assert_eq!(
+            cfg.sync_properties(),
+            vec!["position".to_string(), "health".to_string()]
+        );
+
+        // A `Never`-mode property is excluded from the sync set.
+        cfg.property_set_replication_mode("position", ReplicationMode::Never);
+        assert_eq!(
+            cfg.property_get_replication_mode("position"),
+            ReplicationMode::Never
+        );
+        assert_eq!(cfg.sync_properties(), vec!["health".to_string()]);
+        assert_eq!(ReplicationMode::OnChange.to_godot(), 2);
+
+        cfg.remove_property("health");
+        assert!(!cfg.has_property("health"));
+    }
 
     #[test]
     fn peer_id_server_constant() {

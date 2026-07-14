@@ -503,8 +503,14 @@ mod tests {
         // first overlaps the body's bounding sphere.
         let unsafe_t = get_closest_collision_unsafe_fraction(&tree, cast_id);
         let safe_t = get_closest_collision_safe_fraction(&tree, cast_id);
-        assert!(unsafe_t > 0.0 && unsafe_t <= 1.0, "unsafe fraction = {unsafe_t}");
-        assert!(safe_t < unsafe_t, "safe ({safe_t}) must precede unsafe ({unsafe_t})");
+        assert!(
+            unsafe_t > 0.0 && unsafe_t <= 1.0,
+            "unsafe fraction = {unsafe_t}"
+        );
+        assert!(
+            safe_t < unsafe_t,
+            "safe ({safe_t}) must precede unsafe ({unsafe_t})"
+        );
     }
 
     #[test]

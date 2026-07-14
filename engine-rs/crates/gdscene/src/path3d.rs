@@ -294,7 +294,11 @@ mod tests {
         c.add_point(Vector3::new(0.0, 0.0, 0.0));
         c.add_point(Vector3::new(10.0, 0.0, 0.0));
         let t = c.sample_tangent(5.0);
-        assert!((t.x - 1.0).abs() < 1e-3, "tangent.x should be ~1, got {}", t.x);
+        assert!(
+            (t.x - 1.0).abs() < 1e-3,
+            "tangent.x should be ~1, got {}",
+            t.x
+        );
         assert!(t.y.abs() < 1e-3 && t.z.abs() < 1e-3);
     }
 

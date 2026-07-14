@@ -3606,7 +3606,7 @@ impl Interpreter {
     }
 
     /// Dispatch an `Input.method()` call through the scene_access input API.
-    fn call_input_method(&self, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    fn call_input_method(&mut self, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
         match method {
             "is_action_pressed" => {
                 if args.len() != 1 {
@@ -3763,6 +3763,140 @@ impl Interpreter {
                 } else {
                     Ok(Variant::Bool(false))
                 }
+            }
+            // pat-u3l8c.22 — mouse mode, programmatic actions, joypad & vibration.
+            "set_mouse_mode" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.set_mouse_mode() takes 1 argument".into(),
+                    )));
+                }
+                let Variant::Int(mode) = &args[0] else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.set_mouse_mode() argument must be an int".into(),
+                    )));
+                };
+                let mode = *mode;
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.set_mouse_mode(mode);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_mouse_mode" => {
+                let mode = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.get_mouse_mode())
+                    .unwrap_or(0);
+                Ok(Variant::Int(mode))
+            }
+            "warp_mouse" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.warp_mouse() takes 1 argument".into(),
+                    )));
+                }
+                let Variant::Vector2(pos) = &args[0] else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.warp_mouse() argument must be a Vector2".into(),
+                    )));
+                };
+                let (px, py) = (pos.x, pos.y);
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.warp_mouse(px, py);
+                }
+                Ok(Variant::Nil)
+            }
+            "action_press" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.action_press() takes 1 or 2 arguments".into(),
+                    )));
+                }
+                let action = Self::input_action_arg("action_press", &args[0])?.to_string();
+                let strength = match args.get(1) {
+                    None => 1.0_f32,
+                    Some(Variant::Float(f)) => *f as f32,
+                    Some(Variant::Int(i)) => *i as f32,
+                    Some(_) => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.action_press() strength must be a number".into(),
+                        )))
+                    }
+                };
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.action_press(&action, strength);
+                }
+                Ok(Variant::Nil)
+            }
+            "action_release" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.action_release() takes 1 argument".into(),
+                    )));
+                }
+                let action = Self::input_action_arg("action_release", &args[0])?.to_string();
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.action_release(&action);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_connected_joypads" => {
+                let ids = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.get_connected_joypads())
+                    .unwrap_or_default();
+                Ok(Variant::Array(ids.into_iter().map(Variant::Int).collect()))
+            }
+            "start_joy_vibration" => {
+                if args.len() < 3 || args.len() > 4 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.start_joy_vibration() takes 3 or 4 arguments".into(),
+                    )));
+                }
+                let Variant::Int(device) = &args[0] else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.start_joy_vibration() device must be an int".into(),
+                    )));
+                };
+                let device = *device;
+                let num = |a: &Variant| -> Result<f32, RuntimeError> {
+                    match a {
+                        Variant::Float(f) => Ok(*f as f32),
+                        Variant::Int(i) => Ok(*i as f32),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.start_joy_vibration() magnitudes must be numbers".into(),
+                        ))),
+                    }
+                };
+                let weak = num(&args[1])?;
+                let strong = num(&args[2])?;
+                let duration = match args.get(3) {
+                    Some(v) => num(v)?,
+                    None => 0.0_f32,
+                };
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.start_joy_vibration(device, weak, strong, duration);
+                }
+                Ok(Variant::Nil)
+            }
+            "stop_joy_vibration" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.stop_joy_vibration() takes 1 argument".into(),
+                    )));
+                }
+                let Variant::Int(device) = &args[0] else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.stop_joy_vibration() device must be an int".into(),
+                    )));
+                };
+                let device = *device;
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.stop_joy_vibration(device);
+                }
+                Ok(Variant::Nil)
             }
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("Input.{other}"),
@@ -5710,11 +5844,34 @@ impl Interpreter {
                     class_def.signals.push(name.clone());
                 }
                 Stmt::EnumDecl { name, variants } => {
-                    let mut map = HashMap::new();
-                    for (i, v) in variants.iter().enumerate() {
-                        map.insert(v.clone(), i as i64);
+                    // Compute each variant's value: an explicit `= N` sets it,
+                    // otherwise it is the previous value + 1 (starting at 0),
+                    // matching Godot's enum numbering.
+                    let mut pairs: Vec<(String, i64)> = Vec::with_capacity(variants.len());
+                    let mut next: i64 = 0;
+                    for (variant_name, explicit) in variants {
+                        let val = match explicit {
+                            Some(v) => *v,
+                            None => next,
+                        };
+                        pairs.push((variant_name.clone(), val));
+                        next = val.wrapping_add(1);
                     }
-                    class_def.enums.insert(name.clone(), map);
+                    match name {
+                        Some(enum_name) => {
+                            let map: HashMap<String, i64> = pairs.into_iter().collect();
+                            class_def.enums.insert(enum_name.clone(), map);
+                        }
+                        None => {
+                            // Anonymous enum: its variants become script
+                            // constants (Godot semantics).
+                            for (variant_name, val) in pairs {
+                                class_def
+                                    .constants
+                                    .push((variant_name, Expr::Literal(Variant::Int(val))));
+                            }
+                        }
+                    }
                 }
                 Stmt::FuncDef {
                     name,
@@ -9451,6 +9608,33 @@ enum Direction { UP, DOWN }
     }
 
     #[test]
+    fn class_enum_explicit_values_honored() {
+        let (_, class_def) = run_class("enum Bits { A = 1, B = 2, C, D = 10 }\n");
+        let e = class_def.enums.get("Bits").unwrap();
+        assert_eq!(e.get("A"), Some(&1));
+        assert_eq!(e.get("B"), Some(&2));
+        // Unspecified variant auto-increments from the previous value.
+        assert_eq!(e.get("C"), Some(&3));
+        assert_eq!(e.get("D"), Some(&10));
+    }
+
+    #[test]
+    fn class_anonymous_enum_becomes_constants() {
+        let (_, class_def) = run_class("enum { RED, GREEN = 5, BLUE }\n");
+        // Anonymous enum variants are registered as script constants with the
+        // right values (RED=0, GREEN=5, BLUE=6 — auto-increment after 5).
+        let mut found = std::collections::HashMap::new();
+        for (name, expr) in &class_def.constants {
+            if let Expr::Literal(Variant::Int(v)) = expr {
+                found.insert(name.as_str(), *v);
+            }
+        }
+        assert_eq!(found.get("RED"), Some(&0));
+        assert_eq!(found.get("GREEN"), Some(&5));
+        assert_eq!(found.get("BLUE"), Some(&6));
+    }
+
+    #[test]
     fn class_export_var() {
         let (_, class_def) = run_class(
             "\
@@ -11589,6 +11773,131 @@ func fade(alpha):
         let instance = interp.instantiate_class(&class_def).unwrap();
         interp.set_scene_access(Box::new(access), 1);
         (interp, class_def, instance)
+    }
+
+    // pat-u3l8c.22: mouse mode, programmatic actions, joypad enumeration and
+    // vibration dispatched from GDScript's Input singleton to SceneAccess.
+    #[derive(Default)]
+    struct InputCmdState {
+        mouse_mode: i64,
+        warped_to: Option<(f32, f32)>,
+        pressed: std::collections::HashSet<String>,
+        released: std::collections::HashSet<String>,
+        joypads: Vec<i64>,
+        vibrations: std::collections::HashMap<i64, (f32, f32, f32)>,
+    }
+
+    struct InputCmdAccess {
+        state: std::rc::Rc<std::cell::RefCell<InputCmdState>>,
+    }
+
+    impl SceneAccess for InputCmdAccess {
+        fn get_node(&self, _from: u64, _path: &str) -> Option<u64> {
+            None
+        }
+        fn get_parent(&self, _node: u64) -> Option<u64> {
+            None
+        }
+        fn get_children(&self, _node: u64) -> Vec<u64> {
+            vec![]
+        }
+        fn get_node_property(&self, _node: u64, _prop: &str) -> Variant {
+            Variant::Nil
+        }
+        fn set_node_property(&mut self, _node: u64, _prop: &str, _value: Variant) {}
+        fn emit_signal(&mut self, _node: u64, _signal: &str, _args: &[Variant]) {}
+        fn connect_signal(&mut self, _source: u64, _signal: &str, _target: u64, _method: &str) {}
+        fn get_node_name(&self, _node: u64) -> Option<String> {
+            None
+        }
+
+        fn set_mouse_mode(&mut self, mode: i64) {
+            self.state.borrow_mut().mouse_mode = mode;
+        }
+        fn get_mouse_mode(&self) -> i64 {
+            self.state.borrow().mouse_mode
+        }
+        fn warp_mouse(&mut self, x: f32, y: f32) {
+            self.state.borrow_mut().warped_to = Some((x, y));
+        }
+        fn action_press(&mut self, action: &str, _strength: f32) {
+            self.state.borrow_mut().pressed.insert(action.to_string());
+        }
+        fn action_release(&mut self, action: &str) {
+            let mut st = self.state.borrow_mut();
+            st.pressed.remove(action);
+            st.released.insert(action.to_string());
+        }
+        fn get_connected_joypads(&self) -> Vec<i64> {
+            self.state.borrow().joypads.clone()
+        }
+        fn start_joy_vibration(&mut self, device: i64, weak: f32, strong: f32, duration: f32) {
+            self.state
+                .borrow_mut()
+                .vibrations
+                .insert(device, (weak, strong, duration));
+        }
+        fn stop_joy_vibration(&mut self, device: i64) {
+            self.state.borrow_mut().vibrations.remove(&device);
+        }
+    }
+
+    fn input_cmd_interp() -> (Interpreter, std::rc::Rc<std::cell::RefCell<InputCmdState>>) {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(InputCmdState::default()));
+        let mut interp = Interpreter::new();
+        interp.set_scene_access(Box::new(InputCmdAccess { state: state.clone() }), 1);
+        (interp, state)
+    }
+
+    #[test]
+    fn input_set_and_get_mouse_mode() {
+        let (mut interp, state) = input_cmd_interp();
+        let r = interp
+            .run("Input.set_mouse_mode(2)\nreturn Input.get_mouse_mode()\n")
+            .unwrap();
+        assert_eq!(r.return_value, Some(Variant::Int(2)));
+        assert_eq!(state.borrow().mouse_mode, 2);
+    }
+
+    #[test]
+    fn input_action_press_and_release() {
+        let (mut interp, state) = input_cmd_interp();
+        interp
+            .run("Input.action_press(\"jump\")\nInput.action_press(\"shoot\", 0.5)\nInput.action_release(\"jump\")\n")
+            .unwrap();
+        let st = state.borrow();
+        assert!(st.pressed.contains("shoot"), "shoot pressed");
+        assert!(!st.pressed.contains("jump"), "jump released");
+        assert!(st.released.contains("jump"), "jump release recorded");
+    }
+
+    #[test]
+    fn input_get_connected_joypads() {
+        let (mut interp, state) = input_cmd_interp();
+        state.borrow_mut().joypads = vec![0, 2];
+        let r = interp.run("return Input.get_connected_joypads()\n").unwrap();
+        assert_eq!(
+            r.return_value,
+            Some(Variant::Array(vec![Variant::Int(0), Variant::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn input_joy_vibration_start_stop() {
+        let (mut interp, state) = input_cmd_interp();
+        interp
+            .run("Input.start_joy_vibration(0, 0.5, 0.9, 1.0)\n")
+            .unwrap();
+        assert_eq!(state.borrow().vibrations.get(&0), Some(&(0.5, 0.9, 1.0)));
+        interp.run("Input.stop_joy_vibration(0)\n").unwrap();
+        assert!(state.borrow().vibrations.get(&0).is_none());
+    }
+
+    #[test]
+    fn input_warp_mouse() {
+        let (mut interp, state) = input_cmd_interp();
+        interp.run("Input.warp_mouse(Vector2(10, 20))\n").unwrap();
+        assert_eq!(state.borrow().warped_to, Some((10.0, 20.0)));
     }
 
     #[test]

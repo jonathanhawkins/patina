@@ -9,9 +9,7 @@
 //! them to a framebuffer honoring per-item `light_mask`.
 
 use gdcore::math::{Color, Vector2};
-use gdrender2d::light2d::{
-    apply_lights_to_framebuffer, CanvasAmbient, Light2D, LightOccluder2D,
-};
+use gdrender2d::light2d::{apply_lights_to_framebuffer, CanvasAmbient, Light2D, LightOccluder2D};
 use gdrender2d::renderer::FrameBuffer;
 use gdvariant::Variant;
 
@@ -206,7 +204,11 @@ mod tests {
         let mut fb = FrameBuffer::new(16, 16, Color::new(0.2, 0.2, 0.2, 1.0));
         apply_scene_lights(&tree, &mut fb, CanvasAmbient::default(), 1);
         let near = fb.get_pixel(4, 4);
-        assert!(near.r > 0.2, "light should brighten the pixel under it, got {}", near.r);
+        assert!(
+            near.r > 0.2,
+            "light should brighten the pixel under it, got {}",
+            near.r
+        );
     }
 
     #[test]

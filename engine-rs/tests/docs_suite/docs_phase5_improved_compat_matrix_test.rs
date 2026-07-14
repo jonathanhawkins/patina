@@ -98,3 +98,26 @@ fn matrix_quantifies_test_and_golden_totals() {
         "matrix must publish an 'Oracle output files' count tied to the upstream oracle"
     );
 }
+
+#[test]
+fn matrix_documents_patina_only_multiplayer_transport() {
+    // pat-u3l8c.77: the multiplayer RPC / ENet wire-compat decision is resolved
+    // by documenting the Patina-only transport (and its canonical peer) here.
+    let body = matrix_body();
+    assert!(
+        body.contains("Patina-only"),
+        "matrix must document the Patina-only multiplayer transport decision"
+    );
+    assert!(
+        body.contains("PEN1"),
+        "matrix must cite the bespoke PEN1 ENet framing (vs the real ENet protocol)"
+    );
+    assert!(
+        body.contains("NETWORK_COMMAND_REMOTE_CALL"),
+        "matrix must cite Godot's RPC command layout the Patina RPC does not use"
+    );
+    assert!(
+        body.contains("ENetMultiplayerPeer"),
+        "matrix must name the canonical multiplayer peer"
+    );
+}

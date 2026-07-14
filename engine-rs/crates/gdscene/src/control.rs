@@ -914,11 +914,7 @@ fn arrange_grid(tree: &mut SceneTree, children: &[NodeId], sep: f32, cols: usize
         let col = i % cols;
         let row = i / cols;
         set_position(tree, c, Vector2::new(x_offsets[col], y_offsets[row]));
-        set_size(
-            tree,
-            c,
-            Vector2::new(col_widths[col], row_heights[row]),
-        );
+        set_size(tree, c, Vector2::new(col_widths[col], row_heights[row]));
     }
 }
 
@@ -964,6 +960,48 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
             arrange_tabs(tree, &children, total, current);
         }
         _ => {}
+    }
+}
+
+/// Returns `true` for the container classes [`arrange_container`] lays out.
+pub fn is_container_class_name(class: &str) -> bool {
+    matches!(
+        class,
+        "VBoxContainer"
+            | "HBoxContainer"
+            | "BoxContainer"
+            | "GridContainer"
+            | "MarginContainer"
+            | "CenterContainer"
+            | "ScrollContainer"
+            | "TabContainer"
+    )
+}
+
+/// Recursively arranges `container_id` and every nested container beneath it, so
+/// a resize / child change propagates through the whole layout subtree — the
+/// "queue_sort" re-sort pipeline (pat-u3l8c.71).
+///
+/// [`arrange_container`] alone positions and sizes a container's direct
+/// children but does not descend into container children (a `MarginContainer`
+/// inside a `VBoxContainer` keeps its child unarranged). This walks depth-first:
+/// each child that is itself a container is re-arranged against the size its
+/// parent just allocated it.
+pub fn sort_container_tree(tree: &mut SceneTree, container_id: NodeId, total: Vector2) {
+    arrange_container(tree, container_id, total);
+    let children: Vec<NodeId> = tree
+        .get_node(container_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    for child in children {
+        let class = tree
+            .get_node(child)
+            .map(|n| n.class_name().to_string())
+            .unwrap_or_default();
+        if is_container_class_name(&class) {
+            let child_size = get_size(tree, child);
+            sort_container_tree(tree, child, child_size);
+        }
     }
 }
 
@@ -1462,6 +1500,85 @@ pub fn get_focus_previous(tree: &SceneTree, node_id: NodeId) -> Option<String> {
 }
 
 // ===========================================================================
+// Range value model (Slider / ProgressBar / SpinBox / ScrollBar) — pat-u3l8c.72
+// ===========================================================================
+
+/// Reads an `f64` property (accepting `Float`/`Int`), falling back to `default`.
+fn get_f64_property(tree: &SceneTree, node_id: NodeId, key: &str, default: f64) -> f64 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property(key) {
+            Variant::Float(f) => f,
+            Variant::Int(i) => i as f64,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+/// `Range.min_value` (Godot default `0.0`).
+pub fn get_range_min(tree: &SceneTree, node_id: NodeId) -> f64 {
+    get_f64_property(tree, node_id, "min_value", 0.0)
+}
+
+/// `Range.max_value` (Godot default `100.0`).
+pub fn get_range_max(tree: &SceneTree, node_id: NodeId) -> f64 {
+    get_f64_property(tree, node_id, "max_value", 100.0)
+}
+
+/// `Range.step` (Godot default `1.0`). A step of `0` disables snapping.
+pub fn get_range_step(tree: &SceneTree, node_id: NodeId) -> f64 {
+    get_f64_property(tree, node_id, "step", 1.0)
+}
+
+/// `Range.page` (Godot default `0.0`) — the scrollbar/slider page size that
+/// reduces the effective maximum to `max - page`.
+pub fn get_range_page(tree: &SceneTree, node_id: NodeId) -> f64 {
+    get_f64_property(tree, node_id, "page", 0.0)
+}
+
+/// `Range.value` (Godot default `0.0`).
+pub fn get_range_value(tree: &SceneTree, node_id: NodeId) -> f64 {
+    get_f64_property(tree, node_id, "value", 0.0)
+}
+
+/// Sets `Range.value`, snapping to `step` and clamping to
+/// `[min_value, max_value - page]` (Godot `Range::set_value` semantics).
+///
+/// Returns `true` when the stored value actually changed — the caller emits the
+/// `value_changed` signal in that case (Slider drag, SpinBox typing, etc.).
+pub fn set_range_value(tree: &mut SceneTree, node_id: NodeId, value: f64) -> bool {
+    let min = get_range_min(tree, node_id);
+    let max = get_range_max(tree, node_id);
+    let step = get_range_step(tree, node_id);
+    let page = get_range_page(tree, node_id);
+    let old = get_range_value(tree, node_id);
+
+    let mut v = value;
+    if step > 0.0 {
+        v = min + ((v - min) / step).round() * step;
+    }
+    let effective_max = (max - page).max(min);
+    v = v.clamp(min, effective_max);
+
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("value", Variant::Float(v));
+    }
+    (v - old).abs() > f64::EPSILON
+}
+
+/// The value's normalised position in `[0, 1]` within `[min, max]` — the fill
+/// fraction used by ProgressBar / Slider grabbers. `0.0` for a degenerate range.
+pub fn get_range_ratio(tree: &SceneTree, node_id: NodeId) -> f32 {
+    let min = get_range_min(tree, node_id);
+    let max = get_range_max(tree, node_id);
+    let value = get_range_value(tree, node_id);
+    let span = max - min;
+    if span.abs() < 1e-9 {
+        return 0.0;
+    }
+    (((value - min) / span) as f32).clamp(0.0, 1.0)
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -1478,6 +1595,43 @@ mod tests {
         let root = tree.root_id();
         let node = Node::new(name, class);
         tree.add_child(root, node).unwrap()
+    }
+
+    // -- Range value model (pat-u3l8c.72) -----------------------------------
+
+    #[test]
+    fn range_value_clamps_and_reports_change() {
+        let mut tree = make_tree();
+        let id = add_control(&mut tree, "S", "HSlider");
+        // Defaults: min 0, max 100, step 1.
+        assert!(set_range_value(&mut tree, id, 50.0), "0 -> 50 is a change");
+        assert_eq!(get_range_value(&tree, id), 50.0);
+        // Re-setting the same value reports no change.
+        assert!(!set_range_value(&mut tree, id, 50.0));
+        // Clamp above the max and below the min.
+        set_range_value(&mut tree, id, 250.0);
+        assert_eq!(get_range_value(&tree, id), 100.0);
+        set_range_value(&mut tree, id, -20.0);
+        assert_eq!(get_range_value(&tree, id), 0.0);
+    }
+
+    #[test]
+    fn range_value_snaps_to_step() {
+        let mut tree = make_tree();
+        let id = add_control(&mut tree, "S", "HSlider");
+        tree.get_node_mut(id)
+            .unwrap()
+            .set_property("step", Variant::Float(5.0));
+        set_range_value(&mut tree, id, 12.0);
+        assert_eq!(get_range_value(&tree, id), 10.0); // nearest multiple of 5
+    }
+
+    #[test]
+    fn range_ratio_is_normalized_position() {
+        let mut tree = make_tree();
+        let id = add_control(&mut tree, "P", "ProgressBar");
+        set_range_value(&mut tree, id, 25.0);
+        assert!((get_range_ratio(&tree, id) - 0.25).abs() < 1e-4);
     }
 
     // -- Anchors ------------------------------------------------------------
@@ -1893,9 +2047,15 @@ mod tests {
         set_size(&mut tree, front, Vector2::new(50.0, 50.0));
 
         // Inside both → the later-added (front-most) control wins.
-        assert_eq!(control_at_point(&tree, Vector2::new(20.0, 20.0)), Some(front));
+        assert_eq!(
+            control_at_point(&tree, Vector2::new(20.0, 20.0)),
+            Some(front)
+        );
         // Inside only the back control.
-        assert_eq!(control_at_point(&tree, Vector2::new(80.0, 80.0)), Some(back));
+        assert_eq!(
+            control_at_point(&tree, Vector2::new(80.0, 80.0)),
+            Some(back)
+        );
         // Outside both.
         assert_eq!(control_at_point(&tree, Vector2::new(200.0, 200.0)), None);
     }
@@ -1912,7 +2072,10 @@ mod tests {
         set_mouse_filter(&mut tree, front, MouseFilter::Ignore);
 
         // Front ignores the mouse → the event falls through to the back control.
-        assert_eq!(control_at_point(&tree, Vector2::new(20.0, 20.0)), Some(back));
+        assert_eq!(
+            control_at_point(&tree, Vector2::new(20.0, 20.0)),
+            Some(back)
+        );
     }
 
     #[test]
@@ -1928,9 +2091,15 @@ mod tests {
         set_size(&mut tree, child, Vector2::new(20.0, 20.0));
 
         // Child global rect is (60,60)..(80,80).
-        assert_eq!(control_at_point(&tree, Vector2::new(65.0, 65.0)), Some(child));
+        assert_eq!(
+            control_at_point(&tree, Vector2::new(65.0, 65.0)),
+            Some(child)
+        );
         // Inside parent but outside child.
-        assert_eq!(control_at_point(&tree, Vector2::new(55.0, 55.0)), Some(parent));
+        assert_eq!(
+            control_at_point(&tree, Vector2::new(55.0, 55.0)),
+            Some(parent)
+        );
     }
 
     #[test]
@@ -1956,7 +2125,10 @@ mod tests {
         tree.connect_signal(btn, "pressed", conn);
 
         // Clicking inside the button emits `pressed`; the observer fires once.
-        assert_eq!(click_at_point(&mut tree, Vector2::new(20.0, 15.0)), Some(btn));
+        assert_eq!(
+            click_at_point(&mut tree, Vector2::new(20.0, 15.0)),
+            Some(btn)
+        );
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         // A click outside the button emits nothing.
@@ -2099,6 +2271,36 @@ func _on_pressed():
         // Content larger than viewport keeps its min size, shifted up by scroll.
         assert_eq!(size, Vector2::new(500.0, 400.0));
         assert_eq!(pos, Vector2::new(0.0, -120.0));
+    }
+
+    #[test]
+    fn sort_container_tree_arranges_nested_containers() {
+        // Outer MarginContainer(10) > Inner MarginContainer(5) > Control child.
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let outer = tree
+            .add_child(root, Node::new("Outer", "MarginContainer"))
+            .unwrap();
+        let inner = tree
+            .add_child(outer, Node::new("Inner", "MarginContainer"))
+            .unwrap();
+        let child = tree
+            .add_child(inner, Node::new("Child", "Control"))
+            .unwrap();
+        for side in ["left", "top", "right", "bottom"] {
+            set_margin(&mut tree, outer, side, 10);
+            set_margin(&mut tree, inner, side, 5);
+        }
+
+        sort_container_tree(&mut tree, outer, Vector2::new(200.0, 100.0));
+
+        // Outer insets the inner container by 10 on each side.
+        assert_eq!(get_position(&tree, inner), Vector2::new(10.0, 10.0));
+        assert_eq!(get_size(&tree, inner), Vector2::new(180.0, 80.0));
+        // The recursion then arranges the inner container, insetting its child
+        // by 5 — without recursion the child would stay unarranged.
+        assert_eq!(get_position(&tree, child), Vector2::new(5.0, 5.0));
+        assert_eq!(get_size(&tree, child), Vector2::new(170.0, 70.0));
     }
 
     #[test]

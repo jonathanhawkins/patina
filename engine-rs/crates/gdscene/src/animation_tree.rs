@@ -427,7 +427,10 @@ fn advance_one_shot(
     let trigger = if one_shot.trigger_param.is_empty() {
         false
     } else {
-        params.get(&one_shot.trigger_param).copied().unwrap_or(false)
+        params
+            .get(&one_shot.trigger_param)
+            .copied()
+            .unwrap_or(false)
     };
 
     if !one_shot.active && trigger && !one_shot.prev_trigger {
@@ -525,7 +528,11 @@ fn sample_blend_space_1d(
         return sample_clip_at(library, &space.points[0].1, space.elapsed);
     }
     if x >= space.points[space.points.len() - 1].0 {
-        return sample_clip_at(library, &space.points[space.points.len() - 1].1, space.elapsed);
+        return sample_clip_at(
+            library,
+            &space.points[space.points.len() - 1].1,
+            space.elapsed,
+        );
     }
 
     // Find the bracketing pair.
@@ -668,8 +675,13 @@ fn blend_value_lists(
     for (prop, va) in a {
         seen.insert(prop.as_str());
         if let Some(vb) = b_map.get(prop.as_str()) {
-            let blended = interpolate_variant(va, vb, w)
-                .unwrap_or_else(|| if w < 0.5 { va.clone() } else { (*vb).clone() });
+            let blended = interpolate_variant(va, vb, w).unwrap_or_else(|| {
+                if w < 0.5 {
+                    va.clone()
+                } else {
+                    (*vb).clone()
+                }
+            });
             result.push((prop.clone(), blended));
         } else {
             result.push((prop.clone(), va.clone()));
@@ -753,7 +765,10 @@ mod tests {
 
         // Blend by position: midway between clip A (start 0) and clip B (start 100).
         let v0 = float_of(&tree.get_current_values(), "x");
-        assert!((40.0..=60.0).contains(&v0), "blend-by-position at start: v0={v0}");
+        assert!(
+            (40.0..=60.0).contains(&v0),
+            "blend-by-position at start: v0={v0}"
+        );
 
         // Over time: advancing the tree plays both clips forward (they ramp up),
         // so the blended value increases — previously it was frozen at t=0.

@@ -351,4 +351,40 @@ pub trait SceneAccess {
     fn is_input_action_just_released(&self, _action: &str) -> bool {
         false
     }
+
+    // -- Mouse mode / programmatic actions / joypad (pat-u3l8c.22) ----------
+
+    /// Sets the mouse capture/visibility mode (`Input.set_mouse_mode`).
+    /// `mode` uses Godot's `MOUSE_MODE_*` integer values.
+    fn set_mouse_mode(&mut self, _mode: i64) {}
+
+    /// Returns the current mouse mode as a Godot `MOUSE_MODE_*` integer
+    /// (`Input.get_mouse_mode`); defaults to `MOUSE_MODE_VISIBLE` (0).
+    fn get_mouse_mode(&self) -> i64 {
+        0
+    }
+
+    /// Warps the mouse cursor to `(x, y)` in window coordinates
+    /// (`Input.warp_mouse`).
+    fn warp_mouse(&mut self, _x: f32, _y: f32) {}
+
+    /// Programmatically presses `action` with the given strength
+    /// (`Input.action_press`).
+    fn action_press(&mut self, _action: &str, _strength: f32) {}
+
+    /// Programmatically releases `action` (`Input.action_release`).
+    fn action_release(&mut self, _action: &str) {}
+
+    /// Returns the device ids of connected joypads
+    /// (`Input.get_connected_joypads`).
+    fn get_connected_joypads(&self) -> Vec<i64> {
+        Vec::new()
+    }
+
+    /// Starts a vibration on joypad `device` with `weak`/`strong` motor
+    /// magnitudes for `duration` seconds (`Input.start_joy_vibration`).
+    fn start_joy_vibration(&mut self, _device: i64, _weak: f32, _strong: f32, _duration: f32) {}
+
+    /// Stops any vibration on joypad `device` (`Input.stop_joy_vibration`).
+    fn stop_joy_vibration(&mut self, _device: i64) {}
 }

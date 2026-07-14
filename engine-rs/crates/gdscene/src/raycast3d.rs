@@ -294,10 +294,11 @@ pub fn is_colliding(tree: &SceneTree, node_id: NodeId) -> bool {
 
 /// Returns the scene node that was hit, if any.
 pub fn get_collider(tree: &SceneTree, node_id: NodeId) -> Option<NodeId> {
-    tree.get_node(node_id).and_then(|n| match n.get_property("_hit_collider") {
-        Variant::ObjectId(id) => Some(NodeId::from_object_id(id)),
-        _ => None,
-    })
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property("_hit_collider") {
+            Variant::ObjectId(id) => Some(NodeId::from_object_id(id)),
+            _ => None,
+        })
 }
 
 /// Returns the hit point in world space (zero if no hit).

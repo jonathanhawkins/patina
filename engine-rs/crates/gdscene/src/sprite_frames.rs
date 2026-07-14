@@ -93,7 +93,10 @@ impl SpriteFrames {
 
     /// Number of frames in `name` (0 if the animation is absent).
     pub fn frame_count(&self, name: &str) -> usize {
-        self.animations.get(name).map(|a| a.frame_count).unwrap_or(0)
+        self.animations
+            .get(name)
+            .map(|a| a.frame_count)
+            .unwrap_or(0)
     }
 
     /// FPS of `name` (0 if absent).
@@ -203,8 +206,16 @@ mod tests {
             2,
             5,
         );
-        assert!(approx(src.position.x, 10.0) && approx(src.position.y, 10.0), "pos {:?}", src.position);
-        assert!(approx(src.size.x, 10.0) && approx(src.size.y, 10.0), "size {:?}", src.size);
+        assert!(
+            approx(src.position.x, 10.0) && approx(src.position.y, 10.0),
+            "pos {:?}",
+            src.position
+        );
+        assert!(
+            approx(src.size.x, 10.0) && approx(src.size.y, 10.0),
+            "size {:?}",
+            src.size
+        );
     }
 
     #[test]

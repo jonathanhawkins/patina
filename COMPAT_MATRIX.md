@@ -73,10 +73,38 @@ A subsystem may only claim runtime parity when an **app-level test drives it thr
 | 3D Physics | `gdphysics3d` | **Measured** | 124 + integration | — | Deterministic | `gdphysics3d` units (124) — rigid body, collision, trace comparison |
 | 3D Comparison Tooling | `gdcore` | **Measured** | 44 | — | Tooling | `compare3d` units (34), `comparison_tooling_3d_test` (10) — scene tree, physics trace, render, unified parity reports |
 | Runner | `patina-runner` | **Measured** | 80 | — | N/A | `patina-runner` unit tests (CLI runner, project loading, scene execution) |
+| Multiplayer / Networking | `gdplatform` | **Claimed — Patina-only transport** | — | — | NOT Godot-wire-compatible | `enet_multiplayer` / `tcp_multiplayer` / `webrtc_peer` units — see the "Multiplayer / Network Transport" note below |
 
 **Total test count**: ~15,700 across workspace (6,355 crate unit tests + 9,338 integration tests in 393 test files)
 **Total golden files**: 150 (17 physics, 23 traces, 37 scenes, 5 resources, 64 render, 3 signals, 1 version)
 **Oracle output files**: 115 (measured against Godot 4.6.1)
+
+## Multiplayer / Network Transport (Patina-only) — pat-u3l8c.77
+
+Patina's multiplayer transport is **Patina-only and is NOT wire-compatible with
+Godot's networking**. A Patina client cannot connect to a stock Godot 4.6 server
+(or vice-versa) over the network. This is a documented, deliberate scope
+decision; the alternative — a real ENet protocol implementation plus the Godot
+`NETWORK_COMMAND_REMOTE_CALL` byte layout proven against a Godot 4.6 server
+fixture — is **deferred**.
+
+**Why it is not compatible today:**
+
+- **ENet framing** — `gdplatform::ENetMultiplayerPeer` (`enet_multiplayer.rs`)
+  uses a bespoke `PEN1` 4-byte-magic UDP framing, not the real ENet protocol
+  Godot's `ENetMultiplayerPeer` speaks. The packets are not interchangeable.
+- **RPC wire protocol** — Patina RPC uses a proprietary `PRPC` magic plus a path
+  hash and method-name strings, rather than Godot's command bytes
+  (`NETWORK_COMMAND_REMOTE_CALL`) and the node-path-cache handshake
+  (`CONFIRM_PATH` / `SIMPLIFY_PATH`, `scene_rpc_interface.cpp`).
+
+**Canonical peer:** `gdplatform::ENetMultiplayerPeer` is the single canonical UDP
+multiplayer peer. `TcpMultiplayerPeer` is a separate TCP transport, and the
+ClassDB `ENetMultiplayerPeer` registration is a compatibility *alias* that
+delegates to `TcpMultiplayerPeer` for class-reflection only — it does not change
+the on-wire framing. Same-Patina peers (ENet↔ENet, TCP↔TCP) interoperate
+correctly; cross-implementation and cross-engine (Godot) interop are out of scope
+until the real ENet + Godot command layout is bound.
 
 ---
 

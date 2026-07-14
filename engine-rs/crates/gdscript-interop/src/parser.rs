@@ -294,12 +294,15 @@ pub enum Stmt {
         /// Parameter names.
         params: Vec<String>,
     },
-    /// `enum MyEnum { IDLE, RUNNING, JUMPING }`.
+    /// `enum MyEnum { IDLE, RUNNING, JUMPING }` or anonymous `enum { A = 1, B }`.
     EnumDecl {
-        /// Enum name.
-        name: String,
-        /// Variant names (assigned ascending integer values starting at 0).
-        variants: Vec<String>,
+        /// Enum name; `None` for an anonymous enum whose variants become script
+        /// constants (Godot semantics).
+        name: Option<String>,
+        /// Variants in declaration order. Each carries an optional explicit
+        /// integer value (`A = 5`); unset variants take the previous value + 1
+        /// (starting at 0), matching Godot's enum numbering.
+        variants: Vec<(String, Option<i64>)>,
     },
     /// An expression used as a statement.
     ExprStmt(Expr),
@@ -778,21 +781,63 @@ impl Parser {
 
     fn parse_enum_decl(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // consume `enum`
-        let name = self.eat_ident()?;
+        // The name is optional: an anonymous `enum { .. }` declares its variants
+        // as script constants (Godot semantics) rather than a named enum.
+        let name = if self.check(&Token::LBrace) {
+            None
+        } else {
+            Some(self.eat_ident()?)
+        };
         self.expect(&Token::LBrace)?;
         let mut variants = Vec::new();
         if !self.check(&Token::RBrace) {
-            variants.push(self.eat_ident()?);
+            variants.push(self.parse_enum_variant()?);
             while self.check(&Token::Comma) {
                 self.advance();
                 if self.check(&Token::RBrace) {
                     break;
                 }
-                variants.push(self.eat_ident()?);
+                variants.push(self.parse_enum_variant()?);
             }
         }
         self.expect(&Token::RBrace)?;
         Ok(Stmt::EnumDecl { name, variants })
+    }
+
+    /// Parses one enum variant: `NAME` or `NAME = <int literal>` (an optional
+    /// leading `-` is allowed for negative values).
+    fn parse_enum_variant(&mut self) -> Result<(String, Option<i64>), ParseError> {
+        let variant = self.eat_ident()?;
+        let value = if self.check(&Token::Assign) {
+            self.advance(); // consume `=`
+            let negative = self.check(&Token::Minus);
+            if negative {
+                self.advance();
+            }
+            match self.peek().clone() {
+                Token::IntLit(v) => {
+                    self.advance();
+                    Some(if negative { -v } else { v })
+                }
+                other => {
+                    let (line, col) = self
+                        .tokens
+                        .get(self.pos)
+                        .map(|ts| (ts.line, ts.col))
+                        .unwrap_or((0, 0));
+                    return Err(ParseError::UnexpectedToken {
+                        token: other.to_string(),
+                        expected: "integer literal for enum value".to_string(),
+                        line,
+                        col,
+                        source_line: None,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        Ok((variant, value))
     }
 
     fn parse_inner_class(&mut self) -> Result<Stmt, ParseError> {
@@ -1927,8 +1972,47 @@ mod tests {
     fn parse_enum_decl() {
         let stmts = parse("enum State { IDLE, RUNNING, JUMPING }\n");
         if let Stmt::EnumDecl { name, variants } = &stmts[0] {
-            assert_eq!(name, "State");
-            assert_eq!(variants, &["IDLE", "RUNNING", "JUMPING"]);
+            assert_eq!(name.as_deref(), Some("State"));
+            let names: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, ["IDLE", "RUNNING", "JUMPING"]);
+            assert!(variants.iter().all(|(_, v)| v.is_none()), "no explicit values");
+        } else {
+            panic!("expected EnumDecl");
+        }
+    }
+
+    #[test]
+    fn parse_enum_with_explicit_values() {
+        let stmts = parse("enum Bits { A = 1, B = 2, C, D = 10 }\n");
+        if let Stmt::EnumDecl { name, variants } = &stmts[0] {
+            assert_eq!(name.as_deref(), Some("Bits"));
+            assert_eq!(variants[0], ("A".to_string(), Some(1)));
+            assert_eq!(variants[1], ("B".to_string(), Some(2)));
+            assert_eq!(variants[2], ("C".to_string(), None));
+            assert_eq!(variants[3], ("D".to_string(), Some(10)));
+        } else {
+            panic!("expected EnumDecl");
+        }
+    }
+
+    #[test]
+    fn parse_anonymous_enum() {
+        let stmts = parse("enum { RED, GREEN, BLUE }\n");
+        if let Stmt::EnumDecl { name, variants } = &stmts[0] {
+            assert!(name.is_none(), "anonymous enum has no name");
+            let names: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, ["RED", "GREEN", "BLUE"]);
+        } else {
+            panic!("expected EnumDecl");
+        }
+    }
+
+    #[test]
+    fn parse_enum_negative_value() {
+        let stmts = parse("enum E { NONE = -1, ZERO = 0 }\n");
+        if let Stmt::EnumDecl { variants, .. } = &stmts[0] {
+            assert_eq!(variants[0], ("NONE".to_string(), Some(-1)));
+            assert_eq!(variants[1], ("ZERO".to_string(), Some(0)));
         } else {
             panic!("expected EnumDecl");
         }

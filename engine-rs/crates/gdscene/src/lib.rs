@@ -26,20 +26,23 @@ pub mod canvas_order;
 pub mod collision;
 pub mod control;
 pub mod control_render;
+pub mod grid_map;
+pub mod item_controls;
 pub mod lifecycle;
 pub mod light2d_scene;
 pub mod main_loop;
+pub mod multiplayer;
 pub mod navigation;
 pub mod node;
 pub mod node2d;
 pub mod node3d;
 pub mod packed_scene;
-pub mod grid_map;
 pub mod particle;
 pub mod particle3d;
 pub mod path3d;
 pub mod physics_server;
 pub mod physics_server_3d;
+pub mod popup;
 pub mod raycast3d;
 pub mod render_server_3d;
 pub mod scene_bridge;
@@ -62,6 +65,7 @@ pub mod video_stream;
 
 // Re-export the most-used types at the crate root.
 pub use autoload::{boot_autoloads_from_dir, instantiate_autoloads, AutoloadResult};
+pub use grid_map::{GridCell, GridMap, MeshLibrary, MeshLibraryItem};
 pub use lifecycle::LifecycleManager;
 pub use main_loop::{FrameOutput, FrameRecord, FrameTrace, MainLoop, NodeSnapshot};
 pub use node::{Node, NodeId, ProcessMode};
@@ -69,9 +73,8 @@ pub use packed_scene::{
     add_packed_scene_to_tree, add_packed_scene_to_tree_with_subscenes, wire_connections,
     ExtResourceEntry, PackedScene, SceneConnection,
 };
-pub use scene_saver::TscnSaver;
-pub use grid_map::{GridCell, GridMap, MeshLibrary, MeshLibraryItem};
 pub use path3d::{Curve2D, Curve3D, Path3D, PathFollow3D, PathFollowRotation};
+pub use scene_saver::TscnSaver;
 pub use scene_tree::{SceneTree, SceneTreeTimer};
 pub use scripting::{GDScriptNodeInstance, InputSnapshot};
 pub use tilemap::{default_color_tileset, ColorTile, ColorTileSet, TileGrid, TileGridStore};

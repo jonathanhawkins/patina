@@ -509,7 +509,8 @@ impl ParticleSimulator3D {
                 let dist = p.position.length();
                 if dist > 1e-6 {
                     let radial_dir = p.position * (1.0 / dist);
-                    p.velocity = p.velocity + radial_dir * self.emitter.material.radial_accel * dt_scaled;
+                    p.velocity =
+                        p.velocity + radial_dir * self.emitter.material.radial_accel * dt_scaled;
                 }
             }
 
@@ -520,7 +521,8 @@ impl ParticleSimulator3D {
                     let radial_dir = p.position * (1.0 / dist);
                     // Tangential = cross(up, radial) for a default tangent
                     let tangent = Vector3::UP.cross(radial_dir).normalized();
-                    p.velocity = p.velocity + tangent * self.emitter.material.tangential_accel * dt_scaled;
+                    p.velocity =
+                        p.velocity + tangent * self.emitter.material.tangential_accel * dt_scaled;
                 }
             }
 
@@ -933,7 +935,11 @@ mod tests {
         sim.step(1.0); // integrate 1s
         let p = &sim.active_particles[0];
         // Velocity should be roughly (0, -10, 0) after 1s of gravity
-        assert!(p.velocity.y < -5.0, "Gravity not applied: vy={}", p.velocity.y);
+        assert!(
+            p.velocity.y < -5.0,
+            "Gravity not applied: vy={}",
+            p.velocity.y
+        );
     }
 
     #[test]
@@ -980,10 +986,10 @@ mod tests {
             ..Default::default()
         });
         sim.step(1.0); // emit
-        // At birth, color should be red
+                       // At birth, color should be red
         assert!(sim.active_particles[0].color.r > 0.8);
         sim.step(0.5); // half lifetime
-        // Color should be roughly purple (mix of red and blue)
+                       // Color should be roughly purple (mix of red and blue)
         let c = sim.active_particles[0].color;
         assert!(c.r > 0.3 && c.b > 0.3, "Color should be mixed: {c:?}");
     }
@@ -1027,7 +1033,7 @@ mod tests {
         assert!(!sim.emitter.emitting);
         let count = sim.particle_count();
         sim.step(0.1); // no new particles
-        // Should not emit more (old ones die)
+                       // Should not emit more (old ones die)
         assert!(sim.particle_count() <= count);
     }
 

@@ -359,11 +359,7 @@ impl Animation {
         let mut results = Vec::new();
         for track in &self.tracks {
             if let Some(value) = track.sample(time) {
-                results.push((
-                    track.node_path.clone(),
-                    track.property_path.clone(),
-                    value,
-                ));
+                results.push((track.node_path.clone(), track.property_path.clone(), value));
             }
         }
         results
@@ -1592,7 +1588,6 @@ mod tests {
     }
 }
 
-
 /// Root motion sample (pat-z35r2.10).
 #[derive(Debug, Clone, Copy)]
 pub struct RootMotionDelta {
@@ -1700,8 +1695,11 @@ mod root_motion_tests {
     #[test]
     fn non_property_paths_lists_method_and_root_tracks() {
         let mut anim = Animation::new("a", 1.0);
-        anim.tracks
-            .push(AnimationTrack::with_type("N", "position", TrackType::Property));
+        anim.tracks.push(AnimationTrack::with_type(
+            "N",
+            "position",
+            TrackType::Property,
+        ));
         anim.tracks
             .push(AnimationTrack::with_type("N", "fire", TrackType::Method));
         let mut player = AnimationPlayer::new();
@@ -1711,7 +1709,10 @@ mod root_motion_tests {
 
         let skip = player.non_property_track_paths();
         assert!(skip.contains(&"fire".to_string()), "method track excluded");
-        assert!(skip.contains(&"position".to_string()), "root track excluded");
+        assert!(
+            skip.contains(&"position".to_string()),
+            "root track excluded"
+        );
         // A plain property track that is not root motion stays applicable.
         assert_eq!(skip.iter().filter(|p| *p == "position").count(), 1);
     }
@@ -1771,8 +1772,16 @@ mod track_3d_tests {
             Some(Variant::Transform3D(tf)) => tf,
             other => panic!("expected Transform3D, got {other:?}"),
         };
-        assert!((mid.origin.x - 2.0).abs() < 1e-5, "origin.x lerps to 2, got {}", mid.origin.x);
-        assert!((mid.origin.y - 4.0).abs() < 1e-5, "origin.y lerps to 4, got {}", mid.origin.y);
+        assert!(
+            (mid.origin.x - 2.0).abs() < 1e-5,
+            "origin.x lerps to 2, got {}",
+            mid.origin.x
+        );
+        assert!(
+            (mid.origin.y - 4.0).abs() < 1e-5,
+            "origin.y lerps to 4, got {}",
+            mid.origin.y
+        );
     }
 
     #[test]
@@ -1786,11 +1795,17 @@ mod track_3d_tests {
         ));
         track.add_keyframe(KeyFrame::linear(
             1.0,
-            Variant::Quaternion(Quaternion::from_axis_angle(axis, std::f32::consts::FRAC_PI_2)),
+            Variant::Quaternion(Quaternion::from_axis_angle(
+                axis,
+                std::f32::consts::FRAC_PI_2,
+            )),
         ));
         match track.sample(0.5) {
             Some(Variant::Quaternion(q)) => {
-                assert!((q.length() - 1.0).abs() < 1e-4, "sampled rotation normalized");
+                assert!(
+                    (q.length() - 1.0).abs() < 1e-4,
+                    "sampled rotation normalized"
+                );
             }
             other => panic!("expected sampled Quaternion, got {other:?}"),
         }

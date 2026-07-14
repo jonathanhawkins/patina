@@ -192,8 +192,7 @@ mod tests {
     #[test]
     fn set_get_cell() {
         let mut g = GridMap::new();
-        g.mesh_library
-            .set_item(1, "cube", "res://meshes/cube.tres");
+        g.mesh_library.set_item(1, "cube", "res://meshes/cube.tres");
         let c = GridCell { x: 1, y: 0, z: -2 };
         g.set_cell_item(c, 1);
         assert_eq!(g.get_cell_item(c), 1);
@@ -207,10 +206,18 @@ mod tests {
     fn decode_cells_positive_and_negative_coords() {
         // (0,0,0) item 1 ; (1,0,0) item 0 ; (0,0,1) item 2 ; (-1,-1,0) item 3
         let data = [
-            0, 0, 1, // key=0                 -> (0,0,0), item 1
-            1, 0, 0, // lo=1 (x=1)            -> (1,0,0), item 0
-            0, 1, 2, // hi=1 (z=1)            -> (0,0,1), item 2
-            0xFFFF_FFFF_u32 as i32, 0, 3, // lo=-1 (x=-1,y=-1), hi=0 (z=0) -> item 3
+            0,
+            0,
+            1, // key=0                 -> (0,0,0), item 1
+            1,
+            0,
+            0, // lo=1 (x=1)            -> (1,0,0), item 0
+            0,
+            1,
+            2, // hi=1 (z=1)            -> (0,0,1), item 2
+            0xFFFF_FFFF_u32 as i32,
+            0,
+            3, // lo=-1 (x=-1,y=-1), hi=0 (z=0) -> item 3
         ];
         let decoded = GridMap::decode_cells(&data);
         assert_eq!(decoded.len(), 4);

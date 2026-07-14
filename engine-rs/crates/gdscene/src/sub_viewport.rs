@@ -283,7 +283,8 @@ impl SubViewport {
 
     /// Rasterizes a solid axis-aligned rect into the buffer (ColorRect stand-in).
     pub fn draw_color_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: Color) {
-        self.buffer.fill_rect(x, y, x.saturating_add(w), y.saturating_add(h), color);
+        self.buffer
+            .fill_rect(x, y, x.saturating_add(w), y.saturating_add(h), color);
     }
 
     /// Software path: clear (per clear_mode) then fill a full-viewport ColorRect.

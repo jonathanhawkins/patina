@@ -558,7 +558,10 @@ mod tests {
         // A's own row now reads Hidden; B is itself still visible but an
         // ancestor is hidden, so its row reads InheritedHidden (propagation).
         assert_eq!(visibility_state(&tree, a_id), VisibilityState::Hidden);
-        assert_eq!(visibility_state(&tree, b_id), VisibilityState::InheritedHidden);
+        assert_eq!(
+            visibility_state(&tree, b_id),
+            VisibilityState::InheritedHidden
+        );
         // B's own `visible` flag was NOT modified by hiding the ancestor.
         assert!(is_visible(&tree, b_id));
 

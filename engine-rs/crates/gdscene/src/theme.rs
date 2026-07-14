@@ -100,8 +100,7 @@ impl Theme {
     /// Convenience for parsing a theme resource into typed styleboxes.
     pub fn load_styleboxes_from_tscn(&mut self, control_type: &str, text: &str) {
         for (id, sb) in crate::stylebox::parse_styleboxes_from_tscn(text) {
-            self.styleboxes
-                .insert((control_type.to_string(), id), sb);
+            self.styleboxes.insert((control_type.to_string(), id), sb);
         }
     }
 

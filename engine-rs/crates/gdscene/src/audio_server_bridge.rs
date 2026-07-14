@@ -148,7 +148,9 @@ impl AudioServerBridge {
 
     fn sync_player_node(&mut self, tree: &mut SceneTree, id: NodeId) {
         let (stream_path, volume_db, autoplay, playing_prop, bus) = {
-            let Some(node) = tree.get_node(id) else { return };
+            let Some(node) = tree.get_node(id) else {
+                return;
+            };
             let as_bool = |key: &str| matches!(node.get_property(key), Variant::Bool(true));
             let stream_path = match node.get_property("stream") {
                 Variant::String(s) => s,
