@@ -1896,6 +1896,7 @@ impl Coordinator {
         self.checkpoint_in_flight
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let root = self.config.project_root.clone();
+        let gate_target = self.config.cache_dir().join("checkpoint-target");
         let gate_timeout = Duration::from_secs(self.config.checkpoint_gate_timeout_seconds);
         let counter = Arc::clone(&self.closes_since_checkpoint);
         let flag = Arc::clone(&self.checkpoint_in_flight);
@@ -1906,16 +1907,22 @@ impl Coordinator {
             "auto-checkpoint: spawning workspace-check gate + commit"
         );
         std::thread::spawn(move || {
-            // Green gate goes through verify_commands so it serializes on the
-            // build slot (rust_task.sh wrapping) and gets process-group-kill
-            // timeout handling.
-            let outcome = verifier::verify_commands(
-                &root,
-                &["cargo check --workspace".to_string()],
-                gate_timeout,
-            )
-            .map_err(|e| format!("workspace check not green: {e}"))
-            .and_then(|_| run_checkpoint_commit(&root, closes));
+            // The green gate runs in its OWN target dir, deliberately OFF the
+            // shared build slot: a ~20-minute workspace check on the slot
+            // starves every worker re-check and the verifier lane (observed
+            // live 2026-07-14, where the starved check was then SIGKILLed).
+            // The env-prefixed command dodges verify_commands' rust_task.sh
+            // wrapping while keeping its process-group timeout handling; the
+            // absolute --manifest-path makes it cwd-independent. Costs a
+            // second (persistent, warm) target dir on disk.
+            let gate_cmd = format!(
+                "CARGO_TARGET_DIR='{}' cargo check --workspace --manifest-path '{}'",
+                gate_target.display(),
+                root.join("engine-rs/Cargo.toml").display()
+            );
+            let outcome = verifier::verify_commands(&root, &[gate_cmd], gate_timeout)
+                .map_err(|e| format!("workspace check not green: {e}"))
+                .and_then(|_| run_checkpoint_commit(&root, closes));
             let text = match &outcome {
                 Ok(msg) => {
                     *counter.lock().unwrap() = 0;
@@ -2282,14 +2289,16 @@ fn order_batch_by_crate(batch: &mut [VerifyRequest]) {
 }
 
 /// Uncommitted files under a broken crate — the operator's suspect list for
-/// a crate-breakage alert. Best-effort.
+/// a crate-breakage alert. Uses `git status --porcelain`, NOT `git diff HEAD`:
+/// brand-new (untracked) files are invisible to diff, and the live 2026-07-14
+/// breakage came from exactly such a file (an untracked autoload.rs).
+/// Best-effort.
 fn dirty_files_for_crate(project_root: &std::path::Path, crate_name: &str) -> String {
     let out = Command::new("git")
         .current_dir(project_root)
         .args([
-            "diff",
-            "--name-only",
-            "HEAD",
+            "status",
+            "--porcelain",
             "--",
             &format!("engine-rs/crates/{crate_name}/"),
         ])
@@ -2304,7 +2313,7 @@ fn dirty_files_for_crate(project_root: &std::path::Path, crate_name: &str) -> St
                 files.join("\n")
             }
         }
-        _ => "(git diff unavailable)".to_string(),
+        _ => "(git status unavailable)".to_string(),
     }
 }
 

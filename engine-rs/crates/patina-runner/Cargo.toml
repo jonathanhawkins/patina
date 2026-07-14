@@ -16,6 +16,7 @@ gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
 gdscene = { path = "../gdscene" }
 gdaudio = { path = "../gdaudio" }
+gdplatform = { path = "../gdplatform" }
 gdscript-interop = { path = "../gdscript-interop" }
 serde_json.workspace = true
 tracing.workspace = true

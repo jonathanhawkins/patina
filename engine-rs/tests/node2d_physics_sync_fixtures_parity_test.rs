@@ -286,7 +286,7 @@ fn rigid_body_position_advances_monotonically() {
     let mut last_x = get_vec2(&tree, rigid, "position").x;
 
     for _ in 0..10 {
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         server.step_physics(dt);
         server.sync_from_physics(&mut tree);
 
@@ -318,7 +318,7 @@ fn kinematic_sync_to_physics_is_idempotent() {
 
     // Sync multiple times — body position should stay consistent.
     for _ in 0..5 {
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         let body_id = server.body_for_node(kinematic).unwrap();
         let body = server.world().get_body(body_id).unwrap();
         assert!(
@@ -339,7 +339,7 @@ fn node_property_mutation_affects_next_sync() {
     let (mut tree, mut server, _rigid, _static_b, kinematic) = build_physics_scene();
 
     // Initial sync.
-    server.sync_to_physics(&tree);
+    server.sync_to_physics(&mut tree);
     let body_id = server.body_for_node(kinematic).unwrap();
     let body = server.world().get_body(body_id).unwrap();
     assert!(approx_vec2(body.position, Vector2::new(200.0, 0.0)));
@@ -350,7 +350,7 @@ fn node_property_mutation_affects_next_sync() {
         .set_property("position", Variant::Vector2(Vector2::new(999.0, 777.0)));
 
     // Re-sync — physics should pick up the new position.
-    server.sync_to_physics(&tree);
+    server.sync_to_physics(&mut tree);
     let body = server.world().get_body(body_id).unwrap();
     assert!(
         approx_vec2(body.position, Vector2::new(999.0, 777.0)),
@@ -385,7 +385,7 @@ fn angular_velocity_integration_advances_rotation() {
 
     let dt = 1.0 / 60.0_f32;
     for _ in 0..60 {
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         server.step_physics(dt);
         server.sync_from_physics(&mut tree);
     }
@@ -429,7 +429,7 @@ fn zero_velocity_body_stays_in_place() {
 
     let dt = 1.0 / 60.0_f32;
     for _ in 0..10 {
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         server.step_physics(dt);
         server.sync_from_physics(&mut tree);
     }
@@ -486,7 +486,7 @@ fn sync_from_physics_ignores_unregistered_nodes() {
     server.register_bodies(&tree);
 
     // Step physics (no bodies registered).
-    server.sync_to_physics(&tree);
+    server.sync_to_physics(&mut tree);
     server.step_physics(1.0 / 60.0);
     server.sync_from_physics(&mut tree);
 
@@ -560,7 +560,7 @@ fn mixed_body_types_sync_direction_rules() {
     let dt = 1.0 / 60.0_f32;
 
     // Step once.
-    server.sync_to_physics(&tree);
+    server.sync_to_physics(&mut tree);
     server.step_physics(dt);
     server.sync_from_physics(&mut tree);
 
@@ -587,7 +587,7 @@ fn mixed_body_types_sync_direction_rules() {
     tree.get_node_mut(kinematic)
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(999.0, 0.0)));
-    server.sync_to_physics(&tree);
+    server.sync_to_physics(&mut tree);
 
     let kin_body = server
         .world()
@@ -609,7 +609,7 @@ fn physics_trace_records_all_bodies() {
     server.set_tracing(true);
     server.clear_trace();
 
-    server.sync_to_physics(&tree);
+    server.sync_to_physics(&mut tree);
     server.step_physics(1.0 / 60.0);
     server.record_trace(&tree);
 
@@ -634,7 +634,7 @@ fn physics_sync_is_deterministic() {
         let dt = 1.0 / 60.0_f32;
         let mut positions = Vec::new();
         for _ in 0..20 {
-            server.sync_to_physics(&tree);
+            server.sync_to_physics(&mut tree);
             server.step_physics(dt);
             server.sync_from_physics(&mut tree);
             let pos = get_vec2(&tree, rigid, "position");
@@ -670,7 +670,7 @@ fn sync_roundtrip_position_velocity_consistent() {
     let dt = 1.0 / 60.0_f32;
 
     for _ in 0..5 {
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         server.step_physics(dt);
         server.sync_from_physics(&mut tree);
 
@@ -718,7 +718,7 @@ fn static_body_state_unchanged_across_steps() {
     let dt = 1.0 / 60.0_f32;
 
     for _ in 0..20 {
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         server.step_physics(dt);
         server.sync_from_physics(&mut tree);
     }
@@ -842,7 +842,7 @@ fn multiple_kinematic_bodies_sync_independently() {
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(150.0, 150.0)));
 
-    server.sync_to_physics(&tree);
+    server.sync_to_physics(&mut tree);
 
     let body_a = server
         .world()
@@ -933,7 +933,7 @@ fn full_pipeline_bidirectional_consistency_across_body_types() {
             .unwrap()
             .set_property("position", Variant::Vector2(Vector2::new(kin_x, 0.0)));
 
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         server.step_physics(dt);
         server.sync_from_physics(&mut tree);
 
@@ -1014,7 +1014,7 @@ fn velocity_writeback_roundtrip_across_frames() {
 
     let dt = 1.0 / 60.0_f32;
     for _ in 0..5 {
-        server.sync_to_physics(&tree);
+        server.sync_to_physics(&mut tree);
         server.step_physics(dt);
         server.sync_from_physics(&mut tree);
 

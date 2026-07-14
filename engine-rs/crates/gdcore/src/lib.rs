@@ -30,11 +30,13 @@ pub mod regex;
 pub mod release_notes;
 pub mod release_train;
 pub mod reproducible_build;
+pub mod project_settings;
 pub mod rng;
 pub mod string_name;
 
 // Re-export commonly used types at the crate root.
 pub use error::{EngineError, EngineResult};
+pub use project_settings::{ProjectSettings, SettingsValue};
 pub use file_access::{
     is_dir_access_handle, is_file_access_handle, project_root, resolve_path, set_path_roots,
     user_root, DirAccess, FileAccess, FileMode,

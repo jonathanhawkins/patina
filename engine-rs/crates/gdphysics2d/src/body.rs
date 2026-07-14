@@ -72,6 +72,13 @@ pub struct PhysicsBody2D {
 
     /// Accumulated force for the current frame (reset after integration).
     accumulated_force: Vector2,
+    /// Accumulated torque for the current frame (reset after integration).
+    accumulated_torque: f32,
+    /// Local-space center of mass offset (Godot `center_of_mass`).
+    ///
+    /// Positioned impulses/forces produce torque about this point. Defaults to
+    /// the body origin `(0, 0)`.
+    pub center_of_mass: Vector2,
 }
 
 impl PhysicsBody2D {
@@ -102,6 +109,8 @@ impl PhysicsBody2D {
             linear_damp: 0.0,
             angular_damp: 0.0,
             accumulated_force: Vector2::ZERO,
+            accumulated_torque: 0.0,
+            center_of_mass: Vector2::ZERO,
         }
     }
 
@@ -136,6 +145,93 @@ impl PhysicsBody2D {
         if self.body_type == BodyType::Rigid && self.mass > 0.0 {
             self.linear_velocity = self.linear_velocity + impulse * (1.0 / self.mass);
         }
+    }
+
+    /// Returns the body's moment of inertia about its center of mass, derived
+    /// from its shape and mass (matching Godot's automatic inertia computation
+    /// for a `RigidBody2D` that does not override `inertia`).
+    ///
+    /// Clamped to a small positive value so [`inverse_inertia`] never diverges
+    /// for degenerate shapes.
+    ///
+    /// [`inverse_inertia`]: Self::inverse_inertia
+    pub fn moment_of_inertia(&self) -> f32 {
+        let m = self.mass.max(0.0);
+        let i = match &self.shape {
+            Shape2D::Circle { radius } => 0.5 * m * radius * radius,
+            Shape2D::Rectangle { half_extents } => {
+                // I = m (w^2 + h^2) / 12 with w = 2*hx, h = 2*hy.
+                m * (half_extents.x * half_extents.x + half_extents.y * half_extents.y) / 3.0
+            }
+            Shape2D::Capsule { radius, height } => {
+                // Central rod (length `height`) plus the end-cap disc.
+                m * height * height / 12.0 + 0.5 * m * radius * radius
+            }
+            Shape2D::Segment { a, b } => {
+                let len = (*b - *a).length();
+                m * len * len / 12.0
+            }
+            _ => {
+                // Polygon / world-boundary / separation-ray: approximate with a
+                // disc of the shape's bounding radius (0 for unbounded shapes).
+                let br2 = self
+                    .shape
+                    .polygon_points()
+                    .iter()
+                    .map(|p| p.x * p.x + p.y * p.y)
+                    .fold(0.0_f32, f32::max);
+                0.5 * m * br2
+            }
+        };
+        i.max(1e-4)
+    }
+
+    /// Returns the inverse moment of inertia (0 for static/kinematic bodies).
+    pub fn inverse_inertia(&self) -> f32 {
+        match self.body_type {
+            BodyType::Static | BodyType::Kinematic => 0.0,
+            BodyType::Rigid => {
+                let i = self.moment_of_inertia();
+                if i > 0.0 {
+                    1.0 / i
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// Applies a continuous torque (angular acceleration = torque / inertia) for
+    /// the current step. Has no effect on non-rigid bodies.
+    pub fn apply_torque(&mut self, torque: f32) {
+        if self.body_type == BodyType::Rigid {
+            self.accumulated_torque += torque;
+        }
+    }
+
+    /// Applies an instantaneous angular impulse: directly changes the angular
+    /// velocity by `torque_impulse * inverse_inertia`.
+    pub fn apply_torque_impulse(&mut self, torque_impulse: f32) {
+        if self.body_type == BodyType::Rigid {
+            let inv_i = self.inverse_inertia();
+            self.angular_velocity += torque_impulse * inv_i;
+        }
+    }
+
+    /// Applies an instantaneous impulse at a point offset from the body origin,
+    /// producing both a linear velocity change and an angular velocity change
+    /// about the center of mass (Godot `apply_impulse(impulse, position)`).
+    ///
+    /// `point` is relative to the body's position (its origin).
+    pub fn apply_impulse_at_point(&mut self, impulse: Vector2, point: Vector2) {
+        if self.body_type != BodyType::Rigid {
+            return;
+        }
+        self.apply_impulse(impulse);
+        let r = point - self.center_of_mass;
+        let torque_impulse = r.x * impulse.y - r.y * impulse.x;
+        let inv_i = self.inverse_inertia();
+        self.angular_velocity += torque_impulse * inv_i;
     }
 
     /// Returns the inverse mass (0 for static/kinematic bodies).
@@ -189,10 +285,14 @@ impl PhysicsBody2D {
                     let acceleration =
                         gravity * self.gravity_scale + self.accumulated_force * (1.0 / self.mass);
                     self.linear_velocity = self.linear_velocity + acceleration * dt;
+                    // Angular acceleration from accumulated torque (τ / I).
+                    let inv_i = self.inverse_inertia();
+                    self.angular_velocity += self.accumulated_torque * inv_i * dt;
                 }
                 self.position = self.position + self.linear_velocity * dt;
                 self.rotation += self.angular_velocity * dt;
                 self.accumulated_force = Vector2::ZERO;
+                self.accumulated_torque = 0.0;
             }
         }
     }
@@ -367,5 +467,80 @@ mod tests {
             expected
         );
         assert!(body.linear_velocity.x < 100.0, "velocity must decay");
+    }
+
+    fn rigid_disc(mass: f32) -> PhysicsBody2D {
+        PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 2.0 },
+            mass,
+        )
+    }
+
+    #[test]
+    fn moment_of_inertia_positive_for_rigid_shapes() {
+        assert!(rigid_disc(1.0).moment_of_inertia() > 0.0);
+        assert!(rigid_disc(1.0).inverse_inertia() > 0.0);
+        // Static/kinematic bodies have zero inverse inertia (no rotation from torque).
+        let mut stat = rigid_disc(1.0);
+        stat.body_type = BodyType::Static;
+        assert_eq!(stat.inverse_inertia(), 0.0);
+    }
+
+    #[test]
+    fn apply_torque_spins_body_through_integration() {
+        let mut body = rigid_disc(1.0);
+        body.apply_torque(50.0);
+        body.integrate(1.0 / 60.0, Vector2::ZERO);
+        assert!(
+            body.angular_velocity > 0.0,
+            "positive torque must produce positive angular velocity, got {}",
+            body.angular_velocity
+        );
+        assert!(body.rotation > 0.0, "body should have rotated");
+        // Torque is cleared after integration (like force).
+        let omega = body.angular_velocity;
+        body.integrate(1.0 / 60.0, Vector2::ZERO);
+        assert!(
+            (body.angular_velocity - omega).abs() < 1e-6,
+            "no residual torque should remain after integration"
+        );
+    }
+
+    #[test]
+    fn apply_torque_impulse_changes_angular_velocity_immediately() {
+        let mut body = rigid_disc(1.0);
+        body.apply_torque_impulse(10.0);
+        assert!(
+            body.angular_velocity > 0.0,
+            "torque impulse must change angular velocity without integration"
+        );
+    }
+
+    #[test]
+    fn off_center_impulse_imparts_spin_centered_does_not() {
+        // Impulse applied off-center produces angular velocity.
+        let mut spun = rigid_disc(1.0);
+        spun.apply_impulse_at_point(Vector2::new(10.0, 0.0), Vector2::new(0.0, 2.0));
+        assert!(
+            spun.angular_velocity.abs() > 1e-4,
+            "off-center impulse must impart spin, got {}",
+            spun.angular_velocity
+        );
+        assert!(
+            spun.linear_velocity.x > 0.0,
+            "off-center impulse still changes linear velocity"
+        );
+
+        // Impulse through the center of mass produces no spin.
+        let mut straight = rigid_disc(1.0);
+        straight.apply_impulse_at_point(Vector2::new(10.0, 0.0), Vector2::ZERO);
+        assert!(
+            straight.angular_velocity.abs() < 1e-6,
+            "central impulse must not spin the body, got {}",
+            straight.angular_velocity
+        );
     }
 }

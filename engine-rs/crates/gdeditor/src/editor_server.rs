@@ -9411,6 +9411,30 @@ fn route_is_edit_locked(method: &str, path: &str) -> bool {
     )
 }
 
+/// Instantiates the project's `[autoload]` singletons into `tree` under
+/// `/root` for a Play session, attaching their scripts. Returns the node ids
+/// of the instantiated autoload roots (in declaration order).
+///
+/// Mirrors Godot's boot: autoload nodes exist and their scripts are attached
+/// before any `_ready` runs, so scene scripts can reference `/root/<Autoload>`.
+/// The caller drives `_ready` (see [`api_runtime_play`]). pat-nzgdu.3.
+fn instantiate_play_autoloads(tree: &mut SceneTree, project_root: &str) -> Vec<NodeId> {
+    let root = std::path::Path::new(project_root);
+    let autoloads = match gdresource::ProjectLoader::load(root) {
+        Ok(loader) => loader.get_autoloads(),
+        Err(_) => return Vec::new(),
+    };
+    if autoloads.is_empty() {
+        return Vec::new();
+    }
+    let root_id = tree.root_id();
+    gdscene::autoload::instantiate_autoloads(tree, root_id, &autoloads, root)
+        .nodes
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect()
+}
+
 fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut state = state.lock().unwrap();
     if state.is_running {
@@ -9423,11 +9447,19 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let project_root = state.texture_cache.project_root().to_string();
     attach_scripts_to_tree(&mut cloned, &project_root, &mut state);
 
-    // Call _ready() on all scripted nodes.
+    // Instantiate project [autoload] singletons under /root and run THEIR
+    // _ready first, so the scene's scripts can reference /root/<Autoload> in
+    // their own _ready (Godot boot order). pat-nzgdu.3.
+    let autoload_ids = instantiate_play_autoloads(&mut cloned, &project_root);
+    for id in &autoload_ids {
+        cloned.process_script_ready(*id);
+    }
+
+    // Call _ready() on all remaining scripted nodes (autoloads already done).
     let scripted_ids: Vec<NodeId> = cloned
         .all_nodes_in_tree_order()
         .into_iter()
-        .filter(|id| cloned.has_script(*id))
+        .filter(|id| cloned.has_script(*id) && !autoload_ids.contains(id))
         .collect();
     for id in &scripted_ids {
         cloned.process_script_ready(*id);
@@ -20403,5 +20435,61 @@ position = Vector2(10, 20)
         );
 
         handle.stop();
+    }
+
+    /// The editor "Play" path instantiates project `[autoload]` singletons under
+    /// `/root` and runs their `_ready` before scene scripts, matching Godot.
+    /// pat-nzgdu.3.
+    #[test]
+    fn play_instantiates_project_autoloads_under_root() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static C: AtomicUsize = AtomicUsize::new(0);
+        let n = C.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "patina_editor_autoload_{}_{}",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("project.godot"),
+            "[autoload]\nGlobal=\"*res://global.gd\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("global.gd"),
+            "extends Node\nvar score = 0\nfunc _ready():\n    score = 7\n",
+        )
+        .unwrap();
+
+        // Exercise api_runtime_play's autoload step on a fresh scene tree.
+        let mut tree = SceneTree::new();
+        let autoload_ids = instantiate_play_autoloads(&mut tree, dir.to_str().unwrap());
+        assert_eq!(autoload_ids.len(), 1, "one autoload instantiated");
+
+        // Drive _ready exactly as api_runtime_play does.
+        for id in &autoload_ids {
+            tree.process_script_ready(*id);
+        }
+
+        let gid = tree
+            .get_node_by_path("/root/Global")
+            .expect("/root/Global exists after Play autoload step");
+        assert_eq!(tree.get_node(gid).unwrap().name(), "Global");
+        let score = tree
+            .get_script(gid)
+            .unwrap()
+            .list_properties()
+            .into_iter()
+            .find(|p| p.name == "score")
+            .map(|p| p.default_value);
+        assert_eq!(
+            score,
+            Some(gdvariant::Variant::Int(7)),
+            "_ready ran during Play"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

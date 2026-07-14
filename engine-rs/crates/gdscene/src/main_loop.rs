@@ -981,7 +981,7 @@ impl MainLoop {
             && physics_steps < self.max_physics_steps_per_frame
         {
             // Sync scene node positions to physics world before stepping.
-            self.physics_server.sync_to_physics(&self.tree);
+            self.physics_server.sync_to_physics(&mut self.tree);
             self.physics_server.step_physics(physics_dt as f32);
             self.physics_server.sync_from_physics(&mut self.tree);
 

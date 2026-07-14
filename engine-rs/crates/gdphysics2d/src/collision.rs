@@ -636,6 +636,15 @@ pub fn separate_bodies(a: &mut PhysicsBody2D, b: &mut PhysicsBody2D, result: &Co
     a.linear_velocity = a.linear_velocity - impulse * inv_a;
     b.linear_velocity = b.linear_velocity + impulse * inv_b;
 
+    // Angular response: the normal impulse applied at the contact point spins
+    // each body about its center of mass. For a head-on (centered) contact the
+    // lever arm is parallel to the impulse, so cross(r, impulse) is zero and no
+    // spin is imparted — preserving pre-existing linear-only collision results.
+    let r_a = result.point - a.position;
+    let r_b = result.point - b.position;
+    a.angular_velocity -= (r_a.x * impulse.y - r_a.y * impulse.x) * a.inverse_inertia();
+    b.angular_velocity += (r_b.x * impulse.y - r_b.y * impulse.x) * b.inverse_inertia();
+
     // Friction: reduce tangential velocity component
     let friction = (a.friction + b.friction) * 0.5;
     if friction > 0.0 {
@@ -1186,5 +1195,72 @@ mod tests {
 
         // With restitution=0.8 against static, velocity should reverse * 0.8
         assert!(approx_eq(a.linear_velocity.x, -8.0));
+    }
+
+    #[test]
+    fn off_center_collision_imparts_spin() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.linear_velocity = Vector2::new(10.0, 0.0);
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(1.5, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        // Contact point offset in +Y from body a's center: the normal impulse
+        // now has a lever arm and imparts angular velocity.
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(1.0, 0.0),
+            depth: 0.5,
+            point: Vector2::new(0.75, 0.5),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+        assert!(
+            a.angular_velocity.abs() > 1e-4,
+            "off-center contact should spin body a, got {}",
+            a.angular_velocity
+        );
+    }
+
+    #[test]
+    fn head_on_collision_imparts_no_spin() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.linear_velocity = Vector2::new(10.0, 0.0);
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(1.5, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        // Contact point on the normal axis through a's center: zero lever arm.
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(1.0, 0.0),
+            depth: 0.5,
+            point: Vector2::new(0.75, 0.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+        assert!(
+            a.angular_velocity.abs() < 1e-6,
+            "head-on contact must not spin, got {}",
+            a.angular_velocity
+        );
+        // Linear response is unchanged: inelastic stop along the normal.
+        assert!(approx_eq(a.linear_velocity.x, 0.0));
     }
 }

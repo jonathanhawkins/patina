@@ -108,13 +108,23 @@ impl Default for ProceduralSkyMaterial {
 }
 
 /// Optional in-memory panorama pixels for equirect sampling (tests + loaders).
+///
+/// **Pixels MUST be linear.** All three consumers — `PanoramaSkyMaterial`,
+/// `ProceduralSkyMaterial::sky_cover`, and `PhysicalSkyMaterial::night_sky` —
+/// are Godot `source_color` samplers, so the sampler decodes sRGB→linear at
+/// sample time. The renderer therefore uses these texels **raw** (already
+/// linear). A loader that decodes one of these textures from an image file
+/// must apply sRGB→linear itself (i.e. treat them as color, not data,
+/// textures) before populating this buffer, or the cover/stars/panorama layer
+/// will render too bright and over-saturated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PanoramaTexture {
     /// Width in texels.
     pub width: u32,
     /// Height in texels.
     pub height: u32,
-    /// Linear RGB pixels, row-major, length `width * height`.
+    /// **Linear** RGB(A) pixels, row-major, length `width * height` (see the
+    /// type-level note — these are `source_color`, decode sRGB→linear on load).
     pub pixels: Vec<Color>,
 }
 

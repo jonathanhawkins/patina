@@ -21,6 +21,7 @@ pub mod animation;
 pub mod animation_tree;
 pub mod astar;
 pub mod audio_server_bridge;
+pub mod autoload;
 pub mod canvas_order;
 pub mod collision;
 pub mod control;
@@ -59,6 +60,7 @@ pub mod tween;
 pub mod video_stream;
 
 // Re-export the most-used types at the crate root.
+pub use autoload::{boot_autoloads_from_dir, instantiate_autoloads, AutoloadResult};
 pub use lifecycle::LifecycleManager;
 pub use main_loop::{FrameOutput, FrameRecord, FrameTrace, MainLoop, NodeSnapshot};
 pub use node::{Node, NodeId, ProcessMode};

@@ -40,14 +40,16 @@ pub enum BootPhase {
     Resources = 3,
     /// Phase 4: Scene tree created with root viewport.
     SceneTree = 4,
-    /// Phase 5: Main scene loaded and instanced into tree.
-    MainScene = 5,
-    /// Phase 6: Scripts parsed and attached to nodes.
-    Scripts = 6,
-    /// Phase 7: Lifecycle notifications sent (enter_tree, _ready).
-    Lifecycle = 7,
-    /// Phase 8: Main loop running (frame stepping active).
-    Running = 8,
+    /// Phase 5: Project autoloads instantiated under /root (before main scene).
+    Autoloads = 5,
+    /// Phase 6: Main scene loaded and instanced into tree.
+    MainScene = 6,
+    /// Phase 7: Scripts parsed and attached to nodes.
+    Scripts = 7,
+    /// Phase 8: Lifecycle notifications sent (enter_tree, _ready).
+    Lifecycle = 8,
+    /// Phase 9: Main loop running (frame stepping active).
+    Running = 9,
 }
 
 impl BootPhase {
@@ -59,6 +61,7 @@ impl BootPhase {
             BootPhase::Servers,
             BootPhase::Resources,
             BootPhase::SceneTree,
+            BootPhase::Autoloads,
             BootPhase::MainScene,
             BootPhase::Scripts,
             BootPhase::Lifecycle,
@@ -73,7 +76,8 @@ impl BootPhase {
             BootPhase::Core => Some(BootPhase::Servers),
             BootPhase::Servers => Some(BootPhase::Resources),
             BootPhase::Resources => Some(BootPhase::SceneTree),
-            BootPhase::SceneTree => Some(BootPhase::MainScene),
+            BootPhase::SceneTree => Some(BootPhase::Autoloads),
+            BootPhase::Autoloads => Some(BootPhase::MainScene),
             BootPhase::MainScene => Some(BootPhase::Scripts),
             BootPhase::Scripts => Some(BootPhase::Lifecycle),
             BootPhase::Lifecycle => Some(BootPhase::Running),
@@ -89,6 +93,7 @@ impl BootPhase {
             BootPhase::Servers => "Servers",
             BootPhase::Resources => "Resources",
             BootPhase::SceneTree => "SceneTree",
+            BootPhase::Autoloads => "Autoloads",
             BootPhase::MainScene => "MainScene",
             BootPhase::Scripts => "Scripts",
             BootPhase::Lifecycle => "Lifecycle",
@@ -240,6 +245,7 @@ pub struct EngineBootstrap {
     main_loop: Option<MainLoop>,
     log: Vec<BootstrapLogEntry>,
     scripts_attached: usize,
+    autoloads_instantiated: usize,
     /// Audio output sink to attach to the [`MainLoop`]'s audio bridge when the
     /// [`BootPhase::Running`] phase creates it. If `None`, a platform-default
     /// sink is selected at boot (see [`default_audio_output`]). Injecting a sink
@@ -259,6 +265,7 @@ impl EngineBootstrap {
             main_loop: None,
             log: Vec::new(),
             scripts_attached: 0,
+            autoloads_instantiated: 0,
             pending_output: None,
         }
     }
@@ -326,6 +333,12 @@ impl EngineBootstrap {
         self.scripts_attached
     }
 
+    /// Returns the number of project autoloads instantiated during the
+    /// Autoloads phase.
+    pub fn autoloads_instantiated(&self) -> usize {
+        self.autoloads_instantiated
+    }
+
     /// Advances the bootstrap sequence by one phase.
     ///
     /// Returns the new phase, or an error if the phase failed.
@@ -340,6 +353,7 @@ impl EngineBootstrap {
             BootPhase::Servers => self.init_servers()?,
             BootPhase::Resources => self.init_resources()?,
             BootPhase::SceneTree => self.init_scene_tree()?,
+            BootPhase::Autoloads => self.init_autoloads()?,
             BootPhase::MainScene => self.init_main_scene()?,
             BootPhase::Scripts => self.init_scripts()?,
             BootPhase::Lifecycle => self.init_lifecycle()?,
@@ -413,6 +427,22 @@ impl EngineBootstrap {
         Ok(())
     }
 
+    fn init_autoloads(&mut self) -> Result<(), BootError> {
+        let project_dir = self.config.project_dir.clone();
+        let tree = self.tree.as_mut().ok_or_else(|| BootError {
+            phase: BootPhase::Autoloads,
+            message: "SceneTree not initialized".to_string(),
+        })?;
+
+        // Instantiate the project's [autoload] singletons under /root and run
+        // their enter_tree/_ready now, BEFORE the main scene is instanced, so
+        // the main scene's _ready observes them (Godot boot order). A missing
+        // or autoload-free project.godot yields an empty result (headless/test).
+        let result = gdscene::autoload::boot_autoloads_from_dir(tree, &project_dir);
+        self.autoloads_instantiated = result.len();
+        Ok(())
+    }
+
     fn init_main_scene(&mut self) -> Result<(), BootError> {
         let tree = self.tree.as_mut().ok_or_else(|| BootError {
             phase: BootPhase::MainScene,
@@ -455,6 +485,11 @@ impl EngineBootstrap {
         // Collect (node_id, script_path) pairs to avoid borrow conflict.
         let mut scripts_to_load = Vec::new();
         for node_id in tree.all_nodes_in_tree_order() {
+            // Skip autoload (or otherwise already-scripted) nodes so the Scripts
+            // phase doesn't re-attach and clobber their already-run _ready state.
+            if tree.get_script(node_id).is_some() {
+                continue;
+            }
             if let Some(node) = tree.get_node(node_id) {
                 if let Variant::String(res_path) = node.get_property("_script_path") {
                     let abs_path = resolve_res_path(&project_dir, &res_path);
@@ -561,6 +596,7 @@ impl fmt::Debug for EngineBootstrap {
             .field("has_main_loop", &self.main_loop.is_some())
             .field("scene_root_id", &self.scene_root_id)
             .field("scripts_attached", &self.scripts_attached)
+            .field("autoloads_instantiated", &self.autoloads_instantiated)
             .field("log_entries", &self.log.len())
             .finish()
     }
@@ -602,7 +638,8 @@ mod tests {
         assert!(BootPhase::Core < BootPhase::Servers);
         assert!(BootPhase::Servers < BootPhase::Resources);
         assert!(BootPhase::Resources < BootPhase::SceneTree);
-        assert!(BootPhase::SceneTree < BootPhase::MainScene);
+        assert!(BootPhase::SceneTree < BootPhase::Autoloads);
+        assert!(BootPhase::Autoloads < BootPhase::MainScene);
         assert!(BootPhase::MainScene < BootPhase::Scripts);
         assert!(BootPhase::Scripts < BootPhase::Lifecycle);
         assert!(BootPhase::Lifecycle < BootPhase::Running);
@@ -616,6 +653,7 @@ mod tests {
             BootPhase::Servers,
             BootPhase::Resources,
             BootPhase::SceneTree,
+            BootPhase::Autoloads,
             BootPhase::MainScene,
             BootPhase::Scripts,
             BootPhase::Lifecycle,
@@ -629,10 +667,10 @@ mod tests {
     }
 
     #[test]
-    fn boot_phase_all_has_nine_entries() {
-        assert_eq!(BootPhase::all().len(), 9);
+    fn boot_phase_all_has_ten_entries() {
+        assert_eq!(BootPhase::all().len(), 10);
         assert_eq!(BootPhase::all()[0], BootPhase::None);
-        assert_eq!(BootPhase::all()[8], BootPhase::Running);
+        assert_eq!(BootPhase::all()[9], BootPhase::Running);
     }
 
     #[test]
@@ -642,6 +680,7 @@ mod tests {
         assert_eq!(BootPhase::Servers.name(), "Servers");
         assert_eq!(BootPhase::Resources.name(), "Resources");
         assert_eq!(BootPhase::SceneTree.name(), "SceneTree");
+        assert_eq!(BootPhase::Autoloads.name(), "Autoloads");
         assert_eq!(BootPhase::MainScene.name(), "MainScene");
         assert_eq!(BootPhase::Scripts.name(), "Scripts");
         assert_eq!(BootPhase::Lifecycle.name(), "Lifecycle");
@@ -658,7 +697,8 @@ mod tests {
     fn boot_phase_index() {
         assert_eq!(BootPhase::None.index(), 0);
         assert_eq!(BootPhase::Core.index(), 1);
-        assert_eq!(BootPhase::Running.index(), 8);
+        assert_eq!(BootPhase::Autoloads.index(), 5);
+        assert_eq!(BootPhase::Running.index(), 9);
     }
 
     #[test]
@@ -738,9 +778,9 @@ mod tests {
     fn bootstrap_log_records_all_phases() {
         let mut boot = EngineBootstrap::new(BootConfig::headless());
         boot.run_all().unwrap();
-        assert_eq!(boot.log().len(), 8); // 8 transitions from None→Running
+        assert_eq!(boot.log().len(), 9); // 9 transitions from None→Running
         assert_eq!(boot.log()[0].phase, BootPhase::Core);
-        assert_eq!(boot.log()[7].phase, BootPhase::Running);
+        assert_eq!(boot.log()[8].phase, BootPhase::Running);
     }
 
     #[test]
@@ -807,7 +847,7 @@ mod tests {
     #[test]
     fn bootstrap_phases_match_godot_order() {
         // Verify the phase sequence matches Godot's documented initialization:
-        // Core → Servers → Resources → SceneTree → MainScene → Scripts → Lifecycle → Running
+        // Core → Servers → Resources → SceneTree → Autoloads → MainScene → Scripts → Lifecycle → Running
         let phases: Vec<BootPhase> = {
             let mut v = Vec::new();
             let mut p = BootPhase::None;
@@ -824,6 +864,7 @@ mod tests {
                 BootPhase::Servers,
                 BootPhase::Resources,
                 BootPhase::SceneTree,
+                BootPhase::Autoloads,
                 BootPhase::MainScene,
                 BootPhase::Scripts,
                 BootPhase::Lifecycle,

@@ -27,6 +27,7 @@ use gdscene::trace::TraceEventType;
 use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
 use gdvariant::Variant;
+use patina_runner::project_boot;
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -188,6 +189,12 @@ fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) {
     let mut scripts_to_load: Vec<(NodeId, PathBuf)> = Vec::new();
 
     for node_id in tree.all_nodes_in_tree_order() {
+        // Skip nodes that already have a script attached (e.g. autoload
+        // singletons instantiated during the autoload boot step) so we don't
+        // re-parse and clobber their already-run _ready state.
+        if tree.get_script(node_id).is_some() {
+            continue;
+        }
         if let Some(node) = tree.get_node(node_id) {
             if let Variant::String(res_path) = node.get_property("_script_path") {
                 let abs_path = resolve_res_path(project_dir, &res_path);
@@ -289,6 +296,68 @@ fn run_main_loop(
     frame_trace
 }
 
+/// Boots the runner from a `project.godot` (pat-nzgdu.17): parses the project,
+/// installs `res://` roots, instantiates autoloads + the declared main scene,
+/// runs enter_tree/_ready lifecycle and frames, then dumps the tree — mirroring
+/// the raw-`.tscn` path but driven by the project configuration.
+fn run_project_from_godot(arg_path: &Path, args: &Args) {
+    let project_dir = if arg_path.is_dir() {
+        arg_path.to_path_buf()
+    } else {
+        arg_path.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+
+    let booted = match project_boot::boot_project(&project_dir) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Error booting project '{}': {e}", project_dir.display());
+            process::exit(1);
+        }
+    };
+
+    let mut tree = booted.tree;
+    if args.event_trace {
+        tree.event_trace_mut().enable();
+    }
+
+    // Run lifecycle: autoloads first (Godot boots them before the main scene),
+    // then the declared main scene.
+    for (_, node_id) in &booted.autoload_roots {
+        LifecycleManager::enter_tree(&mut tree, *node_id);
+    }
+    if let Some(main_root) = booted.main_scene_root {
+        LifecycleManager::enter_tree(&mut tree, main_root);
+    }
+
+    tracing::info!(
+        node_count = tree.node_count(),
+        autoloads = booted.autoload_roots.len(),
+        actions = booted.input_map.actions().count(),
+        "booted project from project.godot"
+    );
+
+    let mut main_loop = MainLoop::new(tree);
+    let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
+
+    let mut output = json!({
+        "project_dir": project_dir.display().to_string(),
+        "frame_count": main_loop.frame_count(),
+        "physics_time": main_loop.physics_time(),
+        "process_time": main_loop.process_time(),
+        "tree": dump_tree_json(main_loop.tree()),
+    });
+    if args.trace_frames {
+        output["frame_trace"] = Value::Array(frame_trace);
+    }
+    if args.event_trace {
+        output["event_trace"] = serialize_event_trace(main_loop.tree());
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).expect("JSON serialization failed")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -314,6 +383,15 @@ fn main() {
         "loading scene"
     );
 
+    // pat-nzgdu.17: if the argument is a project directory or a `project.godot`
+    // file, boot from project.godot (main scene, autoloads, input map,
+    // ProjectSettings, res:// root) rather than treating it as a raw `.tscn`.
+    let arg_path = Path::new(&args.scene_path);
+    if arg_path.is_dir() || arg_path.file_name().is_some_and(|n| n == "project.godot") {
+        run_project_from_godot(arg_path, &args);
+        return;
+    }
+
     // Read and parse the .tscn file.
     let source = match fs::read_to_string(&args.scene_path) {
         Ok(s) => s,
@@ -331,10 +409,35 @@ fn main() {
         }
     };
 
-    // Create the scene tree and add the instanced scene.
+    // Create the scene tree.
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();
 
+    // Resolve the project directory from the scene path. Used for res://
+    // resolution of both autoload resources and node scripts.
+    let resolved_scene_path = Path::new(&args.scene_path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&args.scene_path));
+    let project_dir = resolved_scene_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+
+    // Enable event tracing before any lifecycle runs so both autoload and
+    // main-scene _ready callbacks are captured.
+    if args.event_trace {
+        tree.event_trace_mut().enable();
+    }
+
+    // Instantiate project autoloads under /root BEFORE the main scene, so the
+    // main scene's _ready can reference /root/<Autoload> — matching Godot's
+    // boot order (main/main.cpp:4367-4433).
+    let autoloads = gdscene::autoload::boot_autoloads_from_dir(&mut tree, &project_dir);
+    if !autoloads.is_empty() {
+        tracing::info!(count = autoloads.len(), "instantiated project autoloads");
+    }
+
+    // Instance the main scene under /root.
     let scene_root_id = match add_packed_scene_to_tree(&mut tree, root_id, &packed_scene) {
         Ok(id) => id,
         Err(e) => {
@@ -343,22 +446,11 @@ fn main() {
         }
     };
 
-    // Resolve and attach GDScript files to nodes that have _script_path.
-    let resolved_scene_path = Path::new(&args.scene_path)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(&args.scene_path));
-    let project_dir = resolved_scene_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    // Attach GDScript files to main-scene nodes that have _script_path.
+    // Autoload nodes already carry their scripts and are skipped by attach_scripts.
     attach_scripts(&mut tree, &project_dir);
 
-    // Enable event tracing if requested (before lifecycle so we capture _ready etc.).
-    if args.event_trace {
-        tree.event_trace_mut().enable();
-    }
-
-    // Run lifecycle: enter_tree + ready.
+    // Run main-scene lifecycle: enter_tree + ready.
     LifecycleManager::enter_tree(&mut tree, scene_root_id);
 
     tracing::info!(node_count = tree.node_count(), "scene instanced");

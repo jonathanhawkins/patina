@@ -945,12 +945,156 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
 
     match class.as_str() {
         "VBoxContainer" => arrange_vbox(tree, &children, total, sep),
-        "HBoxContainer" => arrange_hbox(tree, &children, total, sep),
+        "HBoxContainer" | "BoxContainer" => arrange_hbox(tree, &children, total, sep),
         "GridContainer" => {
             let cols = get_columns(tree, container_id).max(1) as usize;
             arrange_grid(tree, &children, sep, cols);
         }
+        "MarginContainer" => {
+            let m = get_margins(tree, container_id);
+            arrange_margin(tree, &children, total, m);
+        }
+        "CenterContainer" => arrange_center(tree, &children, total),
+        "ScrollContainer" => {
+            let scroll = get_scroll(tree, container_id);
+            arrange_scroll(tree, &children, total, scroll);
+        }
+        "TabContainer" => {
+            let current = get_current_tab(tree, container_id);
+            arrange_tabs(tree, &children, total, current);
+        }
         _ => {}
+    }
+}
+
+/// Per-side margins (`left`, `top`, `right`, `bottom`) resolved from a
+/// MarginContainer's `theme_override_constants/margin_*` overrides. Each
+/// defaults to `0`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Margins {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+/// Reads the four `theme_override_constants/margin_*` constants of a
+/// MarginContainer.
+pub fn get_margins(tree: &SceneTree, node_id: NodeId) -> Margins {
+    let read = |key: &str| -> f32 {
+        tree.get_node(node_id)
+            .map(|n| match n.get_property(key) {
+                Variant::Int(i) => i as f32,
+                Variant::Float(f) => f as f32,
+                _ => 0.0,
+            })
+            .unwrap_or(0.0)
+    };
+    Margins {
+        left: read("theme_override_constants/margin_left"),
+        top: read("theme_override_constants/margin_top"),
+        right: read("theme_override_constants/margin_right"),
+        bottom: read("theme_override_constants/margin_bottom"),
+    }
+}
+
+/// Sets a single `theme_override_constants/margin_<side>` on a MarginContainer.
+/// `side` is one of `"left"`, `"top"`, `"right"`, `"bottom"`.
+pub fn set_margin(tree: &mut SceneTree, node_id: NodeId, side: &str, px: i64) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(
+            &format!("theme_override_constants/margin_{side}"),
+            Variant::Int(px),
+        );
+    }
+}
+
+/// Gets the `"current_tab"` index of a TabContainer, defaulting to `0`.
+pub fn get_current_tab(tree: &SceneTree, node_id: NodeId) -> usize {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("current_tab") {
+            Variant::Int(i) => i.max(0) as usize,
+            _ => 0,
+        })
+        .unwrap_or(0)
+}
+
+/// Sets the `"current_tab"` index of a TabContainer.
+pub fn set_current_tab(tree: &mut SceneTree, node_id: NodeId, index: i64) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("current_tab", Variant::Int(index.max(0)));
+    }
+}
+
+/// Reads a ScrollContainer's `(scroll_horizontal, scroll_vertical)` offsets in
+/// pixels, each defaulting to `0`.
+pub fn get_scroll(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let read = |key: &str| -> f32 {
+        tree.get_node(node_id)
+            .map(|n| match n.get_property(key) {
+                Variant::Int(i) => i as f32,
+                Variant::Float(f) => f as f32,
+                _ => 0.0,
+            })
+            .unwrap_or(0.0)
+    };
+    Vector2::new(read("scroll_horizontal"), read("scroll_vertical"))
+}
+
+/// Height of a TabContainer's tab-header strip, in pixels. Godot's default
+/// theme tab height is ~32px for the built-in font.
+pub const TAB_BAR_HEIGHT: f32 = 32.0;
+
+/// MarginContainer: every child fills the container rect inset by the margins.
+fn arrange_margin(tree: &mut SceneTree, children: &[NodeId], total: Vector2, m: Margins) {
+    let inner = Vector2::new(
+        (total.x - m.left - m.right).max(0.0),
+        (total.y - m.top - m.bottom).max(0.0),
+    );
+    for &c in children {
+        set_position(tree, c, Vector2::new(m.left, m.top));
+        set_size(tree, c, inner);
+    }
+}
+
+/// CenterContainer: each child keeps its effective minimum size and is centered
+/// within the container.
+fn arrange_center(tree: &mut SceneTree, children: &[NodeId], total: Vector2) {
+    for &c in children {
+        let size = effective_min(tree, c);
+        let pos = Vector2::new(
+            ((total.x - size.x) * 0.5).max(0.0),
+            ((total.y - size.y) * 0.5).max(0.0),
+        );
+        set_position(tree, c, pos);
+        set_size(tree, c, size);
+    }
+}
+
+/// ScrollContainer: the (single) content child is sized to the larger of its
+/// minimum size and the viewport, then shifted by the negative scroll offset so
+/// content scrolls under the clip rect.
+fn arrange_scroll(tree: &mut SceneTree, children: &[NodeId], total: Vector2, scroll: Vector2) {
+    for &c in children {
+        let min = effective_min(tree, c);
+        let size = Vector2::new(min.x.max(total.x), min.y.max(total.y));
+        set_position(tree, c, Vector2::new(-scroll.x, -scroll.y));
+        set_size(tree, c, size);
+    }
+}
+
+/// TabContainer: only the child at `current` is visible, filling the area below
+/// the tab-header strip. Non-current children are collapsed to zero size.
+fn arrange_tabs(tree: &mut SceneTree, children: &[NodeId], total: Vector2, current: usize) {
+    let content = Vector2::new(total.x, (total.y - TAB_BAR_HEIGHT).max(0.0));
+    for (i, &c) in children.iter().enumerate() {
+        if i == current {
+            set_position(tree, c, Vector2::new(0.0, TAB_BAR_HEIGHT));
+            set_size(tree, c, content);
+        } else {
+            set_position(tree, c, Vector2::ZERO);
+            set_size(tree, c, Vector2::ZERO);
+        }
     }
 }
 

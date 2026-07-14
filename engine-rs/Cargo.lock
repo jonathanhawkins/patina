@@ -2001,6 +2001,7 @@ dependencies = [
  "gdaudio",
  "gdcore",
  "gdobject",
+ "gdplatform",
  "gdresource",
  "gdscene",
  "gdscript-interop",

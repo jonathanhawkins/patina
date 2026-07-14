@@ -207,6 +207,10 @@ pub struct SceneLight3D {
     pub energy: f32,
     /// `light_angular_distance` in degrees (sun disc size).
     pub angular_distance: f32,
+    /// Whether this light contributes to sky rendering (its sun disc). Godot's
+    /// `sky_mode`: `LIGHT_ONLY` sets this false so the light shades the scene
+    /// but draws no disc in the procedural/physical sky.
+    pub sky: bool,
 }
 
 /// Collects the scene's `DirectionalLight3D` nodes in tree order (capped at 4,
@@ -233,6 +237,8 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             color: gdscene::node3d::get_light_color(tree, nid),
             energy: gdscene::node3d::get_light_energy(tree, nid) as f32,
             angular_distance: gdscene::node3d::get_light_angular_distance(tree, nid) as f32,
+            // sky_mode == LIGHT_ONLY (1) excludes the light from the sky.
+            sky: gdscene::node3d::get_light_sky_mode(tree, nid) != 1,
         });
         if lights.len() >= 4 {
             break;
@@ -911,6 +917,9 @@ fn setup_editor_lighting_3d(
         light.color = sl.color;
         light.energy = sl.energy.max(0.0);
         light.angular_distance = sl.angular_distance;
+        // Godot's sky_mode: LIGHT_ONLY lights shade the scene but draw no sky
+        // sun disc (sky_suns_from_lights filters on this).
+        light.sky = sl.sky;
         renderer.add_light(light.id);
         renderer.update_light(&light);
     }
@@ -1339,6 +1348,30 @@ mod tests {
         assert_eq!(lights[0].color, gdcore::math::Color::new(1.0, 0.8, 0.5, 1.0));
         assert!((lights[0].energy - 3.0).abs() < 1e-6);
         assert!((lights[0].angular_distance - 2.5).abs() < 1e-6);
+        // Default sky_mode (LIGHT_AND_SKY) → contributes to the sky.
+        assert!(lights[0].sky, "default sky_mode must draw the sky sun");
+    }
+
+    /// Godot's `sky_mode = LIGHT_ONLY` (1) excludes the light from the sky, so
+    /// the light shades the scene but draws no sun disc in the procedural /
+    /// physical sky.
+    #[test]
+    fn scene_light_sky_mode_light_only_excludes_from_sky() {
+        gdobject::class_db::register_3d_classes();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let id = tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+        if let Some(n) = tree.get_node_mut(id) {
+            n.set_property("sky_mode", gdvariant::Variant::Int(1)); // LIGHT_ONLY
+        }
+        let lights = scene_directional_lights(&tree);
+        assert_eq!(lights.len(), 1);
+        assert!(!lights[0].sky, "LIGHT_ONLY must be excluded from the sky");
+        // SKY_ONLY (2) still draws the sky sun.
+        if let Some(n) = tree.get_node_mut(id) {
+            n.set_property("sky_mode", gdvariant::Variant::Int(2));
+        }
+        assert!(scene_directional_lights(&tree)[0].sky, "SKY_ONLY still draws the sky sun");
     }
 
     /// Godot caps sky directional lights at 4; the collector does too.

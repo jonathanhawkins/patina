@@ -325,6 +325,19 @@ pub fn get_light_angular_distance(tree: &SceneTree, node_id: NodeId) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Reads a `DirectionalLight3D`'s `"sky_mode"` property, defaulting to `0`
+/// (`LIGHT_AND_SKY`). Godot's `DirectionalLight3D.SkyMode`: `0 = LIGHT_AND_SKY`,
+/// `1 = LIGHT_ONLY` (excluded from sky rendering — no sky sun disc),
+/// `2 = SKY_ONLY`.
+pub fn get_light_sky_mode(tree: &SceneTree, node_id: NodeId) -> i64 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("sky_mode") {
+            Variant::Int(v) => v,
+            _ => 0,
+        })
+        .unwrap_or(0)
+}
+
 /// Sets the `"shadow_enabled"` property on a light.
 pub fn set_shadow_enabled(tree: &mut SceneTree, node_id: NodeId, enabled: bool) {
     if let Some(node) = tree.get_node_mut(node_id) {

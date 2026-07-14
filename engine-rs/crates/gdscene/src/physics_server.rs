@@ -447,24 +447,115 @@ impl PhysicsServer {
     /// and static bodies we also sync position/rotation so that manual
     /// `set_property("position", ...)` calls (e.g. teleporting a body) are
     /// picked up by the physics engine and the area-overlap detector.
-    pub fn sync_to_physics(&mut self, tree: &SceneTree) {
+    pub fn sync_to_physics(&mut self, tree: &mut SceneTree) {
         for (&node_id, &body_id) in &self.node_to_body {
+            // Snapshot the node's transform, script-set velocity, and any
+            // accumulated force/impulse bridge properties before mutably
+            // borrowing the world body (all immutable tree reads).
+            let scene_pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
+            let scene_rot = float_prop(tree, node_id, "rotation", 0.0) as f32;
+            let node_lin = tree
+                .get_node(node_id)
+                .map(|n| n.get_property("linear_velocity"));
+            let node_ang = tree
+                .get_node(node_id)
+                .map(|n| n.get_property("angular_velocity"));
+            let pending_impulse = vec2_prop(tree, node_id, "_pending_impulse", Vector2::ZERO);
+            let pending_ang_impulse =
+                float_prop(tree, node_id, "_pending_angular_impulse", 0.0) as f32;
+            let pending_force = vec2_prop(tree, node_id, "_pending_force", Vector2::ZERO);
+            let pending_torque = float_prop(tree, node_id, "_pending_torque", 0.0) as f32;
+            let constant_force = vec2_prop(tree, node_id, "constant_force", Vector2::ZERO);
+            let constant_torque = float_prop(tree, node_id, "constant_torque", 0.0) as f32;
+            let axis_velocity = match tree
+                .get_node(node_id)
+                .map(|n| n.get_property("_pending_axis_velocity"))
+            {
+                Some(Variant::Vector2(v)) => Some(v),
+                _ => None,
+            };
+
+            let mut is_rigid = false;
             if let Some(body) = self.world.get_body_mut(body_id) {
-                let scene_pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
-                let scene_rot = float_prop(tree, node_id, "rotation", 0.0) as f32;
-                if body.body_type == BodyType::Kinematic {
-                    body.position = scene_pos;
-                    body.rotation = scene_rot;
-                } else {
-                    // For rigid/static bodies, only sync when the scene tree
-                    // value diverges from the physics world (i.e. user code
-                    // teleported the body).
-                    if (body.position - scene_pos).length_squared() > 1e-6 {
+                match body.body_type {
+                    BodyType::Kinematic => {
                         body.position = scene_pos;
-                    }
-                    let rot_diff = (body.rotation - scene_rot).abs();
-                    if rot_diff > 1e-6 {
                         body.rotation = scene_rot;
+                    }
+                    BodyType::Static => {
+                        // Only pick up manual teleports.
+                        if (body.position - scene_pos).length_squared() > 1e-6 {
+                            body.position = scene_pos;
+                        }
+                        if (body.rotation - scene_rot).abs() > 1e-6 {
+                            body.rotation = scene_rot;
+                        }
+                    }
+                    BodyType::Rigid => {
+                        is_rigid = true;
+                        // Teleport detection for the transform.
+                        if (body.position - scene_pos).length_squared() > 1e-6 {
+                            body.position = scene_pos;
+                        }
+                        if (body.rotation - scene_rot).abs() > 1e-6 {
+                            body.rotation = scene_rot;
+                        }
+                        // Forward script-set velocity. After `sync_from_physics`
+                        // the node value equals the body's own velocity, so this
+                        // round-trips harmlessly unless a script overwrote it.
+                        if let Some(Variant::Vector2(v)) = node_lin {
+                            body.linear_velocity = v;
+                        }
+                        match node_ang {
+                            Some(Variant::Float(f)) => body.angular_velocity = f as f32,
+                            Some(Variant::Int(i)) => body.angular_velocity = i as f32,
+                            _ => {}
+                        }
+                        // set_axis_velocity: replace the velocity component along
+                        // the given axis with the requested one.
+                        if let Some(av) = axis_velocity {
+                            let len_sq = av.x * av.x + av.y * av.y;
+                            if len_sq > 1e-12 {
+                                let dir = av * (1.0 / len_sq.sqrt());
+                                let along = body.linear_velocity.dot(dir);
+                                body.linear_velocity = body.linear_velocity - dir * along + av;
+                            }
+                        }
+                        // Drain accumulated forces/impulses into the body.
+                        if pending_impulse.length_squared() > 0.0 {
+                            body.apply_impulse(pending_impulse);
+                        }
+                        if pending_ang_impulse != 0.0 {
+                            body.apply_torque_impulse(pending_ang_impulse);
+                        }
+                        if pending_force.length_squared() > 0.0 {
+                            body.apply_force(pending_force);
+                        }
+                        if pending_torque != 0.0 {
+                            body.apply_torque(pending_torque);
+                        }
+                        // Constant forces/torques persist each tick (Godot
+                        // `constant_force`/`constant_torque`) — not cleared.
+                        if constant_force.length_squared() > 0.0 {
+                            body.apply_force(constant_force);
+                        }
+                        if constant_torque != 0.0 {
+                            body.apply_torque(constant_torque);
+                        }
+                    }
+                }
+            }
+
+            // Clear the one-shot bridge properties so impulses/forces fire
+            // exactly once per frame (constant_* are intentionally preserved).
+            if is_rigid {
+                if let Some(n) = tree.get_node_mut(node_id) {
+                    n.set_property("_pending_impulse", Variant::Vector2(Vector2::ZERO));
+                    n.set_property("_pending_angular_impulse", Variant::Float(0.0));
+                    n.set_property("_pending_force", Variant::Vector2(Vector2::ZERO));
+                    n.set_property("_pending_torque", Variant::Float(0.0));
+                    if axis_velocity.is_some() {
+                        n.set_property("_pending_axis_velocity", Variant::Nil);
                     }
                 }
             }

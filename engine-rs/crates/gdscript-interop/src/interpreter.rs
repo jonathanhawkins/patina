@@ -30,6 +30,52 @@ const STACK_RED_ZONE: usize = 128 * 1024;
 /// How much native stack to allocate when growing.
 const STACK_GROWTH: usize = 4 * 1024 * 1024;
 
+/// Accumulates a `Vector2` delta onto a node property used as a script→physics
+/// bridge (pat-nzgdu.14). RigidBody2D force/impulse methods have no direct
+/// handle to the `PhysicsServer`, so they accumulate onto `_pending_*` /
+/// `constant_*` node properties that `PhysicsServer::sync_to_physics` drains
+/// into the world body each physics tick.
+fn accumulate_vec2_property(
+    access: &mut dyn SceneAccess,
+    id: u64,
+    prop: &str,
+    delta: gdcore::math::Vector2,
+) {
+    let cur = match access.get_node_property(id, prop) {
+        Variant::Vector2(v) => v,
+        _ => gdcore::math::Vector2::ZERO,
+    };
+    access.set_node_property(id, prop, Variant::Vector2(cur + delta));
+}
+
+/// Accumulates a scalar delta onto a float node property (see
+/// [`accumulate_vec2_property`]).
+fn accumulate_float_property(access: &mut dyn SceneAccess, id: u64, prop: &str, delta: f64) {
+    let cur = match access.get_node_property(id, prop) {
+        Variant::Float(f) => f,
+        Variant::Int(i) => i as f64,
+        _ => 0.0,
+    };
+    access.set_node_property(id, prop, Variant::Float(cur + delta));
+}
+
+/// Extracts a `Vector2` method argument (defaulting to zero).
+fn vec2_arg(args: &[Variant], idx: usize) -> gdcore::math::Vector2 {
+    match args.get(idx) {
+        Some(Variant::Vector2(v)) => *v,
+        _ => gdcore::math::Vector2::ZERO,
+    }
+}
+
+/// Extracts a scalar method argument (Float or Int, defaulting to zero).
+fn float_arg(args: &[Variant], idx: usize) -> f64 {
+    match args.get(idx) {
+        Some(Variant::Float(f)) => *f,
+        Some(Variant::Int(i)) => *i as f64,
+        _ => 0.0,
+    }
+}
+
 /// Source location for error reporting.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
@@ -4833,6 +4879,121 @@ impl Interpreter {
                     // The MainLoop already re-runs these queries every physics
                     // frame, so a scripted force update is a no-op.
                     "force_raycast_update" | "force_shapecast_update" => Ok(Variant::Nil),
+                    // -- RigidBody2D force/impulse/torque script API (pat-nzgdu.14).
+                    // Rigid bodies have no direct handle to the PhysicsServer, so
+                    // these methods accumulate onto `_pending_*` / `constant_*`
+                    // node properties that `PhysicsServer::sync_to_physics` drains
+                    // into the world body each physics tick. A positioned
+                    // impulse/force also contributes a torque = cross(offset, vec).
+                    "apply_central_impulse" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            accumulate_vec2_property(
+                                &mut **access,
+                                id,
+                                "_pending_impulse",
+                                vec2_arg(args, 0),
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "apply_impulse" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            let imp = vec2_arg(args, 0);
+                            let pos = vec2_arg(args, 1);
+                            accumulate_vec2_property(&mut **access, id, "_pending_impulse", imp);
+                            accumulate_float_property(
+                                &mut **access,
+                                id,
+                                "_pending_angular_impulse",
+                                (pos.x * imp.y - pos.y * imp.x) as f64,
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "apply_central_force" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            accumulate_vec2_property(
+                                &mut **access,
+                                id,
+                                "_pending_force",
+                                vec2_arg(args, 0),
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "apply_force" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            let f = vec2_arg(args, 0);
+                            let pos = vec2_arg(args, 1);
+                            accumulate_vec2_property(&mut **access, id, "_pending_force", f);
+                            accumulate_float_property(
+                                &mut **access,
+                                id,
+                                "_pending_torque",
+                                (pos.x * f.y - pos.y * f.x) as f64,
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "apply_torque" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            accumulate_float_property(
+                                &mut **access,
+                                id,
+                                "_pending_torque",
+                                float_arg(args, 0),
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "apply_torque_impulse" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            accumulate_float_property(
+                                &mut **access,
+                                id,
+                                "_pending_angular_impulse",
+                                float_arg(args, 0),
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "add_constant_force" | "add_constant_central_force" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            let f = vec2_arg(args, 0);
+                            accumulate_vec2_property(&mut **access, id, "constant_force", f);
+                            if method == "add_constant_force" {
+                                let pos = vec2_arg(args, 1);
+                                accumulate_float_property(
+                                    &mut **access,
+                                    id,
+                                    "constant_torque",
+                                    (pos.x * f.y - pos.y * f.x) as f64,
+                                );
+                            }
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "add_constant_torque" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            accumulate_float_property(
+                                &mut **access,
+                                id,
+                                "constant_torque",
+                                float_arg(args, 0),
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "set_axis_velocity" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.set_node_property(
+                                id,
+                                "_pending_axis_velocity",
+                                Variant::Vector2(vec2_arg(args, 0)),
+                            );
+                        }
+                        Ok(Variant::Nil)
+                    }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                         format!("ObjectId.{method}"),
                     ))),
