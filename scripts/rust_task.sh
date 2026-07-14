@@ -125,6 +125,16 @@ acquire_lock "$@"
 # most of the machine — 2 jobs starved the swarm's one bottleneck on an 18-core
 # box. Override per-invocation with CARGO_BUILD_JOBS=N.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-10}"
+
+# Verifier lane gets a PRIVATE target dir: another session's cargo (often with
+# different feature flags, e.g. gdrender3d --features gpu) can otherwise hold
+# the shared engine-rs/target flock across an entire 900s verify window
+# (observed: 118-min block 2026-07-13; scoped `check -p gdscene` FAILing on
+# pure lock-wait 2026-07-14). Costs a second warm target tree on disk; sccache
+# absorbs most of the duplicate compilation.
+if [[ "${AGENT}" == "verifier" && -z "${CARGO_TARGET_DIR:-}" ]]; then
+  export CARGO_TARGET_DIR="${ENGINE_ROOT}/target-verifier"
+fi
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
 # Amortize compilation across the many beads the verifier builds in sequence.

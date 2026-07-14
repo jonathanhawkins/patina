@@ -8,6 +8,7 @@ dist/
 out/
 .turbo/
 target/
+target-verifier/
 .shadertest-target/
 
 # Large regenerable Godot ClassDB dump (recreate: godot --headless --dump-extension-api)
