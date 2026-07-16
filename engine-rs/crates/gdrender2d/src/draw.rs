@@ -167,11 +167,54 @@ pub fn fill_circle(fb: &mut FrameBuffer, center: Vector2, radius: f32, color: Co
     }
 }
 
-/// Draws a line from `from` to `to` using Bresenham's line algorithm.
+/// Invokes `plot(x, y)` for every framebuffer pixel covered by a `width`-thick
+/// segment from `from` to `to` — the set of pixels whose center lies within
+/// `width / 2` of the segment (a capsule with rounded caps) — clipped to the
+/// framebuffer. Backs the wide-line paths of [`draw_line`]/[`draw_line_blended`].
+fn for_thick_line_pixels(
+    fb_width: u32,
+    fb_height: u32,
+    from: Vector2,
+    to: Vector2,
+    width: f32,
+    mut plot: impl FnMut(u32, u32),
+) {
+    let half = (width * 0.5).max(0.5);
+    let half_sq = half * half;
+    let min_x = (from.x.min(to.x) - half).floor().max(0.0) as u32;
+    let min_y = (from.y.min(to.y) - half).floor().max(0.0) as u32;
+    let max_x = ((from.x.max(to.x) + half).ceil() as i64).clamp(0, fb_width as i64) as u32;
+    let max_y = ((from.y.max(to.y) + half).ceil() as i64).clamp(0, fb_height as i64) as u32;
+    let seg = to - from;
+    let seg_len_sq = seg.length_squared();
+    for py in min_y..max_y {
+        for px in min_x..max_x {
+            let p = Vector2::new(px as f32 + 0.5, py as f32 + 0.5);
+            // Parametric closest point on the (clamped) segment, then radial test.
+            let t = if seg_len_sq < 1e-10 {
+                0.0
+            } else {
+                ((p - from).dot(seg) / seg_len_sq).clamp(0.0, 1.0)
+            };
+            let closest = from + seg * t;
+            if (p - closest).length_squared() <= half_sq {
+                plot(px, py);
+            }
+        }
+    }
+}
+
+/// Draws a line from `from` to `to`.
 ///
-/// The `_width` parameter is accepted for API compatibility but currently
-/// draws a 1-pixel-wide line.
-pub fn draw_line(fb: &mut FrameBuffer, from: Vector2, to: Vector2, color: Color, _width: f32) {
+/// Widths `<= 1` use Bresenham's algorithm (a 1-pixel line); wider lines
+/// rasterize a `width`-thick capsule so `draw_line`'s width is honored
+/// (Godot draws the requested thickness).
+pub fn draw_line(fb: &mut FrameBuffer, from: Vector2, to: Vector2, color: Color, width: f32) {
+    if width > 1.0 {
+        let (w, h) = (fb.width, fb.height);
+        for_thick_line_pixels(w, h, from, to, width, |x, y| fb.set_pixel(x, y, color));
+        return;
+    }
     let mut x0 = from.x as i32;
     let mut y0 = from.y as i32;
     let x1 = to.x as i32;
@@ -471,14 +514,20 @@ pub fn draw_nine_patch(
     );
 }
 
-/// Draws a line with alpha blending (source-over).
+/// Draws a line with alpha blending (source-over). Widths `> 1` rasterize a
+/// `width`-thick capsule; `<= 1` uses a 1-pixel Bresenham line.
 pub fn draw_line_blended(
     fb: &mut FrameBuffer,
     from: Vector2,
     to: Vector2,
     color: Color,
-    _width: f32,
+    width: f32,
 ) {
+    if width > 1.0 {
+        let (w, h) = (fb.width, fb.height);
+        for_thick_line_pixels(w, h, from, to, width, |x, y| fb.blend_pixel(x, y, color));
+        return;
+    }
     let mut x0 = from.x as i32;
     let mut y0 = from.y as i32;
     let x1 = to.x as i32;
@@ -710,6 +759,56 @@ pub fn fill_rotated_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // pat-nzgdu.71: draw_line / draw_line_blended must honor their width
+    // argument (a 6px line paints a band, not a single Bresenham row).
+    #[test]
+    fn draw_line_honors_width() {
+        let red = Color::rgb(1.0, 0.0, 0.0);
+
+        // A horizontal 6px line at y=10, x∈[5,25] on a 40×40 black buffer:
+        // sampling the middle column x=15 should hit ~6 painted rows.
+        let mut fb = FrameBuffer::new(40, 40, Color::BLACK);
+        draw_line(
+            &mut fb,
+            Vector2::new(5.0, 10.0),
+            Vector2::new(25.0, 10.0),
+            red,
+            6.0,
+        );
+        let thick_rows = (0..40u32).filter(|&y| fb.get_pixel(15, y).r > 0.5).count();
+        assert!(
+            (5..=7).contains(&thick_rows),
+            "a 6px line must paint ~6 rows, got {thick_rows}"
+        );
+
+        // A width-1 line stays a single row (thin Bresenham path unchanged).
+        let mut fb_thin = FrameBuffer::new(40, 40, Color::BLACK);
+        draw_line(
+            &mut fb_thin,
+            Vector2::new(5.0, 20.0),
+            Vector2::new(25.0, 20.0),
+            red,
+            1.0,
+        );
+        let thin_rows = (0..40u32).filter(|&y| fb_thin.get_pixel(15, y).r > 0.5).count();
+        assert_eq!(thin_rows, 1, "a 1px line must stay 1 row, got {thin_rows}");
+
+        // The blended variant honors width too.
+        let mut fb_b = FrameBuffer::new(40, 40, Color::BLACK);
+        draw_line_blended(
+            &mut fb_b,
+            Vector2::new(5.0, 30.0),
+            Vector2::new(25.0, 30.0),
+            red,
+            6.0,
+        );
+        let blend_rows = (0..40u32).filter(|&y| fb_b.get_pixel(15, y).r > 0.5).count();
+        assert!(
+            (5..=7).contains(&blend_rows),
+            "a 6px blended line must paint ~6 rows, got {blend_rows}"
+        );
+    }
 
     #[test]
     fn fill_rect_basic() {

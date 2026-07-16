@@ -2218,6 +2218,194 @@ fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotion
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// pat-nzgdu.86: Node query surface — wildcard find_child/find_children,
+// add_sibling, find_parent, is_ancestor_of, and a propagate_call visitor.
+// These operate on NodeId over the SceneTree with Godot wildcard semantics.
+// (Exposing them to the GDScript bridge is a follow-up; the interpreter's
+// singleton dispatch was under concurrent edit at authoring time.)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Godot `String.match`-style wildcard test used by `find_child`/`find_children`:
+/// `*` matches any (possibly empty) run of characters, `?` matches exactly one,
+/// every other character matches literally. Comparison is over Unicode scalars.
+fn wildcard_match(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = name.chars().collect();
+    // Classic iterative glob with `*` backtracking.
+    let (mut pi, mut si) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            mark = si;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            si = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+impl SceneTree {
+    /// Depth-first descendants of `id` (excluding `id`), in tree (pre-)order.
+    fn collect_subtree_into(&self, id: NodeId, out: &mut Vec<NodeId>) {
+        out.push(id);
+        let kids: Vec<NodeId> = match self.nodes.get(&id) {
+            Some(n) => n.children().to_vec(),
+            None => return,
+        };
+        for c in kids {
+            self.collect_subtree_into(c, out);
+        }
+    }
+
+    /// All descendants of `start` (excluding `start`), depth-first, in tree order.
+    fn descendants(&self, start: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let kids: Vec<NodeId> = self
+            .nodes
+            .get(&start)
+            .map(|n| n.children().to_vec())
+            .unwrap_or_default();
+        for c in kids {
+            self.collect_subtree_into(c, &mut out);
+        }
+        out
+    }
+
+    /// Godot `Node.find_child(pattern, recursive=true)`: the first descendant
+    /// whose name matches `pattern` (wildcard). Searches the whole subtree when
+    /// `recursive`, otherwise only direct children. Excludes `start` itself.
+    pub fn find_child(&self, start: NodeId, pattern: &str, recursive: bool) -> Option<NodeId> {
+        let candidates = if recursive {
+            self.descendants(start)
+        } else {
+            self.nodes
+                .get(&start)
+                .map(|n| n.children().to_vec())
+                .unwrap_or_default()
+        };
+        candidates.into_iter().find(|&id| {
+            self.nodes
+                .get(&id)
+                .map(|n| wildcard_match(pattern, n.name()))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Godot `Node.find_children(pattern, type="", recursive=true)`: every
+    /// descendant whose name matches `pattern` and — when `type_name` is `Some`
+    /// — whose class name equals it. Excludes `start` itself.
+    pub fn find_children(
+        &self,
+        start: NodeId,
+        pattern: &str,
+        type_name: Option<&str>,
+        recursive: bool,
+    ) -> Vec<NodeId> {
+        let candidates = if recursive {
+            self.descendants(start)
+        } else {
+            self.nodes
+                .get(&start)
+                .map(|n| n.children().to_vec())
+                .unwrap_or_default()
+        };
+        candidates
+            .into_iter()
+            .filter(|&id| match self.nodes.get(&id) {
+                Some(n) => {
+                    wildcard_match(pattern, n.name())
+                        && type_name.map_or(true, |t| n.class_name() == t)
+                }
+                None => false,
+            })
+            .collect()
+    }
+
+    /// Godot `Node.find_parent(pattern)`: nearest ancestor whose name matches.
+    pub fn find_parent(&self, start: NodeId, pattern: &str) -> Option<NodeId> {
+        let mut cur = self.nodes.get(&start).and_then(|n| n.parent());
+        while let Some(id) = cur {
+            let n = self.nodes.get(&id)?;
+            if wildcard_match(pattern, n.name()) {
+                return Some(id);
+            }
+            cur = n.parent();
+        }
+        None
+    }
+
+    /// Godot `Node.is_ancestor_of(node)`: true if `descendant` lies in
+    /// `ancestor`'s subtree (strictly below it).
+    pub fn is_ancestor_of(&self, ancestor: NodeId, descendant: NodeId) -> bool {
+        let mut cur = self.nodes.get(&descendant).and_then(|n| n.parent());
+        while let Some(id) = cur {
+            if id == ancestor {
+                return true;
+            }
+            cur = self.nodes.get(&id).and_then(|n| n.parent());
+        }
+        false
+    }
+
+    /// Godot `Node.add_sibling(node)`: inserts `node` into `sibling`'s parent
+    /// immediately after `sibling` in tree order. Returns the new node's id.
+    pub fn add_sibling(&mut self, sibling_id: NodeId, node: Node) -> EngineResult<NodeId> {
+        let parent_id = self
+            .nodes
+            .get(&sibling_id)
+            .and_then(|n| n.parent())
+            .ok_or_else(|| {
+                EngineError::InvalidOperation(format!(
+                    "node {sibling_id} has no parent to add a sibling under"
+                ))
+            })?;
+        let sibling_index = self.get_index(sibling_id).ok_or_else(|| {
+            EngineError::InvalidOperation(format!("node {sibling_id} not found in its parent"))
+        })?;
+        // add_child appends the new node; move it to right after the sibling.
+        let new_id = self.add_child(parent_id, node)?;
+        self.move_child(parent_id, new_id, sibling_index + 1)?;
+        Ok(new_id)
+    }
+
+    /// Godot `Node.propagate_call(method, args, parent_first)` traversal
+    /// primitive: visits `start` and every descendant, applying `f`. When
+    /// `parent_first` is true the parent is visited before its children
+    /// (pre-order), otherwise children first. The GDScript bridge supplies an
+    /// `f` that invokes the named script method; exposing it as a generic
+    /// visitor keeps the traversal testable without the interpreter.
+    pub fn propagate_call<F: FnMut(&mut Node)>(
+        &mut self,
+        start: NodeId,
+        parent_first: bool,
+        mut f: F,
+    ) {
+        let mut order = vec![start];
+        order.extend(self.descendants(start));
+        if !parent_first {
+            order.reverse();
+        }
+        for id in order {
+            if let Some(n) = self.nodes.get_mut(&id) {
+                f(n);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

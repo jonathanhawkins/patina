@@ -55,7 +55,8 @@ pub use body::{BodyId, BodyType, PhysicsBody2D};
 pub use character::{CharacterBody2D, KinematicCollision2D};
 pub use collision::CollisionResult;
 pub use joint::{
-    apply_joint_constraints, DampedSpringJoint2D, Joint2D, Joint2DBase, JointId, PinJoint2D,
+    apply_joint_constraints, DampedSpringJoint2D, GrooveJoint2D, Joint2D, Joint2DBase, JointId,
+    PinJoint2D,
 };
 pub use shape::Shape2D;
 pub use tilemap_collision::{

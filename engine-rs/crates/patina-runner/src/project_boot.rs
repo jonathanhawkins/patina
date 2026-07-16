@@ -85,13 +85,23 @@ pub fn boot_project_with_user_root(
         Some(load_scene_into_tree(&mut tree, root_id, &main_scene)?)
     };
 
-    // (5) Install the input map actions declared in `[input]`.
-    let mut input_map = InputMap::new();
-    for entry in loader.get_input_map() {
-        // ProjectLoader keeps action names + raw event strings; project.godot
-        // uses a per-action `dead_zone` (default 0.5 when unspecified).
-        input_map.add_action(entry.action_name, 0.5_f32);
-    }
+    // (5) Seed the runtime InputMap from `[input]`. Godot's
+    // InputMap::load_from_project_settings installs the builtin `ui_*` actions
+    // and then registers each project action with its real deadzone and bound
+    // events (keycodes), so `Input.is_action_pressed` fires for project actions
+    // after a matching key press. `ProjectLoader::get_input_map` keeps only
+    // lossy action names (no deadzone, no bound events), so hand the raw
+    // project.godot text to the full parser instead. `ProjectLoader::load`
+    // above already proved the file reads; on the unexpected re-read failure we
+    // fall back to just the builtin `ui_*` set.
+    let input_map = match std::fs::read_to_string(project_root.join("project.godot")) {
+        Ok(content) => InputMap::load_from_project_godot(&content),
+        Err(_) => {
+            let mut m = InputMap::new();
+            m.install_builtin_ui_actions();
+            m
+        }
+    };
 
     Ok(BootedProject {
         tree,
@@ -169,6 +179,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// pat-nzgdu.69: booting seeds the runtime InputMap from the project's
+    /// `[input]` section — with the project's own deadzone and bound key events,
+    /// not a hardcoded placeholder — plus the builtin `ui_*` action set, so
+    /// `Input.is_action_pressed` can fire for a project-defined action after the
+    /// matching key press. Proven end-to-end through `boot_project`, not by
+    /// populating the map by hand.
+    #[test]
+    fn project_input_map_honored() {
+        let _guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_temp_dir("inputmap");
+        std::fs::write(
+            dir.join("project.godot"),
+            "[application]\nconfig/name=\"InputMapBootTest\"\n\n\
+             [input]\n\n\
+             jump={\n\
+             \"deadzone\": 0.35,\n\
+             \"events\": [Object(InputEventKey,\"resource_local_to_scene\":false,\"device\":-1,\"keycode\":32,\"physical_keycode\":32,\"pressed\":false,\"script\":null)]\n\
+             }\n",
+        )
+        .unwrap();
+
+        let booted = boot_project(&dir).expect("boot project.godot with [input]");
+
+        // The project action exists with the project's deadzone (0.35) — not the
+        // old hardcoded 0.5.
+        let actions: Vec<&str> = booted.input_map.actions().map(|s| s.as_str()).collect();
+        assert!(
+            actions.contains(&"jump"),
+            "project action 'jump' registered at boot, got {actions:?}"
+        );
+        assert!(
+            (booted.input_map.get_deadzone("jump") - 0.35).abs() < 1e-6,
+            "action deadzone matches the project value, got {}",
+            booted.input_map.get_deadzone("jump")
+        );
+
+        // The project's Space key event is bound to the action, so a Space press
+        // triggers it (the runtime input path consults this map).
+        let space = gdplatform::InputEvent::Key {
+            key: gdplatform::Key::Space,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        assert!(
+            booted.input_map.event_matches_action(&space, "jump"),
+            "a Space press triggers the project-defined 'jump' action"
+        );
+
+        // The builtin `ui_*` actions are also present (installed from the default
+        // table, not per-demo).
+        assert!(
+            booted.input_map.actions().any(|a| a.as_str() == "ui_accept"),
+            "builtin ui_* actions are registered at boot"
+        );
     }
 
     #[test]

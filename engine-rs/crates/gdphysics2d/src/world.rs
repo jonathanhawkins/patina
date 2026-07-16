@@ -26,6 +26,20 @@ pub struct RaycastHit {
     pub distance: f32,
 }
 
+/// A single overlap reported by [`PhysicsWorld2D::shape_cast`] (Godot
+/// `ShapeCast2D`).
+#[derive(Debug, Clone, Copy)]
+pub struct ShapeCastHit {
+    /// The body the cast shape overlaps.
+    pub body_id: BodyId,
+    /// A contact point on the overlap, in world space.
+    pub point: Vector2,
+    /// The contact normal, pointing out of the hit body.
+    pub normal: Vector2,
+    /// Penetration depth of the overlap.
+    pub depth: f32,
+}
+
 /// Whether a contact was just entered or just exited this frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContactState {
@@ -415,6 +429,43 @@ impl PhysicsWorld2D {
         closest
     }
 
+    /// Casts a ray like [`raycast`](Self::raycast) but honoring a Godot
+    /// `RayCast2D`-style filter: bodies whose id is in `exclude` are skipped
+    /// (e.g. `add_exception` / `exclude_parent`), and a body is only hit when
+    /// its `collision_layer` intersects `collision_mask`. Passing
+    /// `collision_mask == 0` disables the mask so every layer is eligible
+    /// (matching the unfiltered [`raycast`](Self::raycast)). Returns the closest
+    /// surviving hit.
+    pub fn raycast_filtered(
+        &self,
+        origin: Vector2,
+        direction: Vector2,
+        max_distance: f32,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> Option<RaycastHit> {
+        let dir = direction.normalized();
+        if dir.length_squared() < 1e-10 {
+            return None;
+        }
+
+        let mut closest: Option<RaycastHit> = None;
+        for (&id, body) in &self.bodies {
+            if exclude.contains(&id) {
+                continue;
+            }
+            if collision_mask != 0 && (body.collision_layer & collision_mask) == 0 {
+                continue;
+            }
+            if let Some(hit) = raycast_shape(origin, dir, max_distance, body) {
+                if closest.is_none() || hit.distance < closest.as_ref().unwrap().distance {
+                    closest = Some(hit);
+                }
+            }
+        }
+        closest
+    }
+
     /// Returns the [`BodyId`]s of all bodies whose shape contains `world_point`,
     /// for input picking (Godot `CollisionObject2D` picking / `_intersect_point`).
     ///
@@ -454,6 +505,50 @@ impl PhysicsWorld2D {
     /// [`point_query`]: Self::point_query
     pub fn point_query_first(&self, world_point: Vector2) -> Option<BodyId> {
         self.point_query(world_point).into_iter().next()
+    }
+
+    /// Tests `shape` placed at `transform` against every body and returns all
+    /// overlaps (Godot `ShapeCast2D`). Bodies in `exclude` are skipped and
+    /// `collision_mask` filters by layer (`0` = every layer). Results are sorted
+    /// by ascending penetration `depth`, so `hits[0]` is the shallowest contact
+    /// and `hits.len()` is the collision count.
+    ///
+    /// This is a positional overlap query (the cast shape resolved at its target
+    /// transform); a full swept sub-step search can layer on top later.
+    pub fn shape_cast(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> Vec<ShapeCastHit> {
+        let mut hits: Vec<ShapeCastHit> = Vec::new();
+        for (&id, body) in &self.bodies {
+            if exclude.contains(&id) {
+                continue;
+            }
+            if collision_mask != 0 && (body.collision_layer & collision_mask) == 0 {
+                continue;
+            }
+            let body_tf = body_transform(body.position, body.rotation);
+            if let Some(result) = collision::test_collision(shape, &transform, &body.shape, &body_tf)
+            {
+                if result.colliding {
+                    hits.push(ShapeCastHit {
+                        body_id: id,
+                        point: result.point,
+                        normal: result.normal,
+                        depth: result.depth,
+                    });
+                }
+            }
+        }
+        hits.sort_by(|a, b| {
+            a.depth
+                .partial_cmp(&b.depth)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits
     }
 }
 
@@ -953,6 +1048,76 @@ mod tests {
             r.position.x > 6.0,
             "Rigid body should be pushed away from static"
         );
+    }
+
+    // pat-nzgdu.58: the gdphysics2d query layer behind RayCast2D/ShapeCast2D —
+    // filtered raycast (exclusions + collision mask) and a shape overlap cast.
+    // (Per-node tick state + interpreter dispatch are a separate lane.)
+    #[test]
+    fn raycast2d_shapecast2d_physics_tick() {
+        // Two bodies on the +x axis: a wall on layer 2 at x=5, a target on
+        // layer 1 at x=10 (both radius 1).
+        let mut world = PhysicsWorld2D::new();
+        let mut wall = make_rigid_circle(Vector2::new(5.0, 0.0), 1.0);
+        wall.collision_layer = 2;
+        let wall_id = world.add_body(wall);
+        let mut target = make_rigid_circle(Vector2::new(10.0, 0.0), 1.0);
+        target.collision_layer = 1;
+        let target_id = world.add_body(target);
+
+        let px = Vector2::new(1.0, 0.0);
+
+        // Unfiltered ray (mask 0) hits the CLOSEST body — the wall at x=5.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[], 0)
+            .expect("ray should hit the wall");
+        assert_eq!(hit.body_id, wall_id);
+
+        // Excluding the wall lets the ray reach the target behind it, with a
+        // normal facing back toward the ray origin.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[wall_id], 0)
+            .expect("ray should reach the target when the wall is excluded");
+        assert_eq!(hit.body_id, target_id);
+        assert!(
+            hit.normal.x < 0.0,
+            "collision normal must face the ray, got {:?}",
+            hit.normal
+        );
+
+        // A mask matching only layer 1 skips the layer-2 wall and hits the target.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[], 1)
+            .expect("layer-1 mask should hit the target");
+        assert_eq!(hit.body_id, target_id);
+        // A mask matching only layer 2 hits the wall.
+        let hit = world
+            .raycast_filtered(Vector2::ZERO, px, 100.0, &[], 2)
+            .expect("layer-2 mask should hit the wall");
+        assert_eq!(hit.body_id, wall_id);
+
+        // ShapeCast: a unit circle placed on the wall overlaps it.
+        let mut at_wall = Transform2D::IDENTITY;
+        at_wall.origin = Vector2::new(5.0, 0.0);
+        let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, at_wall, &[], 0);
+        assert!(!cast.is_empty(), "collision_count must be > 0 against the wall");
+        assert!(
+            cast.iter().any(|h| h.body_id == wall_id),
+            "shape_cast must report the overlapping wall; got {cast:?}"
+        );
+
+        // Excluding the wall removes it from the overlap results.
+        let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, at_wall, &[wall_id], 0);
+        assert!(
+            cast.iter().all(|h| h.body_id != wall_id),
+            "excluded wall must not appear in shape_cast"
+        );
+
+        // A shape far from every body reports no overlaps.
+        let mut far = Transform2D::IDENTITY;
+        far.origin = Vector2::new(1000.0, 0.0);
+        let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, far, &[], 0);
+        assert_eq!(cast.len(), 0);
     }
 
     #[test]

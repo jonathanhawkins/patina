@@ -40,7 +40,7 @@ pub use instance::{Instance3D, Instance3DId};
 pub use light::{CubeFace, Light3D, Light3DId, LightType, OmniShadowMode, ShadowCubemap};
 pub use material::{Material3D, ShadingMode, StandardMaterial3D, TextureSlot};
 pub use mesh::Surface3D;
-pub use mesh::{Mesh3D, PrimitiveType};
+pub use mesh::{Mesh3D, PrimitiveType, SurfaceTool};
 pub use skin::{skin_matrices, skin_mesh, skin_normal, skin_position, Skin, SkinBind};
 pub use multimesh::{MultiMesh3D, TransformFormat};
 pub use navigation::{

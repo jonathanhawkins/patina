@@ -259,6 +259,53 @@ pub fn get_used_cells(store: &TileMapStore, node_id: NodeId, layer: usize) -> Ve
         .unwrap_or_default()
 }
 
+/// Decodes a Godot `TileMapLayer.tile_map_data` PackedByteArray into its
+/// painted cells (pat-nzgdu.52).
+///
+/// Binary layout, matching upstream `TileMapLayer::set_tile_map_data_from_array`
+/// (scene/2d/tile_map_layer.cpp): a little-endian `u16` format-version header
+/// followed by fixed 12-byte cell records until the end of the buffer —
+/// `[i16 x][i16 y][u16 source_id][u16 atlas_x][u16 atlas_y][u16 alternative]`.
+/// Cell coordinates are signed; the tile identifiers are unsigned. The cell
+/// layout does not vary by format version, so the header is skipped. A buffer
+/// shorter than the 2-byte header (or with a trailing partial record) yields no
+/// further cells rather than panicking.
+pub fn decode_tile_map_data(bytes: &[u8]) -> HashMap<Vector2i, TileData> {
+    let mut cells = HashMap::new();
+    if bytes.len() < 2 {
+        return cells;
+    }
+    // bytes[0..2] = format version (currently always 0).
+    let mut index = 2usize;
+    while index + 12 <= bytes.len() {
+        let c = &bytes[index..index + 12];
+        let x = i16::from_le_bytes([c[0], c[1]]) as i32;
+        let y = i16::from_le_bytes([c[2], c[3]]) as i32;
+        let source_id = u16::from_le_bytes([c[4], c[5]]) as i32;
+        let atlas_x = u16::from_le_bytes([c[6], c[7]]) as i32;
+        let atlas_y = u16::from_le_bytes([c[8], c[9]]) as i32;
+        let alternative = u16::from_le_bytes([c[10], c[11]]) as i32;
+        cells.insert(
+            Vector2i::new(x, y),
+            TileData::with_atlas(source_id, Vector2i::new(atlas_x, atlas_y), alternative),
+        );
+        index += 12;
+    }
+    cells
+}
+
+impl TileMapLayer {
+    /// Builds a layer named `name` whose cells are decoded from a Godot
+    /// `tile_map_data` PackedByteArray (see [`decode_tile_map_data`]). This is
+    /// the hook a scene loader uses to populate a TileMapLayer node's cells
+    /// from its `.tscn` `tile_map_data` property.
+    pub fn from_tile_map_data(name: &str, bytes: &[u8]) -> Self {
+        let mut layer = Self::new(name);
+        layer.cells = decode_tile_map_data(bytes);
+        layer
+    }
+}
+
 /// Converts a grid cell coordinate to local pixel position (center of cell).
 ///
 /// Matches Godot's `TileMap.map_to_local()`.
@@ -1217,6 +1264,55 @@ mod tests {
 
         store.insert(node_id, map_data);
         (store, node_id)
+    }
+
+    /// pat-nzgdu.52: decode a Godot `tile_map_data` PackedByteArray (built with
+    /// the exact upstream `get_tile_map_data_as_array` layout) into painted
+    /// cells with correct coordinates and atlas identifiers.
+    #[test]
+    fn decode_tile_map_data_reads_painted_cells() {
+        // A 12-byte cell record: [i16 x][i16 y][u16 src][u16 ax][u16 ay][u16 alt].
+        fn push_cell(buf: &mut Vec<u8>, x: i16, y: i16, src: u16, ax: u16, ay: u16, alt: u16) {
+            buf.extend_from_slice(&(x as u16).to_le_bytes());
+            buf.extend_from_slice(&(y as u16).to_le_bytes());
+            buf.extend_from_slice(&src.to_le_bytes());
+            buf.extend_from_slice(&ax.to_le_bytes());
+            buf.extend_from_slice(&ay.to_le_bytes());
+            buf.extend_from_slice(&alt.to_le_bytes());
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // format version header
+        push_cell(&mut bytes, 0, 0, 1, 2, 3, 0);
+        push_cell(&mut bytes, 1, 0, 1, 4, 0, 0);
+        push_cell(&mut bytes, -2, 5, 7, 0, 0, 1); // negative coords exercise i16
+
+        let cells = decode_tile_map_data(&bytes);
+        assert_eq!(cells.len(), 3, "three painted cells decoded, got {}", cells.len());
+
+        let c0 = cells.get(&Vector2i::new(0, 0)).expect("cell (0,0)");
+        assert_eq!(c0.source_id, 1);
+        assert_eq!(c0.atlas_coords, Vector2i::new(2, 3));
+        assert_eq!(c0.alternative_id, 0);
+
+        let c1 = cells.get(&Vector2i::new(1, 0)).expect("cell (1,0)");
+        assert_eq!(c1.atlas_coords, Vector2i::new(4, 0));
+
+        let c2 = cells.get(&Vector2i::new(-2, 5)).expect("negative-coord cell (-2,5)");
+        assert_eq!(c2.source_id, 7);
+        assert_eq!(c2.alternative_id, 1);
+
+        // The convenience constructor exposes the same cells on a layer.
+        let layer = TileMapLayer::from_tile_map_data("Ground", &bytes);
+        assert_eq!(layer.cells.len(), 3);
+
+        // Robustness: empty / header-only / trailing-partial buffers yield no
+        // cells rather than panicking.
+        assert!(decode_tile_map_data(&[]).is_empty());
+        assert!(decode_tile_map_data(&0u16.to_le_bytes()).is_empty());
+        let mut partial = 0u16.to_le_bytes().to_vec();
+        partial.extend_from_slice(&[1, 0, 2, 0]); // 4 trailing bytes < 12 → ignored
+        assert!(decode_tile_map_data(&partial).is_empty());
     }
 
     // -- TileSet --

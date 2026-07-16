@@ -1782,6 +1782,16 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "ProjectSettings") {
                             return call_projectsettings_static(member, &evaluated_args);
                         }
+                        // DisplayServer singleton (pat-nzgdu.67) — headless
+                        // dispatch; the web surface is wired in gdplatform (wasm32).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "DisplayServer") {
+                            return call_displayserver_static(member, &evaluated_args);
+                        }
+                        // JavaScriptBridge singleton (pat-nzgdu.66) — headless
+                        // recorder; the web-sys binding is wired in gdplatform (wasm32).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "JavaScriptBridge") {
+                            return call_javascriptbridge_static(member, &evaluated_args);
+                        }
                         // Handle ClassName.new() — runtime node creation / RefCounted helpers
                         if member == "new" {
                             if let Expr::Ident(class_name) = object.as_ref() {
@@ -3988,6 +3998,23 @@ impl Interpreter {
                     }
                 }
                 Ok(None)
+            }
+
+            // Variant identity (pat-nzgdu.107). Godot `is_same` requires EXACT
+            // type + value equality (unlike `==`, which coerces int/float).
+            // Reference types (Array/Dictionary/Object) use identity in Godot;
+            // Patina's value-based Variants can't model that, so those fall back
+            // to structural equality here.
+            "is_same" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "is_same() takes exactly 2 arguments".into(),
+                    )));
+                }
+                let same = crate::global_constants::variant_type_code(&args[0])
+                    == crate::global_constants::variant_type_code(&args[1])
+                    && args[0] == args[1];
+                Ok(Some(Variant::Bool(same)))
             }
 
             _ => Ok(None), // Not a built-in
@@ -9011,6 +9038,35 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
             };
             Ok(Variant::Bool(present))
         }
+        // -- Locale / hardware / user-args queries (pat-nzgdu.65) -----------
+        "get_locale" => {
+            // Godot returns e.g. "en_US". Derive from POSIX locale env vars,
+            // stripping the ".ENCODING"/"@modifier" suffixes; the "C"/"POSIX"
+            // (or unset) locale maps to "en".
+            Ok(Variant::String(os_locale()))
+        }
+        "get_locale_language" => {
+            // The language subtag only (e.g. "en" from "en_US").
+            let loc = os_locale();
+            let lang = loc.split(['_', '-']).next().unwrap_or("en");
+            Ok(Variant::String(lang.to_string()))
+        }
+        "get_processor_count" => {
+            let n = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            Ok(Variant::Int(n as i64))
+        }
+        "get_cmdline_user_args" => {
+            // Godot: the args following a bare "--" separator.
+            let all: Vec<String> = std::env::args().collect();
+            let user: Vec<String> = match all.iter().position(|a| a == "--") {
+                Some(i) => all[i + 1..].to_vec(),
+                None => Vec::new(),
+            };
+            Ok(Variant::PackedStringArray(user))
+        }
+        "get_data_dir" => Ok(Variant::String(os_user_data_dir())),
         "execute" => {
             // OS.execute(path, arguments) -> exit code (-1 if launch failed).
             let path = match args.first() {
@@ -9099,14 +9155,90 @@ fn os_user_data_dir() -> String {
     }
 }
 
-/// `ProjectSettings` singleton (pat-u3l8c.21). No `project.godot` is loaded in
-/// the interpreter runtime, so `get_setting` returns the caller default (Godot
-/// semantics for a missing setting) and `globalize_path` resolves the
-/// `res://` / `user://` schemes to filesystem paths.
+/// Best-effort POSIX locale (Godot's `OS.get_locale()` format, e.g. "en_US").
+/// Reads `LC_ALL` / `LC_MESSAGES` / `LANG`, strips the `.ENCODING` and
+/// `@modifier` suffixes, and maps the unset / "C" / "POSIX" locale to "en".
+fn os_locale() -> String {
+    let raw = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default();
+    let base = raw
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next()
+        .unwrap_or("");
+    if base.is_empty() || base == "C" || base == "POSIX" {
+        "en".to_string()
+    } else {
+        base.replace('-', "_")
+    }
+}
+
+thread_local! {
+    /// Process-local `ProjectSettings` store (pat-nzgdu.68). Godot's
+    /// ProjectSettings is a global singleton; a full implementation seeds this
+    /// from `project.godot` at runner boot (see the still-orphaned
+    /// `gdcore::project_settings`). Until then, scripts can round-trip their own
+    /// `set_setting` / `get_setting` / `has_setting` values. Under `nextest`
+    /// each test runs in its own process, so this store is test-isolated.
+    static PROJECT_SETTINGS: std::cell::RefCell<HashMap<String, Variant>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// `ProjectSettings` singleton (pat-u3l8c.21, pat-nzgdu.68). `get_setting` /
+/// `set_setting` / `has_setting` round-trip through a process-local store (see
+/// [`PROJECT_SETTINGS`]); `globalize_path` / `localize_path` convert between the
+/// `res://` / `user://` schemes and absolute filesystem paths. Seeding the store
+/// from `project.godot` (so project-declared settings read back) is still TODO
+/// and lives in the runner boot path.
 fn call_projectsettings_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    fn setting_name(args: &[Variant], who: &str) -> Result<String, RuntimeError> {
+        match args.first() {
+            Some(Variant::String(s)) => Ok(s.clone()),
+            Some(Variant::StringName(sn)) => Ok(sn.as_str().to_string()),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{who} expects a setting-name string"
+            )))),
+        }
+    }
     match method {
-        "get_setting" => Ok(args.get(1).cloned().unwrap_or(Variant::Nil)),
-        "has_setting" => Ok(Variant::Bool(false)),
+        "get_setting" => {
+            let name = setting_name(args, "ProjectSettings.get_setting()")?;
+            let stored = PROJECT_SETTINGS.with(|s| s.borrow().get(&name).cloned());
+            // Godot: a missing setting returns the caller's default (arg 1), Nil.
+            Ok(stored.unwrap_or_else(|| args.get(1).cloned().unwrap_or(Variant::Nil)))
+        }
+        "get_setting_with_override" => {
+            // Feature-tag overrides require the project.godot feature set (not
+            // yet seeded), so fall back to the base value for now.
+            let name = setting_name(args, "ProjectSettings.get_setting_with_override()")?;
+            let stored = PROJECT_SETTINGS.with(|s| s.borrow().get(&name).cloned());
+            Ok(stored.unwrap_or_else(|| args.get(1).cloned().unwrap_or(Variant::Nil)))
+        }
+        "set_setting" => {
+            let name = setting_name(args, "ProjectSettings.set_setting()")?;
+            let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+            PROJECT_SETTINGS.with(|s| {
+                s.borrow_mut().insert(name, value);
+            });
+            Ok(Variant::Nil)
+        }
+        "has_setting" => {
+            let name = setting_name(args, "ProjectSettings.has_setting()")?;
+            Ok(Variant::Bool(
+                PROJECT_SETTINGS.with(|s| s.borrow().contains_key(&name)),
+            ))
+        }
+        "clear" => {
+            let name = setting_name(args, "ProjectSettings.clear()")?;
+            PROJECT_SETTINGS.with(|s| {
+                s.borrow_mut().remove(&name);
+            });
+            Ok(Variant::Nil)
+        }
         "globalize_path" => {
             let path = match args.first() {
                 Some(Variant::String(s)) => s.clone(),
@@ -9133,8 +9265,145 @@ fn call_projectsettings_static(method: &str, args: &[Variant]) -> Result<Variant
             };
             Ok(Variant::String(globalized))
         }
+        "localize_path" => {
+            let path = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "ProjectSettings.localize_path() takes a path string".into(),
+                    )))
+                }
+            };
+            // Inverse of globalize_path: an absolute path under the user data
+            // dir maps back to `user://`, one under the project (cwd) root maps
+            // to `res://`; already-localized paths pass through.
+            let localized = if path.starts_with("res://") || path.starts_with("user://") {
+                path.clone()
+            } else {
+                let user_dir = os_user_data_dir();
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.to_str().map(str::to_string))
+                    .unwrap_or_default();
+                if !user_dir.is_empty() && path.starts_with(&user_dir) {
+                    format!("user://{}", path[user_dir.len()..].trim_start_matches('/'))
+                } else if !cwd.is_empty() && path.starts_with(&cwd) {
+                    format!("res://{}", path[cwd.len()..].trim_start_matches('/'))
+                } else {
+                    path.clone()
+                }
+            };
+            Ok(Variant::String(localized))
+        }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ProjectSettings.{other}"),
+        ))),
+    }
+}
+
+thread_local! {
+    /// Process-local clipboard for the headless `DisplayServer` (pat-nzgdu.67).
+    /// The wasm build routes clipboard through `navigator.clipboard`; this store
+    /// gives a working round-trip in headless / tests.
+    static DISPLAY_CLIPBOARD: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+    /// Records `tts_speak` utterances so headless tests can observe them
+    /// (SpeechSynthesis on web).
+    static DISPLAY_TTS_LOG: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// `DisplayServer` singleton (pat-nzgdu.67). Headless dispatch so `DisplayServer.*`
+/// script calls resolve without UndefinedFunction; the real web surface
+/// (devicePixelRatio, Fullscreen API, `navigator.clipboard`, SpeechSynthesis) is
+/// wired in gdplatform under wasm32. Screen metrics use headless defaults.
+fn call_displayserver_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        // -- Screen / window metrics (headless defaults) -------------------
+        "screen_get_dpi" => Ok(Variant::Int(96)),
+        "screen_get_scale" | "screen_get_max_scale" => Ok(Variant::Float(1.0)),
+        "screen_get_size" | "window_get_size" | "window_get_size_with_decorations" => Ok(
+            Variant::Vector2(gdcore::math::Vector2::new(1920.0, 1080.0)),
+        ),
+        "get_screen_count" => Ok(Variant::Int(1)),
+        "screen_get_orientation" => Ok(Variant::Int(0)),
+        "window_get_mode" => Ok(Variant::Int(0)),
+        "window_set_mode" | "window_set_title" | "window_set_size" => Ok(Variant::Nil),
+        // -- Clipboard (navigator.clipboard on web; store round-trip here) --
+        "clipboard_set" => {
+            let text = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "DisplayServer.clipboard_set() takes a string".into(),
+                    )))
+                }
+            };
+            DISPLAY_CLIPBOARD.with(|c| *c.borrow_mut() = text);
+            Ok(Variant::Nil)
+        }
+        "clipboard_get" => Ok(Variant::String(
+            DISPLAY_CLIPBOARD.with(|c| c.borrow().clone()),
+        )),
+        "clipboard_has" => Ok(Variant::Bool(
+            DISPLAY_CLIPBOARD.with(|c| !c.borrow().is_empty()),
+        )),
+        // -- Text-to-speech (SpeechSynthesis on web; recorded here) --------
+        "tts_speak" => {
+            let text = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            DISPLAY_TTS_LOG.with(|l| l.borrow_mut().push(text));
+            Ok(Variant::Nil)
+        }
+        "tts_pause" | "tts_resume" | "tts_stop" => Ok(Variant::Nil),
+        "tts_get_voices" => Ok(Variant::Array(Vec::new())),
+        "tts_get_voices_for_language" => Ok(Variant::PackedStringArray(Vec::new())),
+        "tts_is_speaking" | "tts_is_paused" => Ok(Variant::Bool(false)),
+        // -- Virtual keyboard / cursor (web / mobile; headless no-ops) ------
+        "virtual_keyboard_show" | "virtual_keyboard_hide" => Ok(Variant::Nil),
+        "virtual_keyboard_get_height" => Ok(Variant::Int(0)),
+        "cursor_set_shape" | "cursor_set_custom_image" => Ok(Variant::Nil),
+        "has_feature" => Ok(Variant::Bool(false)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("DisplayServer.{other}"),
+        ))),
+    }
+}
+
+thread_local! {
+    /// Records `JavaScriptBridge` calls (eval code, download names) so headless
+    /// tests / the runner dump can observe them; the wasm build runs the real
+    /// browser calls via web-sys.
+    static JS_BRIDGE_LOG: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// `JavaScriptBridge` singleton (pat-nzgdu.66). The browser bridge only does real
+/// work in a wasm build (web-sys `eval` / `navigator` / download); in headless /
+/// native tests every call resolves without UndefinedFunction and is recorded in
+/// [`JS_BRIDGE_LOG`], with `eval` returning Nil (no native JS engine).
+fn call_javascriptbridge_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "eval" => {
+            if let Some(Variant::String(code)) = args.first() {
+                JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("eval:{code}")));
+            }
+            // No native JS engine: Godot's non-web JavaScriptBridge.eval yields null.
+            Ok(Variant::Nil)
+        }
+        "download_buffer" | "download" => {
+            // Godot: download_buffer(buffer, name, mime). Record the filename.
+            let name = match args.get(1) {
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("download:{name}")));
+            Ok(Variant::Nil)
+        }
+        "get_interface" | "create_callback" | "create_object" => Ok(Variant::Nil),
+        "force_fs_sync" | "pwa_update" => Ok(Variant::Nil),
+        "pwa_needs_update" => Ok(Variant::Bool(false)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("JavaScriptBridge.{other}"),
         ))),
     }
 }
@@ -9643,6 +9912,22 @@ mod tests {
     #[test]
     fn integer_division() {
         assert_eq!(run_val("return 10 / 3\n"), Variant::Int(3));
+    }
+
+    #[test]
+    fn is_same_requires_exact_type_and_value() {
+        // Value types: exact type + value (unlike `==`, no int/float coercion).
+        assert_eq!(run_val("return is_same(1, 1)\n"), Variant::Bool(true));
+        assert_eq!(run_val("return is_same(1, 1.0)\n"), Variant::Bool(false));
+        assert_eq!(run_val("return is_same(true, 1)\n"), Variant::Bool(false));
+        assert_eq!(
+            run_val("return is_same(\"a\", \"a\")\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return is_same(\"a\", \"b\")\n"),
+            Variant::Bool(false)
+        );
     }
 
     #[test]
@@ -13884,6 +14169,143 @@ match x:
         assert_eq!(
             run_val("var b = PackedByteArray([226, 156, 147])\nreturn b.get_string_from_utf8()\n"),
             Variant::String("\u{2713}".into())
+        );
+    }
+
+    #[test]
+    fn os_singleton_query_methods() {
+        // pat-nzgdu.65 (interpreter slice): OS singleton query methods resolve
+        // through call_os_static without UndefinedFunction.
+        // has_feature returns a bool; "web" tracks the build target.
+        assert_eq!(
+            run_val("return OS.has_feature(\"web\")\n"),
+            Variant::Bool(cfg!(target_arch = "wasm32"))
+        );
+        // get_locale / get_locale_language are non-empty strings.
+        match run_val("return OS.get_locale()\n") {
+            Variant::String(s) => assert!(!s.is_empty(), "locale should be non-empty"),
+            other => panic!("expected String locale, got {other:?}"),
+        }
+        match run_val("return OS.get_locale_language()\n") {
+            Variant::String(s) => assert!(!s.is_empty(), "locale language should be non-empty"),
+            other => panic!("expected String, got {other:?}"),
+        }
+        // processor_count >= 1.
+        match run_val("return OS.get_processor_count()\n") {
+            Variant::Int(n) => assert!(n >= 1, "processor_count should be >=1, got {n}"),
+            other => panic!("expected Int, got {other:?}"),
+        }
+        // get_cmdline_user_args returns a (possibly empty) PackedStringArray.
+        assert!(matches!(
+            run_val("return OS.get_cmdline_user_args()\n"),
+            Variant::PackedStringArray(_)
+        ));
+        // get_name is non-empty (macOS / Linux / Windows / Web).
+        match run_val("return OS.get_name()\n") {
+            Variant::String(s) => assert!(!s.is_empty()),
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_settings_singleton_roundtrip() {
+        // pat-nzgdu.68 (interpreter slice): ProjectSettings set/get/has store +
+        // globalize/localize path round-trip. (Unique "pat68/*" keys keep this
+        // isolated even if the store isn't process-fresh.)
+        // A missing setting returns the caller's default.
+        assert_eq!(
+            run_val("return ProjectSettings.get_setting(\"pat68/unset\", 111.0)\n"),
+            Variant::Float(111.0)
+        );
+        // set_setting then get_setting round-trips the stored value (over the default).
+        assert_eq!(
+            run_val(
+                "ProjectSettings.set_setting(\"pat68/x\", 7)\nreturn ProjectSettings.get_setting(\"pat68/x\", 0)\n"
+            ),
+            Variant::Int(7)
+        );
+        // has_setting reflects presence / absence.
+        assert_eq!(
+            run_val(
+                "ProjectSettings.set_setting(\"pat68/y\", 1)\nreturn ProjectSettings.has_setting(\"pat68/y\")\n"
+            ),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return ProjectSettings.has_setting(\"pat68/never_set\")\n"),
+            Variant::Bool(false)
+        );
+        // globalize_path -> absolute; localize_path round-trips it back to res://.
+        assert_eq!(
+            run_val(
+                "return ProjectSettings.localize_path(ProjectSettings.globalize_path(\"res://a.txt\"))\n"
+            ),
+            Variant::String("res://a.txt".into())
+        );
+    }
+
+    #[test]
+    fn display_server_singleton_methods() {
+        // pat-nzgdu.67 (interpreter slice): DisplayServer.* resolves headless
+        // without UndefinedFunction; clipboard round-trips; tts is recorded.
+        match run_val("return DisplayServer.screen_get_scale()\n") {
+            Variant::Float(_) => {}
+            other => panic!("expected Float scale, got {other:?}"),
+        }
+        assert!(matches!(
+            run_val("return DisplayServer.screen_get_dpi()\n"),
+            Variant::Int(_)
+        ));
+        // clipboard round-trip.
+        assert_eq!(
+            run_val("DisplayServer.clipboard_set(\"hi\")\nreturn DisplayServer.clipboard_get()\n"),
+            Variant::String("hi".into())
+        );
+        // tts_speak resolves without error (Nil); tts_get_voices is an Array.
+        assert_eq!(
+            run_val("return DisplayServer.tts_speak(\"hello\", 0)\n"),
+            Variant::Nil
+        );
+        assert!(matches!(
+            run_val("return DisplayServer.tts_get_voices()\n"),
+            Variant::Array(_)
+        ));
+        // window_get_size is a Vector2.
+        assert!(matches!(
+            run_val("return DisplayServer.window_get_size()\n"),
+            Variant::Vector2(_)
+        ));
+    }
+
+    #[test]
+    fn javascript_bridge_singleton_methods() {
+        // pat-nzgdu.66 (interpreter slice): JavaScriptBridge.* resolves headless
+        // without UndefinedFunction; eval yields Nil (no native JS engine).
+        assert_eq!(
+            run_val("return JavaScriptBridge.eval(\"1+2\")\n"),
+            Variant::Nil
+        );
+        assert_eq!(
+            run_val("return JavaScriptBridge.eval(\"1+2\", true)\n"),
+            Variant::Nil
+        );
+        assert_eq!(
+            run_val("return JavaScriptBridge.get_interface(\"localStorage\")\n"),
+            Variant::Nil
+        );
+        assert_eq!(
+            run_val("return JavaScriptBridge.create_object(\"Object\")\n"),
+            Variant::Nil
+        );
+        // download_buffer resolves (Nil) without error.
+        assert_eq!(
+            run_val("return JavaScriptBridge.download_buffer(0, \"f.txt\", \"text/plain\")\n"),
+            Variant::Nil
+        );
+        // pwa_needs_update is a Bool.
+        assert_eq!(
+            run_val("return JavaScriptBridge.pwa_needs_update()\n"),
+            Variant::Bool(false)
         );
     }
 

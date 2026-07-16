@@ -37,6 +37,101 @@ pub struct Surface3D {
     pub primitive_type: PrimitiveType,
 }
 
+/// Procedural mesh builder mirroring Godot's `SurfaceTool`.
+///
+/// Per-vertex attributes are staged with [`set_normal`](Self::set_normal) /
+/// [`set_uv`](Self::set_uv) and committed by [`add_vertex`](Self::add_vertex)
+/// (which snapshots the current attributes), matching Godot's imperative API;
+/// [`commit`](Self::commit) produces a [`Mesh3D`]. This is the step-by-step
+/// counterpart to [`crate::primitive_mesh::ArrayMesh::add_surface_from_arrays`].
+#[derive(Debug, Clone)]
+pub struct SurfaceTool {
+    primitive_type: PrimitiveType,
+    vertices: Vec<Vector3>,
+    normals: Vec<Vector3>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+    current_normal: Vector3,
+    current_uv: [f32; 2],
+}
+
+impl SurfaceTool {
+    /// Creates an empty builder (defaults to a `Triangles` surface).
+    pub fn new() -> Self {
+        Self {
+            primitive_type: PrimitiveType::Triangles,
+            vertices: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+            current_normal: Vector3::ZERO,
+            current_uv: [0.0, 0.0],
+        }
+    }
+
+    /// Clears accumulated geometry and sets the primitive type
+    /// (`SurfaceTool.begin`).
+    pub fn begin(&mut self, primitive_type: PrimitiveType) {
+        self.primitive_type = primitive_type;
+        self.vertices.clear();
+        self.normals.clear();
+        self.uvs.clear();
+        self.indices.clear();
+        self.current_normal = Vector3::ZERO;
+        self.current_uv = [0.0, 0.0];
+    }
+
+    /// Sets the normal applied to vertices added afterwards.
+    pub fn set_normal(&mut self, normal: Vector3) {
+        self.current_normal = normal;
+    }
+
+    /// Sets the UV applied to vertices added afterwards.
+    pub fn set_uv(&mut self, uv: [f32; 2]) {
+        self.current_uv = uv;
+    }
+
+    /// Adds a vertex carrying the currently-staged normal and UV
+    /// (`SurfaceTool.add_vertex`).
+    pub fn add_vertex(&mut self, position: Vector3) {
+        self.vertices.push(position);
+        self.normals.push(self.current_normal);
+        self.uvs.push(self.current_uv);
+    }
+
+    /// Adds an explicit index into the vertex array (`SurfaceTool.add_index`).
+    pub fn add_index(&mut self, index: u32) {
+        self.indices.push(index);
+    }
+
+    /// Number of vertices staged so far.
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Builds a [`Mesh3D`] from the staged geometry. When no explicit indices
+    /// were added, a sequential index per vertex is generated so the surface is
+    /// renderable as-is (`SurfaceTool.commit`).
+    pub fn commit(&self) -> Mesh3D {
+        let mut mesh = Mesh3D::new(self.primitive_type);
+        mesh.vertices = self.vertices.clone();
+        mesh.normals = self.normals.clone();
+        mesh.uvs = self.uvs.clone();
+        mesh.indices = if self.indices.is_empty() {
+            (0..self.vertices.len() as u32).collect()
+        } else {
+            self.indices.clone()
+        };
+        mesh
+    }
+}
+
+impl Default for SurfaceTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A 3D mesh containing vertex data, optionally split into multiple surfaces.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Mesh3D {
@@ -1050,6 +1145,48 @@ mod tests {
         let mesh = Mesh3D::cube(1.0);
         assert_eq!(mesh.surface_count(), 1);
         assert!(mesh.surfaces.is_empty());
+    }
+
+    // pat-nzgdu.75: SurfaceTool procedural builder stages per-vertex attributes
+    // and commits a renderable Mesh3D.
+    #[test]
+    fn surface_tool_builds_triangle_mesh() {
+        let mut st = SurfaceTool::new();
+        st.begin(PrimitiveType::Triangles);
+        // One triangle: a shared face normal, distinct per-vertex UVs.
+        st.set_normal(Vector3::new(0.0, 0.0, 1.0));
+        st.set_uv([0.0, 0.0]);
+        st.add_vertex(Vector3::new(0.0, 0.0, 0.0));
+        st.set_uv([1.0, 0.0]);
+        st.add_vertex(Vector3::new(1.0, 0.0, 0.0));
+        st.set_uv([0.0, 1.0]);
+        st.add_vertex(Vector3::new(0.0, 1.0, 0.0));
+        assert_eq!(st.vertex_count(), 3);
+
+        let mesh = st.commit();
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.vertices[1], Vector3::new(1.0, 0.0, 0.0));
+        // The staged normal is snapshotted onto every added vertex.
+        assert_eq!(mesh.normals.len(), 3);
+        assert!(mesh
+            .normals
+            .iter()
+            .all(|n| *n == Vector3::new(0.0, 0.0, 1.0)));
+        // Per-vertex UVs are preserved in add order.
+        assert_eq!(mesh.uvs[2], [0.0, 1.0]);
+        // No explicit indices -> a sequential index per vertex (renderable).
+        assert_eq!(mesh.indices, vec![0, 1, 2]);
+        assert_eq!(mesh.primitive_type, PrimitiveType::Triangles);
+
+        // Explicit indices are honored verbatim instead of being generated.
+        let mut st2 = SurfaceTool::new();
+        st2.add_vertex(Vector3::ZERO);
+        st2.add_vertex(Vector3::new(1.0, 0.0, 0.0));
+        st2.add_vertex(Vector3::new(0.0, 1.0, 0.0));
+        st2.add_index(0);
+        st2.add_index(2);
+        st2.add_index(1);
+        assert_eq!(st2.commit().indices, vec![0, 2, 1]);
     }
 
     #[test]

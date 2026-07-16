@@ -74,6 +74,15 @@ pub struct PhysicsBody3D {
     pub linear_damp: f32,
     /// Angular damping factor.
     pub angular_damp: f32,
+    /// When true, all rotation is locked (Godot `RigidBody3D.lock_rotation`):
+    /// angular velocity is forced to zero and rotation is not integrated.
+    pub lock_rotation: bool,
+    /// Constant force applied every physics frame (Godot
+    /// `RigidBody3D.constant_force`), on top of one-shot accumulated forces.
+    pub constant_force: Vector3,
+    /// Constant torque applied every physics frame (Godot
+    /// `RigidBody3D.constant_torque`).
+    pub constant_torque: Vector3,
     /// Whether continuous collision detection is enabled.
     pub continuous_cd: bool,
     /// Whether the body can sleep when at rest.
@@ -121,6 +130,9 @@ impl PhysicsBody3D {
             gravity_scale: 1.0,
             linear_damp: 0.0,
             angular_damp: 0.0,
+            lock_rotation: false,
+            constant_force: Vector3::ZERO,
+            constant_torque: Vector3::ZERO,
             continuous_cd: false,
             can_sleep: true,
             sleeping: false,
@@ -234,7 +246,7 @@ impl PhysicsBody3D {
         // Apply gravity (scaled) and accumulated forces.
         let scaled_gravity = gravity * self.gravity_scale;
         let inv_mass = 1.0 / self.mass.max(f32::EPSILON);
-        let accel = scaled_gravity + self.accumulated_force * inv_mass;
+        let accel = scaled_gravity + (self.accumulated_force + self.constant_force) * inv_mass;
         self.linear_velocity = self.linear_velocity + accel * dt;
 
         // Apply linear damping
@@ -245,27 +257,34 @@ impl PhysicsBody3D {
 
         self.position = self.position + self.linear_velocity * dt;
 
-        // Angular integration: torque → angular acceleration via the inverse
-        // inertia tensor (I⁻¹ · τ), not the unit-inertia approximation.
-        let angular_accel = self.apply_inverse_inertia(self.accumulated_torque);
-        self.angular_velocity = self.angular_velocity + angular_accel * dt;
+        // Angular integration — skipped entirely when rotation is locked
+        // (Godot `lock_rotation`), which also zeroes any residual spin.
+        if self.lock_rotation {
+            self.angular_velocity = Vector3::ZERO;
+        } else {
+            // torque → angular acceleration via the inverse inertia tensor
+            // (I⁻¹ · τ), including the per-frame constant torque.
+            let angular_accel =
+                self.apply_inverse_inertia(self.accumulated_torque + self.constant_torque);
+            self.angular_velocity = self.angular_velocity + angular_accel * dt;
 
-        // Apply angular damping
-        if self.angular_damp > 0.0 {
-            let damp = (1.0 - self.angular_damp * dt).max(0.0);
-            self.angular_velocity = self.angular_velocity * damp;
-        }
+            // Apply angular damping
+            if self.angular_damp > 0.0 {
+                let damp = (1.0 - self.angular_damp * dt).max(0.0);
+                self.angular_velocity = self.angular_velocity * damp;
+            }
 
-        // Integrate rotation (simplified: small-angle approximation)
-        if self.angular_velocity.length_squared() > 1e-12 {
-            let half_dt = dt * 0.5;
-            let dq = Quaternion::new(
-                self.angular_velocity.x * half_dt,
-                self.angular_velocity.y * half_dt,
-                self.angular_velocity.z * half_dt,
-                1.0,
-            );
-            self.rotation = (self.rotation * dq).normalized();
+            // Integrate rotation (simplified: small-angle approximation)
+            if self.angular_velocity.length_squared() > 1e-12 {
+                let half_dt = dt * 0.5;
+                let dq = Quaternion::new(
+                    self.angular_velocity.x * half_dt,
+                    self.angular_velocity.y * half_dt,
+                    self.angular_velocity.z * half_dt,
+                    1.0,
+                );
+                self.rotation = (self.rotation * dq).normalized();
+            }
         }
 
         self.accumulated_force = Vector3::ZERO;
@@ -465,6 +484,64 @@ mod tests {
             Shape3D::Sphere { radius: 1.0 },
             1.0,
         )
+    }
+
+    // pat-nzgdu.61: RigidBody3D integrate-time properties — lock_rotation and
+    // constant_force / constant_torque. (The scene-level material/bounce +
+    // contact signals from the named acceptance test are a separate lane.)
+    #[test]
+    fn rigid_body_3d_lock_rotation_and_constant_force() {
+        let dt = 1.0 / 60.0;
+
+        // lock_rotation zeroes angular motion and freezes orientation even with
+        // a pre-existing spin and an applied torque.
+        let mut locked = make_rigid(Vector3::ZERO);
+        locked.lock_rotation = true;
+        locked.angular_velocity = Vector3::new(1.0, 2.0, 3.0);
+        locked.apply_torque(Vector3::new(5.0, 0.0, 0.0));
+        let rot_before = locked.rotation;
+        locked.integrate(dt, Vector3::ZERO);
+        assert_eq!(
+            locked.angular_velocity,
+            Vector3::ZERO,
+            "lock_rotation must zero angular velocity"
+        );
+        assert_eq!(
+            locked.rotation, rot_before,
+            "lock_rotation must not integrate rotation"
+        );
+
+        // constant_force accelerates the body every frame (v = F/m · dt).
+        let mut pushed = make_rigid(Vector3::ZERO);
+        pushed.constant_force = Vector3::new(10.0, 0.0, 0.0);
+        pushed.integrate(dt, Vector3::ZERO);
+        let expected_vx = 10.0 / pushed.mass * dt;
+        assert!(
+            (pushed.linear_velocity.x - expected_vx).abs() < 1e-6,
+            "constant_force must accelerate the body: got {}, want {expected_vx}",
+            pushed.linear_velocity.x
+        );
+
+        // constant_torque spins up an unlocked body...
+        let mut spun = make_rigid(Vector3::ZERO);
+        spun.constant_torque = Vector3::new(0.0, 4.0, 0.0);
+        spun.integrate(dt, Vector3::ZERO);
+        assert!(
+            spun.angular_velocity.y > 0.0,
+            "constant_torque must spin the body up, got {:?}",
+            spun.angular_velocity
+        );
+
+        // ...but lock_rotation overrides constant_torque entirely.
+        let mut spun_locked = make_rigid(Vector3::ZERO);
+        spun_locked.lock_rotation = true;
+        spun_locked.constant_torque = Vector3::new(0.0, 4.0, 0.0);
+        spun_locked.integrate(dt, Vector3::ZERO);
+        assert_eq!(
+            spun_locked.angular_velocity,
+            Vector3::ZERO,
+            "lock_rotation must override constant_torque"
+        );
     }
 
     #[test]

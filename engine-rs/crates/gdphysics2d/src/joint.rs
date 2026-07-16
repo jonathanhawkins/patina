@@ -3,6 +3,7 @@
 //! Provides [`Joint2D`] variants that mirror Godot's joint types:
 //! - [`PinJoint2D`]: constrains two bodies to share a point (position lock).
 //! - [`DampedSpringJoint2D`]: spring connection with rest length, stiffness, and damping.
+//! - [`GrooveJoint2D`]: constrains `body_b` to slide along a segment on `body_a`.
 
 use gdcore::math::Vector2;
 
@@ -94,6 +95,42 @@ impl DampedSpringJoint2D {
     }
 }
 
+/// A groove joint constrains `body_b`'s anchor to slide along a line segment
+/// (the "groove") attached to `body_a`. Perpendicular displacement off the
+/// groove is corrected each step; motion along the groove is free
+/// (Godot `GrooveJoint2D`).
+#[derive(Debug, Clone)]
+pub struct GrooveJoint2D {
+    /// Shared joint properties.
+    pub base: Joint2DBase,
+    /// First groove endpoint, as an offset from `body_a`'s position.
+    pub groove_a1: Vector2,
+    /// Second groove endpoint, as an offset from `body_a`'s position.
+    pub groove_a2: Vector2,
+    /// `body_b`'s constrained anchor, as an offset from `body_b`'s position.
+    pub anchor_b: Vector2,
+}
+
+impl GrooveJoint2D {
+    /// Creates a groove joint. `groove_a1`/`groove_a2` are the groove segment
+    /// endpoints relative to `body_a`; `anchor_b` is the constrained point
+    /// relative to `body_b`.
+    pub fn new(
+        body_a: BodyId,
+        body_b: BodyId,
+        groove_a1: Vector2,
+        groove_a2: Vector2,
+        anchor_b: Vector2,
+    ) -> Self {
+        Self {
+            base: Joint2DBase::new(body_a, body_b),
+            groove_a1,
+            groove_a2,
+            anchor_b,
+        }
+    }
+}
+
 /// A 2D joint that constrains two bodies.
 #[derive(Debug, Clone)]
 pub enum Joint2D {
@@ -101,6 +138,8 @@ pub enum Joint2D {
     Pin(PinJoint2D),
     /// Damped spring: connects bodies with a spring.
     DampedSpring(DampedSpringJoint2D),
+    /// Groove joint: constrains `body_b` to a segment on `body_a`.
+    Groove(GrooveJoint2D),
 }
 
 impl Joint2D {
@@ -109,6 +148,7 @@ impl Joint2D {
         match self {
             Joint2D::Pin(j) => &j.base,
             Joint2D::DampedSpring(j) => &j.base,
+            Joint2D::Groove(j) => &j.base,
         }
     }
 
@@ -122,6 +162,7 @@ impl Joint2D {
         match self {
             Joint2D::Pin(j) => &mut j.base,
             Joint2D::DampedSpring(j) => &mut j.base,
+            Joint2D::Groove(j) => &mut j.base,
         }
     }
 
@@ -153,6 +194,7 @@ pub fn apply_joint_constraints(
         Joint2D::DampedSpring(spring) => {
             apply_spring_constraint(spring, body_a, body_b, dt);
         }
+        Joint2D::Groove(groove) => apply_groove_constraint(groove, body_a, body_b),
     }
 }
 
@@ -184,6 +226,45 @@ fn apply_pin_constraint(pin: &PinJoint2D, body_a: &mut PhysicsBody2D, body_b: &m
     // as the weighted point — but for a pin joint the contract is that
     // both bodies share the same point, so both go to the anchor.
     let _ = (ratio_a, ratio_b); // suppress unused warnings
+}
+
+/// Applies a groove joint constraint: pulls `body_b`'s anchor perpendicular
+/// onto the groove segment attached to `body_a`, weighted by inverse mass.
+/// Motion *along* the groove is unconstrained — the anchor may slide anywhere
+/// between the endpoints (and is clamped to them beyond the ends).
+fn apply_groove_constraint(
+    groove: &GrooveJoint2D,
+    body_a: &mut PhysicsBody2D,
+    body_b: &mut PhysicsBody2D,
+) {
+    let inv_a = body_a.inverse_mass();
+    let inv_b = body_b.inverse_mass();
+    let total_inv = inv_a + inv_b;
+    if total_inv < 1e-10 {
+        return; // Both bodies immovable.
+    }
+
+    // Groove segment endpoints and body_b's anchor, in world space.
+    let p1 = body_a.position + groove.groove_a1;
+    let p2 = body_a.position + groove.groove_a2;
+    let anchor = body_b.position + groove.anchor_b;
+
+    // Closest point on the (clamped) groove segment to the anchor.
+    let seg = p2 - p1;
+    let len_sq = seg.length_squared();
+    let closest = if len_sq < 1e-10 {
+        p1
+    } else {
+        let t = ((anchor - p1).dot(seg) / len_sq).clamp(0.0, 1.0);
+        p1 + seg * t
+    };
+
+    // Perpendicular correction bringing the anchor onto the groove, split by
+    // inverse mass: a static `body_a` holds the groove fixed while `body_b`
+    // slides onto it.
+    let error = closest - anchor;
+    body_b.position = body_b.position + error * (inv_b / total_inv);
+    body_a.position = body_a.position - error * (inv_a / total_inv);
 }
 
 /// Applies a damped spring constraint using Hooke's law with damping.
@@ -351,6 +432,47 @@ mod tests {
 
         assert_eq!(a.position, Vector2::new(-5.0, 0.0));
         assert_eq!(b.position, Vector2::new(5.0, 0.0));
+    }
+
+    // ---- GrooveJoint2D tests ----
+
+    // pat-nzgdu.59: a GrooveJoint2D pulls body_b perpendicular onto the groove
+    // segment on body_a while leaving motion along the groove free.
+    #[test]
+    fn groove_joint_constrains_body_to_segment() {
+        // Horizontal groove on a STATIC body_a spanning x ∈ [-5, 5] at y = 0;
+        // body_b starts 3 units above the line at x = 2.
+        let mut a = make_static(Vector2::ZERO);
+        let mut b = make_rigid(Vector2::new(2.0, 3.0));
+        let groove = GrooveJoint2D::new(
+            BodyId(1),
+            BodyId(2),
+            Vector2::new(-5.0, 0.0),
+            Vector2::new(5.0, 0.0),
+            Vector2::ZERO,
+        );
+        let joint = Joint2D::Groove(groove);
+
+        // Exhaustive-match wiring reaches the Groove variant.
+        assert!(joint.is_enabled());
+        assert_eq!(joint.base().body_b, BodyId(2));
+
+        apply_joint_constraints(&joint, &mut a, &mut b, 1.0 / 60.0);
+
+        // body_b snapped onto the groove line (y ≈ 0), keeping its slide
+        // position along the groove (x ≈ 2).
+        assert!(
+            approx_eq(b.position.y, 0.0),
+            "body_b must sit on the groove line, got y={}",
+            b.position.y
+        );
+        assert!(
+            approx_eq(b.position.x, 2.0),
+            "body_b must keep its position along the groove, got x={}",
+            b.position.x
+        );
+        // The static body_a holding the groove does not move.
+        assert_eq!(a.position, Vector2::ZERO);
     }
 
     // ---- DampedSpringJoint2D tests ----
