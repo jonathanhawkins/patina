@@ -209,6 +209,34 @@ pub trait SceneAccess {
     fn emit_signal(&mut self, node: u64, signal: &str, args: &[Variant]);
     /// Connect a signal on `source` to `method` on `target`.
     fn connect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str);
+    /// Connect a signal honoring Godot `ConnectFlags`
+    /// (`DEFERRED=1`, `PERSIST=2`, `ONE_SHOT=4`, `REFERENCE_COUNTED=8`) plus any
+    /// `Callable.bind` arguments to append. The default implementation drops the
+    /// flags/binds and calls [`connect_signal`](Self::connect_signal); scene
+    /// backends override it to record them (pat-nzgdu.31).
+    fn connect_signal_flags(
+        &mut self,
+        source: u64,
+        signal: &str,
+        target: u64,
+        method: &str,
+        flags: i64,
+        binds: &[Variant],
+    ) {
+        let _ = (flags, binds);
+        self.connect_signal(source, signal, target, method);
+    }
+    /// Disconnect `target.method` from `source.signal`. Returns `true` if a
+    /// connection was removed. Default: no-op returning `false`.
+    fn disconnect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str) -> bool {
+        let _ = (source, signal, target, method);
+        false
+    }
+    /// Whether `target.method` is connected to `source.signal`. Default `false`.
+    fn is_signal_connected(&self, source: u64, signal: &str, target: u64, method: &str) -> bool {
+        let _ = (source, signal, target, method);
+        false
+    }
     /// Return the name of `node`, if it exists.
     fn get_node_name(&self, node: u64) -> Option<String>;
 
@@ -227,6 +255,28 @@ pub trait SceneAccess {
 
     /// Mark a node for deferred deletion (removed at end of frame).
     fn queue_free(&mut self, _node_id: u64) {}
+
+    /// Return `true` if the object with the given raw id is a live node in the
+    /// scene tree (Godot `is_instance_valid`). A freed / never-existed object
+    /// returns `false`.
+    ///
+    /// The default returns `true` so mock accessors without a real object arena
+    /// preserve the legacy "an ObjectId is always valid" behavior; the
+    /// production `SceneTreeAccessor` overrides this to consult the live arena.
+    fn is_object_alive(&self, _id: u64) -> bool {
+        true
+    }
+
+    /// Resolve a raw object id back to a live object (Godot `instance_from_id`).
+    /// Returns the id if an object with that id is currently alive, else `None`.
+    fn instance_from_id(&self, _id: u64) -> Option<u64> {
+        None
+    }
+
+    /// Immediately free the object (Godot `Object.free()`): remove it and its
+    /// descendants from the tree *now*, unlike [`queue_free`](Self::queue_free)
+    /// which defers removal to end-of-frame.
+    fn free_object(&mut self, _id: u64) {}
 
     /// Queue a method call on `node_id` for end-of-frame (Godot `call_deferred`).
     fn call_deferred(&mut self, _node_id: u64, _method: &str, _args: &[Variant]) {}

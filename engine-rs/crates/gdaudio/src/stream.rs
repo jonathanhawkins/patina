@@ -47,6 +47,12 @@ pub struct AudioStreamPlayback {
     /// here so spatial attenuation multiplies the mix without disturbing the
     /// user-facing `volume_db`.
     linear_gain: f32,
+    /// Loop start in seconds (Godot `loop_begin`); a forward loop wraps here
+    /// when playback reaches `loop_end`. Default 0.0.
+    loop_begin_secs: f32,
+    /// Loop end in seconds (Godot `loop_end`); 0.0 means "use `length_secs`".
+    /// A forward loop wraps back to `loop_begin_secs` upon reaching this point.
+    loop_end_secs: f32,
 }
 
 impl AudioStreamPlayback {
@@ -63,6 +69,8 @@ impl AudioStreamPlayback {
             pan_left: 1.0,
             pan_right: 1.0,
             linear_gain: 1.0,
+            loop_begin_secs: 0.0,
+            loop_end_secs: 0.0,
         }
     }
 
@@ -106,9 +114,11 @@ impl AudioStreamPlayback {
 
     /// Advance playback by `delta` seconds.
     ///
-    /// If the stream reaches the end:
-    /// - [`LoopMode::None`]: playback stops and position resets to 0.
-    /// - [`LoopMode::Forward`]: position wraps around modulo `length_secs`.
+    /// - [`LoopMode::None`]: playback stops when it reaches `length_secs`.
+    /// - [`LoopMode::Forward`]: playback wraps at `loop_end` (which defaults to
+    ///   `length_secs` when `loop_end_secs` is 0.0) back to `loop_begin`,
+    ///   preserving overshoot so it keeps producing audio past its nominal
+    ///   length.
     pub fn advance(&mut self, delta: f32) {
         if self.state != PlaybackState::Playing {
             return;
@@ -116,13 +126,25 @@ impl AudioStreamPlayback {
 
         self.position_secs += delta;
 
-        if self.position_secs >= self.length_secs {
-            match self.loop_mode {
-                LoopMode::None => {
+        match self.loop_mode {
+            LoopMode::None => {
+                if self.position_secs >= self.length_secs {
                     self.stop();
                 }
-                LoopMode::Forward => {
-                    self.position_secs %= self.length_secs;
+            }
+            LoopMode::Forward => {
+                let loop_end = if self.loop_end_secs > 0.0
+                    && self.loop_end_secs <= self.length_secs
+                {
+                    self.loop_end_secs
+                } else {
+                    self.length_secs
+                };
+                let loop_begin = self.loop_begin_secs.clamp(0.0, loop_end);
+                if self.position_secs >= loop_end {
+                    let span = (loop_end - loop_begin).max(f32::EPSILON);
+                    self.position_secs =
+                        loop_begin + (self.position_secs - loop_begin).rem_euclid(span);
                 }
             }
         }
@@ -180,6 +202,27 @@ impl AudioStreamPlayback {
     /// Set the loop mode.
     pub fn set_loop_mode(&mut self, mode: LoopMode) {
         self.loop_mode = mode;
+    }
+
+    /// Loop start in seconds (Godot `loop_begin`).
+    pub fn loop_begin(&self) -> f32 {
+        self.loop_begin_secs
+    }
+
+    /// Set the loop start in seconds, clamped to `[0, length]`.
+    pub fn set_loop_begin(&mut self, secs: f32) {
+        self.loop_begin_secs = secs.clamp(0.0, self.length_secs);
+    }
+
+    /// Loop end in seconds (Godot `loop_end`); 0.0 means "use `length_secs`".
+    pub fn loop_end(&self) -> f32 {
+        self.loop_end_secs
+    }
+
+    /// Set the loop end in seconds, clamped to `[0, length]`; 0.0 disables it
+    /// (falls back to the full stream length).
+    pub fn set_loop_end(&mut self, secs: f32) {
+        self.loop_end_secs = secs.clamp(0.0, self.length_secs);
     }
 
     /// Set the target bus name for routing.

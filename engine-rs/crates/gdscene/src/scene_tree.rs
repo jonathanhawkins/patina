@@ -1222,18 +1222,31 @@ impl SceneTree {
 
         // Collect connection info to avoid borrow conflicts.
         // Note: we snapshot before emit() so one-shot connections are included.
-        let connections: Vec<(gdcore::id::ObjectId, String, bool)> = self
-            .signal_stores
-            .get(&source)
-            .and_then(|store| store.get_signal(signal_name))
-            .map(|signal| {
-                signal
-                    .connections()
-                    .iter()
-                    .map(|c| (c.target_id, c.method.clone(), c.has_callback()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Each entry also carries the connection's `deferred` flag and its
+        // resolved argument list (binds appended / unbinds dropped) so the
+        // script-method dispatch below honors CONNECT_DEFERRED and Callable
+        // bind/unbind (pat-nzgdu.31).
+        #[allow(clippy::type_complexity)]
+        let connections: Vec<(gdcore::id::ObjectId, String, bool, bool, Vec<gdvariant::Variant>)> =
+            self.signal_stores
+                .get(&source)
+                .and_then(|store| store.get_signal(signal_name))
+                .map(|signal| {
+                    signal
+                        .connections()
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.target_id,
+                                c.method.clone(),
+                                c.has_callback(),
+                                c.deferred,
+                                c.resolve_args(args),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
         // Fire callback-based connections and remove one-shot connections.
         let results = self
@@ -1242,11 +1255,18 @@ impl SceneTree {
             .map_or_else(Vec::new, |store| store.emit(signal_name, args));
 
         // For connections without callbacks, dispatch to target node scripts.
-        for (target_id, method, has_callback) in connections {
+        // Deferred connections are queued on the end-of-frame MessageQueue and
+        // fire in `process_deferred_calls`; immediate ones fire now. Both use
+        // the resolved args so `.bind()`/`.unbind()` payloads arrive correctly.
+        for (target_id, method, has_callback, deferred, resolved) in connections {
             if !has_callback {
                 let target_node_id = NodeId::from_object_id(target_id);
                 if self.scripts.contains_key(&target_node_id) {
-                    self.call_script_with_access(target_node_id, &method, args);
+                    if deferred {
+                        self.call_deferred(target_node_id, &method, &resolved);
+                    } else {
+                        self.call_script_with_access(target_node_id, &method, &resolved);
+                    }
                 }
             }
         }

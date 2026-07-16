@@ -2294,6 +2294,17 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <canvas id="viewport-overlay-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;"></canvas>
         <div id="box-select-overlay"></div>
         <div id="snap-indicator">Snap: 8px</div>
+        <!-- pat-nzgdu.34: TileMap paint palette (Godot tiles editor TileSet atlas
+             panel + paint tool, editor/plugins/tiles/). Shown only when a
+             TileMapLayer/TileMap node is selected; the palette is built from
+             GET /api/tilemap/tileset and painting POSTs /api/tilemap/paint. -->
+        <div id="tilemap-palette" style="display:none;position:absolute;top:40px;right:8px;width:184px;max-height:60%;overflow:auto;background:var(--panel-bg,#252525);border:1px solid var(--border,#111);border-radius:4px;padding:6px;z-index:6;font-size:11px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+            <span style="font-weight:bold;">TileSet</span>
+            <button id="tilemap-paint-toggle" title="Toggle tile paint mode: when on, clicking the 2D viewport paints the active tile." style="font-size:10px;">Paint: off</button>
+          </div>
+          <div id="tilemap-palette-tiles" style="display:flex;flex-wrap:wrap;gap:3px;"></div>
+        </div>
         <!-- pat-9yq5q: 2D viewport toolbar (Godot CanvasItemEditor main_menu_hbox,
              canvas_item_editor_plugin.cpp:5702-6040), in Godot order. Shown in 2D
              mode. The transform tools (Q/W/E/R) live in the main editor toolbar. -->
@@ -4127,11 +4138,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       renderNodeDockEmpty();
       clearScript();
       if (typeof updateMiscButtons === 'function') updateMiscButtons();
+      buildTilePalette(); // pat-nzgdu.34: hide TileSet palette when nothing is selected
       return;
     }
     var data = await api('GET', '/api/selected');
     if (data) {
       selectedNodeData = data;
+      buildTilePalette(); // pat-nzgdu.34: refresh TileSet palette for the new selection
       renderInspector(data);
       document.getElementById('status-selected').textContent = data.name || 'None';
       document.getElementById('status-path').textContent = data.path || '\u2014';
@@ -5558,8 +5571,68 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
   }
 
+  // pat-nzgdu.34: TileMap paint tool + TileSet palette, wired to the existing
+  // server tile ops (GET /api/tilemap/tileset builds the palette; POST
+  // /api/tilemap/paint paints a cell). Godot's tiles editor exposes a TileSet
+  // atlas panel and single-cell paint tool; this brings the served editor to
+  // parity for selecting an active tile and painting into a TileMapLayer.
+  var activeTileId = 1;
+  var tilePaintActive = false;
+  var tilesetCellSize = 16;
+
+  function isTileMapNodeSelected() {
+    if (selectedNodeId === null || selectedNodeId === undefined || !selectedNodeData) return false;
+    var cls = selectedNodeData.class || selectedNodeData.class_name || '';
+    return cls === 'TileMapLayer' || cls === 'TileMap';
+  }
+
+  function updateTilePaintToggle() {
+    var btn = document.getElementById('tilemap-paint-toggle');
+    if (btn) btn.textContent = 'Paint: ' + (tilePaintActive ? 'on' : 'off');
+  }
+
+  // Rebuild the TileSet palette for the current selection. Hidden unless a
+  // TileMapLayer/TileMap node is selected. Called from fetchSelected().
+  async function buildTilePalette() {
+    var panel = document.getElementById('tilemap-palette');
+    if (!panel) return;
+    if (!isTileMapNodeSelected()) { panel.style.display = 'none'; tilePaintActive = false; updateTilePaintToggle(); return; }
+    panel.style.display = 'block';
+    updateTilePaintToggle();
+    var data = await api('GET', '/api/tilemap/tileset');
+    var tiles = (data && data.tiles) || [];
+    if (data && data.cell_size && data.cell_size.length === 2 && data.cell_size[0] > 0) tilesetCellSize = data.cell_size[0];
+    var host = document.getElementById('tilemap-palette-tiles');
+    if (!host) return;
+    host.innerHTML = '';
+    for (var i = 0; i < tiles.length; i++) {
+      (function(t) {
+        var sw = document.createElement('div');
+        sw.className = 'tile-swatch' + (t.id === activeTileId ? ' active' : '');
+        sw.title = (t.name || ('tile ' + t.id)) + ' (id ' + t.id + ')';
+        sw.style.cssText = 'width:22px;height:22px;border:2px solid ' + (t.id === activeTileId ? 'var(--accent,#5c9ded)' : 'transparent') + ';background:' + (t.color || '#888') + ';cursor:pointer;border-radius:2px;';
+        sw.addEventListener('click', function() { activeTileId = t.id; buildTilePalette(); });
+        host.appendChild(sw);
+      })(tiles[i]);
+    }
+  }
+
+  // Paint the active tile at the cell under a 2D viewport click, then refresh
+  // the rendered viewport so the change is visible.
+  async function paintTileAtEvent(e) {
+    if (!isTileMapNodeSelected()) return;
+    var c = viewportCoords(e);
+    var cs = tilesetCellSize > 0 ? tilesetCellSize : 16;
+    var cx = Math.floor(c.x / cs);
+    var cy = Math.floor(c.y / cs);
+    await api('POST', '/api/tilemap/paint', { node_id: selectedNodeId, x: cx, y: cy, tile_id: activeTileId });
+    refreshViewport();
+  }
+
   function setupViewport() {
     var container = document.getElementById('viewport-container');
+    var tilePaintToggleBtn = document.getElementById('tilemap-paint-toggle');
+    if (tilePaintToggleBtn) tilePaintToggleBtn.addEventListener('click', function() { tilePaintActive = !tilePaintActive; updateTilePaintToggle(); });
     viewportImg = document.createElement('img');
     viewportImg.id = 'viewport-img';
     viewportImg.style.display = 'none';
@@ -5575,6 +5648,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         else begin3DLeft(e);
         return;
       }
+      // pat-nzgdu.34: in tile paint mode with a TileMapLayer selected, a left
+      // click paints the active tile instead of selecting/dragging.
+      if (tilePaintActive && e.button === 0 && isTileMapNodeSelected()) { paintTileAtEvent(e); return; }
       var c = viewportCoords(e);
       dragStartX = e.clientX; dragStartY = e.clientY;
       isDragging = false;

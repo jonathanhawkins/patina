@@ -598,6 +598,37 @@ pub fn camera2d_config_from_node(tree: &SceneTree, node_id: NodeId) -> Camera2DC
     }
 }
 
+/// Reads the Camera2D `"offset"` property — a world-space nudge of the view
+/// center (Godot default `Vector2::ZERO`).
+pub fn get_camera_offset(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("offset") {
+            Variant::Vector2(v) => v,
+            _ => Vector2::ZERO,
+        })
+        .unwrap_or(Vector2::ZERO)
+}
+
+/// Returns the Camera2D's screen-center world position (Godot
+/// `Camera2D.get_screen_center_position`): the camera's global position plus
+/// its `offset`, clamped so the visible rect stays within the configured
+/// limits. This is the point the viewport centers on.
+///
+/// Drag margins and position smoothing shape only the per-frame easing toward
+/// this target (they need the running scroll state), so at rest the screen
+/// center equals this clamped target — which is what a freshly-current camera
+/// reports before any frames advance.
+pub fn get_screen_center_position(
+    tree: &SceneTree,
+    node_id: NodeId,
+    viewport_size: Vector2,
+) -> Vector2 {
+    let config = camera2d_config_from_node(tree, node_id);
+    let target = get_global_transform(tree, node_id).origin + get_camera_offset(tree, node_id);
+    let half_view = camera2d_half_view(viewport_size, config.zoom);
+    clamp_camera_to_limits(&config, target, half_view)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1028,6 +1059,42 @@ mod tests {
         assert!(!c.drag_vertical_enabled);
         assert!(approx_eq(c.drag_left_margin, 0.35));
         assert!(approx_vec(c.zoom, Vector2::new(2.0, 2.0)));
+    }
+
+    #[test]
+    fn camera2d_screen_center_position_clamps_to_limit() {
+        // Viewport 200x100 -> half-view 100x50 at zoom 1. A camera far left of
+        // its limit_left=0 must report a screen center clamped so the visible
+        // rect's left edge sits at the limit: center.x = 0 + half_view.x = 100.
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let cam = tree.add_child(root, Node::new("Cam", "Camera2D")).unwrap();
+        set_camera_current(&mut tree, cam, true);
+        set_camera_limit(&mut tree, cam, "left", 0);
+        set_position(&mut tree, cam, Vector2::new(-500.0, 30.0));
+
+        let center = get_screen_center_position(&tree, cam, Vector2::new(200.0, 100.0));
+        assert!(
+            approx_eq(center.x, 100.0),
+            "x clamps to limit_left + half_view (0 + 100), got {}",
+            center.x
+        );
+        // Y is within the (default) vertical limits, so it is unclamped.
+        assert!(
+            approx_eq(center.y, 30.0),
+            "y is within limits and unclamped, got {}",
+            center.y
+        );
+
+        // Within limits: the screen center follows the camera position.
+        set_position(&mut tree, cam, Vector2::new(400.0, 20.0));
+        let c2 = get_screen_center_position(&tree, cam, Vector2::new(200.0, 100.0));
+        assert!(
+            approx_vec(c2, Vector2::new(400.0, 20.0)),
+            "unclamped center follows the camera, got ({}, {})",
+            c2.x,
+            c2.y
+        );
     }
 
     // -- NinePatchRect properties --------------------------------------------

@@ -2605,6 +2605,13 @@ impl Interpreter {
                 match &args[0] {
                     Variant::Int(i) => Ok(Some(Variant::Int(i.abs()))),
                     Variant::Float(f) => Ok(Some(Variant::Float(f.abs()))),
+                    // Componentwise on vectors (Godot `Vector2.abs()` etc.).
+                    Variant::Vector2(v) => Ok(Some(Variant::Vector2(
+                        gdcore::math::Vector2::new(v.x.abs(), v.y.abs()),
+                    ))),
+                    Variant::Vector3(v) => Ok(Some(Variant::Vector3(
+                        gdcore::math::Vector3::new(v.x.abs(), v.y.abs(), v.z.abs()),
+                    ))),
                     other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "abs() not supported for {}",
                         other.variant_type()
@@ -3121,7 +3128,19 @@ impl Interpreter {
                         "is_instance_valid() takes 1 argument".into(),
                     )));
                 }
-                Ok(Some(Variant::Bool(!args[0].is_nil())))
+                // A node reference is valid only while its object is still live
+                // in the scene tree. Route object ids through the alive registry
+                // (SceneAccess); a freed node reports invalid even though its id
+                // is non-nil. Non-object args keep the plain non-nil heuristic.
+                let valid = match &args[0] {
+                    Variant::ObjectId(oid) => match &self.scene_access {
+                        Some(access) => access.is_object_alive(oid.raw()),
+                        // No scene to consult -> assume the id is valid (legacy).
+                        None => true,
+                    },
+                    other => !other.is_nil(),
+                };
+                Ok(Some(Variant::Bool(valid)))
             }
             "assert" => {
                 // assert(condition, message = "")
@@ -3479,18 +3498,133 @@ impl Interpreter {
                 };
                 Ok(Some(Variant::Bool(result)))
             }
-            // Object/weakref infrastructure is out of scope for the headless
-            // interpreter (no live object registry reachable here). `weakref`
-            // returns its argument unchanged as a best-effort passthrough;
-            // `instance_from_id` has no id->object map and returns Nil. Both are
-            // registered so they don't fall through to "unknown function".
+            // Object/weakref infrastructure consults the live-object registry
+            // through `SceneAccess` when a scene is present (pat-nzgdu.32).
+            // `weakref` returns the object id as a re-queryable handle;
+            // `instance_from_id` resolves an id back to a live object (or Nil).
+            // Without scene access both degrade gracefully (passthrough / Nil).
             "weakref" => {
                 Self::require_args("weakref", args, 1)?;
+                // A WeakRef is a non-owning handle: return the object id
+                // unchanged so `is_instance_valid(w)` and `w.get_ref()` re-query
+                // the live registry and observe `Nil` once the referent is freed.
                 Ok(Some(args[0].clone()))
             }
             "instance_from_id" => {
                 Self::require_args("instance_from_id", args, 1)?;
-                Ok(Some(Variant::Nil))
+                let raw = match &args[0] {
+                    Variant::ObjectId(oid) => oid.raw(),
+                    other => to_int(other)? as u64,
+                };
+                let resolved = self
+                    .scene_access
+                    .as_ref()
+                    .and_then(|access| access.instance_from_id(raw));
+                Ok(Some(match resolved {
+                    Some(id) => Variant::ObjectId(gdcore::id::ObjectId::from_raw(id)),
+                    None => Variant::Nil,
+                }))
+            }
+
+            // -- Object meta + dynamic property access (pat-nzgdu.30).
+            // Bare `set_meta/get_meta/has_meta/remove_meta/get_meta_list` and the
+            // dynamic `set/get/set_deferred` accessors operate on the implicit
+            // `self` node (Godot `Object` API). Meta uses the Node's separate meta
+            // bag; `set`/`get` reuse the node-property accessors; `set_deferred`
+            // routes a `set` through the end-of-frame deferred queue. A call whose
+            // signature does not match (or without scene access) returns `Ok(None)`
+            // so a user-defined function of the same name still resolves.
+            "set_meta" => {
+                if let (Some(Variant::String(key)), Some(value)) = (args.first(), args.get(1)) {
+                    if let (Some(ref mut access), Some(node_id)) =
+                        (&mut self.scene_access, self.current_node_id)
+                    {
+                        access.set_meta(node_id, key, value.clone());
+                        return Ok(Some(Variant::Nil));
+                    }
+                }
+                Ok(None)
+            }
+            "get_meta" => {
+                if let Some(Variant::String(key)) = args.first() {
+                    if let (Some(ref access), Some(node_id)) =
+                        (&self.scene_access, self.current_node_id)
+                    {
+                        let default = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        return Ok(Some(access.get_meta(node_id, key, default)));
+                    }
+                }
+                Ok(None)
+            }
+            "has_meta" => {
+                if let Some(Variant::String(key)) = args.first() {
+                    if let (Some(ref access), Some(node_id)) =
+                        (&self.scene_access, self.current_node_id)
+                    {
+                        return Ok(Some(Variant::Bool(access.has_meta(node_id, key))));
+                    }
+                }
+                Ok(None)
+            }
+            "remove_meta" => {
+                if let Some(Variant::String(key)) = args.first() {
+                    if let (Some(ref mut access), Some(node_id)) =
+                        (&mut self.scene_access, self.current_node_id)
+                    {
+                        access.remove_meta(node_id, key);
+                        return Ok(Some(Variant::Nil));
+                    }
+                }
+                Ok(None)
+            }
+            "get_meta_list" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    let names = access.get_meta_list(node_id);
+                    return Ok(Some(Variant::Array(
+                        names.into_iter().map(Variant::String).collect(),
+                    )));
+                }
+                Ok(None)
+            }
+            "set" => {
+                if let (Some(Variant::String(prop)), Some(value)) = (args.first(), args.get(1)) {
+                    if let (Some(ref mut access), Some(node_id)) =
+                        (&mut self.scene_access, self.current_node_id)
+                    {
+                        access.set_node_property(node_id, prop, value.clone());
+                        return Ok(Some(Variant::Nil));
+                    }
+                }
+                Ok(None)
+            }
+            "get" => {
+                if args.len() == 1 {
+                    if let Some(Variant::String(prop)) = args.first() {
+                        if let (Some(ref access), Some(node_id)) =
+                            (&self.scene_access, self.current_node_id)
+                        {
+                            return Ok(Some(access.get_node_property(node_id, prop)));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            "set_deferred" => {
+                if let (Some(Variant::String(prop)), Some(value)) = (args.first(), args.get(1)) {
+                    if let (Some(ref mut access), Some(node_id)) =
+                        (&mut self.scene_access, self.current_node_id)
+                    {
+                        access.call_deferred(
+                            node_id,
+                            "set",
+                            &[Variant::String(prop.clone()), value.clone()],
+                        );
+                        return Ok(Some(Variant::Nil));
+                    }
+                }
+                Ok(None)
             }
 
             _ => Ok(None), // Not a built-in
@@ -5037,9 +5171,105 @@ impl Interpreter {
                                 )))
                             }
                         };
+                        // Optional 4th arg = Godot ConnectFlags bitmask
+                        // (DEFERRED=1, ONE_SHOT=4, ...). Older callers omit it.
+                        let flags = match args.get(3) {
+                            Some(Variant::Int(f)) => *f,
+                            _ => 0,
+                        };
                         if let Some(ref mut access) = self.scene_access {
-                            access.connect_signal(id, &signal, target_id, &method_name);
+                            access.connect_signal_flags(
+                                id,
+                                &signal,
+                                target_id,
+                                &method_name,
+                                flags,
+                                &[],
+                            );
                             Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "disconnect" => {
+                        if args.len() < 3 {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "disconnect() needs signal, target, method".into(),
+                            )));
+                        }
+                        let signal = match &args[0] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "disconnect() signal must be string".into(),
+                                )))
+                            }
+                        };
+                        let target_id = match &args[1] {
+                            Variant::ObjectId(tid) => tid.raw(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "disconnect() target must be ObjectId".into(),
+                                )))
+                            }
+                        };
+                        let method_name = match &args[2] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "disconnect() method must be string".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            let removed =
+                                access.disconnect_signal(id, &signal, target_id, &method_name);
+                            Ok(Variant::Bool(removed))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "is_connected" => {
+                        if args.len() < 3 {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "is_connected() needs signal, target, method".into(),
+                            )));
+                        }
+                        let signal = match &args[0] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "is_connected() signal must be string".into(),
+                                )))
+                            }
+                        };
+                        let target_id = match &args[1] {
+                            Variant::ObjectId(tid) => tid.raw(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "is_connected() target must be ObjectId".into(),
+                                )))
+                            }
+                        };
+                        let method_name = match &args[2] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "is_connected() method must be string".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref access) = self.scene_access {
+                            Ok(Variant::Bool(access.is_signal_connected(
+                                id,
+                                &signal,
+                                target_id,
+                                &method_name,
+                            )))
                         } else {
                             Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                 "no scene access".into(),
@@ -5091,6 +5321,33 @@ impl Interpreter {
                             )))
                         }
                     }
+                    "free" => {
+                        // Godot `Object.free()`: immediate destruction (unlike
+                        // `queue_free`, the object is gone the moment this
+                        // returns, so `is_instance_valid` reports false at once).
+                        if let Some(ref mut access) = self.scene_access {
+                            access.free_object(id);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_ref" => {
+                        // `WeakRef.get_ref()`: the live object reference, or Nil
+                        // once the referent has been freed.
+                        let alive = self
+                            .scene_access
+                            .as_ref()
+                            .map(|access| access.is_object_alive(id))
+                            .unwrap_or(true);
+                        Ok(if alive {
+                            Variant::ObjectId(gdcore::id::ObjectId::from_raw(id))
+                        } else {
+                            Variant::Nil
+                        })
+                    }
                     "call_deferred" => {
                         if args.is_empty() {
                             return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -5125,6 +5382,11 @@ impl Interpreter {
                                 "no scene access".into(),
                             )))
                         }
+                    }
+                    "get_instance_id" => {
+                        // Godot `Object.get_instance_id()`: the object's unique
+                        // id, usable with `instance_from_id` / `weakref`.
+                        Ok(Variant::Int(id as i64))
                     }
                     // -- AudioStreamPlayer(2D/3D) playback control (pat-nzgdu.2) --
                     // Godot scripts drive audio via method calls; route them to the
@@ -5378,6 +5640,149 @@ impl Interpreter {
                             );
                         }
                         Ok(Variant::Nil)
+                    }
+                    // -- Object meta + dynamic property access (pat-nzgdu.30),
+                    // method form (`obj.set_meta(...)`); also the target of the
+                    // `set` call queued by `set_deferred`. Mirrors the bare-call
+                    // handlers in `try_builtin`.
+                    "set_meta" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "set_meta() takes (name, value)".into(),
+                                )))
+                            }
+                        };
+                        let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        if let Some(ref mut access) = self.scene_access {
+                            access.set_meta(id, &name, value);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_meta" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "get_meta() takes (name, [default])".into(),
+                                )))
+                            }
+                        };
+                        let default = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        if let Some(ref access) = self.scene_access {
+                            Ok(access.get_meta(id, &name, default))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "has_meta" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "has_meta() takes a name".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref access) = self.scene_access {
+                            Ok(Variant::Bool(access.has_meta(id, &name)))
+                        } else {
+                            Ok(Variant::Bool(false))
+                        }
+                    }
+                    "remove_meta" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "remove_meta() takes a name".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.remove_meta(id, &name);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "get_meta_list" => {
+                        if let Some(ref access) = self.scene_access {
+                            let names = access.get_meta_list(id);
+                            Ok(Variant::Array(
+                                names.into_iter().map(Variant::String).collect(),
+                            ))
+                        } else {
+                            Ok(Variant::Array(Vec::new()))
+                        }
+                    }
+                    "set" => {
+                        let prop = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "set() takes (property, value)".into(),
+                                )))
+                            }
+                        };
+                        let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        if let Some(ref mut access) = self.scene_access {
+                            access.set_node_property(id, &prop, value);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get" if args.len() == 1 => {
+                        let prop = match &args[0] {
+                            Variant::String(s) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "get() takes a property name".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref access) = self.scene_access {
+                            Ok(access.get_node_property(id, &prop))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "set_deferred" => {
+                        let prop = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "set_deferred() takes (property, value)".into(),
+                                )))
+                            }
+                        };
+                        let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        if let Some(ref mut access) = self.scene_access {
+                            access.call_deferred(id, "set", &[Variant::String(prop), value]);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "to_string" => {
+                        let cls = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.get_class(id))
+                            .unwrap_or_else(|| "Object".to_string());
+                        Ok(Variant::String(format!("<{cls}#{id}>")))
                     }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                         format!("ObjectId.{method}"),

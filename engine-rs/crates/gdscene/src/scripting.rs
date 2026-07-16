@@ -402,6 +402,56 @@ impl SceneAccess for SceneTreeAccessor {
         }
     }
 
+    // -- Object metadata (pat-nzgdu.30) -------------------------------------
+    // Meta is Object-level state stored in the Node's own meta bag (distinct
+    // from the script/property namespace used above).
+
+    fn set_meta(&mut self, node: u64, name: &str, value: Variant) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+            n.set_meta(name, value);
+        }
+    }
+
+    fn get_meta(&self, node: u64, name: &str, default: Variant) -> Variant {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree().get_node(nid) {
+            Some(n) if n.has_meta(name) => n.get_meta(name),
+            _ => default,
+        }
+    }
+
+    fn has_meta(&self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_node(nid)
+            .map(|n| n.has_meta(name))
+            .unwrap_or(false)
+    }
+
+    fn remove_meta(&mut self, node: u64, name: &str) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+            n.remove_meta(name);
+        }
+    }
+
+    fn get_meta_list(&self, node: u64) -> Vec<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let mut names: Vec<String> = self
+            .tree()
+            .get_node(nid)
+            .map(|n| {
+                n.get_meta_list()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
     fn emit_signal(&mut self, node: u64, signal: &str, args: &[Variant]) {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree_mut().emit_signal(nid, signal, args);
@@ -412,6 +462,50 @@ impl SceneAccess for SceneTreeAccessor {
         let target_oid = ObjectId::from_raw(target);
         let conn = Connection::new(target_oid, method);
         self.tree_mut().connect_signal(source_id, signal, conn);
+    }
+
+    fn connect_signal_flags(
+        &mut self,
+        source: u64,
+        signal: &str,
+        target: u64,
+        method: &str,
+        flags: i64,
+        binds: &[Variant],
+    ) {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        let target_oid = ObjectId::from_raw(target);
+        let mut conn = Connection::new(target_oid, method);
+        // Godot ConnectFlags: DEFERRED=1, ONE_SHOT=4 (PERSIST/REFERENCE_COUNTED
+        // do not affect dispatch here).
+        conn.deferred = flags & 1 != 0;
+        conn.one_shot = flags & 4 != 0;
+        if !binds.is_empty() {
+            conn.binds = binds.to_vec();
+        }
+        self.tree_mut().connect_signal(source_id, signal, conn);
+    }
+
+    fn disconnect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str) -> bool {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        let target_oid = ObjectId::from_raw(target);
+        self.tree_mut()
+            .signal_store_mut(source_id)
+            .disconnect(signal, target_oid, method)
+    }
+
+    fn is_signal_connected(&self, source: u64, signal: &str, target: u64, method: &str) -> bool {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        let target_oid = ObjectId::from_raw(target);
+        self.tree()
+            .signal_store(source_id)
+            .and_then(|store| store.get_signal(signal))
+            .map(|sig| {
+                sig.connections()
+                    .iter()
+                    .any(|c| c.target_id == target_oid && c.method == method)
+            })
+            .unwrap_or(false)
     }
 
     fn get_node_name(&self, node: u64) -> Option<String> {
@@ -492,6 +586,28 @@ impl SceneAccess for SceneTreeAccessor {
     fn queue_free(&mut self, node_id: u64) {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
         self.tree_mut().queue_free(nid);
+    }
+
+    fn is_object_alive(&self, id: u64) -> bool {
+        // The scene-tree node arena is the authoritative alive registry: a node
+        // is present until it is immediately freed (`remove_node`) or reaped
+        // from the deferred-deletion queue (`process_deletions`). A `queue_free`d
+        // node stays alive until that reap, matching Godot semantics.
+        let nid = NodeId::from_object_id(ObjectId::from_raw(id));
+        self.tree().get_node(nid).is_some()
+    }
+
+    fn instance_from_id(&self, id: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(id));
+        self.tree().get_node(nid).map(|_| id)
+    }
+
+    fn free_object(&mut self, id: u64) {
+        // Godot `Object.free()` is immediate; `remove_node` fires EXIT_TREE /
+        // UNPARENTED, drops the subtree from the arena, and unregisters each
+        // node from the weak-ref registry. The root cannot be freed this way.
+        let nid = NodeId::from_object_id(ObjectId::from_raw(id));
+        let _ = self.tree_mut().remove_node(nid);
     }
 
     fn call_deferred(&mut self, node_id: u64, method: &str, args: &[Variant]) {
@@ -1394,6 +1510,101 @@ func _ready():
         let store = tree.signal_store(parent_id);
         assert!(store.is_some());
         assert!(store.unwrap().has_signal("test_sig"));
+    }
+
+    #[test]
+    fn signal_deferred_one_shot_bind_dispatch() {
+        // A deferred, one-shot connection with a bound arg: emitting twice in a
+        // frame must fire the target method exactly once, only at the deferred
+        // flush, with the bound value; and the connection is gone afterward
+        // (one-shot). Covers the scene-runtime half of pat-nzgdu.31.
+        let (mut tree, parent_id, _c1_id, c2_id) = build_tree_with_children();
+
+        let target_src = "\
+extends Node2D
+var hits = 0
+var last = 0
+func on_sig(v):
+    self.hits += 1
+    self.last = v
+";
+        let script = GDScriptNodeInstance::from_source(target_src, c2_id).unwrap();
+        tree.attach_script(c2_id, Box::new(script));
+        LifecycleManager::enter_tree(&mut tree, c2_id);
+
+        // Connect parent."sig" -> c2.on_sig, deferred + one-shot + bind(42).
+        let conn = Connection::new(c2_id.object_id(), "on_sig")
+            .as_deferred()
+            .as_one_shot()
+            .with_binds(vec![Variant::Int(42)]);
+        tree.connect_signal(parent_id, "sig", conn);
+
+        // Emit twice in the same frame.
+        tree.emit_signal(parent_id, "sig", &[]);
+        tree.emit_signal(parent_id, "sig", &[]);
+
+        // Deferred: nothing has fired yet.
+        assert_eq!(
+            tree.get_script(c2_id).unwrap().get_property("hits"),
+            Some(Variant::Int(0)),
+            "deferred connection must not fire before the flush"
+        );
+
+        // Flush the deferred queue (end-of-frame MessageQueue).
+        tree.process_deferred_calls();
+
+        // Fired exactly once (one-shot removed after first emit), bind arrived.
+        assert_eq!(
+            tree.get_script(c2_id).unwrap().get_property("hits"),
+            Some(Variant::Int(1)),
+            "one-shot deferred connection fires exactly once at the flush"
+        );
+        assert_eq!(
+            tree.get_script(c2_id).unwrap().get_property("last"),
+            Some(Variant::Int(42)),
+            "bound argument arrives in the callback"
+        );
+        // One-shot connection removed.
+        assert!(!tree
+            .signal_store(parent_id)
+            .and_then(|s| s.get_signal("sig"))
+            .map(|sig| sig.is_connected())
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn signal_disconnect_and_is_connected() {
+        // Exercises the SceneTree signal store logic that the SceneAccess
+        // disconnect_signal / is_signal_connected methods delegate to.
+        let (mut tree, parent_id, _c1_id, c2_id) = build_tree_with_children();
+        let target = c2_id.object_id();
+
+        let is_conn = |tree: &SceneTree| {
+            tree.signal_store(parent_id)
+                .and_then(|s| s.get_signal("sig"))
+                .map(|sig| {
+                    sig.connections()
+                        .iter()
+                        .any(|c| c.target_id == target && c.method == "on_sig")
+                })
+                .unwrap_or(false)
+        };
+
+        assert!(!is_conn(&tree), "not connected initially");
+        tree.connect_signal(parent_id, "sig", Connection::new(target, "on_sig"));
+        assert!(is_conn(&tree), "connected after connect");
+        assert!(
+            tree.signal_store_mut(parent_id)
+                .disconnect("sig", target, "on_sig"),
+            "disconnect removes the connection"
+        );
+        assert!(!is_conn(&tree), "not connected after disconnect");
+        assert!(
+            !tree
+                .signal_store_mut(parent_id)
+                .disconnect("sig", target, "on_sig"),
+            "disconnecting a missing connection returns false"
+        );
     }
 
     #[test]
@@ -3416,6 +3627,115 @@ func _process(delta):
         tree.process_deletions();
 
         assert_eq!(tree.get_node(parent_id).unwrap().children().len(), 0);
+    }
+
+    #[test]
+    fn object_instance_validity_lifecycle() {
+        // pat-nzgdu.32: is_instance_valid / instance_from_id / weakref().get_ref()
+        // must all consult the live-object registry (the scene-tree arena) rather
+        // than a bare non-nil check. A child freed via `Object.free()` (immediate)
+        // must report invalid the moment it is freed.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let owner = Node::new("Owner", "Node");
+        let owner_id = tree.add_child(root, owner).unwrap();
+
+        let victim = Node::new("Victim", "Node");
+        let victim_id = tree.add_child(owner_id, victim).unwrap();
+
+        let script_src = "\
+extends Node
+var did_run = false
+var cid = 0
+var valid_before = false
+var resolved_before = 0
+var valid_after = true
+var weak_after = 0
+var resolved_after = 0
+func _process(delta):
+    if did_run:
+        return
+    did_run = true
+    var child = get_node(\"Victim\")
+    cid = child.get_instance_id()
+    var w = weakref(child)
+    valid_before = is_instance_valid(child)
+    resolved_before = instance_from_id(cid)
+    child.free()
+    valid_after = is_instance_valid(child)
+    weak_after = w.get_ref()
+    resolved_after = instance_from_id(cid)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, owner_id).unwrap();
+        tree.attach_script(owner_id, Box::new(script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        // The immediate `free()` removed the victim from the arena.
+        assert!(tree.get_node(victim_id).is_none());
+
+        let s = tree.get_script(owner_id).unwrap();
+        // While alive: valid, and resolvable by id.
+        assert_eq!(s.get_property("valid_before"), Some(Variant::Bool(true)));
+        assert!(
+            matches!(s.get_property("resolved_before"), Some(Variant::ObjectId(_))),
+            "instance_from_id should resolve a live object, got {:?}",
+            s.get_property("resolved_before")
+        );
+        // After free(): invalid, weakref lost, id no longer resolvable.
+        assert_eq!(s.get_property("valid_after"), Some(Variant::Bool(false)));
+        assert_eq!(s.get_property("weak_after"), Some(Variant::Nil));
+        assert_eq!(s.get_property("resolved_after"), Some(Variant::Nil));
+    }
+
+    #[test]
+    fn queue_free_defers_instance_validity_until_reap() {
+        // A `queue_free`d node stays *valid* until the end-of-frame reap
+        // (`process_deletions`), matching Godot: the deferred deletion has not
+        // happened yet, so `is_instance_valid` still reports true in-frame.
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.get_node_mut(root).unwrap().set_inside_tree(true);
+
+        let owner = Node::new("Owner", "Node");
+        let owner_id = tree.add_child(root, owner).unwrap();
+
+        let victim = Node::new("Victim", "Node");
+        let victim_id = tree.add_child(owner_id, victim).unwrap();
+
+        let script_src = "\
+extends Node
+var did_run = false
+var valid_after_queue_free = false
+func _process(delta):
+    if did_run:
+        return
+    did_run = true
+    var child = get_node(\"Victim\")
+    child.queue_free()
+    valid_after_queue_free = is_instance_valid(child)
+";
+        let script = GDScriptNodeInstance::from_source(script_src, owner_id).unwrap();
+        tree.attach_script(owner_id, Box::new(script));
+
+        tree.process_all_scripts_process(1.0 / 60.0);
+
+        // Deferred: still valid and still in the arena this frame.
+        assert_eq!(
+            tree.get_script(owner_id)
+                .unwrap()
+                .get_property("valid_after_queue_free"),
+            Some(Variant::Bool(true))
+        );
+        assert!(tree.get_node(victim_id).is_some());
+        assert_eq!(tree.pending_deletion_count(), 1);
+
+        // After the reap the node is gone from the arena -> future
+        // is_instance_valid checks (via the registry) would report false.
+        tree.process_deletions();
+        assert!(tree.get_node(victim_id).is_none());
     }
 
     #[test]

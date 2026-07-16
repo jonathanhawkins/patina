@@ -144,6 +144,207 @@ pub fn is_visible(tree: &SceneTree, node_id: NodeId) -> bool {
         .unwrap_or(true)
 }
 
+// ---------------------------------------------------------------------------
+// Node3D transform operations: look_at / rotate / translate / to_local /
+// to_global, plus `top_level` and visible-in-tree propagation.
+// ---------------------------------------------------------------------------
+
+/// Writes a node's local [`Transform3D`] via the `"transform"` property.
+///
+/// [`get_local_transform`] prefers this property over the separate
+/// `position`/`rotation`/`scale` fields, so writing it here makes the composed
+/// transform authoritative for every downstream transform read. This is the
+/// same `"transform"` storage key the `.tscn` parser uses — not a parallel
+/// convention.
+fn set_local_transform(tree: &mut SceneTree, node_id: NodeId, t: Transform3D) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("transform", Variant::Transform3D(t));
+    }
+}
+
+/// Sets the `"top_level"` property. When `true`, the node ignores its parent's
+/// transform (its global transform equals its own local transform), matching
+/// Godot's `Node3D.top_level`.
+pub fn set_top_level(tree: &mut SceneTree, node_id: NodeId, top_level: bool) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("top_level", Variant::Bool(top_level));
+    }
+}
+
+/// Reads the `"top_level"` property, defaulting to `false`.
+pub fn is_top_level(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("top_level") {
+            Variant::Bool(b) => b,
+            _ => false,
+        })
+        .unwrap_or(false)
+}
+
+/// Computes the global [`Transform3D`] while honoring `top_level`.
+///
+/// Like [`get_global_transform`] this walks the parent chain multiplying local
+/// transforms from the root downward, but it stops as soon as it reaches a node
+/// whose `top_level` flag is set: that node's local transform becomes the base
+/// and everything above it in the hierarchy is ignored.
+pub fn get_global_transform_top_level(tree: &SceneTree, node_id: NodeId) -> Transform3D {
+    let mut chain = Vec::new();
+    let mut current = node_id;
+    loop {
+        chain.push(current);
+        // A top-level node ignores its parent chain entirely.
+        if is_top_level(tree, current) {
+            break;
+        }
+        match tree.get_node(current).and_then(|n| n.parent()) {
+            Some(parent_id) => current = parent_id,
+            None => break,
+        }
+    }
+    chain.reverse();
+    let mut global = Transform3D::IDENTITY;
+    for id in chain {
+        global = global * get_local_transform(tree, id);
+    }
+    global
+}
+
+/// Returns the global transform of the node's *effective* parent: the parent's
+/// [`get_global_transform_top_level`], or identity when the node is `top_level`
+/// or has no parent. Used to convert world-space orientations into local space.
+fn effective_parent_global(tree: &SceneTree, node_id: NodeId) -> Transform3D {
+    if is_top_level(tree, node_id) {
+        return Transform3D::IDENTITY;
+    }
+    match tree.get_node(node_id).and_then(|n| n.parent()) {
+        Some(parent_id) => get_global_transform_top_level(tree, parent_id),
+        None => Transform3D::IDENTITY,
+    }
+}
+
+/// Transforms `local` from this node's local space to world space using its
+/// global transform (Godot's `Node3D.to_global`).
+pub fn to_global(tree: &SceneTree, node_id: NodeId, local: Vector3) -> Vector3 {
+    get_global_transform_top_level(tree, node_id).xform(local)
+}
+
+/// Transforms `global` from world space into this node's local space
+/// (Godot's `Node3D.to_local`), the inverse of [`to_global`].
+pub fn to_local(tree: &SceneTree, node_id: NodeId, global: Vector3) -> Vector3 {
+    get_global_transform_top_level(tree, node_id)
+        .inverse()
+        .xform(global)
+}
+
+/// Builds an orthonormal rotation basis whose local **-Z** axis points along
+/// `forward`, with `up` establishing the roll. Mirrors Godot's
+/// `Basis::looking_at`.
+///
+/// Note: this is the *opposite* Z convention from this crate's
+/// [`Transform3D::looking_at`], which orients +Z toward the target. Godot's
+/// `Node3D.look_at` faces the **-Z** axis at the target, which is what we need.
+fn basis_looking_at(forward: Vector3, up: Vector3) -> Basis {
+    // +Z column points away from the target so that -Z faces it.
+    let v_z = (-forward).normalized();
+    let v_x = up.cross(v_z).normalized();
+    let v_y = v_z.cross(v_x);
+    Basis {
+        x: v_x,
+        y: v_y,
+        z: v_z,
+    }
+}
+
+/// Orients the node so its local **-Z** axis points at `target` (world space),
+/// using `up` for roll — Godot's `Node3D.look_at`. The node's global position
+/// is used as the eye; its local translation and per-axis scale are preserved.
+pub fn look_at(tree: &mut SceneTree, node_id: NodeId, target: Vector3, up: Vector3) {
+    let eye = get_global_transform_top_level(tree, node_id).origin;
+    let forward = target - eye;
+    if forward.length_squared() < 1e-12 {
+        // Degenerate: target coincides with the eye — leave orientation as-is.
+        return;
+    }
+    let world_basis = basis_looking_at(forward, up);
+
+    // Convert the world-space rotation into the node's local space so that the
+    // resulting global orientation matches `world_basis` regardless of parent.
+    let parent_basis = effective_parent_global(tree, node_id).basis;
+    let local_rot = parent_basis.inverse() * world_basis;
+
+    // Preserve the current local translation and per-axis scale.
+    let current = get_local_transform(tree, node_id);
+    let scale = current.basis.get_scale();
+    let new_basis = Basis {
+        x: local_rot.x * scale.x,
+        y: local_rot.y * scale.y,
+        z: local_rot.z * scale.z,
+    };
+    set_local_transform(
+        tree,
+        node_id,
+        Transform3D {
+            basis: new_basis,
+            origin: current.origin,
+        },
+    );
+}
+
+/// Convenience wrapper for [`look_at`] using the default up vector `(0, 1, 0)`.
+pub fn look_at_default_up(tree: &mut SceneTree, node_id: NodeId, target: Vector3) {
+    look_at(tree, node_id, target, Vector3::new(0.0, 1.0, 0.0));
+}
+
+/// Rotates the node in place about `axis` by `angle_rad` radians, composing the
+/// rotation onto its current local basis (Godot's `Node3D.rotate`, a
+/// parent-space pre-multiply).
+pub fn rotate(tree: &mut SceneTree, node_id: NodeId, axis: Vector3, angle_rad: f32) {
+    let current = get_local_transform(tree, node_id);
+    let new_basis = current.basis.rotated(axis, angle_rad);
+    set_local_transform(
+        tree,
+        node_id,
+        Transform3D {
+            basis: new_basis,
+            origin: current.origin,
+        },
+    );
+}
+
+/// Translates the node in its own **local** space by `offset` (Godot's
+/// `Node3D.translate`): the offset is rotated by the current basis before being
+/// added to the local origin.
+pub fn translate(tree: &mut SceneTree, node_id: NodeId, offset: Vector3) {
+    let current = get_local_transform(tree, node_id);
+    let new_origin = current.origin + current.basis.xform(offset);
+    set_local_transform(
+        tree,
+        node_id,
+        Transform3D {
+            basis: current.basis,
+            origin: new_origin,
+        },
+    );
+}
+
+/// Returns `true` only when this node's own `visible` flag is set **and** every
+/// ancestor up to the root is visible (Godot's `Node3D.is_visible_in_tree`).
+///
+/// Reuses the [`is_visible`] accessor (the `"visible"` property that
+/// [`set_visible`] writes).
+pub fn is_visible_in_tree(tree: &SceneTree, node_id: NodeId) -> bool {
+    let mut current = node_id;
+    loop {
+        if !is_visible(tree, current) {
+            return false;
+        }
+        match tree.get_node(current).and_then(|n| n.parent()) {
+            Some(parent_id) => current = parent_id,
+            None => return true,
+        }
+    }
+}
+
 // ===========================================================================
 // Camera3D properties
 // ===========================================================================
@@ -673,6 +874,95 @@ mod tests {
 
         set_visible(&mut tree, id, false);
         assert!(!is_visible(&tree, id));
+    }
+
+    // -- Node3D transform ops / top_level / visible-in-tree -----------------
+
+    #[test]
+    fn node3d_look_at_toplevel_and_visibility_propagation_from_scene() {
+        // (1) Visibility propagation: a visible child under a hidden parent is
+        //     not visible in the tree; revealing the parent makes it visible.
+        {
+            let mut tree = make_tree();
+            let root = tree.root_id();
+
+            let parent = Node::new("HiddenParent", "Node3D");
+            let p_id = tree.add_child(root, parent).unwrap();
+            set_visible(&mut tree, p_id, false);
+
+            let child = Node::new("Mesh", "MeshInstance3D");
+            let c_id = tree.add_child(p_id, child).unwrap();
+
+            // The child is itself visible (default) ...
+            assert!(is_visible(&tree, c_id));
+            // ... but a hidden ancestor hides it in the tree.
+            assert!(!is_visible_in_tree(&tree, c_id));
+
+            // Reveal the parent → the whole chain is visible.
+            set_visible(&mut tree, p_id, true);
+            assert!(is_visible_in_tree(&tree, c_id));
+        }
+
+        // (2) top_level: a child under a translated parent ignores the parent's
+        //     transform, so its global origin equals its own local origin.
+        {
+            let mut tree = make_tree();
+            let root = tree.root_id();
+
+            let parent = Node::new("Parent", "Node3D");
+            let p_id = tree.add_child(root, parent).unwrap();
+            set_position(&mut tree, p_id, Vector3::new(10.0, 0.0, 0.0));
+
+            let child = Node::new("Child", "Node3D");
+            let c_id = tree.add_child(p_id, child).unwrap();
+            set_position(&mut tree, c_id, Vector3::new(1.0, 2.0, 3.0));
+
+            // Without top_level the parent offset is included.
+            let without = to_global(&tree, c_id, Vector3::ZERO);
+            assert!(approx_vec3(without, Vector3::new(11.0, 2.0, 3.0)));
+
+            // With top_level the parent offset is ignored: global == own local.
+            set_top_level(&mut tree, c_id, true);
+            let with = to_global(&tree, c_id, Vector3::ZERO);
+            assert!(approx_vec3(with, Vector3::new(1.0, 2.0, 3.0)));
+
+            // The difference is exactly the parent translation.
+            assert!(approx_vec3(without - with, Vector3::new(10.0, 0.0, 0.0)));
+        }
+
+        // (3) look_at: the node's local -Z axis points at the target.
+        {
+            let mut tree = make_tree();
+            let root = tree.root_id();
+
+            let node = Node::new("Looker", "Node3D");
+            let id = tree.add_child(root, node).unwrap();
+            set_position(&mut tree, id, Vector3::ZERO);
+
+            // Look toward -Z: local -Z should point at (0, 0, -1).
+            look_at(
+                &mut tree,
+                id,
+                Vector3::new(0.0, 0.0, -5.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            );
+            let neg_z = (to_global(&tree, id, Vector3::new(0.0, 0.0, -1.0))
+                - to_global(&tree, id, Vector3::ZERO))
+            .normalized();
+            assert!(approx_vec3(neg_z, Vector3::new(0.0, 0.0, -1.0)));
+
+            // Look toward +X: local -Z should point at (1, 0, 0).
+            look_at(
+                &mut tree,
+                id,
+                Vector3::new(5.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            );
+            let neg_z2 = (to_global(&tree, id, Vector3::new(0.0, 0.0, -1.0))
+                - to_global(&tree, id, Vector3::ZERO))
+            .normalized();
+            assert!(approx_vec3(neg_z2, Vector3::new(1.0, 0.0, 0.0)));
+        }
     }
 
     // -- Camera3D properties ------------------------------------------------

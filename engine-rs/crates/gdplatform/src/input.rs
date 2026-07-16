@@ -439,6 +439,77 @@ impl InputMap {
         }
     }
 
+    /// Registers Godot's built-in `ui_*` actions with their default key/gamepad
+    /// events (deadzone 0.5), mirroring `InputMap::load_from_project_settings`.
+    /// Project-declared actions override these — see [`load_from_project_godot`].
+    ///
+    /// Note: modifier combos (e.g. Shift+Tab for `ui_focus_prev`) and keys not
+    /// in [`Key`] (Home/End/PageUp/PageDown, the text-editing set) aren't yet
+    /// expressible; the common navigation/accept/cancel/select set is covered.
+    ///
+    /// [`load_from_project_godot`]: InputMap::load_from_project_godot
+    pub fn install_builtin_ui_actions(&mut self) {
+        let builtins: Vec<(&str, Vec<ActionBinding>)> = vec![
+            (
+                "ui_accept",
+                vec![
+                    ActionBinding::KeyBinding(Key::Enter),
+                    ActionBinding::KeyBinding(Key::Space),
+                    ActionBinding::GamepadButtonBinding(GamepadButton::FaceA),
+                ],
+            ),
+            ("ui_select", vec![ActionBinding::KeyBinding(Key::Space)]),
+            (
+                "ui_cancel",
+                vec![
+                    ActionBinding::KeyBinding(Key::Escape),
+                    ActionBinding::GamepadButtonBinding(GamepadButton::FaceB),
+                ],
+            ),
+            ("ui_focus_next", vec![ActionBinding::KeyBinding(Key::Tab)]),
+            (
+                "ui_focus_prev",
+                vec![ActionBinding::GamepadButtonBinding(
+                    GamepadButton::LeftShoulder,
+                )],
+            ),
+            (
+                "ui_left",
+                vec![
+                    ActionBinding::KeyBinding(Key::Left),
+                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadLeft),
+                ],
+            ),
+            (
+                "ui_right",
+                vec![
+                    ActionBinding::KeyBinding(Key::Right),
+                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadRight),
+                ],
+            ),
+            (
+                "ui_up",
+                vec![
+                    ActionBinding::KeyBinding(Key::Up),
+                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadUp),
+                ],
+            ),
+            (
+                "ui_down",
+                vec![
+                    ActionBinding::KeyBinding(Key::Down),
+                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadDown),
+                ],
+            ),
+        ];
+        for (name, bindings) in builtins {
+            self.add_action(name, 0.5);
+            for binding in bindings {
+                self.action_add_event(name, binding);
+            }
+        }
+    }
+
     /// Returns the deadzone for an action, defaulting to 0.0.
     pub fn get_deadzone(&self, action: &str) -> f32 {
         self.deadzones.get(action).copied().unwrap_or(0.0)
@@ -1121,6 +1192,9 @@ impl InputMap {
     /// This is a best-effort parser for the subset of bindings Patina supports.
     pub fn load_from_project_godot(content: &str) -> Self {
         let mut map = InputMap::new();
+        // Godot injects the built-in ui_* actions first; project [input] entries
+        // then override only the actions they declare (see parse_action_block).
+        map.install_builtin_ui_actions();
         let mut in_input_section = false;
 
         // Collect lines belonging to the [input] section.
@@ -1176,6 +1250,9 @@ impl InputMap {
             .unwrap_or(0.5);
 
         map.add_action(action, deadzone);
+        // A declared action replaces any built-in default bindings (Godot
+        // override semantics): start it from an empty binding list.
+        map.bindings.insert(action.to_string(), Vec::new());
 
         // Extract key bindings from InputEventKey objects.
         // Look for keycode values.
@@ -2481,6 +2558,89 @@ mod tests {
     // -----------------------------------------------------------------------
     // pat-vih: Input map loading from project.godot
     // -----------------------------------------------------------------------
+
+    // pat-nzgdu.47: a project.godot with no [input] section still boots with
+    // Godot's built-in ui_* actions; a project that declares its own ui_accept
+    // overrides only that action while the rest keep their defaults.
+    #[test]
+    fn default_ui_actions_e2e() {
+        let tab = InputEvent::Key {
+            key: Key::Tab,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        let enter = InputEvent::Key {
+            key: Key::Enter,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        let esc = InputEvent::Key {
+            key: Key::Escape,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+
+        // (1) No [input] section -> the built-in ui_* actions are present.
+        let no_input = "[application]\nconfig/name=\"Demo\"\n";
+        let map = InputMap::load_from_project_godot(no_input);
+        assert!(
+            map.event_matches_action(&tab, "ui_focus_next"),
+            "Tab must trigger ui_focus_next by default"
+        );
+        assert!(
+            map.event_matches_action(&enter, "ui_accept"),
+            "Enter must trigger ui_accept by default"
+        );
+
+        // Through the InputState layer: pressing Tab makes ui_focus_next pressed.
+        let mut input = InputState::new();
+        input.set_input_map(map);
+        input.process_event(tab.clone());
+        assert!(
+            input.is_action_pressed("ui_focus_next"),
+            "is_action_pressed(ui_focus_next) must be true after pressing Tab"
+        );
+
+        // (2) A project that declares its own ui_accept overrides ONLY that
+        // action; ui_cancel / ui_focus_next keep their built-in defaults.
+        let with_accept = r#"
+[input]
+ui_accept={
+"deadzone": 0.5,
+"events": [Object(InputEventKey,"resource_local_to_scene":false,"device":-1,"keycode":0,"physical_keycode":65,"unicode":97)]
+}
+"#;
+        let map2 = InputMap::load_from_project_godot(with_accept);
+        let key_a = InputEvent::Key {
+            key: Key::A,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        assert!(
+            map2.event_matches_action(&key_a, "ui_accept"),
+            "declared ui_accept must match its own key (A)"
+        );
+        assert!(
+            !map2.event_matches_action(&enter, "ui_accept"),
+            "override must REPLACE the default Enter binding, not append to it"
+        );
+        assert!(
+            map2.event_matches_action(&esc, "ui_cancel"),
+            "undeclared ui_cancel must keep its default Escape binding"
+        );
+        assert!(
+            map2.event_matches_action(&tab, "ui_focus_next"),
+            "undeclared ui_focus_next must keep its default Tab binding"
+        );
+    }
 
     #[test]
     fn load_input_map_from_project_godot_basic() {

@@ -711,6 +711,25 @@ pub fn get_v_size_flags(tree: &SceneTree, node_id: NodeId) -> SizeFlags {
         .unwrap_or(SizeFlags::Fill)
 }
 
+/// Sets a control's `size_flags_stretch_ratio` — the weight with which it
+/// shares expand space among sibling `Expand` controls in a BoxContainer.
+pub fn set_stretch_ratio(tree: &mut SceneTree, node_id: NodeId, ratio: f32) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("size_flags_stretch_ratio", Variant::Float(ratio as f64));
+    }
+}
+
+/// Gets a control's `size_flags_stretch_ratio` (Godot default `1.0`).
+pub fn get_stretch_ratio(tree: &SceneTree, node_id: NodeId) -> f32 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("size_flags_stretch_ratio") {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => 1.0,
+        })
+        .unwrap_or(1.0)
+}
+
 // ===========================================================================
 // Container helpers
 // ===========================================================================
@@ -835,16 +854,27 @@ fn arrange_vbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: 
         .iter()
         .map(|&c| get_v_size_flags(tree, c) == SizeFlags::Expand)
         .collect();
-    let expand_count = expands.iter().filter(|&&b| b).count();
-    let per_expand = if expand_count > 0 {
-        extra / expand_count as f32
-    } else {
-        0.0
-    };
+    // Expand space is shared in proportion to each expanding child's
+    // `size_flags_stretch_ratio` (Godot default 1.0), matching Godot's
+    // BoxContainer. With all ratios equal this reduces to an even split.
+    let ratios: Vec<f32> = children
+        .iter()
+        .map(|&c| get_stretch_ratio(tree, c).max(0.0))
+        .collect();
+    let total_ratio: f32 = expands
+        .iter()
+        .zip(ratios.iter())
+        .filter_map(|(&e, &r)| if e { Some(r) } else { None })
+        .sum();
 
     let mut y = 0.0;
     for (i, &c) in children.iter().enumerate() {
-        let h = mins[i] + if expands[i] { per_expand } else { 0.0 };
+        let grow = if expands[i] && total_ratio > 0.0 {
+            extra * (ratios[i] / total_ratio)
+        } else {
+            0.0
+        };
+        let h = mins[i] + grow;
         set_position(tree, c, Vector2::new(0.0, y));
         set_size(tree, c, Vector2::new(total.x, h));
         y += h + sep;
@@ -865,16 +895,27 @@ fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: 
         .iter()
         .map(|&c| get_h_size_flags(tree, c) == SizeFlags::Expand)
         .collect();
-    let expand_count = expands.iter().filter(|&&b| b).count();
-    let per_expand = if expand_count > 0 {
-        extra / expand_count as f32
-    } else {
-        0.0
-    };
+    // Expand space is shared in proportion to each expanding child's
+    // `size_flags_stretch_ratio` (Godot default 1.0), matching Godot's
+    // BoxContainer. With all ratios equal this reduces to an even split.
+    let ratios: Vec<f32> = children
+        .iter()
+        .map(|&c| get_stretch_ratio(tree, c).max(0.0))
+        .collect();
+    let total_ratio: f32 = expands
+        .iter()
+        .zip(ratios.iter())
+        .filter_map(|(&e, &r)| if e { Some(r) } else { None })
+        .sum();
 
     let mut x = 0.0;
     for (i, &c) in children.iter().enumerate() {
-        let w = mins[i] + if expands[i] { per_expand } else { 0.0 };
+        let grow = if expands[i] && total_ratio > 0.0 {
+            extra * (ratios[i] / total_ratio)
+        } else {
+            0.0
+        };
+        let w = mins[i] + grow;
         set_position(tree, c, Vector2::new(x, 0.0));
         set_size(tree, c, Vector2::new(w, total.y));
         x += w + sep;
@@ -2271,6 +2312,33 @@ func _on_pressed():
         // Content larger than viewport keeps its min size, shifted up by scroll.
         assert_eq!(size, Vector2::new(500.0, 400.0));
         assert_eq!(pos, Vector2::new(0.0, -120.0));
+    }
+
+    #[test]
+    fn hbox_expand_space_splits_by_stretch_ratio() {
+        // Two Expand children with stretch ratios 1 and 3 share the container's
+        // 200px width 1:3 (no min sizes, no separation) -> 50 / 150.
+        let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
+        set_h_size_flags(&mut tree, kids[0], SizeFlags::Expand);
+        set_h_size_flags(&mut tree, kids[1], SizeFlags::Expand);
+        set_stretch_ratio(&mut tree, kids[0], 1.0);
+        set_stretch_ratio(&mut tree, kids[1], 3.0);
+
+        arrange_container(&mut tree, cid, Vector2::new(200.0, 100.0));
+
+        assert_eq!(get_size(&tree, kids[0]).x, 50.0);
+        assert_eq!(get_size(&tree, kids[1]).x, 150.0);
+        // Laid out sequentially with no separation.
+        assert_eq!(get_position(&tree, kids[0]).x, 0.0);
+        assert_eq!(get_position(&tree, kids[1]).x, 50.0);
+
+        // No regression: equal (default) ratios still split expand space evenly.
+        let (mut tree2, cid2, kids2) = container_with_children("HBoxContainer", 2);
+        set_h_size_flags(&mut tree2, kids2[0], SizeFlags::Expand);
+        set_h_size_flags(&mut tree2, kids2[1], SizeFlags::Expand);
+        arrange_container(&mut tree2, cid2, Vector2::new(200.0, 100.0));
+        assert_eq!(get_size(&tree2, kids2[0]).x, 100.0);
+        assert_eq!(get_size(&tree2, kids2[1]).x, 100.0);
     }
 
     #[test]
