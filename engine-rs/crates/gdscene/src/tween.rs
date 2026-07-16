@@ -207,6 +207,10 @@ pub enum TweenerKind {
     Callback,
     /// A pure time delay with no output (Godot `tween_interval`).
     Interval,
+    /// Runs a nested [`Tween`] to completion as one step (Godot
+    /// `tween_subtween`, pat-nzgdu.186). The nested tween lives in
+    /// [`TweenStep::subtween`].
+    Subtween,
 }
 
 /// A single step within a tween — a property transition, a `tween_method`
@@ -237,6 +241,10 @@ pub struct TweenStep {
     pub method: String,
     /// Callback fire-once guard (re-armed on loop).
     fired: bool,
+    /// The nested tween for a `Subtween` step (Godot `tween_subtween`,
+    /// pat-nzgdu.186); `None` for every other kind. Boxed to break the
+    /// otherwise-recursive `TweenStep` → `Tween` → `TweenStep` type.
+    subtween: Option<Box<Tween>>,
 }
 
 impl TweenStep {
@@ -260,6 +268,7 @@ impl TweenStep {
             kind: TweenerKind::Property,
             method: String::new(),
             fired: false,
+            subtween: None,
         }
     }
 
@@ -286,6 +295,20 @@ impl TweenStep {
     pub fn interval(duration: f64) -> Self {
         let mut s = Self::new(String::new(), Variant::Nil, Variant::Nil, duration);
         s.kind = TweenerKind::Interval;
+        s
+    }
+
+    /// Creates a `tween_subtween` step: runs a nested [`Tween`] to completion as
+    /// a single step (Godot `Tween.tween_subtween`, pat-nzgdu.186). The step's
+    /// duration is the nested tween's total duration, so it blocks the next
+    /// chained step until the nested tween finishes. The nested tween is
+    /// started so it advances alongside the parent.
+    pub fn subtween(mut nested: Tween) -> Self {
+        let dur = nested.total_duration();
+        nested.start();
+        let mut s = Self::new(String::new(), Variant::Nil, Variant::Nil, dur);
+        s.kind = TweenerKind::Subtween;
+        s.subtween = Some(Box::new(nested));
         s
     }
 
@@ -374,6 +397,25 @@ impl Tween {
         self.loops_total = loops;
     }
 
+    /// Total duration of one loop in seconds: the sum, over each sequential
+    /// step-group, of the group's longest `delay + duration` (parallel steps
+    /// overlap). Used to size a `tween_subtween` step (pat-nzgdu.186).
+    pub fn total_duration(&self) -> f64 {
+        let mut total = 0.0;
+        let mut i = 0;
+        while i < self.steps.len() {
+            let mut group_max = self.steps[i].delay + self.steps[i].duration;
+            let mut j = i + 1;
+            while j < self.steps.len() && self.steps[j].parallel {
+                group_max = group_max.max(self.steps[j].delay + self.steps[j].duration);
+                j += 1;
+            }
+            total += group_max;
+            i = j;
+        }
+        total
+    }
+
     /// Advances the tween by `delta` seconds. Returns `true` when fully complete.
     /// A killed tween is inert; a paused tween does not progress.
     pub fn advance(&mut self, delta: f64) -> bool {
@@ -426,6 +468,13 @@ impl Tween {
             let advance_by = remaining.min(min_remaining.max(0.0));
             for &idx in &group {
                 self.steps[idx].elapsed += advance_by;
+                // A subtween step drives its nested tween forward in lockstep so
+                // the nested properties animate too (pat-nzgdu.186).
+                if self.steps[idx].kind == TweenerKind::Subtween {
+                    if let Some(sub) = self.steps[idx].subtween.as_mut() {
+                        sub.advance(advance_by);
+                    }
+                }
             }
             remaining -= advance_by;
 
@@ -474,11 +523,16 @@ impl Tween {
         group
     }
 
-    /// Resets all steps for looping (re-arming callbacks).
+    /// Resets all steps for looping (re-arming callbacks and restarting any
+    /// nested subtweens).
     fn reset_steps(&mut self) {
         for step in &mut self.steps {
             step.elapsed = 0.0;
             step.fired = false;
+            if let Some(sub) = step.subtween.as_mut() {
+                sub.reset_steps();
+                sub.start();
+            }
         }
     }
 
@@ -486,11 +540,22 @@ impl Tween {
     /// callback, and interval steps are excluded — they surface through
     /// [`method_values`](Tween::method_values) / [`poll_callbacks`](Tween::poll_callbacks).
     pub fn get_current_values(&self) -> Vec<(String, Variant)> {
-        self.steps
+        let mut out: Vec<(String, Variant)> = self
+            .steps
             .iter()
             .filter(|s| s.kind == TweenerKind::Property)
             .map(|s| (s.property_path.clone(), s.current_value()))
-            .collect()
+            .collect();
+        // Bubble nested subtween property values up so a parent tween's consumer
+        // observes the nested animation as well (pat-nzgdu.186).
+        for step in &self.steps {
+            if step.kind == TweenerKind::Subtween {
+                if let Some(sub) = step.subtween.as_ref() {
+                    out.extend(sub.get_current_values());
+                }
+            }
+        }
+        out
     }
 
     /// Returns `(method_name, interpolated_value)` for every active

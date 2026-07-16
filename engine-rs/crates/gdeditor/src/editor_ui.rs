@@ -1925,6 +1925,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     <button class="mode-btn" data-mode="script">Script</button>
     <button class="mode-btn" data-mode="game">Game</button>
     <button class="mode-btn" data-mode="assetlib">AssetLib</button>
+    <button class="mode-btn" id="distraction-free-toggle" title="Toggle distraction-free mode (hide side docks and bottom panel)">Focus</button>
   </div>
   <div class="menu-spacer"></div>
   <!-- Play controls + renderer indicator (right) -->
@@ -10105,6 +10106,42 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     renderViewportOverlay();
   }
 
+  // ---- Distraction-free mode + dock layout persistence (pat-nzgdu.172) ----
+  // Distraction-free hides the side docks (Scene/FileSystem + Inspector) and the
+  // bottom panel (Godot's distraction_free_mode); toggling again restores them.
+  function toggleDistractionFree() {
+    var on = !document.body.classList.contains('distraction-free');
+    document.body.classList.toggle('distraction-free', on);
+    ['left-panel','left-divider','inspector-panel','inspector-divider','bottom-panel','bottom-resize-handle'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) el.style.display = on ? 'none' : '';
+    });
+  }
+  // saveLayout persists the current dock sizes into the settings store's
+  // panel_sizes map (POST /api/settings); restoreLayout re-applies them on load,
+  // so a saved layout survives a reload.
+  async function saveLayout() {
+    var panel_sizes = {};
+    var lp = document.getElementById('left-panel');
+    if (lp) panel_sizes.left = lp.offsetWidth;
+    var ip = document.getElementById('inspector-panel');
+    if (ip) panel_sizes.right = ip.offsetWidth;
+    var bp = document.getElementById('bottom-panel');
+    if (bp) panel_sizes.bottom = bp.offsetHeight;
+    await api('POST', '/api/settings', { panel_sizes: panel_sizes });
+  }
+  async function restoreLayout() {
+    var data = await api('GET', '/api/settings');
+    if (!data || !data.panel_sizes) return;
+    var ps = data.panel_sizes;
+    var lp = document.getElementById('left-panel');
+    if (lp && ps.left) lp.style.width = ps.left + 'px';
+    var ip = document.getElementById('inspector-panel');
+    if (ip && ps.right) ip.style.width = ps.right + 'px';
+    var bp = document.getElementById('bottom-panel');
+    if (bp && ps.bottom) bp.style.height = ps.bottom + 'px';
+  }
+
 
   // ---- Polling ----
   function startPolling() {
@@ -10131,6 +10168,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     schedulePoll('history', 800, refreshHistoryDock);
     schedulePoll('panels', 2000, function() { updateSnapIndicator(); renderViewportOverlay(); if (editorMode === 'game') refreshGameStatus(); return Promise.all([fetchMonitorData(), fetchDebugData(), fetchProfilerData()]); });
     fetchSettings();
+    // Distraction-free toggle + restore any persisted dock layout (pat-nzgdu.172).
+    restoreLayout();
+    var dfBtn = document.getElementById('distraction-free-toggle');
+    if (dfBtn) dfBtn.addEventListener('click', toggleDistractionFree);
   }
 
   // ---- Right panel tabs (Inspector / Node) ----

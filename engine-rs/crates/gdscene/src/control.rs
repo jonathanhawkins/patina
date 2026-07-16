@@ -573,6 +573,9 @@ const CONTROL_HIT_CLASSES: &[&str] = &[
     "MarginContainer",
     "CenterContainer",
     "ScrollContainer",
+    "FlowContainer",
+    "HFlowContainer",
+    "VFlowContainer",
 ];
 
 /// Button-family classes whose click emits the `pressed` signal.
@@ -922,6 +925,61 @@ fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: 
     }
 }
 
+/// Reflows `children` into rows (horizontal flow) or columns (vertical flow),
+/// wrapping to a new line whenever the next child would overflow the container's
+/// main-axis extent. Mirrors Godot's HFlowContainer / VFlowContainer at the
+/// default `BEGIN` alignment: each child keeps its effective minimum size and is
+/// packed from the start of its line, and a line's cross-axis thickness is the
+/// largest child thickness on that line.
+///
+/// `vertical` selects the flow direction: `false` fills rows left-to-right and
+/// advances downward (HFlowContainer); `true` fills columns top-to-bottom and
+/// advances rightward (VFlowContainer). At least one child is placed per line so
+/// an oversized child never produces an empty line. `sep` (the container's
+/// `separation` theme override) is used for both the in-line gap between children
+/// and the gap between wrapped lines.
+fn arrange_flow(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32, vertical: bool) {
+    if children.is_empty() {
+        return;
+    }
+    let mins: Vec<Vector2> = children.iter().map(|&c| effective_min(tree, c)).collect();
+    let main_limit = if vertical { total.y } else { total.x };
+
+    let mut main = 0.0f32; // cursor along the current line
+    let mut cross = 0.0f32; // start of the current line on the cross axis
+    let mut line_thickness = 0.0f32; // max child cross-size on the current line
+    let mut line_started = false;
+
+    for (i, &c) in children.iter().enumerate() {
+        // main_size grows the line; cross_size decides how thick the line is.
+        let (main_size, cross_size) = if vertical {
+            (mins[i].y, mins[i].x)
+        } else {
+            (mins[i].x, mins[i].y)
+        };
+        // Wrap when the child would overflow the line, but always keep at least
+        // one child per line so an oversized child does not spawn an empty line.
+        if line_started && main + main_size > main_limit {
+            cross += line_thickness + sep;
+            main = 0.0;
+            line_thickness = 0.0;
+            line_started = false;
+        }
+        let pos = if vertical {
+            Vector2::new(cross, main)
+        } else {
+            Vector2::new(main, cross)
+        };
+        set_position(tree, c, pos);
+        set_size(tree, c, mins[i]);
+        main += main_size + sep;
+        if cross_size > line_thickness {
+            line_thickness = cross_size;
+        }
+        line_started = true;
+    }
+}
+
 fn arrange_grid(tree: &mut SceneTree, children: &[NodeId], sep: f32, cols: usize) {
     if children.is_empty() || cols == 0 {
         return;
@@ -983,6 +1041,10 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
     match class.as_str() {
         "VBoxContainer" => arrange_vbox(tree, &children, total, sep),
         "HBoxContainer" | "BoxContainer" => arrange_hbox(tree, &children, total, sep),
+        // FlowContainer defaults to horizontal flow (Godot's `vertical` property
+        // is false by default); H/VFlowContainer force the direction.
+        "FlowContainer" | "HFlowContainer" => arrange_flow(tree, &children, total, sep, false),
+        "VFlowContainer" => arrange_flow(tree, &children, total, sep, true),
         "GridContainer" => {
             let cols = get_columns(tree, container_id).max(1) as usize;
             arrange_grid(tree, &children, sep, cols);
@@ -1016,6 +1078,9 @@ pub fn is_container_class_name(class: &str) -> bool {
             | "CenterContainer"
             | "ScrollContainer"
             | "TabContainer"
+            | "FlowContainer"
+            | "HFlowContainer"
+            | "VFlowContainer"
     )
 }
 
@@ -2415,6 +2480,42 @@ func _on_pressed():
         arrange_container(&mut tree2, cid2, Vector2::new(200.0, 100.0));
         assert_eq!(get_size(&tree2, kids2[0]).x, 100.0);
         assert_eq!(get_size(&tree2, kids2[1]).x, 100.0);
+    }
+
+    #[test]
+    fn hflow_container_wraps_children_when_width_overflows() {
+        // Three 100x20 children in a 250-wide HFlowContainer: two fit on the
+        // first row (0, 100), the third overflows (100+100 > 250 fits, but
+        // 200+100 > 250) and wraps to a new row at y = row height (20).
+        let (mut tree, cid, kids) = container_with_children("HFlowContainer", 3);
+        for &k in &kids {
+            set_custom_minimum_size(&mut tree, k, Vector2::new(100.0, 20.0));
+        }
+        arrange_container(&mut tree, cid, Vector2::new(250.0, 200.0));
+
+        assert_eq!(get_position(&tree, kids[0]), Vector2::new(0.0, 0.0));
+        assert_eq!(get_position(&tree, kids[1]), Vector2::new(100.0, 0.0));
+        // Wrapped to the second row.
+        assert_eq!(get_position(&tree, kids[2]), Vector2::new(0.0, 20.0));
+        // Each child keeps its own minimum size.
+        assert_eq!(get_size(&tree, kids[2]), Vector2::new(100.0, 20.0));
+    }
+
+    #[test]
+    fn vflow_container_wraps_children_when_height_overflows() {
+        // Vertical flow: three 20x100 children in a 250-tall VFlowContainer fill
+        // the first column top-to-bottom (0, 100) then wrap to a new column at
+        // x = column width (20).
+        let (mut tree, cid, kids) = container_with_children("VFlowContainer", 3);
+        for &k in &kids {
+            set_custom_minimum_size(&mut tree, k, Vector2::new(20.0, 100.0));
+        }
+        arrange_container(&mut tree, cid, Vector2::new(200.0, 250.0));
+
+        assert_eq!(get_position(&tree, kids[0]), Vector2::new(0.0, 0.0));
+        assert_eq!(get_position(&tree, kids[1]), Vector2::new(0.0, 100.0));
+        // Wrapped to the second column.
+        assert_eq!(get_position(&tree, kids[2]), Vector2::new(20.0, 0.0));
     }
 
     #[test]

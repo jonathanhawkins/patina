@@ -844,6 +844,66 @@ pub fn register_3d_classes() {
             .parent("Resource")
             .abstract_class(),
     );
+    // ProceduralSkyMaterial → Material (pat-nzgdu.161): the sky shader material
+    // renders (gdserver3d::sky) but was invisible to ClassDB. Register it with
+    // its properties + defaults (mirroring `ProceduralSkyMaterial::default()`)
+    // so it is instantiable and introspectable like any Material resource.
+    register_class(
+        ClassRegistration::new("ProceduralSkyMaterial")
+            .parent("Material")
+            .property(PropertyInfo::new(
+                "sky_top_color",
+                Variant::Color(gdcore::math::Color::new(0.385, 0.454, 0.55, 1.0)),
+            ))
+            .property(PropertyInfo::new(
+                "sky_horizon_color",
+                Variant::Color(gdcore::math::Color::new(0.6463, 0.6558, 0.6708, 1.0)),
+            ))
+            .property(PropertyInfo::new("sky_curve", Variant::Float(0.15)))
+            .property(PropertyInfo::new("sky_energy_multiplier", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "ground_bottom_color",
+                Variant::Color(gdcore::math::Color::new(0.2, 0.169, 0.133, 1.0)),
+            ))
+            .property(PropertyInfo::new(
+                "ground_horizon_color",
+                Variant::Color(gdcore::math::Color::new(0.6463, 0.6558, 0.6708, 1.0)),
+            ))
+            .property(PropertyInfo::new("ground_curve", Variant::Float(0.02)))
+            .property(PropertyInfo::new("ground_energy_multiplier", Variant::Float(1.0)))
+            .property(PropertyInfo::new("sun_angle_max", Variant::Float(30.0)))
+            .property(PropertyInfo::new("sun_curve", Variant::Float(0.15)))
+            .property(PropertyInfo::new(
+                "sky_cover_modulate",
+                Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+            )),
+    );
+    // PrimitiveMesh family (pat-nzgdu.160): these generate geometry
+    // (gdserver3d::primitive_mesh) but were absent from ClassDB. Register the
+    // Mesh -> PrimitiveMesh -> <shape> hierarchy so they are creatable and
+    // introspectable. CapsuleMesh carries Godot's defaults.
+    if !class_exists("Mesh") {
+        register_class(ClassRegistration::new("Mesh").parent("Resource").abstract_class());
+    }
+    register_class(
+        ClassRegistration::new("PrimitiveMesh")
+            .parent("Mesh")
+            .abstract_class(),
+    );
+    register_class(
+        ClassRegistration::new("CapsuleMesh")
+            .parent("PrimitiveMesh")
+            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("height", Variant::Float(2.0)))
+            .property(PropertyInfo::new("radial_segments", Variant::Int(64)))
+            .property(PropertyInfo::new("rings", Variant::Int(8))),
+    );
+    register_class(ClassRegistration::new("BoxMesh").parent("PrimitiveMesh"));
+    register_class(ClassRegistration::new("SphereMesh").parent("PrimitiveMesh"));
+    register_class(ClassRegistration::new("CylinderMesh").parent("PrimitiveMesh"));
+    register_class(ClassRegistration::new("PlaneMesh").parent("PrimitiveMesh"));
+    register_class(ClassRegistration::new("PrismMesh").parent("PrimitiveMesh"));
+    register_class(ClassRegistration::new("ArrayMesh").parent("Mesh"));
     register_class(
         ClassRegistration::new("Shader")
             .parent("Resource")

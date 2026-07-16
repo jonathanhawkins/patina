@@ -519,6 +519,11 @@ impl SceneTree {
             .unwrap_or(false);
         if should_enter_tree {
             LifecycleManager::enter_tree(self, child_id);
+            // Godot's SceneTree.node_added fires when a live node enters the
+            // tree (pat-nzgdu.84). Modelled on the root's signal store since
+            // Patina keys signals by NodeId and has no separate SceneTree entity.
+            let root = self.root_id();
+            self.emit_signal(root, "node_added", &[]);
         }
 
         // Camera3D auto-activation: if this Camera3D has current=true (explicit),
@@ -1205,6 +1210,20 @@ impl SceneTree {
     /// if it doesn't already exist.
     pub fn signal_store_mut(&mut self, id: NodeId) -> &mut SignalStore {
         self.signal_stores.entry(id).or_default()
+    }
+
+    /// Renames a node and emits Godot's `SceneTree.node_renamed` signal
+    /// (pat-nzgdu.84). Returns `false` if `id` does not exist. A direct
+    /// `Node::set_name` bypasses this and does not notify; runtime renames
+    /// should route through here so connected scripts see `node_renamed`.
+    pub fn set_node_name(&mut self, id: NodeId, name: impl Into<String>) -> bool {
+        let Some(node) = self.get_node_mut(id) else {
+            return false;
+        };
+        node.set_name(name);
+        let root = self.root_id();
+        self.emit_signal(root, "node_renamed", &[]);
+        true
     }
 
     /// Connects a signal on the `source` node. The signal store for

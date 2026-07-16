@@ -1124,6 +1124,11 @@ impl MainLoop {
             self.physics_server_3d.step(physics_dt as f32);
             self.physics_server_3d.sync_from_physics(&mut self.tree);
 
+            // SceneTree.physics_frame fires before each physics tick's script
+            // phase, mirroring Godot's per-tick emission (pat-nzgdu.84).
+            let physics_frame_root = self.tree.root_id();
+            self.tree
+                .emit_signal(physics_frame_root, "physics_frame", &[]);
             self.tree.process_internal_physics_frame();
             self.tree.process_physics_frame_with_scripts(physics_dt);
             self.physics_accumulator -= physics_dt;
@@ -1176,6 +1181,11 @@ impl MainLoop {
         // -- process phase --
         // Godot per-frame order: INTERNAL_PROCESS -> PROCESS
         // Script calls are interleaved per-node to match Godot's dispatch.
+        // SceneTree.process_frame fires immediately before the process phase
+        // so `await get_tree().process_frame` resumes each frame (pat-nzgdu.84).
+        let process_frame_root = self.tree.root_id();
+        self.tree
+            .emit_signal(process_frame_root, "process_frame", &[]);
         self.tree.process_internal_frame();
         self.tree.process_frame_with_scripts(delta_secs);
 
@@ -1380,6 +1390,76 @@ mod tests {
         NOTIFICATION_INTERNAL_PROCESS, NOTIFICATION_PARENTED, NOTIFICATION_PHYSICS_PROCESS,
         NOTIFICATION_POSTINITIALIZE, NOTIFICATION_PROCESS, NOTIFICATION_READY,
     };
+
+    /// pat-nzgdu.84: SceneTree/Node lifecycle + per-frame signals fire. A
+    /// handler on the tree's `process_frame`/`physics_frame` receives a callback
+    /// when the scene is stepped through MainLoop; `node_added` fires on
+    /// add_child, `node_renamed` on set_node_name, and `tree_entered` when a
+    /// node enters the tree. All signals ride the existing per-node SignalStore.
+    #[test]
+    fn scene_tree_and_node_signals_fire_via_main_loop() {
+        use gdcore::id::ObjectId;
+        use gdobject::signal::Connection;
+        use gdvariant::Variant;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // A recording connection: bumps `cell` each time its signal fires. The
+        // dummy target id is unused because the connection carries a callback.
+        fn recorder(cell: &Arc<AtomicUsize>, tag: u64) -> Connection {
+            let c = cell.clone();
+            Connection::with_callback(ObjectId::from_raw(tag), "on_signal", move |_args| {
+                c.fetch_add(1, Ordering::SeqCst);
+                Variant::Nil
+            })
+        }
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // node_added fires when a live node enters the tree.
+        let added = Arc::new(AtomicUsize::new(0));
+        tree.connect_signal(root, "node_added", recorder(&added, 1));
+        let child = tree.add_child(root, Node::new("Child", "Node")).unwrap();
+        assert_eq!(added.load(Ordering::SeqCst), 1, "node_added fires on add_child");
+
+        // tree_entered fires on the node as it enters the tree. The child is
+        // already in-tree, so re-run the enter phase to observe the emission.
+        let entered = Arc::new(AtomicUsize::new(0));
+        tree.connect_signal(child, "tree_entered", recorder(&entered, 2));
+        crate::lifecycle::LifecycleManager::enter_tree(&mut tree, child);
+        assert!(
+            entered.load(Ordering::SeqCst) >= 1,
+            "tree_entered fires when the node enters the tree",
+        );
+
+        // node_renamed fires on a SceneTree-level rename.
+        let renamed = Arc::new(AtomicUsize::new(0));
+        tree.connect_signal(root, "node_renamed", recorder(&renamed, 3));
+        assert!(tree.set_node_name(child, "Renamed"), "rename hits a live node");
+        assert_eq!(
+            renamed.load(Ordering::SeqCst),
+            1,
+            "node_renamed fires on set_node_name",
+        );
+
+        // process_frame + physics_frame fire when stepped through MainLoop.
+        let process = Arc::new(AtomicUsize::new(0));
+        let physics = Arc::new(AtomicUsize::new(0));
+        tree.connect_signal(root, "process_frame", recorder(&process, 4));
+        tree.connect_signal(root, "physics_frame", recorder(&physics, 5));
+        let mut main_loop = MainLoop::new(tree);
+        // A 0.1s delta guarantees at least one physics tick at any normal tps.
+        main_loop.step(0.1);
+        assert!(
+            process.load(Ordering::SeqCst) >= 1,
+            "process_frame fires once per MainLoop step",
+        );
+        assert!(
+            physics.load(Ordering::SeqCst) >= 1,
+            "physics_frame fires for the physics tick(s) in the step",
+        );
+    }
 
     /// Helper: build a MainLoop with a tree containing root + one child.
     fn make_loop_with_child() -> (MainLoop, crate::node::NodeId) {

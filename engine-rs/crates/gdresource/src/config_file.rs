@@ -91,6 +91,63 @@ impl ConfigFile {
         self.sections.clear();
     }
 
+    /// Parses an INI-style string into this ConfigFile, replacing its current
+    /// contents (Godot's `ConfigFile.parse(data)`, pat-nzgdu.177).
+    pub fn parse(&mut self, data: &str) -> Result<(), String> {
+        *self = ConfigFile::load_from_string(data)?;
+        Ok(())
+    }
+
+    /// Encodes the config to an INI-style string (Godot's
+    /// `ConfigFile.encode_to_text()`, pat-nzgdu.177). Alias of
+    /// [`ConfigFile::save_to_string`].
+    pub fn encode_to_text(&self) -> String {
+        self.save_to_string()
+    }
+
+    /// Derives a deterministic 16-byte AES-CBC IV from the 32-byte key so the
+    /// encrypted store round-trips without persisting a separate random IV.
+    /// (Self-consistent format — not byte-identical to Godot's on-disk
+    /// FileAccessEncrypted layout.)
+    fn derive_iv(key: &[u8; 32]) -> [u8; 16] {
+        let h = gdcore::crypto::sha256(&key[..]);
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(&h[..16]);
+        iv
+    }
+
+    /// Saves the config to `path`, AES-256-CBC encrypted under a key derived
+    /// from `password` (Godot's `ConfigFile.save_encrypted_pass()`,
+    /// pat-nzgdu.177). The key is `SHA-256(password)`.
+    pub fn save_encrypted_pass(&self, path: &str, password: &str) -> Result<(), String> {
+        let text = self.save_to_string();
+        let key = gdcore::crypto::sha256(password.as_bytes());
+        let iv = Self::derive_iv(&key);
+        let mut ctx = gdcore::crypto::AesContext::new();
+        ctx.start(gdcore::crypto::AesMode::Encrypt, &key, &iv)
+            .map_err(|e| e.to_string())?;
+        let ciphertext = ctx.update(text.as_bytes()).map_err(|e| e.to_string())?;
+        std::fs::write(path, &ciphertext).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Loads an AES-256-CBC encrypted config from `path`, decrypting under a key
+    /// derived from `password` (Godot's `ConfigFile.load_encrypted_pass()`,
+    /// pat-nzgdu.177). Returns `Err` if the password is wrong (decrypt / UTF-8 /
+    /// parse fails).
+    pub fn load_encrypted_pass(path: &str, password: &str) -> Result<Self, String> {
+        let ciphertext = std::fs::read(path).map_err(|e| e.to_string())?;
+        let key = gdcore::crypto::sha256(password.as_bytes());
+        let iv = Self::derive_iv(&key);
+        let mut ctx = gdcore::crypto::AesContext::new();
+        ctx.start(gdcore::crypto::AesMode::Decrypt, &key, &iv)
+            .map_err(|e| e.to_string())?;
+        let plaintext = ctx.update(&ciphertext).map_err(|e| e.to_string())?;
+        let text = String::from_utf8(plaintext)
+            .map_err(|_| "decrypted data is not valid UTF-8 (wrong password?)".to_string())?;
+        ConfigFile::load_from_string(&text)
+    }
+
     /// Serializes the config to an INI-style string.
     ///
     /// Format matches Godot's ConfigFile.save() output:

@@ -44,6 +44,10 @@ impl LifecycleManager {
             // Deliver ENTER_TREE to the script's `_notification` virtual too,
             // alongside the named `_enter_tree` callback (pat-nzgdu.13).
             tree.notify_script(id, NOTIFICATION_ENTER_TREE.code() as i64);
+            // Godot emits Node.tree_entered as each node enters the tree
+            // (pat-nzgdu.84). Fires here for both add_child auto-enter and any
+            // subtree re-entry; nodes with no connections are a no-op.
+            tree.emit_signal(id, "tree_entered", &[]);
         }
 
         // Phase 2: READY — bottom-up.
