@@ -18,6 +18,7 @@ pub mod debugger;
 pub mod diagnostics;
 pub mod error;
 pub mod file_access;
+pub mod geometry3d;
 pub mod id;
 pub mod math;
 pub mod math3d;
@@ -33,6 +34,8 @@ pub mod reproducible_build;
 pub mod project_settings;
 pub mod rng;
 pub mod string_name;
+pub mod translation;
+pub mod xml_parser;
 
 // Re-export commonly used types at the crate root.
 pub use error::{EngineError, EngineResult};
@@ -46,3 +49,5 @@ pub use math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3};
 pub use math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 pub use node_path::NodePath;
 pub use string_name::StringName;
+pub use translation::{parse_csv, parse_po, Translation, TranslationServer};
+pub use xml_parser::{XmlNodeType, XmlParser};

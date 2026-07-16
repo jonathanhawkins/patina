@@ -2038,7 +2038,16 @@ impl SceneTree {
     /// parent yet. Call [`add_child`](Self::add_child) to place it in the
     /// hierarchy.
     pub fn create_node(&mut self, class_name: &str, name: &str) -> NodeId {
-        let node = Node::new(name, class_name);
+        let mut node = Node::new(name, class_name);
+        // Seed the property bag with the class's registered ClassDB defaults,
+        // walked base→derived up the inheritance chain, so a freshly created
+        // node already carries Godot's class defaults (scale=(1,1), visible=true,
+        // …) before any override — reading an unset registered property yields
+        // the class default, not Nil (pat-nzgdu.100). An unpopulated ClassDB
+        // (empty property list) simply seeds nothing.
+        for prop in gdobject::class_db::get_property_list(class_name) {
+            node.set_property(&prop.name, prop.default_value);
+        }
         let id = node.id();
         self.nodes.insert(id, node);
         id

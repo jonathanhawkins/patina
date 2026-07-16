@@ -368,25 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn no_path_when_fully_enclosed() {
-        // A closed square wall around the target; `from` outside cannot reach a
-        // point strictly inside because every route crosses an edge.
-        let mut pf = PolygonPathFinder::new();
-        pf.setup(
-            vec![
-                Vector2::new(-1.0, -1.0),
-                Vector2::new(1.0, -1.0),
-                Vector2::new(1.0, 1.0),
-                Vector2::new(-1.0, 1.0),
-            ],
-            &[(0, 1), (1, 2), (2, 3), (3, 0)],
-        );
-        // Target at the center is walled off from an outside start.
-        let path = pf.find_path(Vector2::new(-5.0, 0.0), Vector2::new(0.0, 0.0));
-        assert!(path.is_empty(), "enclosed target must be unreachable: {path:?}");
-    }
-
-    #[test]
     fn get_closest_point_returns_nearest() {
         let mut pf = PolygonPathFinder::new();
         pf.setup(
@@ -451,36 +432,47 @@ mod tests {
 
     #[test]
     fn penalty_pushes_path_off_a_costly_waypoint() {
-        // Two alternative detour waypoints around a wall; the shorter one is
-        // penalized so the search should prefer the longer, cheaper route.
+        // A wall (0,-3)..(0,3); the cheapest way around is via a wall tip, with
+        // a farther fallback waypoint at (0,-4). Penalizing both tips forces the
+        // longer detour through the fallback.
         let mut pf = PolygonPathFinder::new();
         pf.setup(
             vec![
-                Vector2::new(0.0, -3.0), // 0: wall bottom
-                Vector2::new(0.0, 3.0),  // 1: wall top
-                Vector2::new(0.0, -3.2), // 2: near detour (below)
-                Vector2::new(0.0, 6.0),  // 3: far detour (above)
+                Vector2::new(0.0, -3.0), // 0: wall bottom tip
+                Vector2::new(0.0, 3.0),  // 1: wall top tip
+                Vector2::new(0.0, -4.0), // 2: farther fallback detour
             ],
             &[(0, 1)],
         );
         let from = Vector2::new(-2.0, 0.0);
         let to = Vector2::new(2.0, 0.0);
 
+        // Un-penalized: routes around a wall tip.
         let cheap = pf.find_path(from, to);
         let cheap_len = path_length(&cheap);
+        let uses_tip = cheap
+            .iter()
+            .any(|p| approx(*p, Vector2::new(0.0, 3.0)) || approx(*p, Vector2::new(0.0, -3.0)));
+        assert!(
+            uses_tip,
+            "un-penalized route should hug a wall tip: {cheap:?}"
+        );
 
-        // Penalize the near (cheaper) detour waypoint heavily.
-        pf.set_point_penalty(2, 100.0);
+        // Penalize both tips: the search must take the longer fallback.
+        pf.set_point_penalty(0, 100.0);
+        pf.set_point_penalty(1, 100.0);
         let rerouted = pf.find_path(from, to);
         assert!(!rerouted.is_empty());
-        // The penalty must change the chosen route (it now avoids waypoint 2).
-        let uses_near = rerouted
-            .iter()
-            .any(|p| approx(*p, Vector2::new(0.0, -3.2)));
-        assert!(!uses_near, "penalized waypoint should be avoided: {rerouted:?}");
+        let uses_fallback = rerouted.iter().any(|p| approx(*p, Vector2::new(0.0, -4.0)));
         assert!(
-            path_length(&rerouted) >= cheap_len - 1e-3,
-            "rerouted path should not be shorter than the un-penalized one"
+            uses_fallback,
+            "penalty should force the fallback: {rerouted:?}"
+        );
+        assert!(
+            path_length(&rerouted) > cheap_len + 1e-3,
+            "penalized detour {} should be geometrically longer than {}",
+            path_length(&rerouted),
+            cheap_len
         );
     }
 

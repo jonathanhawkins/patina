@@ -29,6 +29,7 @@ pub mod collision;
 pub mod control;
 pub mod control_render;
 pub mod grid_map;
+pub mod ik_solver;
 pub mod item_controls;
 pub mod lifecycle;
 pub mod light2d_scene;

@@ -640,6 +640,20 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("current", Variant::Bool(false))),
     );
 
+    // XR node + server family (pat-p0s82.23). XRServer is the Object singleton
+    // fed by the mock pose backend (gdplatform::xr); the spatial nodes place XR
+    // tracking data into the scene. XROrigin3D is registered just above.
+    register_class(ClassRegistration::new("XRServer").parent("Object"));
+    register_class(
+        ClassRegistration::new("XRNode3D")
+            .parent("Node3D")
+            .abstract_class()
+            .property(PropertyInfo::new("tracker", Variant::String(String::new()))),
+    );
+    register_class(ClassRegistration::new("XRController3D").parent("XRNode3D"));
+    register_class(ClassRegistration::new("XRAnchor3D").parent("XRNode3D"));
+    register_class(ClassRegistration::new("XRCamera3D").parent("Camera3D"));
+
     // -- Additional 3D types --
     register_class(ClassRegistration::new("NavigationRegion3D").parent("Node3D"));
     // NavigationAgent3D — scene-tree pathfinding agent (pat-rzs4o).
@@ -723,6 +737,47 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("BoneAttachment3D").parent("Node3D"));
     register_class(ClassRegistration::new("AnimationPlayer").parent("Node"));
     register_class(ClassRegistration::new("AnimationTree").parent("Node"));
+
+    // AnimationNode* resource hierarchy (pat-nzgdu.95): the graph-node resources
+    // an AnimationTree's tree_root is built from. Registering them lets ClassDB
+    // resolve `[sub_resource type="AnimationNodeBlendTree"]` graphs from .tscn/.tres.
+    register_class(
+        ClassRegistration::new("AnimationNode")
+            .parent("Resource")
+            .abstract_class(),
+    );
+    register_class(
+        ClassRegistration::new("AnimationRootNode")
+            .parent("AnimationNode")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("AnimationNodeAnimation").parent("AnimationRootNode"));
+    register_class(ClassRegistration::new("AnimationNodeBlendTree").parent("AnimationRootNode"));
+    register_class(ClassRegistration::new("AnimationNodeStateMachine").parent("AnimationRootNode"));
+    register_class(ClassRegistration::new("AnimationNodeBlendSpace1D").parent("AnimationRootNode"));
+    register_class(ClassRegistration::new("AnimationNodeBlendSpace2D").parent("AnimationRootNode"));
+    register_class(
+        ClassRegistration::new("AnimationNodeSync")
+            .parent("AnimationNode")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("AnimationNodeAdd2").parent("AnimationNodeSync"));
+    register_class(ClassRegistration::new("AnimationNodeAdd3").parent("AnimationNodeSync"));
+    register_class(ClassRegistration::new("AnimationNodeSub2").parent("AnimationNodeSync"));
+    register_class(ClassRegistration::new("AnimationNodeBlend2").parent("AnimationNodeSync"));
+    register_class(ClassRegistration::new("AnimationNodeBlend3").parent("AnimationNodeSync"));
+    register_class(ClassRegistration::new("AnimationNodeOneShot").parent("AnimationNodeSync"));
+    register_class(ClassRegistration::new("AnimationNodeTransition").parent("AnimationNodeSync"));
+    register_class(ClassRegistration::new("AnimationNodeTimeScale").parent("AnimationNode"));
+    register_class(ClassRegistration::new("AnimationNodeTimeSeek").parent("AnimationNode"));
+    register_class(ClassRegistration::new("AnimationNodeOutput").parent("AnimationNode"));
+    register_class(
+        ClassRegistration::new("AnimationNodeStateMachineTransition").parent("Resource"),
+    );
+    register_class(
+        ClassRegistration::new("AnimationNodeStateMachinePlayback").parent("Resource"),
+    );
+
     register_class(ClassRegistration::new("GPUParticles3D").parent("GeometryInstance3D"));
     register_class(ClassRegistration::new("CPUParticles3D").parent("Node3D"));
     register_class(ClassRegistration::new("Decal").parent("Node3D"));
@@ -1820,6 +1875,89 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    /// pat-nzgdu.95: the AnimationNode* graph-node resource hierarchy is
+    /// registered in ClassDB with the correct parent chains, so
+    /// `[sub_resource type="AnimationNode*"]` graphs resolve during .tres/.tscn
+    /// load.
+    #[test]
+    fn animation_node_classdb_hierarchy() {
+        let _guard = setup();
+        register_3d_classes();
+
+        assert!(class_exists("AnimationNode"), "AnimationNode registered");
+        assert!(is_parent_class("AnimationNode", "Resource"));
+        assert!(class_exists("AnimationRootNode"));
+        assert!(is_parent_class("AnimationRootNode", "AnimationNode"));
+
+        // BlendTree / StateMachine / Animation derive AnimationRootNode.
+        for cls in [
+            "AnimationNodeBlendTree",
+            "AnimationNodeStateMachine",
+            "AnimationNodeAnimation",
+        ] {
+            assert!(class_exists(cls), "{cls} registered");
+            assert!(
+                is_parent_class(cls, "AnimationRootNode"),
+                "{cls} derives AnimationRootNode"
+            );
+        }
+
+        // The blend/mix nodes derive AnimationNodeSync (← AnimationNode).
+        assert!(is_parent_class("AnimationNodeSync", "AnimationNode"));
+        for cls in [
+            "AnimationNodeAdd2",
+            "AnimationNodeSub2",
+            "AnimationNodeBlend2",
+            "AnimationNodeOneShot",
+            "AnimationNodeTransition",
+        ] {
+            assert!(class_exists(cls), "{cls} registered");
+            assert!(
+                is_parent_class(cls, "AnimationNodeSync"),
+                "{cls} derives AnimationNodeSync"
+            );
+            assert!(
+                is_parent_class(cls, "AnimationNode"),
+                "{cls} derives AnimationNode transitively"
+            );
+        }
+
+        // TimeScale/TimeSeek derive AnimationNode directly.
+        assert!(is_parent_class("AnimationNodeTimeScale", "AnimationNode"));
+        assert!(is_parent_class("AnimationNodeTimeSeek", "AnimationNode"));
+    }
+
+    /// pat-p0s82.23: the XR node family + XRServer are registered in ClassDB with
+    /// the correct parents (the mock pose backend lives in `gdplatform::xr` and is
+    /// covered by its own `mock_session_pose` test).
+    #[test]
+    fn xr_nodes_classdb_registered() {
+        let _guard = setup();
+        register_3d_classes();
+
+        assert!(class_exists("XRServer"), "XRServer registered");
+        assert!(is_parent_class("XRServer", "Object"));
+
+        assert!(class_exists("XRNode3D"));
+        assert!(is_parent_class("XRNode3D", "Node3D"));
+
+        assert!(class_exists("XROrigin3D"));
+        assert!(is_parent_class("XROrigin3D", "Node3D"));
+
+        assert!(class_exists("XRCamera3D"));
+        assert!(is_parent_class("XRCamera3D", "Camera3D"));
+
+        assert!(class_exists("XRController3D"));
+        assert!(is_parent_class("XRController3D", "XRNode3D"));
+        assert!(
+            is_parent_class("XRController3D", "Node3D"),
+            "XRController3D → XRNode3D → Node3D"
+        );
+
+        assert!(class_exists("XRAnchor3D"));
+        assert!(is_parent_class("XRAnchor3D", "XRNode3D"));
     }
 
     /// pat-nzgdu.93: ParticleProcessMaterial is registered in ClassDB as a

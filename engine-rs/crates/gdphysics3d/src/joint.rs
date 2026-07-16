@@ -355,12 +355,148 @@ impl SliderJoint3D {
 // Joint3D enum — unified type
 // ---------------------------------------------------------------------------
 
+/// A single axis's limit configuration for a [`Generic6DofJoint3D`].
+#[derive(Debug, Clone, Copy)]
+pub struct AxisLimit {
+    /// Whether this axis is limited (otherwise free).
+    pub enabled: bool,
+    /// Lower bound (meters for linear axes, radians for angular).
+    pub lower: f32,
+    /// Upper bound.
+    pub upper: f32,
+}
+
+impl Default for AxisLimit {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lower: 0.0,
+            upper: 0.0,
+        }
+    }
+}
+
+impl AxisLimit {
+    /// Signed distance `value` lies outside `[lower, upper]`: negative below
+    /// `lower`, positive above `upper`, `0.0` when within range or unlimited.
+    /// This is the constraint error a solver would correct.
+    pub fn violation(&self, value: f32) -> f32 {
+        if !self.enabled {
+            0.0
+        } else if value < self.lower {
+            value - self.lower
+        } else if value > self.upper {
+            value - self.upper
+        } else {
+            0.0
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConeTwistJoint3D — ball-socket with swing/twist limits
+// ---------------------------------------------------------------------------
+
+/// Parameters for a `ConeTwistJoint3D` — a ball-and-socket joint that limits the
+/// swing (cone half-angle) and twist about the joint axis (Godot
+/// `ConeTwistJoint3D`). The swing/twist angle *decomposition* and the solver
+/// live elsewhere; this holds the parameters and the limit-excess helpers.
+#[derive(Debug, Clone)]
+pub struct ConeTwistJoint3D {
+    /// Shared joint properties.
+    pub base: Joint3DBase,
+    /// Maximum swing angle from the twist axis, in radians (cone half-angle).
+    pub swing_span: f32,
+    /// Maximum twist angle about the axis, in radians.
+    pub twist_span: f32,
+    /// Constraint bias — how strongly the limit is enforced.
+    pub bias: f32,
+    /// Limit softness.
+    pub softness: f32,
+    /// Relaxation factor.
+    pub relaxation: f32,
+}
+
+impl ConeTwistJoint3D {
+    /// Creates a cone-twist joint with Godot's default spans.
+    pub fn new(id: JointId3D, body_a: BodyId3D, body_b: BodyId3D) -> Self {
+        Self {
+            base: Joint3DBase::new(id, body_a, body_b),
+            swing_span: std::f32::consts::FRAC_PI_4,
+            twist_span: std::f32::consts::PI,
+            bias: 0.3,
+            softness: 0.8,
+            relaxation: 1.0,
+        }
+    }
+
+    /// Excess of `swing_angle` (radians, from the axis) beyond `swing_span`, or
+    /// `0.0` when within the cone.
+    pub fn swing_violation(&self, swing_angle: f32) -> f32 {
+        (swing_angle.abs() - self.swing_span).max(0.0)
+    }
+
+    /// Excess of `twist_angle` (radians, about the axis) beyond `twist_span`, or
+    /// `0.0` when within range.
+    pub fn twist_violation(&self, twist_angle: f32) -> f32 {
+        (twist_angle.abs() - self.twist_span).max(0.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic6DofJoint3D — per-axis limits on all six DOFs
+// ---------------------------------------------------------------------------
+
+/// Parameters for a `Generic6DOFJoint3D` — independent lower/upper limits on all
+/// three linear and three angular axes (Godot `Generic6DOFJoint3D`). Motors and
+/// springs are a later addition; this holds the limits and the per-axis
+/// limit-excess helper.
+#[derive(Debug, Clone)]
+pub struct Generic6DofJoint3D {
+    /// Shared joint properties.
+    pub base: Joint3DBase,
+    /// Linear limits for the local X/Y/Z axes (meters).
+    pub linear_limits: [AxisLimit; 3],
+    /// Angular limits for the local X/Y/Z axes (radians).
+    pub angular_limits: [AxisLimit; 3],
+}
+
+impl Generic6DofJoint3D {
+    /// Creates a 6-DOF joint with every axis unlimited (free).
+    pub fn new(id: JointId3D, body_a: BodyId3D, body_b: BodyId3D) -> Self {
+        Self {
+            base: Joint3DBase::new(id, body_a, body_b),
+            linear_limits: [AxisLimit::default(); 3],
+            angular_limits: [AxisLimit::default(); 3],
+        }
+    }
+
+    /// Constraint error for the linear `axis` (0..=2) at `value`, or `0.0` for
+    /// an out-of-range axis index.
+    pub fn linear_violation(&self, axis: usize, value: f32) -> f32 {
+        self.linear_limits
+            .get(axis)
+            .map_or(0.0, |l| l.violation(value))
+    }
+
+    /// Constraint error for the angular `axis` (0..=2) at `value`.
+    pub fn angular_violation(&self, axis: usize, value: f32) -> f32 {
+        self.angular_limits
+            .get(axis)
+            .map_or(0.0, |l| l.violation(value))
+    }
+}
+
 /// A 3D physics joint, wrapping one of the concrete joint types.
 #[derive(Debug, Clone)]
 pub enum Joint3D {
     Pin(PinJoint3D),
     Hinge(HingeJoint3D),
     Slider(SliderJoint3D),
+    /// Ball-socket with swing/twist limits.
+    ConeTwist(ConeTwistJoint3D),
+    /// Fully-configurable per-axis joint.
+    Generic6Dof(Generic6DofJoint3D),
 }
 
 impl Joint3D {
@@ -370,6 +506,8 @@ impl Joint3D {
             Joint3D::Pin(j) => &j.base,
             Joint3D::Hinge(j) => &j.base,
             Joint3D::Slider(j) => &j.base,
+            Joint3D::ConeTwist(j) => &j.base,
+            Joint3D::Generic6Dof(j) => &j.base,
         }
     }
 
@@ -379,6 +517,8 @@ impl Joint3D {
             Joint3D::Pin(j) => &mut j.base,
             Joint3D::Hinge(j) => &mut j.base,
             Joint3D::Slider(j) => &mut j.base,
+            Joint3D::ConeTwist(j) => &mut j.base,
+            Joint3D::Generic6Dof(j) => &mut j.base,
         }
     }
 

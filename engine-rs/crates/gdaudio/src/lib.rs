@@ -7,6 +7,7 @@ pub mod biquad;
 pub mod bus;
 pub mod decode;
 pub mod effects;
+pub mod ima_adpcm;
 pub mod import;
 pub mod mixer;
 pub mod output;
