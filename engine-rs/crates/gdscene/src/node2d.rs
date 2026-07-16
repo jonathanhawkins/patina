@@ -339,6 +339,265 @@ pub fn set_camera_current(tree: &mut SceneTree, node_id: NodeId, current: bool) 
     }
 }
 
+/// Godot Camera2D limit sentinel (`±10_000_000`) meaning "no limit".
+pub const CAMERA2D_LIMIT_DEFAULT: f32 = 10_000_000.0;
+
+/// Runtime configuration for a Camera2D: view limits, position smoothing, and
+/// drag margins. Mirrors Godot's `Camera2D` properties that shape the canvas
+/// transform. Values are the resolved runtime form (limits as `f32`, drag
+/// margins as `[0, 1]` fractions of the half-view).
+#[derive(Debug, Clone, Copy)]
+pub struct Camera2DConfig {
+    /// Left/right/top/bottom world-space clamp limits for the visible rect.
+    pub limit_left: f32,
+    pub limit_right: f32,
+    pub limit_top: f32,
+    pub limit_bottom: f32,
+    /// When enabled, the camera eases toward its target instead of snapping.
+    pub position_smoothing_enabled: bool,
+    /// Smoothing rate (higher = snappier). Combined with `dt` as `speed * dt`.
+    pub position_smoothing_speed: f32,
+    /// Whether horizontal/vertical drag margins are active.
+    pub drag_horizontal_enabled: bool,
+    pub drag_vertical_enabled: bool,
+    /// Drag margins as fractions `[0, 1]` of the half-view on each side.
+    pub drag_left_margin: f32,
+    pub drag_right_margin: f32,
+    pub drag_top_margin: f32,
+    pub drag_bottom_margin: f32,
+    /// Camera zoom (Godot 4: larger zoom = magnified = smaller visible area).
+    pub zoom: Vector2,
+}
+
+impl Default for Camera2DConfig {
+    fn default() -> Self {
+        Self {
+            limit_left: -CAMERA2D_LIMIT_DEFAULT,
+            limit_right: CAMERA2D_LIMIT_DEFAULT,
+            limit_top: -CAMERA2D_LIMIT_DEFAULT,
+            limit_bottom: CAMERA2D_LIMIT_DEFAULT,
+            position_smoothing_enabled: false,
+            position_smoothing_speed: 5.0,
+            drag_horizontal_enabled: false,
+            drag_vertical_enabled: false,
+            drag_left_margin: 0.2,
+            drag_right_margin: 0.2,
+            drag_top_margin: 0.2,
+            drag_bottom_margin: 0.2,
+            zoom: Vector2::ONE,
+        }
+    }
+}
+
+/// Half the visible world-space extent for a viewport under `zoom`. In Godot 4
+/// a larger zoom magnifies (shows less), so the half-extent divides by zoom.
+fn camera2d_half_view(viewport_size: Vector2, zoom: Vector2) -> Vector2 {
+    let zx = if zoom.x.abs() < 1e-6 { 1.0 } else { zoom.x };
+    let zy = if zoom.y.abs() < 1e-6 { 1.0 } else { zoom.y };
+    Vector2::new(viewport_size.x * 0.5 / zx, viewport_size.y * 0.5 / zy)
+}
+
+/// Applies the drag "dead zone": the camera only moves enough to keep `target`
+/// within the drag margins around `current`. Disabled axes track the target
+/// exactly. Returns the drag-adjusted desired camera center.
+pub fn apply_drag_margins(
+    config: &Camera2DConfig,
+    current: Vector2,
+    target: Vector2,
+    half_view: Vector2,
+) -> Vector2 {
+    let x = if !config.drag_horizontal_enabled {
+        target.x
+    } else {
+        let left_edge = current.x - config.drag_left_margin * half_view.x;
+        let right_edge = current.x + config.drag_right_margin * half_view.x;
+        if target.x < left_edge {
+            target.x + config.drag_left_margin * half_view.x
+        } else if target.x > right_edge {
+            target.x - config.drag_right_margin * half_view.x
+        } else {
+            current.x
+        }
+    };
+    let y = if !config.drag_vertical_enabled {
+        target.y
+    } else {
+        let top_edge = current.y - config.drag_top_margin * half_view.y;
+        let bottom_edge = current.y + config.drag_bottom_margin * half_view.y;
+        if target.y < top_edge {
+            target.y + config.drag_top_margin * half_view.y
+        } else if target.y > bottom_edge {
+            target.y - config.drag_bottom_margin * half_view.y
+        } else {
+            current.y
+        }
+    };
+    Vector2::new(x, y)
+}
+
+/// Eases `current` toward `desired`. With smoothing disabled (or non-positive
+/// `dt`) the camera snaps to `desired`; otherwise it lerps by `speed * dt`.
+pub fn smooth_camera_position(
+    config: &Camera2DConfig,
+    current: Vector2,
+    desired: Vector2,
+    dt: f32,
+) -> Vector2 {
+    if config.position_smoothing_enabled && dt > 0.0 {
+        let t = (config.position_smoothing_speed * dt).clamp(0.0, 1.0);
+        current.lerp(desired, t)
+    } else {
+        desired
+    }
+}
+
+/// Clamps a camera center so its visible rectangle stays within the configured
+/// limits. When the limits are tighter than the view on an axis, the camera
+/// centers on that axis's limit midpoint.
+pub fn clamp_camera_to_limits(
+    config: &Camera2DConfig,
+    center: Vector2,
+    half_view: Vector2,
+) -> Vector2 {
+    let clamp_axis = |v: f32, lo: f32, hi: f32, hv: f32| {
+        let min = lo + hv;
+        let max = hi - hv;
+        if min <= max {
+            v.clamp(min, max)
+        } else {
+            (lo + hi) * 0.5
+        }
+    };
+    Vector2::new(
+        clamp_axis(center.x, config.limit_left, config.limit_right, half_view.x),
+        clamp_axis(center.y, config.limit_top, config.limit_bottom, half_view.y),
+    )
+}
+
+/// Computes the next Camera2D center from a target: drag dead-zone → position
+/// smoothing → limit clamp. The result feeds the canvas transform
+/// (`viewport.camera_position`). `current` is the camera's previous center.
+pub fn compute_camera2d_position(
+    config: &Camera2DConfig,
+    current: Vector2,
+    target: Vector2,
+    viewport_size: Vector2,
+    dt: f32,
+) -> Vector2 {
+    let half_view = camera2d_half_view(viewport_size, config.zoom);
+    let dragged = apply_drag_margins(config, current, target, half_view);
+    let smoothed = smooth_camera_position(config, current, dragged, dt);
+    clamp_camera_to_limits(config, smoothed, half_view)
+}
+
+// -- Camera2D limit / smoothing / drag property accessors -------------------
+
+fn get_f32_prop(tree: &SceneTree, node_id: NodeId, key: &str, default: f32) -> f32 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property(key) {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+fn get_bool_prop(tree: &SceneTree, node_id: NodeId, key: &str, default: bool) -> bool {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property(key) {
+            Variant::Bool(b) => b,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+/// Sets a Camera2D limit (`limit_left`/`limit_right`/`limit_top`/`limit_bottom`)
+/// in pixels. Godot stores limits as integers.
+pub fn set_camera_limit(tree: &mut SceneTree, node_id: NodeId, side: &str, value: i64) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(&format!("limit_{side}"), Variant::Int(value));
+    }
+}
+
+/// Enables/sets position smoothing for a Camera2D node.
+pub fn set_position_smoothing(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    enabled: bool,
+    speed: f32,
+) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("position_smoothing_enabled", Variant::Bool(enabled));
+        node.set_property("position_smoothing_speed", Variant::Float(speed as f64));
+    }
+}
+
+/// Sets a Camera2D drag margin fraction (`side` = left/right/top/bottom).
+pub fn set_drag_margin(tree: &mut SceneTree, node_id: NodeId, side: &str, fraction: f32) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(&format!("drag_{side}_margin"), Variant::Float(fraction as f64));
+    }
+}
+
+/// Enables horizontal/vertical drag margins for a Camera2D node.
+pub fn set_drag_enabled(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    horizontal: bool,
+    vertical: bool,
+) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("drag_horizontal_enabled", Variant::Bool(horizontal));
+        node.set_property("drag_vertical_enabled", Variant::Bool(vertical));
+    }
+}
+
+/// Reads a Camera2D node's limit/smoothing/drag/zoom properties into a
+/// [`Camera2DConfig`], filling Godot defaults for any that are unset.
+pub fn camera2d_config_from_node(tree: &SceneTree, node_id: NodeId) -> Camera2DConfig {
+    let d = Camera2DConfig::default();
+    Camera2DConfig {
+        limit_left: get_f32_prop(tree, node_id, "limit_left", d.limit_left),
+        limit_right: get_f32_prop(tree, node_id, "limit_right", d.limit_right),
+        limit_top: get_f32_prop(tree, node_id, "limit_top", d.limit_top),
+        limit_bottom: get_f32_prop(tree, node_id, "limit_bottom", d.limit_bottom),
+        position_smoothing_enabled: get_bool_prop(
+            tree,
+            node_id,
+            "position_smoothing_enabled",
+            d.position_smoothing_enabled,
+        ),
+        position_smoothing_speed: get_f32_prop(
+            tree,
+            node_id,
+            "position_smoothing_speed",
+            d.position_smoothing_speed,
+        ),
+        drag_horizontal_enabled: get_bool_prop(
+            tree,
+            node_id,
+            "drag_horizontal_enabled",
+            d.drag_horizontal_enabled,
+        ),
+        drag_vertical_enabled: get_bool_prop(
+            tree,
+            node_id,
+            "drag_vertical_enabled",
+            d.drag_vertical_enabled,
+        ),
+        drag_left_margin: get_f32_prop(tree, node_id, "drag_left_margin", d.drag_left_margin),
+        drag_right_margin: get_f32_prop(tree, node_id, "drag_right_margin", d.drag_right_margin),
+        drag_top_margin: get_f32_prop(tree, node_id, "drag_top_margin", d.drag_top_margin),
+        drag_bottom_margin: get_f32_prop(
+            tree,
+            node_id,
+            "drag_bottom_margin",
+            d.drag_bottom_margin,
+        ),
+        zoom: get_zoom(tree, node_id),
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -648,6 +907,127 @@ mod tests {
         set_camera_current(&mut tree, id, true);
         let n = tree.get_node(id).unwrap();
         assert_eq!(n.get_property("current"), Variant::Bool(true));
+    }
+
+    // -- Camera2D limits / smoothing / drag ---------------------------------
+
+    #[test]
+    fn camera2d_clamps_view_to_limits() {
+        let mut cfg = Camera2DConfig {
+            limit_left: 0.0,
+            limit_right: 1000.0,
+            limit_top: 0.0,
+            limit_bottom: 1000.0,
+            ..Default::default()
+        };
+        cfg.zoom = Vector2::ONE;
+        let half_view = Vector2::new(400.0, 300.0); // 800x600 viewport, zoom 1
+        // A center near the top-left corner is pushed in so the view fits.
+        let clamped = clamp_camera_to_limits(&cfg, Vector2::new(100.0, 100.0), half_view);
+        assert!(approx_vec(clamped, Vector2::new(400.0, 300.0)), "{clamped:?}");
+        // A center past the bottom-right is pulled back.
+        let clamped2 = clamp_camera_to_limits(&cfg, Vector2::new(5000.0, 5000.0), half_view);
+        assert!(approx_vec(clamped2, Vector2::new(600.0, 700.0)), "{clamped2:?}");
+    }
+
+    #[test]
+    fn camera2d_smoothing_eases_toward_target() {
+        let mut cfg = Camera2DConfig {
+            position_smoothing_enabled: true,
+            position_smoothing_speed: 5.0,
+            ..Default::default()
+        };
+        // speed 5 * dt 0.1 = 0.5 -> halfway.
+        let eased = smooth_camera_position(&cfg, Vector2::ZERO, Vector2::new(100.0, 0.0), 0.1);
+        assert!(approx_eq(eased.x, 50.0), "eased halfway: {eased:?}");
+        // Disabled -> snaps to target.
+        cfg.position_smoothing_enabled = false;
+        let snapped = smooth_camera_position(&cfg, Vector2::ZERO, Vector2::new(100.0, 0.0), 0.1);
+        assert!(approx_vec(snapped, Vector2::new(100.0, 0.0)), "{snapped:?}");
+    }
+
+    #[test]
+    fn camera2d_drag_margin_is_a_dead_zone() {
+        let cfg = Camera2DConfig {
+            drag_horizontal_enabled: true,
+            drag_left_margin: 0.2,
+            drag_right_margin: 0.2,
+            ..Default::default()
+        };
+        let half_view = Vector2::new(400.0, 300.0); // dead zone = ±80 px
+        // Target within the dead zone: camera does not move.
+        let inside = apply_drag_margins(&cfg, Vector2::ZERO, Vector2::new(50.0, 0.0), half_view);
+        assert!(approx_eq(inside.x, 0.0), "inside dead zone: {inside:?}");
+        // Target past the right edge: camera moves so target sits on the margin.
+        let outside = apply_drag_margins(&cfg, Vector2::ZERO, Vector2::new(200.0, 0.0), half_view);
+        assert!(approx_eq(outside.x, 120.0), "dragged to margin: {outside:?}");
+        // Vertical drag disabled -> y tracks the target exactly.
+        let v = apply_drag_margins(&cfg, Vector2::ZERO, Vector2::new(0.0, 999.0), half_view);
+        assert!(approx_eq(v.y, 999.0), "disabled axis tracks target: {v:?}");
+    }
+
+    #[test]
+    fn camera2d_compute_position_composes_drag_smoothing_limits() {
+        // No drag / no smoothing / wide limits -> follows target exactly.
+        let cfg = Camera2DConfig::default();
+        let p = compute_camera2d_position(
+            &cfg,
+            Vector2::ZERO,
+            Vector2::new(500.0, 500.0),
+            Vector2::new(800.0, 600.0),
+            0.016,
+        );
+        assert!(approx_vec(p, Vector2::new(500.0, 500.0)), "{p:?}");
+
+        // Tight limits clamp the followed target.
+        let cfg2 = Camera2DConfig {
+            limit_left: 0.0,
+            limit_right: 1000.0,
+            limit_top: 0.0,
+            limit_bottom: 1000.0,
+            ..Default::default()
+        };
+        let p2 = compute_camera2d_position(
+            &cfg2,
+            Vector2::ZERO,
+            Vector2::new(5000.0, 5000.0),
+            Vector2::new(800.0, 600.0),
+            0.016,
+        );
+        assert!(approx_vec(p2, Vector2::new(600.0, 700.0)), "{p2:?}");
+    }
+
+    #[test]
+    fn camera2d_config_reads_node_properties() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let node = Node::new("Cam", "Camera2D");
+        let id = tree.add_child(root, node).unwrap();
+
+        // Unset -> Godot defaults.
+        let d = camera2d_config_from_node(&tree, id);
+        assert_eq!(d.limit_right, CAMERA2D_LIMIT_DEFAULT);
+        assert!(!d.position_smoothing_enabled);
+        assert!(approx_eq(d.position_smoothing_speed, 5.0));
+        assert!(approx_eq(d.drag_left_margin, 0.2));
+
+        // Set via helpers -> config reflects them.
+        set_camera_limit(&mut tree, id, "left", -100);
+        set_camera_limit(&mut tree, id, "right", 100);
+        set_position_smoothing(&mut tree, id, true, 8.0);
+        set_drag_enabled(&mut tree, id, true, false);
+        set_drag_margin(&mut tree, id, "left", 0.35);
+        set_zoom(&mut tree, id, Vector2::new(2.0, 2.0));
+
+        let c = camera2d_config_from_node(&tree, id);
+        assert!(approx_eq(c.limit_left, -100.0));
+        assert!(approx_eq(c.limit_right, 100.0));
+        assert!(c.position_smoothing_enabled);
+        assert!(approx_eq(c.position_smoothing_speed, 8.0));
+        assert!(c.drag_horizontal_enabled);
+        assert!(!c.drag_vertical_enabled);
+        assert!(approx_eq(c.drag_left_margin, 0.35));
+        assert!(approx_vec(c.zoom, Vector2::new(2.0, 2.0)));
     }
 
     // -- NinePatchRect properties --------------------------------------------

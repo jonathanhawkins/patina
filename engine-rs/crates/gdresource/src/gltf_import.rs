@@ -94,7 +94,10 @@ fn import_glb(bytes: &[u8], path: &Path) -> EngineResult<Arc<Resource>> {
                 // JSON
                 let s = std::str::from_utf8(chunk)
                     .map_err(|e| EngineError::Parse(format!("glb JSON chunk: {e}")))?;
-                json_text = Some(s.trim_end_matches(|c: char| c == '\0' || c == ' ').to_string());
+                json_text = Some(
+                    s.trim_end_matches(|c: char| c == '\0' || c == ' ')
+                        .to_string(),
+                );
             }
             0x004E_4942 => {
                 // BIN
@@ -125,9 +128,19 @@ fn build_document(
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.display().to_string());
 
-    // --- materials ---
+    // --- materials + textures/images ---
     let materials = json
         .get("materials")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let textures = json
+        .get("textures")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let images = json
+        .get("images")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -230,7 +243,7 @@ fn build_document(
             if let Some(mat_idx) = prim.get("material").and_then(|v| v.as_u64()) {
                 let mi_u = mat_idx as usize;
                 if let Some(mat) = materials.get(mi_u) {
-                    apply_material_props(&mut sub, mat);
+                    apply_material_props(&mut sub, mat, &textures, &images);
                 }
                 sub.set_property("material_index", Variant::Int(mat_idx as i64));
             }
@@ -259,6 +272,18 @@ fn build_document(
         d.insert("name", Variant::String(name));
         if let Some(mesh) = node.get("mesh").and_then(|v| v.as_u64()) {
             d.insert("mesh", Variant::Int(mesh as i64));
+        }
+        if let Some(camera) = node.get("camera").and_then(|v| v.as_u64()) {
+            d.insert("camera", Variant::Int(camera as i64));
+        }
+        // KHR_lights_punctual: node references a light via extensions.
+        if let Some(light) = node
+            .get("extensions")
+            .and_then(|e| e.get("KHR_lights_punctual"))
+            .and_then(|l| l.get("light"))
+            .and_then(|v| v.as_u64())
+        {
+            d.insert("light", Variant::Int(light as i64));
         }
         if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
             let kids: Vec<Variant> = children
@@ -299,6 +324,27 @@ fn build_document(
     doc.set_property("node_count", Variant::Int(nodes.len() as i64));
     doc.set_property("mesh_count", Variant::Int(mesh_count));
     doc.set_property("primitive_count", Variant::Int(prim_total));
+
+    // --- cameras (core glTF) ---
+    if let Some(cameras) = json.get("cameras").and_then(|v| v.as_array()) {
+        let cam_dicts: Vec<Variant> =
+            cameras.iter().map(|c| Variant::Dictionary(camera_dict(c))).collect();
+        doc.set_property("camera_count", Variant::Int(cam_dicts.len() as i64));
+        doc.set_property("cameras", Variant::Array(cam_dicts));
+    }
+
+    // --- lights (KHR_lights_punctual) ---
+    if let Some(lights) = json
+        .get("extensions")
+        .and_then(|e| e.get("KHR_lights_punctual"))
+        .and_then(|l| l.get("lights"))
+        .and_then(|v| v.as_array())
+    {
+        let light_dicts: Vec<Variant> =
+            lights.iter().map(|l| Variant::Dictionary(light_dict(l))).collect();
+        doc.set_property("light_count", Variant::Int(light_dicts.len() as i64));
+        doc.set_property("lights", Variant::Array(light_dicts));
+    }
     doc.set_property(
         "unsupported_extensions",
         Variant::Array(
@@ -332,11 +378,10 @@ const UNSUPPORTED_EXTENSIONS: &[&str] = &[
     "EXT_meshopt_compression",
     "KHR_materials_transmission",
     "KHR_materials_volume",
-    "KHR_lights_punctual",
     "KHR_animation_pointer",
 ];
 
-fn apply_material_props(sub: &mut Resource, mat: &Value) {
+fn apply_material_props(sub: &mut Resource, mat: &Value, textures: &[Value], images: &[Value]) {
     let pbr = mat.get("pbrMetallicRoughness");
     let albedo = pbr
         .and_then(|p| p.get("baseColorFactor"))
@@ -383,9 +428,156 @@ fn apply_material_props(sub: &mut Resource, mat: &Value) {
         .unwrap_or(false);
     sub.set_property("material_double_sided", Variant::Bool(double_sided));
 
+    // alphaMode: OPAQUE (default) / MASK / BLEND, with alphaCutoff for MASK.
+    let alpha_mode = mat
+        .get("alphaMode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("OPAQUE")
+        .to_string();
+    sub.set_property("material_alpha_mode", Variant::String(alpha_mode.clone()));
+    if alpha_mode == "MASK" {
+        let cutoff = mat
+            .get("alphaCutoff")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5);
+        sub.set_property("material_alpha_cutoff", Variant::Float(cutoff));
+    }
+
+    // Texture maps: resolve each `<map>.index` through textures -> images and
+    // record the resolved image URI so the render path can load the pixels.
+    let map = |name: &str| {
+        mat.get(name)
+            .and_then(|v| v.get("index"))
+            .and_then(|v| v.as_u64())
+    };
+    // baseColorTexture/metallicRoughnessTexture live under pbrMetallicRoughness.
+    let pbr_map = |name: &str| {
+        pbr.and_then(|p| p.get(name))
+            .and_then(|v| v.get("index"))
+            .and_then(|v| v.as_u64())
+    };
+    for (prop, idx) in [
+        ("material_albedo_texture", pbr_map("baseColorTexture")),
+        (
+            "material_metallic_roughness_texture",
+            pbr_map("metallicRoughnessTexture"),
+        ),
+        ("material_normal_texture", map("normalTexture")),
+        ("material_emissive_texture", map("emissiveTexture")),
+        ("material_occlusion_texture", map("occlusionTexture")),
+    ] {
+        let Some(tex_idx) = idx else { continue };
+        sub.set_property(format!("{prop}_index"), Variant::Int(tex_idx as i64));
+        if let Some(uri) = resolve_texture_uri(textures, images, tex_idx as usize) {
+            sub.set_property(prop, Variant::String(uri));
+        }
+    }
+
     if let Some(name) = mat.get("name").and_then(|v| v.as_str()) {
         sub.set_property("material_name", Variant::String(name.into()));
     }
+}
+
+/// Resolves a glTF texture index to its backing image URI, following
+/// `textures[i].source -> images[source].uri`. Returns `None` when the texture
+/// or its image source is missing (e.g. GLB `bufferView`-backed images, which
+/// carry no URI).
+fn resolve_texture_uri(textures: &[Value], images: &[Value], tex_idx: usize) -> Option<String> {
+    let source = textures
+        .get(tex_idx)?
+        .get("source")
+        .and_then(|v| v.as_u64())? as usize;
+    let image = images.get(source)?;
+    image
+        .get("uri")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Builds a node-dictionary entry for a core glTF camera. Perspective cameras
+/// carry `yfov`/`aspect`/`znear`/`zfar`; orthographic carry `xmag`/`ymag`.
+fn camera_dict(cam: &Value) -> Dictionary {
+    let mut d = Dictionary::new();
+    let cam_type = cam.get("type").and_then(|v| v.as_str()).unwrap_or("perspective");
+    d.insert("type", Variant::String(cam_type.to_string()));
+    if let Some(name) = cam.get("name").and_then(|v| v.as_str()) {
+        d.insert("name", Variant::String(name.to_string()));
+    }
+    let getf = |obj: Option<&Value>, key: &str| obj.and_then(|o| o.get(key)).and_then(|v| v.as_f64());
+    if cam_type == "orthographic" {
+        let ortho = cam.get("orthographic");
+        if let Some(v) = getf(ortho, "xmag") {
+            d.insert("xmag", Variant::Float(v));
+        }
+        if let Some(v) = getf(ortho, "ymag") {
+            d.insert("ymag", Variant::Float(v));
+        }
+        if let Some(v) = getf(ortho, "znear") {
+            d.insert("znear", Variant::Float(v));
+        }
+        if let Some(v) = getf(ortho, "zfar") {
+            d.insert("zfar", Variant::Float(v));
+        }
+    } else {
+        let persp = cam.get("perspective");
+        if let Some(v) = getf(persp, "yfov") {
+            d.insert("yfov", Variant::Float(v));
+        }
+        if let Some(v) = getf(persp, "aspectRatio") {
+            d.insert("aspect", Variant::Float(v));
+        }
+        if let Some(v) = getf(persp, "znear") {
+            d.insert("znear", Variant::Float(v));
+        }
+        if let Some(v) = getf(persp, "zfar") {
+            d.insert("zfar", Variant::Float(v));
+        }
+    }
+    d
+}
+
+/// Builds a dictionary entry for a KHR_lights_punctual light. Carries
+/// `type` (directional/point/spot), `color`, `intensity`, optional `range`,
+/// and spot cone angles for spot lights.
+fn light_dict(light: &Value) -> Dictionary {
+    let mut d = Dictionary::new();
+    let light_type = light.get("type").and_then(|v| v.as_str()).unwrap_or("point");
+    d.insert("type", Variant::String(light_type.to_string()));
+    if let Some(name) = light.get("name").and_then(|v| v.as_str()) {
+        d.insert("name", Variant::String(name.to_string()));
+    }
+    let color = light
+        .get("color")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            Color::new(
+                a.first().and_then(|x| x.as_f64()).unwrap_or(1.0) as f32,
+                a.get(1).and_then(|x| x.as_f64()).unwrap_or(1.0) as f32,
+                a.get(2).and_then(|x| x.as_f64()).unwrap_or(1.0) as f32,
+                1.0,
+            )
+        })
+        .unwrap_or(Color::WHITE);
+    d.insert("color", Variant::Color(color));
+    let intensity = light.get("intensity").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    d.insert("intensity", Variant::Float(intensity));
+    if let Some(range) = light.get("range").and_then(|v| v.as_f64()) {
+        d.insert("range", Variant::Float(range));
+    }
+    if light_type == "spot" {
+        let spot = light.get("spot");
+        let inner = spot
+            .and_then(|s| s.get("innerConeAngle"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let outer = spot
+            .and_then(|s| s.get("outerConeAngle"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(std::f64::consts::FRAC_PI_4);
+        d.insert("spot_inner_cone_angle", Variant::Float(inner));
+        d.insert("spot_outer_cone_angle", Variant::Float(outer));
+    }
+    d
 }
 
 fn node_trs(node: &Value) -> ([f32; 3], [f32; 4], [f32; 3]) {
@@ -395,11 +587,15 @@ fn node_trs(node: &Value) -> ([f32; 3], [f32; 4], [f32; 3]) {
             let f = |i: usize| m[i].as_f64().unwrap_or(0.0) as f32;
             // column-major 4x4: translation is m[12], m[13], m[14]
             let t = [f(12), f(13), f(14)];
-            // crude scale from column lengths; rotation left as identity for matrix path
+            // scale from basis-column lengths
             let sx = (f(0) * f(0) + f(1) * f(1) + f(2) * f(2)).sqrt();
             let sy = (f(4) * f(4) + f(5) * f(5) + f(6) * f(6)).sqrt();
             let sz = (f(8) * f(8) + f(9) * f(9) + f(10) * f(10)).sqrt();
-            return (t, [0.0, 0.0, 0.0, 1.0], [sx.max(1e-8), sy.max(1e-8), sz.max(1e-8)]);
+            let s = [sx.max(1e-8), sy.max(1e-8), sz.max(1e-8)];
+            // rotation: normalize the basis columns to remove scale, then
+            // convert the pure-rotation 3x3 to a quaternion.
+            let r = matrix_rotation_quat(&f, s);
+            return (t, r, s);
         }
     }
     let t = read_f32_3(node.get("translation"), [0.0, 0.0, 0.0]);
@@ -408,14 +604,88 @@ fn node_trs(node: &Value) -> ([f32; 3], [f32; 4], [f32; 3]) {
     (t, r, s)
 }
 
+/// Extracts the rotation quaternion `[x, y, z, w]` from a column-major glTF node
+/// matrix. `f(i)` reads matrix element `i`; `scale` is the already-computed
+/// per-axis basis-column length used to divide out scale before conversion.
+///
+/// The 3x3 rotation is built by normalizing each basis column, then converted
+/// with the standard trace-based algorithm. `m[row][col]` below follows
+/// column-major storage: column 0 is `f(0..=2)`, column 1 `f(4..=6)`,
+/// column 2 `f(8..=10)`.
+fn matrix_rotation_quat<F>(f: &F, scale: [f32; 3]) -> [f32; 4]
+where
+    F: Fn(usize) -> f32,
+{
+    let (sx, sy, sz) = (scale[0], scale[1], scale[2]);
+    // Row-major access into the normalized rotation basis: m[row][col].
+    let m00 = f(0) / sx;
+    let m10 = f(1) / sx;
+    let m20 = f(2) / sx;
+    let m01 = f(4) / sy;
+    let m11 = f(5) / sy;
+    let m21 = f(6) / sy;
+    let m02 = f(8) / sz;
+    let m12 = f(9) / sz;
+    let m22 = f(10) / sz;
+
+    let trace = m00 + m11 + m22;
+    let (x, y, z, w) = if trace > 0.0 {
+        let s = 0.5 / (trace + 1.0).sqrt();
+        (
+            (m21 - m12) * s,
+            (m02 - m20) * s,
+            (m10 - m01) * s,
+            0.25 / s,
+        )
+    } else if m00 > m11 && m00 > m22 {
+        let s = 2.0 * (1.0 + m00 - m11 - m22).sqrt();
+        (
+            0.25 * s,
+            (m01 + m10) / s,
+            (m02 + m20) / s,
+            (m21 - m12) / s,
+        )
+    } else if m11 > m22 {
+        let s = 2.0 * (1.0 + m11 - m00 - m22).sqrt();
+        (
+            (m01 + m10) / s,
+            0.25 * s,
+            (m12 + m21) / s,
+            (m02 - m20) / s,
+        )
+    } else {
+        let s = 2.0 * (1.0 + m22 - m00 - m11).sqrt();
+        (
+            (m02 + m20) / s,
+            (m12 + m21) / s,
+            0.25 * s,
+            (m10 - m01) / s,
+        )
+    };
+
+    // Normalize to guard against accumulated float error.
+    let n = (x * x + y * y + z * z + w * w).sqrt();
+    if n > 1e-8 {
+        [x / n, y / n, z / n, w / n]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
+}
+
 fn read_f32_3(v: Option<&Value>, default: [f32; 3]) -> [f32; 3] {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return default;
     };
     [
-        arr.first().and_then(|x| x.as_f64()).unwrap_or(default[0] as f64) as f32,
-        arr.get(1).and_then(|x| x.as_f64()).unwrap_or(default[1] as f64) as f32,
-        arr.get(2).and_then(|x| x.as_f64()).unwrap_or(default[2] as f64) as f32,
+        arr.first()
+            .and_then(|x| x.as_f64())
+            .unwrap_or(default[0] as f64) as f32,
+        arr.get(1)
+            .and_then(|x| x.as_f64())
+            .unwrap_or(default[1] as f64) as f32,
+        arr.get(2)
+            .and_then(|x| x.as_f64())
+            .unwrap_or(default[2] as f64) as f32,
     ]
 }
 
@@ -424,10 +694,18 @@ fn read_f32_4(v: Option<&Value>, default: [f32; 4]) -> [f32; 4] {
         return default;
     };
     [
-        arr.first().and_then(|x| x.as_f64()).unwrap_or(default[0] as f64) as f32,
-        arr.get(1).and_then(|x| x.as_f64()).unwrap_or(default[1] as f64) as f32,
-        arr.get(2).and_then(|x| x.as_f64()).unwrap_or(default[2] as f64) as f32,
-        arr.get(3).and_then(|x| x.as_f64()).unwrap_or(default[3] as f64) as f32,
+        arr.first()
+            .and_then(|x| x.as_f64())
+            .unwrap_or(default[0] as f64) as f32,
+        arr.get(1)
+            .and_then(|x| x.as_f64())
+            .unwrap_or(default[1] as f64) as f32,
+        arr.get(2)
+            .and_then(|x| x.as_f64())
+            .unwrap_or(default[2] as f64) as f32,
+        arr.get(3)
+            .and_then(|x| x.as_f64())
+            .unwrap_or(default[3] as f64) as f32,
     ]
 }
 
@@ -435,20 +713,13 @@ fn read_f32_4(v: Option<&Value>, default: [f32; 4]) -> [f32; 4] {
 // Buffers / accessors
 // ---------------------------------------------------------------------------
 
-fn load_buffers(
-    json: &Value,
-    path: &Path,
-    glb_bin: Option<&[u8]>,
-) -> EngineResult<Vec<Vec<u8>>> {
+fn load_buffers(json: &Value, path: &Path, glb_bin: Option<&[u8]>) -> EngineResult<Vec<Vec<u8>>> {
     let Some(bufs) = json.get("buffers").and_then(|v| v.as_array()) else {
         return Ok(Vec::new());
     };
     let mut out = Vec::with_capacity(bufs.len());
     for (i, buf) in bufs.iter().enumerate() {
-        let byte_length = buf
-            .get("byteLength")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let byte_length = buf.get("byteLength").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         if let Some(uri) = buf.get("uri").and_then(|v| v.as_str()) {
             if let Some(b64) = uri.strip_prefix("data:") {
                 // data:application/octet-stream;base64,....
@@ -483,9 +754,7 @@ fn load_buffers(
             }
             out.push(data);
         } else {
-            return Err(EngineError::Parse(format!(
-                "gltf: buffer {i} missing uri"
-            )));
+            return Err(EngineError::Parse(format!("gltf: buffer {i} missing uri")));
         }
     }
     Ok(out)
@@ -496,9 +765,9 @@ fn accessor_meta(json: &Value, accessor_idx: usize) -> EngineResult<AccessorMeta
         .get("accessors")
         .and_then(|v| v.as_array())
         .ok_or_else(|| EngineError::Parse("gltf: missing accessors".into()))?;
-    let acc = accessors.get(accessor_idx).ok_or_else(|| {
-        EngineError::Parse(format!("gltf: accessor {accessor_idx} out of range"))
-    })?;
+    let acc = accessors
+        .get(accessor_idx)
+        .ok_or_else(|| EngineError::Parse(format!("gltf: accessor {accessor_idx} out of range")))?;
     let count = acc
         .get("count")
         .and_then(|v| v.as_u64())
@@ -514,10 +783,7 @@ fn accessor_meta(json: &Value, accessor_idx: usize) -> EngineResult<AccessorMeta
         .and_then(|v| v.as_str())
         .unwrap_or("SCALAR")
         .to_string();
-    let byte_offset = acc
-        .get("byteOffset")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let byte_offset = acc.get("byteOffset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     let bv_idx = acc
         .get("bufferView")
@@ -531,18 +797,9 @@ fn accessor_meta(json: &Value, accessor_idx: usize) -> EngineResult<AccessorMeta
     let view = views
         .get(bv_idx)
         .ok_or_else(|| EngineError::Parse(format!("gltf: bufferView {bv_idx} OOR")))?;
-    let buffer_idx = view
-        .get("buffer")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-    let view_offset = view
-        .get("byteOffset")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-    let view_length = view
-        .get("byteLength")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let buffer_idx = view.get("buffer").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let view_offset = view.get("byteOffset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let view_length = view.get("byteLength").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let stride = view
         .get("byteStride")
         .and_then(|v| v.as_u64())
@@ -612,9 +869,9 @@ fn read_vec3_accessor(
             "gltf: only FLOAT VEC3 accessors supported for positions/normals".into(),
         ));
     }
-    let buf = buffers.get(meta.buffer_idx).ok_or_else(|| {
-        EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx))
-    })?;
+    let buf = buffers
+        .get(meta.buffer_idx)
+        .ok_or_else(|| EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx)))?;
     let elem_size = 12usize;
     let stride = meta.stride.unwrap_or(elem_size);
     let mut out = Vec::with_capacity(meta.count);
@@ -645,9 +902,9 @@ fn read_vec2_accessor(
             "gltf: only FLOAT VEC2 for TEXCOORD_0".into(),
         ));
     }
-    let buf = buffers.get(meta.buffer_idx).ok_or_else(|| {
-        EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx))
-    })?;
+    let buf = buffers
+        .get(meta.buffer_idx)
+        .ok_or_else(|| EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx)))?;
     let elem_size = 8usize;
     let stride = meta.stride.unwrap_or(elem_size);
     let mut out = Vec::with_capacity(meta.count);
@@ -671,14 +928,12 @@ fn read_index_accessor(
     let meta = accessor_meta(json, accessor_idx)?;
     let comps = type_components(&meta.type_str);
     if comps != 1 {
-        return Err(EngineError::Parse(
-            "gltf: indices must be SCALAR".into(),
-        ));
+        return Err(EngineError::Parse("gltf: indices must be SCALAR".into()));
     }
     let cs = component_size(meta.component_type)?;
-    let buf = buffers.get(meta.buffer_idx).ok_or_else(|| {
-        EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx))
-    })?;
+    let buf = buffers
+        .get(meta.buffer_idx)
+        .ok_or_else(|| EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx)))?;
     let stride = meta.stride.unwrap_or(cs);
     let mut out = Vec::with_capacity(meta.count);
     for i in 0..meta.count {
@@ -758,10 +1013,466 @@ fn base64_decode(input: &str) -> EngineResult<Vec<u8>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Skins & animations (pat-u3l8c.88)
+//
+// Parses the glTF `skins` and `animations` arrays into structured data that
+// higher layers turn into a `Skeleton3D` (bone hierarchy + bind poses) and an
+// `AnimationPlayer` clip. Reuses the accessor/buffer plumbing above. Building
+// the actual scene nodes (gdscene) and per-vertex JOINTS_0/WEIGHTS_0 skinning
+// deformation are separate follow-ups.
+// ---------------------------------------------------------------------------
+
+/// A parsed glTF skin — the joint node list, bone parent hierarchy, and bind
+/// poses that build a `Skeleton3D`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GltfSkin {
+    /// Node indices of the joints, in skin-joint (bone) order.
+    pub joints: Vec<usize>,
+    /// Parent bone index (into `joints`) for each joint, or `None` for a root
+    /// bone. Derived from the node `children` graph.
+    pub parents: Vec<Option<usize>>,
+    /// Inverse bind matrix (column-major 4×4, 16 floats) per joint. Empty when
+    /// the skin omits `inverseBindMatrices` (identity implied).
+    pub inverse_bind_matrices: Vec<[f32; 16]>,
+    /// Optional common skeleton root node index (`skin.skeleton`).
+    pub skeleton_root: Option<usize>,
+}
+
+/// The node property an animation channel drives (Godot `Animation` track).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GltfAnimationPath {
+    /// Local translation (VEC3 output).
+    Translation,
+    /// Local rotation quaternion (VEC4 xyzw output).
+    Rotation,
+    /// Local scale (VEC3 output).
+    Scale,
+    /// Morph-target weights (SCALAR output, one per target per key).
+    Weights,
+}
+
+/// Keyframe interpolation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GltfInterpolation {
+    /// Linear interpolation (glTF default).
+    Linear,
+    /// Stepwise / constant-hold interpolation.
+    Step,
+    /// Cubic spline — output holds in-tangent, value, and out-tangent per key.
+    CubicSpline,
+}
+
+/// One animation channel: a keyframe track for a single node property.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GltfAnimationChannel {
+    /// Target node index.
+    pub target_node: usize,
+    /// Property this track drives.
+    pub path: GltfAnimationPath,
+    /// Interpolation mode.
+    pub interpolation: GltfInterpolation,
+    /// Keyframe times in seconds (sampler `input`).
+    pub times: Vec<f32>,
+    /// Flattened keyframe values (sampler `output`): `components` floats per key
+    /// (×3 keys for `CubicSpline`).
+    pub values: Vec<f32>,
+    /// Float components per keyframe value (3 translation/scale, 4 rotation, …).
+    pub components: usize,
+}
+
+/// A parsed glTF animation → a Godot `AnimationPlayer` clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GltfAnimation {
+    /// Clip name (defaults to `animation_<i>`).
+    pub name: String,
+    /// Channels (tracks) in the clip.
+    pub channels: Vec<GltfAnimationChannel>,
+    /// Clip length in seconds (max keyframe time across channels).
+    pub length: f32,
+}
+
+/// Reads a `FLOAT` accessor with `expected_comps` components per element into a
+/// flat `Vec<f32>` of `count * expected_comps` values. Handles `SCALAR` (times),
+/// `VEC3`/`VEC4` (translation/scale/rotation), and `MAT4` (bind matrices).
+fn read_flat_f32_accessor(
+    json: &Value,
+    buffers: &[Vec<u8>],
+    accessor_idx: usize,
+    expected_comps: usize,
+) -> EngineResult<Vec<f32>> {
+    let meta = accessor_meta(json, accessor_idx)?;
+    if meta.component_type != 5126 {
+        return Err(EngineError::Unsupported(format!(
+            "gltf: expected FLOAT accessor, got componentType {}",
+            meta.component_type
+        )));
+    }
+    let comps = type_components(&meta.type_str);
+    if comps != expected_comps {
+        return Err(EngineError::Parse(format!(
+            "gltf: accessor {accessor_idx} has {comps} components ({}), expected {expected_comps}",
+            meta.type_str
+        )));
+    }
+    let buf = buffers
+        .get(meta.buffer_idx)
+        .ok_or_else(|| EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx)))?;
+    let elem_size = comps * 4;
+    let stride = meta.stride.unwrap_or(elem_size);
+    let mut out = Vec::with_capacity(meta.count * comps);
+    for i in 0..meta.count {
+        let base = meta.byte_offset + i * stride;
+        if base + elem_size > buf.len() {
+            return Err(EngineError::Parse(format!(
+                "gltf: FLOAT accessor overrun at element {i}"
+            )));
+        }
+        for c in 0..comps {
+            let off = base + c * 4;
+            out.push(f32::from_le_bytes(buf[off..off + 4].try_into().unwrap()));
+        }
+    }
+    Ok(out)
+}
+
+/// For each joint, finds its parent joint — the joint whose node lists this
+/// joint's node among its `children` — returning an index into `joints` or
+/// `None` for a root bone.
+fn compute_joint_parents(joints: &[usize], nodes: Option<&Vec<Value>>) -> Vec<Option<usize>> {
+    let mut parents: Vec<Option<usize>> = vec![None; joints.len()];
+    let Some(nodes) = nodes else {
+        return parents;
+    };
+    for (ji, &node_idx) in joints.iter().enumerate() {
+        for (pi, &parent_node) in joints.iter().enumerate() {
+            if pi == ji {
+                continue;
+            }
+            let Some(node) = nodes.get(parent_node) else {
+                continue;
+            };
+            if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+                if children.iter().any(|c| c.as_u64() == Some(node_idx as u64)) {
+                    parents[ji] = Some(pi);
+                    break;
+                }
+            }
+        }
+    }
+    parents
+}
+
+/// Parses the glTF `skins` array into [`GltfSkin`]s (empty when absent).
+pub fn parse_skins(json: &Value, buffers: &[Vec<u8>]) -> EngineResult<Vec<GltfSkin>> {
+    let Some(skins) = json.get("skins").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let nodes = json.get("nodes").and_then(|v| v.as_array());
+    let mut out = Vec::with_capacity(skins.len());
+    for skin in skins {
+        let joints: Vec<usize> = skin
+            .get("joints")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|j| j.as_u64().map(|n| n as usize))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let inverse_bind_matrices = match skin.get("inverseBindMatrices").and_then(|v| v.as_u64()) {
+            Some(acc) => read_flat_f32_accessor(json, buffers, acc as usize, 16)?
+                .chunks_exact(16)
+                .map(|c| {
+                    let mut m = [0.0f32; 16];
+                    m.copy_from_slice(c);
+                    m
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let skeleton_root = skin
+            .get("skeleton")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        let parents = compute_joint_parents(&joints, nodes);
+
+        out.push(GltfSkin {
+            joints,
+            parents,
+            inverse_bind_matrices,
+            skeleton_root,
+        });
+    }
+    Ok(out)
+}
+
+/// Parses the glTF `animations` array into [`GltfAnimation`]s (empty when
+/// absent). Channels whose target lacks a node or uses an unrecognised path are
+/// skipped rather than erroring.
+pub fn parse_animations(json: &Value, buffers: &[Vec<u8>]) -> EngineResult<Vec<GltfAnimation>> {
+    let Some(anims) = json.get("animations").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(anims.len());
+    for (ai, anim) in anims.iter().enumerate() {
+        let name = anim
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("animation_{ai}"));
+        let samplers = anim
+            .get("samplers")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| EngineError::Parse("gltf: animation missing samplers".into()))?;
+        let channels_json = anim
+            .get("channels")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| EngineError::Parse("gltf: animation missing channels".into()))?;
+
+        let mut channels = Vec::new();
+        let mut length = 0.0f32;
+        for ch in channels_json {
+            let sampler_idx = ch
+                .get("sampler")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| EngineError::Parse("gltf: channel missing sampler".into()))?
+                as usize;
+            let Some(target) = ch.get("target") else {
+                continue;
+            };
+            let Some(target_node) = target
+                .get("node")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+            else {
+                continue; // channel with no node target (e.g. pointer ext) — skip
+            };
+            let path = match target.get("path").and_then(|v| v.as_str()).unwrap_or("") {
+                "translation" => GltfAnimationPath::Translation,
+                "rotation" => GltfAnimationPath::Rotation,
+                "scale" => GltfAnimationPath::Scale,
+                "weights" => GltfAnimationPath::Weights,
+                _ => continue, // unknown path — skip
+            };
+            let sampler = samplers
+                .get(sampler_idx)
+                .ok_or_else(|| EngineError::Parse("gltf: sampler index out of range".into()))?;
+            let input_acc = sampler
+                .get("input")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| EngineError::Parse("gltf: sampler missing input".into()))?
+                as usize;
+            let output_acc = sampler
+                .get("output")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| EngineError::Parse("gltf: sampler missing output".into()))?
+                as usize;
+            let interpolation = match sampler
+                .get("interpolation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("LINEAR")
+            {
+                "STEP" => GltfInterpolation::Step,
+                "CUBICSPLINE" => GltfInterpolation::CubicSpline,
+                _ => GltfInterpolation::Linear,
+            };
+
+            let times = read_flat_f32_accessor(json, buffers, input_acc, 1)?;
+            let out_meta = accessor_meta(json, output_acc)?;
+            let components = type_components(&out_meta.type_str);
+            let values = read_flat_f32_accessor(json, buffers, output_acc, components)?;
+            if let Some(&t) = times.last() {
+                if t > length {
+                    length = t;
+                }
+            }
+            channels.push(GltfAnimationChannel {
+                target_node,
+                path,
+                interpolation,
+                times,
+                values,
+                components,
+            });
+        }
+        out.push(GltfAnimation {
+            name,
+            channels,
+            length,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gdcore::math::Vector3;
+
+    #[test]
+    fn node_matrix_transform_preserves_rotation() {
+        use serde_json::json;
+        // Column-major 4x4 for a pure 90° rotation about +Y (no scale/translation).
+        // Basis X -> -Z, Y -> Y, Z -> +X.
+        let node = json!({
+            "matrix": [
+                0.0, 0.0, -1.0, 0.0,
+                0.0, 1.0,  0.0, 0.0,
+                1.0, 0.0,  0.0, 0.0,
+                0.0, 0.0,  0.0, 1.0
+            ]
+        });
+        let (t, r, s) = node_trs(&node);
+        assert!(t.iter().all(|c| c.abs() < 1e-5), "translation zero: {t:?}");
+        for c in s {
+            assert!((c - 1.0).abs() < 1e-5, "unit scale: {s:?}");
+        }
+        // Expected quaternion for 90° about Y: [x,y,z,w] = [0, sin45, 0, cos45].
+        let s45 = std::f32::consts::FRAC_1_SQRT_2;
+        let expected = [0.0, s45, 0.0, s45];
+        for (got, exp) in r.iter().zip(expected.iter()) {
+            assert!(
+                (got - exp).abs() < 1e-4,
+                "rotation quat mismatch: got {r:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_matrix_transform_recovers_rotation_and_scale() {
+        use serde_json::json;
+        // 90° about +Y with non-uniform scale (2, 3, 4) applied per basis column.
+        // Column i = scale_i * rotated_basis_i.
+        let node = json!({
+            "matrix": [
+                0.0, 0.0, -2.0, 0.0,
+                0.0, 3.0,  0.0, 0.0,
+                4.0, 0.0,  0.0, 0.0,
+                5.0, 6.0,  7.0, 1.0
+            ]
+        });
+        let (t, r, s) = node_trs(&node);
+        assert!((t[0] - 5.0).abs() < 1e-5 && (t[1] - 6.0).abs() < 1e-5 && (t[2] - 7.0).abs() < 1e-5);
+        assert!((s[0] - 2.0).abs() < 1e-5, "sx: {s:?}");
+        assert!((s[1] - 3.0).abs() < 1e-5, "sy: {s:?}");
+        assert!((s[2] - 4.0).abs() < 1e-5, "sz: {s:?}");
+        // Rotation must be recovered independent of the non-uniform scale.
+        let s45 = std::f32::consts::FRAC_1_SQRT_2;
+        let expected = [0.0, s45, 0.0, s45];
+        for (got, exp) in r.iter().zip(expected.iter()) {
+            assert!((got - exp).abs() < 1e-4, "quat: got {r:?}, expected {expected:?}");
+        }
+    }
+
+    #[test]
+    fn material_imports_textures_and_alpha_mode() {
+        use serde_json::json;
+        let textures = vec![
+            json!({ "source": 0 }),
+            json!({ "source": 1 }),
+        ];
+        let images = vec![
+            json!({ "uri": "albedo.png" }),
+            json!({ "uri": "normal.png" }),
+        ];
+        let mat = json!({
+            "name": "Tex",
+            "pbrMetallicRoughness": {
+                "baseColorTexture": { "index": 0 }
+            },
+            "normalTexture": { "index": 1 },
+            "alphaMode": "MASK",
+            "alphaCutoff": 0.25
+        });
+        let mut sub = Resource::new("ArrayMeshSurface");
+        apply_material_props(&mut sub, &mat, &textures, &images);
+        assert_eq!(
+            sub.get_property("material_albedo_texture"),
+            Some(&Variant::String("albedo.png".to_string()))
+        );
+        assert_eq!(
+            sub.get_property("material_albedo_texture_index"),
+            Some(&Variant::Int(0))
+        );
+        assert_eq!(
+            sub.get_property("material_normal_texture"),
+            Some(&Variant::String("normal.png".to_string()))
+        );
+        assert_eq!(
+            sub.get_property("material_alpha_mode"),
+            Some(&Variant::String("MASK".to_string()))
+        );
+        assert_eq!(
+            sub.get_property("material_alpha_cutoff"),
+            Some(&Variant::Float(0.25))
+        );
+    }
+
+    #[test]
+    fn camera_and_light_nodes_imported() {
+        use serde_json::json;
+        // No meshes/buffers — just scene graph with a camera node + a light node.
+        let json = json!({
+            "asset": { "version": "2.0" },
+            "scene": 0,
+            "scenes": [{ "nodes": [0, 1] }],
+            "extensions": {
+                "KHR_lights_punctual": {
+                    "lights": [
+                        { "type": "spot", "color": [1.0, 0.5, 0.0], "intensity": 3.0,
+                          "spot": { "innerConeAngle": 0.1, "outerConeAngle": 0.5 } }
+                    ]
+                }
+            },
+            "cameras": [
+                { "type": "perspective", "perspective": { "yfov": 0.8, "znear": 0.1, "zfar": 100.0 } }
+            ],
+            "nodes": [
+                { "name": "Cam", "camera": 0 },
+                { "name": "Lamp", "extensions": { "KHR_lights_punctual": { "light": 0 } } }
+            ]
+        });
+        // Serialize as a .gltf (JSON) so import parses cameras/lights.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cl.gltf");
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let res = import_gltf(&path).expect("import cameras+lights");
+
+        assert_eq!(res.get_property("camera_count"), Some(&Variant::Int(1)));
+        assert_eq!(res.get_property("light_count"), Some(&Variant::Int(1)));
+
+        // node dicts carry camera/light references.
+        let nodes = match res.get_property("nodes") {
+            Some(Variant::Array(a)) => a,
+            other => panic!("nodes: {other:?}"),
+        };
+        let cam_node = match &nodes[0] {
+            Variant::Dictionary(d) => d,
+            other => panic!("cam node: {other:?}"),
+        };
+        assert_eq!(cam_node.get("camera"), Some(&Variant::Int(0)));
+        let lamp_node = match &nodes[1] {
+            Variant::Dictionary(d) => d,
+            other => panic!("lamp node: {other:?}"),
+        };
+        assert_eq!(lamp_node.get("light"), Some(&Variant::Int(0)));
+
+        // light dict carries type + cone angles.
+        let lights = match res.get_property("lights") {
+            Some(Variant::Array(a)) => a,
+            other => panic!("lights: {other:?}"),
+        };
+        let light = match &lights[0] {
+            Variant::Dictionary(d) => d,
+            other => panic!("light: {other:?}"),
+        };
+        assert_eq!(light.get("type"), Some(&Variant::String("spot".to_string())));
+        assert_eq!(light.get("intensity"), Some(&Variant::Float(3.0)));
+        assert_eq!(light.get("spot_outer_cone_angle"), Some(&Variant::Float(0.5)));
+    }
 
     fn make_triangle_glb() -> Vec<u8> {
         let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
@@ -923,8 +1634,7 @@ mod tests {
             }
         }
         let b64 = {
-            const T: &[u8] =
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
             let mut s = String::new();
             let mut i = 0;
             while i + 3 <= bin.len() {
@@ -980,7 +1690,9 @@ mod tests {
         let res = import_gltf(&path).unwrap();
         match res.get_property("unsupported_extensions") {
             Some(Variant::Array(a)) => {
-                assert!(a.iter().any(|v| matches!(v, Variant::String(s) if s.contains("draco"))));
+                assert!(a
+                    .iter()
+                    .any(|v| matches!(v, Variant::String(s) if s.contains("draco"))));
             }
             other => panic!("{other:?}"),
         }
@@ -1002,5 +1714,97 @@ mod tests {
             _ => panic!("indices"),
         };
         assert_eq!(indices.len(), 6, "two triangles");
+    }
+
+    #[test]
+    fn parse_skins_and_animations_from_rigged_fixture() {
+        use serde_json::json;
+
+        // Binary blob: 2 inverse-bind MAT4 (128 B) + 2 time SCALARs (8 B) +
+        // 2 translation VEC3 outputs (24 B) = 160 bytes.
+        let ibm0: [f32; 16] = [
+            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ];
+        let ibm1: [f32; 16] = [
+            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., -1., 0., 0., 1.,
+        ];
+        let mut bin = Vec::new();
+        for m in [ibm0, ibm1] {
+            for v in m {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        for t in [0.0f32, 1.0] {
+            bin.extend_from_slice(&t.to_le_bytes());
+        }
+        for p in [[0.0f32, 0., 0.], [5., 0., 0.]] {
+            for v in p {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        assert_eq!(bin.len(), 160);
+        let buffers = vec![bin];
+
+        let doc = json!({
+            "asset": {"version": "2.0"},
+            "nodes": [
+                {"name": "Armature", "children": [1]},
+                {"name": "BoneA", "children": [2]},
+                {"name": "BoneB"}
+            ],
+            "skins": [{"joints": [1, 2], "inverseBindMatrices": 0, "skeleton": 0}],
+            "animations": [{
+                "name": "Walk",
+                "samplers": [{"input": 1, "output": 2, "interpolation": "LINEAR"}],
+                "channels": [{"sampler": 0, "target": {"node": 1, "path": "translation"}}]
+            }],
+            "buffers": [{"byteLength": 160}],
+            "bufferViews": [
+                {"buffer": 0, "byteOffset": 0, "byteLength": 128},
+                {"buffer": 0, "byteOffset": 128, "byteLength": 8},
+                {"buffer": 0, "byteOffset": 136, "byteLength": 24}
+            ],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 2, "type": "MAT4"},
+                {"bufferView": 1, "componentType": 5126, "count": 2, "type": "SCALAR"},
+                {"bufferView": 2, "componentType": 5126, "count": 2, "type": "VEC3"}
+            ]
+        });
+
+        // Skin → bone hierarchy + bind poses.
+        let skins = parse_skins(&doc, &buffers).expect("parse skins");
+        assert_eq!(skins.len(), 1);
+        let skin = &skins[0];
+        assert_eq!(skin.joints, vec![1, 2]);
+        // BoneA (joint 0) is a root within the skin; BoneB (joint 1) parents to it.
+        assert_eq!(skin.parents, vec![None, Some(0)]);
+        assert_eq!(skin.skeleton_root, Some(0));
+        assert_eq!(skin.inverse_bind_matrices.len(), 2);
+        assert_eq!(skin.inverse_bind_matrices[0][0], 1.0);
+        assert_eq!(skin.inverse_bind_matrices[1][12], -1.0);
+
+        // Animation → AnimationPlayer clip.
+        let anims = parse_animations(&doc, &buffers).expect("parse animations");
+        assert_eq!(anims.len(), 1);
+        let clip = &anims[0];
+        assert_eq!(clip.name, "Walk");
+        assert_eq!(clip.length, 1.0);
+        assert_eq!(clip.channels.len(), 1);
+        let track = &clip.channels[0];
+        assert_eq!(track.target_node, 1);
+        assert_eq!(track.path, GltfAnimationPath::Translation);
+        assert_eq!(track.interpolation, GltfInterpolation::Linear);
+        assert_eq!(track.times, vec![0.0, 1.0]);
+        assert_eq!(track.values, vec![0.0, 0.0, 0.0, 5.0, 0.0, 0.0]);
+        assert_eq!(track.components, 3);
+    }
+
+    #[test]
+    fn parse_skins_animations_absent_yields_empty() {
+        use serde_json::json;
+        let doc = json!({"asset": {"version": "2.0"}, "nodes": []});
+        let buffers: Vec<Vec<u8>> = Vec::new();
+        assert!(parse_skins(&doc, &buffers).unwrap().is_empty());
+        assert!(parse_animations(&doc, &buffers).unwrap().is_empty());
     }
 }

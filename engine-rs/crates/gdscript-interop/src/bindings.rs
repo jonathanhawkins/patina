@@ -248,6 +248,37 @@ pub trait SceneAccess {
         None
     }
 
+    // -- Object metadata (pat-nzgdu.30) ------------------------------------
+    //
+    // Godot's `Object` exposes a meta namespace distinct from properties,
+    // used by the editor, plugins, and generic tooling. These route through
+    // the Node's meta bag. Defaults are no-ops so non-tree implementors
+    // (test mocks) need not override them.
+
+    /// Set a meta entry on `node` (Godot `Object.set_meta`).
+    fn set_meta(&mut self, _node: u64, _name: &str, _value: Variant) {}
+
+    /// Get a meta entry from `node`, or `default` if absent
+    /// (Godot `Object.get_meta`).
+    fn get_meta(&self, _node: u64, _name: &str, default: Variant) -> Variant {
+        default
+    }
+
+    /// Returns `true` if `node` has a meta entry named `name`
+    /// (Godot `Object.has_meta`).
+    fn has_meta(&self, _node: u64, _name: &str) -> bool {
+        false
+    }
+
+    /// Remove a meta entry from `node` (Godot `Object.remove_meta`).
+    fn remove_meta(&mut self, _node: u64, _name: &str) {}
+
+    /// Return the sorted list of meta entry names on `node`
+    /// (Godot `Object.get_meta_list`).
+    fn get_meta_list(&self, _node: u64) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Instantiate a packed scene (`.tscn`/`.scn`) referenced by `path`,
     /// building its node subtree and returning the root node's raw ObjectId.
     ///

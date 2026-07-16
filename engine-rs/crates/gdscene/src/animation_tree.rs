@@ -185,6 +185,11 @@ pub struct StateMachine {
     pub current: String,
     pub elapsed: f64,
     transition: Option<ActiveTransition>,
+    /// Remaining states of a queued [`travel`](StateMachine::travel) path — the
+    /// ordered hops after `current`. Each `advance` takes the next hop
+    /// (crossfading) once any active transition completes; empty when not
+    /// travelling.
+    travel_queue: Vec<String>,
 }
 
 impl StateMachine {
@@ -193,6 +198,67 @@ impl StateMachine {
     /// equivalent to `StateMachine::default()`.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Computes the shortest transition path from `current` to `target` via BFS
+    /// over the declared (directional) transitions, returning the ordered list
+    /// of states to walk **after** `current`.
+    ///
+    /// Returns `Some(vec![])` when already at `target`, and `None` when
+    /// `target` is unknown or unreachable through the transition graph.
+    pub fn travel_path(&self, target: &str) -> Option<Vec<String>> {
+        if target == self.current {
+            return Some(Vec::new());
+        }
+        if !self.states.contains_key(target) {
+            return None;
+        }
+        // BFS; `pred` maps each discovered state to the state we reached it from.
+        let mut pred: HashMap<&str, &str> = HashMap::new();
+        let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+        queue.push_back(self.current.as_str());
+        while let Some(state) = queue.pop_front() {
+            for t in &self.transitions {
+                if t.from == state && t.to != self.current && !pred.contains_key(t.to.as_str()) {
+                    pred.insert(t.to.as_str(), state);
+                    if t.to == target {
+                        // Reconstruct target -> current, then reverse.
+                        let mut path = vec![target.to_string()];
+                        let mut cur = target;
+                        while let Some(&prev) = pred.get(cur) {
+                            if prev == self.current {
+                                break;
+                            }
+                            path.push(prev.to_string());
+                            cur = prev;
+                        }
+                        path.reverse();
+                        return Some(path);
+                    }
+                    queue.push_back(t.to.as_str());
+                }
+            }
+        }
+        None
+    }
+
+    /// Queues a travel to `target` (Godot `AnimationNodeStateMachinePlayback::travel`).
+    /// Subsequent `advance` calls crossfade along the shortest transition path,
+    /// using each hop's declared crossfade. Returns `true` if a path was found
+    /// (or already at `target`), `false` if `target` is unreachable.
+    pub fn travel(&mut self, target: &str) -> bool {
+        match self.travel_path(target) {
+            Some(path) => {
+                self.travel_queue = path;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `true` while a queued travel path is still being walked.
+    pub fn is_travelling(&self) -> bool {
+        !self.travel_queue.is_empty()
     }
 }
 
@@ -222,6 +288,13 @@ pub struct AnimationTree {
     pub animations: HashMap<String, Animation>,
     pub root: Option<AnimationNode>,
     pub parameters: HashMap<String, bool>,
+    /// Godot-style `parameters/...` map keyed by string path (e.g.
+    /// `"parameters/blend/blend_amount"`), holding arbitrary [`Variant`]
+    /// values. Additive foundation for the Godot `AnimationTree.set()/get()`
+    /// parameter surface; distinct from the boolean `parameters` map above
+    /// (which drives transition conditions). Not yet consulted by the eval
+    /// path — the eval migration is a separate follow-up.
+    pub params: HashMap<String, Variant>,
     pub active: bool,
 }
 
@@ -231,6 +304,7 @@ impl AnimationTree {
             animations: HashMap::new(),
             root: None,
             parameters: HashMap::new(),
+            params: HashMap::new(),
             active: true,
         }
     }
@@ -246,6 +320,51 @@ impl AnimationTree {
     /// Set a boolean parameter used as a transition condition.
     pub fn set_param(&mut self, name: impl Into<String>, value: bool) {
         self.parameters.insert(name.into(), value);
+    }
+
+    /// Sets a Godot-style tree parameter by path (e.g.
+    /// `"parameters/blend/blend_amount"`) to an arbitrary [`Variant`].
+    /// Mirrors Godot's `AnimationTree.set("parameters/...", value)`.
+    ///
+    /// This is the additive `parameters/...` map only — it does not feed the
+    /// eval path yet (the eval migration is a separate follow-up).
+    pub fn set_parameter(&mut self, path: impl Into<String>, value: Variant) {
+        self.params.insert(path.into(), value);
+    }
+
+    /// Returns a clone of the raw [`Variant`] stored at `path`, or `None` if
+    /// no parameter has been set there. Mirrors `AnimationTree.get("parameters/...")`.
+    pub fn get_parameter(&self, path: &str) -> Option<Variant> {
+        self.params.get(path).cloned()
+    }
+
+    /// Returns the parameter at `path` as an `f32` when it is numeric —
+    /// [`Variant::Float`] (cast `f64`→`f32`) or [`Variant::Int`]
+    /// (cast `i64`→`f32`) — and `None` for any other type or a missing key.
+    pub fn get_parameter_float(&self, path: &str) -> Option<f32> {
+        match self.params.get(path) {
+            Some(Variant::Float(f)) => Some(*f as f32),
+            Some(Variant::Int(i)) => Some(*i as f32),
+            _ => None,
+        }
+    }
+
+    /// Returns the parameter at `path` as a [`Vector2`] when it is stored as a
+    /// [`Variant::Vector2`], and `None` for any other type or a missing key.
+    pub fn get_parameter_vector2(&self, path: &str) -> Option<Vector2> {
+        match self.params.get(path) {
+            Some(Variant::Vector2(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Returns the parameter at `path` as an `i64` when it is stored as a
+    /// [`Variant::Int`], and `None` for any other type or a missing key.
+    pub fn get_parameter_int(&self, path: &str) -> Option<i64> {
+        match self.params.get(path) {
+            Some(Variant::Int(i)) => Some(*i),
+            _ => None,
+        }
     }
 
     /// Advances all time-dependent nodes by `delta` seconds.
@@ -351,26 +470,54 @@ fn advance_state_machine(
     // If no active transition, evaluate outgoing transitions before advancing
     // so a transition triggered this tick receives the full delta of progress.
     if sm.transition.is_none() {
-        let triggered = sm
-            .transitions
-            .iter()
-            .find(|t| t.from == sm.current && params.get(&t.condition).copied().unwrap_or(false))
-            .cloned();
-
-        if let Some(t) = triggered {
+        if !sm.travel_queue.is_empty() {
+            // Travel: take the next queued hop regardless of transition
+            // conditions, using the declared crossfade for that edge (if any).
+            let next = sm.travel_queue.remove(0);
+            let crossfade = sm
+                .transitions
+                .iter()
+                .find(|t| t.from == sm.current && t.to == next)
+                .map(|t| t.crossfade)
+                .unwrap_or(0.0);
             if let Some(from_node) = sm.states.get(&sm.current).cloned() {
-                let prev_state = std::mem::replace(&mut sm.current, t.to.clone());
-                // Reset the incoming state to start from zero.
+                let prev_state = std::mem::replace(&mut sm.current, next);
                 if let Some(node) = sm.states.get_mut(&sm.current) {
                     reset_node_time(node);
                 }
-                if t.crossfade > 0.0 {
+                if crossfade > 0.0 {
                     sm.transition = Some(ActiveTransition {
                         from_state: prev_state,
                         from_node: Box::new(from_node),
                         elapsed: 0.0,
-                        duration: t.crossfade,
+                        duration: crossfade,
                     });
+                }
+            }
+        } else {
+            let triggered = sm
+                .transitions
+                .iter()
+                .find(|t| {
+                    t.from == sm.current && params.get(&t.condition).copied().unwrap_or(false)
+                })
+                .cloned();
+
+            if let Some(t) = triggered {
+                if let Some(from_node) = sm.states.get(&sm.current).cloned() {
+                    let prev_state = std::mem::replace(&mut sm.current, t.to.clone());
+                    // Reset the incoming state to start from zero.
+                    if let Some(node) = sm.states.get_mut(&sm.current) {
+                        reset_node_time(node);
+                    }
+                    if t.crossfade > 0.0 {
+                        sm.transition = Some(ActiveTransition {
+                            from_state: prev_state,
+                            from_node: Box::new(from_node),
+                            elapsed: 0.0,
+                            duration: t.crossfade,
+                        });
+                    }
                 }
             }
         }
@@ -811,5 +958,153 @@ mod tests {
             Variant::Float(x) => assert!((x - 21.0).abs() < 1.0, "x={x}"),
             other => panic!("x not driven by AnimationTree: {other:?}"),
         }
+    }
+
+    fn anim_state(name: &str) -> AnimationNode {
+        AnimationNode::Animation {
+            name: name.into(),
+            position: 0.0,
+        }
+    }
+
+    fn edge(from: &str, to: &str) -> StateTransition {
+        StateTransition {
+            from: from.into(),
+            to: to.into(),
+            condition: String::new(),
+            crossfade: 0.0,
+        }
+    }
+
+    #[test]
+    fn travel_path_finds_shortest_route() {
+        let mut sm = StateMachine::new();
+        for s in ["idle", "walk", "run", "jump"] {
+            sm.states.insert(s.into(), anim_state(s));
+        }
+        sm.current = "idle".into();
+        // idle -> walk -> run ; idle -> jump ; (no direct idle -> run)
+        sm.transitions.push(edge("idle", "walk"));
+        sm.transitions.push(edge("walk", "run"));
+        sm.transitions.push(edge("idle", "jump"));
+
+        assert_eq!(
+            sm.travel_path("run"),
+            Some(vec!["walk".to_string(), "run".to_string()])
+        );
+        assert_eq!(sm.travel_path("jump"), Some(vec!["jump".to_string()]));
+        assert_eq!(sm.travel_path("idle"), Some(vec![])); // already there
+        assert_eq!(sm.travel_path("nope"), None); // unknown state
+    }
+
+    #[test]
+    fn travel_unreachable_returns_none() {
+        let mut sm = StateMachine::new();
+        for s in ["a", "b", "island"] {
+            sm.states.insert(s.into(), anim_state(s));
+        }
+        sm.current = "a".into();
+        sm.transitions.push(edge("a", "b"));
+        // "island" has no inbound transition.
+        assert_eq!(sm.travel_path("island"), None);
+        assert!(!sm.travel("island"));
+        assert!(!sm.is_travelling());
+    }
+
+    #[test]
+    fn travel_walks_the_graph_path_via_advance() {
+        // idle -> walk -> run with instant hops; travel("run") reaches "run" by
+        // walking through "walk" across successive advance() calls.
+        let mut tree = AnimationTree::new();
+        for s in ["idle", "walk", "run"] {
+            tree.add_animation(ramp_anim(s, 0.0, 1.0));
+        }
+        let mut sm = StateMachine::new();
+        for s in ["idle", "walk", "run"] {
+            sm.states.insert(s.into(), anim_state(s));
+        }
+        sm.current = "idle".into();
+        sm.transitions.push(edge("idle", "walk"));
+        sm.transitions.push(edge("walk", "run"));
+
+        assert!(sm.travel("run"));
+        assert!(sm.is_travelling());
+        tree.set_root(AnimationNode::StateMachine(sm));
+
+        tree.advance(0.1); // idle -> walk
+        tree.advance(0.1); // walk -> run
+
+        match &tree.root {
+            Some(AnimationNode::StateMachine(sm)) => {
+                assert_eq!(sm.current, "run");
+                assert!(!sm.is_travelling(), "travel queue drained on arrival");
+            }
+            _ => panic!("root is not a state machine"),
+        }
+    }
+
+    // -- Godot-style `parameters/...` Variant parameter map -----------------
+
+    #[test]
+    fn param_map_set_get_float() {
+        let mut tree = AnimationTree::new();
+        tree.set_parameter("parameters/blend/blend_amount", Variant::Float(0.25));
+        let f = tree
+            .get_parameter_float("parameters/blend/blend_amount")
+            .expect("float param present");
+        assert!((f - 0.25).abs() < 1e-6, "f={f}");
+        assert_eq!(
+            tree.get_parameter("parameters/blend/blend_amount"),
+            Some(Variant::Float(0.25))
+        );
+    }
+
+    #[test]
+    fn param_map_set_get_vector2() {
+        let mut tree = AnimationTree::new();
+        let pos = Vector2::new(0.5, -0.25);
+        tree.set_parameter("parameters/blend_position", Variant::Vector2(pos));
+        assert_eq!(
+            tree.get_parameter_vector2("parameters/blend_position"),
+            Some(pos)
+        );
+        assert_eq!(
+            tree.get_parameter("parameters/blend_position"),
+            Some(Variant::Vector2(pos))
+        );
+    }
+
+    #[test]
+    fn param_map_int_and_type_mismatch() {
+        let mut tree = AnimationTree::new();
+        tree.set_parameter("parameters/OneShot/request", Variant::Int(3));
+        assert_eq!(
+            tree.get_parameter_int("parameters/OneShot/request"),
+            Some(3)
+        );
+        // Wrong-type accessor on an Int param returns None.
+        assert_eq!(
+            tree.get_parameter_vector2("parameters/OneShot/request"),
+            None
+        );
+    }
+
+    #[test]
+    fn param_map_missing_returns_none() {
+        let tree = AnimationTree::new();
+        assert_eq!(tree.get_parameter("nope"), None);
+        assert_eq!(tree.get_parameter_float("nope"), None);
+        assert_eq!(tree.get_parameter_vector2("nope"), None);
+        assert_eq!(tree.get_parameter_int("nope"), None);
+    }
+
+    #[test]
+    fn param_map_float_getter_accepts_int() {
+        let mut tree = AnimationTree::new();
+        tree.set_parameter("parameters/count", Variant::Int(2));
+        let f = tree
+            .get_parameter_float("parameters/count")
+            .expect("int coerces to float");
+        assert!((f - 2.0).abs() < 1e-6, "f={f}");
     }
 }

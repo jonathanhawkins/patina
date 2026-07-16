@@ -414,6 +414,47 @@ impl PhysicsWorld2D {
 
         closest
     }
+
+    /// Returns the [`BodyId`]s of all bodies whose shape contains `world_point`,
+    /// for input picking (Godot `CollisionObject2D` picking / `_intersect_point`).
+    ///
+    /// The world point is transformed into each body's LOCAL space — using the
+    /// same rotation-aware [`body_transform`] convention the narrow-phase uses to
+    /// place a body's shape in the world (see [`step_inner`](Self::step_inner)) —
+    /// before the shape's [`Shape2D::contains_point`] test, which expects a
+    /// shape-local point.
+    ///
+    /// Results are sorted deterministically by ascending [`BodyId`] so
+    /// callers/tests are stable; a scene layer can re-sort by draw/z order.
+    ///
+    /// Every body is considered pickable: [`PhysicsBody2D`] has no
+    /// pickable/monitorable flag, so none is respected here.
+    pub fn point_query(&self, world_point: Vector2) -> Vec<BodyId> {
+        let mut hits: Vec<BodyId> = self
+            .bodies
+            .iter()
+            .filter_map(|(&id, body)| {
+                // World -> local: invert the body's world transform, mirroring
+                // the `body_transform(pos, rot)` the narrow-phase builds to place
+                // this body's shape in the world.
+                let local = body_transform(body.position, body.rotation)
+                    .affine_inverse()
+                    .xform(world_point);
+                body.shape.contains_point(local).then_some(id)
+            })
+            .collect();
+        // `BodyId` is not `Ord`; sort by its inner id for a deterministic order.
+        hits.sort_by_key(|id| id.0);
+        hits
+    }
+
+    /// Returns the smallest [`BodyId`] whose shape contains `world_point`, or
+    /// `None` if the point hits no body. Convenience over [`point_query`].
+    ///
+    /// [`point_query`]: Self::point_query
+    pub fn point_query_first(&self, world_point: Vector2) -> Option<BodyId> {
+        self.point_query(world_point).into_iter().next()
+    }
 }
 
 impl Default for PhysicsWorld2D {
@@ -942,6 +983,73 @@ mod tests {
 
         let hit = world.raycast(Vector2::ZERO, Vector2::new(1.0, 0.0), 10.0);
         assert!(hit.is_none(), "Body is beyond max_distance");
+    }
+
+    // ---- point_query (input-picking foundation) tests ----
+
+    #[test]
+    fn point_query_hits_body_containing_point() {
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        // A world point inside the radius-5 circle centred at the origin.
+        let hits = world.point_query(Vector2::new(1.0, 2.0));
+        assert!(hits.contains(&id), "point inside circle must hit the body");
+    }
+
+    #[test]
+    fn point_query_misses_point_outside() {
+        let mut world = PhysicsWorld2D::new();
+        let id = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        // A world point well outside the radius-5 circle.
+        let hits = world.point_query(Vector2::new(100.0, 100.0));
+        assert!(!hits.contains(&id), "point outside circle must not hit the body");
+        assert!(hits.is_empty(), "no bodies should match, got {hits:?}");
+    }
+
+    #[test]
+    fn point_query_respects_body_position() {
+        let mut world = PhysicsWorld2D::new();
+        // Body offset to (100, 0) with radius 5 — proves the world->local transform.
+        let id = world.add_body(make_rigid_circle(Vector2::new(100.0, 0.0), 5.0));
+        // A point at the body's world position maps to local (0,0) → inside.
+        assert!(
+            world.point_query(Vector2::new(100.0, 0.0)).contains(&id),
+            "point at the body's world position must hit it"
+        );
+        // A point at the world origin is 100 units away → outside.
+        assert!(
+            !world.point_query(Vector2::new(0.0, 0.0)).contains(&id),
+            "world origin must miss a body offset to (100, 0)"
+        );
+    }
+
+    #[test]
+    fn point_query_returns_all_overlapping_bodies_sorted() {
+        let mut world = PhysicsWorld2D::new();
+        // Two bodies both covering the world origin; ids are assigned
+        // incrementally, so id_a.0 < id_b.0.
+        let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
+        let id_b = world.add_body(make_static_rect(Vector2::new(0.0, 0.0), 5.0));
+        assert!(id_a.0 < id_b.0, "ids must be incremental for this assertion");
+
+        let hits = world.point_query(Vector2::new(0.0, 0.0));
+        assert_eq!(
+            hits,
+            vec![id_a, id_b],
+            "both overlapping bodies, ascending BodyId order"
+        );
+
+        // The convenience returns the smallest matching id.
+        assert_eq!(
+            world.point_query_first(Vector2::new(0.0, 0.0)),
+            Some(id_a),
+            "point_query_first returns the smallest matching BodyId"
+        );
+        assert_eq!(
+            world.point_query_first(Vector2::new(1000.0, 1000.0)),
+            None,
+            "point_query_first returns None when nothing matches"
+        );
     }
 
     #[test]

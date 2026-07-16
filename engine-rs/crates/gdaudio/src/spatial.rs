@@ -4,7 +4,7 @@
 //! stereo panning based on the distance and angle between the audio source
 //! and a listener position.
 
-use gdcore::math::Vector3;
+use gdcore::math::{Vector2, Vector3};
 
 /// Attenuation model for distance-based volume falloff.
 ///
@@ -236,6 +236,126 @@ impl AudioStreamPlayer3D {
 /// Converts decibels to linear gain.
 fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
+}
+
+/// Builds equal-power stereo pan gains from a pan value in `[-1, 1]`
+/// (`-1` = full left, `0` = center, `+1` = full right). Returns
+/// `(pan_left, pan_right)` each in `[0, 1]` with constant power.
+fn equal_power_pan(pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(-1.0, 1.0);
+    let angle = (pan + 1.0) * 0.5 * std::f32::consts::FRAC_PI_2;
+    (angle.cos(), angle.sin())
+}
+
+/// A 2D positional audio source (Godot's `AudioStreamPlayer2D`).
+///
+/// Panning follows the source's horizontal screen position relative to the
+/// listener (a `Camera2D`/screen center); volume attenuates with distance up to
+/// `max_distance`. Unlike the 3D player there is no elevation/forward axis.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioStreamPlayer2D {
+    /// Canvas-space position of the source.
+    pub position: Vector2,
+    /// Base volume in decibels.
+    pub volume_db: f32,
+    /// Distance (in the same units as `position`) beyond which the source is
+    /// silent. `0.0` means unlimited (no distance attenuation).
+    pub max_distance: f32,
+    /// Attenuation exponent applied to the normalized distance falloff.
+    pub attenuation: f32,
+    /// Panning strength (`0` = no pan, `1` = full stereo). Godot default `1.0`.
+    pub panning_strength: f32,
+}
+
+impl Default for AudioStreamPlayer2D {
+    fn default() -> Self {
+        Self {
+            position: Vector2::ZERO,
+            volume_db: 0.0,
+            max_distance: 2000.0,
+            attenuation: 1.0,
+            panning_strength: 1.0,
+        }
+    }
+}
+
+impl AudioStreamPlayer2D {
+    /// Creates a 2D audio source at `position` with Godot defaults.
+    pub fn new(position: Vector2) -> Self {
+        Self {
+            position,
+            ..Default::default()
+        }
+    }
+
+    /// Computes spatial volume + equal-power pan relative to a listener.
+    ///
+    /// `screen_half_width` is half the viewport width (in `position` units); a
+    /// source that far to the right of the listener pans fully right. Volume
+    /// falls off with distance across `max_distance`.
+    pub fn compute_spatial_2d(
+        &self,
+        listener: Vector2,
+        screen_half_width: f32,
+    ) -> SpatialAudioResult {
+        let offset = self.position - listener;
+        let distance = offset.length();
+
+        // Distance attenuation: 1.0 at the listener, 0.0 at/after max_distance.
+        let base_linear = db_to_linear(self.volume_db);
+        let atten = if self.max_distance <= 0.0 {
+            1.0
+        } else if distance >= self.max_distance {
+            0.0
+        } else {
+            (1.0 - distance / self.max_distance).powf(self.attenuation.max(0.0))
+        };
+        let volume_linear = base_linear * atten;
+
+        // Pan from horizontal screen offset, scaled by panning_strength.
+        let pan = if screen_half_width <= 1e-6 || self.panning_strength <= 0.0 {
+            0.0
+        } else {
+            (offset.x / screen_half_width) * self.panning_strength
+        };
+        let (pan_left, pan_right) = equal_power_pan(pan);
+
+        SpatialAudioResult {
+            volume_linear,
+            pan_left,
+            pan_right,
+        }
+    }
+}
+
+/// Computes a Doppler pitch-scale multiplier for a moving source and listener.
+///
+/// Uses the textbook Doppler relation `f' = f * (c + v_o) / (c - v_s)`, where
+/// `c` is the speed of sound, `v_s` is the source's velocity component toward
+/// the listener, and `v_o` is the listener's velocity component toward the
+/// source. Approaching raises the pitch (`> 1.0`), receding lowers it. The
+/// result is clamped to `[0.25, 4.0]` to stay stable near/above the sound
+/// barrier. Returns `1.0` when coincident or `c <= 0`.
+pub fn doppler_pitch_scale(
+    source_pos: Vector3,
+    source_velocity: Vector3,
+    listener_pos: Vector3,
+    listener_velocity: Vector3,
+    speed_of_sound: f32,
+) -> f32 {
+    let to_listener = listener_pos - source_pos;
+    let distance = to_listener.length();
+    if distance < 1e-6 || speed_of_sound <= 0.0 {
+        return 1.0;
+    }
+    let dir = to_listener * (1.0 / distance); // unit source -> listener
+    let v_s = source_velocity.dot(dir); // source moving toward listener (+)
+    let v_o = -listener_velocity.dot(dir); // listener moving toward source (+)
+    let denom = speed_of_sound - v_s;
+    if denom <= 1e-6 {
+        return 4.0; // source at/above sound speed toward listener
+    }
+    ((speed_of_sound + v_o) / denom).clamp(0.25, 4.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -483,5 +603,87 @@ mod tests {
     fn db_to_linear_plus6_is_about_two() {
         let val = db_to_linear(6.0);
         assert!((val - 1.995).abs() < 0.01, "got {val}");
+    }
+
+    // -- AudioStreamPlayer2D panning --
+
+    #[test]
+    fn player2d_pans_right_for_source_on_the_right() {
+        let src = AudioStreamPlayer2D::new(Vector2::new(400.0, 0.0));
+        let res = src.compute_spatial_2d(Vector2::ZERO, 400.0); // half-width 400
+        // Source at +half_width -> full right: right gain dominates.
+        assert!(res.pan_right > res.pan_left, "{res:?}");
+        assert!(res.pan_right > 0.98, "near full right: {res:?}");
+    }
+
+    #[test]
+    fn player2d_pans_left_for_source_on_the_left() {
+        let src = AudioStreamPlayer2D::new(Vector2::new(-400.0, 0.0));
+        let res = src.compute_spatial_2d(Vector2::ZERO, 400.0);
+        assert!(res.pan_left > res.pan_right, "{res:?}");
+        assert!(res.pan_left > 0.98, "near full left: {res:?}");
+    }
+
+    #[test]
+    fn player2d_center_is_equal_power() {
+        let src = AudioStreamPlayer2D::new(Vector2::ZERO);
+        let res = src.compute_spatial_2d(Vector2::ZERO, 400.0);
+        assert!((res.pan_left - res.pan_right).abs() < 1e-5, "{res:?}");
+    }
+
+    #[test]
+    fn player2d_attenuates_with_distance() {
+        let mut src = AudioStreamPlayer2D::new(Vector2::new(1000.0, 0.0));
+        src.max_distance = 2000.0;
+        let near = AudioStreamPlayer2D::new(Vector2::new(100.0, 0.0))
+            .compute_spatial_2d(Vector2::ZERO, 2000.0)
+            .volume_linear;
+        let far = src.compute_spatial_2d(Vector2::ZERO, 2000.0).volume_linear;
+        assert!(far < near, "far {far} should attenuate below near {near}");
+        // At/after max_distance -> silent.
+        let edge = AudioStreamPlayer2D::new(Vector2::new(2000.0, 0.0))
+            .compute_spatial_2d(Vector2::ZERO, 2000.0)
+            .volume_linear;
+        assert!(edge.abs() < 1e-6, "silent at max_distance: {edge}");
+    }
+
+    // -- Doppler --
+
+    #[test]
+    fn doppler_stationary_is_unity() {
+        let p = doppler_pitch_scale(
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::ZERO,
+            Vector3::ZERO,
+            Vector3::ZERO,
+            343.0,
+        );
+        assert!((p - 1.0).abs() < 1e-5, "got {p}");
+    }
+
+    #[test]
+    fn doppler_approaching_source_raises_pitch() {
+        // Source at +x moving toward listener at origin (-x velocity).
+        let p = doppler_pitch_scale(
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::new(-34.3, 0.0, 0.0),
+            Vector3::ZERO,
+            Vector3::ZERO,
+            343.0,
+        );
+        assert!(p > 1.0, "approaching should raise pitch, got {p}");
+    }
+
+    #[test]
+    fn doppler_receding_source_lowers_pitch() {
+        // Source at +x moving away from listener (+x velocity).
+        let p = doppler_pitch_scale(
+            Vector3::new(10.0, 0.0, 0.0),
+            Vector3::new(34.3, 0.0, 0.0),
+            Vector3::ZERO,
+            Vector3::ZERO,
+            343.0,
+        );
+        assert!(p < 1.0, "receding should lower pitch, got {p}");
     }
 }

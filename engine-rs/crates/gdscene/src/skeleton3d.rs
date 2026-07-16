@@ -11,7 +11,8 @@
 //! - [`set_bone_pose`] / [`get_bone_pose`]
 //! - [`get_bone_global_pose`] — recursively composes rest * pose up the chain
 
-use gdcore::math3d::Transform3D;
+use gdcore::math::Vector3;
+use gdcore::math3d::{Basis, Quaternion, Transform3D};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
@@ -35,6 +36,18 @@ fn bone_rest_key(idx: usize) -> String {
 
 fn bone_pose_key(idx: usize) -> String {
     format!("bones/{idx}/pose")
+}
+
+fn bone_pose_position_key(idx: usize) -> String {
+    format!("bones/{idx}/pose_position")
+}
+
+fn bone_pose_rotation_key(idx: usize) -> String {
+    format!("bones/{idx}/pose_rotation")
+}
+
+fn bone_pose_scale_key(idx: usize) -> String {
+    format!("bones/{idx}/pose_scale")
 }
 
 fn bone_enabled_key(idx: usize) -> String {
@@ -189,6 +202,113 @@ pub fn get_bone_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Transform
         .unwrap_or(Transform3D::IDENTITY)
 }
 
+// ---------------------------------------------------------------------------
+// Per-component pose accessors (pat-u3l8c.101)
+//
+// Godot's `Skeleton3D` exposes the bone pose as separate position / rotation /
+// scale components (`set_bone_pose_position`/`_rotation`/`_scale`). We store the
+// three components on the node and recompose them into the full `pose`
+// Transform3D (basis = rotation × scale, origin = position) so the existing
+// `get_bone_pose` / `get_bone_global_pose` path keeps working.
+// ---------------------------------------------------------------------------
+
+/// Returns the position component of bone `idx`'s pose (default `ZERO`).
+pub fn get_bone_pose_position(tree: &SceneTree, node_id: NodeId, idx: usize) -> Vector3 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property(&bone_pose_position_key(idx)) {
+            Variant::Vector3(v) => v,
+            _ => Vector3::ZERO,
+        })
+        .unwrap_or(Vector3::ZERO)
+}
+
+/// Returns the rotation component of bone `idx`'s pose (default identity).
+pub fn get_bone_pose_rotation(tree: &SceneTree, node_id: NodeId, idx: usize) -> Quaternion {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property(&bone_pose_rotation_key(idx)) {
+            Variant::Quaternion(q) => q,
+            _ => Quaternion::IDENTITY,
+        })
+        .unwrap_or(Quaternion::IDENTITY)
+}
+
+/// Returns the scale component of bone `idx`'s pose (default `ONE`).
+pub fn get_bone_pose_scale(tree: &SceneTree, node_id: NodeId, idx: usize) -> Vector3 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property(&bone_pose_scale_key(idx)) {
+            Variant::Vector3(v) => v,
+            _ => Vector3::ONE,
+        })
+        .unwrap_or(Vector3::ONE)
+}
+
+/// Recomposes bone `idx`'s full pose Transform3D from its stored
+/// position / rotation / scale components.
+fn recompose_bone_pose(tree: &mut SceneTree, node_id: NodeId, idx: usize) {
+    let position = get_bone_pose_position(tree, node_id, idx);
+    let rotation = get_bone_pose_rotation(tree, node_id, idx);
+    let scale = get_bone_pose_scale(tree, node_id, idx);
+    // Scale the rotation basis per-column so `Basis::get_scale` recovers
+    // `scale`. `Basis` has no `scaled` method (that lives on `Transform3D`
+    // and would also scale the origin, which must stay equal to `position`).
+    let rotation_basis = Basis::from_quaternion(rotation);
+    let pose = Transform3D {
+        basis: Basis {
+            x: rotation_basis.x * scale.x,
+            y: rotation_basis.y * scale.y,
+            z: rotation_basis.z * scale.z,
+        },
+        origin: position,
+    };
+    set_bone_pose(tree, node_id, idx, pose);
+}
+
+/// Sets the position component of bone `idx`'s pose (Godot
+/// `set_bone_pose_position`) and recomposes the full pose.
+pub fn set_bone_pose_position(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    idx: usize,
+    position: Vector3,
+) {
+    if idx >= get_bone_count(tree, node_id) {
+        return;
+    }
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(&bone_pose_position_key(idx), Variant::Vector3(position));
+    }
+    recompose_bone_pose(tree, node_id, idx);
+}
+
+/// Sets the rotation component of bone `idx`'s pose (Godot
+/// `set_bone_pose_rotation`) and recomposes the full pose.
+pub fn set_bone_pose_rotation(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    idx: usize,
+    rotation: Quaternion,
+) {
+    if idx >= get_bone_count(tree, node_id) {
+        return;
+    }
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(&bone_pose_rotation_key(idx), Variant::Quaternion(rotation));
+    }
+    recompose_bone_pose(tree, node_id, idx);
+}
+
+/// Sets the scale component of bone `idx`'s pose (Godot `set_bone_pose_scale`)
+/// and recomposes the full pose.
+pub fn set_bone_pose_scale(tree: &mut SceneTree, node_id: NodeId, idx: usize, scale: Vector3) {
+    if idx >= get_bone_count(tree, node_id) {
+        return;
+    }
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(&bone_pose_scale_key(idx), Variant::Vector3(scale));
+    }
+    recompose_bone_pose(tree, node_id, idx);
+}
+
 /// Sets whether bone `idx` is enabled.
 pub fn set_bone_enabled(tree: &mut SceneTree, node_id: NodeId, idx: usize, enabled: bool) {
     if idx < get_bone_count(tree, node_id) {
@@ -300,6 +420,35 @@ pub fn get_bone_attachment_bone_idx(tree: &SceneTree, node_id: NodeId) -> i64 {
         .unwrap_or(-1)
 }
 
+/// Places a BoneAttachment3D node at the global pose of its target bone.
+///
+/// The target bone is resolved from the attachment's `bone_idx` when set
+/// (`>= 0`), otherwise from its `bone_name` via [`find_bone`]. The bone's
+/// global pose is written to the attachment node's `"transform"` property so it
+/// follows the (possibly animated) bone. Returns the applied transform, or
+/// `None` when the bone can't be resolved.
+pub fn update_bone_attachment(
+    tree: &mut SceneTree,
+    skeleton_id: NodeId,
+    attachment_id: NodeId,
+) -> Option<Transform3D> {
+    let by_idx = get_bone_attachment_bone_idx(tree, attachment_id);
+    let idx = if by_idx >= 0 {
+        by_idx as usize
+    } else {
+        let name = get_bone_attachment_bone_name(tree, attachment_id)?;
+        find_bone(tree, skeleton_id, &name)?
+    };
+    if idx >= get_bone_count(tree, skeleton_id) {
+        return None;
+    }
+    let pose = get_bone_global_pose(tree, skeleton_id, idx);
+    if let Some(node) = tree.get_node_mut(attachment_id) {
+        node.set_property("transform", Variant::Transform3D(pose));
+    }
+    Some(pose)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -309,7 +458,7 @@ mod tests {
     use super::*;
     use crate::node::Node;
     use gdcore::math::Vector3;
-    use gdcore::math3d::Basis;
+    use gdcore::math3d::{Basis, Quaternion};
 
     fn make_tree() -> SceneTree {
         SceneTree::new()
@@ -836,5 +985,98 @@ mod tests {
 
         set_bone_parent(&mut tree, skel_id, 0, -1);
         assert_eq!(get_bone_count(&tree, skel_id), 0);
+    }
+
+    #[test]
+    fn per_component_pose_accessors_roundtrip() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let skel = tree
+            .add_child(root, Node::new("Skeleton", "Skeleton3D"))
+            .unwrap();
+        let hip = add_bone(&mut tree, skel, "Hip");
+
+        // Position.
+        let pos = Vector3::new(1.0, 2.0, 3.0);
+        set_bone_pose_position(&mut tree, skel, hip, pos);
+        assert_eq!(get_bone_pose_position(&tree, skel, hip), pos);
+
+        // Rotation (90° about Y).
+        let rot = Quaternion::new(0.0, 0.707_106_77, 0.0, 0.707_106_77);
+        set_bone_pose_rotation(&mut tree, skel, hip, rot);
+        let got = get_bone_pose_rotation(&tree, skel, hip);
+        assert!(
+            (got.x - rot.x).abs() < 1e-6
+                && (got.y - rot.y).abs() < 1e-6
+                && (got.z - rot.z).abs() < 1e-6
+                && (got.w - rot.w).abs() < 1e-6,
+            "rotation round-trip: {got:?}"
+        );
+
+        // Scale.
+        let scale = Vector3::new(2.0, 2.0, 2.0);
+        set_bone_pose_scale(&mut tree, skel, hip, scale);
+        assert_eq!(get_bone_pose_scale(&tree, skel, hip), scale);
+
+        // The recomposed pose Transform3D carries the position as its origin.
+        assert_eq!(get_bone_pose(&tree, skel, hip).origin, pos);
+
+        // A fresh bone has identity/default components.
+        let spine = add_bone(&mut tree, skel, "Spine");
+        assert_eq!(get_bone_pose_position(&tree, skel, spine), Vector3::ZERO);
+        assert_eq!(get_bone_pose_scale(&tree, skel, spine), Vector3::ONE);
+        assert!((get_bone_pose_rotation(&tree, skel, spine).w - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bone_attachment_follows_bone_global_pose() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let skel = tree
+            .add_child(root, Node::new("Skeleton", "Skeleton3D"))
+            .unwrap();
+        let hip = add_bone(&mut tree, skel, "Hip");
+
+        // Animate the bone by moving its pose.
+        let pos = Vector3::new(5.0, 0.0, 0.0);
+        set_bone_pose_position(&mut tree, skel, hip, pos);
+
+        let attach = tree
+            .add_child(root, Node::new("Attach", "BoneAttachment3D"))
+            .unwrap();
+        set_bone_attachment_bone_idx(&mut tree, attach, hip as i64);
+
+        let applied =
+            update_bone_attachment(&mut tree, skel, attach).expect("attachment tracks the bone");
+        assert_eq!(applied.origin, pos);
+
+        // The attachment node's transform property now equals the bone pose.
+        match tree.get_node(attach).unwrap().get_property("transform") {
+            Variant::Transform3D(t) => assert_eq!(t.origin, pos),
+            other => panic!("attachment transform not set: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bone_attachment_resolves_by_name() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let skel = tree
+            .add_child(root, Node::new("Skeleton", "Skeleton3D"))
+            .unwrap();
+        let _hip = add_bone(&mut tree, skel, "Hip");
+        let head = add_bone(&mut tree, skel, "Head");
+        let pos = Vector3::new(0.0, 7.0, 0.0);
+        set_bone_pose_position(&mut tree, skel, head, pos);
+
+        let attach = tree
+            .add_child(root, Node::new("Attach", "BoneAttachment3D"))
+            .unwrap();
+        // No bone_idx set (-1) → resolve via bone_name.
+        set_bone_attachment_bone_name(&mut tree, attach, "Head");
+
+        let applied = update_bone_attachment(&mut tree, skel, attach)
+            .expect("attachment resolves bone by name");
+        assert_eq!(applied.origin, pos);
     }
 }

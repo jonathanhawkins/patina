@@ -33,6 +33,20 @@ pub struct AudioStreamPlayback {
     position_secs: f32,
     length_secs: f32,
     bus_name: String,
+    /// Pitch multiplier applied during mixing (Godot default 1.0). Values > 1.0
+    /// speed the stream up (higher pitch), < 1.0 slow it down (lower pitch).
+    pitch_scale: f32,
+    /// Per-channel gain for stereo panning: left channel gain. Default 1.0.
+    /// Positional players (2D/3D) push equal-power pan gains here so the mixer
+    /// spatializes the stream.
+    pan_left: f32,
+    /// Per-channel gain for stereo panning: right channel gain. Default 1.0.
+    pan_right: f32,
+    /// Extra linear gain multiplier applied on top of `volume_db`. Default 1.0.
+    /// Positional players push their computed distance-attenuated linear volume
+    /// here so spatial attenuation multiplies the mix without disturbing the
+    /// user-facing `volume_db`.
+    linear_gain: f32,
 }
 
 impl AudioStreamPlayback {
@@ -45,6 +59,10 @@ impl AudioStreamPlayback {
             position_secs: 0.0,
             length_secs,
             bus_name: "Master".to_string(),
+            pitch_scale: 1.0,
+            pan_left: 1.0,
+            pan_right: 1.0,
+            linear_gain: 1.0,
         }
     }
 
@@ -118,6 +136,40 @@ impl AudioStreamPlayback {
     /// Set the volume in decibels.
     pub fn set_volume_db(&mut self, db: f32) {
         self.volume_db = db;
+    }
+
+    /// Return the pitch scale multiplier.
+    pub fn pitch_scale(&self) -> f32 {
+        self.pitch_scale
+    }
+
+    /// Set the pitch scale multiplier. Clamped to a small positive minimum so a
+    /// zero/negative scale can never stall or reverse playback.
+    pub fn set_pitch_scale(&mut self, scale: f32) {
+        self.pitch_scale = scale.max(0.01);
+    }
+
+    /// Left/right stereo pan gains applied per output channel during mixing.
+    pub fn pan(&self) -> (f32, f32) {
+        (self.pan_left, self.pan_right)
+    }
+
+    /// Set the left/right stereo pan gains (clamped to `[0, 1]`). Positional
+    /// players push equal-power pan here from a spatial calculation.
+    pub fn set_pan(&mut self, left: f32, right: f32) {
+        self.pan_left = left.clamp(0.0, 1.0);
+        self.pan_right = right.clamp(0.0, 1.0);
+    }
+
+    /// Extra linear gain applied on top of `volume_db` during mixing.
+    pub fn linear_gain(&self) -> f32 {
+        self.linear_gain
+    }
+
+    /// Set the extra linear gain (clamped non-negative). Positional players push
+    /// their distance-attenuated linear volume here.
+    pub fn set_linear_gain(&mut self, gain: f32) {
+        self.linear_gain = gain.max(0.0);
     }
 
     /// Return the loop mode.

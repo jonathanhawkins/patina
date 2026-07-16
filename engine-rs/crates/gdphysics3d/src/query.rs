@@ -1287,8 +1287,8 @@ mod tests {
     #[test]
     fn shape_query_scans_areas_when_enabled() {
         let areas = vec![
-            sphere_area(1, Vector3::new(1.0, 0.0, 0.0)),   // overlapping
-            sphere_area(2, Vector3::new(100.0, 0.0, 0.0)), // far
+            sphere_area(1, Vector3::new(1.0, 0.0, 0.0), 1.0),   // overlapping
+            sphere_area(2, Vector3::new(100.0, 0.0, 0.0), 1.0), // far
         ];
         let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
 
@@ -1302,7 +1302,7 @@ mod tests {
 
     #[test]
     fn shape_query_area_scan_honors_mask() {
-        let mut area = sphere_area(1, Vector3::new(1.0, 0.0, 0.0));
+        let mut area = sphere_area(1, Vector3::new(1.0, 0.0, 0.0), 1.0);
         area.collision_layer = 0b0100;
         let areas = vec![area];
         let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);

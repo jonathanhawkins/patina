@@ -41,6 +41,9 @@ pub struct SceneConnection {
     pub method_name: String,
     /// Optional connection flags (defaults to 0).
     pub flags: u32,
+    /// Extra bound arguments delivered to the callback ahead of the signal's
+    /// own arguments (Godot `binds=[...]` on the connection). Empty when absent.
+    pub binds: Vec<Variant>,
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,9 @@ struct NodeTemplate {
     instance: Option<String>,
     /// Script resource path resolved from `script = ExtResource("id")`.
     script_path: Option<String>,
+    /// `res://` path from `instance_placeholder="..."` — the sub-scene is
+    /// deferred (a placeholder stands in) rather than instanced on load.
+    instance_placeholder: Option<String>,
 }
 
 /// An external resource reference parsed from `[ext_resource]` sections.
@@ -104,6 +110,9 @@ pub struct PackedScene {
     /// callers resolve a node's `prop = SubResource("id")` to the concrete
     /// resource's fields (e.g. a `WorldEnvironment`'s `Environment`).
     sub_resource_props: HashMap<String, HashMap<String, Variant>>,
+    /// Node paths from `[editable path="..."]` sections — sub-scene instances
+    /// whose local property/child overrides should be applied on load.
+    editable_instances: Vec<String>,
 }
 
 impl PackedScene {
@@ -112,6 +121,7 @@ impl PackedScene {
         let mut uid = None;
         let mut templates: Vec<NodeTemplate> = Vec::new();
         let mut connections: Vec<SceneConnection> = Vec::new();
+        let mut editable_instances: Vec<String> = Vec::new();
         let mut ext_resources: HashMap<String, ExtResourceEntry> = HashMap::new();
         // Inline sub-resources: id -> type (e.g. "SphereMesh"). Used to resolve a
         // node's `mesh = SubResource("id")` to a concrete primitive type so the
@@ -188,12 +198,22 @@ impl PackedScene {
                                 .get("flags")
                                 .and_then(|v| v.parse::<u32>().ok())
                                 .unwrap_or(0);
+                            // `binds=[...]` — extra args prepended to the callback.
+                            let binds = attrs
+                                .get("binds")
+                                .and_then(|s| parse_variant_value(s).ok())
+                                .and_then(|v| match v {
+                                    Variant::Array(a) => Some(a),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
                             connections.push(SceneConnection {
                                 signal_name: signal,
                                 from_path: from,
                                 to_path: to,
                                 method_name: method,
                                 flags,
+                                binds,
                             });
                         }
                         _ => {
@@ -201,6 +221,13 @@ impl PackedScene {
                                 "skipping malformed [connection] — missing required attributes"
                             );
                         }
+                    }
+                } else if inner.starts_with("editable") {
+                    // `[editable path="Sub/Instance"]` — mark a sub-scene instance
+                    // as having local overrides that apply on load.
+                    let attrs = extract_header_attrs(inner);
+                    if let Some(path) = attrs.get("path").cloned() {
+                        editable_instances.push(path);
                     }
                 } else if inner.starts_with("node") {
                     let attrs = extract_header_attrs(inner);
@@ -225,6 +252,9 @@ impl PackedScene {
                     // Parse instance=ExtResource("id") attribute.
                     let instance = attrs.get("instance").cloned();
 
+                    // Parse instance_placeholder="res://..." (deferred instancing).
+                    let instance_placeholder = attrs.get("instance_placeholder").cloned();
+
                     current = Some(NodeTemplate {
                         name,
                         class_name,
@@ -234,6 +264,7 @@ impl PackedScene {
                         unique_name,
                         instance,
                         script_path: None,
+                        instance_placeholder,
                     });
                 } else if inner.starts_with("ext_resource") {
                     let attrs = extract_header_attrs(inner);
@@ -482,6 +513,7 @@ impl PackedScene {
             ext_resources,
             sub_resources,
             sub_resource_props,
+            editable_instances,
         })
     }
 
@@ -617,6 +649,26 @@ impl PackedScene {
     /// Returns the number of signal connections in this packed scene.
     pub fn connection_count(&self) -> usize {
         self.connections.len()
+    }
+
+    /// Node paths declared editable via `[editable path="..."]` — sub-scene
+    /// instances whose local property/child overrides apply on load. Empty when
+    /// none are present.
+    pub fn editable_instances(&self) -> &[String] {
+        &self.editable_instances
+    }
+
+    /// Nodes that defer instancing via `instance_placeholder`, as
+    /// `(node_name, placeholder_res_path)` pairs.
+    pub fn placeholder_nodes(&self) -> Vec<(String, String)> {
+        self.templates
+            .iter()
+            .filter_map(|t| {
+                t.instance_placeholder
+                    .as_ref()
+                    .map(|p| (t.name.clone(), p.clone()))
+            })
+            .collect()
     }
 
     /// Returns the external resources map (id -> entry).
@@ -3020,5 +3072,57 @@ material_override = SubResource("ShaderMaterial_1")
         );
         // No inline code in the ext case.
         assert_eq!(ocean.get_property("shader_code"), Variant::Nil);
+    }
+
+    #[test]
+    fn parses_connection_binds_editable_and_placeholder() {
+        let tscn = r#"[gd_scene load_steps=1 format=3]
+
+[node name="Root" type="Node2D"]
+
+[node name="Button" type="Button" parent="."]
+
+[node name="Sub" parent="." instance_placeholder="res://sub.tscn"]
+
+[editable path="Child/Instance"]
+
+[connection signal="pressed" from="Button" to="." method="_on_pressed" binds=[42, "hi"]]
+"#;
+        let scene = PackedScene::from_tscn(tscn).expect("parse");
+
+        // Connection `binds=[...]` captured (previously dropped).
+        let conns = scene.connections();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].method_name, "_on_pressed");
+        assert_eq!(
+            conns[0].binds,
+            vec![Variant::Int(42), Variant::String("hi".into())]
+        );
+
+        // `[editable path="..."]` section captured (previously ignored).
+        assert_eq!(scene.editable_instances(), &["Child/Instance".to_string()]);
+
+        // `instance_placeholder="..."` captured (previously unhandled).
+        assert_eq!(
+            scene.placeholder_nodes(),
+            vec![("Sub".to_string(), "res://sub.tscn".to_string())]
+        );
+    }
+
+    #[test]
+    fn connection_without_binds_and_no_editable_or_placeholder() {
+        let tscn = r#"[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="Child" type="Node" parent="."]
+
+[connection signal="ready" from="." to="." method="_go"]
+"#;
+        let scene = PackedScene::from_tscn(tscn).expect("parse");
+        assert_eq!(scene.connections().len(), 1);
+        assert!(scene.connections()[0].binds.is_empty());
+        assert!(scene.editable_instances().is_empty());
+        assert!(scene.placeholder_nodes().is_empty());
     }
 }

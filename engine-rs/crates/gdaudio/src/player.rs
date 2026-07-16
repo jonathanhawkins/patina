@@ -21,8 +21,9 @@ pub struct AudioStreamPlayer {
     stream_path: String,
     /// Volume in decibels (Godot default 0.0).
     volume_db: f32,
-    /// Pitch scale multiplier (Godot default 1.0). Affects reported length only
-    /// in this slice — sample-rate pitch shifting is deferred.
+    /// Pitch scale multiplier (Godot default 1.0). Pushed to the active stream
+    /// playback on [`play`](Self::play); the server's mixer resamples by this
+    /// factor so 2.0 doubles the pitch.
     pitch_scale: f32,
     /// When `true`, callers should invoke [`play`](Self::play) on tree enter.
     autoplay: bool,
@@ -100,7 +101,8 @@ impl AudioStreamPlayer {
         self.volume_db
     }
 
-    /// Sets pitch scale (stored for property parity; resampling deferred).
+    /// Sets pitch scale. Applied to the active playback on the next
+    /// [`play`](Self::play); clamped to a small positive minimum.
     pub fn set_pitch_scale(&mut self, scale: f32) {
         self.pitch_scale = scale.max(0.01);
     }
@@ -150,9 +152,11 @@ impl AudioStreamPlayer {
         }
 
         let id = server.play_on_bus(buffer, &self.bus);
-        // Apply volume to the active stream playback object.
+        // Apply volume and pitch to the active stream playback object so the
+        // server's mixer resamples at the requested pitch.
         if let Some(stream) = server.stream_mut(id) {
             stream.set_volume_db(self.volume_db);
+            stream.set_pitch_scale(self.pitch_scale);
         }
         self.playback_id = Some(id);
         self.wants_playing = true;

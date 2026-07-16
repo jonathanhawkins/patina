@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use gdcore::math::{Color, Vector2, Vector3};
 use gdcore::math3d::{Basis, Transform3D};
 use gdvariant::Variant;
 
@@ -132,6 +133,56 @@ impl TrackType {
 }
 
 // ---------------------------------------------------------------------------
+// TrackUpdateMode / TrackInterpolation (pat-u3l8c.102)
+// ---------------------------------------------------------------------------
+
+/// How a value track's sampled value is updated over time, mirroring Godot's
+/// `Animation.UpdateMode`.
+///
+/// Named `TrackUpdateMode` (not `UpdateMode`) to avoid colliding with the
+/// unrelated [`crate::sub_viewport::UpdateMode`] re-exported at the crate root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackUpdateMode {
+    /// Interpolate continuously between keys (default — legacy behavior).
+    #[default]
+    Continuous,
+    /// Step function: hold the value of the most-recent key at-or-before the
+    /// sample time, with no interpolation (Godot `UPDATE_DISCRETE`).
+    Discrete,
+    /// Godot `UPDATE_CAPTURE`. Treated the same as
+    /// [`Continuous`](Self::Continuous) for sampling here (capture blending is
+    /// not yet modeled).
+    Capture,
+}
+
+/// The numeric interpolation curve applied per track, mirroring Godot's
+/// `Animation.InterpolationType`.
+///
+/// The default [`PerKey`](Self::PerKey) preserves the legacy per-keyframe
+/// [`TransitionType`] behavior exactly; the other variants override it with
+/// Godot-accurate curves. A per-track selector is used (rather than new
+/// [`TransitionType`] variants) so the interpolation type stays close to
+/// Godot's model and so existing exhaustive matches on [`TransitionType`]
+/// elsewhere remain valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackInterpolation {
+    /// Use each keyframe's per-key [`TransitionType`] (Linear / Nearest /
+    /// CubicBezier). Default — unchanged legacy behavior.
+    #[default]
+    PerKey,
+    /// Godot `INTERPOLATION_CUBIC`: Catmull-Rom cubic through neighbor keys,
+    /// passing through the surrounding key values.
+    Cubic,
+    /// Godot `INTERPOLATION_LINEAR_ANGLE`: shortest-path angular lerp across the
+    /// 2π wrap. Only affects `Float` values (radians); other types fall back to
+    /// linear.
+    LinearAngle,
+    /// Godot `INTERPOLATION_CUBIC_ANGLE`: cubic on the unwrapped angle sequence.
+    /// Only affects `Float` values (radians); other types fall back to cubic.
+    CubicAngle,
+}
+
+// ---------------------------------------------------------------------------
 // AnimationTrack
 // ---------------------------------------------------------------------------
 
@@ -152,6 +203,13 @@ pub struct AnimationTrack {
     pub property_path: String,
     /// The type of this track.
     pub track_type: TrackType,
+    /// How the sampled value updates over time (Godot `UpdateMode`). Defaults
+    /// to [`TrackUpdateMode::Continuous`] (pat-u3l8c.102).
+    pub update_mode: TrackUpdateMode,
+    /// The per-track interpolation curve (Godot `InterpolationType`). Defaults
+    /// to [`TrackInterpolation::PerKey`], preserving legacy behavior
+    /// (pat-u3l8c.102).
+    pub interpolation: TrackInterpolation,
     /// Keyframes sorted by time.
     keyframes: Vec<KeyFrame>,
 }
@@ -163,6 +221,8 @@ impl AnimationTrack {
             node_path: String::new(),
             property_path: property_path.into(),
             track_type: TrackType::Property,
+            update_mode: TrackUpdateMode::Continuous,
+            interpolation: TrackInterpolation::PerKey,
             keyframes: Vec::new(),
         }
     }
@@ -173,6 +233,8 @@ impl AnimationTrack {
             node_path: node_path.into(),
             property_path: property_path.into(),
             track_type: TrackType::Property,
+            update_mode: TrackUpdateMode::Continuous,
+            interpolation: TrackInterpolation::PerKey,
             keyframes: Vec::new(),
         }
     }
@@ -187,6 +249,8 @@ impl AnimationTrack {
             node_path: node_path.into(),
             property_path: property_path.into(),
             track_type,
+            update_mode: TrackUpdateMode::Continuous,
+            interpolation: TrackInterpolation::PerKey,
             keyframes: Vec::new(),
         }
     }
@@ -194,6 +258,20 @@ impl AnimationTrack {
     /// Returns the track type.
     pub fn track_type(&self) -> TrackType {
         self.track_type
+    }
+
+    /// Sets the track's [`TrackUpdateMode`] (Godot `track_set_update_mode`).
+    /// Returns `&mut self` for chaining.
+    pub fn set_update_mode(&mut self, mode: TrackUpdateMode) -> &mut Self {
+        self.update_mode = mode;
+        self
+    }
+
+    /// Sets the track's [`TrackInterpolation`] curve (Godot
+    /// `track_set_interpolation_type`). Returns `&mut self` for chaining.
+    pub fn set_interpolation(&mut self, interp: TrackInterpolation) -> &mut Self {
+        self.interpolation = interp;
+        self
     }
 
     /// Adds a keyframe, maintaining sorted order by time.
@@ -234,6 +312,23 @@ impl AnimationTrack {
         if self.keyframes.is_empty() {
             return None;
         }
+
+        // Discrete update mode (pat-u3l8c.102): step function — return the value
+        // of the most-recent key at-or-before `time` (or the first key when
+        // `time` precedes all keys), with no interpolation. `Continuous` and
+        // `Capture` fall through to the interpolating path below unchanged.
+        if self.update_mode == TrackUpdateMode::Discrete {
+            let mut chosen = &self.keyframes[0];
+            for kf in &self.keyframes {
+                if kf.time <= time {
+                    chosen = kf;
+                } else {
+                    break;
+                }
+            }
+            return Some(chosen.value.clone());
+        }
+
         if self.keyframes.len() == 1 {
             return Some(self.keyframes[0].value.clone());
         }
@@ -254,6 +349,17 @@ impl AnimationTrack {
             let a = &self.keyframes[i];
             let b = &self.keyframes[i + 1];
             if time >= a.time && time <= b.time {
+                // Per-track interpolation (pat-u3l8c.102) overrides the per-key
+                // transition curve. The default `PerKey` falls through to the
+                // unchanged legacy transition logic below.
+                if self.interpolation != TrackInterpolation::PerKey {
+                    let duration = b.time - a.time;
+                    if duration < 1e-10 {
+                        return Some(b.value.clone());
+                    }
+                    let t = ((time - a.time) / duration) as f32;
+                    return self.sample_interpolated(i, t);
+                }
                 match b.transition {
                     TransitionType::Nearest => {
                         let mid = (a.time + b.time) / 2.0;
@@ -287,6 +393,37 @@ impl AnimationTrack {
         }
 
         Some(last.value.clone())
+    }
+
+    /// Applies the non-default per-track [`TrackInterpolation`] curve to the
+    /// segment between keyframes `i` (`from`, local `t=0`) and `i+1` (`to`,
+    /// local `t=1`), using neighbor keys `i-1` (`pre`) and `i+2` (`post`) for
+    /// cubic tangents. Missing neighbors clamp to `from`/`to` respectively.
+    ///
+    /// Unsupported [`Variant`] types (and the angle modes on non-`Float`
+    /// values) fall back to linear interpolation, then to `from` (pat-u3l8c.102).
+    fn sample_interpolated(&self, i: usize, t: f32) -> Option<Variant> {
+        let from = &self.keyframes[i].value;
+        let to = &self.keyframes[i + 1].value;
+        let pre = if i > 0 {
+            &self.keyframes[i - 1].value
+        } else {
+            from
+        };
+        let post = if i + 2 < self.keyframes.len() {
+            &self.keyframes[i + 2].value
+        } else {
+            to
+        };
+        let out = match self.interpolation {
+            TrackInterpolation::Cubic => cubic_interpolate_variant(pre, from, to, post, t),
+            TrackInterpolation::LinearAngle => linear_angle_variant(from, to, t),
+            TrackInterpolation::CubicAngle => cubic_angle_variant(pre, from, to, post, t),
+            // `PerKey` is guarded out by the caller; keep the match exhaustive.
+            TrackInterpolation::PerKey => None,
+        };
+        out.or_else(|| interpolate_variant(from, to, t))
+            .or_else(|| Some(from.clone()))
     }
 }
 
@@ -370,6 +507,25 @@ impl Animation {
 // AnimationPlayer
 // ---------------------------------------------------------------------------
 
+/// A playback signal emitted by an [`AnimationPlayer`], mirroring Godot's
+/// `AnimationMixer`/`AnimationPlayer` signals. Queued as they occur and drained
+/// via [`AnimationPlayer::drain_signals`] so the scripting layer can re-emit
+/// them to connected GDScript callbacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnimationPlayerSignal {
+    /// `animation_started(name)` — playback of `name` began.
+    AnimationStarted(String),
+    /// `animation_finished(name)` — a non-looping `name` reached its end.
+    AnimationFinished(String),
+    /// `animation_changed(old, new)` — the current animation switched.
+    AnimationChanged {
+        /// Previously-current animation name.
+        old: String,
+        /// Newly-current animation name.
+        new: String,
+    },
+}
+
 /// Manages playback of named animations, analogous to Godot's `AnimationPlayer`.
 #[derive(Debug, Clone)]
 pub struct AnimationPlayer {
@@ -400,6 +556,12 @@ pub struct AnimationPlayer {
     /// Defaults to `"."` (the owner node itself); set to `".."` for Godot's
     /// parent-relative default. An empty track `node_path` targets this node.
     pub root_node: String,
+    /// Playback signals emitted since the last [`drain_signals`](AnimationPlayer::drain_signals).
+    pending_signals: Vec<AnimationPlayerSignal>,
+    /// Per-pair crossfade times: `(from, to) -> seconds` (Godot `set_blend_time`).
+    blend_times: HashMap<(String, String), f64>,
+    /// Queued follow-up animations: `anim -> next` (Godot `animation_set_next`).
+    next_animations: HashMap<String, String>,
 }
 
 /// Tracks an in-progress crossfade between two animations.
@@ -444,6 +606,9 @@ impl AnimationPlayer {
             blend_state: None,
             root_motion_track: None,
             root_node: ".".to_string(),
+            pending_signals: Vec::new(),
+            blend_times: HashMap::new(),
+            next_animations: HashMap::new(),
         }
     }
 
@@ -453,18 +618,120 @@ impl AnimationPlayer {
     }
 
     /// Starts playing the named animation from the beginning.
+    ///
+    /// Emits `animation_changed` (when the current animation differs) and
+    /// `animation_started` into the signal queue.
     pub fn play(&mut self, name: &str) {
         if self.animations.contains_key(name) {
+            let previous = self.current.take();
             self.current = Some(name.to_owned());
             self.position = 0.0;
             self.playing = true;
             self.ping_pong_forward = true;
+            if let Some(prev) = previous {
+                if prev != name {
+                    self.pending_signals
+                        .push(AnimationPlayerSignal::AnimationChanged {
+                            old: prev,
+                            new: name.to_owned(),
+                        });
+                }
+            }
+            self.pending_signals
+                .push(AnimationPlayerSignal::AnimationStarted(name.to_owned()));
         }
     }
 
     /// Stops playback.
     pub fn stop(&mut self) {
         self.playing = false;
+    }
+
+    /// Emits `animation_finished` for the current animation and, if one is
+    /// queued via [`animation_set_next`](AnimationPlayer::animation_set_next),
+    /// starts it. Called when a non-looping animation reaches its end.
+    fn on_animation_finished(&mut self) {
+        let Some(name) = self.current.clone() else {
+            return;
+        };
+        self.pending_signals
+            .push(AnimationPlayerSignal::AnimationFinished(name.clone()));
+        if let Some(next) = self.next_animations.get(&name).cloned() {
+            if self.animations.contains_key(&next) {
+                // `play` emits `animation_changed` + `animation_started`.
+                self.play(&next);
+            }
+        }
+    }
+
+    /// Seeks to `time` seconds within the current animation (clamped to its
+    /// length). Godot's `seek(seconds, update)` — because sampling here is
+    /// pull-based ([`get_current_values`](AnimationPlayer::get_current_values)
+    /// reads the position), setting the position *is* the immediate update, so
+    /// `update` is accepted for API parity.
+    pub fn seek(&mut self, time: f64, update: bool) {
+        let _ = update;
+        let length = self
+            .current
+            .as_ref()
+            .and_then(|n| self.animations.get(n))
+            .map(|a| a.length)
+            .unwrap_or(0.0);
+        self.position = if length > 0.0 {
+            time.clamp(0.0, length)
+        } else {
+            time.max(0.0)
+        };
+    }
+
+    /// Sets the crossfade time in seconds applied when transitioning from `from`
+    /// to `to` (Godot `AnimationPlayer::set_blend_time`).
+    pub fn set_blend_time(&mut self, from: impl Into<String>, to: impl Into<String>, secs: f64) {
+        self.blend_times
+            .insert((from.into(), to.into()), secs.max(0.0));
+    }
+
+    /// Returns the configured blend time from `from` to `to`, or `0.0` if none.
+    pub fn get_blend_time(&self, from: &str, to: &str) -> f64 {
+        self.blend_times
+            .get(&(from.to_string(), to.to_string()))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Queues `next` to auto-play when `anim` finishes (Godot
+    /// `AnimationPlayer::animation_set_next`).
+    pub fn animation_set_next(&mut self, anim: impl Into<String>, next: impl Into<String>) {
+        self.next_animations.insert(anim.into(), next.into());
+    }
+
+    /// Returns the animation queued to follow `anim`, if any.
+    pub fn animation_get_next(&self, anim: &str) -> Option<&str> {
+        self.next_animations.get(anim).map(String::as_str)
+    }
+
+    /// Plays the configured [`autoplay`](AnimationPlayer::autoplay) animation, if
+    /// present in the library. Intended to be called when the player's owner
+    /// node enters the tree (Godot's autoplay-on-ready). Returns `true` if an
+    /// animation was started.
+    pub fn play_autoplay(&mut self) -> bool {
+        if let Some(name) = self.autoplay.clone() {
+            if self.animations.contains_key(&name) {
+                self.play(&name);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drains and returns queued playback signals in emission order.
+    pub fn drain_signals(&mut self) -> Vec<AnimationPlayerSignal> {
+        std::mem::take(&mut self.pending_signals)
+    }
+
+    /// `true` if there are queued signals awaiting [`drain_signals`](AnimationPlayer::drain_signals).
+    pub fn has_pending_signals(&self) -> bool {
+        !self.pending_signals.is_empty()
     }
 
     /// Returns the currently playing animation name.
@@ -511,9 +778,11 @@ impl AnimationPlayer {
                 if self.position >= length {
                     self.position = length;
                     self.playing = false;
+                    self.on_animation_finished();
                 } else if self.position < 0.0 {
                     self.position = 0.0;
                     self.playing = false;
+                    self.on_animation_finished();
                 }
             }
             LoopMode::Linear => {
@@ -921,6 +1190,127 @@ pub fn interpolate_variant(from: &Variant, to: &Variant, t: f32) -> Option<Varia
                 },
                 origin: a.origin.lerp(b.origin, t),
             }))
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cubic (Catmull-Rom) and angle interpolation (pat-u3l8c.102)
+// ---------------------------------------------------------------------------
+
+/// Catmull-Rom cubic through four control values, evaluated at `t ∈ [0,1]` for
+/// the segment `from → to`. `pre` is the value before `from`, `post` the value
+/// after `to`. Passes through the keys: `t=0 → from`, `t=1 → to`.
+///
+/// This is Godot's uniform `_cubic_interpolate` form (uniform key spacing).
+pub fn cubic_interp_f32(pre: f32, from: f32, to: f32, post: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * ((2.0 * from)
+        + (-pre + to) * t
+        + (2.0 * pre - 5.0 * from + 4.0 * to - post) * t2
+        + (-pre + 3.0 * from - 3.0 * to + post) * t3)
+}
+
+/// `f64` variant of [`cubic_interp_f32`], used for `Float` keys to preserve
+/// precision.
+pub fn cubic_interp_f64(pre: f64, from: f64, to: f64, post: f64, t: f64) -> f64 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * ((2.0 * from)
+        + (-pre + to) * t
+        + (2.0 * pre - 5.0 * from + 4.0 * to - post) * t2
+        + (-pre + 3.0 * from - 3.0 * to + post) * t3)
+}
+
+/// Catmull-Rom cubic interpolation applied component-wise to a [`Variant`].
+///
+/// Supports `Float`, `Vector2`, `Vector3`, and `Color`; returns `None` for
+/// other/ mismatched types (callers fall back to linear). `pre`/`post` are the
+/// neighbor key values (clamped to `from`/`to` by the caller when missing).
+pub fn cubic_interpolate_variant(
+    pre: &Variant,
+    from: &Variant,
+    to: &Variant,
+    post: &Variant,
+    t: f32,
+) -> Option<Variant> {
+    match (pre, from, to, post) {
+        (Variant::Float(pr), Variant::Float(fr), Variant::Float(tv), Variant::Float(po)) => {
+            Some(Variant::Float(cubic_interp_f64(*pr, *fr, *tv, *po, t as f64)))
+        }
+        (Variant::Vector2(pr), Variant::Vector2(fr), Variant::Vector2(tv), Variant::Vector2(po)) => {
+            Some(Variant::Vector2(Vector2::new(
+                cubic_interp_f32(pr.x, fr.x, tv.x, po.x, t),
+                cubic_interp_f32(pr.y, fr.y, tv.y, po.y, t),
+            )))
+        }
+        (Variant::Vector3(pr), Variant::Vector3(fr), Variant::Vector3(tv), Variant::Vector3(po)) => {
+            Some(Variant::Vector3(Vector3::new(
+                cubic_interp_f32(pr.x, fr.x, tv.x, po.x, t),
+                cubic_interp_f32(pr.y, fr.y, tv.y, po.y, t),
+                cubic_interp_f32(pr.z, fr.z, tv.z, po.z, t),
+            )))
+        }
+        (Variant::Color(pr), Variant::Color(fr), Variant::Color(tv), Variant::Color(po)) => {
+            Some(Variant::Color(Color::new(
+                cubic_interp_f32(pr.r, fr.r, tv.r, po.r, t),
+                cubic_interp_f32(pr.g, fr.g, tv.g, po.g, t),
+                cubic_interp_f32(pr.b, fr.b, tv.b, po.b, t),
+                cubic_interp_f32(pr.a, fr.a, tv.a, po.a, t),
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// Wraps `x` into the half-open range `[min, max)` (Godot's `wrapf`). Used to
+/// compute shortest signed angle deltas across the 2π boundary.
+pub fn wrapf(x: f32, min: f32, max: f32) -> f32 {
+    let range = max - min;
+    if range.abs() < 1e-20 {
+        return min;
+    }
+    min + (x - min).rem_euclid(range)
+}
+
+/// Shortest-path angular lerp (Godot `LINEAR_ANGLE`) for `Float` (radian)
+/// values: `from + wrapf(to - from, -PI, PI) * t`. Returns `None` for
+/// non-`Float` values so callers fall back to plain linear interpolation.
+fn linear_angle_variant(from: &Variant, to: &Variant, t: f32) -> Option<Variant> {
+    match (from, to) {
+        (Variant::Float(a), Variant::Float(b)) => {
+            let pi = std::f32::consts::PI;
+            let delta = wrapf((*b - *a) as f32, -pi, pi);
+            Some(Variant::Float(*a + (delta * t) as f64))
+        }
+        _ => None,
+    }
+}
+
+/// Cubic interpolation on the *unwrapped* angle sequence (Godot `CUBIC_ANGLE`)
+/// for `Float` (radian) values: `to`/`pre`/`post` are unwrapped to be
+/// continuous relative to `from` before applying the Catmull-Rom cubic, so the
+/// curve follows the shortest path and never overshoots by ~π. Returns `None`
+/// for non-`Float` values so callers fall back to plain cubic.
+fn cubic_angle_variant(
+    pre: &Variant,
+    from: &Variant,
+    to: &Variant,
+    post: &Variant,
+    t: f32,
+) -> Option<Variant> {
+    match (pre, from, to, post) {
+        (Variant::Float(pr), Variant::Float(fr), Variant::Float(tv), Variant::Float(po)) => {
+            let pi = std::f32::consts::PI;
+            let from_f = *fr as f32;
+            let to_u = from_f + wrapf(*tv as f32 - from_f, -pi, pi);
+            let pre_u = from_f + wrapf(*pr as f32 - from_f, -pi, pi);
+            let post_u = to_u + wrapf(*po as f32 - to_u, -pi, pi);
+            Some(Variant::Float(
+                cubic_interp_f32(pre_u, from_f, to_u, post_u, t) as f64,
+            ))
         }
         _ => None,
     }
@@ -1585,6 +1975,202 @@ mod tests {
         assert!(player.blend_state().is_some());
         player.clear_blend();
         assert!(player.blend_state().is_none());
+    }
+
+    #[test]
+    fn play_emits_started_and_changed_signals() {
+        let mut p = AnimationPlayer::new();
+        p.add_animation(Animation::new("idle", 1.0));
+        p.add_animation(Animation::new("run", 1.0));
+
+        p.play("idle");
+        assert_eq!(
+            p.drain_signals(),
+            vec![AnimationPlayerSignal::AnimationStarted("idle".into())]
+        );
+
+        p.play("run");
+        assert_eq!(
+            p.drain_signals(),
+            vec![
+                AnimationPlayerSignal::AnimationChanged {
+                    old: "idle".into(),
+                    new: "run".into(),
+                },
+                AnimationPlayerSignal::AnimationStarted("run".into()),
+            ]
+        );
+        assert!(!p.has_pending_signals(), "drain clears the queue");
+    }
+
+    #[test]
+    fn advance_past_end_emits_finished_and_plays_queued_next() {
+        let mut p = AnimationPlayer::new();
+        p.add_animation(Animation::new("attack", 1.0)); // non-looping (default)
+        p.add_animation(Animation::new("idle", 1.0));
+        p.animation_set_next("attack", "idle");
+        assert_eq!(p.animation_get_next("attack"), Some("idle"));
+
+        p.play("attack");
+        let _ = p.drain_signals(); // clear the started signal
+
+        // Advance past the 1.0s length → attack finishes → idle auto-plays.
+        p.advance(1.5);
+        let sigs = p.drain_signals();
+        assert!(
+            sigs.contains(&AnimationPlayerSignal::AnimationFinished("attack".into())),
+            "finished signal: {sigs:?}"
+        );
+        assert!(
+            sigs.contains(&AnimationPlayerSignal::AnimationStarted("idle".into())),
+            "queued-next started: {sigs:?}"
+        );
+        assert_eq!(p.current_animation(), Some("idle"));
+    }
+
+    #[test]
+    fn seek_clamps_and_sets_position() {
+        let mut p = AnimationPlayer::new();
+        p.add_animation(Animation::new("clip", 2.0));
+        p.play("clip");
+
+        p.seek(1.25, true);
+        assert!((p.position() - 1.25).abs() < 1e-9);
+        p.seek(99.0, false); // clamped to length
+        assert!((p.position() - 2.0).abs() < 1e-9);
+        p.seek(-5.0, true); // clamped to 0
+        assert!(p.position().abs() < 1e-9);
+    }
+
+    #[test]
+    fn blend_times_and_autoplay() {
+        let mut p = AnimationPlayer::new();
+        p.add_animation(Animation::new("a", 1.0));
+        p.add_animation(Animation::new("b", 1.0));
+
+        p.set_blend_time("a", "b", 0.4);
+        assert!((p.get_blend_time("a", "b") - 0.4).abs() < 1e-9);
+        assert_eq!(p.get_blend_time("b", "a"), 0.0); // unset pair defaults to 0
+
+        p.autoplay = Some("a".into());
+        assert!(p.play_autoplay());
+        assert_eq!(p.current_animation(), Some("a"));
+
+        // Autoplay of a missing animation is a no-op.
+        p.autoplay = Some("missing".into());
+        assert!(!p.play_autoplay());
+    }
+
+    // -- pat-u3l8c.102: discrete / cubic / angle interpolation --------------
+
+    #[test]
+    fn anim_interp_discrete_holds_previous_key() {
+        let mut track = AnimationTrack::new("x");
+        track.update_mode = TrackUpdateMode::Discrete;
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(1.0))); // A
+        track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(2.0))); // B
+
+        // Between keys: hold the previous key (A), no interpolation.
+        assert_eq!(track.sample(0.5), Some(Variant::Float(1.0)));
+        // At the second key: value B.
+        assert_eq!(track.sample(1.0), Some(Variant::Float(2.0)));
+        // Before all keys: first key.
+        assert_eq!(track.sample(-1.0), Some(Variant::Float(1.0)));
+    }
+
+    #[test]
+    fn anim_interp_cubic_passes_through_keys() {
+        let mut track = AnimationTrack::new("x");
+        track.interpolation = TrackInterpolation::Cubic;
+        let vals = [0.0_f64, 2.0, -1.0, 3.0];
+        for (i, v) in vals.iter().enumerate() {
+            track.add_keyframe(KeyFrame::linear(i as f64, Variant::Float(*v)));
+        }
+        // Cubic must pass through the exact key value at each key time.
+        for (i, v) in vals.iter().enumerate() {
+            match track.sample(i as f64) {
+                Some(Variant::Float(f)) => assert!(
+                    (f - *v).abs() < 1e-4,
+                    "cubic key {i}: expected {v}, got {f}"
+                ),
+                other => panic!("expected Float at key {i}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn anim_interp_cubic_differs_from_linear_at_midpoint() {
+        // Non-collinear keys: 0, 0, 10, 0 at t = 0, 1, 2, 3.
+        let vals = [0.0_f64, 0.0, 10.0, 0.0];
+        let mut cubic = AnimationTrack::new("x");
+        cubic.interpolation = TrackInterpolation::Cubic;
+        let mut linear = AnimationTrack::new("x");
+        for (i, v) in vals.iter().enumerate() {
+            cubic.add_keyframe(KeyFrame::linear(i as f64, Variant::Float(*v)));
+            linear.add_keyframe(KeyFrame::linear(i as f64, Variant::Float(*v)));
+        }
+
+        // Midpoint of the [t=1, t=2] segment (from=0, to=10).
+        let c = match cubic.sample(1.5) {
+            Some(Variant::Float(f)) => f,
+            o => panic!("expected Float, got {o:?}"),
+        };
+        let l = match linear.sample(1.5) {
+            Some(Variant::Float(f)) => f,
+            o => panic!("expected Float, got {o:?}"),
+        };
+        assert!((l - 5.0).abs() < 1e-4, "linear midpoint should be 5.0, got {l}");
+        assert!((c - l).abs() > 1e-2, "cubic ({c}) must differ from linear ({l})");
+        // Catmull-Rom overshoots above the linear midpoint here (≈ 5.625).
+        assert!((c - 5.625).abs() < 1e-3, "cubic midpoint ≈ 5.625, got {c}");
+    }
+
+    #[test]
+    fn anim_interp_linear_angle_shortest_path() {
+        use std::f32::consts::PI;
+        let from = 350.0_f64.to_radians(); // ≈ 6.108
+        let to = 10.0_f64.to_radians(); // ≈ 0.1745
+        let mut track = AnimationTrack::new("rotation");
+        track.interpolation = TrackInterpolation::LinearAngle;
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(from)));
+        track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(to)));
+
+        let mid = match track.sample(0.5) {
+            Some(Variant::Float(f)) => f as f32,
+            o => panic!("expected Float, got {o:?}"),
+        };
+        // Shortest path is +20° through the 360° wrap → midpoint ≈ 0 (mod 2π),
+        // NOT −340° through ~180°.
+        let wrapped = wrapf(mid, -PI, PI);
+        assert!(
+            wrapped.abs() < 0.05,
+            "expected ≈0 (mod 2π), got {mid} (wrapped {wrapped})"
+        );
+    }
+
+    #[test]
+    fn anim_interp_cubic_angle_wraps() {
+        use std::f32::consts::PI;
+        // Angles (wrapped into [0, 2π)) marching across the 0/2π boundary.
+        let vals = [6.0_f64, 6.2, 0.1, 0.3];
+        let mut track = AnimationTrack::new("rotation");
+        track.interpolation = TrackInterpolation::CubicAngle;
+        for (i, v) in vals.iter().enumerate() {
+            track.add_keyframe(KeyFrame::linear(i as f64, Variant::Float(*v)));
+        }
+
+        // Sample the [t=1 (6.2), t=2 (0.1)] segment, which straddles 2π.
+        let mid = match track.sample(1.5) {
+            Some(Variant::Float(f)) => f as f32,
+            o => panic!("expected Float, got {o:?}"),
+        };
+        // The unwrapped cubic stays near the 0/2π boundary — it must NOT
+        // overshoot toward π.
+        let wrapped = wrapf(mid, -PI, PI);
+        assert!(
+            wrapped.abs() < 0.3,
+            "cubic-angle should stay near the 0/2π boundary, got {mid} (wrapped {wrapped})"
+        );
     }
 }
 

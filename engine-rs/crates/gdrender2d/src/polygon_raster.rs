@@ -5,7 +5,7 @@
 //! polylines with caps and joints. This module adds those as scanline
 //! rasterizers operating directly on a [`FrameBuffer`].
 
-use gdcore::math::{Color, Vector2};
+use gdcore::math::{Color, Transform2D, Vector2};
 
 use crate::renderer::FrameBuffer;
 use crate::texture::Texture2D;
@@ -196,6 +196,102 @@ pub fn draw_polyline(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Skeleton2D / Bone2D skinning (pat-u3l8c.100)
+// ---------------------------------------------------------------------------
+
+/// A single 2D skinning bone, holding its **global-space** rest and pose
+/// transforms.
+///
+/// Godot's `Bone2D` stores a *local* rest pose and derives its global rest from
+/// the `Skeleton2D` hierarchy; here the caller composes the hierarchy and
+/// supplies already-global transforms, which keeps the skinning math pure and
+/// trivially testable. The bone's *skinning* transform maps a vertex from its
+/// rest position into its posed position: `pose * rest.affine_inverse()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bone2D {
+    /// The bone's rest transform in global space.
+    pub rest: Transform2D,
+    /// The bone's current pose transform in global space.
+    pub pose: Transform2D,
+}
+
+impl Bone2D {
+    /// Creates a bone from its global rest and pose transforms.
+    pub fn new(rest: Transform2D, pose: Transform2D) -> Self {
+        Self { rest, pose }
+    }
+
+    /// Returns the skinning transform `pose * rest.affine_inverse()`.
+    ///
+    /// Applied to a rest-space vertex, this yields the vertex's deformed
+    /// position for a full-weight (1.0) influence from this bone. When
+    /// `pose == rest` the skinning transform is the identity and the vertex is
+    /// left unchanged.
+    pub fn skinning_transform(&self) -> Transform2D {
+        self.pose * self.rest.affine_inverse()
+    }
+}
+
+/// A 2D skeleton: an ordered collection of [`Bone2D`]s.
+///
+/// Bone order is significant — Polygon2D weight arrays are indexed by bone.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Skeleton2D {
+    /// The skeleton's bones, in weight-index order.
+    pub bones: Vec<Bone2D>,
+}
+
+impl Skeleton2D {
+    /// Creates a skeleton from a list of bones.
+    pub fn new(bones: Vec<Bone2D>) -> Self {
+        Self { bones }
+    }
+
+    /// Returns each bone's [`skinning_transform`](Bone2D::skinning_transform),
+    /// parallel to `bones`, ready to pass to [`deform_polygon_vertices`].
+    pub fn skinning_transforms(&self) -> Vec<Transform2D> {
+        self.bones.iter().map(Bone2D::skinning_transform).collect()
+    }
+}
+
+/// Deform Polygon2D `vertices` by per-bone, per-vertex `weights`.
+///
+/// `weights[b][v]` is bone `b`'s influence on vertex `v`, and `skin_xforms[b]`
+/// is that bone's skinning transform (see [`Bone2D::skinning_transform`]). The
+/// deformed position of vertex `v` is the weighted average of every bone's
+/// transform applied to the rest vertex:
+/// `(Σ_b w[b][v] * skin_xforms[b].xform(v)) / Σ_b w[b][v]`, matching Godot's
+/// normalized skinning. A vertex whose total weight is ~0 stays at its rest
+/// position. Ragged weight rows are tolerated: bone `b` only influences vertex
+/// `v` when `v < weights[b].len()`, and bones beyond `skin_xforms.len()` (or
+/// `weights.len()`) are ignored.
+pub fn deform_polygon_vertices(
+    vertices: &[Vector2],
+    skin_xforms: &[Transform2D],
+    weights: &[Vec<f32>],
+) -> Vec<Vector2> {
+    let bone_count = skin_xforms.len().min(weights.len());
+    let mut out = Vec::with_capacity(vertices.len());
+    for (v, &vertex) in vertices.iter().enumerate() {
+        let mut acc = Vector2::ZERO;
+        let mut total = 0.0f32;
+        for b in 0..bone_count {
+            if v < weights[b].len() {
+                let w = weights[b][v];
+                acc = acc + w * skin_xforms[b].xform(vertex);
+                total += w;
+            }
+        }
+        if total > 1e-6 {
+            out.push(acc / total);
+        } else {
+            out.push(vertex);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +401,127 @@ mod tests {
         let pts = [Vector2::new(1.0, 5.0), Vector2::new(9.0, 5.0)];
         draw_polyline(&mut fb, &pts, 0.0, red(), false, LineCap::None, LineJoint::Sharp);
         assert!(approx(fb.get_pixel(5, 5), clear()));
+    }
+
+    // -- Skeleton2D / Bone2D skinning (pat-u3l8c.100) -----------------------
+
+    /// A small rest-space triangle reused across the deform tests.
+    fn tri() -> [Vector2; 3] {
+        [
+            Vector2::new(0.0, 0.0),
+            Vector2::new(4.0, 0.0),
+            Vector2::new(2.0, 3.0),
+        ]
+    }
+
+    fn approx_v(a: Vector2, b: Vector2, tol: f32) -> bool {
+        (a.x - b.x).abs() < tol && (a.y - b.y).abs() < tol
+    }
+
+    #[test]
+    fn polygon2d_single_bone_translation_deforms_vertices() {
+        // One bone whose pose is the rest translated by (10, 0), full weight.
+        let bone = Bone2D::new(
+            Transform2D::IDENTITY,
+            Transform2D::translated(Vector2::new(10.0, 0.0)),
+        );
+        let skel = Skeleton2D::new(vec![bone]);
+        let skin = skel.skinning_transforms();
+        let verts = tri();
+        let weights = vec![vec![1.0, 1.0, 1.0]];
+        let deformed = deform_polygon_vertices(&verts, &skin, &weights);
+        for (r, d) in verts.iter().zip(deformed.iter()) {
+            assert!(
+                approx_v(*d, Vector2::new(r.x + 10.0, r.y), 1e-3),
+                "vertex should shift by (10,0): rest {r:?} -> deformed {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn polygon2d_zero_weight_vertex_stays_at_rest() {
+        // Bone moves far, but the third vertex has zero weight and must not move.
+        let bone = Bone2D::new(
+            Transform2D::IDENTITY,
+            Transform2D::translated(Vector2::new(50.0, -20.0)),
+        );
+        let skin = vec![bone.skinning_transform()];
+        let verts = tri();
+        let weights = vec![vec![1.0, 1.0, 0.0]];
+        let deformed = deform_polygon_vertices(&verts, &skin, &weights);
+        // Zero-weight vertex is unchanged even though the bone moved far.
+        assert!(approx_v(deformed[2], verts[2], 1e-3));
+        // A fully weighted vertex did move by the bone translation.
+        assert!(approx_v(deformed[0], Vector2::new(50.0, -20.0), 1e-3));
+    }
+
+    #[test]
+    fn polygon2d_two_bone_weighted_blend() {
+        let dx = 10.0;
+        let dy = 6.0;
+        // Bone 0 translates +X, bone 1 translates +Y; a vertex weighted 0.5/0.5
+        // lands at the midpoint of the two candidate positions.
+        let bone_x = Bone2D::new(
+            Transform2D::IDENTITY,
+            Transform2D::translated(Vector2::new(dx, 0.0)),
+        );
+        let bone_y = Bone2D::new(
+            Transform2D::IDENTITY,
+            Transform2D::translated(Vector2::new(0.0, dy)),
+        );
+        let skel = Skeleton2D::new(vec![bone_x, bone_y]);
+        let skin = skel.skinning_transforms();
+        let verts = [Vector2::new(0.0, 0.0)];
+        let weights = vec![vec![0.5], vec![0.5]];
+        let deformed = deform_polygon_vertices(&verts, &skin, &weights);
+        // (0.5*(dx,0) + 0.5*(0,dy)) / (0.5 + 0.5) = (dx/2, dy/2).
+        assert!(approx_v(deformed[0], Vector2::new(dx * 0.5, dy * 0.5), 1e-3));
+    }
+
+    #[test]
+    fn polygon2d_bone_rotation_deforms() {
+        // Rest identity, pose = 90° rotation about the origin, full weight.
+        let bone = Bone2D::new(
+            Transform2D::IDENTITY,
+            Transform2D::rotated(std::f32::consts::FRAC_PI_2),
+        );
+        let skin = vec![bone.skinning_transform()];
+        let verts = [Vector2::new(1.0, 0.0)];
+        let weights = vec![vec![1.0]];
+        let deformed = deform_polygon_vertices(&verts, &skin, &weights);
+        // (1,0) rotated +90° maps to (0,1) under Godot's Transform2D::rotated.
+        assert!(approx_v(deformed[0], Vector2::new(0.0, 1.0), 1e-3));
+    }
+
+    #[test]
+    fn polygon2d_deformed_fill_moves_pixels() {
+        // Rasterize a square at rest and after a +12px x-translation deform;
+        // the filled region must shift accordingly.
+        let square = [
+            Vector2::new(2.0, 2.0),
+            Vector2::new(8.0, 2.0),
+            Vector2::new(8.0, 8.0),
+            Vector2::new(2.0, 8.0),
+        ];
+        let bone = Bone2D::new(
+            Transform2D::IDENTITY,
+            Transform2D::translated(Vector2::new(12.0, 0.0)),
+        );
+        let skin = vec![bone.skinning_transform()];
+        let weights = vec![vec![1.0, 1.0, 1.0, 1.0]];
+        let deformed = deform_polygon_vertices(&square, &skin, &weights);
+
+        let mut fb_rest = FrameBuffer::new(30, 20, clear());
+        fill_polygon(&mut fb_rest, &square, red());
+        let mut fb_deformed = FrameBuffer::new(30, 20, clear());
+        fill_polygon(&mut fb_deformed, &deformed, red());
+
+        // Rest fill covers the original region but not the shifted region.
+        assert!(approx(fb_rest.get_pixel(5, 5), red()));
+        assert!(approx(fb_rest.get_pixel(17, 5), clear()));
+        // Deformed fill moved +12px in x: original region now clear, shifted
+        // region now filled.
+        assert!(approx(fb_deformed.get_pixel(5, 5), clear()));
+        assert!(approx(fb_deformed.get_pixel(17, 5), red()));
     }
 }

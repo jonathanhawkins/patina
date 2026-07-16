@@ -192,7 +192,25 @@ fn bounce_out(t: f64) -> f64 {
 // TweenStep
 // ---------------------------------------------------------------------------
 
-/// A single property transition within a tween.
+/// The kind of work a [`TweenStep`] performs. `Property` interpolates a node
+/// property (the original behaviour); the others mirror Godot's `tween_method`,
+/// `tween_callback`, and `tween_interval` tweeners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TweenerKind {
+    /// Interpolates `property_path` from start to end (default).
+    #[default]
+    Property,
+    /// Interpolates start..end and delivers the value to a script method each
+    /// frame (Godot `tween_method`). The method name is in [`TweenStep::method`].
+    Method,
+    /// Fires a script method once when the step is reached (Godot `tween_callback`).
+    Callback,
+    /// A pure time delay with no output (Godot `tween_interval`).
+    Interval,
+}
+
+/// A single step within a tween — a property transition, a `tween_method`
+/// interpolation, a `tween_callback`, or a `tween_interval` delay.
 #[derive(Debug, Clone)]
 pub struct TweenStep {
     /// The property path to animate.
@@ -213,6 +231,12 @@ pub struct TweenStep {
     pub delay: f64,
     /// Whether this step runs in parallel with the previous step.
     pub parallel: bool,
+    /// What this step does (property/method/callback/interval).
+    pub kind: TweenerKind,
+    /// Script method name for `Method`/`Callback` steps (empty otherwise).
+    pub method: String,
+    /// Callback fire-once guard (re-armed on loop).
+    fired: bool,
 }
 
 impl TweenStep {
@@ -233,7 +257,36 @@ impl TweenStep {
             trans_func: TransFunc::Linear,
             delay: 0.0,
             parallel: false,
+            kind: TweenerKind::Property,
+            method: String::new(),
+            fired: false,
         }
+    }
+
+    /// Creates a `tween_method` step: interpolates `start`..`end` over
+    /// `duration`, delivering the value to the script `method` each frame.
+    pub fn method(method: impl Into<String>, start: Variant, end: Variant, duration: f64) -> Self {
+        let mut s = Self::new(String::new(), start, end, duration);
+        s.kind = TweenerKind::Method;
+        s.method = method.into();
+        s
+    }
+
+    /// Creates a `tween_callback` step: fires `method` once when the sequence
+    /// reaches it.
+    pub fn callback(method: impl Into<String>) -> Self {
+        let mut s = Self::new(String::new(), Variant::Nil, Variant::Nil, 0.0);
+        s.kind = TweenerKind::Callback;
+        s.method = method.into();
+        s
+    }
+
+    /// Creates a `tween_interval` step: a pure `duration`-second delay with no
+    /// output.
+    pub fn interval(duration: f64) -> Self {
+        let mut s = Self::new(String::new(), Variant::Nil, Variant::Nil, duration);
+        s.kind = TweenerKind::Interval;
+        s
     }
 
     /// Returns `true` if this step has completed.
@@ -279,6 +332,15 @@ pub struct Tween {
     pub loops: i32,
     /// Total number of loops configured.
     loops_total: i32,
+    /// Playback speed multiplier applied to every `advance` (Godot
+    /// `set_speed_scale`). Defaults to 1.0.
+    pub speed_scale: f64,
+    /// When paused, `advance` is a no-op (Godot `pause`).
+    paused: bool,
+    /// When killed, the tween is permanently inert (Godot `kill`).
+    killed: bool,
+    /// Set for one drain when the tween completes (Godot `finished` signal).
+    finished_pending: bool,
 }
 
 impl Tween {
@@ -289,6 +351,10 @@ impl Tween {
             running: false,
             loops: 1,
             loops_total: 1,
+            speed_scale: 1.0,
+            paused: false,
+            killed: false,
+            finished_pending: false,
         }
     }
 
@@ -309,7 +375,14 @@ impl Tween {
     }
 
     /// Advances the tween by `delta` seconds. Returns `true` when fully complete.
+    /// A killed tween is inert; a paused tween does not progress.
     pub fn advance(&mut self, delta: f64) -> bool {
+        if self.killed {
+            return true;
+        }
+        if self.paused {
+            return false;
+        }
         if !self.running {
             return true;
         }
@@ -320,7 +393,7 @@ impl Tween {
 
         // Process steps in groups: sequential steps form barriers,
         // parallel steps run together with the previous sequential step.
-        let mut remaining = delta;
+        let mut remaining = delta * self.speed_scale;
         while remaining > 0.0 {
             // Find the current group of steps to process.
             let group = self.current_step_group();
@@ -333,6 +406,7 @@ impl Tween {
                 self.loops -= 1;
                 if self.loops <= 0 {
                     self.running = false;
+                    self.finished_pending = true;
                     return true;
                 }
                 self.reset_steps();
@@ -371,6 +445,7 @@ impl Tween {
             self.loops -= 1;
             if self.loops <= 0 {
                 self.running = false;
+                self.finished_pending = true;
                 return true;
             }
             self.reset_steps();
@@ -399,19 +474,90 @@ impl Tween {
         group
     }
 
-    /// Resets all steps for looping.
+    /// Resets all steps for looping (re-arming callbacks).
     fn reset_steps(&mut self) {
         for step in &mut self.steps {
             step.elapsed = 0.0;
+            step.fired = false;
         }
     }
 
-    /// Returns the current values of all active steps.
+    /// Returns the current values of all active **property** steps. Method,
+    /// callback, and interval steps are excluded — they surface through
+    /// [`method_values`](Tween::method_values) / [`poll_callbacks`](Tween::poll_callbacks).
     pub fn get_current_values(&self) -> Vec<(String, Variant)> {
         self.steps
             .iter()
+            .filter(|s| s.kind == TweenerKind::Property)
             .map(|s| (s.property_path.clone(), s.current_value()))
             .collect()
+    }
+
+    /// Returns `(method_name, interpolated_value)` for every active
+    /// `tween_method` step — the values Godot delivers to the method each frame.
+    pub fn method_values(&self) -> Vec<(String, Variant)> {
+        self.current_step_group()
+            .iter()
+            .filter_map(|&i| {
+                let s = &self.steps[i];
+                (s.kind == TweenerKind::Method).then(|| (s.method.clone(), s.current_value()))
+            })
+            .collect()
+    }
+
+    /// Fires any `tween_callback` steps the sequence has now reached (all
+    /// earlier steps complete), returning their method names in sequence order.
+    /// Each callback fires once per loop.
+    pub fn poll_callbacks(&mut self) -> Vec<String> {
+        let mut fired_now = Vec::new();
+        for i in 0..self.steps.len() {
+            if self.steps[i].kind != TweenerKind::Callback || self.steps[i].fired {
+                continue;
+            }
+            let reached = self.steps[..i].iter().all(TweenStep::is_complete);
+            if reached {
+                self.steps[i].fired = true;
+                fired_now.push(self.steps[i].method.clone());
+            }
+        }
+        fired_now
+    }
+
+    /// Pauses playback — subsequent `advance` calls are no-ops until [`play`](Tween::play).
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// Resumes playback after a [`pause`](Tween::pause).
+    pub fn play(&mut self) {
+        self.paused = false;
+    }
+
+    /// `true` while paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Permanently stops the tween (Godot `kill`); it becomes inert and invalid.
+    pub fn kill(&mut self) {
+        self.killed = true;
+        self.running = false;
+    }
+
+    /// `true` until the tween has been [`kill`](Tween::kill)ed (Godot `is_valid`).
+    pub fn is_valid(&self) -> bool {
+        !self.killed
+    }
+
+    /// Sets the playback speed multiplier (clamped to ≥ 0).
+    pub fn set_speed_scale(&mut self, scale: f64) {
+        self.speed_scale = scale.max(0.0);
+    }
+
+    /// Returns `true` exactly once after the tween completes, draining the
+    /// `finished` signal.
+    pub fn take_just_finished(&mut self) -> bool {
+        std::mem::take(&mut self.finished_pending)
     }
 }
 
@@ -825,5 +971,116 @@ mod tests {
         } else {
             panic!("expected Color");
         }
+    }
+
+    #[test]
+    fn tween_method_interpolates_and_reports_value() {
+        let mut t = Tween::new();
+        t.steps.push(TweenStep::method(
+            "_set_alpha",
+            Variant::Float(0.0),
+            Variant::Float(10.0),
+            1.0,
+        ));
+        t.start();
+        // Method steps do not emit property values.
+        assert!(t.get_current_values().is_empty());
+
+        t.advance(0.5);
+        let mv = t.method_values();
+        assert_eq!(mv.len(), 1);
+        assert_eq!(mv[0].0, "_set_alpha");
+        match mv[0].1 {
+            Variant::Float(f) => assert!((f - 5.0).abs() < 1e-6, "midpoint value {f}"),
+            ref other => panic!("expected float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tween_callbacks_fire_in_sequence_order() {
+        let mut t = Tween::new();
+        t.steps.push(TweenStep::new(
+            "x",
+            Variant::Float(0.0),
+            Variant::Float(1.0),
+            0.5,
+        ));
+        t.steps.push(TweenStep::callback("_first"));
+        t.steps.push(TweenStep::callback("_second"));
+        t.start();
+
+        // Before the property step completes, no callback fires.
+        t.advance(0.25);
+        assert!(t.poll_callbacks().is_empty());
+
+        // Once it completes, both callbacks fire in sequence order.
+        t.advance(0.5);
+        assert_eq!(
+            t.poll_callbacks(),
+            vec!["_first".to_string(), "_second".to_string()]
+        );
+        // They do not fire again.
+        assert!(t.poll_callbacks().is_empty());
+    }
+
+    #[test]
+    fn tween_interval_delays_without_output() {
+        let mut t = Tween::new();
+        t.steps.push(TweenStep::interval(1.0));
+        t.steps.push(TweenStep::new(
+            "y",
+            Variant::Float(0.0),
+            Variant::Float(4.0),
+            1.0,
+        ));
+        t.start();
+
+        // Mid-interval: only the sequential property "y" surfaces, still at start.
+        t.advance(0.5);
+        let vals = t.get_current_values();
+        assert_eq!(vals.len(), 1);
+        assert_eq!(vals[0].0, "y");
+        match vals[0].1 {
+            Variant::Float(f) => assert!(f.abs() < 1e-6, "y should be 0 during interval, got {f}"),
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tween_finished_signal_and_lifecycle() {
+        let mut t = Tween::new();
+        t.steps.push(TweenStep::new(
+            "x",
+            Variant::Float(0.0),
+            Variant::Float(1.0),
+            1.0,
+        ));
+        t.start();
+
+        // speed_scale doubles effective progress.
+        t.set_speed_scale(2.0);
+        t.advance(0.25); // effective 0.5
+        assert!(!t.take_just_finished());
+
+        // pause halts progress entirely.
+        t.pause();
+        assert!(t.is_paused());
+        t.advance(1.0); // no-op while paused
+        assert!(!t.take_just_finished());
+        t.play();
+
+        // Finish it (effective 1.0 → total elapsed 1.5 ≥ 1.0).
+        t.advance(0.5);
+        assert!(t.take_just_finished(), "finished signal set on completion");
+        assert!(!t.take_just_finished(), "signal drained once");
+
+        // kill makes it invalid + inert.
+        assert!(t.is_valid());
+        t.kill();
+        assert!(!t.is_valid());
+        assert!(
+            t.advance(1.0),
+            "killed tween reports complete and does nothing"
+        );
     }
 }

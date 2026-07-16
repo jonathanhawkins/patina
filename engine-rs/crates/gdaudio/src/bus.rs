@@ -175,4 +175,51 @@ mod send_tests {
         assert_eq!(b.send(), "Master");
         assert!(b.send_linear() < 0.6 && b.send_linear() > 0.4);
     }
+
+    // pat-nzgdu.27: DSP effects (from pat-u3l8c.107) reach the mixer through a
+    // bus's EffectChain — a low-pass then a compressor on one bus.
+    #[test]
+    fn audio_effects_dsp_chain() {
+        use crate::effects::{AudioEffectCompressor, AudioEffectFilter};
+        let sr = 48000u32;
+        let sine = |f: f32, amp: f32, n: usize| {
+            (0..n)
+                .map(|i| (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin() * amp)
+                .collect::<Vec<f32>>()
+        };
+
+        // A bus carrying a low-pass filter then a compressor.
+        let mut bus = AudioBus::new("SFX");
+        bus.effects_mut()
+            .add(Box::new(AudioEffectFilter::low_pass(1000.0, 0.707)));
+        bus.effects_mut()
+            .add(Box::new(AudioEffectCompressor::new(-24.0, 8.0, 2.0, 50.0)));
+        assert_eq!(bus.effects().names(), vec!["Filter", "Compressor"]);
+
+        // (1) Frequency-dependent attenuation: quiet signals keep the compressor
+        // inert (below threshold), so only the low-pass shapes them — a high sine
+        // is attenuated far more than a low one.
+        let mut low = sine(150.0, 0.03, 4096);
+        bus.process_effects(&mut low, sr, 1);
+        bus.effects_mut().reset();
+        let mut high = sine(11000.0, 0.03, 4096);
+        bus.process_effects(&mut high, sr, 1);
+        let e_low: f32 = low.iter().map(|s| s * s).sum();
+        let e_high: f32 = high.iter().map(|s| s * s).sum();
+        assert!(
+            e_low > e_high * 4.0,
+            "low-pass bus must attenuate highs: low={e_low} high={e_high}"
+        );
+
+        // (2) Gain reduction: a loud in-band signal is compressed above threshold.
+        bus.effects_mut().reset();
+        let mut loud = sine(200.0, 0.9, 8000);
+        let in_peak = loud.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        bus.process_effects(&mut loud, sr, 1);
+        let out_peak = loud[4000..].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(
+            out_peak < in_peak * 0.7,
+            "compressor must reduce loud signal: in={in_peak} out={out_peak}"
+        );
+    }
 }

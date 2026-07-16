@@ -19,8 +19,9 @@ pub mod wav;
 pub use bus::AudioBus;
 pub use decode::{decode_mp3, is_mp3, AudioBuffer, AudioStreamGenerator, DecodeError, PolyphonicPlayer};
 pub use effects::{
-    process_buffer, AudioEffect, AudioEffectAmplify, AudioEffectEQ, AudioEffectReverb,
-    EffectChain,
+    process_buffer, AudioEffect, AudioEffectAmplify, AudioEffectCompressor, AudioEffectEQ,
+    AudioEffectFilter, AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectReverb,
+    AudioEffectSpectrumAnalyzer, EffectChain, FilterMode,
 };
 pub use mixer::AudioMixer;
 pub use output::{

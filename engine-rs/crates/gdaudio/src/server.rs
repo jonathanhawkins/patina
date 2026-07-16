@@ -28,6 +28,11 @@ pub struct AudioServer {
     output_sample_rate: u32,
     /// Master channel count for output.
     output_channels: u16,
+    /// Playback handles that reached the end of their stream during the most
+    /// recent `mix` calls and have not yet been drained. Scene glue drains this
+    /// via [`take_finished`](Self::take_finished) to emit Godot's
+    /// `AudioStreamPlayer::finished` signal.
+    finished: Vec<PlaybackId>,
 }
 
 impl AudioServer {
@@ -39,6 +44,7 @@ impl AudioServer {
             next_id: 1,
             output_sample_rate: 44100,
             output_channels: 2,
+            finished: Vec::new(),
         }
     }
 
@@ -109,6 +115,28 @@ impl AudioServer {
             .map(|(_, s)| &mut s.playback)
     }
 
+    /// Redirects a live stream to a different mixer bus. Used for Godot's
+    /// `Area3D`/`Area2D` audio-bus override: when a source node enters an area
+    /// with `audio_bus_override` enabled, its voice is rerouted to the area's
+    /// bus (e.g. a reverb bus) until it leaves. Returns `false` if `id` is
+    /// unknown. The name resolves to `Master` at mix time if the bus is missing.
+    pub fn redirect_stream_bus(&mut self, id: PlaybackId, bus: &str) -> bool {
+        if let Some(playback) = self.stream_mut(id) {
+            playback.set_bus(bus);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drains and returns the playback handles that finished (reached the end of
+    /// their stream) since the last drain. Scene glue calls this after each
+    /// `mix` to emit `AudioStreamPlayer::finished` for the matching nodes.
+    /// Streams stopped explicitly via [`stop`](Self::stop) are not reported.
+    pub fn take_finished(&mut self) -> Vec<PlaybackId> {
+        std::mem::take(&mut self.finished)
+    }
+
     /// Returns the number of active streams.
     pub fn active_stream_count(&self) -> usize {
         self.streams.len()
@@ -158,7 +186,9 @@ impl AudioServer {
                 .filter(|&idx| idx < bus_count)
                 .unwrap_or(0);
 
-            let stream_linear = AudioBus::db_to_linear(stream.playback.volume_db());
+            // User volume (dB) times any spatial linear gain (distance attenuation).
+            let stream_linear = AudioBus::db_to_linear(stream.playback.volume_db())
+                * stream.playback.linear_gain();
 
             let pos_secs = stream.playback.get_playback_position();
             let src_channels = stream.buffer.channels as usize;
@@ -169,26 +199,55 @@ impl AudioServer {
                 continue;
             }
 
-            let src_frame_start = (pos_secs * src_rate as f32) as usize;
+            // Resample the source into the output stream: each output frame
+            // advances the source read cursor by `step` source frames, where
+            // `step = (src_rate / output_rate) * pitch_scale`. This corrects the
+            // pitch of streams whose sample rate differs from the output rate
+            // (a 22050 Hz stream on 44100 Hz output steps 0.5 src frames/out
+            // frame) and honors `pitch_scale` (2.0 doubles the step → +1 octave).
+            // Fractional cursor positions are linearly interpolated.
+            let pitch = stream.playback.pitch_scale().max(0.0);
+            let step = (src_rate as f32 / rate as f32) * pitch;
+            let src_pos_start = pos_secs * src_rate as f32;
+            let frame_total = stream.buffer.frame_count();
+            // Equal-power stereo pan gains (default 1.0/1.0 = center) supplied by
+            // positional players (AudioStreamPlayer2D/3D) via `set_pan`.
+            let (pan_left, pan_right) = stream.playback.pan();
             let buf = &mut bus_bufs[bus_idx];
 
             for frame in 0..frame_count {
-                let src_frame = src_frame_start + frame;
-                if src_frame >= stream.buffer.frame_count() {
+                let src_pos = src_pos_start + frame as f32 * step;
+                if src_pos < 0.0 {
+                    continue;
+                }
+                let i0 = src_pos.floor() as usize;
+                if i0 >= frame_total {
                     break;
                 }
-
-                let src_offset = src_frame * src_channels;
+                // Interpolate toward the next source frame (clamped at the end).
+                let i1 = (i0 + 1).min(frame_total - 1);
+                let frac = src_pos - i0 as f32;
                 let dst_offset = frame * out_ch;
 
                 for ch in 0..out_ch {
                     let src_ch = if ch < src_channels { ch } else { 0 };
-                    let sample = stream.buffer.samples[src_offset + src_ch];
-                    buf[dst_offset + ch] += sample * stream_linear;
+                    let s0 = stream.buffer.samples[i0 * src_channels + src_ch];
+                    let s1 = stream.buffer.samples[i1 * src_channels + src_ch];
+                    let sample = s0 + (s1 - s0) * frac;
+                    // Left/right pan applies to channels 0/1; extra channels pass through.
+                    let pan_gain = match ch {
+                        0 => pan_left,
+                        1 => pan_right,
+                        _ => 1.0,
+                    };
+                    buf[dst_offset + ch] += sample * stream_linear * pan_gain;
                 }
             }
 
-            stream.playback.advance(dt);
+            // Advance source-stream time by the pitched amount so the reported
+            // playback position, looping, and end-of-stream detection stay
+            // consistent with the pitched read cursor.
+            stream.playback.advance(dt * pitch);
         }
 
         // Any soloed non-master bus makes all other non-master buses inaudible.
@@ -256,7 +315,16 @@ impl AudioServer {
             }
         }
 
-        // Remove stopped streams.
+        // A stream reaches `Stopped` here only by running past its end (an
+        // explicit `stop` removes it immediately). Record those handles as
+        // finished so callers can emit the `finished` signal, then drop them.
+        let just_finished: Vec<PlaybackId> = self
+            .streams
+            .iter()
+            .filter(|(_, s)| s.playback.state() == PlaybackState::Stopped)
+            .map(|(id, _)| *id)
+            .collect();
+        self.finished.extend(just_finished);
         self.streams
             .retain(|(_, s)| s.playback.state() != PlaybackState::Stopped);
 
@@ -315,6 +383,16 @@ mod tests {
         }
     }
 
+    /// Mono ramp where sample `i` == `i as f32`, at the given sample rate.
+    /// Makes resampling behavior directly observable in the mixed output.
+    fn make_ramp_buffer(frames: usize, sample_rate: u32) -> AudioBuffer {
+        AudioBuffer {
+            samples: (0..frames).map(|i| i as f32).collect(),
+            sample_rate,
+            channels: 1,
+        }
+    }
+
     #[test]
     fn server_play_and_stop() {
         let mut server = AudioServer::new();
@@ -341,6 +419,240 @@ mod tests {
         // DC value 1.0, mono -> both channels should be ~1.0
         assert!((output[0] - 1.0).abs() < 1e-4);
         assert!((output[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn mix_resamples_low_rate_stream_to_output_rate() {
+        // 22050 Hz source on 44100 Hz output: the read cursor steps 0.5 source
+        // frames per output frame, so a source ramp emerges at half the slope
+        // (correct pitch). The old 1:1 read stepped 1.0 → played 2x too fast.
+        let mut server = AudioServer::new();
+        assert_eq!(server.output_sample_rate(), 44100);
+        server.play(make_ramp_buffer(64, 22050));
+
+        let out = server.mix(8); // stereo interleaved
+        for frame in 0..8 {
+            let got = out[frame * 2];
+            let expected = 0.5 * frame as f32;
+            assert!(
+                (got - expected).abs() < 1e-4,
+                "frame {frame}: got {got}, want {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn mix_pitch_scale_doubles_read_rate() {
+        // Same-rate stream, pitch_scale = 2.0 → step 2.0 source frames per
+        // output frame → the ramp climbs twice as fast (one octave up).
+        let mut server = AudioServer::new();
+        let id = server.play(make_ramp_buffer(64, 44100));
+        server.stream_mut(id).unwrap().set_pitch_scale(2.0);
+
+        let out = server.mix(8);
+        for frame in 0..8 {
+            let got = out[frame * 2];
+            let expected = 2.0 * frame as f32; // reads source frame 2*frame
+            assert!(
+                (got - expected).abs() < 1e-4,
+                "frame {frame}: got {got}, want {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn mix_resampler_linearly_interpolates() {
+        // Two-sample source [0, 10] at half the output rate: output frame 1
+        // lands at source position 0.5 and must interpolate to 5.0.
+        // Nearest-neighbor resampling would snap it to 0.0 or 10.0.
+        let mut server = AudioServer::new();
+        server.play(AudioBuffer {
+            samples: vec![0.0, 10.0],
+            sample_rate: 22050,
+            channels: 1,
+        });
+
+        let out = server.mix(2);
+        assert!((out[0] - 0.0).abs() < 1e-4, "frame0 {}", out[0]);
+        assert!((out[2] - 5.0).abs() < 1e-4, "frame1 midpoint {}", out[2]);
+    }
+
+    #[test]
+    fn player_pushes_pitch_scale_on_play() {
+        use crate::player::AudioStreamPlayer;
+        let mut server = AudioServer::new();
+        let mut player = AudioStreamPlayer::new();
+        player.set_stream(make_ramp_buffer(64, 44100));
+        player.set_pitch_scale(2.0);
+        let id = player.play(&mut server).expect("stream starts");
+
+        // Pitch propagated to the live playback...
+        assert_eq!(server.stream_mut(id).unwrap().pitch_scale(), 2.0);
+        // ...and the mixer honors it (output frame 1 reads source frame 2).
+        let out = server.mix(4);
+        assert!((out[2] - 2.0).abs() < 1e-4, "pitched read: {}", out[2]);
+    }
+
+    #[test]
+    fn mix_applies_3d_attenuation_and_equal_power_pan() {
+        use crate::spatial::{AudioListener3D, AudioStreamPlayer3D};
+        use gdcore::math::Vector3;
+        // Source 30 units to the listener's right (unit_size 10 → atten 0.25).
+        let src = AudioStreamPlayer3D::new(Vector3::new(30.0, 0.0, 0.0));
+        let res = src.compute_spatial(&AudioListener3D::default());
+        assert!(res.pan_right > res.pan_left, "spatial calc pans right: {res:?}");
+
+        let mut server = AudioServer::new();
+        let id = server.play(make_dc_buffer(1.0, 44100));
+        {
+            let pb = server.stream_mut(id).unwrap();
+            pb.set_linear_gain(res.volume_linear);
+            pb.set_pan(res.pan_left, res.pan_right);
+        }
+        let out = server.mix(1);
+        // Right louder than left (panned right)...
+        assert!(out[1] > out[0], "R {} should exceed L {}", out[1], out[0]);
+        // ...distance-attenuated well below unity...
+        assert!(out[1] < 0.5, "distance-attenuated: {}", out[1]);
+        // ...and full-right pan silences the left channel.
+        assert!(out[0].abs() < 1e-4, "left silent on full-right pan: {}", out[0]);
+    }
+
+    #[test]
+    fn mix_applies_2d_pan_from_screen_position() {
+        use crate::spatial::AudioStreamPlayer2D;
+        use gdcore::math::Vector2;
+        // Source at the right edge of the screen (half-width 400).
+        let src = AudioStreamPlayer2D::new(Vector2::new(400.0, 0.0));
+        let res = src.compute_spatial_2d(Vector2::ZERO, 400.0);
+
+        let mut server = AudioServer::new();
+        let id = server.play(make_dc_buffer(1.0, 44100));
+        {
+            let pb = server.stream_mut(id).unwrap();
+            pb.set_linear_gain(res.volume_linear);
+            pb.set_pan(res.pan_left, res.pan_right);
+        }
+        let out = server.mix(1);
+        assert!(
+            out[1] > out[0],
+            "2D source on the right pans right: L{} R{}",
+            out[0],
+            out[1]
+        );
+    }
+
+    #[test]
+    fn area_bus_redirect_reroutes_live_stream() {
+        let mut server = AudioServer::new();
+        // A quiet "Reverb" bus to prove the redirect takes effect.
+        let reverb_idx = server.mixer_mut().add_bus("Reverb");
+        server
+            .mixer_mut()
+            .get_bus_mut(reverb_idx)
+            .unwrap()
+            .set_volume_db(-60.0); // ~0.001 linear
+
+        let id = server.play(make_dc_buffer(1.0, 44100)); // starts on Master
+        assert!(
+            server.mix(1)[0].abs() > 0.5,
+            "audible on Master before redirect"
+        );
+
+        // Area3D audio_bus_override: reroute the live voice to the Reverb bus.
+        assert!(server.redirect_stream_bus(id, "Reverb"));
+        let level = server.mix(1)[0].abs();
+        assert!(
+            level < 0.01,
+            "redirected voice routes through attenuated Reverb bus: {level}"
+        );
+
+        // Unknown handle is a no-op.
+        assert!(!server.redirect_stream_bus(PlaybackId(99999), "Reverb"));
+    }
+
+    #[test]
+    fn mix_reports_finished_stream() {
+        let mut server = AudioServer::new();
+        // 100-frame stream (~2.27 ms) so one 200-frame mix runs past its end.
+        let id = server.play(make_dc_buffer(1.0, 100));
+        assert!(server.take_finished().is_empty(), "nothing finished yet");
+
+        server.mix(200);
+        let finished = server.take_finished();
+        assert_eq!(finished, vec![id], "the ended stream is reported once");
+        assert_eq!(server.active_stream_count(), 0, "ended stream is dropped");
+        // Draining is one-shot.
+        assert!(server.take_finished().is_empty(), "finished queue drained");
+    }
+
+    #[test]
+    fn mix_does_not_report_still_playing_stream() {
+        let mut server = AudioServer::new();
+        // 1-second stream; a 256-frame mix does not reach the end.
+        server.play(make_dc_buffer(1.0, 44100));
+        server.mix(256);
+        assert!(
+            server.take_finished().is_empty(),
+            "long stream has not finished"
+        );
+    }
+
+    #[test]
+    fn solo_bus_silences_non_solo_buses() {
+        let mut server = AudioServer::new();
+        server.mixer_mut().add_bus("Music");
+        let voice_idx = server.mixer_mut().add_bus("Voice");
+
+        server.play_on_bus(make_dc_buffer(1.0, 44100), "Music");
+        // No solo yet: Music is audible.
+        assert!(server.mix(1)[0].abs() > 0.5, "Music audible before solo");
+
+        // Solo a *different* bus → the non-solo Music bus is silenced.
+        server.mixer_mut().get_bus_mut(voice_idx).unwrap().set_solo(true);
+        let out = server.mix(1);
+        assert!(
+            out.iter().all(|&s| s.abs() < 1e-6),
+            "non-solo bus must be silenced while another bus is soloed"
+        );
+    }
+
+    #[test]
+    fn non_master_bus_effect_chain_is_processed() {
+        use crate::effects::AudioEffectAmplify;
+        let mut server = AudioServer::new();
+        let fx_idx = server.mixer_mut().add_bus("FX");
+        // +6 dB (~2x) amplify on the *non-master* bus.
+        server
+            .mixer_mut()
+            .get_bus_mut(fx_idx)
+            .unwrap()
+            .effects_mut()
+            .add(Box::new(AudioEffectAmplify::new(6.0)));
+
+        server.play_on_bus(make_dc_buffer(0.25, 44100), "FX");
+        let out = server.mix(1)[0];
+        // 0.25 amplified by ~2x → ~0.5 (proves the non-master effect chain ran).
+        assert!((out - 0.499).abs() < 0.02, "amplified output: {out}");
+        assert!(out > 0.25, "effect must have boosted above the dry input");
+    }
+
+    #[test]
+    fn reverb_on_non_master_bus_is_audible() {
+        use crate::effects::AudioEffectReverb;
+        let mut server = AudioServer::new();
+        let rev_idx = server.mixer_mut().add_bus("Reverb");
+        server
+            .mixer_mut()
+            .get_bus_mut(rev_idx)
+            .unwrap()
+            .effects_mut()
+            .add(Box::new(AudioEffectReverb::new()));
+
+        server.play_on_bus(make_dc_buffer(0.5, 44100), "Reverb");
+        let out = server.mix(1)[0];
+        // Reverb keeps a dry component, so the source stays audible on the bus.
+        assert!(out.abs() > 0.1, "reverb on a non-master bus stays audible: {out}");
     }
 
     #[test]

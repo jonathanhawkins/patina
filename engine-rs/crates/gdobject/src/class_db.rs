@@ -813,6 +813,14 @@ pub fn register_2d_classes() {
     if !class_exists("Polygon2D") {
         register_class(ClassRegistration::new("Polygon2D").parent("Node2D"));
     }
+    // Skeleton2D / Bone2D — 2D skeletal deform for Polygon2D skinning
+    // (pat-u3l8c.100). Both derive from Node2D in Godot's hierarchy.
+    if !class_exists("Skeleton2D") {
+        register_class(ClassRegistration::new("Skeleton2D").parent("Node2D"));
+    }
+    if !class_exists("Bone2D") {
+        register_class(ClassRegistration::new("Bone2D").parent("Node2D"));
+    }
     if !class_exists("Path2D") {
         register_class(ClassRegistration::new("Path2D").parent("Node2D"));
     }

@@ -298,6 +298,465 @@ pub fn process_buffer(
     chain.process(samples, sample_rate, channels);
 }
 
+// ---------------------------------------------------------------------------
+// Biquad filter family — Godot `AudioEffectFilter` (pat-u3l8c.107)
+// ---------------------------------------------------------------------------
+
+/// Biquad response type (RBJ audio-EQ cookbook).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterMode {
+    /// Low-pass (attenuate above cutoff).
+    LowPass,
+    /// High-pass (attenuate below cutoff).
+    HighPass,
+    /// Band-pass (0 dB peak at centre).
+    BandPass,
+    /// Notch / band-reject (null at centre).
+    Notch,
+    /// Peaking EQ (boost/cut a band by `gain_db`).
+    Peak,
+    /// Low shelf (boost/cut below cutoff by `gain_db`).
+    LowShelf,
+    /// High shelf (boost/cut above cutoff by `gain_db`).
+    HighShelf,
+}
+
+/// Normalised biquad coefficients (Direct Form I), with `a0` folded to 1.
+#[derive(Debug, Clone, Copy)]
+struct BiquadCoeffs {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+}
+
+impl BiquadCoeffs {
+    /// RBJ cookbook coefficients for `mode` at `f0` Hz, quality `q`, shelf/peak
+    /// `gain_db`, sampled at `sample_rate`.
+    fn design(mode: FilterMode, f0: f32, q: f32, gain_db: f32, sample_rate: f32) -> Self {
+        let sr = sample_rate.max(1.0);
+        let f0 = f0.clamp(1.0, sr * 0.49); // keep below Nyquist
+        let q = q.max(1e-3);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / sr;
+        let cw = w0.cos();
+        let sw = w0.sin();
+        let alpha = sw / (2.0 * q);
+        let a = 10.0f32.powf(gain_db / 40.0); // shelf/peak amplitude
+
+        let (b0, b1, b2, a0, a1, a2) = match mode {
+            FilterMode::LowPass => (
+                (1.0 - cw) * 0.5,
+                1.0 - cw,
+                (1.0 - cw) * 0.5,
+                1.0 + alpha,
+                -2.0 * cw,
+                1.0 - alpha,
+            ),
+            FilterMode::HighPass => (
+                (1.0 + cw) * 0.5,
+                -(1.0 + cw),
+                (1.0 + cw) * 0.5,
+                1.0 + alpha,
+                -2.0 * cw,
+                1.0 - alpha,
+            ),
+            FilterMode::BandPass => {
+                (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cw, 1.0 - alpha)
+            }
+            FilterMode::Notch => {
+                (1.0, -2.0 * cw, 1.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha)
+            }
+            FilterMode::Peak => (
+                1.0 + alpha * a,
+                -2.0 * cw,
+                1.0 - alpha * a,
+                1.0 + alpha / a,
+                -2.0 * cw,
+                1.0 - alpha / a,
+            ),
+            FilterMode::LowShelf => {
+                let ap1 = a + 1.0;
+                let am1 = a - 1.0;
+                let ta = 2.0 * a.sqrt() * alpha;
+                (
+                    a * (ap1 - am1 * cw + ta),
+                    2.0 * a * (am1 - ap1 * cw),
+                    a * (ap1 - am1 * cw - ta),
+                    ap1 + am1 * cw + ta,
+                    -2.0 * (am1 + ap1 * cw),
+                    ap1 + am1 * cw - ta,
+                )
+            }
+            FilterMode::HighShelf => {
+                let ap1 = a + 1.0;
+                let am1 = a - 1.0;
+                let ta = 2.0 * a.sqrt() * alpha;
+                (
+                    a * (ap1 + am1 * cw + ta),
+                    -2.0 * a * (am1 + ap1 * cw),
+                    a * (ap1 + am1 * cw - ta),
+                    ap1 - am1 * cw + ta,
+                    2.0 * (am1 - ap1 * cw),
+                    ap1 - am1 * cw - ta,
+                )
+            }
+        };
+
+        let inv = 1.0 / a0;
+        Self {
+            b0: b0 * inv,
+            b1: b1 * inv,
+            b2: b2 * inv,
+            a1: a1 * inv,
+            a2: a2 * inv,
+        }
+    }
+}
+
+/// Godot `AudioEffectFilter` family — one biquad in any [`FilterMode`].
+#[derive(Debug, Clone)]
+pub struct AudioEffectFilter {
+    /// Response type.
+    pub mode: FilterMode,
+    /// Cutoff / centre frequency in Hz.
+    pub cutoff_hz: f32,
+    /// Quality factor (resonance).
+    pub resonance: f32,
+    /// Shelf / peak gain in dB (ignored for LP/HP/BP/Notch).
+    pub gain_db: f32,
+    /// Per-channel state: `[x1, x2, y1, y2]`.
+    state: Vec<[f32; 4]>,
+}
+
+impl AudioEffectFilter {
+    /// Explicit constructor.
+    pub fn new(mode: FilterMode, cutoff_hz: f32, resonance: f32, gain_db: f32) -> Self {
+        Self {
+            mode,
+            cutoff_hz,
+            resonance,
+            gain_db,
+            state: Vec::new(),
+        }
+    }
+    /// Low-pass filter wrapper.
+    pub fn low_pass(cutoff_hz: f32, resonance: f32) -> Self {
+        Self::new(FilterMode::LowPass, cutoff_hz, resonance, 0.0)
+    }
+    /// High-pass filter wrapper.
+    pub fn high_pass(cutoff_hz: f32, resonance: f32) -> Self {
+        Self::new(FilterMode::HighPass, cutoff_hz, resonance, 0.0)
+    }
+    /// Band-pass filter wrapper.
+    pub fn band_pass(center_hz: f32, resonance: f32) -> Self {
+        Self::new(FilterMode::BandPass, center_hz, resonance, 0.0)
+    }
+    /// Notch (band-reject) filter wrapper.
+    pub fn notch(center_hz: f32, resonance: f32) -> Self {
+        Self::new(FilterMode::Notch, center_hz, resonance, 0.0)
+    }
+    /// Peaking EQ filter wrapper.
+    pub fn peak(center_hz: f32, resonance: f32, gain_db: f32) -> Self {
+        Self::new(FilterMode::Peak, center_hz, resonance, gain_db)
+    }
+    /// Low-shelf filter wrapper.
+    pub fn low_shelf(cutoff_hz: f32, gain_db: f32) -> Self {
+        Self::new(FilterMode::LowShelf, cutoff_hz, 0.707, gain_db)
+    }
+    /// High-shelf filter wrapper.
+    pub fn high_shelf(cutoff_hz: f32, gain_db: f32) -> Self {
+        Self::new(FilterMode::HighShelf, cutoff_hz, 0.707, gain_db)
+    }
+}
+
+impl AudioEffect for AudioEffectFilter {
+    fn name(&self) -> &str {
+        "Filter"
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        let ch = channels.max(1) as usize;
+        if self.state.len() != ch {
+            self.state = vec![[0.0; 4]; ch];
+        }
+        let c = BiquadCoeffs::design(
+            self.mode,
+            self.cutoff_hz,
+            self.resonance,
+            self.gain_db,
+            sample_rate as f32,
+        );
+        let frames = samples.len() / ch;
+        for f in 0..frames {
+            for ci in 0..ch {
+                let x0 = samples[f * ch + ci];
+                let s = &mut self.state[ci];
+                let y0 = c.b0 * x0 + c.b1 * s[0] + c.b2 * s[1] - c.a1 * s[2] - c.a2 * s[3];
+                s[1] = s[0];
+                s[0] = x0;
+                s[3] = s[2];
+                s[2] = y0;
+                samples[f * ch + ci] = y0;
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        for s in &mut self.state {
+            *s = [0.0; 4];
+        }
+    }
+}
+
+/// Dynamics compressor with optional sidechain key input.
+#[derive(Debug, Clone)]
+pub struct AudioEffectCompressor {
+    /// Threshold in dB above which compression applies.
+    pub threshold_db: f32,
+    /// Compression ratio (e.g. 4.0 → 4:1).
+    pub ratio: f32,
+    /// Attack time in milliseconds.
+    pub attack_ms: f32,
+    /// Release time in milliseconds.
+    pub release_ms: f32,
+    /// Makeup gain in dB applied after compression.
+    pub gain_db: f32,
+    /// Optional external sidechain key (mono, one sample per frame).
+    sidechain: Option<Vec<f32>>,
+    /// Envelope follower state (linear).
+    env: f32,
+}
+
+impl AudioEffectCompressor {
+    /// Create a compressor.
+    pub fn new(threshold_db: f32, ratio: f32, attack_ms: f32, release_ms: f32) -> Self {
+        Self {
+            threshold_db,
+            ratio: ratio.max(1.0),
+            attack_ms,
+            release_ms,
+            gain_db: 0.0,
+            sidechain: None,
+            env: 0.0,
+        }
+    }
+
+    /// Provide (or clear) an external sidechain key. One sample per frame.
+    pub fn set_sidechain(&mut self, key: Option<Vec<f32>>) {
+        self.sidechain = key;
+    }
+}
+
+impl AudioEffect for AudioEffectCompressor {
+    fn name(&self) -> &str {
+        "Compressor"
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        let ch = channels.max(1) as usize;
+        let sr = sample_rate.max(1) as f32;
+        let att = (-1.0 / ((self.attack_ms.max(0.01) * 0.001) * sr)).exp();
+        let rel = (-1.0 / ((self.release_ms.max(0.01) * 0.001) * sr)).exp();
+        let ratio = self.ratio.max(1.0);
+        let makeup = 10.0f32.powf(self.gain_db / 20.0);
+        let frames = samples.len() / ch;
+        for f in 0..frames {
+            // Detector: external sidechain key if present, else max abs across channels.
+            let detector = if let Some(key) = &self.sidechain {
+                key.get(f).copied().unwrap_or(0.0).abs()
+            } else {
+                let mut m = 0.0f32;
+                for c in 0..ch {
+                    m = m.max(samples[f * ch + c].abs());
+                }
+                m
+            };
+            // Peak envelope follower with attack/release ballistics.
+            let coeff = if detector > self.env { att } else { rel };
+            self.env = coeff * self.env + (1.0 - coeff) * detector;
+            let env_db = 20.0 * (self.env + 1e-9).log10();
+            let gain_db = if env_db > self.threshold_db {
+                -(env_db - self.threshold_db) * (1.0 - 1.0 / ratio)
+            } else {
+                0.0
+            };
+            let g = 10.0f32.powf(gain_db / 20.0) * makeup;
+            for c in 0..ch {
+                samples[f * ch + c] *= g;
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.env = 0.0;
+    }
+}
+
+/// Soft-knee limiter — smoothly saturates peaks toward a ceiling.
+#[derive(Debug, Clone)]
+pub struct AudioEffectLimiter {
+    /// Output ceiling in dB (peaks never exceed this).
+    pub ceiling_db: f32,
+    /// Soft-clip knee width in dB below the ceiling.
+    pub soft_clip_db: f32,
+}
+
+impl AudioEffectLimiter {
+    /// Create a soft limiter.
+    pub fn new(ceiling_db: f32, soft_clip_db: f32) -> Self {
+        Self {
+            ceiling_db,
+            soft_clip_db: soft_clip_db.max(0.0),
+        }
+    }
+}
+
+impl AudioEffect for AudioEffectLimiter {
+    fn name(&self) -> &str {
+        "Limiter"
+    }
+
+    fn process(&mut self, samples: &mut [f32], _sample_rate: u32, _channels: u16) {
+        let ceiling = 10.0f32.powf(self.ceiling_db / 20.0);
+        let knee = 10.0f32.powf((self.ceiling_db - self.soft_clip_db) / 20.0);
+        let range = (ceiling - knee).max(1e-6);
+        for s in samples.iter_mut() {
+            let mag = s.abs();
+            if mag > knee {
+                let over = mag - knee;
+                let comp = knee + range * (over / range).tanh();
+                *s = s.signum() * comp.min(ceiling);
+            }
+        }
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// Hard (brick-wall) limiter — clips at the ceiling after optional pre-gain.
+#[derive(Debug, Clone)]
+pub struct AudioEffectHardLimiter {
+    /// Clip ceiling in dB.
+    pub ceiling_db: f32,
+    /// Pre-gain (drive) in dB applied before clipping.
+    pub pre_gain_db: f32,
+}
+
+impl AudioEffectHardLimiter {
+    /// Create a hard limiter.
+    pub fn new(ceiling_db: f32, pre_gain_db: f32) -> Self {
+        Self {
+            ceiling_db,
+            pre_gain_db,
+        }
+    }
+}
+
+impl AudioEffect for AudioEffectHardLimiter {
+    fn name(&self) -> &str {
+        "HardLimiter"
+    }
+
+    fn process(&mut self, samples: &mut [f32], _sample_rate: u32, _channels: u16) {
+        let ceiling = 10.0f32.powf(self.ceiling_db / 20.0);
+        let drive = 10.0f32.powf(self.pre_gain_db / 20.0);
+        for s in samples.iter_mut() {
+            *s = (*s * drive).clamp(-ceiling, ceiling);
+        }
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// Spectrum analyzer tap. Buffers a mono mixdown and answers
+/// [`get_magnitude_for_frequency_range`](Self::get_magnitude_for_frequency_range)
+/// via a windowed DFT (direct, not a fast FFT — correct magnitudes; can be
+/// swapped for an FFT later). Mirrors Godot
+/// `AudioEffectSpectrumAnalyzerInstance` (MAGNITUDE_MAX mode).
+#[derive(Debug, Clone)]
+pub struct AudioEffectSpectrumAnalyzer {
+    /// History window length in seconds.
+    pub buffer_length_secs: f32,
+    buf: Vec<f32>,
+    sample_rate: u32,
+}
+
+impl AudioEffectSpectrumAnalyzer {
+    /// Create an analyzer holding `buffer_length_secs` of history.
+    pub fn new(buffer_length_secs: f32) -> Self {
+        Self {
+            buffer_length_secs: buffer_length_secs.max(0.01),
+            buf: Vec::new(),
+            sample_rate: 0,
+        }
+    }
+
+    /// Peak magnitude in `[from_hz, to_hz]` over the buffered window.
+    pub fn get_magnitude_for_frequency_range(&self, from_hz: f32, to_hz: f32) -> f32 {
+        let n = self.buf.len();
+        if n == 0 || self.sample_rate == 0 {
+            return 0.0;
+        }
+        let sr = self.sample_rate as f32;
+        let nyq = sr * 0.5;
+        let f_lo = from_hz.min(to_hz).clamp(0.0, nyq);
+        let f_hi = from_hz.max(to_hz).clamp(0.0, nyq);
+        let df = sr / n as f32;
+        let step = df.max((f_hi - f_lo) / 32.0).max(1.0);
+        let denom = (n as f32 - 1.0).max(1.0);
+        let mut maxmag = 0.0f32;
+        let mut f = f_lo;
+        while f <= f_hi + 1e-3 {
+            let mut re = 0.0f32;
+            let mut im = 0.0f32;
+            for (i, &x) in self.buf.iter().enumerate() {
+                // Hann window
+                let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / denom).cos();
+                let ang = -2.0 * std::f32::consts::PI * f * i as f32 / sr;
+                re += w * x * ang.cos();
+                im += w * x * ang.sin();
+            }
+            let mag = (re * re + im * im).sqrt() / n as f32 * 2.0;
+            if mag > maxmag {
+                maxmag = mag;
+            }
+            f += step;
+        }
+        maxmag
+    }
+}
+
+impl AudioEffect for AudioEffectSpectrumAnalyzer {
+    fn name(&self) -> &str {
+        "SpectrumAnalyzer"
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        self.sample_rate = sample_rate.max(1);
+        let ch = channels.max(1) as usize;
+        let frames = samples.len() / ch;
+        let max_len = ((self.buffer_length_secs * self.sample_rate as f32) as usize).max(1);
+        for f in 0..frames {
+            let mut m = 0.0f32;
+            for c in 0..ch {
+                m += samples[f * ch + c];
+            }
+            self.buf.push(m / ch as f32);
+        }
+        if self.buf.len() > max_len {
+            let excess = self.buf.len() - max_len;
+            self.buf.drain(0..excess);
+        }
+        // Analyzer is a tap: samples pass through unchanged.
+    }
+
+    fn reset(&mut self) {
+        self.buf.clear();
+        self.sample_rate = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +859,210 @@ mod tests {
         // Just assert not zeroed and not NaN
         assert!(buf.iter().all(|s| s.is_finite()));
         assert!(buf.iter().any(|s| s.abs() > 0.1));
+    }
+
+    // --- Biquad filter family (pat-u3l8c.107) ------------------------------
+
+    fn sine(freq: f32, sr: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr as f32).sin() * 0.5)
+            .collect()
+    }
+
+    fn energy(buf: &[f32]) -> f32 {
+        buf.iter().map(|s| s * s).sum()
+    }
+
+    #[test]
+    fn low_pass_keeps_lows_cuts_highs() {
+        let sr = 48000u32;
+        let mut lp = AudioEffectFilter::low_pass(1000.0, 0.707);
+        let mut low = sine(200.0, sr, 4096);
+        let mut high = sine(12000.0, sr, 4096);
+        lp.process(&mut low, sr, 1);
+        lp.reset();
+        lp.process(&mut high, sr, 1);
+        assert!(
+            energy(&low) > energy(&high) * 4.0,
+            "LP: low={} high={}",
+            energy(&low),
+            energy(&high)
+        );
+    }
+
+    #[test]
+    fn high_pass_keeps_highs_cuts_lows() {
+        let sr = 48000u32;
+        let mut hp = AudioEffectFilter::high_pass(2000.0, 0.707);
+        let mut low = sine(100.0, sr, 4096);
+        let mut high = sine(10000.0, sr, 4096);
+        hp.process(&mut low, sr, 1);
+        hp.reset();
+        hp.process(&mut high, sr, 1);
+        assert!(
+            energy(&high) > energy(&low) * 4.0,
+            "HP: low={} high={}",
+            energy(&low),
+            energy(&high)
+        );
+    }
+
+    #[test]
+    fn band_pass_favours_center() {
+        let sr = 48000u32;
+        let run = |freq: f32| {
+            let mut bp = AudioEffectFilter::band_pass(1000.0, 2.0);
+            let mut buf = sine(freq, sr, 4096);
+            bp.process(&mut buf, sr, 1);
+            energy(&buf)
+        };
+        let center = run(1000.0);
+        let far = run(8000.0);
+        assert!(center > far * 4.0, "BP: center={center} far={far}");
+    }
+
+    #[test]
+    fn notch_rejects_center() {
+        let sr = 48000u32;
+        let mut notch = AudioEffectFilter::notch(1000.0, 2.0);
+        let mut at_center = sine(1000.0, sr, 4096);
+        let raw = energy(&at_center);
+        notch.process(&mut at_center, sr, 1);
+        let cut = energy(&at_center);
+        assert!(cut < raw * 0.5, "notch: raw={raw} cut={cut}");
+    }
+
+    #[test]
+    fn peak_boost_raises_center_band() {
+        let sr = 48000u32;
+        let mut peak = AudioEffectFilter::peak(1000.0, 1.0, 12.0);
+        let mut buf = sine(1000.0, sr, 4096);
+        let raw = energy(&buf);
+        peak.process(&mut buf, sr, 1);
+        let boosted = energy(&buf);
+        assert!(boosted > raw * 1.5, "peak +12dB: raw={raw} boosted={boosted}");
+    }
+
+    // --- Dynamics (pat-u3l8c.107) ------------------------------------------
+
+    fn peak_abs(buf: &[f32]) -> f32 {
+        buf.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    fn compressor_reduces_loud_signal() {
+        let sr = 48000u32;
+        let n = 8000;
+        let mut loud: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin() * 0.9)
+            .collect();
+        let in_peak = peak_abs(&loud);
+        let mut comp = AudioEffectCompressor::new(-24.0, 8.0, 2.0, 50.0);
+        comp.process(&mut loud, sr, 1);
+        let out_peak = peak_abs(&loud[n / 2..]);
+        assert!(
+            out_peak < in_peak * 0.7,
+            "compressor: in={in_peak} out={out_peak}"
+        );
+    }
+
+    #[test]
+    fn compressor_passes_signal_below_threshold() {
+        let sr = 48000u32;
+        let n = 4000;
+        let mut quiet: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin() * 0.02)
+            .collect();
+        let in_peak = peak_abs(&quiet);
+        let mut comp = AudioEffectCompressor::new(-20.0, 8.0, 2.0, 50.0); // signal ~ -34 dB
+        comp.process(&mut quiet, sr, 1);
+        let out_peak = peak_abs(&quiet[n / 2..]);
+        assert!(
+            (out_peak - in_peak).abs() < in_peak * 0.1,
+            "below threshold passes: in={in_peak} out={out_peak}"
+        );
+    }
+
+    #[test]
+    fn compressor_sidechain_ducks_quiet_main() {
+        let sr = 48000u32;
+        let n = 4000;
+        // Quiet main (~ -26 dB) that would NOT self-compress below the -24 dB threshold.
+        let mut main: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin() * 0.05)
+            .collect();
+        let in_peak = peak_abs(&main);
+        let key: Vec<f32> = vec![0.9; n]; // loud sidechain key
+        let mut comp = AudioEffectCompressor::new(-24.0, 8.0, 2.0, 50.0);
+        comp.set_sidechain(Some(key));
+        comp.process(&mut main, sr, 1);
+        let out_peak = peak_abs(&main[n / 2..]);
+        assert!(
+            out_peak < in_peak * 0.7,
+            "sidechain ducks main: in={in_peak} out={out_peak}"
+        );
+    }
+
+    #[test]
+    fn soft_limiter_respects_ceiling() {
+        let ceiling = 10.0f32.powf(-0.1 / 20.0);
+        let mut lim = AudioEffectLimiter::new(-0.1, 6.0);
+        let mut buf: Vec<f32> = vec![2.0, -2.0, 1.5, -1.5, 0.8, -0.8];
+        lim.process(&mut buf, 48000, 1);
+        for &s in &buf {
+            assert!(s.abs() <= ceiling + 1e-4, "soft limiter ceiling {ceiling}: got {s}");
+        }
+        // Sub-knee sample preserved.
+        let mut small = vec![0.1_f32];
+        lim.process(&mut small, 48000, 1);
+        assert!((small[0] - 0.1).abs() < 1e-4, "sub-knee unchanged: {}", small[0]);
+    }
+
+    #[test]
+    fn hard_limiter_brickwalls() {
+        let mut lim = AudioEffectHardLimiter::new(0.0, 0.0); // ceiling = 1.0
+        let mut buf: Vec<f32> = vec![2.0, -3.0, 0.5, -0.5];
+        lim.process(&mut buf, 48000, 1);
+        assert_eq!(buf[0], 1.0);
+        assert_eq!(buf[1], -1.0);
+        assert!((buf[2] - 0.5).abs() < 1e-6);
+        assert!((buf[3] + 0.5).abs() < 1e-6);
+        assert!(buf.iter().all(|&s| s.abs() <= 1.0 + 1e-6));
+    }
+
+    // --- Spectrum analyzer (pat-u3l8c.107) ---------------------------------
+
+    #[test]
+    fn spectrum_peaks_in_tone_band() {
+        let sr = 48000u32;
+        let n = 4096;
+        let mut tone: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr as f32).sin() * 0.8)
+            .collect();
+        let mut analyzer = AudioEffectSpectrumAnalyzer::new(1.0);
+        analyzer.process(&mut tone, sr, 1);
+        let in_band = analyzer.get_magnitude_for_frequency_range(900.0, 1100.0);
+        let out_band = analyzer.get_magnitude_for_frequency_range(5000.0, 6000.0);
+        assert!(
+            in_band > out_band * 4.0,
+            "1kHz tone peaks in band: in={in_band} out={out_band}"
+        );
+        assert!(in_band > 0.1, "in-band magnitude substantial: {in_band}");
+        // Tap passes samples through unchanged.
+        assert!(tone.iter().any(|s| s.abs() > 0.1));
+    }
+
+    #[test]
+    fn filter_and_dynamics_compose_in_chain() {
+        let mut chain = EffectChain::new();
+        chain.add(Box::new(AudioEffectFilter::low_pass(2000.0, 0.707)));
+        chain.add(Box::new(AudioEffectCompressor::new(-18.0, 4.0, 5.0, 60.0)));
+        chain.add(Box::new(AudioEffectHardLimiter::new(-0.5, 0.0)));
+        assert_eq!(chain.names(), vec!["Filter", "Compressor", "HardLimiter"]);
+        let mut buf = sine(500.0, 48000, 2048);
+        chain.process(&mut buf, 48000, 1);
+        let ceiling = 10.0f32.powf(-0.5 / 20.0);
+        assert!(buf.iter().all(|s| s.is_finite()));
+        assert!(buf.iter().all(|&s| s.abs() <= ceiling + 1e-4));
     }
 }
