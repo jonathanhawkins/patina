@@ -15,9 +15,9 @@ Generated scorecard companion. Status: full / partial / absent for high-use runt
 | RichTextLabel / ScrollContainer / TabContainer | partial | ClassDB registered |
 | VoxelGI / LightmapGI | partial | spatial bake samples |
 | SoftBody3D | partial | stepped in PhysicsWorld3D |
-| XROrigin3D | absent | |
-| WebRTCMultiplayerPeer | absent | |
-| VideoStreamPlayer | absent | |
+| XROrigin3D | partial | ClassDB registered w/ defaults (pat-p0s82.29); full XR session handling is a separate bead |
+| WebRTCMultiplayerPeer | partial | ClassDB registered w/ core methods (pat-p0s82.29); native WebRTC transport is pat-p0s82.22 |
+| VideoStreamPlayer | partial | ClassDB registered w/ defaults (pat-p0s82.29); video decode/playback is pat-p0s82.28 |
 | ENetMultiplayerPeer | partial | UDP not stock ENet |
 
 See `class_db.rs` for the live registry (~130+ classes after expansion).

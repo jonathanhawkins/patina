@@ -2469,6 +2469,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <!-- pat-bc0tv: Shader Editor bottom-panel tab (Godot shader_editor_plugin.cpp
              adds "Shader Editor" to the bottom panel). -->
         <button class="bottom-tab" data-tab="shader" id="shader-tab-btn">Shader Editor</button>
+        <!-- pat-nzgdu.101: Version Control bottom-panel tab (Godot version_control_editor_plugin.cpp). -->
+        <button class="bottom-tab" data-tab="vcs" id="vcs-tab-btn">Version Control</button>
         <div id="bottom-strip-right">
           <span id="bottom-version" title="Patina Engine">Patina</span>
           <button id="bottom-pin" class="bottom-strip-btn" title="Pin Bottom Panel Switching">&#128204;</button>
@@ -2501,6 +2503,21 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
               <button class="output-filter-btn active" id="output-filter-warning" title="Toggle visibility of warnings."><span class="of-icon ofi-warn">&#9650;</span><span class="of-count" id="output-count-warning">0</span></button>
               <button class="output-filter-btn active" id="output-filter-editor" title="Toggle visibility of editor messages."><span class="of-icon ofi-editor">&#9998;</span><span class="of-count" id="output-count-editor">0</span></button>
             </div>
+          </div>
+        </div>
+        <div class="bottom-content-tab" data-tab="vcs">
+          <!-- pat-nzgdu.101: Version Control panel (Godot version_control_editor_plugin.cpp).
+               Lists changed files from GET /api/vcs/status with per-file Stage/Unstage
+               (POST /api/vcs/stage, /api/vcs/unstage), the selected file's diff
+               (GET /api/vcs/diff), backed by the existing server-side vcs.rs. -->
+          <div id="vcs-panel">
+            <div id="vcs-toolbar">
+              <span id="vcs-branch">&#8212;</span>
+              <span class="vcs-tb-spacer" style="flex:1"></span>
+              <button class="vcs-tb-btn" id="vcs-refresh" title="Refresh version-control status">Refresh</button>
+            </div>
+            <div id="vcs-file-list"></div>
+            <pre id="vcs-diff" style="white-space:pre-wrap;overflow:auto;max-height:40%;"></pre>
           </div>
         </div>
         <div class="bottom-content-tab" data-tab="audio">
@@ -6819,6 +6836,63 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     renderShaderEditor();
   }
 
+  // pat-nzgdu.101: Version Control panel, wired to the existing server-side VCS
+  // routes (vcs.rs). refreshVcsPanel() lists changed files from /api/vcs/status;
+  // each row can be staged/unstaged (/api/vcs/stage, /api/vcs/unstage) and shows
+  // its diff (/api/vcs/diff). Called when the Version Control tab is opened.
+  async function refreshVcsPanel() {
+    var list = document.getElementById('vcs-file-list');
+    if (!list) return;
+    var status = await api('GET', '/api/vcs/status');
+    var branchEl = document.getElementById('vcs-branch');
+    if (branchEl) {
+      if (status && status.is_git_repo) {
+        branchEl.textContent = 'Branch: ' + ((status.branch && status.branch.name) || '—');
+      } else {
+        branchEl.textContent = 'Not a git repository';
+      }
+    }
+    list.innerHTML = '';
+    var files = (status && status.files) || [];
+    if (files.length === 0) {
+      list.innerHTML = '<div class="vcs-empty">No changes</div>';
+      return;
+    }
+    for (var i = 0; i < files.length; i++) {
+      (function(f) {
+        var staged = f.area === 'staged'; // ChangeArea serde rename_all=snake_case
+        var row = document.createElement('div');
+        row.className = 'vcs-file-row';
+        var name = document.createElement('span');
+        name.className = 'vcs-file-name';
+        name.style.cursor = 'pointer';
+        name.textContent = '[' + (staged ? 'staged' : 'unstaged') + '] ' + f.path;
+        name.addEventListener('click', function() { showVcsDiff(f.path, staged); });
+        row.appendChild(name);
+        var btn = document.createElement('button');
+        btn.className = 'vcs-file-btn';
+        btn.textContent = staged ? 'Unstage' : 'Stage';
+        btn.addEventListener('click', function() { vcsStageFile(f.path, !staged); });
+        row.appendChild(btn);
+        list.appendChild(row);
+      })(files[i]);
+    }
+  }
+
+  // Stage (or unstage) a file, then refresh the status list.
+  async function vcsStageFile(file, stage) {
+    await api('POST', stage ? '/api/vcs/stage' : '/api/vcs/unstage', { file: file });
+    refreshVcsPanel();
+  }
+
+  // Show a file's diff in the panel's diff view.
+  async function showVcsDiff(file, staged) {
+    var pre = document.getElementById('vcs-diff');
+    if (!pre) return;
+    var resp = await api('GET', '/api/vcs/diff?file=' + encodeURIComponent(file) + '&staged=' + (staged ? 'true' : 'false'));
+    pre.textContent = (resp && resp.diff) || '';
+  }
+
   // ---- Bottom panel ----
   function setupBottomPanel() {
     var panel = document.getElementById('bottom-panel');
@@ -6862,9 +6936,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           collapse();
         } else {
           openTab(tabName);
+          // pat-nzgdu.101: refresh version-control status when the tab is opened.
+          if (tabName === 'vcs' && typeof refreshVcsPanel === 'function') refreshVcsPanel();
         }
       });
     }
+
+    // pat-nzgdu.101: manual refresh button in the Version Control panel.
+    var vcsRefreshBtn = document.getElementById('vcs-refresh');
+    if (vcsRefreshBtn) vcsRefreshBtn.addEventListener('click', refreshVcsPanel);
 
     // Pin: lock panel switching (blocks auto-open triggers, not manual clicks).
     if (pinBtn) pinBtn.addEventListener('click', function() {

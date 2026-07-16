@@ -1792,6 +1792,17 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "JavaScriptBridge") {
                             return call_javascriptbridge_static(member, &evaluated_args);
                         }
+                        // Marshalls + ResourceUID IO singletons (pat-nzgdu.79).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Marshalls") {
+                            return call_marshalls_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "ResourceUID") {
+                            return call_resourceuid_static(member, &evaluated_args);
+                        }
+                        // TranslationServer singleton (pat-nzgdu.92).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "TranslationServer") {
+                            return call_translationserver_static(member, &evaluated_args);
+                        }
                         // Handle ClassName.new() — runtime node creation / RefCounted helpers
                         if member == "new" {
                             if let Expr::Ident(class_name) = object.as_ref() {
@@ -2477,6 +2488,50 @@ impl Interpreter {
                 // every argument with no separator. `str()` yields "".
                 let joined: String = args.iter().map(|a| format!("{a}")).collect();
                 Ok(Some(Variant::String(joined)))
+            }
+            // i18n builtins (pat-nzgdu.92). `tr(message[, context])` returns the
+            // active-locale translation of `message`, or `message` unchanged when
+            // there is no catalog entry (Godot's fallback). `tr_n` is the
+            // plural-aware form.
+            "tr" => {
+                let key = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(sn)) => sn.as_str().to_string(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "tr() takes a message string".into(),
+                        )))
+                    }
+                };
+                Ok(Some(Variant::String(tr_lookup(&key))))
+            }
+            "tr_n" => {
+                // tr_n(message, plural_message, n[, context]).
+                if args.len() < 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "tr_n() takes (message, plural_message, n)".into(),
+                    )));
+                }
+                let key = match &args[0] {
+                    Variant::String(s) => s.clone(),
+                    Variant::StringName(sn) => sn.as_str().to_string(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "tr_n() message must be a string".into(),
+                        )))
+                    }
+                };
+                let plural = match &args[1] {
+                    Variant::String(s) => s.clone(),
+                    Variant::StringName(sn) => sn.as_str().to_string(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "tr_n() plural_message must be a string".into(),
+                        )))
+                    }
+                };
+                let n = to_int(&args[2])?;
+                Ok(Some(Variant::String(tr_lookup_plural(&key, &plural, n))))
             }
             "int" => {
                 if args.len() != 1 {
@@ -9408,6 +9463,249 @@ fn call_javascriptbridge_static(method: &str, args: &[Variant]) -> Result<Varian
     }
 }
 
+/// Standard (RFC 4648) base64 encode with `=` padding.
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            CHARS[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            CHARS[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Standard (RFC 4648) base64 decode. Ignores `=` padding and ASCII whitespace;
+/// errors on any other invalid character.
+fn base64_decode(s: &str) -> Result<Vec<u8>, RuntimeError> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let filtered: Vec<u8> = s
+        .bytes()
+        .filter(|&c| c != b'=' && !c.is_ascii_whitespace())
+        .collect();
+    let mut out = Vec::with_capacity(filtered.len() / 4 * 3);
+    for chunk in filtered.chunks(4) {
+        let mut n = 0u32;
+        for &c in chunk {
+            let v = val(c).ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "invalid base64 character".into(),
+                ))
+            })?;
+            n = (n << 6) | v;
+        }
+        let bits = chunk.len() * 6;
+        let bytes_out = bits / 8;
+        n <<= (24 - bits) as u32; // MSB-align within a 24-bit window
+        for i in 0..bytes_out {
+            out.push(((n >> (16 - i * 8)) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// `Marshalls` singleton (pat-nzgdu.79) — base64 <-> Variant / raw / utf8 via
+/// the shared `gdvariant` binary codec.
+fn call_marshalls_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let first_str = |who: &str| -> Result<String, RuntimeError> {
+        match args.first() {
+            Some(Variant::String(s)) => Ok(s.clone()),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{who} expects a base64 string"
+            )))),
+        }
+    };
+    match method {
+        "variant_to_base64" => {
+            let v = args.first().ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Marshalls.variant_to_base64() takes a value".into(),
+                ))
+            })?;
+            let bytes = gdvariant::binary::encode_variant(v).map_err(|e| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "variant_to_base64: {e:?}"
+                )))
+            })?;
+            Ok(Variant::String(base64_encode(&bytes)))
+        }
+        "base64_to_variant" => {
+            let bytes = base64_decode(&first_str("Marshalls.base64_to_variant()")?)?;
+            let (v, _) = gdvariant::binary::decode_variant(&bytes).map_err(|e| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "base64_to_variant: {e:?}"
+                )))
+            })?;
+            Ok(v)
+        }
+        "raw_to_base64" => match args.first() {
+            Some(Variant::PackedByteArray(b)) => Ok(Variant::String(base64_encode(b))),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "Marshalls.raw_to_base64() expects a PackedByteArray".into(),
+            ))),
+        },
+        "base64_to_raw" => Ok(Variant::PackedByteArray(base64_decode(&first_str(
+            "Marshalls.base64_to_raw()",
+        )?)?)),
+        "utf8_to_base64" => Ok(Variant::String(base64_encode(
+            first_str("Marshalls.utf8_to_base64()")?.as_bytes(),
+        ))),
+        "base64_to_utf8" => {
+            let bytes = base64_decode(&first_str("Marshalls.base64_to_utf8()")?)?;
+            Ok(Variant::String(String::from_utf8_lossy(&bytes).into_owned()))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Marshalls.{other}"),
+        ))),
+    }
+}
+
+/// `ResourceUID` singleton (pat-nzgdu.79) — id <-> `uid://` text via
+/// `gdresource::uid`.
+fn call_resourceuid_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "id_to_text" => {
+            let id = to_int(args.first().ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ResourceUID.id_to_text() takes an id".into(),
+                ))
+            })?)?;
+            Ok(Variant::String(gdresource::uid::id_to_text(id)))
+        }
+        "text_to_id" => match args.first() {
+            Some(Variant::String(s)) => {
+                Ok(Variant::Int(gdresource::uid::text_to_id(s).raw()))
+            }
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "ResourceUID.text_to_id() expects a uid:// string".into(),
+            ))),
+        },
+        "has_id" => {
+            let id = to_int(args.first().ok_or_else(|| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ResourceUID.has_id() takes an id".into(),
+                ))
+            })?)?;
+            Ok(Variant::Bool(gdresource::uid::id_to_text(id) != "uid://<invalid>"))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("ResourceUID.{other}"),
+        ))),
+    }
+}
+
+thread_local! {
+    /// Active locale for `TranslationServer` / `tr()` (pat-nzgdu.92). Godot's
+    /// default is the OS locale; headless defaults to "en".
+    static TR_LOCALE: std::cell::RefCell<String> = std::cell::RefCell::new(String::from("en"));
+    /// Loaded translation catalogs, `locale -> (source -> translated)`. The
+    /// `.po` / `.csv` importers (gdresource) populate this at boot; scripts /
+    /// tests can seed it via `TranslationServer.add_message`.
+    static TR_CATALOGS: std::cell::RefCell<HashMap<String, HashMap<String, String>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Translates `key` via the active-locale catalog, returning `key` unchanged
+/// when there is no entry (Godot's fallback). Shared by `tr()` and
+/// `TranslationServer.translate()`.
+fn tr_lookup(key: &str) -> String {
+    let locale = TR_LOCALE.with(|l| l.borrow().clone());
+    TR_CATALOGS.with(|c| {
+        c.borrow()
+            .get(&locale)
+            .and_then(|cat| cat.get(key))
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    })
+}
+
+/// Plural-aware lookup (`tr_n` / `translate_plural`): picks the singular `key`
+/// for `n == 1`, otherwise `plural`, then translates.
+fn tr_lookup_plural(key: &str, plural: &str, n: i64) -> String {
+    tr_lookup(if n == 1 { key } else { plural })
+}
+
+/// `TranslationServer` singleton (pat-nzgdu.92) — locale state + catalog lookup.
+/// The `.po`/`.csv` loaders (gdresource) and Translation resources are the
+/// cross-crate remainder; `add_message` is the interim seed path for the store.
+fn call_translationserver_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let arg_string = |idx: usize, who: &str| -> Result<String, RuntimeError> {
+        match args.get(idx) {
+            Some(Variant::String(s)) => Ok(s.clone()),
+            Some(Variant::StringName(sn)) => Ok(sn.as_str().to_string()),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{who} expects a string argument"
+            )))),
+        }
+    };
+    match method {
+        "set_locale" => {
+            let loc = arg_string(0, "TranslationServer.set_locale()")?;
+            TR_LOCALE.with(|l| *l.borrow_mut() = loc);
+            Ok(Variant::Nil)
+        }
+        "get_locale" => Ok(Variant::String(TR_LOCALE.with(|l| l.borrow().clone()))),
+        "translate" => Ok(Variant::String(tr_lookup(&arg_string(
+            0,
+            "TranslationServer.translate()",
+        )?))),
+        "translate_plural" => {
+            let key = arg_string(0, "TranslationServer.translate_plural()")?;
+            let plural = arg_string(1, "TranslationServer.translate_plural()")?;
+            let n = to_int(args.get(2).unwrap_or(&Variant::Int(1)))?;
+            Ok(Variant::String(tr_lookup_plural(&key, &plural, n)))
+        }
+        // Patina seed path pending the .po/.csv loaders + Translation resources:
+        // add_message(locale, source, translated).
+        "add_message" => {
+            let locale = arg_string(0, "TranslationServer.add_message()")?;
+            let src = arg_string(1, "TranslationServer.add_message()")?;
+            let xlated = arg_string(2, "TranslationServer.add_message()")?;
+            TR_CATALOGS.with(|c| {
+                c.borrow_mut()
+                    .entry(locale)
+                    .or_default()
+                    .insert(src, xlated);
+            });
+            Ok(Variant::Nil)
+        }
+        "get_loaded_locales" => Ok(Variant::PackedStringArray(
+            TR_CATALOGS.with(|c| c.borrow().keys().cloned().collect()),
+        )),
+        "clear" => {
+            TR_CATALOGS.with(|c| c.borrow_mut().clear());
+            Ok(Variant::Nil)
+        }
+        "get_translation_object" => Ok(Variant::Nil),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("TranslationServer.{other}"),
+        ))),
+    }
+}
+
 fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
         "is_editor_hint" => {
@@ -10123,6 +10421,47 @@ for i in range(5):
 return sum
 ";
         assert_eq!(run_val(src), Variant::Int(10)); // 0+1+2+3+4
+    }
+
+    #[test]
+    fn for_in_int_iterates_range() {
+        // pat-q7048: `for i in <int>` iterates 0..int (Godot semantics),
+        // equivalent to `for i in range(int)`.
+        let sum = "\
+var sum = 0
+for i in 5:
+    sum += i
+return sum
+";
+        assert_eq!(run_val(sum), Variant::Int(10)); // 0+1+2+3+4
+
+        // Confirm the exact 0..n sequence.
+        let seq = "\
+var out = []
+for i in 4:
+    out.append(i)
+return out
+";
+        assert_eq!(
+            run_val(seq),
+            Variant::Array(vec![
+                Variant::Int(0),
+                Variant::Int(1),
+                Variant::Int(2),
+                Variant::Int(3),
+            ])
+        );
+
+        // Non-positive int -> empty iteration (body never runs).
+        let empty = "\
+var count = 0
+for i in 0:
+    count += 1
+for i in -3:
+    count += 1
+return count
+";
+        assert_eq!(run_val(empty), Variant::Int(0));
     }
 
     #[test]
@@ -14306,6 +14645,91 @@ match x:
         assert_eq!(
             run_val("return JavaScriptBridge.pwa_needs_update()\n"),
             Variant::Bool(false)
+        );
+    }
+
+    #[test]
+    fn io_singletons_marshalls_and_resourceuid() {
+        // pat-nzgdu.79 (interpreter slice): Marshalls base64<->Variant and
+        // ResourceUID id<->text round-trips.
+        // Variant round-trips through base64 (via the gdvariant binary codec).
+        assert_eq!(
+            run_val(
+                "var v = 42\nreturn Marshalls.base64_to_variant(Marshalls.variant_to_base64(v))\n"
+            ),
+            Variant::Int(42)
+        );
+        assert_eq!(
+            run_val(
+                "return Marshalls.base64_to_variant(Marshalls.variant_to_base64(\"hello\"))\n"
+            ),
+            Variant::String("hello".into())
+        );
+        // raw -> base64 is a String; utf8 round-trips through base64.
+        assert!(matches!(
+            run_val("return Marshalls.raw_to_base64(PackedByteArray([1, 2, 3]))\n"),
+            Variant::String(_)
+        ));
+        assert_eq!(
+            run_val("return Marshalls.base64_to_utf8(Marshalls.utf8_to_base64(\"Hi!\"))\n"),
+            Variant::String("Hi!".into())
+        );
+        // ResourceUID id -> text -> id round-trips (canonical text from id_to_text).
+        assert_eq!(
+            run_val("return ResourceUID.text_to_id(ResourceUID.id_to_text(12345))\n"),
+            Variant::Int(12345)
+        );
+        assert!(matches!(
+            run_val("return ResourceUID.text_to_id(\"uid://abc\")\n"),
+            Variant::Int(_)
+        ));
+        assert!(matches!(
+            run_val("return ResourceUID.id_to_text(0)\n"),
+            Variant::String(_)
+        ));
+    }
+
+    #[test]
+    fn tr_and_translationserver_locale() {
+        // pat-nzgdu.92 (interpreter slice): tr()/tr_n() + TranslationServer
+        // locale state + catalog lookup. Unique pat92* keys/locales keep this
+        // isolated from the process-global translation store.
+        // No catalog entry -> tr() falls back to the key.
+        assert_eq!(
+            run_val("TranslationServer.set_locale(\"pat92xx\")\nreturn tr(\"pat92_missing\")\n"),
+            Variant::String("pat92_missing".into())
+        );
+        // Seed a catalog, switch locale, translate via tr().
+        assert_eq!(
+            run_val(
+                "TranslationServer.add_message(\"pat92fr\", \"pat92_hi\", \"Bonjour\")\nTranslationServer.set_locale(\"pat92fr\")\nreturn tr(\"pat92_hi\")\n"
+            ),
+            Variant::String("Bonjour".into())
+        );
+        // TranslationServer.translate matches tr().
+        assert_eq!(
+            run_val(
+                "TranslationServer.set_locale(\"pat92fr\")\nreturn TranslationServer.translate(\"pat92_hi\")\n"
+            ),
+            Variant::String("Bonjour".into())
+        );
+        // get_locale round-trips the set locale.
+        assert_eq!(
+            run_val("TranslationServer.set_locale(\"pat92de\")\nreturn TranslationServer.get_locale()\n"),
+            Variant::String("pat92de".into())
+        );
+        // tr_n picks singular vs plural (fallback, untranslated unique keys).
+        assert_eq!(
+            run_val(
+                "TranslationServer.set_locale(\"pat92xx\")\nreturn tr_n(\"pat92_apple\", \"pat92_apples\", 1)\n"
+            ),
+            Variant::String("pat92_apple".into())
+        );
+        assert_eq!(
+            run_val(
+                "TranslationServer.set_locale(\"pat92xx\")\nreturn tr_n(\"pat92_apple\", \"pat92_apples\", 3)\n"
+            ),
+            Variant::String("pat92_apples".into())
         );
     }
 

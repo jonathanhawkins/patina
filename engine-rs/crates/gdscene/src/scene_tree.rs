@@ -111,6 +111,16 @@ pub struct SceneTree {
     /// per frame via [`poll_multiplayer`](Self::poll_multiplayer); inbound RPCs
     /// are dispatched to their target node's script.
     multiplayer: MultiplayerAPI,
+    /// A scene queued by [`change_scene_to_file`](Self::change_scene_to_file),
+    /// applied at the next [`process_deferred_scene_change`] — Godot defers the
+    /// swap to the frame boundary so the calling script's own scene is not
+    /// freed mid-execution (pat-nzgdu.85).
+    pending_scene: Option<crate::packed_scene::PackedScene>,
+    /// Set by [`quit`](Self::quit); the runner/editor polls
+    /// [`should_quit`](Self::should_quit) to stop its loop.
+    should_quit: bool,
+    /// Exit code from the last [`quit`](Self::quit) (Godot's `OS.exit_code`).
+    exit_code: i32,
 }
 
 impl std::fmt::Debug for SceneTree {
@@ -153,6 +163,9 @@ impl SceneTree {
             trace_frame: 0,
             paused: false,
             multiplayer: MultiplayerAPI::new(),
+            pending_scene: None,
+            should_quit: false,
+            exit_code: 0,
         }
     }
 
@@ -2179,6 +2192,78 @@ impl SceneTree {
         let id = self.add_child(self.root_id, node)?;
         self.current_scene_id = Some(id);
         Ok(id)
+    }
+
+    /// Queues a scene change from a `res://` (or absolute) path, mirroring
+    /// Godot's `SceneTree.change_scene_to_file()`. The `.tscn` is loaded and
+    /// parsed immediately (so a missing/invalid path errors here), but the swap
+    /// is DEFERRED: it is applied by [`process_deferred_scene_change`] at the
+    /// next frame boundary, so a script that calls this is not torn down
+    /// mid-run. `MainLoop::step` drives the deferred apply each frame.
+    pub fn change_scene_to_file(&mut self, path: &str) -> EngineResult<()> {
+        let resolved = gdcore::resolve_path(path)?;
+        let source = std::fs::read_to_string(&resolved)?;
+        let scene = crate::packed_scene::PackedScene::from_tscn(&source)?;
+        self.pending_scene = Some(scene);
+        Ok(())
+    }
+
+    /// Applies a scene change queued by [`change_scene_to_file`], if any.
+    /// Returns the new scene root's id when a swap occurred. Driven once per
+    /// frame by `MainLoop::step` for Godot's end-of-frame deferred timing.
+    pub fn process_deferred_scene_change(&mut self) -> EngineResult<Option<NodeId>> {
+        match self.pending_scene.take() {
+            Some(scene) => Ok(Some(self.change_scene_to_packed(&scene)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether a deferred scene change is queued (a `change_scene_to_file` call
+    /// is awaiting the next frame boundary).
+    pub fn has_pending_scene_change(&self) -> bool {
+        self.pending_scene.is_some()
+    }
+
+    /// Frees the current scene without loading a replacement, mirroring Godot's
+    /// `SceneTree.unload_current_scene()`. Removes every child of root (firing
+    /// exit_tree and cleaning up their scripts/signals/animation players) and
+    /// clears the current-scene and packed-source state.
+    pub fn unload_current_scene(&mut self) {
+        let children: Vec<NodeId> = self
+            .get_node(self.root_id)
+            .map(|root| root.children().to_vec())
+            .unwrap_or_default();
+        for child_id in children {
+            let mut subtree = Vec::new();
+            self.collect_subtree_top_down(child_id, &mut subtree);
+            for &nid in &subtree {
+                self.scripts.remove(&nid);
+                self.signal_stores.remove(&nid);
+                self.animation_players.remove(&nid);
+            }
+            let _ = self.remove_node(child_id);
+        }
+        self.process_deletions();
+        self.current_packed_scene = None;
+        self.current_scene_id = None;
+    }
+
+    /// Requests the application quit with `exit_code`, mirroring Godot's
+    /// `SceneTree.quit()`. Sets a flag the runner/editor polls via
+    /// [`should_quit`](Self::should_quit); it does not itself stop execution.
+    pub fn quit(&mut self, exit_code: i32) {
+        self.should_quit = true;
+        self.exit_code = exit_code;
+    }
+
+    /// Whether [`quit`](Self::quit) has been requested.
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    /// The exit code set by the last [`quit`](Self::quit) call (default 0).
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
     }
 }
 

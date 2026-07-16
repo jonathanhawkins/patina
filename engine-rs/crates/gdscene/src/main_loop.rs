@@ -1202,6 +1202,12 @@ impl MainLoop {
         // Remove nodes that called queue_free() during this frame.
         self.tree.process_deletions();
 
+        // -- deferred scene change (pat-nzgdu.85) --
+        // Godot applies change_scene_to_file() at the frame boundary (after
+        // _process and the deferred/deletion phases) so the calling script's
+        // scene is not freed mid-run. A load error is non-fatal to the loop.
+        let _ = self.tree.process_deferred_scene_change();
+
         // -- input cleanup --
         // Clear input snapshot so it doesn't leak into the next frame.
         self.tree.clear_input_snapshot();

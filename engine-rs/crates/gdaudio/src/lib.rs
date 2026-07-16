@@ -3,6 +3,7 @@
 //! Audio runtime, stream plumbing, and basic mixer
 //! for the Patina Engine runtime.
 
+pub mod biquad;
 pub mod bus;
 pub mod decode;
 pub mod effects;

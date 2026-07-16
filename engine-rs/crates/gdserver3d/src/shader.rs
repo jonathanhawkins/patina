@@ -193,6 +193,70 @@ pub fn parse_uniforms(source: &str) -> Vec<ShaderUniform3D> {
     uniforms
 }
 
+/// A parsed shader uniform hint — the structured interpretation of the raw
+/// `hint` string on a [`ShaderUniform3D`] (Godot's uniform hint grammar).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShaderHint {
+    /// `source_color` / `hint_color`: the value is authored in sRGB and should
+    /// be decoded to linear before use.
+    SourceColor,
+    /// `hint_range(min, max[, step])`: clamps the value and drives an inspector
+    /// slider.
+    Range {
+        /// Inclusive minimum.
+        min: f32,
+        /// Inclusive maximum.
+        max: f32,
+        /// Optional step increment.
+        step: Option<f32>,
+    },
+    /// `hint_normal`: the sampler texture is a normal map.
+    Normal,
+    /// `filter_*` sampler filtering mode (the raw keyword, e.g. `filter_linear`).
+    Filter(String),
+    /// `repeat_enable` (true) / `repeat_disable` (false) sampler wrap mode.
+    Repeat(bool),
+}
+
+/// Parses a raw shader uniform hint string into a structured [`ShaderHint`], or
+/// `None` when the hint is empty or unrecognized.
+pub fn parse_shader_hint(hint: &str) -> Option<ShaderHint> {
+    let hint = hint.trim();
+    match hint {
+        "source_color" | "hint_color" => return Some(ShaderHint::SourceColor),
+        "hint_normal" => return Some(ShaderHint::Normal),
+        "repeat_enable" => return Some(ShaderHint::Repeat(true)),
+        "repeat_disable" => return Some(ShaderHint::Repeat(false)),
+        _ => {}
+    }
+    if hint.starts_with("filter_") {
+        return Some(ShaderHint::Filter(hint.to_string()));
+    }
+    if let Some(rest) = hint.strip_prefix("hint_range") {
+        let inner = rest.trim().strip_prefix('(')?.strip_suffix(')')?;
+        let parts: Vec<f32> = inner
+            .split(',')
+            .filter_map(|p| p.trim().parse::<f32>().ok())
+            .collect();
+        if parts.len() >= 2 {
+            return Some(ShaderHint::Range {
+                min: parts[0],
+                max: parts[1],
+                step: parts.get(2).copied(),
+            });
+        }
+    }
+    None
+}
+
+impl ShaderUniform3D {
+    /// Parses this uniform's raw `hint` into a structured [`ShaderHint`], or
+    /// `None` when there is no hint or it is unrecognized.
+    pub fn parsed_hint(&self) -> Option<ShaderHint> {
+        self.hint.as_deref().and_then(parse_shader_hint)
+    }
+}
+
 /// Map a type keyword to `UniformType`.
 fn parse_uniform_type(s: &str) -> Option<UniformType> {
     match s {
@@ -1521,6 +1585,68 @@ impl ShaderProcessor3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // pat-nzgdu.88: raw uniform hint strings parse into structured ShaderHint.
+    // (The hint *semantics*, global/instance uniforms, and #include are a
+    // separate compiler/interpreter lane.)
+    #[test]
+    fn shader_uniform_hints_parse() {
+        assert_eq!(
+            parse_shader_hint("source_color"),
+            Some(ShaderHint::SourceColor)
+        );
+        assert_eq!(parse_shader_hint("hint_color"), Some(ShaderHint::SourceColor));
+        assert_eq!(parse_shader_hint("hint_normal"), Some(ShaderHint::Normal));
+        assert_eq!(
+            parse_shader_hint("repeat_enable"),
+            Some(ShaderHint::Repeat(true))
+        );
+        assert_eq!(
+            parse_shader_hint("repeat_disable"),
+            Some(ShaderHint::Repeat(false))
+        );
+        assert_eq!(
+            parse_shader_hint("filter_linear"),
+            Some(ShaderHint::Filter("filter_linear".to_string()))
+        );
+        assert_eq!(
+            parse_shader_hint("hint_range(0.0, 100.0)"),
+            Some(ShaderHint::Range {
+                min: 0.0,
+                max: 100.0,
+                step: None
+            })
+        );
+        assert_eq!(
+            parse_shader_hint("hint_range(0, 10, 0.5)"),
+            Some(ShaderHint::Range {
+                min: 0.0,
+                max: 10.0,
+                step: Some(0.5)
+            })
+        );
+        assert_eq!(parse_shader_hint("bogus"), None);
+        assert_eq!(parse_shader_hint(""), None);
+
+        // Round-trip: a `source_color`-hinted uniform parsed from shader source
+        // exposes a structured SourceColor hint.
+        let shader = Shader3D::new(
+            ShaderType3D::Spatial,
+            "shader_type spatial;\nuniform vec4 albedo : source_color = vec4(1.0);\n",
+        );
+        let u = shader.get_uniform("albedo").expect("albedo uniform parsed");
+        assert_eq!(u.parsed_hint(), Some(ShaderHint::SourceColor));
+
+        // A uniform with no hint yields None.
+        let plain = Shader3D::new(
+            ShaderType3D::Spatial,
+            "shader_type spatial;\nuniform float strength = 1.0;\n",
+        );
+        assert_eq!(
+            plain.get_uniform("strength").and_then(|u| u.parsed_hint()),
+            None
+        );
+    }
 
     // ── Uniform parsing ──
 

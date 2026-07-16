@@ -33,6 +33,7 @@ pub mod body;
 pub mod character;
 pub mod collision;
 pub mod joint;
+pub mod obb_sat_3d;
 pub mod query;
 pub mod shape;
 pub mod world;

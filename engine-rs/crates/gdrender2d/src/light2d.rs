@@ -24,6 +24,40 @@ pub enum Light2DKind {
     Directional,
 }
 
+/// How a light's contribution combines with the canvas beneath it
+/// (Godot `Light2D.blend_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Light2DBlendMode {
+    /// Composite the light over the canvas (soft brighten). Godot's default.
+    #[default]
+    Mix,
+    /// Add the light contribution to the canvas (brighten).
+    Add,
+    /// Subtract the light contribution from the canvas (darken).
+    Sub,
+}
+
+/// Combines a `contribution` (a light's colored intensity at a pixel) with the
+/// `base` canvas color under the given [`Light2DBlendMode`], per RGB channel and
+/// clamped to `[0, 1]`. Alpha is taken from `base` (lights affect RGB only).
+pub fn composite_light(base: Color, contribution: Color, mode: Light2DBlendMode) -> Color {
+    let ch = |b: f32, c: f32| -> f32 {
+        match mode {
+            Light2DBlendMode::Add => b + c,
+            Light2DBlendMode::Sub => b - c,
+            // Composite the light over the base (screen-style soft brighten).
+            Light2DBlendMode::Mix => b + c * (1.0 - b),
+        }
+        .clamp(0.0, 1.0)
+    };
+    Color::new(
+        ch(base.r, contribution.r),
+        ch(base.g, contribution.g),
+        ch(base.b, contribution.b),
+        base.a,
+    )
+}
+
 /// A 2D light affecting canvas items.
 #[derive(Debug, Clone)]
 pub struct Light2D {
@@ -46,6 +80,8 @@ pub struct Light2D {
     pub enabled: bool,
     /// Whether this light casts shadows against occluders.
     pub shadow_enabled: bool,
+    /// How this light combines with the canvas (`Light2D.blend_mode`).
+    pub blend_mode: Light2DBlendMode,
 }
 
 impl Light2D {
@@ -61,6 +97,7 @@ impl Light2D {
             light_mask: 1,
             enabled: true,
             shadow_enabled: true,
+            blend_mode: Light2DBlendMode::Mix,
         }
     }
 
@@ -82,6 +119,7 @@ impl Light2D {
             light_mask: 1,
             enabled: true,
             shadow_enabled: true,
+            blend_mode: Light2DBlendMode::Mix,
         }
     }
 }
@@ -284,6 +322,47 @@ pub const LIGHT2D_CLASS_NAMES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // pat-nzgdu.72: Light2D blend-mode compositing (add/sub/mix) + default.
+    #[test]
+    fn light2d_blend_modes_composite() {
+        let base = Color::new(0.5, 0.5, 0.5, 1.0);
+        let light = Color::new(0.4, 0.4, 0.4, 1.0);
+
+        let add = composite_light(base, light, Light2DBlendMode::Add);
+        assert!((add.r - 0.9).abs() < 1e-5, "ADD brightens, got {}", add.r);
+
+        let sub = composite_light(base, light, Light2DBlendMode::Sub);
+        assert!((sub.r - 0.1).abs() < 1e-5, "SUB darkens, got {}", sub.r);
+
+        let mix = composite_light(base, light, Light2DBlendMode::Mix);
+        // Mix = 0.5 + 0.4*(1-0.5) = 0.7 — brighter than base, softer than Add.
+        assert!((mix.r - 0.7).abs() < 1e-5, "MIX soft-brightens, got {}", mix.r);
+        assert!(mix.r < add.r, "MIX must be softer than ADD");
+        assert!(sub.r < base.r, "SUB must darken below the base");
+
+        // Clamp: Add saturates at 1.0, Sub floors at 0.0.
+        let hot = composite_light(
+            Color::new(0.9, 0.9, 0.9, 1.0),
+            Color::new(0.5, 0.5, 0.5, 1.0),
+            Light2DBlendMode::Add,
+        );
+        assert_eq!(hot.r, 1.0);
+        let cold = composite_light(
+            Color::new(0.2, 0.2, 0.2, 1.0),
+            Color::new(0.5, 0.5, 0.5, 1.0),
+            Light2DBlendMode::Sub,
+        );
+        assert_eq!(cold.r, 0.0);
+
+        // Alpha comes from the base (lights affect RGB only).
+        assert_eq!(add.a, 1.0);
+
+        // A freshly-constructed light defaults to Mix (Godot's default).
+        let l = Light2D::point(Vector2::new(0.0, 0.0), Color::WHITE, 1.0, 100.0);
+        assert_eq!(l.blend_mode, Light2DBlendMode::Mix);
+        assert_eq!(Light2DBlendMode::default(), Light2DBlendMode::Mix);
+    }
 
     #[test]
     fn point_light_brighter_near_source() {

@@ -552,6 +552,45 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("disabled", Variant::Bool(false))),
     );
 
+    // -- Shape3D resource hierarchy (pat-nzgdu.96) --
+    // The shapes a CollisionShape3D.shape references. Shape3D is the Resource
+    // base carrying `margin` (Godot default 0.04); every concrete shape derives
+    // from it. Registering them lets ClassDB resolve `[sub_resource type="…"]`
+    // shape resources in a .tscn to their proper class + parent chain.
+    register_class(
+        ClassRegistration::new("Shape3D")
+            .parent("Resource")
+            .property(PropertyInfo::new("margin", Variant::Float(0.04))),
+    );
+    register_class(
+        ClassRegistration::new("SphereShape3D")
+            .parent("Shape3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.5))),
+    );
+    register_class(ClassRegistration::new("BoxShape3D").parent("Shape3D"));
+    register_class(
+        ClassRegistration::new("CapsuleShape3D")
+            .parent("Shape3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("height", Variant::Float(2.0))),
+    );
+    register_class(
+        ClassRegistration::new("CylinderShape3D")
+            .parent("Shape3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("height", Variant::Float(2.0))),
+    );
+    register_class(ClassRegistration::new("ConvexPolygonShape3D").parent("Shape3D"));
+    register_class(ClassRegistration::new("ConcavePolygonShape3D").parent("Shape3D"));
+    register_class(ClassRegistration::new("WorldBoundaryShape3D").parent("Shape3D"));
+    register_class(ClassRegistration::new("HeightMapShape3D").parent("Shape3D"));
+    register_class(
+        ClassRegistration::new("SeparationRayShape3D")
+            .parent("Shape3D")
+            .property(PropertyInfo::new("length", Variant::Float(1.0)))
+            .property(PropertyInfo::new("slide_on_slope", Variant::Bool(false))),
+    );
+
     // -- RayCast3D / ShapeCast3D (scene query nodes over PhysicsServer3D) --
     register_class(
         ClassRegistration::new("RayCast3D")
@@ -591,6 +630,15 @@ pub fn register_3d_classes() {
     // -- Environment / World --
     register_class(ClassRegistration::new("WorldEnvironment").parent("Node3D"));
     register_class(ClassRegistration::new("Marker3D").parent("Node3D"));
+
+    // -- XR (pat-p0s82.29): high-use runtime class registered with defaults so
+    // ClassDB recognizes it; full XR session handling is a separate concern. --
+    register_class(
+        ClassRegistration::new("XROrigin3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("world_scale", Variant::Float(1.0)))
+            .property(PropertyInfo::new("current", Variant::Bool(false))),
+    );
 
     // -- Additional 3D types --
     register_class(ClassRegistration::new("NavigationRegion3D").parent("Node3D"));
@@ -904,6 +952,19 @@ pub fn register_2d_classes() {
     }
     if !class_exists("TextureRect") {
         register_class(ClassRegistration::new("TextureRect").parent("Control"));
+    }
+    // pat-p0s82.29: VideoStreamPlayer is a high-use Control node; register the
+    // class + defaults for ClassDB parity (the video decode/playback path is a
+    // separate media bead, pat-p0s82.28).
+    if !class_exists("VideoStreamPlayer") {
+        register_class(
+            ClassRegistration::new("VideoStreamPlayer")
+                .parent("Control")
+                .property(PropertyInfo::new("autoplay", Variant::Bool(false)))
+                .property(PropertyInfo::new("paused", Variant::Bool(false)))
+                .property(PropertyInfo::new("volume_db", Variant::Float(0.0)))
+                .property(PropertyInfo::new("expand", Variant::Bool(true))),
+        );
     }
     if !class_exists("GridContainer") {
         register_class(ClassRegistration::new("GridContainer").parent("Container"));
@@ -1450,6 +1511,20 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("close", 0)),
         );
     }
+    // pat-p0s82.29: WebRTCMultiplayerPeer is a high-use MultiplayerPeer;
+    // register the class + core methods for ClassDB parity (native WebRTC
+    // transport is a separate bead, pat-p0s82.22).
+    if !class_exists("WebRTCMultiplayerPeer") {
+        register_class(
+            ClassRegistration::new("WebRTCMultiplayerPeer")
+                .parent("MultiplayerPeer")
+                .method(MethodInfo::new("create_server", 0))
+                .method(MethodInfo::new("create_client", 1))
+                .method(MethodInfo::new("add_peer", 3))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("close", 0)),
+        );
+    }
     // ENetMultiplayerPeer (pat-z26jd): ClassDB-compatible alias that delegates
     // to TcpMultiplayerPeer. Channel + transfer-mode metadata are preserved in
     // packet headers; transport is TCP-reliable (not native ENet UDP).
@@ -1695,6 +1770,64 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    /// pat-nzgdu.96: the Shape3D resource base and its concrete shapes are
+    /// registered in ClassDB with the correct parent chain; Shape3D carries
+    /// `margin` (Godot default 0.04) and SeparationRayShape3D carries
+    /// length/slide_on_slope.
+    #[test]
+    fn shape3d_resource_classdb_test() {
+        let _guard = setup();
+        register_3d_classes();
+
+        // Shape3D base derives from Resource.
+        assert!(class_exists("Shape3D"), "Shape3D must be in ClassDB");
+        assert!(
+            is_parent_class("Shape3D", "Resource"),
+            "Shape3D derives from Resource"
+        );
+
+        // SeparationRayShape3D derives from Shape3D (and thus Resource).
+        assert!(class_exists("SeparationRayShape3D"));
+        assert!(is_parent_class("SeparationRayShape3D", "Shape3D"));
+        assert!(is_parent_class("SeparationRayShape3D", "Resource"));
+
+        // Every concrete shape a CollisionShape3D.shape references derives Shape3D.
+        for shape in [
+            "SphereShape3D",
+            "BoxShape3D",
+            "CapsuleShape3D",
+            "CylinderShape3D",
+            "ConvexPolygonShape3D",
+            "ConcavePolygonShape3D",
+            "WorldBoundaryShape3D",
+            "HeightMapShape3D",
+        ] {
+            assert!(class_exists(shape), "{shape} must be registered");
+            assert!(is_parent_class(shape, "Shape3D"), "{shape} derives from Shape3D");
+        }
+
+        // Shape3D.margin round-trips through ClassDB with Godot's default 0.04.
+        let info = get_class_info("Shape3D").expect("Shape3D info");
+        let margin = info
+            .properties
+            .iter()
+            .find(|p| p.name.as_str() == "margin")
+            .expect("Shape3D exposes a margin property");
+        assert_eq!(
+            margin.default_value,
+            Variant::Float(0.04),
+            "Shape3D.margin default is 0.04"
+        );
+
+        // SeparationRayShape3D exposes length + slide_on_slope.
+        let sr = get_class_info("SeparationRayShape3D").expect("SeparationRayShape3D info");
+        assert!(sr.properties.iter().any(|p| p.name.as_str() == "length"));
+        assert!(sr
+            .properties
+            .iter()
+            .any(|p| p.name.as_str() == "slide_on_slope"));
     }
 
     // pat-nzgdu.56: MeshInstance3D and the drawable-instance family inherit

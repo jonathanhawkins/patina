@@ -26,11 +26,13 @@ pub mod config_file;
 pub mod ctex;
 pub mod fuzz_res;
 pub mod gltf_import;
+pub mod image;
 pub mod image_tga_bmp;
 pub mod importers;
 pub mod loader;
 pub mod pck;
 pub mod project;
+pub mod radiance_hdr;
 pub mod res_loader;
 pub mod resource;
 pub mod saver;
@@ -40,6 +42,9 @@ pub mod unified;
 
 // Re-export the most-used types at the crate root.
 pub use cache::ResourceCache;
+// `crate::` qualifier disambiguates the local module from the external `image`
+// crate dependency (which is referenced elsewhere via `::image::`).
+pub use crate::image::{Image, ImageFormat};
 pub use config_file::{is_config_file_handle, ConfigFile};
 pub use importers::{
     import_font, import_image, import_wav, load_import_file, parse_import_file, resolve_res_path,

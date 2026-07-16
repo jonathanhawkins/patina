@@ -148,6 +148,9 @@ pub struct FileAccess {
     mode: FileMode,
     file: Option<File>,
     last_error: Option<String>,
+    /// When true, multi-byte typed reads/writes use big-endian order
+    /// (Godot `FileAccess.set_big_endian`); default little-endian.
+    big_endian: bool,
 }
 
 impl FileAccess {
@@ -174,6 +177,7 @@ impl FileAccess {
             mode,
             file: Some(file),
             last_error: None,
+            big_endian: false,
         })
     }
 
@@ -259,6 +263,121 @@ impl FileAccess {
             file.write_all(bytes)?;
             Ok(())
         })
+    }
+
+    // -- Typed binary get/store (Godot `FileAccess` numeric family) ----------
+    //
+    // Multi-byte values honor the current endianness (`set_big_endian`); reads
+    // past EOF yield zero-padded values, matching Godot's forgiving behavior.
+
+    /// Sets whether multi-byte typed reads/writes use big-endian order
+    /// (`FileAccess.set_big_endian`). Off by default (little-endian).
+    pub fn set_big_endian(&mut self, big_endian: bool) {
+        self.big_endian = big_endian;
+    }
+
+    /// Returns the current endianness flag (`FileAccess.is_big_endian`).
+    pub fn is_big_endian(&self) -> bool {
+        self.big_endian
+    }
+
+    /// Writes a single byte (`FileAccess.store_8`).
+    pub fn store_8(&mut self, value: u8) -> EngineResult<()> {
+        self.store_buffer(&[value])
+    }
+
+    /// Writes a `u16` in the current endianness (`FileAccess.store_16`).
+    pub fn store_16(&mut self, value: u16) -> EngineResult<()> {
+        let bytes = if self.big_endian {
+            value.to_be_bytes()
+        } else {
+            value.to_le_bytes()
+        };
+        self.store_buffer(&bytes)
+    }
+
+    /// Writes a `u32` in the current endianness (`FileAccess.store_32`).
+    pub fn store_32(&mut self, value: u32) -> EngineResult<()> {
+        let bytes = if self.big_endian {
+            value.to_be_bytes()
+        } else {
+            value.to_le_bytes()
+        };
+        self.store_buffer(&bytes)
+    }
+
+    /// Writes a `u64` in the current endianness (`FileAccess.store_64`).
+    pub fn store_64(&mut self, value: u64) -> EngineResult<()> {
+        let bytes = if self.big_endian {
+            value.to_be_bytes()
+        } else {
+            value.to_le_bytes()
+        };
+        self.store_buffer(&bytes)
+    }
+
+    /// Writes an IEEE-754 single-precision float (`FileAccess.store_float`).
+    pub fn store_float(&mut self, value: f32) -> EngineResult<()> {
+        self.store_32(value.to_bits())
+    }
+
+    /// Writes an IEEE-754 double-precision float (`FileAccess.store_double`).
+    pub fn store_double(&mut self, value: f64) -> EngineResult<()> {
+        self.store_64(value.to_bits())
+    }
+
+    /// Reads a single byte, or `0` at EOF (`FileAccess.get_8`).
+    pub fn get_8(&mut self) -> EngineResult<u8> {
+        Ok(self.get_buffer(1)?.first().copied().unwrap_or(0))
+    }
+
+    /// Reads a `u16` in the current endianness (`FileAccess.get_16`).
+    pub fn get_16(&mut self) -> EngineResult<u16> {
+        let read = self.get_buffer(2)?;
+        let mut arr = [0u8; 2];
+        let n = read.len().min(2);
+        arr[..n].copy_from_slice(&read[..n]);
+        Ok(if self.big_endian {
+            u16::from_be_bytes(arr)
+        } else {
+            u16::from_le_bytes(arr)
+        })
+    }
+
+    /// Reads a `u32` in the current endianness (`FileAccess.get_32`).
+    pub fn get_32(&mut self) -> EngineResult<u32> {
+        let read = self.get_buffer(4)?;
+        let mut arr = [0u8; 4];
+        let n = read.len().min(4);
+        arr[..n].copy_from_slice(&read[..n]);
+        Ok(if self.big_endian {
+            u32::from_be_bytes(arr)
+        } else {
+            u32::from_le_bytes(arr)
+        })
+    }
+
+    /// Reads a `u64` in the current endianness (`FileAccess.get_64`).
+    pub fn get_64(&mut self) -> EngineResult<u64> {
+        let read = self.get_buffer(8)?;
+        let mut arr = [0u8; 8];
+        let n = read.len().min(8);
+        arr[..n].copy_from_slice(&read[..n]);
+        Ok(if self.big_endian {
+            u64::from_be_bytes(arr)
+        } else {
+            u64::from_le_bytes(arr)
+        })
+    }
+
+    /// Reads an IEEE-754 single-precision float (`FileAccess.get_float`).
+    pub fn get_float(&mut self) -> EngineResult<f32> {
+        Ok(f32::from_bits(self.get_32()?))
+    }
+
+    /// Reads an IEEE-754 double-precision float (`FileAccess.get_double`).
+    pub fn get_double(&mut self) -> EngineResult<f64> {
+        Ok(f64::from_bits(self.get_64()?))
     }
 
     /// Seeks to an absolute byte offset from the start of the file.
@@ -478,6 +597,89 @@ impl DirAccess {
         self.current_is_dir = false;
     }
 
+    /// Splits `dir`'s entries into `(files, directories)`, sorted, honoring the
+    /// hidden / navigational settings and excluding `.import` sidecars from the
+    /// file list (Godot hides import metadata from `get_files`).
+    fn split_entries(
+        dir: &Path,
+        include_hidden: bool,
+        include_navigational: bool,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+        if let Ok(read) = fs::read_dir(dir) {
+            for entry in read.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !include_navigational && (name == "." || name == "..") {
+                    continue;
+                }
+                if !include_hidden && name.starts_with('.') && name != "." && name != ".." {
+                    continue;
+                }
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    dirs.push(name);
+                } else if !name.ends_with(".import") {
+                    files.push(name);
+                }
+            }
+        }
+        files.sort();
+        dirs.sort();
+        (files, dirs)
+    }
+
+    /// The non-directory file names in this directory, excluding `.import`
+    /// sidecars (Godot `DirAccess.get_files`).
+    pub fn get_files(&self) -> Vec<String> {
+        Self::split_entries(&self.path, self.include_hidden, self.include_navigational).0
+    }
+
+    /// The subdirectory names in this directory (Godot `DirAccess.get_directories`).
+    pub fn get_directories(&self) -> Vec<String> {
+        Self::split_entries(&self.path, self.include_hidden, self.include_navigational).1
+    }
+
+    /// Static: file names at `path` (`res://` / `user://` resolved), excluding
+    /// `.import` sidecars (Godot `DirAccess.get_files_at`).
+    pub fn get_files_at(path: &str) -> EngineResult<Vec<String>> {
+        Ok(Self::split_entries(&resolve_path(path)?, false, false).0)
+    }
+
+    /// Static: subdirectory names at `path` (Godot `DirAccess.get_directories_at`).
+    pub fn get_directories_at(path: &str) -> EngineResult<Vec<String>> {
+        Ok(Self::split_entries(&resolve_path(path)?, false, false).1)
+    }
+
+    /// The absolute path of this directory as a string (Godot `get_current_dir`).
+    pub fn get_current_dir(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+
+    /// Changes the current directory to `path` (relative to this handle, or an
+    /// absolute / `res://` path). Errors if the target is not a directory.
+    pub fn change_dir(&mut self, path: &str) -> EngineResult<()> {
+        let target = self.resolve_child(path)?;
+        if !target.is_dir() {
+            return Err(EngineError::NotFound(format!(
+                "not a directory: {}",
+                target.display()
+            )));
+        }
+        self.path = target;
+        Ok(())
+    }
+
+    /// Copies the file at `from` to `to` (both resolved relative to this handle,
+    /// or absolute / `res://`) (Godot `DirAccess.copy`).
+    pub fn copy(&mut self, from: &str, to: &str) -> EngineResult<()> {
+        let src = self.resolve_child(from)?;
+        let dst = self.resolve_child(to)?;
+        fs::copy(&src, &dst).map(|_| ()).map_err(|e| {
+            self.last_error = Some(e.to_string());
+            EngineError::from(e)
+        })
+    }
+
     /// Creates a directory relative to this handle (or absolute / `res://` path).
     pub fn make_dir(&mut self, path: &str) -> EngineResult<()> {
         let target = self.resolve_child(path)?;
@@ -656,6 +858,32 @@ mod tests {
     }
 
     #[test]
+    fn dir_access_get_files_and_directories() {
+        with_temp_roots(|project, _| {
+            let assets = project.join("assets");
+            fs::create_dir_all(assets.join("sub")).unwrap();
+            fs::write(assets.join("a.txt"), b"x").unwrap();
+            fs::write(assets.join("tex.png"), b"x").unwrap();
+            fs::write(assets.join("tex.png.import"), b"x").unwrap();
+            fs::write(assets.join(".hidden"), b"x").unwrap();
+
+            // get_files_at excludes the sibling directory, the .import sidecar,
+            // and hidden files.
+            let files = DirAccess::get_files_at("res://assets").unwrap();
+            assert!(files.contains(&"a.txt".to_string()));
+            assert!(files.contains(&"tex.png".to_string()));
+            assert!(!files.iter().any(|f| f.ends_with(".import")));
+            assert!(!files.iter().any(|f| f.starts_with('.')));
+            assert!(!files.contains(&"sub".to_string()));
+
+            // get_directories lists only subdirectories.
+            let dir = DirAccess::open("res://assets").unwrap();
+            assert_eq!(dir.get_directories(), vec!["sub".to_string()]);
+            assert!(dir.get_files().contains(&"a.txt".to_string()));
+        });
+    }
+
+    #[test]
     fn res_uri_resolves_under_project_root() {
         with_temp_roots(|project, _| {
             fs::write(project.join("note.txt"), b"from res").unwrap();
@@ -676,6 +904,45 @@ mod tests {
             assert!(user.join("save.dat").is_file());
             let mut f = FileAccess::open("user://save.dat", FileMode::Read).unwrap();
             assert_eq!(f.get_buffer(4).unwrap(), vec![1, 2, 3, 4]);
+        });
+    }
+
+    // pat-nzgdu.80: typed binary get_*/store_* round-trip + endianness control.
+    #[test]
+    fn file_access_typed_binary_roundtrip() {
+        with_temp_roots(|_, _user| {
+            // Little-endian (default): write a typed record, reopen, read it back.
+            {
+                let mut f = FileAccess::open("user://typed.dat", FileMode::Write).unwrap();
+                f.store_8(0xAB).unwrap();
+                f.store_16(0x1234).unwrap();
+                f.store_32(0xDEAD_BEEF).unwrap();
+                f.store_64(0x0123_4567_89AB_CDEF).unwrap();
+                f.store_float(1.5f32).unwrap();
+                f.store_double(-2.25f64).unwrap();
+            }
+            let mut f = FileAccess::open("user://typed.dat", FileMode::Read).unwrap();
+            assert_eq!(f.get_8().unwrap(), 0xAB);
+            assert_eq!(f.get_16().unwrap(), 0x1234);
+            assert_eq!(f.get_32().unwrap(), 0xDEAD_BEEF);
+            assert_eq!(f.get_64().unwrap(), 0x0123_4567_89AB_CDEF);
+            assert_eq!(f.get_float().unwrap(), 1.5f32);
+            assert_eq!(f.get_double().unwrap(), -2.25f64);
+
+            // set_big_endian(true) flips the on-disk byte order.
+            {
+                let mut f = FileAccess::open("user://be.dat", FileMode::Write).unwrap();
+                f.set_big_endian(true);
+                assert!(f.is_big_endian());
+                f.store_32(0x1122_3344).unwrap();
+            }
+            // Raw bytes are in big-endian order...
+            let mut raw = FileAccess::open("user://be.dat", FileMode::Read).unwrap();
+            assert_eq!(raw.get_buffer(4).unwrap(), vec![0x11, 0x22, 0x33, 0x44]);
+            // ...and a big-endian get reads the original value.
+            let mut be = FileAccess::open("user://be.dat", FileMode::Read).unwrap();
+            be.set_big_endian(true);
+            assert_eq!(be.get_32().unwrap(), 0x1122_3344);
         });
     }
 

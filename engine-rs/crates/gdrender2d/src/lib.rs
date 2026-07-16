@@ -34,8 +34,8 @@ pub use ttf_font::{
     draw_label_text, draw_ttf_text, AtlasGlyph, GlyphAtlas, RasterGlyph, TtfFont,
 };
 pub use light2d::{
-    apply_lights_to_framebuffer, is_occluded, light_factor_at, CanvasAmbient, Light2D,
-    Light2DKind, LightOccluder2D, LIGHT2D_CLASS_NAMES,
+    apply_lights_to_framebuffer, composite_light, is_occluded, light_factor_at, CanvasAmbient,
+    Light2D, Light2DBlendMode, Light2DKind, LightOccluder2D, LIGHT2D_CLASS_NAMES,
 };
 pub use renderer::{Bgra8Image, FrameBuffer, Raster, SoftwareRenderer};
 pub use texture::{decode_png, load_png, resolve_res_path, Texture2D};
